@@ -1,0 +1,25 @@
+[package]
+name = "argos-osint-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Terminal UI for Argos OSINT"
+rust-version.workspace = true
+
+[[bin]]
+name = "argos"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+argos-osint-core = { path = "../argos-osint-core" }
+clap.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+ratatui.workspace = true
+rpassword.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+unicode-width.workspace = true

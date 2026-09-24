@@ -4,7 +4,9 @@ Two crates.
 
 `argos-osint-core` is the desk: cases, SQLite, brain recall, hardware probe,
 provider login and chat, public search, markdown reports, and the Gmail MCP
-codec. It does not know about the terminal.
+codec. It does not know about the terminal. Provider login is a catalog of
+Grok, OpenAI, OpenRouter, and local. The turn runner only sees an
+OpenAI-compatible base URL, a resolved bearer token, and optional headers.
 
 `argos-osint-bin` is the `argos` binary. `cli` handles login, logout,
 hardware, reports, headless `-p`, and `mcp gmail`. `tui` is the screen.

@@ -1,28 +1,42 @@
 # Providers, voice, and Gmail
 
+Argos does not bind the agent loop to one model vendor. Every signed-in
+provider is called the same way: `POST {base}/chat/completions` for text and
+`POST {base}/audio/transcriptions` for voice. Login chooses Grok, OpenAI,
+OpenRouter, or a local server, and that choice only changes the host, the
+default model, the key, and OpenRouter's attribution headers.
+
 ## Terminal login
 
-`argos login` asks, in order:
+`argos login` prints the four providers, then asks:
 
-1. Modality, `text` or `voice`.
-2. Kind, `local`, `api`, or `device`.
-3. Base URL and model.
-4. A secret that matches the kind.
+1. Modality, `text` or `voice`. Each slot is independent.
+2. Provider, `grok`, `openai`, `openrouter`, or `local`.
+3. Base URL. The default is that provider's public API. Change it only for a proxy or a local port.
+4. Model. Defaults are `grok-4.6`, `gpt-4.1`, `openai/gpt-4.1`, and `llama3.2`. Voice defaults are `whisper-1`, `openai/whisper-1`, or `whisper`.
 
-An API key is read with echo off. A local endpoint may omit the key. A
-device login asks for the OAuth client id, the device-authorization URL, and
-the token URL, then prints the user code and verification URL from RFC 8628
-and polls the token endpoint until you approve, deny, or the code expires.
-Slow-down responses wait longer. The access token is stored as the slot's
-API key and is not printed back.
+Nothing saved means the text slot is already Grok on `https://api.x.ai/v1`
+with `grok-4.6`. That is the model id in Grok Build's `default_models.json`.
+`Ctrl+M`, `/model`, and `argos models` list `grok-4.6` and `grok-4.5`, then
+merge the live `/v1/models` catalog when the key can reach the endpoint.
+`/model grok-4.5` and `argos -m grok-4.5` select one. The choice is stored in
+`~/.argos/config.toml` as `model`. Chat still uses chat completions, which
+is the API Grok documents for `grok-4.6` alongside the Responses API.
+5. API key, read with echo off.
 
-The Providers app in the TUI edits the same `~/.argos/auth.json` file. The
-key field is masked. "Test /models" calls `GET {base}/models`. "Start
-device-code login" runs the same poll and writes the token when it arrives.
+Cloud providers require a key. When `XAI_API_KEY`, `OPENAI_API_KEY`, or
+`OPENROUTER_API_KEY` is already set, the prompt offers to use that variable
+and does not copy it into `auth.json`. A local server may leave the key empty.
 
-Text completions are `POST {base}/chat/completions`, streamed when the server
-allows it, with a non-streaming retry. Tool calls use the OpenAI function
-shape.
+The Providers app edits the same file. Enter on the provider row cycles the
+four ids and refreshes the URL and model while they still match a preset.
+The key field is masked. "Test /models" calls `GET {base}/models` with the
+same key and headers a chat turn would use.
+
+OpenRouter requests include `HTTP-Referer`, `X-Title`, and
+`X-OpenRouter-Title`. Grok and OpenAI use bearer auth only. A saved kind of
+`api` from an older file is classified from the host, so an OpenRouter URL
+still gets those headers.
 
 ## Voice
 

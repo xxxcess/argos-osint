@@ -33,6 +33,11 @@ pub fn accent() -> Style {
     Style::default().fg(ACCENT).bg(BG)
 }
 
+/// User turn, close to the Grok Build prompt block.
+pub fn user_message() -> Style {
+    Style::default().fg(TEXT).bg(Color::Rgb(12, 36, 44))
+}
+
 pub fn selected() -> Style {
     Style::default()
         .fg(GREEN)

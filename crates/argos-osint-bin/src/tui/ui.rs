@@ -1,14 +1,13 @@
-//! Layouts follow the reference sheet: launcher, canvas, splits, modal,
-//! floating actions, widget grid, and zen. The prompt stays at the bottom
-//! and is bound to whatever the canvas is showing.
+//! Apps column on the left, the open app on the right, prompt at the bottom.
+//! The prompt talks to the case desk or the selected case.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Wrap};
+use ratatui::widgets::{Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Focus, LayoutMode, ModuleId};
+use super::app::{App, CasePage, Focus, ModuleId, ProviderPage};
 use super::theme::{self, panel};
 use argos_osint_core::paths::fit_status;
 use argos_osint_core::secrets::mask;
@@ -16,101 +15,241 @@ use argos_osint_core::secrets::mask;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     frame.render_widget(Paragraph::new("").style(theme::text()), area);
-    let prompt_h = if app.layout == LayoutMode::Zen { 6 } else { 4 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(8),
-            Constraint::Length(prompt_h),
+            Constraint::Length(4),
             Constraint::Length(1),
         ])
         .split(area);
     draw_body(frame, app, chunks[0]);
     draw_prompt(frame, app, chunks[1]);
     draw_footer(frame, app, chunks[2]);
-    if app.modal || app.layout == LayoutMode::Modal {
+    if app.modal {
         draw_modal(frame, app, area);
+    }
+    if app.model_picker {
+        draw_model_picker(frame, app, area);
     }
     if app.help {
         draw_help(frame, area);
     }
+    if app.confirm_query.is_some() {
+        draw_case_confirm(frame, app, area);
+    }
+    if app.confirm_delete_report.is_some() {
+        draw_delete_report_confirm(frame, app, area);
+    } else if app.confirm_report.is_some() {
+        draw_report_confirm(frame, app, area);
+    }
+    if app.brain_card {
+        draw_brain_card(frame, app, area);
+    }
+}
+
+fn on_case_desk(app: &App) -> bool {
+    matches!(app.module, None | Some(ModuleId::Cases))
 }
 
 fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
-    match app.layout {
-        LayoutMode::Classic | LayoutMode::Modal => {
-            let cols = split_h(
-                area,
-                &[Constraint::Percentage(28), Constraint::Percentage(72)],
-            );
-            draw_launcher(frame, app, cols[0]);
-            draw_canvas(frame, app, cols[1]);
-        }
-        LayoutMode::Dashboard => {
-            let cols = split_h(
-                area,
-                &[Constraint::Percentage(30), Constraint::Percentage(70)],
-            );
-            draw_launcher(frame, app, cols[0]);
-            draw_gauges(frame, app, cols[1], 2);
-        }
-        LayoutMode::Tabs => {
-            let rows = split_v(area, &[Constraint::Length(3), Constraint::Min(6)]);
-            draw_tabs(frame, app, rows[0]);
-            let cols = split_h(
-                rows[1],
-                &[Constraint::Percentage(62), Constraint::Percentage(38)],
-            );
-            draw_canvas(frame, app, cols[0]);
-            draw_log(frame, app, cols[1]);
-        }
-        LayoutMode::Vertical => {
-            let cols = split_h(
-                area,
-                &[Constraint::Percentage(26), Constraint::Percentage(74)],
-            );
-            draw_launcher(frame, app, cols[0]);
-            let rows = split_v(
-                cols[1],
-                &[Constraint::Percentage(62), Constraint::Percentage(38)],
-            );
-            draw_canvas(frame, app, rows[0]);
-            draw_log(frame, app, rows[1]);
-        }
-        LayoutMode::Horizontal => {
-            let rows = split_v(
-                area,
-                &[Constraint::Percentage(64), Constraint::Percentage(36)],
-            );
-            draw_canvas(frame, app, rows[0]);
-            draw_log(frame, app, rows[1]);
-        }
-        LayoutMode::Three => {
-            let cols = split_h(
-                area,
-                &[
-                    Constraint::Percentage(22),
-                    Constraint::Percentage(54),
-                    Constraint::Percentage(24),
-                ],
-            );
-            draw_launcher(frame, app, cols[0]);
-            draw_canvas(frame, app, cols[1]);
-            draw_context(frame, app, cols[2]);
-        }
-        LayoutMode::Float => {
-            draw_canvas(frame, app, area);
-            let panel = Rect {
-                x: area.x + area.width.saturating_sub(36),
-                y: area.y + 1,
-                width: 34.min(area.width),
-                height: area.height.saturating_sub(2).min(16),
-            };
-            draw_quick(frame, app, panel);
-        }
-        LayoutMode::Grid => draw_gauges(frame, app, area, 3),
-        LayoutMode::Zen => draw_zen(frame, app, area),
+    draw_desk_row(frame, app, area);
+}
+
+fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
+    if on_case_desk(app) {
+        let work = under_case_tabs(frame, app, area);
+        draw_desk_and_reports(frame, app, work);
+    } else {
+        app.case_tab_area = Rect::default();
+        app.case_tab_hits.clear();
+        app.canvas_area = Rect::default();
+        draw_widget(frame, app, area);
     }
+}
+
+fn draw_desk_row(frame: &mut Frame, app: &mut App, area: Rect) {
+    let cols = split_h(
+        area,
+        &[Constraint::Percentage(26), Constraint::Percentage(74)],
+    );
+    draw_launcher(frame, app, cols[0]);
+    draw_main(frame, app, cols[1]);
+}
+
+fn draw_desk_and_reports(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.case_page == CasePage::Brain {
+        draw_brain(frame, app, area);
+        return;
+    }
+    let cols = split_h(
+        area,
+        &[Constraint::Percentage(64), Constraint::Percentage(36)],
+    );
+    app.canvas_area = cols[0];
+    draw_canvas(frame, app, cols[0]);
+    draw_report_list(frame, app, cols[1]);
+}
+
+fn draw_brain(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.report_area = Rect::default();
+    app.report_line_index.clear();
+    app.canvas_area = Rect::default();
+    draw_brain_list(frame, app, area);
+}
+
+fn draw_brain_list(frame: &mut Frame, app: &App, area: Rect) {
+    let title = " Memories ";
+    let lines = brain_list_lines(app, area.height.saturating_sub(2) as usize);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel(&title))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_brain_card(frame: &mut Frame, app: &App, area: Rect) {
+    let modal = centered(
+        area,
+        area.width.saturating_mul(3) / 4,
+        area.height.saturating_mul(3) / 4,
+    );
+    frame.render_widget(Clear, modal);
+    let memory = app
+        .memories
+        .iter()
+        .find(|memory| Some(memory.id.as_str()) == app.brain_edit_id.as_deref());
+    let text = memory
+        .map(|memory| memory.text.clone())
+        .unwrap_or_else(|| "This memory is no longer stored.".into());
+    let source = memory
+        .and_then(|memory| memory.report_id.as_deref())
+        .and_then(|id| app.reports.iter().find(|report| report.id == id))
+        .map(|report| format!("From report: {}", report.title))
+        .unwrap_or_else(|| "Fact".into());
+    let lines = vec![
+        Line::from(text).style(theme::text()),
+        Line::from(""),
+        Line::from(source).style(theme::dim()),
+        Line::from(""),
+        Line::from("Close").style(theme::selected()),
+        Line::from(""),
+        Line::from("Enter or Esc closes this card.").style(theme::dim()),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel(" Memory "))
+            .wrap(Wrap { trim: false }),
+        modal,
+    );
+}
+
+fn brain_list_lines(app: &App, height: usize) -> Vec<Line<'static>> {
+    let shown = app.shown_memories();
+    let mut lines = vec![
+        Line::from("j/k move · Enter views a fact").style(theme::dim()),
+        Line::from(""),
+    ];
+    if shown.is_empty() {
+        lines.push(Line::from("No memories in this view.".to_string()).style(theme::dim()));
+        return tail(lines, height);
+    }
+    let room = height.saturating_sub(lines.len()).max(1);
+    let start = if shown.len() <= room {
+        0
+    } else {
+        app.brain_sel
+            .saturating_sub(room / 2)
+            .min(shown.len().saturating_sub(room))
+    };
+    for (offset, memory) in shown.iter().enumerate().skip(start).take(room) {
+        let pin = if memory.pinned { "pin" } else { "   " };
+        let mark = if offset == app.brain_sel { ">" } else { " " };
+        let style = if offset == app.brain_sel {
+            theme::selected()
+        } else {
+            theme::text()
+        };
+        lines.push(Line::from(format!("{mark} {pin}  {}", memory.text)).style(style));
+    }
+    tail(lines, height)
+}
+
+fn draw_report_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.report_area = area;
+    let (lines, index) = report_lines(app, area.width.saturating_sub(2) as usize);
+    app.report_line_index = index;
+    let title = if app.focus == Focus::Reports {
+        " Reports · focused "
+    } else {
+        " Reports "
+    };
+    frame.render_widget(Paragraph::new(lines).block(panel(title)), area);
+}
+
+fn report_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
+    let rows = app.report_rows();
+    if rows.is_empty() {
+        return (
+            vec![
+                Line::from("No reports yet.").style(theme::dim()),
+                Line::from("A case query stays pending here until the markdown is filed.")
+                    .style(theme::dim()),
+            ],
+            vec![None, None],
+        );
+    }
+    let mut lines = Vec::new();
+    let mut index = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let selected = i == app.report_sel;
+        let status_style = if selected && app.focus == Focus::Reports {
+            theme::selected()
+        } else if selected {
+            theme::accent()
+        } else {
+            match row.status() {
+                "pending" => Style::default().fg(theme::WARN).bg(theme::BG),
+                "failed" => Style::default().fg(theme::RED).bg(theme::BG),
+                _ => Style::default().fg(theme::GREEN).bg(theme::BG),
+            }
+        };
+        let open = matches!(
+            (&row, app.chat_report.as_deref()),
+            (super::app::ReportRow::Completed(report), Some(id)) if report.id == id
+        );
+        let mark = if open { "● " } else { "" };
+        let title_line = clip_chars(
+            &format!("{mark}{:<10} {}", row.status(), row.title()),
+            width,
+        );
+        lines.push(Line::from(title_line).style(status_style));
+        index.push(Some(i));
+        if let Some(when) = row.when() {
+            lines.push(Line::from(when).style(theme::dim()));
+            index.push(Some(i));
+        } else if let Some(detail) = row.detail() {
+            lines.push(
+                Line::from(clip_chars(detail, width))
+                    .style(Style::default().fg(theme::RED).bg(theme::BG)),
+            );
+            index.push(Some(i));
+        }
+    }
+    lines.push(
+        Line::from(clip_chars(
+            "Tab focuses this list · Enter or click asks to open · Esc returns to the desk",
+            width,
+        ))
+        .style(theme::dim()),
+    );
+    index.push(None);
+    (lines, index)
+}
+
+fn clip_chars(text: &str, width: usize) -> String {
+    text.chars().take(width.max(1)).collect()
 }
 
 fn draw_launcher(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -119,11 +258,10 @@ fn draw_launcher(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, module)| {
-            let mark = if app.module == Some(*module) {
-                ">"
-            } else {
-                " "
-            };
+            let active = app.module == Some(*module)
+                || (*module == ModuleId::Cases
+                    && matches!(app.module, None | Some(ModuleId::Cases)));
+            let mark = if active { ">" } else { " " };
             ListItem::new(Line::from(vec![Span::styled(
                 format!(" {mark} {}. {} ", i + 1, module.title()),
                 theme::text(),
@@ -133,9 +271,9 @@ fn draw_launcher(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.launcher_sel));
     let title = if app.focus == Focus::Launcher {
-        " APPLICATION LAUNCHER "
+        " Apps "
     } else {
-        " APPLICATION LAUNCHER "
+        " Apps "
     };
     let list = List::new(items)
         .block(panel(title))
@@ -145,96 +283,232 @@ fn draw_launcher(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_canvas(frame: &mut Frame, app: &App, area: Rect) {
-    let title = format!(" {} ", app.view_name());
-    let lines = canvas_lines(app, area.height.saturating_sub(2) as usize);
+    let focused = app.focus == Focus::Canvas;
+    let title = if focused {
+        format!(" {} · chat ", app.view_name())
+    } else {
+        format!(" {} ", app.view_name())
+    };
+    let lines = canvas_lines(
+        app,
+        area.width.saturating_sub(2) as usize,
+        area.height.saturating_sub(2) as usize,
+    );
+    let block = if focused {
+        panel(&title).border_style(Style::default().fg(theme::ACCENT))
+    } else {
+        panel(&title)
+    };
     let paragraph = Paragraph::new(lines)
-        .block(panel(&title))
+        .block(block)
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
-fn canvas_lines(app: &App, height: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    match app.module {
-        Some(ModuleId::Hardware) => {
-            lines.push(Line::from(app.hardware.one_line()));
-            lines.push(Line::from(format!(
-                "CPU {cpu:.0}%   RAM {ram}%   Disk {disk}%   backend {backend}",
+fn canvas_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
+    let transcript = transcript_lines(app, width);
+    let lines = if app.chat_report.is_some() {
+        let mut lines = vec![
+            Line::from(
+                "This report chat replaces the case desk. Answers use only this file. Earlier questions in this report stay here. Esc returns to the desk. /clear wipes this chat.",
+            )
+            .style(theme::dim()),
+            Line::from(""),
+        ];
+        if transcript.is_empty() {
+            lines.push(
+                Line::from("Ask a question about this report.".to_string()).style(theme::dim()),
+            );
+        } else {
+            lines.extend(transcript);
+        }
+        lines
+    } else if transcript.is_empty() {
+        vec![
+            Line::from(
+                "Ask about the reports, or type a query and press + to start a case. /clear wipes this chat.",
+            )
+                .style(theme::dim()),
+        ]
+    } else {
+        transcript
+    };
+    if app.scroll_back > 0 {
+        let mut window = tail(lines, height.saturating_sub(1));
+        window.push(
+            Line::from("scrolled up · Down, PgDn, or End returns to the latest")
+                .style(theme::dim()),
+        );
+        return window;
+    }
+    tail(lines, height)
+}
+
+fn under_case_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
+    if app.module != Some(ModuleId::Cases) || area.height < 7 {
+        app.case_tab_area = Rect::default();
+        app.case_tab_hits.clear();
+        return area;
+    }
+    let rows = split_v(area, &[Constraint::Length(3), Constraint::Min(4)]);
+    draw_case_tabs(frame, app, rows[0]);
+    rows[1]
+}
+
+fn draw_case_tabs(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.case_tab_area = area;
+    let titles: Vec<Line> = CasePage::all()
+        .into_iter()
+        .map(|page| Line::from(format!(" {} ", page.title())))
+        .collect();
+    app.case_tab_hits = tab_hits(area, &titles);
+    let selected = CasePage::all()
+        .iter()
+        .position(|page| *page == app.case_page)
+        .unwrap_or(0);
+    frame.render_widget(
+        Tabs::new(titles)
+            .block(panel(" Case Desk "))
+            .select(selected)
+            .highlight_style(theme::selected())
+            .divider("")
+            .padding(" ", " "),
+        area,
+    );
+}
+
+fn draw_provider_tabs(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.provider_tab_area = area;
+    let titles: Vec<Line> = ProviderPage::all()
+        .into_iter()
+        .map(|page| Line::from(format!(" {} ", page.title())))
+        .collect();
+    app.provider_tab_hits = tab_hits(area, &titles);
+    let selected = ProviderPage::all()
+        .iter()
+        .position(|page| *page == app.provider_page)
+        .unwrap_or(0);
+    frame.render_widget(
+        Tabs::new(titles)
+            .block(panel(" Providers "))
+            .select(selected)
+            .highlight_style(theme::selected())
+            .divider("")
+            .padding(" ", " "),
+        area,
+    );
+}
+
+/// Matches ratatui's left-packed tabs: one space, the label, one space, inside the border.
+fn tab_hits(area: Rect, titles: &[Line]) -> Vec<Rect> {
+    if area.width < 3 || area.height < 2 {
+        return Vec::new();
+    }
+    let mut x = area.x + 1;
+    let right = area.x + area.width - 1;
+    let y = area.y + 1;
+    let mut hits = Vec::new();
+    for title in titles {
+        if x >= right {
+            break;
+        }
+        let width = (1 + title.width() as u16 + 1).min(right - x);
+        hits.push(Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        });
+        x = x.saturating_add(width);
+    }
+    hits
+}
+
+fn draw_widget(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(widget) = app.widget() else {
+        return;
+    };
+    frame.render_widget(Clear, area);
+    let mut area = area;
+    if app.module == Some(ModuleId::Providers) && area.height >= 7 {
+        let rows = split_v(area, &[Constraint::Length(3), Constraint::Min(4)]);
+        draw_provider_tabs(frame, app, rows[0]);
+        area = rows[1];
+    } else {
+        app.provider_tab_area = Rect::default();
+        app.provider_tab_hits.clear();
+    }
+    if widget == ModuleId::Hardware && area.width >= 40 && area.height >= 8 {
+        draw_gauges(frame, app, area, 2);
+        return;
+    }
+    let title = match app.module {
+        Some(ModuleId::Cases) => format!(" {} ", app.case_page.title()),
+        Some(ModuleId::Providers) => format!(" {} ", app.provider_page.title()),
+        _ => format!(" {} ", widget.title()),
+    };
+    let lines = if app.module == Some(ModuleId::Providers) {
+        provider_lines(app, area.height.saturating_sub(2) as usize)
+    } else if app.module == Some(ModuleId::Cases) {
+        case_side_lines(app, area.height.saturating_sub(2) as usize)
+    } else if widget == ModuleId::Settings {
+        field_lines(app)
+    } else {
+        widget_lines(app, widget, area.height.saturating_sub(2) as usize)
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel(&title))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn widget_lines(app: &App, widget: ModuleId, height: usize) -> Vec<Line<'static>> {
+    let lines = match widget {
+        ModuleId::Osint => osint_lines(app, height),
+        ModuleId::Hardware => vec![
+            Line::from(app.hardware.one_line()),
+            Line::from(format!(
+                "CPU {cpu:.0}%   RAM {ram}%   Disk {disk}%   {backend}",
                 cpu = app.cpu_now,
                 ram = app.hardware.ram_pct(),
                 disk = app.hardware.disk_pct(),
                 backend = app.hardware.backend,
-            )));
-            lines.push(Line::from("r rescan".to_string()).style(theme::dim()));
-        }
-        Some(ModuleId::Cases) => {
-            if app.cases.is_empty() {
-                lines.push(Line::from(
-                    "No cases yet. /new <title> opens one.".to_string(),
-                ));
-            } else {
-                for (i, case) in app.cases.iter().take(6).enumerate() {
-                    let style = if i == app.case_sel {
-                        theme::selected()
-                    } else {
-                        theme::text()
-                    };
-                    lines.push(Line::from(format!("{}  {}", case.id, case.title)).style(style));
-                }
-                lines.push(
-                    Line::from(
-                        "J/K switch case. The prompt talks to the highlighted case.".to_string(),
-                    )
-                    .style(theme::dim()),
-                );
-            }
-        }
-        Some(ModuleId::Brain) => {
-            if app.memories.is_empty() {
-                lines.push(Line::from(
-                    "No memories. /brain <fact> or say \"remember …\".".to_string(),
-                ));
-            }
-            for (i, mem) in app.memories.iter().take(8).enumerate() {
-                let style = if i == app.brain_sel {
-                    theme::accent()
-                } else {
-                    theme::text()
-                };
-                lines.push(Line::from(mem.text.clone()).style(style));
-            }
-        }
-        Some(ModuleId::Reports) => {
+            )),
+            Line::from("r rescan".to_string()).style(theme::dim()),
+        ],
+        ModuleId::Brain => brain_list_lines(app, height),
+        ModuleId::Reports => {
             if app.reports.is_empty() {
-                lines.push(Line::from(
-                    "No reports yet. /search or a case turn writes markdown.".to_string(),
-                ));
-            }
-            for report in app.reports.iter().take(10) {
-                lines.push(Line::from(format!("{}  {}", report.title, report.path)));
-            }
-        }
-        Some(ModuleId::Log) => {
-            for line in app.log.iter().rev().take(height.max(1)).rev() {
-                lines.push(Line::from(line.clone()).style(theme::dim()));
+                vec![Line::from(
+                    "No reports yet. A case search writes markdown.".to_string(),
+                )]
+            } else {
+                app.reports
+                    .iter()
+                    .take(12)
+                    .map(|report| Line::from(format!("{}  {}", report.title, report.path)))
+                    .collect()
             }
         }
-        Some(ModuleId::Providers) | Some(ModuleId::Gmail) | Some(ModuleId::Settings) => {
-            lines.extend(field_lines(app));
+        ModuleId::Log => {
+            if app.log.is_empty() {
+                vec![Line::from("Tool and search notes land here.").style(theme::dim())]
+            } else {
+                app.log
+                    .iter()
+                    .rev()
+                    .take(height.max(1))
+                    .rev()
+                    .cloned()
+                    .map(|line| Line::from(line).style(theme::dim()))
+                    .collect()
+            }
         }
-        None => {
-            lines.push(Line::from(app.layout.label().to_string()).style(theme::accent()));
-            lines.push(Line::from(
-                "Ctrl+P searches apps. The prompt on this screen talks to the desk.".to_string(),
-            ));
-            lines.push(Line::from(app.hardware.one_line()).style(theme::dim()));
-        }
-    }
-    if !matches!(app.module, Some(ModuleId::Log)) {
-        lines.push(Line::from(""));
-        let transcript = visible_transcript(app, height.saturating_sub(lines.len()));
-        lines.extend(transcript);
-    }
+        ModuleId::Providers | ModuleId::Gmail | ModuleId::Settings => field_lines(app),
+        ModuleId::Cases => Vec::new(),
+    };
     tail(lines, height)
 }
 
@@ -268,106 +542,146 @@ fn field_lines(app: &App) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn visible_transcript(app: &App, rows: usize) -> Vec<Line<'static>> {
-    let all = app.transcript();
-    if all.is_empty() {
-        return vec![Line::from("The stream for this view is empty.").style(theme::dim())];
-    }
-    let skip = app.scroll_back.min(all.len().saturating_sub(1));
-    let end = all.len().saturating_sub(skip);
-    let start = end.saturating_sub(rows.max(1));
-    all[start..end]
-        .iter()
-        .map(|line| {
-            let style = if line.role == "user" {
-                theme::accent()
-            } else if line.role == "assistant" {
-                theme::text()
-            } else {
-                theme::dim()
-            };
-            let body = line.body.replace('\n', " ");
-            let clipped: String = body.chars().take(220).collect();
-            Line::from(format!("{}  {}", role_mark(&line.role), clipped)).style(style)
-        })
-        .collect()
-}
-
-fn role_mark(role: &str) -> &'static str {
-    match role {
-        "user" => "you",
-        "assistant" => "argos",
-        _ => "note",
-    }
-}
-
-fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
-    let lines: Vec<Line> = if app.log.is_empty() {
-        vec![Line::from("Tool and search notes land here.").style(theme::dim())]
-    } else {
-        app.log
-            .iter()
-            .rev()
-            .take(area.height.saturating_sub(2) as usize)
-            .rev()
-            .cloned()
-            .map(Line::from)
-            .collect()
+fn case_side_lines(app: &App, height: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let body = match app.case_page {
+        CasePage::Brain => brain_list_lines(app, height.saturating_sub(3)),
+        CasePage::Closed => vec![Line::from("Case desk only.".to_string())],
     };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel(" Recent Events "))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    lines.extend(body);
+    tail(lines, height)
 }
 
-fn draw_context(frame: &mut Frame, app: &App, area: Rect) {
-    let gmail = app
-        .auth
-        .gmail
-        .as_ref()
-        .map(|g| g.email.as_str())
-        .unwrap_or("not connected");
-    let lines = vec![
-        Line::from("Context").style(theme::accent()),
-        Line::from(format!("View   {}", app.view_name())),
-        Line::from(format!(
-            "Text   {}",
-            super::app::provider_label(app.auth.text.as_ref())
-        )),
-        Line::from(format!(
-            "Voice  {}",
-            super::app::provider_label(app.auth.voice.as_ref())
-        )),
-        Line::from(format!("Brain  {}", app.memories.len())),
-        Line::from(format!("Gmail  {gmail}")),
-        Line::from(format!("Reports {}", app.reports.len())),
-        Line::from(""),
-        Line::from(app.hardware.one_line()).style(theme::dim()),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel(" Context "))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+fn provider_lines(app: &App, height: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let body = match app.provider_page {
+        ProviderPage::Mail => field_lines(app),
+        ProviderPage::Osint => osint_lines(app, height.saturating_sub(3)),
+        ProviderPage::Llm => field_lines(app),
+    };
+    lines.extend(body);
+    tail(lines, height)
 }
 
-fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
-    let mut spans = Vec::new();
-    for (i, module) in ModuleId::all().iter().enumerate() {
-        let style = if i == app.tab_sel {
+fn osint_lines(app: &App, height: usize) -> Vec<Line<'static>> {
+    let mut lines = field_lines(app);
+    lines.push(Line::from(""));
+    if app.settings.sources.is_empty() {
+        lines.push(
+            Line::from("No extra sources. Add a public URL template with {query}.".to_string())
+                .style(theme::dim()),
+        );
+    }
+    for (i, source) in app.settings.sources.iter().enumerate() {
+        let mark = if source.enabled { "on " } else { "off" };
+        let style = if i == app.source_sel {
             theme::selected()
         } else {
-            theme::dim()
+            theme::text()
         };
-        spans.push(Span::styled(format!(" {} ", module.title()), style));
+        lines.push(
+            Line::from(format!("{mark}  {}  {}", source.name, source.url_template)).style(style),
+        );
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).block(panel(" Modules ")),
-        area,
+    lines.push(
+        Line::from("[ ] move · t toggle · x delete an extra source".to_string())
+            .style(theme::dim()),
     );
+    tail(lines, height)
+}
+
+fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let all = app.transcript();
+    let mut lines = Vec::new();
+    for (index, message) in all.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.extend(render_message(&message.role, &message.body, width));
+    }
+    let skip = app.scroll_back.min(lines.len().saturating_sub(1));
+    let end = lines.len().saturating_sub(skip);
+    lines.truncate(end);
+    lines
+}
+
+fn render_message(role: &str, body: &str, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(4);
+    match role {
+        "user" => {
+            let content_width = width.saturating_sub(2).max(1);
+            let wrapped = wrap_text(body, content_width);
+            let prefix_style = theme::user_message()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD);
+            wrapped
+                .into_iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let prefix = if index == 0 { "❯ " } else { "  " };
+                    let pad = content_width.saturating_sub(text.chars().count());
+                    let shown = format!("{text}{}", " ".repeat(pad));
+                    Line::from(vec![
+                        Span::styled(prefix, prefix_style),
+                        Span::styled(shown, theme::user_message()),
+                    ])
+                })
+                .collect()
+        }
+        "assistant" => wrap_text(body, width)
+            .into_iter()
+            .map(|text| Line::from(text).style(theme::text()))
+            .collect(),
+        _ => wrap_text(body, width)
+            .into_iter()
+            .map(|text| Line::from(text).style(theme::dim()))
+            .collect(),
+    }
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for raw in text.split('\n') {
+        if raw.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut rest = raw.to_string();
+        while rest.chars().count() > width {
+            let mut break_at = width;
+            let space = rest
+                .char_indices()
+                .take(width)
+                .filter(|(_, ch)| *ch == ' ')
+                .map(|(index, _)| index)
+                .last();
+            if let Some(space) = space {
+                if space > 0 {
+                    break_at = rest[..space].chars().count();
+                }
+            }
+            let (head, tail) = split_chars(&rest, break_at);
+            lines.push(head);
+            rest = tail.trim_start().to_string();
+        }
+        lines.push(rest);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn split_chars(text: &str, count: usize) -> (String, String) {
+    let mut end = text.len();
+    for (index, (byte, _)) in text.char_indices().enumerate() {
+        if index == count {
+            end = byte;
+            break;
+        }
+    }
+    (text[..end].to_string(), text[end..].to_string())
 }
 
 fn draw_gauges(frame: &mut Frame, app: &App, area: Rect, cols: u16) {
@@ -468,50 +782,6 @@ fn draw_gauges(frame: &mut Frame, app: &App, area: Rect, cols: u16) {
     }
 }
 
-fn draw_quick(frame: &mut Frame, app: &App, area: Rect) {
-    frame.render_widget(Clear, area);
-    let mut lines = vec![Line::from("Quick Actions").style(theme::accent())];
-    for (i, module) in ModuleId::all().iter().enumerate() {
-        let style = if i == app.quick_sel {
-            theme::selected()
-        } else {
-            theme::text()
-        };
-        lines.push(Line::from(format!("{}. {}", i + 1, module.title())).style(style));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from("r  rescan hardware").style(theme::dim()));
-    lines.push(Line::from("/new  open a case").style(theme::dim()));
-    frame.render_widget(Paragraph::new(lines).block(panel(" Quick Actions ")), area);
-}
-
-fn draw_zen(frame: &mut Frame, app: &App, area: Rect) {
-    let rows = split_v(area, &[Constraint::Length(5), Constraint::Min(3)]);
-    let summary = vec![
-        Line::from(format!(" {} ", app.view_name())).style(theme::accent()),
-        Line::from(format!(
-            "CPU {:.0}%    RAM {}%    {}",
-            app.cpu_now,
-            app.hardware.ram_pct(),
-            app.hardware.cpu_name
-        )),
-        Line::from(app.hardware.one_line()).style(theme::dim()),
-    ];
-    frame.render_widget(Paragraph::new(summary).block(panel(" Zen ")), rows[0]);
-    let data: Vec<u64> = if app.cpu_hist.is_empty() {
-        vec![1, 2, 3, 2, 4]
-    } else {
-        app.cpu_hist.iter().copied().collect()
-    };
-    frame.render_widget(
-        Sparkline::default()
-            .block(panel(" CPU "))
-            .data(&data)
-            .style(theme::accent()),
-        rows[1],
-    );
-}
-
 fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width.saturating_sub(2) as usize;
     let title = fit_status(width, &app.mode_label(), &app.db_label);
@@ -530,10 +800,12 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             .take(3)
             .map(|opt| Line::from(format!("{}  {}", opt.label, opt.detail)).style(hint_style))
             .collect()
+    } else if !app.status.is_empty() && app.status != "ready" {
+        vec![Line::from(app.status.clone()).style(hint_style)]
     } else if app.settings.modality == "voice" {
-        vec![Line::from("voice · Ctrl+R record · Enter sends").style(hint_style)]
+        vec![Line::from("voice · Ctrl+R record · Enter send").style(hint_style)]
     } else {
-        vec![Line::from("text · Enter sends · /help").style(hint_style)]
+        vec![Line::from("Enter send · + new case · /help").style(hint_style)]
     };
     let mut lines = vec![input];
     lines.extend(hint);
@@ -576,14 +848,14 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let left = "[Ctrl+P] App Search";
     let right = match app.focus {
         Focus::Prompt => "[Tab] Jump Focus | [Esc] Exit App",
-        Focus::Canvas => "[Tab] Jump Focus | [Esc] Exit App",
+        Focus::Canvas => "[Up/Down] Scroll chat  [Wheel] Scroll  [Tab] Jump",
+        Focus::Reports => "[j/k] Move  [Enter] Open  [Tab] Jump",
         Focus::Launcher => "[Tab] Jump Focus | [Esc] Exit App",
     };
     let gap = area.width as usize;
     let used = left.chars().count() + right.chars().count();
     let spaces = gap.saturating_sub(used);
     let line = format!("{left}{}{right}", " ".repeat(spaces));
-    let _ = app;
     frame.render_widget(Paragraph::new(line).style(theme::dim()), area);
 }
 
@@ -628,6 +900,181 @@ fn draw_modal(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn draw_model_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let modal = centered(
+        area,
+        area.width.saturating_mul(2) / 3,
+        area.height.saturating_mul(2) / 3,
+    );
+    frame.render_widget(Clear, modal);
+    let choices = app.filtered_model_choices();
+    let current = app.active_model();
+    let mut lines = vec![
+        Line::from("Models").style(theme::accent()),
+        Line::from(format!(
+            "> {}",
+            if app.model_query.is_empty() {
+                "type to filter"
+            } else {
+                app.model_query.as_str()
+            }
+        )),
+        Line::from(""),
+    ];
+    for (i, (id, label)) in choices.iter().enumerate() {
+        let mark = if *id == current { "●" } else { " " };
+        let style = if i == app.model_sel {
+            theme::selected()
+        } else {
+            theme::text()
+        };
+        let name = if label == id {
+            label.clone()
+        } else {
+            format!("{label}  {id}")
+        };
+        lines.push(Line::from(format!("{mark} {name}")).style(style));
+    }
+    if choices.is_empty() {
+        lines.push(Line::from("No models match").style(theme::dim()));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("[Enter] Use model   [Esc] Close   Ctrl+M").style(theme::dim()));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel(" Model "))
+            .wrap(Wrap { trim: false }),
+        modal,
+    );
+}
+
+fn draw_report_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let modal = centered(
+        area,
+        area.width.saturating_mul(2) / 3,
+        area.height.saturating_mul(1) / 2,
+    );
+    frame.render_widget(Clear, modal);
+    let title = app
+        .confirm_report
+        .as_deref()
+        .and_then(|id| app.reports.iter().find(|report| report.id == id))
+        .map(|report| report.title.clone())
+        .unwrap_or_else(|| "Report".into());
+    let style_for = |index: usize| {
+        if app.confirm_report_sel == index {
+            theme::selected()
+        } else {
+            theme::text()
+        }
+    };
+    let text = vec![
+        Line::from("Open this report?").style(theme::accent()),
+        Line::from(""),
+        Line::from(title).style(theme::text()),
+        Line::from(""),
+        Line::from(
+            "Opening replaces the case desk chat. Deleting removes the markdown file and the facts taken from this report.",
+        )
+        .style(theme::dim()),
+        Line::from(""),
+        Line::from("Open report chat").style(style_for(0)),
+        Line::from("Delete report").style(style_for(1)),
+        Line::from("Cancel").style(style_for(2)),
+        Line::from(""),
+        Line::from("Enter confirms · Esc cancels · j/k move").style(theme::dim()),
+    ];
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(panel(" Report "))
+            .wrap(Wrap { trim: false }),
+        modal,
+    );
+}
+
+fn draw_delete_report_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let modal = centered(
+        area,
+        area.width.saturating_mul(2) / 3,
+        area.height.saturating_mul(1) / 2,
+    );
+    frame.render_widget(Clear, modal);
+    let title = app
+        .confirm_delete_report
+        .as_deref()
+        .and_then(|id| app.reports.iter().find(|report| report.id == id))
+        .map(|report| report.title.clone())
+        .unwrap_or_else(|| "Report".into());
+    let delete = if app.confirm_delete_sel == 0 {
+        theme::selected()
+    } else {
+        theme::text()
+    };
+    let cancel = if app.confirm_delete_sel == 1 {
+        theme::selected()
+    } else {
+        theme::text()
+    };
+    let text = vec![
+        Line::from("Delete this report?").style(theme::accent()),
+        Line::from(""),
+        Line::from(title).style(theme::text()),
+        Line::from(""),
+        Line::from("This deletes the markdown file and every fact memory taken from this report.")
+            .style(theme::dim()),
+        Line::from(""),
+        Line::from("Delete report and memories").style(delete),
+        Line::from("Cancel").style(cancel),
+        Line::from(""),
+        Line::from("Enter confirms · Esc cancels · j/k move").style(theme::dim()),
+    ];
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(panel(" Delete report "))
+            .wrap(Wrap { trim: false }),
+        modal,
+    );
+}
+
+fn draw_case_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let modal = centered(
+        area,
+        area.width.saturating_mul(2) / 3,
+        area.height.saturating_mul(1) / 2,
+    );
+    frame.render_widget(Clear, modal);
+    let title = app.confirm_query.clone().unwrap_or_default();
+    let yes = if app.confirm_sel == 0 {
+        theme::selected()
+    } else {
+        theme::text()
+    };
+    let no = if app.confirm_sel == 1 {
+        theme::selected()
+    } else {
+        theme::text()
+    };
+    let text = vec![
+        Line::from("Start a case worker?").style(theme::accent()),
+        Line::from(""),
+        Line::from(title).style(theme::text()),
+        Line::from(""),
+        Line::from("This researches public sources. The report list shows the task as pending.")
+            .style(theme::dim()),
+        Line::from(""),
+        Line::from("Start case worker").style(yes),
+        Line::from("Just answer").style(no),
+        Line::from(""),
+        Line::from("Enter confirms · Esc cancels · j/k move").style(theme::dim()),
+    ];
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(panel(" New case "))
+            .wrap(Wrap { trim: false }),
+        modal,
+    );
+}
+
 fn draw_help(frame: &mut Frame, area: Rect) {
     let modal = centered(
         area,
@@ -637,10 +1084,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, modal);
     let text = vec![
         Line::from("Argos OSINT").style(theme::accent()),
-        Line::from("Enter sends to the view on the canvas. Esc leaves that app for the dashboard."),
-        Line::from("Ctrl+P app search    Tab cycle focus    Ctrl+L next layout    Ctrl+C cancel or quit"),
-        Line::from("Ctrl+R record voice  Ctrl+U clear prompt    ? help when the prompt is not focused"),
-        Line::from("/search /new /use /report /hardware /provider /brain /gmail /voice /text /layout /quit"),
+        Line::from("Enter talks on the case desk. + starts a case worker. Report status stays in the list beside the desk."),
+        Line::from("Ctrl+P app search    Ctrl+M models    Tab cycle focus    Ctrl+C cancel or quit"),
+        Line::from("/model lists Grok 4.6 and Grok 4.5. /model grok-4.5 switches. The default is grok-4.6."),
+        Line::from("PgUp and PgDn scroll the case desk or report chat. End jumps to the latest. The wheel does the same over the chat."),
+        Line::from("/clear wipes the case desk chat, or the open report chat. /search /new /use /quit"),
         Line::from("Public search only. Gmail is imap.gmail.com, read-only, app password."),
         Line::from("Esc or any key closes this card."),
     ];

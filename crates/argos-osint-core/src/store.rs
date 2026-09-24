@@ -89,6 +89,32 @@ impl Store {
             );
             "#,
         )?;
+        self.ensure_memory_columns()?;
+        Ok(())
+    }
+
+    fn ensure_memory_columns(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(memories)")?;
+        let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let cols: Vec<String> = cols.collect::<Result<Vec<_>, _>>()?;
+        if !cols.iter().any(|col| col == "category") {
+            self.conn.execute(
+                "ALTER TABLE memories ADD COLUMN category TEXT NOT NULL DEFAULT 'fact'",
+                [],
+            )?;
+        }
+        if !cols.iter().any(|col| col == "pinned") {
+            self.conn.execute(
+                "ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !cols.iter().any(|col| col == "report_id") {
+            self.conn
+                .execute("ALTER TABLE memories ADD COLUMN report_id TEXT", [])?;
+        }
+        self.conn
+            .execute("UPDATE memories SET category = 'fact'", [])?;
         Ok(())
     }
 
@@ -115,6 +141,16 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn delete_case(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
+        self.conn.execute(
+            "DELETE FROM sessions WHERE id = ?1 AND kind = 'case'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     pub fn create_case(&self, title: &str) -> Result<Case> {
         let case = Case {
             id: new_id("case"),
@@ -129,6 +165,20 @@ impl Store {
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             params![stamp(), id],
         )?;
+        Ok(())
+    }
+
+    /// Replace the newest message of `role` in the session. Inserts one when none exists.
+    pub fn update_last_message(&self, session_id: &str, role: &str, body: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE messages SET body = ?1 WHERE id = (
+                SELECT id FROM messages WHERE session_id = ?2 AND role = ?3 ORDER BY id DESC LIMIT 1
+            )",
+            params![body, session_id, role],
+        )?;
+        if changed == 0 {
+            self.append_message(session_id, role, body)?;
+        }
         Ok(())
     }
 
@@ -164,30 +214,104 @@ impl Store {
     }
 
     pub fn list_memories(&self) -> Result<Vec<Memory>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, text, created_at FROM memories ORDER BY created_at DESC")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, created_at, category, pinned, report_id FROM memories ORDER BY pinned DESC, created_at DESC",
+        )?;
         let rows = stmt.query_map([], |row| {
+            let pinned: i64 = row.get(4)?;
             Ok(Memory {
                 id: row.get(0)?,
                 text: row.get(1)?,
                 created_at: row.get(2)?,
+                category: "fact".into(),
+                pinned: pinned != 0,
+                report_id: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn add_memory(&self, text: &str) -> Result<Memory> {
+        self.add_memory_typed(text, "fact", false)
+    }
+
+    pub fn add_memory_typed(&self, text: &str, category: &str, pinned: bool) -> Result<Memory> {
         let memory = Memory {
             id: new_id("mem"),
             text: text.trim().to_string(),
+            category: "fact".into(),
+            pinned,
             created_at: stamp(),
+            report_id: None,
         };
+        let _ = category;
+        if memory.text.is_empty() {
+            anyhow::bail!("memory text is empty");
+        }
         self.conn.execute(
-            "INSERT INTO memories (id, text, created_at) VALUES (?1, ?2, ?3)",
-            params![memory.id, memory.text, memory.created_at],
+            "INSERT INTO memories (id, text, created_at, category, pinned, report_id) VALUES (?1, ?2, ?3, 'fact', ?4, ?5)",
+            params![
+                memory.id,
+                memory.text,
+                memory.created_at,
+                i64::from(memory.pinned),
+                memory.report_id
+            ],
         )?;
         Ok(memory)
+    }
+
+    pub fn add_report_fact(&self, text: &str, report_id: &str) -> Result<Memory> {
+        let memory = Memory {
+            id: new_id("mem"),
+            text: text.trim().to_string(),
+            category: "fact".into(),
+            pinned: false,
+            created_at: stamp(),
+            report_id: Some(report_id.to_string()),
+        };
+        if memory.text.is_empty() {
+            anyhow::bail!("memory text is empty");
+        }
+        self.conn.execute(
+            "INSERT INTO memories (id, text, created_at, category, pinned, report_id) VALUES (?1, ?2, ?3, 'fact', 0, ?4)",
+            params![memory.id, memory.text, memory.created_at, report_id],
+        )?;
+        Ok(memory)
+    }
+
+    pub fn update_memory(
+        &self,
+        id: &str,
+        text: &str,
+        category: &str,
+        pinned: bool,
+    ) -> Result<bool> {
+        let text = text.trim();
+        if text.is_empty() {
+            anyhow::bail!("memory text is empty");
+        }
+        let _ = category;
+        let n = self.conn.execute(
+            "UPDATE memories SET text = ?1, category = 'fact', pinned = ?2 WHERE id = ?3",
+            params![text, i64::from(pinned), id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn delete_report_bundle(&self, id: &str) -> Result<()> {
+        let session = format!("report:{id}");
+        self.conn
+            .execute("DELETE FROM memories WHERE report_id = ?1", params![id])?;
+        self.conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session],
+        )?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", params![session])?;
+        self.conn
+            .execute("DELETE FROM reports WHERE id = ?1", params![id])?;
+        Ok(())
     }
 
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
@@ -260,13 +384,33 @@ mod tests {
             .unwrap();
         assert_eq!(store.load_messages(&case.id).unwrap().len(), 2);
         store
+            .update_last_message(&case.id, "assistant", "the tide turned")
+            .unwrap();
+        let saved = store.load_messages(&case.id).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[1].body, "the tide turned");
+        store
             .log_call(&case.id, "web_search", "ok", "3 hits")
             .unwrap();
         assert_eq!(
             store.call_states().unwrap(),
             vec![("web_search".into(), "ok".into())]
         );
-        let mem = store.add_memory("My name is Ada").unwrap();
-        assert_eq!(store.list_memories().unwrap()[0].id, mem.id);
+        let mem = store
+            .add_memory_typed("Night desk case", "project", true)
+            .unwrap();
+        let listed = store.list_memories().unwrap();
+        assert_eq!(listed[0].id, mem.id);
+        assert_eq!(listed[0].category, "fact");
+        assert!(listed[0].pinned);
+        assert!(store
+            .update_memory(&mem.id, "Night desk, renamed", "goal", false)
+            .unwrap());
+        let updated = store.list_memories().unwrap();
+        assert_eq!(updated[0].text, "Night desk, renamed");
+        assert_eq!(updated[0].category, "fact");
+        assert!(!updated[0].pinned);
+        assert!(store.delete_memory(&mem.id).unwrap());
+        assert!(store.list_memories().unwrap().is_empty());
     }
 }

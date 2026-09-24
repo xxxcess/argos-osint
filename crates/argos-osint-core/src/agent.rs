@@ -11,7 +11,7 @@ use std::sync::{
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::brain::{self, Memory};
+use crate::brain::Memory;
 use crate::gmail::{self, GmailConfig};
 use crate::prompt::{self, Intent, PromptParts};
 use crate::provider::{self, ChatMessage, ToolCall, ToolSpec};
@@ -40,6 +40,12 @@ pub struct TurnInput {
     pub report_dir: PathBuf,
     pub case_id: Option<String>,
     pub gmail: Option<GmailConfig>,
+    /// Markdown already on file whose titles match this question.
+    pub prior_reports: String,
+    /// When set, the turn may not search or leave the supplied report text.
+    pub evidence_only: bool,
+    /// Answer from fact memories of completed reports, and cite those reports.
+    pub from_memory: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -73,32 +79,20 @@ async fn run_turn_inner(
         if fact.is_empty() {
             return Err("nothing to remember".into());
         }
-        let _ = tx.send(TurnEvent::Memory(Memory {
-            id: String::new(),
-            text: fact.clone(),
-            created_at: String::new(),
-        }));
+        let _ = tx.send(TurnEvent::Memory(Memory::fact("", fact.clone(), "")));
         let _ = tx.send(TurnEvent::Done(format!("Remembered: {fact}")));
         return Ok(());
     }
 
-    let hits_mem = brain::recall(&input.memories, &input.user_text, 6);
-    if !hits_mem.is_empty() {
-        let line = hits_mem
-            .iter()
-            .map(|h| h.memory.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let _ = tx.send(TurnEvent::Note(format!(
-            "recalled {n}: {line}",
-            n = hits_mem.len()
-        )));
-    }
-
     let mut gathered = String::new();
     let mut sources: Vec<SearchHit> = Vec::new();
+    let answering_reports = input.evidence_only || !input.prior_reports.trim().is_empty();
+    if answering_reports {
+        gathered.push_str(&input.prior_reports);
+        gathered.push('\n');
+    }
 
-    if intent == Intent::Investigate {
+    if intent == Intent::Investigate && !answering_reports {
         let _ = tx.send(TurnEvent::Status("searching public sources".into()));
         match search::web_search(&input.user_text, input.searx_url.as_deref()).await {
             Ok(hits) => {
@@ -112,7 +106,7 @@ async fn run_turn_inner(
         }
     }
 
-    if intent == Intent::Gmail {
+    if intent == Intent::Gmail && !answering_reports {
         if let Some(cfg) = &input.gmail {
             let _ = tx.send(TurnEvent::Status("reading gmail headers".into()));
             match gmail::list_recent(cfg, 8) {
@@ -134,7 +128,7 @@ async fn run_turn_inner(
         }
     }
 
-    if intent == Intent::Hardware {
+    if intent == Intent::Hardware && !answering_reports {
         gathered.push_str(&input.hardware_line);
         gathered.push('\n');
     }
@@ -142,9 +136,21 @@ async fn run_turn_inner(
     let provider = match &input.provider {
         Some(p) if !p.base_url.trim().is_empty() && !p.model.trim().is_empty() => p.clone(),
         _ => {
-            let answer = offline_answer(intent, &input, &sources, &gathered);
+            let answer = if answering_reports {
+                format!(
+                    "No text provider is signed in. This is drawn from the matching report already on file.\n\n{}",
+                    truncate_chars(gathered.trim(), 1600)
+                )
+            } else {
+                offline_answer(intent, &input, &sources, &gathered)
+            };
             if intent == Intent::Investigate && !sources.is_empty() {
-                let md = report::source_pack(&case_title(&input), &input.user_text, &sources);
+                let md = report::source_pack(
+                    &case_title(&input),
+                    input.case_id.as_deref(),
+                    &input.user_text,
+                    &sources,
+                );
                 match report::write_report(
                     &input.report_dir,
                     &case_title(&input),
@@ -175,8 +181,10 @@ async fn run_turn_inner(
         view_name: &input.view_name,
         view_context: &input.view_context,
         hardware_line: &input.hardware_line,
-        memories: &hits_mem,
+        memories: &[],
         modality: &input.modality,
+        evidence_only: input.evidence_only || answering_reports,
+        from_memory: input.from_memory,
     });
 
     let mut messages = vec![ChatMessage {
@@ -213,7 +221,11 @@ async fn run_turn_inner(
         tool_calls: Vec::new(),
     });
 
-    let tools = tool_specs();
+    let tools = if answering_reports {
+        Vec::new()
+    } else {
+        tool_specs()
+    };
     let mut final_text = String::new();
     for round in 0..3 {
         if cancel.load(Ordering::Relaxed) {
@@ -259,7 +271,10 @@ async fn run_turn_inner(
     if final_text.trim().is_empty() {
         final_text = "The model returned no text.".into();
     }
-    if intent == Intent::Investigate && (!sources.is_empty() || final_text.len() > 400) {
+    if intent == Intent::Investigate
+        && !answering_reports
+        && (!sources.is_empty() || final_text.len() > 400)
+    {
         let md = report::render_report(
             &case_title(&input),
             input.case_id.as_deref(),
@@ -279,6 +294,15 @@ async fn run_turn_inner(
     }
     let _ = tx.send(TurnEvent::Done(final_text));
     Ok(())
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}…")
 }
 
 fn case_title(input: &TurnInput) -> String {
@@ -393,11 +417,7 @@ async fn exec_tool(
             }
             (
                 {
-                    let _ = tx.send(TurnEvent::Memory(Memory {
-                        id: String::new(),
-                        text: text.clone(),
-                        created_at: String::new(),
-                    }));
+                    let _ = tx.send(TurnEvent::Memory(Memory::fact("", text.clone(), "")));
                     format!("remembered {text}")
                 },
                 format!("stored: {text}"),

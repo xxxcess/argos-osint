@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod brain;
 pub mod gmail;
+pub mod grok_oauth;
 pub mod hardware;
 pub mod mcp;
 pub mod paths;

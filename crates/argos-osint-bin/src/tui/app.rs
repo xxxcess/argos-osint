@@ -11,15 +11,15 @@ use std::time::Duration;
 
 use anyhow::Result;
 use argos_osint_core::agent::{self, HistMsg, TurnEvent, TurnInput};
-use argos_osint_core::brain::Memory;
+use argos_osint_core::brain::{self, Memory};
 use argos_osint_core::gmail::{self, GmailConfig};
 use argos_osint_core::hardware::{self, HardwareProfile};
 use argos_osint_core::paths::{self, db_label};
 use argos_osint_core::prompt::{self, Intent};
-use argos_osint_core::provider::{self, Poll, SettingsFile};
+use argos_osint_core::provider::{self, SettingsFile};
 use argos_osint_core::report::{self, ReportMeta};
 use argos_osint_core::search::SearchHit;
-use argos_osint_core::secrets::{self, AuthFile, DeviceEndpoints, GmailSecret, ProviderSecret};
+use argos_osint_core::secrets::{self, AuthFile, GmailSecret, ProviderSecret};
 use argos_osint_core::session::{self, Case};
 use argos_osint_core::store::{ChatLine, Store};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
@@ -32,6 +32,7 @@ pub enum ModuleId {
     Cases,
     Hardware,
     Providers,
+    Osint,
     Brain,
     Gmail,
     Reports,
@@ -45,6 +46,7 @@ impl ModuleId {
             Self::Cases => "Case Desk",
             Self::Hardware => "Hardware",
             Self::Providers => "Providers",
+            Self::Osint => "OSINT Providers",
             Self::Brain => "Brain",
             Self::Gmail => "Gmail",
             Self::Reports => "Reports",
@@ -55,25 +57,24 @@ impl ModuleId {
 
     pub fn blurb(self) -> &'static str {
         match self {
-            Self::Cases => "Investigation chat and markdown reports",
+            Self::Cases => "Desk for new queries, with reports beside it",
             Self::Hardware => "Cores, RAM, VRAM, architecture",
-            Self::Providers => "Text and voice model login",
-            Self::Brain => "Facts recalled into the agent loop",
+            Self::Providers => "Mail, OSINT sources, and LLM login",
+            Self::Osint => "Public search sources for case research",
+            Self::Brain => "fact, identity, preference, contact, project, goal, task",
             Self::Gmail => "Gmail IMAP app password and MCP",
             Self::Reports => "Markdown reports on disk",
             Self::Log => "Search and tool stream",
-            Self::Settings => "Layout, search endpoint, report folder",
+            Self::Settings => "SearXNG URL and report folder",
         }
     }
 
-    pub fn all() -> [ModuleId; 8] {
+    /// Launcher order: case desk, providers, hardware, search log, settings.
+    pub fn all() -> [ModuleId; 5] {
         [
             Self::Cases,
-            Self::Hardware,
             Self::Providers,
-            Self::Brain,
-            Self::Gmail,
-            Self::Reports,
+            Self::Hardware,
             Self::Log,
             Self::Settings,
         ]
@@ -81,84 +82,123 @@ impl ModuleId {
 
     pub fn from_name(name: &str) -> Option<Self> {
         let n = name.trim().to_lowercase();
-        Self::all().into_iter().find(|m| {
-            let title = m.title().to_lowercase();
-            title == n || title.starts_with(&n) || format!("{:?}", m).to_lowercase() == n
-        })
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LayoutMode {
-    Classic,
-    Dashboard,
-    Tabs,
-    Modal,
-    Vertical,
-    Horizontal,
-    Three,
-    Float,
-    Grid,
-    Zen,
-}
-
-impl LayoutMode {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Classic => "classic",
-            Self::Dashboard => "dashboard",
-            Self::Tabs => "tabs",
-            Self::Modal => "modal",
-            Self::Vertical => "vertical",
-            Self::Horizontal => "horizontal",
-            Self::Three => "three",
-            Self::Float => "float",
-            Self::Grid => "grid",
-            Self::Zen => "zen",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Classic => "Classic Sidebar + Canvas",
-            Self::Dashboard => "Two-Column Dashboard",
-            Self::Tabs => "Top Tabs + Split",
-            Self::Modal => "Focused Modal",
-            Self::Vertical => "Vertical Split",
-            Self::Horizontal => "Horizontal Split",
-            Self::Three => "Three-Panel",
-            Self::Float => "Floating Side Panel",
-            Self::Grid => "Grid of Widgets",
-            Self::Zen => "Minimal / Zen",
-        }
-    }
-
-    pub fn all() -> [LayoutMode; 10] {
-        [
-            Self::Classic,
-            Self::Dashboard,
-            Self::Tabs,
-            Self::Modal,
-            Self::Vertical,
-            Self::Horizontal,
-            Self::Three,
-            Self::Float,
-            Self::Grid,
-            Self::Zen,
-        ]
-    }
-
-    pub fn parse(name: &str) -> Option<Self> {
-        let n = name.trim().to_lowercase();
         Self::all()
             .into_iter()
-            .find(|m| m.name() == n || m.label().to_lowercase().starts_with(&n))
+            .chain([Self::Brain, Self::Gmail, Self::Reports, Self::Log])
+            .find(|m| {
+                let title = m.title().to_lowercase();
+                title == n
+                    || title.starts_with(&n)
+                    || format!("{:?}", m).to_lowercase() == n
+                    || (n == "chat" && *m == Self::Providers)
+                    || (n == "osint" && *m == Self::Osint)
+            })
+    }
+}
+
+/// Side pages on the case desk. Reports stay beside the desk and are not a page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CasePage {
+    Closed,
+    Brain,
+}
+
+impl CasePage {
+    pub fn all() -> [Self; 2] {
+        [Self::Closed, Self::Brain]
     }
 
-    pub fn next(self) -> Self {
-        let all = Self::all();
-        let i = all.iter().position(|m| *m == self).unwrap_or(0);
-        all[(i + 1) % all.len()]
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Closed => "Desk",
+            Self::Brain => "Brain",
+        }
+    }
+}
+
+/// Research that has started and has not filed markdown yet.
+/// `failed` is set when the worker stops without a report.
+#[derive(Clone, Debug)]
+pub struct PendingReport {
+    pub case_id: String,
+    pub title: String,
+    pub failed: Option<String>,
+}
+
+/// One row in the report list beside the case desk.
+#[derive(Clone, Debug)]
+pub enum ReportRow {
+    Pending {
+        case_id: String,
+        title: String,
+        failed: Option<String>,
+    },
+    Completed(ReportMeta),
+}
+
+impl ReportRow {
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Pending { title, .. } => title,
+            Self::Completed(report) => &report.title,
+        }
+    }
+
+    pub fn case_id(&self) -> Option<&str> {
+        match self {
+            Self::Pending { case_id, .. } => Some(case_id),
+            Self::Completed(report) => report.case_id.as_deref(),
+        }
+    }
+
+    pub fn status(&self) -> &'static str {
+        match self {
+            Self::Pending {
+                failed: Some(_), ..
+            } => "failed",
+            Self::Pending { .. } => "pending",
+            Self::Completed(_) => "completed",
+        }
+    }
+
+    pub fn when(&self) -> Option<String> {
+        match self {
+            Self::Completed(report) => Some(report::short_when(&report.created_at)),
+            _ => None,
+        }
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Pending {
+                failed: Some(reason),
+                ..
+            } => Some(reason),
+            Self::Completed(_) => None,
+            Self::Pending { .. } => None,
+        }
+    }
+}
+
+/// Side pages on Providers: mail, OSINT sources, and the LLM login.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProviderPage {
+    Mail,
+    Osint,
+    Llm,
+}
+
+impl ProviderPage {
+    pub fn all() -> [Self; 3] {
+        [Self::Mail, Self::Osint, Self::Llm]
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Mail => "Mail",
+            Self::Osint => "OSINT",
+            Self::Llm => "LLM",
+        }
     }
 }
 
@@ -166,6 +206,7 @@ impl LayoutMode {
 pub enum Focus {
     Launcher,
     Canvas,
+    Reports,
     Prompt,
 }
 
@@ -183,11 +224,18 @@ pub enum AppMsg {
     Hardware(HardwareProfile),
     Note(String),
     Search(Result<Vec<SearchHit>, String>),
-    DeviceStatus(String),
-    DeviceToken(String),
     Models(Result<Vec<String>, String>),
+    ModelList(Result<Vec<String>, String>),
     Voice(Result<String, String>),
     GmailTest(Result<String, String>),
+    Research {
+        case_id: String,
+        result: Result<(String, Option<ReportMeta>), String>,
+    },
+    Insight {
+        report_id: String,
+        fact: String,
+    },
 }
 
 pub struct App {
@@ -196,14 +244,30 @@ pub struct App {
     pub settings: SettingsFile,
     pub auth: AuthFile,
     pub focus: Focus,
-    pub layout: LayoutMode,
     pub launcher_sel: usize,
     pub module: Option<ModuleId>,
-    pub tab_sel: usize,
+    pub case_page: CasePage,
+    pub provider_page: ProviderPage,
+    pub source_sel: usize,
     pub modal: bool,
     pub modal_query: String,
     pub modal_sel: usize,
     pub help: bool,
+    /// Query waiting on the case-worker confirmation popup.
+    pub confirm_query: Option<String>,
+    pub confirm_sel: usize,
+    /// Completed report waiting on the open-chat confirmation popup.
+    pub confirm_report: Option<String>,
+    pub confirm_report_sel: usize,
+    /// Fact text held when a desk question already has memories but the user asked for a new case.
+    pub desk_memory_answer: Option<String>,
+    /// Second confirmation before a report file and its facts are removed.
+    pub confirm_delete_report: Option<String>,
+    pub confirm_delete_sel: usize,
+    pub model_picker: bool,
+    pub model_query: String,
+    pub model_sel: usize,
+    pub remote_models: Vec<String>,
     pub prompt: String,
     pub cursor: usize,
     pub history: Vec<String>,
@@ -211,9 +275,24 @@ pub struct App {
     pub transcripts: HashMap<String, Vec<ChatLine>>,
     pub cases: Vec<Case>,
     pub case_sel: usize,
+    /// None means the prompt is talking to the case desk. Some is a selected case.
+    pub chat_case: Option<String>,
+    /// Completed report whose chat replaces the case-desk canvas.
+    pub chat_report: Option<String>,
     pub memories: Vec<Memory>,
     pub brain_sel: usize,
+    /// `all` or one memory category. Filters the Brain list.
+    pub brain_filter: String,
+    /// Set while the editor is updating an existing memory.
+    pub brain_edit_id: Option<String>,
+    /// Popup card for creating or editing one memory.
+    pub brain_card: bool,
+    /// 0 edit, 1 save, 2 cancel, 3 delete.
+    pub brain_action: usize,
     pub reports: Vec<ReportMeta>,
+    /// Research that has started and has not filed a markdown report yet.
+    pub pending_reports: Vec<PendingReport>,
+    pub report_sel: usize,
     pub log: Vec<String>,
     pub hardware: HardwareProfile,
     pub cpu_now: f32,
@@ -232,7 +311,16 @@ pub struct App {
     pub scroll_back: usize,
     pub quit: bool,
     pub launcher_area: Rect,
-    pub quick_sel: usize,
+    pub report_area: Rect,
+    pub canvas_area: Rect,
+    /// Content rows inside the reports pane. `Some(index)` is a clickable report.
+    pub report_line_index: Vec<Option<usize>>,
+    pub case_tab_area: Rect,
+    pub provider_tab_area: Rect,
+    /// Clickable label for each Case Desk tab, in tab order.
+    pub case_tab_hits: Vec<Rect>,
+    /// Clickable label for each Providers tab, in tab order.
+    pub provider_tab_hits: Vec<Rect>,
 }
 
 impl App {
@@ -240,6 +328,7 @@ impl App {
         paths::ensure_home()?;
         let store = Store::open(&paths::db_path())?;
         store.ensure_session("desk", "Desk", "desk")?;
+        store.clear_messages("desk")?;
         for module in ModuleId::all() {
             if module != ModuleId::Cases {
                 store.ensure_session(&module_session(module), module.title(), "module")?;
@@ -254,21 +343,32 @@ impl App {
 
     pub fn from_parts(store: Store, settings: SettingsFile, auth: AuthFile) -> Result<Self> {
         let (tx, _rx) = unbounded_channel();
-        let layout = LayoutMode::parse(&settings.layout).unwrap_or(LayoutMode::Classic);
         let mut app = Self {
             tx,
             store,
             settings,
             auth,
             focus: Focus::Prompt,
-            layout,
             launcher_sel: 0,
-            module: None,
-            tab_sel: 0,
+            module: Some(ModuleId::Cases),
+            case_page: CasePage::Closed,
+            provider_page: ProviderPage::Llm,
+            source_sel: 0,
             modal: false,
             modal_query: String::new(),
             modal_sel: 0,
             help: false,
+            confirm_query: None,
+            confirm_sel: 0,
+            confirm_report: None,
+            confirm_report_sel: 0,
+            desk_memory_answer: None,
+            confirm_delete_report: None,
+            confirm_delete_sel: 1,
+            model_picker: false,
+            model_query: String::new(),
+            model_sel: 0,
+            remote_models: Vec::new(),
             prompt: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -276,9 +376,17 @@ impl App {
             transcripts: HashMap::new(),
             cases: Vec::new(),
             case_sel: 0,
+            chat_case: None,
+            chat_report: None,
             memories: Vec::new(),
             brain_sel: 0,
+            brain_filter: "all".into(),
+            brain_edit_id: None,
+            brain_card: false,
+            brain_action: 0,
             reports: Vec::new(),
+            pending_reports: Vec::new(),
+            report_sel: 0,
             log: Vec::new(),
             hardware: HardwareProfile::unknown(),
             cpu_now: 0.0,
@@ -297,7 +405,13 @@ impl App {
             scroll_back: 0,
             quit: false,
             launcher_area: Rect::default(),
-            quick_sel: 0,
+            report_area: Rect::default(),
+            canvas_area: Rect::default(),
+            report_line_index: Vec::new(),
+            case_tab_area: Rect::default(),
+            provider_tab_area: Rect::default(),
+            case_tab_hits: Vec::new(),
+            provider_tab_hits: Vec::new(),
         };
         app.reload_lists()?;
         app.load_transcript(&app.session_id());
@@ -317,30 +431,83 @@ impl App {
         if self.case_sel >= self.cases.len() && !self.cases.is_empty() {
             self.case_sel = 0;
         }
+        if let Some(id) = &self.chat_case {
+            if !self.cases.iter().any(|case| &case.id == id) {
+                self.chat_case = None;
+            }
+        }
+        if let Some(id) = &self.chat_report {
+            if !self.reports.iter().any(|report| &report.id == id) {
+                self.chat_report = None;
+            }
+        }
+        let rows = self.report_rows().len();
+        if rows == 0 {
+            self.report_sel = 0;
+        } else if self.report_sel >= rows {
+            self.report_sel = rows - 1;
+        }
         Ok(())
     }
 
+    /// Chat lands on the open report, the selected case, or the case desk.
     pub fn session_id(&self) -> String {
-        match self.module {
-            None => "desk".into(),
-            Some(ModuleId::Cases) => self
-                .cases
-                .get(self.case_sel)
-                .map(|c| c.id.clone())
-                .unwrap_or_else(|| "desk".into()),
-            Some(module) => module_session(module),
+        if let Some(id) = &self.chat_report {
+            return format!("report:{id}");
         }
+        self.chat_case.clone().unwrap_or_else(|| "desk".into())
     }
 
     pub fn view_name(&self) -> String {
+        if let Some(report) = self.open_report() {
+            return format!("Report · {}", report.title);
+        }
+        match self
+            .chat_case
+            .as_ref()
+            .and_then(|id| self.cases.iter().find(|case| &case.id == id))
+        {
+            Some(case) => format!("Case · {}", case.title),
+            None => "Case Desk".into(),
+        }
+    }
+
+    fn open_report(&self) -> Option<&ReportMeta> {
+        let id = self.chat_report.as_deref()?;
+        self.reports.iter().find(|report| report.id == id)
+    }
+
+    pub fn widget(&self) -> Option<ModuleId> {
         match self.module {
-            None => "Dashboard".into(),
-            Some(ModuleId::Cases) => self
-                .cases
-                .get(self.case_sel)
-                .map(|c| format!("Case · {}", c.title))
-                .unwrap_or_else(|| "Case Desk".into()),
-            Some(module) => module.title().to_string(),
+            Some(ModuleId::Cases) => match self.case_page {
+                CasePage::Closed => None,
+                CasePage::Brain => Some(ModuleId::Brain),
+            },
+            Some(ModuleId::Providers) => Some(ModuleId::Providers),
+            None
+            | Some(ModuleId::Brain)
+            | Some(ModuleId::Gmail)
+            | Some(ModuleId::Osint)
+            | Some(ModuleId::Reports) => None,
+            Some(module) => Some(module),
+        }
+    }
+
+    /// The side page whose fields and keys are live.
+    pub fn form_module(&self) -> Option<ModuleId> {
+        match self.module {
+            Some(ModuleId::Cases) => match self.case_page {
+                CasePage::Brain => Some(ModuleId::Brain),
+                CasePage::Closed => None,
+            },
+            Some(ModuleId::Providers) => match self.provider_page {
+                ProviderPage::Mail => Some(ModuleId::Gmail),
+                ProviderPage::Osint => Some(ModuleId::Osint),
+                ProviderPage::Llm => Some(ModuleId::Providers),
+            },
+            Some(ModuleId::Settings) => Some(ModuleId::Settings),
+            Some(ModuleId::Hardware) => Some(ModuleId::Hardware),
+            _ => None,
         }
     }
 
@@ -354,9 +521,117 @@ impl App {
         format!(
             "{} · {} · {}{run}",
             self.view_name(),
+            self.active_model(),
             self.settings.modality,
-            self.layout.name(),
         )
+    }
+
+    pub fn text_secret(&self) -> argos_osint_core::secrets::ProviderSecret {
+        provider::active_text_secret(&self.auth, &self.settings.model)
+    }
+
+    pub fn active_model(&self) -> String {
+        self.text_secret().model
+    }
+
+    pub fn model_choices(&self) -> Vec<(String, String)> {
+        let secret = self.text_secret();
+        let mut choices = Vec::new();
+        if provider::effective_kind(&secret) == "grok" {
+            for model in provider::grok_models() {
+                choices.push((model.id.to_string(), model.name.to_string()));
+            }
+        }
+        for id in &self.remote_models {
+            if !choices.iter().any(|(existing, _)| existing == id) {
+                choices.push((id.clone(), id.clone()));
+            }
+        }
+        if choices.is_empty() {
+            choices.push((secret.model.clone(), secret.model.clone()));
+        }
+        choices
+    }
+
+    pub fn filtered_model_choices(&self) -> Vec<(String, String)> {
+        let q = self.model_query.trim().to_lowercase();
+        self.model_choices()
+            .into_iter()
+            .filter(|(id, label)| {
+                q.is_empty() || id.to_lowercase().contains(&q) || label.to_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    fn open_model_picker(&mut self) {
+        self.model_picker = true;
+        self.model_query.clear();
+        self.model_sel = 0;
+        self.refresh_model_list();
+    }
+
+    fn refresh_model_list(&self) {
+        let secret = self.text_secret();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = provider::list_models(&secret)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(AppMsg::ModelList(result));
+        });
+    }
+
+    pub(crate) fn select_model(&mut self, id: &str) {
+        self.settings.model = id.to_string();
+        let _ = self.settings.save();
+        match self.auth.text.as_mut() {
+            Some(slot) => slot.model = id.to_string(),
+            None => {
+                let mut secret = self.text_secret();
+                secret.model = id.to_string();
+                self.auth.text = Some(secret);
+            }
+        }
+        let _ = self.auth.save();
+        self.model_picker = false;
+        self.push_line("assistant", &format!("Model is {id}."));
+    }
+
+    fn on_model_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('m')) {
+            self.model_picker = false;
+            return false;
+        }
+        let count = self.filtered_model_choices().len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if count > 0 {
+                    self.model_sel = (self.model_sel + count - 1) % count;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if count > 0 {
+                    self.model_sel = (self.model_sel + 1) % count;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some((id, _)) = self.filtered_model_choices().get(self.model_sel) {
+                    let id = id.clone();
+                    self.select_model(&id);
+                }
+            }
+            KeyCode::Backspace => {
+                self.model_query.pop();
+                self.model_sel = 0;
+            }
+            KeyCode::Char(ch) if !ctrl => {
+                self.model_query.push(ch);
+                self.model_sel = 0;
+            }
+            _ => {}
+        }
+        false
     }
 
     pub fn transcript(&self) -> &[ChatLine] {
@@ -386,8 +661,68 @@ impl App {
         self.scroll_back = 0;
     }
 
+    fn capture_report_insight(&mut self, answer: &str) {
+        let Some(report_id) = self.chat_report.clone() else {
+            return;
+        };
+        let answer = answer.trim().to_string();
+        if answer.is_empty() {
+            return;
+        }
+        let question = self
+            .transcript()
+            .iter()
+            .rev()
+            .find(|line| line.role == "user")
+            .map(|line| line.body.clone())
+            .unwrap_or_default();
+        let title = self
+            .reports
+            .iter()
+            .find(|report| report.id == report_id)
+            .map(|report| report.title.clone())
+            .unwrap_or_else(|| "report".into());
+        let secret = self.text_secret();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let fact = match distill_insight(&secret, &title, &question, &answer).await {
+                Ok(text) => text,
+                Err(_) => brain::clip_fact(&answer),
+            };
+            let fact = brain::clip_fact(&fact);
+            if fact.is_empty() {
+                return;
+            }
+            let _ = tx.send(AppMsg::Insight { report_id, fact });
+        });
+    }
+
+    fn store_report_insight(&mut self, report_id: String, fact: String) {
+        let title = self
+            .reports
+            .iter()
+            .find(|report| report.id == report_id)
+            .map(|report| report.title.clone())
+            .unwrap_or_else(|| report_id.clone());
+        let text = if fact.contains("(report:") {
+            fact
+        } else {
+            format!("{fact} (report: {title})")
+        };
+        if self.memories.iter().any(|memory| {
+            memory.report_id.as_deref() == Some(report_id.as_str()) && memory.text == text
+        }) {
+            return;
+        }
+        if let Ok(memory) = self.store.add_report_fact(&text, &report_id) {
+            self.memories.insert(0, memory);
+            self.log_note("fact filed from report chat");
+        }
+    }
+
     fn replace_last_assistant(&mut self, body: &str) {
         let id = self.session_id();
+        let _ = self.store.update_last_message(&id, "assistant", body);
         if let Some(lines) = self.transcripts.get_mut(&id) {
             if let Some(last) = lines.last_mut() {
                 if last.role == "assistant" {
@@ -399,38 +734,132 @@ impl App {
         self.push_line("assistant", body);
     }
 
+    /// Write the reply currently on screen so a later visit reloads it.
+    fn persist_visible_chat(&mut self) {
+        let id = self.session_id();
+        let Some(body) = self
+            .transcripts
+            .get(&id)
+            .and_then(|lines| lines.last())
+            .filter(|line| line.role == "assistant")
+            .map(|line| line.body.clone())
+        else {
+            return;
+        };
+        let _ = self.store.update_last_message(&id, "assistant", &body);
+    }
+
     pub fn view_context(&self) -> String {
-        match self.module {
-            None => "The dashboard launcher is open. Help the user pick an app or start a case. The prompt on this screen talks to the desk session.".into(),
-            Some(ModuleId::Cases) => {
-                if let Some(case) = self.cases.get(self.case_sel) {
-                    format!("Case {} — {}. The user is looking at this investigation.", case.id, case.title)
-                } else {
-                    "No case is open. Suggest /new <title>.".into()
+        if let Some(report) = self.open_report() {
+            return format!(
+                "The user is in the chat for report {} — {}. Answer only from that report's content. Do not use brain memories or other reports. If this report does not contain the answer, say so.",
+                report.id, report.title
+            );
+        }
+        let mut ctx = match self
+            .chat_case
+            .as_ref()
+            .and_then(|id| self.cases.iter().find(|case| &case.id == id))
+        {
+            Some(case) => format!(
+                "The user is talking about case {} — {}. Answer this investigation.\n{}",
+                case.id,
+                case.title,
+                self.report_inventory()
+            ),
+            None => format!(
+                "The user is on the case desk. This desk starts new case queries and discusses every report listed beside it.\n{}",
+                self.report_inventory()
+            ),
+        };
+        if let Some(widget) = self.widget() {
+            ctx.push_str(&format!(
+                "\nA {} widget is open beside the case desk for configuration or data. It is not a separate chat.",
+                widget.title()
+            ));
+            ctx.push('\n');
+            ctx.push_str(&self.widget_snapshot(widget));
+        }
+        ctx
+    }
+
+    pub fn report_rows(&self) -> Vec<ReportRow> {
+        let mut rows: Vec<ReportRow> = self
+            .pending_reports
+            .iter()
+            .rev()
+            .map(|pending| ReportRow::Pending {
+                case_id: pending.case_id.clone(),
+                title: pending.title.clone(),
+                failed: pending.failed.clone(),
+            })
+            .collect();
+        rows.extend(self.reports.iter().cloned().map(ReportRow::Completed));
+        rows
+    }
+
+    fn report_inventory(&self) -> String {
+        let rows = self.report_rows();
+        if rows.is_empty() {
+            return "No reports yet.".into();
+        }
+        let mut out = String::from("Reports beside the desk:\n");
+        for row in rows.iter().take(12) {
+            match row {
+                ReportRow::Pending {
+                    title,
+                    failed: Some(reason),
+                    ..
+                } => {
+                    out.push_str(&format!("- failed: {title} ({reason})\n"));
+                }
+                ReportRow::Pending { title, .. } => {
+                    out.push_str(&format!("- pending: {title}\n"));
+                }
+                ReportRow::Completed(report) => {
+                    out.push_str(&format!(
+                        "- completed: {} ({})\n",
+                        report.title, report.path
+                    ));
                 }
             }
-            Some(ModuleId::Hardware) => format!("Hardware profile is on screen.\n{}", self.hardware.one_line()),
-            Some(ModuleId::Providers) => format!(
-                "Provider setup is open ({} slot). Text: {}. Voice: {}.",
-                self.provider_slot,
+        }
+        out
+    }
+
+    fn widget_snapshot(&self, widget: ModuleId) -> String {
+        match widget {
+            ModuleId::Hardware => self.hardware.one_line(),
+            ModuleId::Osint => format!(
+                "Internet {}, Wikipedia {}, {} extra sources.",
+                if self.settings.internet { "on" } else { "off" },
+                if self.settings.wikipedia { "on" } else { "off" },
+                self.settings.sources.len()
+            ),
+            ModuleId::Providers => format!(
+                "Text: {}. Voice: {}.",
                 provider_label(self.auth.text.as_ref()),
                 provider_label(self.auth.voice.as_ref())
             ),
-            Some(ModuleId::Brain) => format!("{} memories are stored. The user is looking at the brain.", self.memories.len()),
-            Some(ModuleId::Gmail) => {
-                if let Some(g) = &self.auth.gmail {
-                    format!("Gmail setup is open for {}.", g.email)
+            ModuleId::Brain => format!("{} memories stored.", self.memories.len()),
+            ModuleId::Gmail => self
+                .auth
+                .gmail
+                .as_ref()
+                .map(|gmail| format!("Gmail account {}.", gmail.email))
+                .unwrap_or_else(|| "Gmail is not connected.".into()),
+            ModuleId::Reports => format!("{} reports on disk.", self.reports.len()),
+            ModuleId::Log => "Search and tool notes are in the log widget.".into(),
+            ModuleId::Settings => format!(
+                "SearXNG: {}. Reports: {}.",
+                if self.settings.searx_url.is_empty() {
+                    "public fallback"
                 } else {
-                    "Gmail is not connected. IMAP host is imap.gmail.com only.".into()
-                }
-            }
-            Some(ModuleId::Reports) => format!("{} reports on disk.", self.reports.len()),
-            Some(ModuleId::Log) => "The search and tool log is the main view.".into(),
-            Some(ModuleId::Settings) => format!(
-                "Settings. SearXNG: {}. Reports: {}.",
-                if self.settings.searx_url.is_empty() { "public fallback" } else { self.settings.searx_url.as_str() },
+                    self.settings.searx_url.as_str()
+                },
                 report_dir(&self.settings).display()
             ),
+            ModuleId::Cases => String::new(),
         }
     }
 
@@ -501,13 +930,10 @@ impl App {
             }
             AppMsg::Note(text) => self.log_note(&text),
             AppMsg::Search(result) => self.finish_search(result),
-            AppMsg::DeviceStatus(text) => {
-                self.status = "device login".into();
-                self.push_line("assistant", &text);
-                self.log_note(&text);
-            }
-            AppMsg::DeviceToken(token) => {
-                self.save_device_token(token);
+            AppMsg::ModelList(result) => {
+                if let Ok(names) = result {
+                    self.remote_models = names;
+                }
             }
             AppMsg::Models(result) => match result {
                 Ok(names) => {
@@ -541,6 +967,8 @@ impl App {
                     self.push_line("assistant", &err);
                 }
             },
+            AppMsg::Research { case_id, result } => self.finish_research(case_id, result),
+            AppMsg::Insight { report_id, fact } => self.store_report_insight(report_id, fact),
             AppMsg::GmailTest(result) => match result {
                 Ok(text) => {
                     self.status = "gmail ok".into();
@@ -582,6 +1010,7 @@ impl App {
                 self.running = false;
                 self.status = "ready".into();
                 self.replace_last_assistant(&text);
+                self.capture_report_insight(&text);
             }
             TurnEvent::Failed(err) => {
                 self.running = false;
@@ -605,6 +1034,7 @@ impl App {
                     .collect::<String>();
                 let md = report::source_pack(
                     if title.is_empty() { "Search" } else { &title },
+                    self.case_id().as_deref(),
                     &question,
                     &hits,
                 );
@@ -632,19 +1062,20 @@ impl App {
     }
 
     fn case_id(&self) -> Option<String> {
-        if self.module == Some(ModuleId::Cases) {
-            self.cases.get(self.case_sel).map(|c| c.id.clone())
-        } else {
-            None
-        }
+        self.chat_case.clone()
     }
 
     pub fn on_event(&mut self, ev: Event) -> bool {
         match ev {
             Event::Key(key) => self.on_key(key),
             Event::Mouse(mouse) => {
-                if mouse.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) {
-                    self.click(mouse.column, mouse.row);
+                match mouse.kind {
+                    MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                        self.click(mouse.column, mouse.row);
+                    }
+                    MouseEventKind::ScrollUp => self.scroll_chat_at(mouse.column, mouse.row, 3),
+                    MouseEventKind::ScrollDown => self.scroll_chat_at(mouse.column, mouse.row, -3),
+                    _ => {}
                 }
                 false
             }
@@ -653,11 +1084,42 @@ impl App {
     }
 
     fn click(&mut self, x: u16, y: u16) {
-        if self
-            .launcher_area
-            .contains(ratatui::layout::Position { x, y })
-            && self.layout_has_launcher()
+        if self.confirm_query.is_some()
+            || self.confirm_report.is_some()
+            || self.confirm_delete_report.is_some()
+            || self.brain_card
+            || self.modal
+            || self.help
         {
+            return;
+        }
+        let pos = ratatui::layout::Position { x, y };
+        if self.report_area.contains(pos) {
+            self.focus = Focus::Reports;
+            let rel = y.saturating_sub(self.report_area.y + 1) as usize;
+            if let Some(Some(index)) = self.report_line_index.get(rel).copied() {
+                self.report_sel = index;
+                self.ask_open_report();
+            }
+            return;
+        }
+        if let Some(index) = self.case_tab_hits.iter().position(|tab| tab.contains(pos)) {
+            self.select_case_page(CasePage::all()[index]);
+            return;
+        }
+        if let Some(index) = self
+            .provider_tab_hits
+            .iter()
+            .position(|tab| tab.contains(pos))
+        {
+            self.select_provider_page(ProviderPage::all()[index]);
+            return;
+        }
+        if self.canvas_area.contains(pos) {
+            self.focus = Focus::Canvas;
+            return;
+        }
+        if self.launcher_area.contains(pos) {
             let rel = y.saturating_sub(self.launcher_area.y + 1) as usize;
             if rel < ModuleId::all().len() {
                 self.launcher_sel = rel;
@@ -666,28 +1128,73 @@ impl App {
         }
     }
 
-    fn layout_has_launcher(&self) -> bool {
-        matches!(
-            self.layout,
-            LayoutMode::Classic
-                | LayoutMode::Dashboard
-                | LayoutMode::Vertical
-                | LayoutMode::Three
-                | LayoutMode::Modal
-        )
+    fn select_case_page(&mut self, page: CasePage) {
+        self.module = Some(ModuleId::Cases);
+        self.case_page = page;
+        self.field_sel = 0;
+        self.editing = false;
+        if page == CasePage::Closed {
+            if self.chat_report.is_some() {
+                self.persist_visible_chat();
+            }
+            self.chat_report = None;
+            self.fields.clear();
+            self.focus = Focus::Prompt;
+            self.scroll_back = 0;
+            self.load_transcript("desk");
+            return;
+        }
+        self.focus = Focus::Canvas;
+        self.load_group_fields();
+    }
+
+    fn select_provider_page(&mut self, page: ProviderPage) {
+        self.module = Some(ModuleId::Providers);
+        self.provider_page = page;
+        self.field_sel = 0;
+        self.editing = false;
+        self.focus = Focus::Canvas;
+        self.load_group_fields();
     }
 
     fn on_key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.confirm_query.is_some() && !(ctrl && key.code == KeyCode::Char('c')) {
+            return self.on_confirm_key(key);
+        }
+        if self.confirm_delete_report.is_some() && !(ctrl && key.code == KeyCode::Char('c')) {
+            return self.on_delete_report_key(key);
+        }
+        if self.confirm_report.is_some() && !(ctrl && key.code == KeyCode::Char('c')) {
+            return self.on_report_confirm_key(key);
+        }
+        if self.brain_card && !(ctrl && key.code == KeyCode::Char('c')) {
+            return self.on_brain_card_key(key);
+        }
         if self.help {
             self.help = false;
             return false;
         }
+        if self.model_picker && !(ctrl && key.code == KeyCode::Char('c')) {
+            return self.on_model_key(key);
+        }
         if ctrl && key.code == KeyCode::Char('c') {
             return self.cancel_or_quit();
         }
-        if self.modal || self.layout == LayoutMode::Modal && self.focus != Focus::Prompt {
+        if self.modal {
             return self.on_modal_key(key);
+        }
+        if self.on_case_desk() && !self.editing {
+            if key.code == KeyCode::Char('+') {
+                self.start_case_from_prompt();
+                return false;
+            }
+            if key.code == KeyCode::Char('x')
+                && (self.focus != Focus::Prompt || self.prompt.is_empty())
+            {
+                self.delete_highlighted_case();
+                return false;
+            }
         }
         if ctrl && key.code == KeyCode::Char('p') {
             self.modal = true;
@@ -695,10 +1202,8 @@ impl App {
             self.modal_sel = 0;
             return false;
         }
-        if ctrl && key.code == KeyCode::Char('l') {
-            self.layout = self.layout.next();
-            self.settings.layout = self.layout.name().into();
-            let _ = self.settings.save();
+        if ctrl && key.code == KeyCode::Char('m') && !self.editing {
+            self.open_model_picker();
             return false;
         }
         if ctrl && key.code == KeyCode::Char('r') && self.focus == Focus::Prompt {
@@ -707,6 +1212,23 @@ impl App {
         }
         if self.editing {
             return self.on_field_key(key);
+        }
+        if self.chat_is_on_screen() {
+            match key.code {
+                KeyCode::PageUp => {
+                    self.scroll_chat(8);
+                    return false;
+                }
+                KeyCode::PageDown => {
+                    self.scroll_chat(-8);
+                    return false;
+                }
+                KeyCode::End => {
+                    self.scroll_back = 0;
+                    return false;
+                }
+                _ => {}
+            }
         }
         match key.code {
             KeyCode::Tab => {
@@ -723,6 +1245,7 @@ impl App {
             }
             _ if self.focus == Focus::Prompt => self.on_prompt_key(key),
             _ if self.focus == Focus::Launcher => self.on_launcher_key(key),
+            _ if self.focus == Focus::Reports => self.on_reports_key(key),
             _ => self.on_canvas_key(key),
         }
     }
@@ -742,17 +1265,163 @@ impl App {
         }
     }
 
-    fn next_focus(&self) -> Focus {
-        let order = if self.layout_has_launcher() {
-            [Focus::Launcher, Focus::Canvas, Focus::Prompt]
+    fn chat_is_on_screen(&self) -> bool {
+        self.on_case_desk() && self.case_page != CasePage::Brain
+    }
+
+    fn scroll_chat(&mut self, delta: isize) {
+        if !self.chat_is_on_screen() {
+            return;
+        }
+        if delta > 0 {
+            self.scroll_back = self.scroll_back.saturating_add(delta as usize);
         } else {
-            [Focus::Canvas, Focus::Prompt, Focus::Prompt]
-        };
+            self.scroll_back = self.scroll_back.saturating_sub((-delta) as usize);
+        }
+    }
+
+    fn scroll_chat_at(&mut self, x: u16, y: u16, delta: isize) {
+        let pos = ratatui::layout::Position { x, y };
+        if self.focus == Focus::Canvas || self.canvas_area.contains(pos) {
+            self.scroll_chat(delta);
+        }
+    }
+
+    fn next_focus(&self) -> Focus {
+        let reports = self.on_case_desk() && self.case_page != CasePage::Brain;
         match self.focus {
             Focus::Launcher => Focus::Canvas,
-            Focus::Canvas => Focus::Prompt,
-            Focus::Prompt => order[0],
+            Focus::Canvas if reports => Focus::Reports,
+            Focus::Canvas | Focus::Reports => Focus::Prompt,
+            Focus::Prompt => Focus::Launcher,
         }
+    }
+
+    fn on_reports_key(&mut self, key: KeyEvent) -> bool {
+        let n = self.report_rows().len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if n > 0 => {
+                self.report_sel = (self.report_sel + n - 1) % n;
+            }
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
+                self.report_sel = (self.report_sel + 1) % n;
+            }
+            KeyCode::Enter => self.ask_open_report(),
+            KeyCode::Left => {
+                self.cycle_group_page(-1);
+                if self.case_page == CasePage::Brain {
+                    self.focus = Focus::Canvas;
+                }
+            }
+            KeyCode::Right => {
+                self.cycle_group_page(1);
+                if self.case_page == CasePage::Brain {
+                    self.focus = Focus::Canvas;
+                }
+            }
+            KeyCode::Esc => self.on_esc(),
+            _ => {}
+        }
+        false
+    }
+
+    fn ask_open_report(&mut self) {
+        let Some(row) = self.report_rows().get(self.report_sel).cloned() else {
+            self.status = "no report selected".into();
+            return;
+        };
+        match row {
+            ReportRow::Completed(report) => {
+                self.confirm_report = Some(report.id);
+                self.confirm_report_sel = 0;
+            }
+            ReportRow::Pending { failed: None, .. } => {
+                self.status = "that report is still pending".into();
+            }
+            ReportRow::Pending { .. } => {
+                self.status = "that report has no file to open".into();
+            }
+        }
+    }
+
+    fn on_report_confirm_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.confirm_report_sel = (self.confirm_report_sel + 2) % 3;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.confirm_report_sel = (self.confirm_report_sel + 1) % 3;
+            }
+            KeyCode::Esc => {
+                self.confirm_report = None;
+            }
+            KeyCode::Enter => self.run_report_confirm(),
+            _ => {}
+        }
+        false
+    }
+
+    fn run_report_confirm(&mut self) {
+        let Some(id) = self.confirm_report.take() else {
+            return;
+        };
+        match self.confirm_report_sel {
+            0 => self.open_report_chat(&id),
+            1 => {
+                self.confirm_delete_report = Some(id);
+                self.confirm_delete_sel = 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn on_delete_report_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+                self.confirm_delete_sel = if self.confirm_delete_sel == 0 { 1 } else { 0 };
+            }
+            KeyCode::Esc => {
+                self.confirm_delete_report = None;
+            }
+            KeyCode::Enter => {
+                let delete = self.confirm_delete_sel == 0;
+                if let Some(id) = self.confirm_delete_report.take() {
+                    if delete {
+                        self.delete_report_and_memories(&id);
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn delete_report_and_memories(&mut self, id: &str) {
+        let path = self
+            .reports
+            .iter()
+            .find(|report| report.id == id)
+            .map(|report| report.path.clone());
+        if let Some(path) = path {
+            if let Err(err) = std::fs::remove_file(&path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    self.status = format!("could not delete the report file: {err}");
+                    return;
+                }
+            }
+        }
+        if self.store.delete_report_bundle(id).is_err() {
+            self.status = "could not delete the report".into();
+            return;
+        }
+        self.transcripts.remove(&format!("report:{id}"));
+        if self.chat_report.as_deref() == Some(id) {
+            self.chat_report = None;
+            self.load_transcript("desk");
+            self.scroll_back = 0;
+        }
+        let _ = self.reload_lists();
+        self.status = "report deleted".into();
     }
 
     fn on_esc(&mut self) {
@@ -764,16 +1433,20 @@ impl App {
             self.editing = false;
             return;
         }
-        if self.module.is_some() {
-            self.module = None;
+        if self.widget().is_some() {
+            self.module = Some(ModuleId::Cases);
             self.fields.clear();
-            self.focus = if self.layout_has_launcher() {
-                Focus::Launcher
-            } else {
-                Focus::Prompt
-            };
+            self.editing = false;
+            self.focus = Focus::Prompt;
+            return;
+        }
+        if self.chat_report.is_some() || self.chat_case.is_some() {
+            self.persist_visible_chat();
+            self.chat_report = None;
+            self.chat_case = None;
             self.load_transcript("desk");
             self.scroll_back = 0;
+            self.focus = Focus::Prompt;
         }
     }
 
@@ -781,9 +1454,6 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('p')) {
             self.modal = false;
-            if self.layout == LayoutMode::Modal {
-                self.layout = LayoutMode::Classic;
-            }
             return false;
         }
         let n = self.filtered_modules().len();
@@ -836,10 +1506,19 @@ impl App {
     }
 
     fn on_canvas_key(&mut self, key: KeyEvent) -> bool {
+        if self.case_page == CasePage::Brain && self.form_module() == Some(ModuleId::Brain) {
+            return self.on_brain_key(key);
+        }
         if !self.fields.is_empty()
             && matches!(
-                self.module,
-                Some(ModuleId::Providers | ModuleId::Gmail | ModuleId::Settings)
+                self.form_module(),
+                Some(
+                    ModuleId::Providers
+                        | ModuleId::Gmail
+                        | ModuleId::Settings
+                        | ModuleId::Brain
+                        | ModuleId::Osint,
+                )
             )
         {
             let n = self.fields.len();
@@ -847,60 +1526,346 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k') => self.field_sel = (self.field_sel + n - 1) % n,
                 KeyCode::Down | KeyCode::Char('j') => self.field_sel = (self.field_sel + 1) % n,
                 KeyCode::Enter => self.activate_field(),
-                KeyCode::Char('r') if self.module == Some(ModuleId::Hardware) => {
-                    self.spawn_hardware(true)
+                KeyCode::Left | KeyCode::Right
+                    if matches!(self.module, Some(ModuleId::Cases | ModuleId::Providers)) =>
+                {
+                    let delta = if key.code == KeyCode::Left { -1 } else { 1 };
+                    self.cycle_group_page(delta);
+                }
+                KeyCode::Char('x') | KeyCode::Delete
+                    if self.form_module() == Some(ModuleId::Osint) =>
+                {
+                    self.delete_osint_source();
+                }
+                KeyCode::Char('t') if self.form_module() == Some(ModuleId::Osint) => {
+                    self.toggle_osint_source();
+                }
+                KeyCode::Char('[') | KeyCode::Char(']')
+                    if self.form_module() == Some(ModuleId::Osint) =>
+                {
+                    let n = self.settings.sources.len();
+                    if n > 0 {
+                        let delta = if key.code == KeyCode::Char('[') {
+                            n - 1
+                        } else {
+                            1
+                        };
+                        self.source_sel = (self.source_sel + delta) % n;
+                    }
                 }
                 _ => {}
             }
             return false;
         }
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.scroll_back = self.scroll_back.saturating_add(1)
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.scroll_back = self.scroll_back.saturating_sub(1)
-            }
-            KeyCode::Char('r') if self.module == Some(ModuleId::Hardware) => {
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_chat(1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_chat(-1),
+            KeyCode::Char('r') if self.widget() == Some(ModuleId::Hardware) => {
                 self.spawn_hardware(true)
             }
             _ => {}
         }
-        if self.module == Some(ModuleId::Cases) && !self.cases.is_empty() {
-            let n = self.cases.len();
-            match key.code {
-                KeyCode::Char('K') => {
-                    self.case_sel = (self.case_sel + n - 1) % n;
-                    self.bind_case();
+        if self.on_case_desk() {
+            let n = self.report_rows().len();
+            if n > 0 {
+                match key.code {
+                    KeyCode::Char('K') => {
+                        self.report_sel = (self.report_sel + n - 1) % n;
+                    }
+                    KeyCode::Char('J') => {
+                        self.report_sel = (self.report_sel + 1) % n;
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('J') => {
-                    self.case_sel = (self.case_sel + 1) % n;
-                    self.bind_case();
-                }
-                _ => {}
             }
         }
-        if self.module == Some(ModuleId::Brain) && !self.memories.is_empty() {
-            let n = self.memories.len();
+        if matches!(self.module, Some(ModuleId::Cases | ModuleId::Providers)) {
             match key.code {
-                KeyCode::Char('x') | KeyCode::Delete => {
-                    if let Some(mem) = self.memories.get(self.brain_sel) {
-                        let id = mem.id.clone();
-                        let _ = self.store.delete_memory(&id);
-                        let _ = self.reload_lists();
-                    }
-                }
-                KeyCode::Up => self.brain_sel = (self.brain_sel + n - 1) % n,
-                KeyCode::Down => self.brain_sel = (self.brain_sel + 1) % n,
+                KeyCode::Left => self.cycle_group_page(-1),
+                KeyCode::Right => self.cycle_group_page(1),
                 _ => {}
             }
         }
         false
     }
 
+    fn on_brain_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Left => self.cycle_group_page(-1),
+            KeyCode::Right => self.cycle_group_page(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_brain_sel(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_brain_sel(1),
+            KeyCode::Enter => self.open_memory_card(),
+            _ => {}
+        }
+        false
+    }
+
+    fn open_memory_card(&mut self) {
+        let Some(memory) = self.shown_memories().get(self.brain_sel).cloned() else {
+            return;
+        };
+        self.brain_edit_id = Some(memory.id);
+        self.brain_card = true;
+        self.editing = false;
+    }
+
+    fn on_brain_card_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => self.close_brain_card(),
+            _ => {}
+        }
+        false
+    }
+
+    fn close_brain_card(&mut self) {
+        self.brain_card = false;
+        self.editing = false;
+        self.brain_edit_id = None;
+        self.brain_action = 0;
+        if self.status.starts_with("saved ") || self.status == "new memory" {
+            self.status = "ready".into();
+        }
+    }
+
+    fn move_brain_sel(&mut self, delta: isize) {
+        let n = self.shown_memories().len();
+        if n == 0 {
+            self.brain_sel = 0;
+            return;
+        }
+        self.brain_sel = (self.brain_sel as isize + delta).rem_euclid(n as isize) as usize;
+    }
+
+    fn on_case_desk(&self) -> bool {
+        matches!(self.module, None | Some(ModuleId::Cases))
+    }
+
+    fn start_case_from_prompt(&mut self) {
+        let query = self.prompt.trim().to_string();
+        if query.is_empty() {
+            self.status = "Type a research query, then press +".into();
+            self.focus = Focus::Prompt;
+            return;
+        }
+        self.prompt.clear();
+        self.cursor = 0;
+        self.launch_case_worker(query, true);
+    }
+
+    fn launch_case_worker(&mut self, query: String, echo_on_desk: bool) {
+        let case = match self.store.create_case(&query) {
+            Ok(case) => case,
+            Err(err) => {
+                self.status = err.to_string();
+                return;
+            }
+        };
+        let _ = self.reload_lists();
+        self.case_sel = self
+            .cases
+            .iter()
+            .position(|item| item.id == case.id)
+            .unwrap_or(0);
+        self.module = Some(ModuleId::Cases);
+        self.case_page = CasePage::Closed;
+        self.fields.clear();
+        self.chat_case = None;
+        self.pending_reports.push(PendingReport {
+            case_id: case.id.clone(),
+            title: query.clone(),
+            failed: None,
+        });
+        self.report_sel = 0;
+        self.load_transcript("desk");
+        let ack = "Case worker started to carry out the research.";
+        self.append_to_session(&case.id, "user", &query);
+        self.append_to_session(&case.id, "assistant", ack);
+        if echo_on_desk {
+            self.append_to_session("desk", "user", &query);
+        }
+        self.append_to_session("desk", "assistant", ack);
+        self.status = "ready".into();
+        self.log_note(&format!("case research {}", case.title));
+        let plan = self.source_plan();
+        let case_id = case.id.clone();
+        let report_dir = report_dir(&self.settings);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = match argos_osint_core::search::research(&query, &plan).await {
+                Ok(hits) => {
+                    let md = report::source_pack(&query, Some(&case_id), &query, &hits);
+                    match report::write_report(&report_dir, &query, Some(&case_id), &md) {
+                        Ok(meta) => Ok((summarize_hits(&hits), Some(meta))),
+                        Err(err) => Ok((
+                            format!(
+                                "{}\n\nCould not write the report: {err}",
+                                summarize_hits(&hits)
+                            ),
+                            None,
+                        )),
+                    }
+                }
+                Err(err) => Err(err),
+            };
+            let _ = tx.send(AppMsg::Research { case_id, result });
+        });
+    }
+
+    fn source_plan(&self) -> argos_osint_core::search::SourcePlan {
+        argos_osint_core::search::SourcePlan {
+            internet: self.settings.internet,
+            wikipedia: self.settings.wikipedia,
+            searx_url: Some(self.settings.searx_url.clone()).filter(|url| !url.trim().is_empty()),
+            extra: self.settings.sources.clone(),
+        }
+    }
+
+    fn finish_research(
+        &mut self,
+        case_id: String,
+        result: Result<(String, Option<ReportMeta>), String>,
+    ) {
+        self.status = "ready".into();
+        match result {
+            Ok((_summary, Some(report))) => {
+                self.pending_reports
+                    .retain(|pending| pending.case_id != case_id);
+                let _ = self.store.add_report(&report);
+                let _ = self.reload_lists();
+            }
+            Ok((summary, None)) => self.mark_task_failed(&case_id, &summary),
+            Err(err) => self.mark_task_failed(&case_id, &err),
+        }
+    }
+
+    fn mark_task_failed(&mut self, case_id: &str, reason: &str) {
+        let reason = reason
+            .split('\n')
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("research failed")
+            .chars()
+            .take(160)
+            .collect::<String>();
+        if let Some(task) = self
+            .pending_reports
+            .iter_mut()
+            .find(|pending| pending.case_id == case_id)
+        {
+            task.failed = Some(reason);
+        }
+    }
+
+    fn append_to_session(&mut self, session_id: &str, role: &str, body: &str) {
+        let _ = self.store.append_message(session_id, role, body);
+        if self.transcripts.contains_key(session_id) {
+            if let Some(lines) = self.transcripts.get_mut(session_id) {
+                lines.push(ChatLine {
+                    role: role.into(),
+                    body: body.into(),
+                    created_at: String::new(),
+                });
+            }
+        } else {
+            self.load_transcript(session_id);
+        }
+        if self.session_id() == session_id {
+            self.scroll_back = 0;
+        }
+    }
+
+    fn delete_highlighted_case(&mut self) {
+        let Some(case_id) = self
+            .report_rows()
+            .get(self.report_sel)
+            .and_then(|row| row.case_id().map(|id| id.to_string()))
+        else {
+            self.status = "no case to delete".into();
+            return;
+        };
+        let Some(case) = self.cases.iter().find(|case| case.id == case_id).cloned() else {
+            self.pending_reports
+                .retain(|pending| pending.case_id != case_id);
+            self.status = "no case to delete".into();
+            return;
+        };
+        if let Err(err) = self.store.delete_case(&case.id) {
+            self.status = err.to_string();
+            return;
+        }
+        if self.chat_case.as_deref() == Some(case.id.as_str()) {
+            self.chat_case = None;
+        }
+        self.pending_reports
+            .retain(|pending| pending.case_id != case.id);
+        let _ = self.reload_lists();
+        self.load_transcript(&self.session_id());
+        self.status = format!("deleted {}", case.title);
+        self.log_note(&format!("deleted case {}", case.title));
+    }
+
+    fn save_osint_toggles(&mut self) {
+        self.settings.internet = self.field_value("internet").eq_ignore_ascii_case("yes");
+        self.settings.wikipedia = self.field_value("wikipedia").eq_ignore_ascii_case("yes");
+        self.settings.searx_url = self.field_value("searx_url");
+        match self.settings.save() {
+            Ok(()) => self.status = "saved OSINT sources".into(),
+            Err(err) => self.status = err.to_string(),
+        }
+    }
+
+    fn add_osint_source(&mut self) {
+        let name = self.field_value("source_name").trim().to_string();
+        let url_template = self.field_value("source_url").trim().to_string();
+        if name.is_empty() || !url_template.contains("{query}") {
+            self.status = "name and a URL template containing {query} are required".into();
+            return;
+        }
+        let sample = url_template.replace("{query}", "example");
+        if let Err(err) = argos_osint_core::search::check_public_http(&sample) {
+            self.status = err;
+            return;
+        }
+        self.settings
+            .sources
+            .push(argos_osint_core::search::OsintSource {
+                name,
+                url_template,
+                enabled: true,
+            });
+        if let Err(err) = self.settings.save() {
+            self.status = err.to_string();
+            return;
+        }
+        self.field_set("source_name", String::new());
+        self.field_set("source_url", String::new());
+        self.source_sel = self.settings.sources.len().saturating_sub(1);
+        self.status = "added OSINT source".into();
+    }
+
+    fn delete_osint_source(&mut self) {
+        if self.settings.sources.is_empty() {
+            return;
+        }
+        let index = self.source_sel.min(self.settings.sources.len() - 1);
+        self.settings.sources.remove(index);
+        if self.source_sel >= self.settings.sources.len() {
+            self.source_sel = self.settings.sources.len().saturating_sub(1);
+        }
+        let _ = self.settings.save();
+    }
+
+    fn toggle_osint_source(&mut self) {
+        if let Some(source) = self.settings.sources.get_mut(self.source_sel) {
+            source.enabled = !source.enabled;
+        }
+        let _ = self.settings.save();
+    }
+
     fn bind_case(&mut self) {
         if let Some(case) = self.cases.get(self.case_sel) {
             let id = case.id.clone();
+            self.chat_case = Some(id.clone());
             self.load_transcript(&id);
         }
         self.scroll_back = 0;
@@ -983,8 +1948,113 @@ impl App {
         self.cursor = 0;
         if line.starts_with('/') {
             self.run_slash(&line);
+        } else if self.routes_desk_message() {
+            self.route_desk_message(line);
         } else {
             self.spawn_turn(line);
+        }
+    }
+
+    fn routes_desk_message(&self) -> bool {
+        self.on_case_desk() && self.chat_case.is_none() && self.chat_report.is_none()
+    }
+
+    fn open_report_chat(&mut self, id: &str) {
+        let Some(report) = self.reports.iter().find(|report| report.id == id).cloned() else {
+            self.status = "that report is no longer on file".into();
+            return;
+        };
+        let session = format!("report:{}", report.id);
+        if self
+            .store
+            .ensure_session(&session, &report.title, "report")
+            .is_err()
+        {
+            self.status = "could not open the report chat".into();
+            return;
+        }
+        if self.chat_report.as_deref() != Some(report.id.as_str()) {
+            self.persist_visible_chat();
+        }
+        self.chat_case = None;
+        self.chat_report = Some(report.id);
+        self.case_page = CasePage::Closed;
+        self.module = Some(ModuleId::Cases);
+        self.scroll_back = 0;
+        self.focus = Focus::Prompt;
+        self.transcripts.remove(&session);
+        self.load_transcript(&self.session_id());
+        self.status = "ready".into();
+    }
+
+    fn route_desk_message(&mut self, text: String) {
+        if self.running {
+            self.status = "busy".into();
+            return;
+        }
+        if prompt::classify(&text) == Intent::Remember {
+            self.spawn_turn(text);
+            return;
+        }
+        let facts = brain::recall_report_facts(&self.memories, &text, 4);
+        if !facts.is_empty() {
+            let material = memory_answer_material(self, &facts);
+            if brain::insists_on_new_case(&text) {
+                self.push_line("user", &text);
+                self.desk_memory_answer = Some(material);
+                self.confirm_query = Some(text);
+                self.confirm_sel = 0;
+            } else {
+                self.desk_memory_answer = None;
+                self.spawn_answered_turn(text, material, true, true, true);
+            }
+            return;
+        }
+        if let Some(pending) = self
+            .pending_reports
+            .iter()
+            .filter(|pending| pending.failed.is_none())
+            .find(|pending| report::title_matches(&text, &pending.title))
+        {
+            let title = pending.title.clone();
+            self.push_line("user", &text);
+            self.push_line(
+                "assistant",
+                &format!(
+                    "A case worker is already researching “{title}”. The report list shows it as pending."
+                ),
+            );
+            return;
+        }
+        self.push_line("user", &text);
+        self.desk_memory_answer = None;
+        self.confirm_query = Some(text);
+        self.confirm_sel = 0;
+    }
+
+    fn on_confirm_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.confirm_sel = 0,
+            KeyCode::Down | KeyCode::Char('j') => self.confirm_sel = 1,
+            KeyCode::Char('y') => self.confirm_case(true),
+            KeyCode::Char('n') | KeyCode::Esc => self.confirm_case(false),
+            KeyCode::Enter => self.confirm_case(self.confirm_sel == 0),
+            _ => {}
+        }
+        false
+    }
+
+    fn confirm_case(&mut self, start: bool) {
+        let Some(query) = self.confirm_query.take() else {
+            return;
+        };
+        if start {
+            self.desk_memory_answer = None;
+            self.launch_case_worker(query, false);
+        } else if let Some(material) = self.desk_memory_answer.take() {
+            self.spawn_answered_turn(query, material, false, true, true);
+        } else {
+            self.spawn_answered_turn(query, String::new(), false, false, false);
         }
     }
 
@@ -997,26 +2067,11 @@ impl App {
             "help" | "?" => self.help = true,
             "quit" | "exit" | "q" => self.quit = true,
             "dashboard" | "home" => self.on_esc(),
-            "layout" => {
-                if let Some(mode) = LayoutMode::parse(&arg) {
-                    self.layout = mode;
-                    self.settings.layout = mode.name().into();
-                    let _ = self.settings.save();
-                } else {
-                    self.push_line("assistant", "Layouts: classic, dashboard, tabs, modal, vertical, horizontal, three, float, grid, zen");
-                }
-            }
             "new" => {
-                let title = if arg.is_empty() {
-                    "Untitled case".into()
+                if arg.is_empty() {
+                    self.status = "Type a research query, then press +".into();
                 } else {
-                    arg
-                };
-                if let Ok(case) = self.store.create_case(&title) {
-                    let _ = self.reload_lists();
-                    self.case_sel = self.cases.iter().position(|c| c.id == case.id).unwrap_or(0);
-                    self.open_module(ModuleId::Cases);
-                    self.push_line("assistant", &format!("Opened {} ({})", case.title, case.id));
+                    self.launch_case_worker(arg, true);
                 }
             }
             "use" => match session::resolve_case(&self.cases, &arg) {
@@ -1040,12 +2095,39 @@ impl App {
                 self.spawn_hardware(arg == "fresh");
             }
             "provider" | "login" => self.open_module(ModuleId::Providers),
+            "osint" | "sources" => self.open_module(ModuleId::Osint),
+            "model" | "m" | "models" => {
+                if arg.is_empty() || cmd == "models" {
+                    self.open_model_picker();
+                } else {
+                    match provider::resolve_model_choice(&self.model_choices(), &arg) {
+                        Some(id) => self.select_model(&id),
+                        None => self.push_line(
+                            "assistant",
+                            &format!("No single model matches {arg}. /model opens the picker."),
+                        ),
+                    }
+                }
+            }
             "brain" => {
                 if arg.is_empty() {
                     self.open_module(ModuleId::Brain);
-                } else if let Ok(mem) = self.store.add_memory(&arg) {
-                    self.memories.insert(0, mem);
-                    self.push_line("assistant", &format!("Remembered: {arg}"));
+                } else {
+                    let (category, text) = brain::parse_typed_memory(&arg);
+                    if text.is_empty() {
+                        self.open_module(ModuleId::Brain);
+                    } else {
+                        match self.store.add_memory_typed(&text, category, false) {
+                            Ok(mem) => {
+                                let _ = self.reload_lists();
+                                self.push_line(
+                                    "assistant",
+                                    &format!("Remembered [{}]: {}", mem.category, mem.text),
+                                );
+                            }
+                            Err(err) => self.push_line("assistant", &err.to_string()),
+                        }
+                    }
                 }
             }
             "gmail" => self.open_module(ModuleId::Gmail),
@@ -1069,16 +2151,28 @@ impl App {
                     self.push_line("assistant", "Unknown app. Ctrl+P lists them.");
                 }
             }
-            "clear" => {
-                let id = self.session_id();
-                let _ = self.store.clear_messages(&id);
-                self.transcripts.insert(id, Vec::new());
-            }
+            "clear" => self.clear_chat_view(),
             other => self.push_line(
                 "assistant",
                 &format!("Unknown command /{other}. /help lists them."),
             ),
         }
+    }
+
+    fn clear_chat_view(&mut self) {
+        if self.running {
+            self.status = "busy".into();
+            return;
+        }
+        let id = self.session_id();
+        let _ = self.store.clear_messages(&id);
+        self.transcripts.insert(id, Vec::new());
+        self.scroll_back = 0;
+        self.status = match self.chat_report {
+            Some(_) => "report chat cleared".into(),
+            None if self.chat_case.is_none() => "case desk chat cleared".into(),
+            None => "chat cleared".into(),
+        };
     }
 
     fn write_visible_report(&mut self, title: &str) {
@@ -1130,11 +2224,22 @@ impl App {
     }
 
     fn spawn_turn(&mut self, text: String) {
+        self.spawn_answered_turn(text, String::new(), true, false, false);
+    }
+
+    fn spawn_answered_turn(
+        &mut self,
+        text: String,
+        prior_reports: String,
+        echo_user: bool,
+        evidence_only: bool,
+        from_memory: bool,
+    ) {
         if self.running {
             self.status = "busy".into();
             return;
         }
-        if prompt::classify(&text) == Intent::Remember {
+        if prior_reports.is_empty() && prompt::classify(&text) == Intent::Remember {
             let fact = prompt::remember_text(&text);
             self.push_line("user", &text);
             if let Ok(mem) = self.store.add_memory(&fact) {
@@ -1146,8 +2251,26 @@ impl App {
         self.running = true;
         self.cancel = Arc::new(AtomicBool::new(false));
         self.status = "starting".into();
-        self.push_line("user", &text);
+        if echo_user {
+            self.push_line("user", &text);
+        }
         self.push_line("assistant", "");
+        let (prior_reports, evidence_only, from_memory, memories) =
+            if let Some(report) = self.open_report().cloned() {
+                (
+                    prior_report_material(std::slice::from_ref(&report)),
+                    true,
+                    false,
+                    Vec::new(),
+                )
+            } else {
+                (
+                    prior_reports,
+                    evidence_only,
+                    from_memory,
+                    self.memories.clone(),
+                )
+            };
         let id = self.session_id();
         let history = self
             .transcript()
@@ -1168,16 +2291,19 @@ impl App {
             session_id: id,
             user_text: text,
             history,
-            memories: self.memories.clone(),
+            memories,
             view_name: self.view_name(),
             view_context: self.view_context(),
             hardware_line: self.hardware.one_line(),
             modality: self.settings.modality.clone(),
-            provider: self.auth.text.clone(),
+            provider: Some(self.text_secret()),
             searx_url: Some(self.settings.searx_url.clone()).filter(|s| !s.is_empty()),
             report_dir: report_dir(&self.settings),
             case_id: self.case_id(),
             gmail: self.auth.gmail.as_ref().map(GmailConfig::from),
+            prior_reports,
+            evidence_only,
+            from_memory,
         };
         let tx = self.tx.clone();
         let cancel = Arc::clone(&self.cancel);
@@ -1196,40 +2322,143 @@ impl App {
     }
 
     pub fn open_module(&mut self, module: ModuleId) {
-        self.module = Some(module);
-        self.tab_sel = ModuleId::all()
-            .iter()
-            .position(|m| *m == module)
-            .unwrap_or(0);
-        self.focus = Focus::Prompt;
+        match module {
+            ModuleId::Brain => {
+                self.module = Some(ModuleId::Cases);
+                self.case_page = CasePage::Brain;
+            }
+            ModuleId::Reports => {
+                self.module = Some(ModuleId::Cases);
+                self.case_page = CasePage::Closed;
+            }
+            ModuleId::Cases => {
+                self.module = Some(ModuleId::Cases);
+                self.case_page = CasePage::Closed;
+            }
+            ModuleId::Gmail => {
+                self.module = Some(ModuleId::Providers);
+                self.provider_page = ProviderPage::Mail;
+            }
+            ModuleId::Osint => {
+                self.module = Some(ModuleId::Providers);
+                self.provider_page = ProviderPage::Osint;
+            }
+            ModuleId::Providers => {
+                self.module = Some(ModuleId::Providers);
+                self.provider_page = ProviderPage::Llm;
+            }
+            other => self.module = Some(other),
+        }
+        let module = self.module.unwrap_or(ModuleId::Cases);
         self.scroll_back = 0;
         self.editing = false;
-        self.load_fields(module);
-        if module == ModuleId::Cases {
-            self.bind_case();
-        } else {
-            let id = module_session(module);
-            self.load_transcript(&id);
+        if module == ModuleId::Cases && self.case_page == CasePage::Closed {
+            self.fields.clear();
+            self.focus = Focus::Prompt;
+            self.load_transcript(&self.session_id());
+            return;
         }
+        self.focus = Focus::Canvas;
+        self.load_group_fields();
         if module == ModuleId::Hardware {
             self.spawn_hardware(false);
         }
+    }
+
+    fn load_group_fields(&mut self) {
+        match self.form_module() {
+            Some(module) => self.load_fields(module),
+            None => self.fields.clear(),
+        }
+    }
+
+    fn cycle_group_page(&mut self, delta: isize) {
+        match self.module {
+            Some(ModuleId::Cases) => {
+                let pages = CasePage::all();
+                let index = pages
+                    .iter()
+                    .position(|page| *page == self.case_page)
+                    .unwrap_or(0);
+                let next = (index as isize + delta).rem_euclid(pages.len() as isize) as usize;
+                self.case_page = pages[next];
+            }
+            Some(ModuleId::Providers) => {
+                let pages = ProviderPage::all();
+                let index = pages
+                    .iter()
+                    .position(|page| *page == self.provider_page)
+                    .unwrap_or(0);
+                let next = (index as isize + delta).rem_euclid(pages.len() as isize) as usize;
+                self.provider_page = pages[next];
+            }
+            _ => return,
+        }
+        self.field_sel = 0;
+        self.editing = false;
+        self.focus = Focus::Canvas;
+        self.load_group_fields();
     }
 
     fn load_fields(&mut self, module: ModuleId) {
         self.fields.clear();
         self.field_sel = 0;
         match module {
+            ModuleId::Osint => {
+                self.fields = vec![
+                    field(
+                        "internet",
+                        "Internet search (enter toggles)",
+                        yes_no(self.settings.internet),
+                        false,
+                    ),
+                    field(
+                        "wikipedia",
+                        "Wikipedia (enter toggles)",
+                        yes_no(self.settings.wikipedia),
+                        false,
+                    ),
+                    field(
+                        "searx_url",
+                        "SearXNG URL (empty uses DuckDuckGo for internet)",
+                        self.settings.searx_url.clone(),
+                        false,
+                    ),
+                    field("source_name", "Extra source name", String::new(), false),
+                    field(
+                        "source_url",
+                        "Extra source URL template with {query}",
+                        String::new(),
+                        false,
+                    ),
+                    field("__add", "Add extra source", "enter".into(), false),
+                    field("__save", "Save source toggles", "enter".into(), false),
+                ];
+            }
+            ModuleId::Brain => {
+                self.fields = vec![
+                    field("category", "Type  1-7", "fact".into(), false),
+                    field("text", "Memory", String::new(), false),
+                    field("pin", "Pin for recall", "no".into(), false),
+                    field("__save", "Add this memory", "s".into(), false),
+                ];
+                self.brain_edit_id = None;
+                self.set_brain_action_label();
+            }
             ModuleId::Providers => {
                 let secret = self.slot_secret();
+                let fallback = provider::preset("local").expect("local preset");
+                let kind = secret
+                    .as_ref()
+                    .map(|slot| provider::normalize_kind(&slot.kind))
+                    .filter(|kind| provider::preset(kind).is_some())
+                    .unwrap_or_else(|| "local".into());
+                let chosen = provider::preset(&kind).unwrap_or(fallback);
                 self.fields = vec![
                     field(
                         "kind",
-                        "Kind (local / api / device)",
-                        secret
-                            .as_ref()
-                            .map(|s| s.kind.clone())
-                            .unwrap_or_else(|| "local".into()),
+                        "Provider (enter cycles grok / openai / openrouter / local)",
+                        kind,
                         false,
                     ),
                     field(
@@ -1237,8 +2466,9 @@ impl App {
                         "Base URL",
                         secret
                             .as_ref()
-                            .map(|s| s.base_url.clone())
-                            .unwrap_or_else(|| "http://127.0.0.1:11434/v1".into()),
+                            .map(|slot| slot.base_url.clone())
+                            .filter(|url| !url.is_empty())
+                            .unwrap_or_else(|| chosen.base_url.into()),
                         false,
                     ),
                     field(
@@ -1246,16 +2476,23 @@ impl App {
                         "Model",
                         secret
                             .as_ref()
-                            .map(|s| s.model.clone())
-                            .unwrap_or_else(|| "llama3.2".into()),
+                            .map(|slot| slot.model.clone())
+                            .filter(|model| !model.is_empty())
+                            .unwrap_or_else(|| {
+                                if self.provider_slot == "voice" {
+                                    chosen.voice_model.into()
+                                } else {
+                                    chosen.text_model.into()
+                                }
+                            }),
                         false,
                     ),
                     field(
                         "api_key",
-                        "API key",
+                        "API key (empty uses XAI_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY)",
                         secret
                             .as_ref()
-                            .and_then(|s| s.api_key.clone())
+                            .and_then(|slot| slot.api_key.clone())
                             .unwrap_or_default(),
                         true,
                     ),
@@ -1264,44 +2501,8 @@ impl App {
                         "Voice model",
                         secret
                             .as_ref()
-                            .and_then(|s| s.stt_model.clone())
-                            .unwrap_or_else(|| "whisper-1".into()),
-                        false,
-                    ),
-                    field(
-                        "client_id",
-                        "Device client id",
-                        secret
-                            .as_ref()
-                            .and_then(|s| s.device.as_ref().map(|d| d.client_id.clone()))
-                            .unwrap_or_default(),
-                        false,
-                    ),
-                    field(
-                        "device_auth_url",
-                        "Device authorization URL",
-                        secret
-                            .as_ref()
-                            .and_then(|s| s.device.as_ref().map(|d| d.device_auth_url.clone()))
-                            .unwrap_or_default(),
-                        false,
-                    ),
-                    field(
-                        "token_url",
-                        "Token URL",
-                        secret
-                            .as_ref()
-                            .and_then(|s| s.device.as_ref().map(|d| d.token_url.clone()))
-                            .unwrap_or_default(),
-                        false,
-                    ),
-                    field(
-                        "scope",
-                        "Scope",
-                        secret
-                            .as_ref()
-                            .and_then(|s| s.device.as_ref().map(|d| d.scope.clone()))
-                            .unwrap_or_else(|| "openid profile email".into()),
+                            .and_then(|slot| slot.stt_model.clone())
+                            .unwrap_or_else(|| chosen.voice_model.into()),
                         false,
                     ),
                     field(
@@ -1312,7 +2513,6 @@ impl App {
                     ),
                     field("__save", "Save this slot", "enter".into(), false),
                     field("__test", "Test /models", "enter".into(), false),
-                    field("__device", "Start device-code login", "enter".into(), false),
                 ];
             }
             ModuleId::Gmail => {
@@ -1351,7 +2551,6 @@ impl App {
                         self.settings.report_dir.clone(),
                         false,
                     ),
-                    field("layout", "Layout name", self.layout.name().into(), false),
                     field("__save", "Save settings", "enter".into(), false),
                 ];
             }
@@ -1381,14 +2580,162 @@ impl App {
             .get(self.field_sel)
             .map(|f| f.key.clone())
             .unwrap_or_default();
-        if key.starts_with("__") {
+        if key == "kind" {
+            self.cycle_provider();
+        } else if self.form_module() == Some(ModuleId::Brain)
+            && matches!(key.as_str(), "category" | "pin")
+        {
+            self.cycle_brain_field(&key);
+        } else if self.form_module() == Some(ModuleId::Osint)
+            && matches!(key.as_str(), "internet" | "wikipedia")
+        {
+            let next = if self.field_value(&key).eq_ignore_ascii_case("yes") {
+                "no"
+            } else {
+                "yes"
+            };
+            self.field_set(&key, next.into());
+        } else if key.starts_with("__") {
             self.run_field_action(&key);
         } else {
             self.editing = true;
         }
     }
 
+    fn cycle_provider(&mut self) {
+        let current = provider::normalize_kind(&self.field_value("kind"));
+        let order = provider::presets();
+        let index = order
+            .iter()
+            .position(|preset| preset.id == current)
+            .unwrap_or(order.len() - 1);
+        let next = &order[(index + 1) % order.len()];
+        let url = self.field_value("base_url");
+        let model = self.field_value("model");
+        let stt = self.field_value("stt_model");
+        let url_is_default = url.is_empty() || order.iter().any(|preset| preset.base_url == url);
+        let model_is_default = model.is_empty()
+            || order
+                .iter()
+                .any(|preset| preset.text_model == model || preset.voice_model == model);
+        let stt_is_default = stt.is_empty() || order.iter().any(|preset| preset.voice_model == stt);
+        self.field_set("kind", next.id.into());
+        if url_is_default {
+            self.field_set("base_url", next.base_url.into());
+        }
+        if model_is_default {
+            let model = if self.provider_slot == "voice" {
+                next.voice_model
+            } else {
+                next.text_model
+            };
+            self.field_set("model", model.into());
+        }
+        if stt_is_default {
+            self.field_set("stt_model", next.voice_model.into());
+        }
+    }
+
+    fn cycle_brain_field(&mut self, key: &str) {
+        match key {
+            "category" => {
+                let current = brain::normalize_category(&self.field_value("category"));
+                let index = brain::CATEGORIES
+                    .iter()
+                    .position(|name| *name == current)
+                    .unwrap_or(0);
+                let next = brain::CATEGORIES[(index + 1) % brain::CATEGORIES.len()];
+                self.field_set("category", next.into());
+            }
+            "pin" => {
+                let next = if self.field_value("pin").eq_ignore_ascii_case("yes") {
+                    "no"
+                } else {
+                    "yes"
+                };
+                self.field_set("pin", next.into());
+            }
+            _ => {}
+        }
+    }
+
+    fn save_brain_memory(&mut self) {
+        let text = self.field_value("text");
+        if text.trim().is_empty() {
+            self.status = "memory needs text".into();
+            return;
+        }
+        let category = brain::normalize_category(&self.field_value("category"));
+        let pinned = self.field_value("pin").eq_ignore_ascii_case("yes");
+        let saved = if let Some(id) = self.brain_edit_id.clone() {
+            match self.store.update_memory(&id, &text, category, pinned) {
+                Ok(true) => Ok(id),
+                Ok(false) => {
+                    self.status = "that memory is gone".into();
+                    return;
+                }
+                Err(err) => Err(err),
+            }
+        } else {
+            self.store
+                .add_memory_typed(&text, category, pinned)
+                .map(|memory| memory.id)
+        };
+        match saved {
+            Ok(id) => {
+                let _ = self.reload_lists();
+                self.brain_edit_id = Some(id.clone());
+                self.select_shown_memory(&id);
+                self.set_brain_action_label();
+                self.status = format!("saved {category} memory");
+                self.log_note(&format!("brain {category} {text}"));
+            }
+            Err(err) => self.status = err.to_string(),
+        }
+    }
+
+    fn select_shown_memory(&mut self, id: &str) {
+        if let Some(index) = self
+            .shown_memories()
+            .iter()
+            .position(|memory| memory.id == id)
+        {
+            self.brain_sel = index;
+        }
+    }
+
+    fn set_brain_action_label(&mut self) {
+        let label = if self.brain_edit_id.is_some() {
+            "Update this memory"
+        } else {
+            "Add this memory"
+        };
+        if let Some(field) = self.fields.iter_mut().find(|field| field.key == "__save") {
+            field.label = label.into();
+            field.value = "s".into();
+        }
+    }
+
+    pub fn shown_memories(&self) -> Vec<Memory> {
+        let show = self.brain_filter.as_str();
+        self.memories
+            .iter()
+            .filter(|memory| show.is_empty() || show == "all" || memory.category == show)
+            .cloned()
+            .collect()
+    }
+
+    fn field_set(&mut self, key: &str, value: String) {
+        if let Some(field) = self.fields.iter_mut().find(|field| field.key == key) {
+            field.value = value;
+        }
+    }
+
     fn run_field_action(&mut self, key: &str) {
+        if self.form_module() == Some(ModuleId::Brain) && key == "__save" {
+            self.save_brain_memory();
+            return;
+        }
         match (self.module, key) {
             (Some(ModuleId::Providers), "__slot") => {
                 self.provider_slot = if self.provider_slot == "text" {
@@ -1400,11 +2747,13 @@ impl App {
             }
             (Some(ModuleId::Providers), "__save") => self.save_provider_fields(),
             (Some(ModuleId::Providers), "__test") => self.test_provider(),
-            (Some(ModuleId::Providers), "__device") => self.start_device(),
             (Some(ModuleId::Gmail), "__save") => self.save_gmail_fields(),
             (Some(ModuleId::Gmail), "__test") => self.test_gmail(),
             (Some(ModuleId::Gmail), "__mcp") => self.write_mcp(),
             (Some(ModuleId::Settings), "__save") => self.save_settings_fields(),
+            (Some(ModuleId::Brain), "__save") => self.save_brain_memory(),
+            (Some(ModuleId::Osint), "__save") => self.save_osint_toggles(),
+            (Some(ModuleId::Osint), "__add") => self.add_osint_source(),
             _ => {}
         }
     }
@@ -1428,57 +2777,59 @@ impl App {
     }
 
     fn save_provider_fields(&mut self) {
+        let kind = provider::normalize_kind(&empty_fallback(&self.field_value("kind"), "local"));
+        let chosen = provider::preset(&kind);
+        let mut base_url = self.field_value("base_url");
+        let mut model = self.field_value("model");
+        if let Some(chosen) = chosen {
+            if base_url.trim().is_empty() {
+                base_url = chosen.base_url.into();
+            }
+            if model.trim().is_empty() {
+                model = if self.provider_slot == "voice" {
+                    chosen.voice_model.into()
+                } else {
+                    chosen.text_model.into()
+                };
+            }
+        }
         let secret = ProviderSecret {
-            kind: empty_fallback(&self.field_value("kind"), "local"),
-            base_url: self.field_value("base_url"),
-            model: self.field_value("model"),
-            api_key: Some(self.field_value("api_key")).filter(|s| !s.is_empty()),
-            stt_model: Some(self.field_value("stt_model")).filter(|s| !s.is_empty()),
-            device: Some(DeviceEndpoints {
-                client_id: self.field_value("client_id"),
-                device_auth_url: self.field_value("device_auth_url"),
-                token_url: self.field_value("token_url"),
-                scope: empty_fallback(&self.field_value("scope"), "openid profile email"),
-            })
-            .filter(|d| !d.client_id.is_empty()),
+            kind: if chosen.is_some() {
+                kind.clone()
+            } else {
+                "local".into()
+            },
+            base_url,
+            model,
+            api_key: Some(self.field_value("api_key")).filter(|key| !key.is_empty()),
+            stt_model: Some(self.field_value("stt_model")).filter(|model| !model.is_empty()),
+            device: None,
         };
+        let missing_key = chosen
+            .filter(|preset| preset.key_required)
+            .filter(|_| secret.api_key.is_none())
+            .filter(|preset| provider::resolved_key(&secret).is_none() || preset.env_key.is_none());
+        if self.provider_slot == "text" {
+            self.settings.model = secret.model.clone();
+            let _ = self.settings.save();
+        }
         if self.provider_slot == "voice" {
             self.auth.voice = Some(secret);
         } else {
             self.auth.text = Some(secret);
         }
         match self.auth.save() {
-            Ok(()) => self.push_line(
-                "assistant",
-                &format!("Saved the {} provider.", self.provider_slot),
-            ),
+            Ok(()) => {
+                let mut note = format!("Saved the {} slot on {kind}.", self.provider_slot);
+                if let Some(preset) = missing_key {
+                    if let Some(name) = preset.env_key {
+                        note.push_str(&format!(" No key stored and {name} is unset."));
+                    }
+                }
+                self.push_line("assistant", &note);
+            }
             Err(err) => self.push_line("assistant", &err.to_string()),
         }
-    }
-
-    fn save_device_token(&mut self, token: String) {
-        let mut secret = self.slot_secret().unwrap_or(ProviderSecret {
-            kind: "device".into(),
-            base_url: self.field_value("base_url"),
-            model: self.field_value("model"),
-            api_key: None,
-            stt_model: None,
-            device: None,
-        });
-        secret.kind = "device".into();
-        secret.api_key = Some(token);
-        if self.provider_slot == "voice" {
-            self.auth.voice = Some(secret);
-        } else {
-            self.auth.text = Some(secret);
-        }
-        let _ = self.auth.save();
-        self.load_fields(ModuleId::Providers);
-        self.push_line(
-            "assistant",
-            "Device login stored a token. The token is not shown.",
-        );
-        self.status = "ready".into();
     }
 
     fn test_provider(&mut self) {
@@ -1494,63 +2845,6 @@ impl App {
             let _ = tx.send(AppMsg::Models(result));
         });
         self.status = "contacting provider".into();
-    }
-
-    fn start_device(&mut self) {
-        self.save_provider_fields();
-        let Some(secret) = self.slot_secret() else {
-            return;
-        };
-        let Some(endpoints) = secret.device.clone() else {
-            self.push_line(
-                "assistant",
-                "Fill in the device client id, authorization URL, and token URL first.",
-            );
-            return;
-        };
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            match provider::start_device(&endpoints).await {
-                Err(err) => {
-                    let _ = tx.send(AppMsg::DeviceStatus(err.to_string()));
-                }
-                Ok(grant) => {
-                    let show = format!(
-                        "Open {} and enter code {}.\n{}",
-                        grant.verification_uri,
-                        grant.user_code,
-                        grant.verification_uri_complete.unwrap_or_default()
-                    );
-                    let _ = tx.send(AppMsg::DeviceStatus(show));
-                    let mut interval = grant.interval.max(2);
-                    let mut waited = 0u64;
-                    loop {
-                        if waited >= grant.expires_in {
-                            let _ = tx.send(AppMsg::DeviceStatus("Device code expired.".into()));
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_secs(interval)).await;
-                        waited = waited.saturating_add(interval);
-                        match provider::poll_device(&endpoints, &grant.device_code).await {
-                            Ok(Poll::Pending) => {}
-                            Ok(Poll::SlowDown) => interval = interval.saturating_add(5),
-                            Ok(Poll::Token(token)) => {
-                                let _ = tx.send(AppMsg::DeviceToken(token));
-                                break;
-                            }
-                            Ok(Poll::Denied(err)) => {
-                                let _ = tx.send(AppMsg::DeviceStatus(err));
-                                break;
-                            }
-                            Err(err) => {
-                                let _ = tx.send(AppMsg::DeviceStatus(err.to_string()));
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        });
     }
 
     fn save_gmail_fields(&mut self) {
@@ -1611,10 +2905,6 @@ impl App {
     fn save_settings_fields(&mut self) {
         self.settings.searx_url = self.field_value("searx_url");
         self.settings.report_dir = self.field_value("report_dir");
-        if let Some(mode) = LayoutMode::parse(&self.field_value("layout")) {
-            self.layout = mode;
-            self.settings.layout = mode.name().into();
-        }
         match self.settings.save() {
             Ok(()) => self.push_line("assistant", "Settings saved."),
             Err(err) => self.push_line("assistant", &err.to_string()),
@@ -1668,6 +2958,14 @@ fn module_session(module: ModuleId) -> String {
     format!("module:{}", module.title().to_lowercase().replace(' ', "-"))
 }
 
+fn yes_no(on: bool) -> String {
+    if on {
+        "yes".into()
+    } else {
+        "no".into()
+    }
+}
+
 fn field(key: &str, label: &str, value: String, secret: bool) -> Field {
     Field {
         key: key.into(),
@@ -1699,6 +2997,78 @@ pub fn report_dir(settings: &SettingsFile) -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("reports")
+}
+
+fn memory_answer_material(app: &App, hits: &[brain::ScoredMemory]) -> String {
+    let mut out = String::from(
+        "FACTS FROM COMPLETED REPORTS. Answer only from these facts. Name the report each fact came from so the user can open it. Do not read the report files and do not start a search.\n",
+    );
+    for hit in hits {
+        let source = hit
+            .memory
+            .report_id
+            .as_deref()
+            .and_then(|id| app.reports.iter().find(|report| report.id == id))
+            .map(|report| report.title.as_str())
+            .unwrap_or("completed report");
+        out.push_str(&format!(
+            "- {}\n  source: {source}\n",
+            hit.memory.text.trim()
+        ));
+    }
+    out
+}
+
+fn prior_report_material(reports: &[ReportMeta]) -> String {
+    let mut out = String::from(
+        "RELEVANT REPORTS ALREADY ON FILE. Answer from these reports. Do not open a new investigation.\n",
+    );
+    for report in reports {
+        out.push_str(&format!("\n# {}\n", report.title));
+        match std::fs::read_to_string(&report.path) {
+            Ok(body) => {
+                let clipped: String = body.chars().take(3500).collect();
+                out.push_str(&clipped);
+                if body.chars().count() > 3500 {
+                    out.push_str("\n…\n");
+                } else {
+                    out.push('\n');
+                }
+            }
+            Err(err) => {
+                out.push_str(&format!("(could not read {}: {err})\n", report.path));
+            }
+        }
+    }
+    out
+}
+
+async fn distill_insight(
+    secret: &argos_osint_core::secrets::ProviderSecret,
+    report: &str,
+    question: &str,
+    answer: &str,
+) -> Result<String, String> {
+    if secret.base_url.trim().is_empty() || secret.model.trim().is_empty() {
+        return Err("no provider".into());
+    }
+    let messages = vec![provider::ChatMessage {
+        role: "user".into(),
+        content: format!(
+            "Summarize this report-chat exchange as one or two concise sentences.\n\
+             Keep the new insight from the user's question and the answer.\n\
+             Paraphrase. Do not quote the whole reply. No preamble and no bullet list.\n\
+             The fact is about report \"{report}\".\n\n\
+             Question:\n{question}\n\n\
+             Answer:\n{answer}"
+        ),
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+    }];
+    let completion = provider::complete(secret, &messages, &[], |_| {})
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(completion.content)
 }
 
 fn summarize_hits(hits: &[SearchHit]) -> String {
@@ -1842,9 +3212,52 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("APPLICATION LAUNCHER"), "{text}");
+        assert!(text.contains("Apps"), "{text}");
+        assert!(text.contains("Case Desk"), "{text}");
+        assert!(text.contains("Reports"), "{text}");
+        assert!(text.contains("No reports yet"), "{text}");
+        assert!(
+            !text.contains("Reports  Brain") && !text.contains("Reports Brain"),
+            "{text}"
+        );
         assert!(text.contains("Ctrl+P"), "{text}");
         assert_eq!(super::super::slash_menu("/use").option_count(), 1);
+        let chat = app.canvas_area;
+        app.click(chat.x + 2, chat.y + 2);
+        assert_eq!(app.focus, Focus::Canvas);
+        assert_eq!(app.case_tab_hits.len(), 2);
+        let brain = app.case_tab_hits[1];
+        app.click(brain.x + 1, brain.y);
+        assert_eq!(app.case_page, CasePage::Brain);
+
+        app.open_module(ModuleId::Brain);
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Memories"), "{text}");
+        assert!(text.contains("Enter views a fact"), "{text}");
+        assert!(!text.contains("No reports yet"), "{text}");
+        app.brain_card = true;
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Memory"), "{text}");
+        assert!(text.contains("Close"), "{text}");
+        assert!(!text.contains("Edit"), "{text}");
     }
 }
 

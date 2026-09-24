@@ -11,6 +11,10 @@ pub struct PromptParts<'a> {
     pub hardware_line: &'a str,
     pub memories: &'a [ScoredMemory],
     pub modality: &'a str,
+    /// The turn may use only the report text supplied with the question.
+    pub evidence_only: bool,
+    /// The included evidence is fact memories from completed reports, not the files.
+    pub from_memory: bool,
 }
 
 pub fn system_prompt(parts: &PromptParts<'_>) -> String {
@@ -32,12 +36,24 @@ HOST: {hardware}
 MODALITY: {modality}
 The user may be speaking or typing. Treat the latest user message as what they just said.
 
-{memory}When a public search was already run for this turn, use those hits. If you need another public page, call fetch_page. If the user asked you to remember a fact about themselves, call remember. Prefer a short answer, then the report."#,
+{memory}{scope}"#,
         view = parts.view_name,
         context = parts.view_context.trim(),
         hardware = parts.hardware_line,
         modality = parts.modality,
         memory = memory,
+        scope = if parts.from_memory {
+            "SCOPE: Answer only from the fact memories included with this question. \
+             Cite the report title given with each fact so the user knows which completed report to open. \
+             Do not read report files, do not search, and do not start a new case. \
+             If the facts do not cover the question, say so."
+        } else if parts.evidence_only {
+            "SCOPE: Answer only from the report evidence included with this question. \
+             Paraphrase or quote that report. If it does not contain the answer, say that the report does not cover the question. \
+             Do not search, do not use brain memories, do not invent sources, and do not start a new case."
+        } else {
+            "When a public search was already run for this turn, use those hits. If you need another public page, call fetch_page. If the user asked you to remember a fact about themselves, call remember. Prefer a short answer, then the report."
+        },
     )
 }
 
@@ -96,11 +112,7 @@ mod tests {
 
     #[test]
     fn injection_includes_recalled_name() {
-        let memories = vec![Memory {
-            id: "1".into(),
-            text: "My name is Ada".into(),
-            created_at: "t".into(),
-        }];
+        let memories = vec![Memory::fact("1", "My name is Ada", "t")];
         let hits = recall(&memories, "who am I", 3);
         let prompt = system_prompt(&PromptParts {
             view_name: "Brain",
@@ -108,10 +120,28 @@ mod tests {
             hardware_line: "macos arm64",
             memories: &hits,
             modality: "text",
+            evidence_only: false,
+            from_memory: false,
         });
         assert!(prompt.contains("My name is Ada"));
         assert!(prompt.contains("ACTIVE VIEW: Brain"));
         assert!(!prompt.contains("app_password"));
+        assert!(!prompt.contains("SCOPE:"));
+    }
+
+    #[test]
+    fn evidence_scope_forbids_a_new_search() {
+        let prompt = system_prompt(&PromptParts {
+            view_name: "Report · Harbor",
+            view_context: "The user selected one report.",
+            hardware_line: "macos arm64",
+            memories: &[],
+            modality: "text",
+            evidence_only: true,
+            from_memory: false,
+        });
+        assert!(prompt.contains("Answer only from the report evidence"));
+        assert!(prompt.contains("Do not search"));
     }
 
     #[test]

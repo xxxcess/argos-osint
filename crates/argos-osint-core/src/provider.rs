@@ -1,11 +1,11 @@
 //! Text and voice providers.
 //!
-//! Text chats use the OpenAI-compatible chat completions API (xAI, OpenAI,
-//! Ollama, llama.cpp, LM Studio). Voice uses the OpenAI-compatible
-//! `/audio/transcriptions` endpoint. Login is either an API key typed at the
-//! terminal, a local base URL, or an RFC 8628 device-code grant. Argos shows
-//! the verification URL and user code; it does not embed another product's
-//! OAuth client id.
+//! The agent loop speaks one protocol: OpenAI-compatible chat completions,
+//! plus `/audio/transcriptions` for voice. Login chooses which vendor fills
+//! that protocol: Grok (`api.x.ai`), OpenAI, OpenRouter, or a local server
+//! (Ollama, llama.cpp, LM Studio). Cloud providers take an API key typed at
+//! the terminal or the vendor's environment variable. A local server may omit
+//! the key. OpenRouter also gets its attribution headers.
 
 use std::time::Duration;
 
@@ -76,6 +76,269 @@ pub fn normalize_base(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
+/// A vendor the desk knows how to sign in. The chat loop does not branch on
+/// these ids; only the endpoint, key, and a few headers do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub base_url: &'static str,
+    pub text_model: &'static str,
+    pub voice_model: &'static str,
+    pub env_key: Option<&'static str>,
+    pub key_required: bool,
+}
+
+pub fn presets() -> &'static [ProviderPreset] {
+    &[
+        ProviderPreset {
+            id: "grok",
+            label: "Grok",
+            base_url: "https://api.x.ai/v1",
+            text_model: "grok-4.6",
+            voice_model: "whisper-1",
+            env_key: Some("XAI_API_KEY"),
+            key_required: true,
+        },
+        ProviderPreset {
+            id: "openai",
+            label: "OpenAI",
+            base_url: "https://api.openai.com/v1",
+            text_model: "gpt-4.1",
+            voice_model: "whisper-1",
+            env_key: Some("OPENAI_API_KEY"),
+            key_required: true,
+        },
+        ProviderPreset {
+            id: "openrouter",
+            label: "OpenRouter",
+            base_url: "https://openrouter.ai/api/v1",
+            text_model: "openai/gpt-4.1",
+            voice_model: "openai/whisper-1",
+            env_key: Some("OPENROUTER_API_KEY"),
+            key_required: true,
+        },
+        ProviderPreset {
+            id: "local",
+            label: "Local",
+            base_url: "http://127.0.0.1:11434/v1",
+            text_model: "llama3.2",
+            voice_model: "whisper",
+            env_key: None,
+            key_required: false,
+        },
+    ]
+}
+
+pub fn preset(id: &str) -> Option<&'static ProviderPreset> {
+    let id = normalize_kind(id);
+    presets().iter().find(|preset| preset.id == id)
+}
+
+/// Built-in Grok catalog. The default matches the model Grok Build starts
+/// on (`grok-4.6` in its `default_models.json`). Older ids stay selectable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GrokModel {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub detail: &'static str,
+}
+
+pub fn grok_models() -> &'static [GrokModel] {
+    &[
+        GrokModel {
+            id: "grok-4.6",
+            name: "Grok 4.6",
+            detail: "Current default. Frontier model for agents.",
+        },
+        GrokModel {
+            id: "grok-4.5",
+            name: "Grok 4.5",
+            detail: "Previous Grok Build default.",
+        },
+    ]
+}
+
+pub fn default_grok_model() -> &'static str {
+    grok_models()[0].id
+}
+
+/// Exact id or display name, then a single unambiguous prefix. Empty and
+/// ambiguous queries return nothing, same rule as `/use`.
+pub fn resolve_model_choice(choices: &[(String, String)], query: &str) -> Option<String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    let ql = query.to_lowercase();
+    if let Some((id, _)) = choices
+        .iter()
+        .find(|(id, label)| id.eq_ignore_ascii_case(query) || label.eq_ignore_ascii_case(query))
+    {
+        return Some(id.clone());
+    }
+    let prefs: Vec<_> = choices
+        .iter()
+        .filter(|(id, label)| {
+            id.to_lowercase().starts_with(&ql) || label.to_lowercase().starts_with(&ql)
+        })
+        .collect();
+    if prefs.len() == 1 {
+        Some(prefs[0].0.clone())
+    } else {
+        None
+    }
+}
+
+/// The text provider a turn should call. With nothing saved, that is Grok
+/// on `api.x.ai` using the current default model. `selected` (from
+/// `/model`, Ctrl+M, or `-m`) wins over the model stored on the provider.
+pub fn active_text_secret(
+    auth: &crate::secrets::AuthFile,
+    selected: &str,
+) -> crate::secrets::ProviderSecret {
+    use crate::secrets::ProviderSecret;
+    let grok = preset("grok").expect("grok preset");
+    let mut secret = auth.text.clone().unwrap_or_else(|| ProviderSecret {
+        kind: "grok".into(),
+        base_url: grok.base_url.into(),
+        model: grok.text_model.into(),
+        api_key: None,
+        stt_model: Some(grok.voice_model.into()),
+        device: None,
+    });
+    if secret.kind.trim().is_empty() {
+        secret.kind = "grok".into();
+    }
+    if secret.base_url.trim().is_empty() {
+        if let Some(preset) = preset(&secret.kind) {
+            secret.base_url = preset.base_url.into();
+        }
+    }
+    if !selected.trim().is_empty() {
+        secret.model = selected.trim().to_string();
+    } else if secret.model.trim().is_empty() {
+        secret.model = preset(&effective_kind(&secret))
+            .map(|preset| preset.text_model)
+            .unwrap_or_else(|| default_grok_model())
+            .to_string();
+    }
+    secret
+}
+
+/// Map login input onto a known provider id. Unknown text is returned
+/// trimmed so a saved custom kind still round-trips.
+pub fn normalize_kind(kind: &str) -> String {
+    let compact: String = kind
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '-' && *ch != '_')
+        .collect();
+    match compact.as_str() {
+        "grok" | "xai" | "x.ai" => "grok".into(),
+        "openai" => "openai".into(),
+        "openrouter" => "openrouter".into(),
+        "local" | "ollama" | "llama" | "llamacpp" | "lmstudio" => "local".into(),
+        _ => kind.trim().to_lowercase(),
+    }
+}
+
+/// Provider id used for headers and the environment key. A stored id wins.
+/// Older files that only have a base URL are classified from the host.
+pub fn effective_kind(secret: &ProviderSecret) -> String {
+    let kind = normalize_kind(&secret.kind);
+    if preset(&kind).is_some() {
+        return kind;
+    }
+    detect_kind_from_url(&secret.base_url)
+}
+
+pub fn detect_kind_from_url(url: &str) -> String {
+    let host = url::Url::parse(url.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_default();
+    if host == "openrouter.ai" || host.ends_with(".openrouter.ai") {
+        "openrouter".into()
+    } else if host == "api.x.ai" || host == "x.ai" || host.ends_with(".x.ai") {
+        "grok".into()
+    } else if host == "api.openai.com" || host.ends_with(".openai.com") {
+        "openai".into()
+    } else if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
+        "local".into()
+    } else {
+        "local".into()
+    }
+}
+
+/// Stored key first, then the vendor environment variable. The environment
+/// value is not written back into `auth.json`.
+pub fn resolved_key(secret: &ProviderSecret) -> Option<String> {
+    resolved_key_with(secret, |name| std::env::var(name).ok())
+}
+
+fn resolved_key_with(
+    secret: &ProviderSecret,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if let Some(key) = secret
+        .api_key
+        .as_ref()
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+    {
+        return Some(key.to_string());
+    }
+    let kind = effective_kind(secret);
+    let name = preset(&kind).and_then(|preset| preset.env_key)?;
+    lookup(name)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub fn provider_headers(secret: &ProviderSecret) -> Vec<(&'static str, &'static str)> {
+    if effective_kind(secret) == "openrouter" {
+        vec![
+            ("HTTP-Referer", "https://github.com/argos-osint"),
+            ("X-Title", "Argos OSINT"),
+            ("X-OpenRouter-Title", "Argos OSINT"),
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
+async fn bearer_token(secret: &ProviderSecret) -> Result<Option<String>, String> {
+    if let Some(key) = resolved_key(secret) {
+        return Ok(Some(key));
+    }
+    if effective_kind(secret) == "grok" {
+        return crate::grok_oauth::bearer().await;
+    }
+    Ok(None)
+}
+
+async fn authorize(
+    mut req: reqwest::RequestBuilder,
+    secret: &ProviderSecret,
+) -> Result<reqwest::RequestBuilder> {
+    match bearer_token(secret).await {
+        Ok(Some(key)) => req = req.bearer_auth(key),
+        Ok(None) if effective_kind(secret) == "grok" => {
+            return Err(anyhow!(
+                "No Grok credentials. Run `grok login` or `argos login`, or set XAI_API_KEY."
+            ));
+        }
+        Ok(None) => {}
+        Err(err) => return Err(anyhow!(err)),
+    }
+    for (name, value) in provider_headers(secret) {
+        req = req.header(name, value);
+    }
+    Ok(req)
+}
+
 pub async fn complete(
     secret: &ProviderSecret,
     messages: &[ChatMessage],
@@ -85,10 +348,7 @@ pub async fn complete(
     let client = http()?;
     let url = format!("{}/chat/completions", normalize_base(&secret.base_url));
     let body = chat_body(secret, messages, tools, true);
-    let mut req = client.post(&url).json(&body);
-    if let Some(key) = secret.api_key.as_ref().filter(|k| !k.is_empty()) {
-        req = req.bearer_auth(key);
-    }
+    let req = authorize(client.post(&url).json(&body), secret).await?;
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
@@ -130,10 +390,7 @@ async fn complete_once(
     let client = http()?;
     let url = format!("{}/chat/completions", normalize_base(&secret.base_url));
     let body = chat_body(secret, messages, tools, false);
-    let mut req = client.post(&url).json(&body);
-    if let Some(key) = secret.api_key.as_ref().filter(|k| !k.is_empty()) {
-        req = req.bearer_auth(key);
-    }
+    let req = authorize(client.post(&url).json(&body), secret).await?;
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
@@ -345,10 +602,7 @@ pub async fn transcribe(secret: &ProviderSecret, wav: &[u8]) -> Result<String> {
         .text("model", model)
         .part("file", part);
     let url = format!("{}/audio/transcriptions", normalize_base(&secret.base_url));
-    let mut req = client.post(&url).multipart(form);
-    if let Some(key) = secret.api_key.as_ref().filter(|k| !k.is_empty()) {
-        req = req.bearer_auth(key);
-    }
+    let req = authorize(client.post(&url).multipart(form), secret).await?;
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
@@ -366,10 +620,7 @@ pub async fn transcribe(secret: &ProviderSecret, wav: &[u8]) -> Result<String> {
 pub async fn list_models(secret: &ProviderSecret) -> Result<Vec<String>> {
     let client = http()?;
     let url = format!("{}/models", normalize_base(&secret.base_url));
-    let mut req = client.get(&url);
-    if let Some(key) = secret.api_key.as_ref().filter(|k| !k.is_empty()) {
-        req = req.bearer_auth(key);
-    }
+    let req = authorize(client.get(&url), secret).await?;
     let resp = req.send().await.with_context(|| format!("GET {url}"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
@@ -402,15 +653,27 @@ pub struct SettingsFile {
     pub searx_url: String,
     #[serde(default)]
     pub report_dir: String,
-    #[serde(default = "default_layout")]
-    pub layout: String,
     #[serde(default = "default_modality")]
     pub modality: String,
+    /// Selected text model. Empty means the provider's own default, which
+    /// is `grok-4.6` until another provider is signed in.
+    #[serde(default)]
+    pub model: String,
+    /// Public web search (DuckDuckGo, or SearXNG when `searx_url` is set).
+    #[serde(default = "default_true")]
+    pub internet: bool,
+    /// English Wikipedia opensearch.
+    #[serde(default = "default_true")]
+    pub wikipedia: bool,
+    /// Extra public sources. Each URL template must contain `{query}`.
+    #[serde(default)]
+    pub sources: Vec<crate::search::OsintSource>,
 }
 
-fn default_layout() -> String {
-    "classic".into()
+fn default_true() -> bool {
+    true
 }
+
 fn default_modality() -> String {
     "text".into()
 }
@@ -420,8 +683,11 @@ impl Default for SettingsFile {
         Self {
             searx_url: String::new(),
             report_dir: String::new(),
-            layout: default_layout(),
             modality: default_modality(),
+            model: String::new(),
+            internet: true,
+            wikipedia: true,
+            sources: Vec::new(),
         }
     }
 }
@@ -463,6 +729,84 @@ mod tests {
         acc.push_line(r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"web_search","arguments":"{\"q\":"}}]}}]}"#);
         acc.push_line(r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}"#);
         assert_eq!(acc.tool_calls[0].arguments, "{\"q\":1}");
+    }
+
+    fn secret(kind: &str, base: &str, key: Option<&str>) -> ProviderSecret {
+        ProviderSecret {
+            kind: kind.into(),
+            base_url: base.into(),
+            model: "m".into(),
+            api_key: key.map(|k| k.to_string()),
+            stt_model: None,
+            device: None,
+        }
+    }
+
+    #[test]
+    fn presets_cover_cloud_and_local() {
+        let ids: Vec<_> = presets().iter().map(|preset| preset.id).collect();
+        assert_eq!(ids, vec!["grok", "openai", "openrouter", "local"]);
+        assert!(preset("xai").unwrap().base_url.contains("api.x.ai"));
+        assert_eq!(normalize_kind("LM Studio"), "local");
+        assert!(!preset("local").unwrap().key_required);
+        assert!(preset("openrouter").unwrap().key_required);
+    }
+
+    #[test]
+    fn kind_follows_host_when_the_saved_id_is_generic() {
+        let saved = secret("api", "https://openrouter.ai/api/v1", None);
+        assert_eq!(effective_kind(&saved), "openrouter");
+        let local = secret("api", "http://127.0.0.1:11434/v1", None);
+        assert_eq!(effective_kind(&local), "local");
+        let named = secret("openai", "https://example.test/v1", None);
+        assert_eq!(effective_kind(&named), "openai");
+    }
+
+    #[test]
+    fn key_prefers_the_file_and_headers_are_only_for_openrouter() {
+        let stored = secret("grok", "https://api.x.ai/v1", Some("stored-key"));
+        let found = resolved_key_with(&stored, |_| Some("from-env".into()));
+        assert_eq!(found.as_deref(), Some("stored-key"));
+        assert!(provider_headers(&stored).is_empty());
+
+        let from_env = secret("openrouter", "https://openrouter.ai/api/v1", None);
+        let found = resolved_key_with(&from_env, |name| {
+            assert_eq!(name, "OPENROUTER_API_KEY");
+            Some("or-key".into())
+        });
+        assert_eq!(found.as_deref(), Some("or-key"));
+        let names: Vec<_> = provider_headers(&from_env)
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(names.contains(&"HTTP-Referer"));
+        assert!(names.contains(&"X-Title"));
+    }
+
+    #[test]
+    fn grok_defaults_to_the_current_build_model_and_picks_unambiguously() {
+        assert_eq!(default_grok_model(), "grok-4.6");
+        assert_eq!(preset("grok").unwrap().text_model, "grok-4.6");
+        let choices = grok_models()
+            .iter()
+            .map(|model| (model.id.to_string(), model.name.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resolve_model_choice(&choices, "grok-4.5").as_deref(),
+            Some("grok-4.5")
+        );
+        assert_eq!(
+            resolve_model_choice(&choices, "Grok 4.6").as_deref(),
+            Some("grok-4.6")
+        );
+        assert!(resolve_model_choice(&choices, "grok").is_none());
+        assert!(resolve_model_choice(&choices, "  ").is_none());
+        let secret = active_text_secret(&crate::secrets::AuthFile::default(), "");
+        assert_eq!(secret.kind, "grok");
+        assert_eq!(secret.model, "grok-4.6");
+        assert_eq!(secret.base_url, "https://api.x.ai/v1");
+        let picked = active_text_secret(&crate::secrets::AuthFile::default(), "grok-4.5");
+        assert_eq!(picked.model, "grok-4.5");
     }
 
     #[test]

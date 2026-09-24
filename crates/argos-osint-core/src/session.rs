@@ -79,22 +79,74 @@ pub struct SlashCommand {
 
 pub fn slash_commands() -> &'static [SlashCommand] {
     &[
-        SlashCommand { name: "help", summary: "Show keyboard and command help" },
-        SlashCommand { name: "dashboard", summary: "Return to the app launcher" },
-        SlashCommand { name: "layout", summary: "Switch layout: classic, dashboard, tabs, modal, vertical, horizontal, three, float, grid, zen" },
-        SlashCommand { name: "new", summary: "Open a case: /new <title>" },
-        SlashCommand { name: "use", summary: "Focus a case by id or title" },
-        SlashCommand { name: "search", summary: "Public web search into a markdown report" },
-        SlashCommand { name: "report", summary: "Write the visible transcript into a markdown report" },
-        SlashCommand { name: "hardware", summary: "Open the host profile" },
-        SlashCommand { name: "provider", summary: "Open text and voice provider login" },
-        SlashCommand { name: "brain", summary: "Open recall, or /brain <fact> to remember" },
-        SlashCommand { name: "gmail", summary: "Open the Gmail MCP setup" },
-        SlashCommand { name: "voice", summary: "Send the next turns as voice" },
-        SlashCommand { name: "text", summary: "Send the next turns as text" },
-        SlashCommand { name: "open", summary: "Launch an app by name" },
-        SlashCommand { name: "clear", summary: "Clear the prompt" },
-        SlashCommand { name: "quit", summary: "Leave Argos" },
+        SlashCommand {
+            name: "help",
+            summary: "Show keyboard and command help",
+        },
+        SlashCommand {
+            name: "dashboard",
+            summary: "Return to the app launcher",
+        },
+        SlashCommand {
+            name: "new",
+            summary: "Open a case: /new <title>",
+        },
+        SlashCommand {
+            name: "use",
+            summary: "Focus a case by id or title",
+        },
+        SlashCommand {
+            name: "search",
+            summary: "Public web search into a markdown report",
+        },
+        SlashCommand {
+            name: "report",
+            summary: "Write the visible transcript into a markdown report",
+        },
+        SlashCommand {
+            name: "hardware",
+            summary: "Open the host profile",
+        },
+        SlashCommand {
+            name: "provider",
+            summary: "Open text and voice provider login",
+        },
+        SlashCommand {
+            name: "model",
+            summary: "Pick a model, or /model <id>",
+        },
+        SlashCommand {
+            name: "models",
+            summary: "Open the model picker",
+        },
+        SlashCommand {
+            name: "brain",
+            summary: "Open recall, or /brain <fact> to remember",
+        },
+        SlashCommand {
+            name: "gmail",
+            summary: "Open the Gmail MCP setup",
+        },
+        SlashCommand {
+            name: "voice",
+            summary: "Send the next turns as voice",
+        },
+        SlashCommand {
+            name: "text",
+            summary: "Send the next turns as text",
+        },
+        SlashCommand {
+            name: "open",
+            summary: "Launch an app by name",
+        },
+        SlashCommand {
+            name: "clear",
+            summary: "Clear the case desk chat, or the open report chat",
+        },
+        SlashCommand {
+            name: "quit",
+            summary: "Leave Argos",
+        },
     ]
 }
 

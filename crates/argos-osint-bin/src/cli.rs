@@ -1,10 +1,9 @@
 //! `argos` command line. The default is the full-screen terminal UI.
-//! `argos -p` runs one turn and prints it. `argos login` is the terminal
-//! provider flow (API key, local endpoint, or RFC 8628 device code).
+//! `argos -p` runs one turn and prints it. `argos login` signs in Grok,
+//! OpenAI, OpenRouter, or a local OpenAI-compatible server.
 
 use std::io::{self, Read, Write};
 use std::sync::{atomic::AtomicBool, Arc};
-use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use argos_osint_core::agent::{self, TurnEvent, TurnInput};
@@ -12,8 +11,8 @@ use argos_osint_core::gmail::GmailConfig;
 use argos_osint_core::hardware;
 use argos_osint_core::mcp::{self, take_frame};
 use argos_osint_core::paths;
-use argos_osint_core::provider::{self, Poll, SettingsFile};
-use argos_osint_core::secrets::{AuthFile, DeviceEndpoints, ProviderSecret};
+use argos_osint_core::provider::{self, SettingsFile};
+use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
 use clap::{Parser, Subcommand};
 use tokio::sync::mpsc::unbounded_channel;
@@ -30,6 +29,9 @@ struct Cli {
     /// Run one turn and print the answer instead of opening the TUI.
     #[arg(short = 'p', long)]
     prompt: Option<String>,
+    /// Text model for this process. Saved when opening the TUI.
+    #[arg(short = 'm', long)]
+    model: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -47,6 +49,8 @@ enum Command {
     Hardware,
     /// List markdown reports.
     Reports,
+    /// List models for the active text provider. Grok starts with its built-in catalog.
+    Models,
     /// Speak MCP over stdio. Only `gmail` is implemented.
     Mcp { service: String },
 }
@@ -59,14 +63,44 @@ pub async fn dispatch() -> Result<()> {
             Command::Logout { gmail } => logout(gmail),
             Command::Hardware => print_hardware(),
             Command::Reports => print_reports(),
+            Command::Models => print_models().await,
             Command::Mcp { service } => mcp(service),
         };
     }
     if let Some(prompt) = cli.prompt {
-        return headless(prompt).await;
+        return headless(prompt, cli.model).await;
     }
-    let app = App::boot()?;
+    let mut app = App::boot()?;
+    if let Some(model) = cli.model {
+        app.select_model(&model);
+    }
     tui::run(app).await
+}
+
+async fn print_models() -> Result<()> {
+    let settings = SettingsFile::load().unwrap_or_default();
+    let auth = AuthFile::load().unwrap_or_default();
+    let secret = provider::active_text_secret(&auth, &settings.model);
+    println!("{}  {}", provider::effective_kind(&secret), secret.base_url);
+    if provider::effective_kind(&secret) == "grok" {
+        for model in provider::grok_models() {
+            let mark = if model.id == secret.model { "*" } else { " " };
+            println!("{mark} {:<12} {}", model.id, model.name);
+        }
+    }
+    match provider::list_models(&secret).await {
+        Ok(names) => {
+            if !names.is_empty() {
+                println!("endpoint:");
+                for name in names {
+                    let mark = if name == secret.model { "*" } else { " " };
+                    println!("{mark} {name}");
+                }
+            }
+        }
+        Err(err) => println!("endpoint list unavailable: {err}"),
+    }
+    Ok(())
 }
 
 fn print_hardware() -> Result<()> {
@@ -111,93 +145,48 @@ fn logout(gmail: bool) -> Result<()> {
 
 async fn login() -> Result<()> {
     println!("Argos provider login");
+    println!("Chat and voice use the OpenAI-compatible API. The provider only changes the host and the key.");
     println!(
         "Credentials are stored in {} with owner-only permissions.",
         paths::auth_path().display()
     );
+    println!();
+    for preset in provider::presets() {
+        let auth = match preset.env_key {
+            Some(name) if preset.key_required => format!("key or {name}"),
+            Some(name) => format!("optional key or {name}"),
+            None => "optional key".into(),
+        };
+        println!("  {:<12} {}  ({auth})", preset.id, preset.base_url);
+    }
+    println!();
     let modality = ask("Modality [text/voice]", "text")?;
-    let kind = ask("Kind [local/api/device]", "local")?;
-    let default_base = if kind == "local" {
-        "http://127.0.0.1:11434/v1"
-    } else {
-        "https://api.x.ai/v1"
+    let choice = ask("Provider [grok/openai/openrouter/local]", "grok")?;
+    let Some(preset) = provider::preset(&choice) else {
+        return Err(anyhow!(
+            "unknown provider {choice}. Choose grok, openai, openrouter, or local."
+        ));
     };
-    let base_url = ask("Base URL", default_base)?;
-    let model = ask(
-        "Model",
-        if modality == "voice" {
-            "whisper-1"
-        } else {
-            "grok-4"
-        },
-    )?;
-    let mut secret = ProviderSecret {
-        kind: kind.clone(),
+    let base_url = ask("Base URL", preset.base_url)?;
+    let default_model = if modality == "voice" {
+        preset.voice_model
+    } else {
+        preset.text_model
+    };
+    let model = ask("Model", default_model)?;
+    let api_key = prompt_provider_key(preset)?;
+    let secret = ProviderSecret {
+        kind: preset.id.to_string(),
         base_url,
         model: model.clone(),
-        api_key: None,
+        api_key,
         stt_model: if modality == "voice" {
             Some(model)
         } else {
-            None
+            Some(preset.voice_model.to_string())
         },
         device: None,
     };
-    match kind.as_str() {
-        "device" => {
-            let endpoints = DeviceEndpoints {
-                client_id: ask("OAuth client id", "")?,
-                device_auth_url: ask("Device authorization URL", "")?,
-                token_url: ask("Token URL", "")?,
-                scope: ask("Scope", "openid profile email")?,
-            };
-            if endpoints.client_id.is_empty() {
-                return Err(anyhow!("device login needs a client id"));
-            }
-            let grant = provider::start_device(&endpoints).await?;
-            println!();
-            println!("Open: {}", grant.verification_uri);
-            if let Some(url) = &grant.verification_uri_complete {
-                println!("Or:   {url}");
-            }
-            println!("Code: {}", grant.user_code);
-            println!("Waiting for approval. Ctrl+C cancels.");
-            let mut interval = grant.interval.max(2);
-            let mut waited = 0u64;
-            loop {
-                if waited >= grant.expires_in {
-                    return Err(anyhow!("device code expired"));
-                }
-                tokio::time::sleep(Duration::from_secs(interval)).await;
-                waited = waited.saturating_add(interval);
-                match provider::poll_device(&endpoints, &grant.device_code).await? {
-                    Poll::Pending => print!("."),
-                    Poll::SlowDown => interval = interval.saturating_add(5),
-                    Poll::Token(token) => {
-                        println!();
-                        secret.api_key = Some(token);
-                        secret.device = Some(endpoints);
-                        break;
-                    }
-                    Poll::Denied(err) => return Err(anyhow!(err)),
-                }
-                let _ = io::stdout().flush();
-            }
-        }
-        "api" => {
-            let key = rpassword::prompt_password("API key: ")?;
-            if key.trim().is_empty() {
-                return Err(anyhow!("empty API key"));
-            }
-            secret.api_key = Some(key.trim().to_string());
-        }
-        _ => {
-            let key = ask("API key (empty if the local server does not need one)", "")?;
-            if !key.is_empty() {
-                secret.api_key = Some(key);
-            }
-        }
-    }
     let mut auth = AuthFile::load()?;
     if modality == "voice" {
         auth.voice = Some(secret);
@@ -205,8 +194,45 @@ async fn login() -> Result<()> {
         auth.text = Some(secret);
     }
     auth.save()?;
-    println!("Saved the {modality} provider.");
+    println!("Saved the {modality} slot on {}.", preset.label);
     Ok(())
+}
+
+fn prompt_provider_key(preset: &provider::ProviderPreset) -> Result<Option<String>> {
+    if let Some(name) = preset.env_key {
+        if std::env::var(name)
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            let use_env = ask(&format!("Use {name} from the environment? [Y/n]"), "Y")?;
+            if !matches!(use_env.to_lowercase().as_str(), "n" | "no") {
+                println!("{name} will be read at request time and is not copied into auth.json.");
+                return Ok(None);
+            }
+        }
+    }
+    let prompt = if preset.key_required {
+        "API key: "
+    } else {
+        "API key (empty if this server does not need one): "
+    };
+    let key = rpassword::prompt_password(prompt)?;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        if preset.key_required {
+            return Err(anyhow!(
+                "{} needs an API key{}",
+                preset.label,
+                preset
+                    .env_key
+                    .map(|name| format!(" or {name}"))
+                    .unwrap_or_default()
+            ));
+        }
+        return Ok(None);
+    }
+    Ok(Some(key))
 }
 
 fn ask(label: &str, default: &str) -> Result<String> {
@@ -226,7 +252,7 @@ fn ask(label: &str, default: &str) -> Result<String> {
     }
 }
 
-async fn headless(prompt: String) -> Result<()> {
+async fn headless(prompt: String, model: Option<String>) -> Result<()> {
     paths::ensure_home()?;
     let store = Store::open(&paths::db_path())?;
     store.ensure_session("desk", "Desk", "desk")?;
@@ -242,7 +268,10 @@ async fn headless(prompt: String) -> Result<()> {
         view_context: "Headless turn. No canvas is open.".into(),
         hardware_line: profile.one_line(),
         modality: settings.modality.clone(),
-        provider: auth.text,
+        provider: Some(provider::active_text_secret(
+            &auth,
+            model.as_deref().unwrap_or(settings.model.as_str()),
+        )),
         searx_url: {
             let url = settings.searx_url.clone();
             Some(url).filter(|s| !s.is_empty())
@@ -250,6 +279,9 @@ async fn headless(prompt: String) -> Result<()> {
         report_dir: crate::tui::report_dir(&settings),
         case_id: None,
         gmail: auth.gmail.as_ref().map(GmailConfig::from),
+        prior_reports: String::new(),
+        evidence_only: false,
+        from_memory: false,
     };
     let (tx, mut rx) = unbounded_channel();
     let cancel = Arc::new(AtomicBool::new(false));

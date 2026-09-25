@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use argos_osint_core::agent::{self, HistMsg, TurnEvent, TurnInput};
+use chrono::Local;
 use argos_osint_core::brain::{self, Memory};
 use argos_osint_core::gmail::{self, GmailConfig};
 use argos_osint_core::hardware::{self, HardwareProfile};
@@ -30,6 +31,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ModuleId {
     Cases,
+    System,
     Hardware,
     Providers,
     Osint,
@@ -44,13 +46,14 @@ impl ModuleId {
     pub fn title(self) -> &'static str {
         match self {
             Self::Cases => "Case Desk",
+            Self::System => "System",
             Self::Hardware => "Hardware",
             Self::Providers => "Providers",
             Self::Osint => "OSINT Providers",
             Self::Brain => "Brain",
             Self::Gmail => "Gmail",
             Self::Reports => "Reports",
-            Self::Log => "Search Log",
+            Self::Log => "Log",
             Self::Settings => "Settings",
         }
     }
@@ -58,33 +61,37 @@ impl ModuleId {
     pub fn blurb(self) -> &'static str {
         match self {
             Self::Cases => "Desk for new queries, with reports beside it",
+            Self::System => "Log, hardware, and settings",
             Self::Hardware => "Cores, RAM, VRAM, architecture",
             Self::Providers => "Mail, OSINT sources, and LLM login",
             Self::Osint => "Public search sources for case research",
             Self::Brain => "fact, identity, preference, contact, project, goal, task",
             Self::Gmail => "Gmail IMAP app password and MCP",
             Self::Reports => "Markdown reports on disk",
-            Self::Log => "Search and tool stream",
+            Self::Log => "Timestamped system, API, task, and search log",
             Self::Settings => "SearXNG URL and report folder",
         }
     }
 
-    /// Launcher order: case desk, providers, hardware, search log, settings.
-    pub fn all() -> [ModuleId; 5] {
-        [
-            Self::Cases,
-            Self::Providers,
-            Self::Hardware,
-            Self::Log,
-            Self::Settings,
-        ]
+    /// Launcher order: case desk, providers, system.
+    /// Hardware and Settings are tabs on System. Log is the System log.
+    pub fn all() -> [ModuleId; 3] {
+        [Self::Cases, Self::Providers, Self::System]
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
         let n = name.trim().to_lowercase();
         Self::all()
             .into_iter()
-            .chain([Self::Brain, Self::Gmail, Self::Reports, Self::Log])
+            .chain([
+                Self::Brain,
+                Self::Gmail,
+                Self::Osint,
+                Self::Reports,
+                Self::Log,
+                Self::Hardware,
+                Self::Settings,
+            ])
             .find(|m| {
                 let title = m.title().to_lowercase();
                 title == n
@@ -114,6 +121,36 @@ impl CasePage {
             Self::Brain => "Brain",
         }
     }
+}
+
+/// Tabs on the System app. Log replaces the old case-desk search log.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SystemPage {
+    Log,
+    Hardware,
+    Settings,
+}
+
+impl SystemPage {
+    pub fn all() -> [Self; 3] {
+        [Self::Log, Self::Hardware, Self::Settings]
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Log => "Log",
+            Self::Hardware => "Hardware",
+            Self::Settings => "Settings",
+        }
+    }
+}
+
+/// One timestamped line in the System log.
+#[derive(Clone, Debug)]
+pub struct LogEntry {
+    pub at: String,
+    pub kind: String,
+    pub text: String,
 }
 
 /// Research that has started and has not filed markdown yet.
@@ -167,17 +204,6 @@ impl ReportRow {
             _ => None,
         }
     }
-
-    pub fn detail(&self) -> Option<&str> {
-        match self {
-            Self::Pending {
-                failed: Some(reason),
-                ..
-            } => Some(reason),
-            Self::Completed(_) => None,
-            Self::Pending { .. } => None,
-        }
-    }
 }
 
 /// Side pages on Providers: mail, OSINT sources, and the LLM login.
@@ -223,7 +249,10 @@ pub enum AppMsg {
     Turn(TurnEvent),
     Hardware(HardwareProfile),
     Note(String),
-    Search(Result<Vec<SearchHit>, String>),
+    Search {
+        query: String,
+        result: Result<Vec<SearchHit>, String>,
+    },
     Models(Result<Vec<String>, String>),
     ModelList(Result<Vec<String>, String>),
     Voice(Result<String, String>),
@@ -247,6 +276,7 @@ pub struct App {
     pub launcher_sel: usize,
     pub module: Option<ModuleId>,
     pub case_page: CasePage,
+    pub system_page: SystemPage,
     pub provider_page: ProviderPage,
     pub source_sel: usize,
     pub modal: bool,
@@ -293,7 +323,7 @@ pub struct App {
     /// Research that has started and has not filed a markdown report yet.
     pub pending_reports: Vec<PendingReport>,
     pub report_sel: usize,
-    pub log: Vec<String>,
+    pub log: Vec<LogEntry>,
     pub hardware: HardwareProfile,
     pub cpu_now: f32,
     pub cpu_hist: VecDeque<u64>,
@@ -321,6 +351,9 @@ pub struct App {
     pub case_tab_hits: Vec<Rect>,
     /// Clickable label for each Providers tab, in tab order.
     pub provider_tab_hits: Vec<Rect>,
+    pub system_tab_area: Rect,
+    /// Clickable label for each System tab, in tab order.
+    pub system_tab_hits: Vec<Rect>,
 }
 
 impl App {
@@ -334,9 +367,15 @@ impl App {
                 store.ensure_session(&module_session(module), module.title(), "module")?;
             }
         }
-        let settings = SettingsFile::load().unwrap_or_default();
+        let (settings, config_error) = match SettingsFile::load() {
+            Ok(settings) => (settings, None),
+            Err(err) => (SettingsFile::default(), Some(err.to_string())),
+        };
         let auth = AuthFile::load().unwrap_or_default();
         let mut app = Self::from_parts(store, settings, auth)?;
+        if let Some(err) = config_error {
+            app.log_event("system", &format!("config load failed: {err}"));
+        }
         app.reload_lists()?;
         Ok(app)
     }
@@ -352,6 +391,7 @@ impl App {
             launcher_sel: 0,
             module: Some(ModuleId::Cases),
             case_page: CasePage::Closed,
+            system_page: SystemPage::Log,
             provider_page: ProviderPage::Llm,
             source_sel: 0,
             modal: false,
@@ -412,6 +452,8 @@ impl App {
             provider_tab_area: Rect::default(),
             case_tab_hits: Vec::new(),
             provider_tab_hits: Vec::new(),
+            system_tab_area: Rect::default(),
+            system_tab_hits: Vec::new(),
         };
         app.reload_lists()?;
         app.load_transcript(&app.session_id());
@@ -483,6 +525,11 @@ impl App {
                 CasePage::Closed => None,
                 CasePage::Brain => Some(ModuleId::Brain),
             },
+            Some(ModuleId::System) => match self.system_page {
+                SystemPage::Log => Some(ModuleId::Log),
+                SystemPage::Hardware => Some(ModuleId::Hardware),
+                SystemPage::Settings => Some(ModuleId::Settings),
+            },
             Some(ModuleId::Providers) => Some(ModuleId::Providers),
             None
             | Some(ModuleId::Brain)
@@ -499,6 +546,11 @@ impl App {
             Some(ModuleId::Cases) => match self.case_page {
                 CasePage::Brain => Some(ModuleId::Brain),
                 CasePage::Closed => None,
+            },
+            Some(ModuleId::System) => match self.system_page {
+                SystemPage::Settings => Some(ModuleId::Settings),
+                SystemPage::Hardware => Some(ModuleId::Hardware),
+                SystemPage::Log => None,
             },
             Some(ModuleId::Providers) => match self.provider_page {
                 ProviderPage::Mail => Some(ModuleId::Gmail),
@@ -594,7 +646,8 @@ impl App {
         }
         let _ = self.auth.save();
         self.model_picker = false;
-        self.push_line("assistant", &format!("Model is {id}."));
+        self.status = format!("model {id}");
+        self.log_event("system", &format!("model set to {id}"));
     }
 
     fn on_model_key(&mut self, key: KeyEvent) -> bool {
@@ -716,7 +769,7 @@ impl App {
         }
         if let Ok(memory) = self.store.add_report_fact(&text, &report_id) {
             self.memories.insert(0, memory);
-            self.log_note("fact filed from report chat");
+            self.log_event("system", "fact filed from report chat");
         }
     }
 
@@ -808,10 +861,10 @@ impl App {
             match row {
                 ReportRow::Pending {
                     title,
-                    failed: Some(reason),
+                    failed: Some(_),
                     ..
                 } => {
-                    out.push_str(&format!("- failed: {title} ({reason})\n"));
+                    out.push_str(&format!("- failed: {title}\n"));
                 }
                 ReportRow::Pending { title, .. } => {
                     out.push_str(&format!("- pending: {title}\n"));
@@ -849,7 +902,8 @@ impl App {
                 .map(|gmail| format!("Gmail account {}.", gmail.email))
                 .unwrap_or_else(|| "Gmail is not connected.".into()),
             ModuleId::Reports => format!("{} reports on disk.", self.reports.len()),
-            ModuleId::Log => "Search and tool notes are in the log widget.".into(),
+            ModuleId::Log => "The System log is open. Do not repeat its lines.".into(),
+            ModuleId::System => "System is open.".into(),
             ModuleId::Settings => format!(
                 "SearXNG: {}. Reports: {}.",
                 if self.settings.searx_url.is_empty() {
@@ -926,15 +980,21 @@ impl App {
                 if self.hardware.logical_cores == 0 {
                     self.hardware.logical_cores = hist_cores;
                 }
-                self.log_note("hardware profile refreshed");
-            }
-            AppMsg::Note(text) => self.log_note(&text),
-            AppMsg::Search(result) => self.finish_search(result),
-            AppMsg::ModelList(result) => {
-                if let Ok(names) = result {
-                    self.remote_models = names;
+                if let Some(err) = self.hardware.gpu_error.clone() {
+                    self.log_event("system", &format!("hardware: {err}"));
+                } else {
+                    self.log_event("system", "hardware profile refreshed");
                 }
             }
+            AppMsg::Note(text) => self.log_event("api", &text),
+            AppMsg::Search { query, result } => self.finish_search(query, result),
+            AppMsg::ModelList(result) => match result {
+                Ok(names) => {
+                    self.log_event("api", &format!("models listed: {}", names.len()));
+                    self.remote_models = names;
+                }
+                Err(err) => self.log_event("api", &format!("models failed: {err}")),
+            },
             AppMsg::Models(result) => match result {
                 Ok(names) => {
                     let shown = if names.is_empty() {
@@ -947,11 +1007,11 @@ impl App {
                         )
                     };
                     self.status = "provider ok".into();
-                    self.push_line("assistant", &shown);
+                    self.log_event("api", &shown);
                 }
                 Err(err) => {
                     self.status = "provider error".into();
-                    self.push_line("assistant", &err);
+                    self.log_event("api", &format!("provider: {err}"));
                 }
             },
             AppMsg::Voice(result) => match result {
@@ -963,8 +1023,7 @@ impl App {
                 }
                 Err(err) => {
                     self.status = "voice error".into();
-                    self.log_note(&err);
-                    self.push_line("assistant", &err);
+                    self.log_event("api", &format!("voice: {err}"));
                 }
             },
             AppMsg::Research { case_id, result } => self.finish_research(case_id, result),
@@ -972,11 +1031,11 @@ impl App {
             AppMsg::GmailTest(result) => match result {
                 Ok(text) => {
                     self.status = "gmail ok".into();
-                    self.push_line("assistant", &text);
+                    self.log_event("api", &text);
                 }
                 Err(err) => {
                     self.status = "gmail error".into();
-                    self.push_line("assistant", &err);
+                    self.log_event("api", &format!("gmail: {err}"));
                 }
             },
         }
@@ -994,16 +1053,16 @@ impl App {
                     }
                 }
             }
-            TurnEvent::Note(text) => self.log_note(&text),
+            TurnEvent::Note(text) => self.log_event(note_kind(&text), &text),
             TurnEvent::Report(meta) => {
                 let _ = self.store.add_report(&meta);
-                self.log_note(&format!("report {}", meta.path));
+                self.log_event("task", &format!("report {}", meta.path));
                 let _ = self.reload_lists();
             }
             TurnEvent::Memory(memory) => {
                 if let Ok(saved) = self.store.add_memory(&memory.text) {
                     self.memories.insert(0, saved);
-                    self.log_note("brain updated");
+                    self.log_event("system", "brain updated");
                 }
             }
             TurnEvent::Done(text) => {
@@ -1015,27 +1074,23 @@ impl App {
             TurnEvent::Failed(err) => {
                 self.running = false;
                 self.status = "error".into();
-                self.replace_last_assistant(&err);
-                self.log_note(&err);
+                self.log_event("api", &err);
+                self.replace_last_assistant(
+                    "Could not finish that request. The detail is in the System log.",
+                );
             }
         }
     }
 
-    fn finish_search(&mut self, result: Result<Vec<SearchHit>, String>) {
+    fn finish_search(&mut self, query: String, result: Result<Vec<SearchHit>, String>) {
         self.running = false;
         match result {
             Ok(hits) => {
-                let question = self.log.last().cloned().unwrap_or_else(|| "search".into());
-                let title = question
-                    .trim_start_matches("search ")
-                    .trim()
-                    .chars()
-                    .take(72)
-                    .collect::<String>();
+                let title = query.trim().chars().take(72).collect::<String>();
                 let md = report::source_pack(
                     if title.is_empty() { "Search" } else { &title },
                     self.case_id().as_deref(),
-                    &question,
+                    &query,
                     &hits,
                 );
                 match report::write_report(
@@ -1051,12 +1106,22 @@ impl App {
                             "assistant",
                             &format!("{}\n\nReport: {}", summarize_hits(&hits), meta.path),
                         );
-                        self.log_note(&format!("{} hits", hits.len()));
+                        self.log_event("search", &format!("{} hits", hits.len()));
                     }
-                    Err(err) => self.push_line("assistant", &err.to_string()),
+                    Err(err) => {
+                        self.log_event("task", &format!("report write failed: {err}"));
+                        self.replace_last_assistant(
+                            "The report could not be written. The detail is in the System log.",
+                        );
+                    }
                 }
             }
-            Err(err) => self.push_line("assistant", &err),
+            Err(err) => {
+                self.log_event("search", &format!("search failed: {err}"));
+                self.replace_last_assistant(
+                    "The search failed. The detail is in the System log.",
+                );
+            }
         }
         self.status = "ready".into();
     }
@@ -1115,6 +1180,14 @@ impl App {
             self.select_provider_page(ProviderPage::all()[index]);
             return;
         }
+        if let Some(index) = self
+            .system_tab_hits
+            .iter()
+            .position(|tab| tab.contains(pos))
+        {
+            self.select_system_page(SystemPage::all()[index]);
+            return;
+        }
         if self.canvas_area.contains(pos) {
             self.focus = Focus::Canvas;
             return;
@@ -1146,6 +1219,18 @@ impl App {
         }
         self.focus = Focus::Canvas;
         self.load_group_fields();
+    }
+
+    fn select_system_page(&mut self, page: SystemPage) {
+        self.module = Some(ModuleId::System);
+        self.system_page = page;
+        self.field_sel = 0;
+        self.editing = false;
+        self.focus = Focus::Canvas;
+        self.load_group_fields();
+        if page == SystemPage::Hardware {
+            self.spawn_hardware(false);
+        }
     }
 
     fn select_provider_page(&mut self, page: ProviderPage) {
@@ -1266,7 +1351,7 @@ impl App {
     }
 
     fn chat_is_on_screen(&self) -> bool {
-        self.on_case_desk() && self.case_page != CasePage::Brain
+        self.on_case_desk() && self.case_page == CasePage::Closed
     }
 
     fn scroll_chat(&mut self, delta: isize) {
@@ -1288,7 +1373,7 @@ impl App {
     }
 
     fn next_focus(&self) -> Focus {
-        let reports = self.on_case_desk() && self.case_page != CasePage::Brain;
+        let reports = self.on_case_desk() && self.case_page == CasePage::Closed;
         match self.focus {
             Focus::Launcher => Focus::Canvas,
             Focus::Canvas if reports => Focus::Reports,
@@ -1309,13 +1394,13 @@ impl App {
             KeyCode::Enter => self.ask_open_report(),
             KeyCode::Left => {
                 self.cycle_group_page(-1);
-                if self.case_page == CasePage::Brain {
+                if self.case_page != CasePage::Closed {
                     self.focus = Focus::Canvas;
                 }
             }
             KeyCode::Right => {
                 self.cycle_group_page(1);
-                if self.case_page == CasePage::Brain {
+                if self.case_page != CasePage::Closed {
                     self.focus = Focus::Canvas;
                 }
             }
@@ -1405,7 +1490,8 @@ impl App {
         if let Some(path) = path {
             if let Err(err) = std::fs::remove_file(&path) {
                 if err.kind() != std::io::ErrorKind::NotFound {
-                    self.status = format!("could not delete the report file: {err}");
+                    self.status = "could not delete the report file".into();
+                    self.log_event("task", &format!("delete report file: {err}"));
                     return;
                 }
             }
@@ -1527,7 +1613,10 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => self.field_sel = (self.field_sel + 1) % n,
                 KeyCode::Enter => self.activate_field(),
                 KeyCode::Left | KeyCode::Right
-                    if matches!(self.module, Some(ModuleId::Cases | ModuleId::Providers)) =>
+                    if matches!(
+                        self.module,
+                        Some(ModuleId::Cases | ModuleId::Providers | ModuleId::System)
+                    ) =>
                 {
                     let delta = if key.code == KeyCode::Left { -1 } else { 1 };
                     self.cycle_group_page(delta);
@@ -1579,7 +1668,10 @@ impl App {
                 }
             }
         }
-        if matches!(self.module, Some(ModuleId::Cases | ModuleId::Providers)) {
+        if matches!(
+            self.module,
+            Some(ModuleId::Cases | ModuleId::Providers | ModuleId::System)
+        ) {
             match key.code {
                 KeyCode::Left => self.cycle_group_page(-1),
                 KeyCode::Right => self.cycle_group_page(1),
@@ -1686,7 +1778,7 @@ impl App {
         }
         self.append_to_session("desk", "assistant", ack);
         self.status = "ready".into();
-        self.log_note(&format!("case research {}", case.title));
+        self.log_event("task", &format!("case research {}", case.title));
         let plan = self.source_plan();
         let case_id = case.id.clone();
         let report_dir = report_dir(&self.settings);
@@ -1731,6 +1823,7 @@ impl App {
             Ok((_summary, Some(report))) => {
                 self.pending_reports
                     .retain(|pending| pending.case_id != case_id);
+                self.log_event("task", &format!("report {}", report.path));
                 let _ = self.store.add_report(&report);
                 let _ = self.reload_lists();
             }
@@ -1740,6 +1833,7 @@ impl App {
     }
 
     fn mark_task_failed(&mut self, case_id: &str, reason: &str) {
+        self.log_event("task", &format!("case {case_id} failed: {reason}"));
         let reason = reason
             .split('\n')
             .find(|line| !line.trim().is_empty())
@@ -1801,7 +1895,7 @@ impl App {
         let _ = self.reload_lists();
         self.load_transcript(&self.session_id());
         self.status = format!("deleted {}", case.title);
-        self.log_note(&format!("deleted case {}", case.title));
+        self.log_event("task", &format!("deleted case {}", case.title));
     }
 
     fn save_osint_toggles(&mut self) {
@@ -1810,7 +1904,10 @@ impl App {
         self.settings.searx_url = self.field_value("searx_url");
         match self.settings.save() {
             Ok(()) => self.status = "saved OSINT sources".into(),
-            Err(err) => self.status = err.to_string(),
+            Err(err) => {
+                self.status = "could not save OSINT sources".into();
+                self.log_event("system", &format!("osint sources: {err}"));
+            }
         }
     }
 
@@ -2092,8 +2189,13 @@ impl App {
             "report" => self.write_visible_report(&arg),
             "hardware" => {
                 self.open_module(ModuleId::Hardware);
-                self.spawn_hardware(arg == "fresh");
+                if arg == "fresh" {
+                    self.spawn_hardware(true);
+                }
             }
+            "log" => self.open_module(ModuleId::Log),
+            "settings" => self.open_module(ModuleId::Settings),
+            "system" => self.open_module(ModuleId::System),
             "provider" | "login" => self.open_module(ModuleId::Providers),
             "osint" | "sources" => self.open_module(ModuleId::Osint),
             "model" | "m" | "models" => {
@@ -2125,7 +2227,13 @@ impl App {
                                     &format!("Remembered [{}]: {}", mem.category, mem.text),
                                 );
                             }
-                            Err(err) => self.push_line("assistant", &err.to_string()),
+                            Err(err) => {
+                                self.log_event("system", &format!("brain save failed: {err}"));
+                                self.push_line(
+                                    "assistant",
+                                    "Could not store that memory. The detail is in the System log.",
+                                );
+                            }
                         }
                     }
                 }
@@ -2197,7 +2305,13 @@ impl App {
                 let _ = self.reload_lists();
                 self.push_line("assistant", &format!("Report: {}", meta.path));
             }
-            Err(err) => self.push_line("assistant", &err.to_string()),
+            Err(err) => {
+                self.log_event("task", &format!("report write failed: {err}"));
+                self.push_line(
+                    "assistant",
+                    "The report could not be written. The detail is in the System log.",
+                );
+            }
         }
     }
 
@@ -2210,7 +2324,7 @@ impl App {
         self.status = "searching".into();
         self.push_line("user", &format!("/search {query}"));
         self.push_line("assistant", "");
-        self.log_note(&format!("search {query}"));
+        self.log_event("search", &format!("search {query}"));
         let searx = self.settings.searx_url.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -2219,7 +2333,7 @@ impl App {
                 Some(searx.as_str()).filter(|s| !s.is_empty()),
             )
             .await;
-            let _ = tx.send(AppMsg::Search(result));
+            let _ = tx.send(AppMsg::Search { query, result });
         });
     }
 
@@ -2255,6 +2369,7 @@ impl App {
             self.push_line("user", &text);
         }
         self.push_line("assistant", "");
+        self.log_event("api", &format!("chat {}", self.active_model()));
         let (prior_reports, evidence_only, from_memory, memories) =
             if let Some(report) = self.open_report().cloned() {
                 (
@@ -2327,6 +2442,22 @@ impl App {
                 self.module = Some(ModuleId::Cases);
                 self.case_page = CasePage::Brain;
             }
+            ModuleId::Log => {
+                self.module = Some(ModuleId::System);
+                self.system_page = SystemPage::Log;
+            }
+            ModuleId::Hardware => {
+                self.module = Some(ModuleId::System);
+                self.system_page = SystemPage::Hardware;
+            }
+            ModuleId::Settings => {
+                self.module = Some(ModuleId::System);
+                self.system_page = SystemPage::Settings;
+            }
+            ModuleId::System => {
+                self.module = Some(ModuleId::System);
+                self.system_page = SystemPage::Log;
+            }
             ModuleId::Reports => {
                 self.module = Some(ModuleId::Cases);
                 self.case_page = CasePage::Closed;
@@ -2347,7 +2478,6 @@ impl App {
                 self.module = Some(ModuleId::Providers);
                 self.provider_page = ProviderPage::Llm;
             }
-            other => self.module = Some(other),
         }
         let module = self.module.unwrap_or(ModuleId::Cases);
         self.scroll_back = 0;
@@ -2360,7 +2490,7 @@ impl App {
         }
         self.focus = Focus::Canvas;
         self.load_group_fields();
-        if module == ModuleId::Hardware {
+        if module == ModuleId::System && self.system_page == SystemPage::Hardware {
             self.spawn_hardware(false);
         }
     }
@@ -2391,6 +2521,18 @@ impl App {
                     .unwrap_or(0);
                 let next = (index as isize + delta).rem_euclid(pages.len() as isize) as usize;
                 self.provider_page = pages[next];
+            }
+            Some(ModuleId::System) => {
+                let pages = SystemPage::all();
+                let index = pages
+                    .iter()
+                    .position(|page| *page == self.system_page)
+                    .unwrap_or(0);
+                let next = (index as isize + delta).rem_euclid(pages.len() as isize) as usize;
+                self.system_page = pages[next];
+                if self.system_page == SystemPage::Hardware {
+                    self.spawn_hardware(false);
+                }
             }
             _ => return,
         }
@@ -2688,7 +2830,7 @@ impl App {
                 self.select_shown_memory(&id);
                 self.set_brain_action_label();
                 self.status = format!("saved {category} memory");
-                self.log_note(&format!("brain {category} {text}"));
+                self.log_event("system", &format!("brain {category} {text}"));
             }
             Err(err) => self.status = err.to_string(),
         }
@@ -2750,7 +2892,12 @@ impl App {
             (Some(ModuleId::Gmail), "__save") => self.save_gmail_fields(),
             (Some(ModuleId::Gmail), "__test") => self.test_gmail(),
             (Some(ModuleId::Gmail), "__mcp") => self.write_mcp(),
-            (Some(ModuleId::Settings), "__save") => self.save_settings_fields(),
+            (Some(ModuleId::Settings), "__save")
+            | (Some(ModuleId::System), "__save")
+                if self.form_module() == Some(ModuleId::Settings) =>
+            {
+                self.save_settings_fields()
+            }
             (Some(ModuleId::Brain), "__save") => self.save_brain_memory(),
             (Some(ModuleId::Osint), "__save") => self.save_osint_toggles(),
             (Some(ModuleId::Osint), "__add") => self.add_osint_source(),
@@ -2826,9 +2973,13 @@ impl App {
                         note.push_str(&format!(" No key stored and {name} is unset."));
                     }
                 }
-                self.push_line("assistant", &note);
+                self.status = format!("saved {} slot", self.provider_slot);
+                self.log_event("system", &note);
             }
-            Err(err) => self.push_line("assistant", &err.to_string()),
+            Err(err) => {
+                self.status = "provider save failed".into();
+                self.log_event("system", &format!("provider save failed: {err}"));
+            }
         }
     }
 
@@ -2854,16 +3005,23 @@ impl App {
         };
         let cfg = GmailConfig::from(&secret);
         if let Err(err) = gmail::validate(&cfg) {
-            self.push_line("assistant", &err);
+            self.status = "gmail settings need a correction".into();
+            self.log_event("system", &format!("gmail: {err}"));
             return;
         }
         self.auth.gmail = Some(secret);
         match self.auth.save() {
-            Ok(()) => self.push_line(
-                "assistant",
-                "Saved Gmail. The app password stays in ~/.argos/auth.json.",
-            ),
-            Err(err) => self.push_line("assistant", &err.to_string()),
+            Ok(()) => {
+                self.status = "gmail saved".into();
+                self.log_event(
+                    "system",
+                    "Saved Gmail. The app password stays in ~/.argos/auth.json.",
+                );
+            }
+            Err(err) => {
+                self.status = "gmail save failed".into();
+                self.log_event("system", &format!("gmail save failed: {err}"));
+            }
         }
     }
 
@@ -2894,11 +3052,17 @@ impl App {
             )
             .unwrap_or(body),
         ) {
-            Ok(()) => self.push_line(
-                "assistant",
-                &format!("Wrote {}. Launch with `argos mcp gmail`.", path.display()),
-            ),
-            Err(err) => self.push_line("assistant", &err.to_string()),
+            Ok(()) => {
+                self.status = "gmail mcp config written".into();
+                self.log_event(
+                    "system",
+                    &format!("Wrote {}. Launch with `argos mcp gmail`.", path.display()),
+                );
+            }
+            Err(err) => {
+                self.status = "gmail mcp write failed".into();
+                self.log_event("system", &format!("mcp write failed: {err}"));
+            }
         }
     }
 
@@ -2906,16 +3070,23 @@ impl App {
         self.settings.searx_url = self.field_value("searx_url");
         self.settings.report_dir = self.field_value("report_dir");
         match self.settings.save() {
-            Ok(()) => self.push_line("assistant", "Settings saved."),
-            Err(err) => self.push_line("assistant", &err.to_string()),
+            Ok(()) => {
+                self.status = "settings saved".into();
+                self.log_event("system", "settings saved");
+            }
+            Err(err) => {
+                self.status = "settings save failed".into();
+                self.log_event("system", &format!("settings save failed: {err}"));
+            }
         }
     }
 
     fn record_voice(&mut self) {
         let Some(secret) = self.auth.voice.clone().or_else(|| self.auth.text.clone()) else {
-            self.push_line(
-                "assistant",
-                "Set a voice provider first. The endpoint must implement /audio/transcriptions.",
+            self.status = "voice provider is not set".into();
+            self.log_event(
+                "system",
+                "voice capture needs a provider that implements /audio/transcriptions",
             );
             return;
         };
@@ -2941,16 +3112,38 @@ impl App {
         });
     }
 
-    fn log_note(&mut self, text: &str) {
+    fn log_event(&mut self, kind: &str, text: &str) {
+        let at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         for line in text.lines() {
-            if !line.trim().is_empty() {
-                self.log.push(line.trim().to_string());
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
             }
+            self.log.push(LogEntry {
+                at: at.clone(),
+                kind: kind.to_string(),
+                text: line.to_string(),
+            });
         }
-        if self.log.len() > 200 {
-            let drain = self.log.len() - 200;
+        if self.log.len() > 400 {
+            let drain = self.log.len() - 400;
             self.log.drain(0..drain);
         }
+    }
+}
+
+fn note_kind(text: &str) -> &'static str {
+    let lower = text.to_lowercase();
+    if lower.contains("search")
+        || lower.contains("web_search")
+        || lower.contains("fetch_page")
+        || lower.contains("public hits")
+    {
+        "search"
+    } else if lower.contains("fail") || lower.contains("error") || lower.contains("refused") {
+        "task"
+    } else {
+        "system"
     }
 }
 
@@ -3226,6 +3419,8 @@ mod tests {
         app.click(chat.x + 2, chat.y + 2);
         assert_eq!(app.focus, Focus::Canvas);
         assert_eq!(app.case_tab_hits.len(), 2);
+        assert!(text.contains("System"), "{text}");
+        assert!(!text.contains("Search Log"), "{text}");
         let brain = app.case_tab_hits[1];
         app.click(brain.x + 1, brain.y);
         assert_eq!(app.case_page, CasePage::Brain);
@@ -3258,6 +3453,74 @@ mod tests {
         assert!(text.contains("Memory"), "{text}");
         assert!(text.contains("Close"), "{text}");
         assert!(!text.contains("Edit"), "{text}");
+    }
+
+    #[test]
+    fn system_log_hides_configuration_errors_from_the_desk_and_reports() {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        let marker = "sysctl-config-UNIQUE-9f3a";
+        app.pending_reports.push(PendingReport {
+            case_id: "case-1".into(),
+            title: "who is ada".into(),
+            failed: None,
+        });
+        app.on_msg(AppMsg::Research {
+            case_id: "case-1".into(),
+            result: Err(marker.into()),
+        });
+        app.on_msg(AppMsg::Turn(TurnEvent::Failed(format!("api {marker}"))));
+        app.on_msg(AppMsg::Models(Err(format!("provider {marker}"))));
+
+        let chat = app
+            .transcript()
+            .iter()
+            .map(|line| line.body.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!chat.contains(marker), "{chat}");
+        assert!(chat.contains("System log"), "{chat}");
+        assert!(app.log.iter().any(|entry| {
+            entry.text.contains(marker) && entry.at.len() == "2026-09-24 15:04:01".len()
+        }));
+        assert!(app
+            .report_rows()
+            .iter()
+            .any(|row| row.status() == "failed" && row.title() == "who is ada"));
+
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(!text.contains(marker), "{text}");
+        assert!(text.contains("failed"), "{text}");
+        assert!(!text.contains("Search Log"), "{text}");
+
+        app.open_module(ModuleId::System);
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains(marker), "{text}");
+        assert!(text.contains("Log"), "{text}");
+        assert!(text.contains("Hardware"), "{text}");
+        assert!(text.contains("Settings"), "{text}");
+        assert_eq!(app.system_tab_hits.len(), 3);
+        assert_eq!(app.system_page, SystemPage::Log);
     }
 }
 

@@ -18,8 +18,9 @@ fills in (`Dashboard`, `Case · …`, `Hardware`, …) plus a short description 
 what is on the canvas. That pair is the system prompt's `ACTIVE VIEW`, so the
 same composer can talk to whichever module is showing.
 
-Sessions have stable ids. `desk` is the dashboard. `module:hardware` and the
-other module ids are the setup apps. A case id from `/new` is the
+Sessions have stable ids. `desk` is the dashboard. `module:system` and the
+other module ids are the setup apps. Hardware and settings are tabs on
+System, next to the timestamped log. A case id from `/new` is the
 investigation. Switching the canvas switches which transcript the prompt
 appends to.
 

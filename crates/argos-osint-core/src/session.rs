@@ -105,7 +105,19 @@ pub fn slash_commands() -> &'static [SlashCommand] {
         },
         SlashCommand {
             name: "hardware",
-            summary: "Open the host profile",
+            summary: "Open the System hardware tab",
+        },
+        SlashCommand {
+            name: "system",
+            summary: "Open the System app",
+        },
+        SlashCommand {
+            name: "log",
+            summary: "Open the System log",
+        },
+        SlashCommand {
+            name: "settings",
+            summary: "Open System settings",
         },
         SlashCommand {
             name: "provider",

@@ -6,8 +6,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs, Wrap};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, CasePage, Focus, ModuleId, ProviderPage};
+use super::app::{App, CasePage, Focus, ModuleId, ProviderPage, SystemPage};
 use super::theme::{self, panel};
 use argos_osint_core::paths::fit_status;
 use argos_osint_core::secrets::mask;
@@ -229,12 +230,6 @@ fn report_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<Option<usiz
         if let Some(when) = row.when() {
             lines.push(Line::from(when).style(theme::dim()));
             index.push(Some(i));
-        } else if let Some(detail) = row.detail() {
-            lines.push(
-                Line::from(clip_chars(detail, width))
-                    .style(Style::default().fg(theme::RED).bg(theme::BG)),
-            );
-            index.push(Some(i));
         }
     }
     lines.push(
@@ -377,6 +372,28 @@ fn draw_case_tabs(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn draw_system_tabs(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.system_tab_area = area;
+    let titles: Vec<Line> = SystemPage::all()
+        .into_iter()
+        .map(|page| Line::from(format!(" {} ", page.title())))
+        .collect();
+    app.system_tab_hits = tab_hits(area, &titles);
+    let selected = SystemPage::all()
+        .iter()
+        .position(|page| *page == app.system_page)
+        .unwrap_or(0);
+    frame.render_widget(
+        Tabs::new(titles)
+            .block(panel(" System "))
+            .select(selected)
+            .highlight_style(theme::selected())
+            .divider("")
+            .padding(" ", " "),
+        area,
+    );
+}
+
 fn draw_provider_tabs(frame: &mut Frame, app: &mut App, area: Rect) {
     app.provider_tab_area = area;
     let titles: Vec<Line> = ProviderPage::all()
@@ -434,9 +451,19 @@ fn draw_widget(frame: &mut Frame, app: &mut App, area: Rect) {
         let rows = split_v(area, &[Constraint::Length(3), Constraint::Min(4)]);
         draw_provider_tabs(frame, app, rows[0]);
         area = rows[1];
+        app.system_tab_area = Rect::default();
+        app.system_tab_hits.clear();
+    } else if app.module == Some(ModuleId::System) && area.height >= 7 {
+        let rows = split_v(area, &[Constraint::Length(3), Constraint::Min(4)]);
+        draw_system_tabs(frame, app, rows[0]);
+        area = rows[1];
+        app.provider_tab_area = Rect::default();
+        app.provider_tab_hits.clear();
     } else {
         app.provider_tab_area = Rect::default();
         app.provider_tab_hits.clear();
+        app.system_tab_area = Rect::default();
+        app.system_tab_hits.clear();
     }
     if widget == ModuleId::Hardware && area.width >= 40 && area.height >= 8 {
         draw_gauges(frame, app, area, 2);
@@ -445,6 +472,7 @@ fn draw_widget(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = match app.module {
         Some(ModuleId::Cases) => format!(" {} ", app.case_page.title()),
         Some(ModuleId::Providers) => format!(" {} ", app.provider_page.title()),
+        Some(ModuleId::System) => format!(" {} ", app.system_page.title()),
         _ => format!(" {} ", widget.title()),
     };
     let lines = if app.module == Some(ModuleId::Providers) {
@@ -492,23 +520,40 @@ fn widget_lines(app: &App, widget: ModuleId, height: usize) -> Vec<Line<'static>
                     .collect()
             }
         }
-        ModuleId::Log => {
-            if app.log.is_empty() {
-                vec![Line::from("Tool and search notes land here.").style(theme::dim())]
-            } else {
-                app.log
-                    .iter()
-                    .rev()
-                    .take(height.max(1))
-                    .rev()
-                    .cloned()
-                    .map(|line| Line::from(line).style(theme::dim()))
-                    .collect()
-            }
-        }
+        ModuleId::Log => log_lines(app, height),
         ModuleId::Providers | ModuleId::Gmail | ModuleId::Settings => field_lines(app),
-        ModuleId::Cases => Vec::new(),
+        ModuleId::Cases | ModuleId::System => Vec::new(),
     };
+    tail(lines, height)
+}
+
+fn log_lines(app: &App, height: usize) -> Vec<Line<'static>> {
+    if app.log.is_empty() {
+        return tail(
+            vec![Line::from(
+                "System calls, API calls, failed tasks, and searches from this session land here."
+                    .to_string(),
+            )
+            .style(theme::dim())],
+            height,
+        );
+    }
+    let lines = app
+        .log
+        .iter()
+        .map(|entry| {
+            let failed = {
+                let lower = entry.text.to_lowercase();
+                lower.contains("fail") || lower.contains("error")
+            };
+            let style = if failed {
+                Style::default().fg(theme::RED).bg(theme::BG)
+            } else {
+                theme::dim()
+            };
+            Line::from(format!("{}  {:<7} {}", entry.at, entry.kind, entry.text)).style(style)
+        })
+        .collect();
     tail(lines, height)
 }
 
@@ -610,78 +655,278 @@ fn render_message(role: &str, body: &str, width: usize) -> Vec<Line<'static>> {
     match role {
         "user" => {
             let content_width = width.saturating_sub(2).max(1);
-            let wrapped = wrap_text(body, content_width);
             let prefix_style = theme::user_message()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD);
-            wrapped
+            markdown_lines(body, content_width, theme::user_message())
                 .into_iter()
                 .enumerate()
-                .map(|(index, text)| {
+                .map(|(index, mut line)| {
                     let prefix = if index == 0 { "❯ " } else { "  " };
-                    let pad = content_width.saturating_sub(text.chars().count());
-                    let shown = format!("{text}{}", " ".repeat(pad));
-                    Line::from(vec![
-                        Span::styled(prefix, prefix_style),
-                        Span::styled(shown, theme::user_message()),
-                    ])
+                    let used: usize = line.spans.iter().map(|span| span.content.width()).sum();
+                    let pad = content_width.saturating_sub(used);
+                    if pad > 0 {
+                        line.push_span(Span::styled(" ".repeat(pad), theme::user_message()));
+                    }
+                    let mut spans = vec![Span::styled(prefix, prefix_style)];
+                    spans.extend(line.spans);
+                    Line::from(spans)
                 })
                 .collect()
         }
-        "assistant" => wrap_text(body, width)
-            .into_iter()
-            .map(|text| Line::from(text).style(theme::text()))
-            .collect(),
-        _ => wrap_text(body, width)
-            .into_iter()
-            .map(|text| Line::from(text).style(theme::dim()))
-            .collect(),
+        "assistant" => markdown_lines(body, width, theme::text()),
+        _ => markdown_lines(body, width, theme::dim()),
     }
 }
 
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
+struct Piece {
+    text: String,
+    style: Style,
+}
+
+fn markdown_lines(body: &str, width: usize, base: Style) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut lines = Vec::new();
-    for raw in text.split('\n') {
-        if raw.is_empty() {
-            lines.push(String::new());
+    let mut in_fence = false;
+    for raw in body.split('\n') {
+        let trimmed = raw.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
             continue;
         }
-        let mut rest = raw.to_string();
-        while rest.chars().count() > width {
-            let mut break_at = width;
-            let space = rest
-                .char_indices()
-                .take(width)
-                .filter(|(_, ch)| *ch == ' ')
-                .map(|(index, _)| index)
-                .last();
-            if let Some(space) = space {
-                if space > 0 {
-                    break_at = rest[..space].chars().count();
-                }
-            }
-            let (head, tail) = split_chars(&rest, break_at);
-            lines.push(head);
-            rest = tail.trim_start().to_string();
+        if in_fence {
+            lines.extend(wrap_pieces(
+                &[Piece {
+                    text: raw.to_string(),
+                    style: code_style(base),
+                }],
+                width,
+            ));
+            continue;
         }
-        lines.push(rest);
+        if trimmed.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+        let (prefix, rest, heading) = block_prefix(trimmed);
+        let mut pieces = Vec::new();
+        if let Some(prefix) = prefix {
+            pieces.push(Piece {
+                text: prefix,
+                style: base.fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            });
+        }
+        let body_style = if heading {
+            base.fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            base
+        };
+        pieces.extend(inline_pieces(rest, body_style));
+        lines.extend(wrap_pieces(&pieces, width));
     }
     if lines.is_empty() {
-        lines.push(String::new());
+        lines.push(Line::from(""));
     }
     lines
 }
 
-fn split_chars(text: &str, count: usize) -> (String, String) {
-    let mut end = text.len();
-    for (index, (byte, _)) in text.char_indices().enumerate() {
-        if index == count {
-            end = byte;
+fn block_prefix(line: &str) -> (Option<String>, &str, bool) {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    if (1..=6).contains(&hashes) && line.chars().nth(hashes) == Some(' ') {
+        return (None, line[hashes + 1..].trim(), true);
+    }
+    if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+        return (Some("• ".into()), rest, false);
+    }
+    let mut digits = 0;
+    for ch in line.chars() {
+        if ch.is_ascii_digit() {
+            digits += 1;
+        } else {
             break;
         }
     }
-    (text[..end].to_string(), text[end..].to_string())
+    if digits > 0 && line[digits..].starts_with(". ") {
+        let marker: String = line[..digits + 2].to_string();
+        return (Some(marker), &line[digits + 2..], false);
+    }
+    (None, line, false)
+}
+
+fn inline_pieces(text: &str, base: Style) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    let mut buf = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    let flush = |buf: &mut String, pieces: &mut Vec<Piece>, style: Style| {
+        if !buf.is_empty() {
+            pieces.push(Piece {
+                text: std::mem::take(buf),
+                style,
+            });
+        }
+    };
+    while i < chars.len() {
+        if chars[i] == '`' {
+            if let Some(end) = chars[i + 1..].iter().position(|ch| *ch == '`') {
+                flush(&mut buf, &mut pieces, base);
+                let inner: String = chars[i + 1..i + 1 + end].iter().collect();
+                pieces.push(Piece {
+                    text: inner,
+                    style: code_style(base),
+                });
+                i += end + 2;
+                continue;
+            }
+        }
+        if starts_with(&chars, i, "**") || starts_with(&chars, i, "__") {
+            let marker = &chars[i..i + 2];
+            if let Some(end) = find_marker(&chars, i + 2, marker) {
+                flush(&mut buf, &mut pieces, base);
+                let inner: String = chars[i + 2..end].iter().collect();
+                pieces.extend(inline_pieces(&inner, base.add_modifier(Modifier::BOLD)));
+                i = end + 2;
+                continue;
+            }
+        }
+        if chars[i] == '*' || chars[i] == '_' {
+            let marker = [chars[i]];
+            if let Some(end) = find_marker(&chars, i + 1, &marker) {
+                flush(&mut buf, &mut pieces, base);
+                let inner: String = chars[i + 1..end].iter().collect();
+                pieces.extend(inline_pieces(&inner, base.add_modifier(Modifier::ITALIC)));
+                i = end + 1;
+                continue;
+            }
+        }
+        if chars[i] == '[' {
+            if let Some((label, url, next)) = parse_link(&chars, i) {
+                flush(&mut buf, &mut pieces, base);
+                pieces.push(Piece {
+                    text: label,
+                    style: base.fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                });
+                if !url.is_empty() {
+                    pieces.push(Piece {
+                        text: format!(" ({url})"),
+                        style: base.fg(theme::DIM),
+                    });
+                }
+                i = next;
+                continue;
+            }
+        }
+        buf.push(chars[i]);
+        i += 1;
+    }
+    flush(&mut buf, &mut pieces, base);
+    pieces
+}
+
+fn code_style(base: Style) -> Style {
+    base.fg(theme::ACCENT)
+}
+
+fn starts_with(chars: &[char], index: usize, marker: &str) -> bool {
+    chars[index..]
+        .iter()
+        .take(marker.chars().count())
+        .collect::<String>()
+        == marker
+}
+
+fn find_marker(chars: &[char], from: usize, marker: &[char]) -> Option<usize> {
+    if marker.is_empty() || from >= chars.len() {
+        return None;
+    }
+    chars[from..]
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .map(|pos| from + pos)
+}
+
+fn parse_link(chars: &[char], start: usize) -> Option<(String, String, usize)> {
+    let close = chars[start + 1..].iter().position(|ch| *ch == ']')? + start + 1;
+    if chars.get(close + 1) != Some(&'(') {
+        return None;
+    }
+    let end = chars[close + 2..].iter().position(|ch| *ch == ')')? + close + 2;
+    let label: String = chars[start + 1..close].iter().collect();
+    let url: String = chars[close + 2..end].iter().collect();
+    Some((label, url, end + 1))
+}
+
+fn wrap_pieces(pieces: &[Piece], width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Vec<Piece>> = vec![Vec::new()];
+    let mut col = 0usize;
+    for piece in pieces {
+        let mut rest = piece.text.as_str();
+        while !rest.is_empty() {
+            if col >= width {
+                lines.push(Vec::new());
+                col = 0;
+            }
+            let room = width - col;
+            let (head, tail, broken) = take_width(rest, room);
+            if head.is_empty() && broken {
+                lines.push(Vec::new());
+                col = 0;
+                continue;
+            }
+            if !head.is_empty() {
+                lines.last_mut().unwrap().push(Piece {
+                    text: head,
+                    style: piece.style,
+                });
+                col += UnicodeWidthStr::width(lines.last().unwrap().last().unwrap().text.as_str());
+            }
+            rest = tail.trim_start();
+            if !rest.is_empty() {
+                lines.push(Vec::new());
+                col = 0;
+            }
+        }
+    }
+    if lines.iter().all(|line| line.is_empty()) {
+        return vec![Line::from("")];
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            Line::from(
+                line.into_iter()
+                    .map(|piece| Span::styled(piece.text, piece.style))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+fn take_width(text: &str, width: usize) -> (String, &str, bool) {
+    if text.width() <= width {
+        return (text.to_string(), "", false);
+    }
+    let mut end = 0usize;
+    let mut used = 0usize;
+    let mut last_space = None;
+    for (index, ch) in text.char_indices() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        used += w;
+        end = index + ch.len_utf8();
+        if ch == ' ' {
+            last_space = Some(end);
+        }
+    }
+    if let Some(space) = last_space.filter(|space| *space > 0 && *space < end) {
+        return (text[..space].to_string(), &text[space..], true);
+    }
+    if end == 0 {
+        return (String::new(), text, true);
+    }
+    (text[..end].to_string(), &text[end..], true)
 }
 
 fn draw_gauges(frame: &mut Frame, app: &App, area: Rect, cols: u16) {
@@ -1088,7 +1333,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("Ctrl+P app search    Ctrl+M models    Tab cycle focus    Ctrl+C cancel or quit"),
         Line::from("/model lists Grok 4.6 and Grok 4.5. /model grok-4.5 switches. The default is grok-4.6."),
         Line::from("PgUp and PgDn scroll the case desk or report chat. End jumps to the latest. The wheel does the same over the chat."),
-        Line::from("/clear wipes the case desk chat, or the open report chat. /search /new /use /quit"),
+        Line::from("/clear wipes the case desk chat, or the open report chat. /search /new /use /system /log /quit"),
+        Line::from("System keeps the log, hardware, and settings. Configuration and task errors stay in that log."),
         Line::from("Public search only. Gmail is imap.gmail.com, read-only, app password."),
         Line::from("Esc or any key closes this card."),
     ];
@@ -1125,6 +1371,29 @@ fn split_v(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
         .constraints(constraints)
         .split(area)
         .to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::markdown_lines;
+    use crate::tui::theme;
+
+    #[test]
+    fn chat_markdown_hides_markers() {
+        let lines = markdown_lines(
+            "1. **who is elon musk?**\n\n`/tmp/report.md`",
+            80,
+            theme::text(),
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect();
+        assert!(text.contains("who is elon musk?"));
+        assert!(text.contains("/tmp/report.md"));
+        assert!(!text.contains("**"));
+        assert!(!text.contains('`'));
+    }
 }
 
 fn tail(mut lines: Vec<Line<'static>>, height: usize) -> Vec<Line<'static>> {

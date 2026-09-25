@@ -52,7 +52,7 @@ The user may be speaking or typing. Treat the latest user message as what they j
              Paraphrase or quote that report. If it does not contain the answer, say that the report does not cover the question. \
              Do not search, do not use brain memories, do not invent sources, and do not start a new case."
         } else {
-            "When a public search was already run for this turn, use those hits. If you need another public page, call fetch_page. If the user asked you to remember a fact about themselves, call remember. Prefer a short answer, then the report."
+            "When a public search was already run for this turn, use those hits. If you need another public page, call fetch_page. If the user asked you to remember a fact about themselves, call remember. Prefer a short answer, then the report. If a tool, search, or API call fails, do not quote the error. Say that the step failed and that the detail is in the System log."
         },
     )
 }

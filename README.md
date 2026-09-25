@@ -3,8 +3,8 @@
 Argos is a terminal research desk. It keeps the Grok Build shape that matters
 for a long session: a full-screen TUI, a launcher, and a prompt fixed to the
 bottom. The main canvas is the case desk. The prompt talks to that desk, or
-to the one case you have selected. Hardware, providers, brain, Gmail,
-reports, the log, and settings open as widgets beside it. A turn searches
+to the one case you have selected. System, providers, and brain open
+beside it. A turn searches
 public sources, recalls what Argos knows about you, and writes a markdown
 report.
 
@@ -97,7 +97,7 @@ covert surveillance.
 
 ## Chat Providers
 
-The launcher is Case Desk, Providers, Hardware, Search Log, and Settings. The Brain tab replaces the desk and the report list. It lists fact memories and opens a card to read one. New facts come from report-chat replies. The report list stays beside the desk and shows pending and completed reports. Providers' side pages are Mail, OSINT, and LLM. Left and right move between those pages. Search Log stays its own app. Hardware stays its own app. Settings is the SearXNG URL and the report folder.
+The launcher is Case Desk, Providers, and System. Case Desk tabs are Desk and Brain. Brain replaces the desk and the report list. Brain lists fact memories and opens a card to read one. New facts come from report-chat replies. The report list stays beside the desk and shows pending and completed reports. A failed task stays marked failed there; the reason is only in the System log. Providers' side pages are Mail, OSINT, and LLM. System tabs are Log, Hardware, and Settings. Left and right move between those pages. The log is timestamped and holds system calls, API calls, failed tasks, and searches. Settings is the SearXNG URL and the report folder.
 
 OSINT, under Providers, turns internet search and Wikipedia on or off, sets a SearXNG URL, and adds extra public sources whose URL contains `{query}`. Private addresses are refused.
 
@@ -145,7 +145,7 @@ The host profile reports OS, architecture, CPU name, logical cores, RAM, disk,
 and a GPU when one is visible. Apple Silicon has no discrete VRAM. Argos
 reports a Metal working set: 67% of RAM up to 16 GB, 75% up to 64 GB, 80%
 above that, unless `iogpu.wired_limit_mb` is set. NVIDIA uses `nvidia-smi`.
-The probe is cached for 30 minutes. `r` on the Hardware canvas rescans.
+The probe is cached for 30 minutes. `r` on the System hardware tab rescans. `/hardware`, `/log`, and `/settings` open those System tabs.
 
 ## Brain
 
@@ -165,7 +165,7 @@ Sending mail is not implemented.
 
 ## Search endpoint
 
-Set `searx_url` in Settings or `~/.argos/config.toml` to a SearXNG base URL.
+Set `searx_url` on the System settings tab or in `~/.argos/config.toml` to a SearXNG base URL.
 Argos calls `GET /search?q=&format=json`. JSON output has to be enabled on
 that instance. An empty URL falls back to the public DuckDuckGo HTML results.
 

@@ -1509,8 +1509,10 @@ fn split_v(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
 
 #[cfg(test)]
 mod tests {
-    use super::markdown_lines;
+    use super::{markdown_lines, tna_box_connections};
     use crate::tui::theme;
+    use ratatui::style::Style;
+    use tui_nodes::{NodeGraph, NodeLayout};
 
     #[test]
     fn chat_markdown_hides_markers() {
@@ -1527,6 +1529,31 @@ mod tests {
         assert!(text.contains("/tmp/report.md"));
         assert!(!text.contains("**"));
         assert!(!text.contains('`'));
+    }
+
+    #[test]
+    fn tna_many_edges_ports_zero_no_panic() {
+        // Many duplicate directed edges between 4 boxes → one unordered Connection each, ports 0.
+        let mut pairs = Vec::new();
+        for _ in 0..6 {
+            for i in 0..4usize {
+                for j in 0..4usize {
+                    if i != j {
+                        pairs.push((i, j, Style::default()));
+                    }
+                }
+            }
+        }
+        assert!(pairs.len() > 4 * 3 / 2);
+        let conns = tna_box_connections(pairs);
+        assert_eq!(conns.len(), 4 * 3 / 2);
+        for c in &conns {
+            assert_eq!(c.from_port, 0);
+            assert_eq!(c.to_port, 0);
+        }
+        let nodes: Vec<_> = (0..4).map(|_| NodeLayout::new((16, 4))).collect();
+        let mut graph = NodeGraph::new(nodes, conns, 100, 40);
+        graph.calculate();
     }
 }
 
@@ -1683,10 +1710,9 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    // Invented ports: unique per endpoint so wire layout does not clobber.
-    let mut from_port_count: Vec<usize> = vec![0; items.len()];
-    let mut to_port_count: Vec<usize> = vec![0; items.len()];
-    let mut connections: Vec<Connection> = Vec::new();
+    // Boxes are (16,4): ports must stay in 0..(height-2) → port 0 only.
+    // One Connection per unordered visible pair; never invent unique ports.
+    let mut pairs: Vec<(usize, usize, Style)> = Vec::new();
     for edge in &snap.edges {
         let Some(&a) = id_to_box.get(&edge.from) else {
             continue;
@@ -1694,25 +1720,15 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
         let Some(&b) = id_to_box.get(&edge.to) else {
             continue;
         };
-        if a == b {
-            continue;
-        }
-        // Directed for layout: lower box index → higher.
-        let (from, to) = if a < b { (a, b) } else { (b, a) };
-        let fp = from_port_count[from];
-        let tp = to_port_count[to];
-        from_port_count[from] += 1;
-        to_port_count[to] += 1;
         let color = snap
             .nodes
             .iter()
             .find(|n| n.id == edge.from)
             .map(|n| cluster_color(n.cluster))
             .unwrap_or(theme::DIM);
-        connections.push(
-            Connection::new(from, fp, to, tp).with_line_style(Style::default().fg(color)),
-        );
+        pairs.push((a, b, Style::default().fg(color)));
     }
+    let connections = tna_box_connections(pairs);
 
     let mut graph = NodeGraph::new(
         nodes,
@@ -1720,7 +1736,19 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
         inner.width as usize,
         inner.height as usize,
     );
-    graph.calculate();
+    // tui-nodes can panic (e.g. ALIAS_CHARS OOB) on dense graphs; keep TUI alive.
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        graph.calculate();
+    }))
+    .is_err()
+    {
+        frame.render_widget(
+            Paragraph::new("Graph layout failed — try Outline or Table.")
+                .style(theme::dim()),
+            inner,
+        );
+        return;
+    }
     let zones = graph.split(inner);
     for (idx, zone) in zones.into_iter().enumerate() {
         if zone.width == 0 || zone.height == 0 {
@@ -1741,6 +1769,26 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(Paragraph::new(body).style(style), zone);
     }
     frame.render_stateful_widget(graph, inner, &mut ());
+}
+
+/// One wire per unordered visible box pair; both ports always 0.
+/// Compact (16×4) boxes only expose port 0 safely for tui-nodes.
+fn tna_box_connections(
+    pairs: impl IntoIterator<Item = (usize, usize, Style)>,
+) -> Vec<Connection> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (a, b, style) in pairs {
+        if a == b {
+            continue;
+        }
+        let (from, to) = if a < b { (a, b) } else { (b, a) };
+        if !seen.insert((from, to)) {
+            continue;
+        }
+        out.push(Connection::new(from, 0, to, 0).with_line_style(style));
+    }
+    out
 }
 
 fn draw_tna_outline(frame: &mut Frame, app: &App, area: Rect) {

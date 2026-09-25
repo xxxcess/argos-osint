@@ -10,7 +10,7 @@ edition = "2021"
 license = "Apache-2.0"
 version = "0.1.0"
 authors = ["the Argos OSINT authors"]
-rust-version = "1.80"
+rust-version = "1.86"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -21,7 +21,7 @@ dirs = "5"
 futures-util = "0.3"
 imap = { version = "2.4", default-features = false, features = ["tls"] }
 native-tls = "0.2"
-ratatui = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28", "all-widgets", "layout-cache", "macros", "underline-color"] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 rpassword = "7"

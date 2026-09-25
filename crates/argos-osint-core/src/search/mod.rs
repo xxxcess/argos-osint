@@ -442,7 +442,7 @@ pub(crate) fn merge_adapter_results(
 }
 
 /// Host from a hit URL when it is a public domain (not loopback/private).
-pub(crate) fn public_host_from_url(raw: &str) -> Option<String> {
+pub fn public_host_from_url(raw: &str) -> Option<String> {
     let url = Url::parse(raw.trim()).ok()?;
     if url.scheme() != "http" && url.scheme() != "https" {
         return None;
@@ -714,7 +714,7 @@ pub fn check_public_http(raw: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-pub(crate) fn ip_blocked(ip: IpAddr) -> bool {
+pub fn ip_blocked(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();

@@ -22,6 +22,7 @@ use argos_osint_core::search::{SearchHit, SourcePlan};
 use argos_osint_core::secrets::{self, AuthFile, GmailSecret, ProviderSecret};
 use argos_osint_core::session::{self, Case};
 use argos_osint_core::store::{ChatLine, Store};
+use argos_osint_core::tna::{self, desk_key, report_key, TnaSnapshot};
 use chrono::Local;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::layout::Rect;
@@ -108,17 +109,19 @@ impl ModuleId {
 pub enum CasePage {
     Closed,
     Brain,
+    Network,
 }
 
 impl CasePage {
-    pub fn all() -> [Self; 2] {
-        [Self::Closed, Self::Brain]
+    pub fn all() -> [Self; 3] {
+        [Self::Closed, Self::Brain, Self::Network]
     }
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Closed => "Desk",
             Self::Brain => "Brain",
+            Self::Network => "Network",
         }
     }
 }
@@ -261,6 +264,8 @@ pub enum Focus {
     Canvas,
     Reports,
     Prompt,
+    Graph,
+    TnaSide,
 }
 
 #[derive(Clone, Debug)]
@@ -390,6 +395,12 @@ pub struct App {
     pub system_tab_area: Rect,
     /// Clickable label for each System tab, in tab order.
     pub system_tab_hits: Vec<Rect>,
+    pub tna_desk: Option<TnaSnapshot>,
+    pub tna_report: Option<TnaSnapshot>,
+    pub tna_find: Option<String>,
+    pub tna_sel: usize,
+    pub tna_side_scroll: usize,
+    pub tna_rebuilding: bool,
 }
 
 impl App {
@@ -497,6 +508,12 @@ impl App {
             provider_tab_hits: Vec::new(),
             system_tab_area: Rect::default(),
             system_tab_hits: Vec::new(),
+            tna_desk: None,
+            tna_report: None,
+            tna_find: None,
+            tna_sel: 0,
+            tna_side_scroll: 0,
+            tna_rebuilding: false,
         };
         app.reload_lists()?;
         app.load_transcript(&app.session_id());
@@ -557,7 +574,7 @@ impl App {
         }
     }
 
-    fn open_report(&self) -> Option<&ReportMeta> {
+    pub fn open_report(&self) -> Option<&ReportMeta> {
         let id = self.chat_report.as_deref()?;
         self.reports.iter().find(|report| report.id == id)
     }
@@ -567,6 +584,7 @@ impl App {
             Some(ModuleId::Cases) => match self.case_page {
                 CasePage::Closed => None,
                 CasePage::Brain => Some(ModuleId::Brain),
+                CasePage::Network => None,
             },
             Some(ModuleId::System) => match self.system_page {
                 SystemPage::Log => Some(ModuleId::Log),
@@ -588,7 +606,7 @@ impl App {
         match self.module {
             Some(ModuleId::Cases) => match self.case_page {
                 CasePage::Brain => Some(ModuleId::Brain),
-                CasePage::Closed => None,
+                CasePage::Closed | CasePage::Network => None,
             },
             Some(ModuleId::System) => match self.system_page {
                 SystemPage::Settings => Some(ModuleId::Settings),
@@ -1236,6 +1254,7 @@ impl App {
                 let _ = self.store.add_report(&meta);
                 self.log_event("task", &format!("report {}", meta.path));
                 let _ = self.reload_lists();
+                self.after_report_filed(&meta.id);
             }
             TurnEvent::Memory(memory) => {
                 if let Ok(saved) = self.store.add_memory(&memory.text) {
@@ -1396,6 +1415,15 @@ impl App {
             self.load_transcript("desk");
             return;
         }
+        if page == CasePage::Network {
+            self.fields.clear();
+            self.focus = Focus::Graph;
+            self.tna_find = None;
+            self.tna_sel = 0;
+            self.tna_side_scroll = 0;
+            self.ensure_tna_snapshot(false);
+            return;
+        }
         self.focus = Focus::Canvas;
         self.load_group_fields();
     }
@@ -1516,6 +1544,7 @@ impl App {
             _ if self.focus == Focus::Prompt => self.on_prompt_key(key),
             _ if self.focus == Focus::Launcher => self.on_launcher_key(key),
             _ if self.focus == Focus::Reports => self.on_reports_key(key),
+            _ if self.focus == Focus::Graph || self.focus == Focus::TnaSide => self.on_tna_key(key),
             _ => self.on_canvas_key(key),
         }
     }
@@ -1559,8 +1588,17 @@ impl App {
 
     fn next_focus(&self) -> Focus {
         let reports = self.on_case_desk() && self.case_page == CasePage::Closed;
+        let network = self.on_case_desk() && self.case_page == CasePage::Network;
         match self.focus {
-            Focus::Launcher => Focus::Canvas,
+            Focus::Launcher => {
+                if network {
+                    Focus::Graph
+                } else {
+                    Focus::Canvas
+                }
+            }
+            Focus::Graph => Focus::TnaSide,
+            Focus::TnaSide => Focus::Prompt,
             Focus::Canvas if reports => Focus::Reports,
             Focus::Canvas | Focus::Reports => Focus::Prompt,
             Focus::Prompt => Focus::Launcher,
@@ -1691,8 +1729,200 @@ impl App {
             self.load_transcript("desk");
             self.scroll_back = 0;
         }
+        self.after_report_deleted(id);
         let _ = self.reload_lists();
         self.status = "report deleted".into();
+    }
+
+
+    pub fn tna_snapshot(&self) -> Option<&TnaSnapshot> {
+        if self.chat_report.is_some() {
+            self.tna_report.as_ref()
+        } else {
+            self.tna_desk.as_ref()
+        }
+    }
+
+    pub fn tna_visible_nodes(&self) -> Vec<usize> {
+        let Some(snap) = self.tna_snapshot() else {
+            return Vec::new();
+        };
+        let q = self
+            .tna_find
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        snap.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| q.is_empty() || n.label.to_ascii_lowercase().contains(&q) || n.id.to_ascii_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn ensure_tna_snapshot(&mut self, force: bool) {
+        if self.tna_rebuilding {
+            return;
+        }
+        if self.chat_report.is_some() {
+            if force || self.tna_report.is_none() {
+                self.spawn_tna_rebuild(true);
+            }
+        } else if force || self.tna_desk.is_none() {
+            self.spawn_tna_rebuild(false);
+        }
+    }
+
+    fn spawn_tna_rebuild(&mut self, targeted: bool) {
+        self.tna_rebuilding = true;
+        if targeted {
+            if let Some(id) = self.chat_report.clone() {
+                match tna::rebuild_for_report(&self.store, &id) {
+                    Ok(snap) => self.tna_report = Some(snap),
+                    Err(err) => self.log_event("task", &format!("tna rebuild failed: {err}")),
+                }
+            }
+        } else {
+            match tna::rebuild_collection(&self.store) {
+                Ok(snap) => self.tna_desk = Some(snap),
+                Err(err) => self.log_event("task", &format!("tna rebuild failed: {err}")),
+            }
+        }
+        self.tna_rebuilding = false;
+        let n = self.tna_visible_nodes().len();
+        if n == 0 {
+            self.tna_sel = 0;
+        } else if self.tna_sel >= n {
+            self.tna_sel = n - 1;
+        }
+    }
+
+    fn after_report_filed(&mut self, report_id: &str) {
+        let _ = tna::rebuild_after_file(&self.store, report_id);
+        if let Ok(Some(snap)) = self.store.get_tna_graph(desk_key()) {
+            self.tna_desk = Some(snap);
+        }
+        if let Ok(Some(snap)) = self.store.get_tna_graph(&report_key(report_id)) {
+            if self.chat_report.as_deref() == Some(report_id) {
+                self.tna_report = Some(snap);
+            }
+        }
+        if self.case_page == CasePage::Network {
+            self.ensure_tna_snapshot(true);
+        }
+    }
+
+    fn after_report_deleted(&mut self, report_id: &str) {
+        let _ = tna::rebuild_after_delete(&self.store, report_id);
+        self.tna_report = None;
+        if let Ok(Some(snap)) = self.store.get_tna_graph(desk_key()) {
+            self.tna_desk = Some(snap);
+        } else {
+            self.tna_desk = None;
+        }
+    }
+
+    fn on_tna_key(&mut self, key: KeyEvent) -> bool {
+        if self.tna_find.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.tna_find = None;
+                }
+                KeyCode::Backspace => {
+                    if let Some(q) = self.tna_find.as_mut() {
+                        q.pop();
+                    }
+                }
+                KeyCode::Enter => {
+                    // keep filter active but stop editing
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(q) = self.tna_find.as_mut() {
+                        q.push(c);
+                    }
+                }
+                _ => {}
+            }
+            let n = self.tna_visible_nodes().len();
+            if n == 0 {
+                self.tna_sel = 0;
+            } else if self.tna_sel >= n {
+                self.tna_sel = n - 1;
+            }
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('/') => {
+                self.tna_find = Some(String::new());
+                self.focus = Focus::Graph;
+            }
+            KeyCode::Char('h') | KeyCode::Left => self.walk_tna_node(-1, 0),
+            KeyCode::Char('l') | KeyCode::Right => self.walk_tna_node(1, 0),
+            KeyCode::Char('k') | KeyCode::Up => self.walk_tna_node(0, -1),
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.focus == Focus::TnaSide {
+                    self.tna_side_scroll = self.tna_side_scroll.saturating_add(1);
+                } else {
+                    self.walk_tna_node(0, 1);
+                }
+            }
+            KeyCode::Tab => {
+                self.focus = if self.focus == Focus::Graph {
+                    Focus::TnaSide
+                } else {
+                    Focus::Graph
+                };
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn walk_tna_node(&mut self, dx: i32, dy: i32) {
+        let nodes = self.tna_visible_nodes();
+        if nodes.is_empty() {
+            return;
+        }
+        let snap = match self.tna_snapshot() {
+            Some(s) => s,
+            None => return,
+        };
+        let cur = nodes[self.tna_sel.min(nodes.len() - 1)];
+        let cx = snap.nodes[cur].x;
+        let cy = snap.nodes[cur].y;
+        let mut best: Option<(usize, f64)> = None;
+        for (vis_i, &idx) in nodes.iter().enumerate() {
+            if idx == cur {
+                continue;
+            }
+            let n = &snap.nodes[idx];
+            let vx = n.x - cx;
+            let vy = n.y - cy;
+            let aligned = if dx != 0 {
+                vx * dx as f64 > 0.01 && vy.abs() <= vx.abs() + 0.15
+            } else {
+                vy * dy as f64 > 0.01 && vx.abs() <= vy.abs() + 0.15
+            };
+            if !aligned {
+                continue;
+            }
+            let dist = vx.hypot(vy);
+            if best.map(|(_, d)| dist < d).unwrap_or(true) {
+                best = Some((vis_i, dist));
+            }
+        }
+        if let Some((vis_i, _)) = best {
+            self.tna_sel = vis_i;
+        } else {
+            // wrap along visible list
+            let n = nodes.len();
+            if dx < 0 || dy < 0 {
+                self.tna_sel = (self.tna_sel + n - 1) % n;
+            } else if dx > 0 || dy > 0 {
+                self.tna_sel = (self.tna_sel + 1) % n;
+            }
+        }
     }
 
     fn on_esc(&mut self) {
@@ -1702,6 +1932,26 @@ impl App {
         }
         if self.editing {
             self.editing = false;
+            return;
+        }
+        if self.case_page == CasePage::Network {
+            if self.tna_find.is_some() {
+                self.tna_find = None;
+                return;
+            }
+            if self.chat_report.is_some() {
+                self.persist_visible_chat();
+                self.chat_report = None;
+                self.tna_report = None;
+                self.load_transcript("desk");
+                self.scroll_back = 0;
+                self.focus = Focus::Graph;
+                self.ensure_tna_snapshot(false);
+                return;
+            }
+            self.case_page = CasePage::Closed;
+            self.fields.clear();
+            self.focus = Focus::Prompt;
             return;
         }
         if self.widget().is_some() {
@@ -1777,6 +2027,9 @@ impl App {
     }
 
     fn on_canvas_key(&mut self, key: KeyEvent) -> bool {
+        if self.case_page == CasePage::Network {
+            return self.on_tna_key(key);
+        }
         if self.case_page == CasePage::Brain && self.form_module() == Some(ModuleId::Brain) {
             return self.on_brain_key(key);
         }
@@ -2079,6 +2332,7 @@ Could not write the report: {err}",
                 self.log_event("task", &format!("report {}", report.path));
                 let _ = self.store.add_report(&report);
                 let _ = self.reload_lists();
+                self.after_report_filed(&report.id);
             }
             Ok((summary, None)) => self.mark_task_failed(&case_id, &summary),
             Err(err) => self.mark_task_failed(&case_id, &err),
@@ -2335,11 +2589,19 @@ Could not write the report: {err}",
             self.persist_visible_chat();
         }
         self.chat_case = None;
-        self.chat_report = Some(report.id);
-        self.case_page = CasePage::Closed;
-        self.module = Some(ModuleId::Cases);
-        self.scroll_back = 0;
-        self.focus = Focus::Prompt;
+        self.chat_report = Some(report.id.clone());
+        if self.case_page == CasePage::Network {
+            self.module = Some(ModuleId::Cases);
+            self.scroll_back = 0;
+            self.focus = Focus::Graph;
+            self.tna_report = None;
+            self.ensure_tna_snapshot(true);
+        } else {
+            self.case_page = CasePage::Closed;
+            self.module = Some(ModuleId::Cases);
+            self.scroll_back = 0;
+            self.focus = Focus::Prompt;
+        }
         self.transcripts.remove(&session);
         self.load_transcript(&self.session_id());
         self.status = "ready".into();
@@ -2472,6 +2734,17 @@ Could not write the report: {err}",
                     }
                 }
             }
+            "network" => {
+                self.open_module(ModuleId::Cases);
+                self.select_case_page(CasePage::Network);
+            }
+            "find" => {
+                if self.case_page != CasePage::Network {
+                    self.select_case_page(CasePage::Network);
+                }
+                self.tna_find = Some(String::new());
+                self.focus = Focus::Graph;
+            }
             "brain" => {
                 if arg.is_empty() {
                     self.open_module(ModuleId::Brain);
@@ -2564,6 +2837,7 @@ Could not write the report: {err}",
             Ok(meta) => {
                 let _ = self.store.add_report(&meta);
                 let _ = self.reload_lists();
+                self.after_report_filed(&meta.id);
                 self.push_line("assistant", &format!("Report: {}", meta.path));
             }
             Err(err) => {
@@ -3778,7 +4052,7 @@ mod tests {
         let chat = app.canvas_area;
         app.click(chat.x + 2, chat.y + 2);
         assert_eq!(app.focus, Focus::Canvas);
-        assert_eq!(app.case_tab_hits.len(), 2);
+        assert_eq!(app.case_tab_hits.len(), 3);
         assert!(text.contains("System"), "{text}");
         assert!(!text.contains("Search Log"), "{text}");
         let brain = app.case_tab_hits[1];
@@ -3813,6 +4087,23 @@ mod tests {
         assert!(text.contains("Memory"), "{text}");
         assert!(text.contains("Close"), "{text}");
         assert!(!text.contains("Edit"), "{text}");
+    }
+
+    #[test]
+    fn case_page_all_includes_network() {
+        let pages = CasePage::all();
+        assert_eq!(pages.len(), 3);
+        assert!(pages.contains(&CasePage::Network));
+        assert_eq!(CasePage::Network.title(), "Network");
+    }
+
+    #[test]
+    fn slash_network_opens_network_page() {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        app.run_slash("/network");
+        assert_eq!(app.case_page, CasePage::Network);
+        assert_eq!(app.focus, Focus::Graph);
     }
 
     #[test]

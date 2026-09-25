@@ -9,6 +9,7 @@ use rusqlite::{params, Connection};
 use crate::brain::Memory;
 use crate::report::ReportMeta;
 use crate::session::Case;
+use crate::tna::TnaSnapshot;
 
 static IDS: AtomicU64 = AtomicU64::new(1);
 
@@ -86,6 +87,11 @@ impl Store {
                 status TEXT NOT NULL,
                 detail TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tna_graphs (
+                key TEXT PRIMARY KEY,
+                snapshot_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             "#,
         )?;
@@ -362,6 +368,38 @@ impl Store {
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    pub fn get_tna_graph(&self, key: &str) -> Result<Option<TnaSnapshot>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT snapshot_json FROM tna_graphs WHERE key = ?1")?;
+        let mut rows = stmt.query(params![key])?;
+        if let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            let snap: TnaSnapshot = serde_json::from_str(&json)
+                .with_context(|| format!("decode tna graph {key}"))?;
+            Ok(Some(snap))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn upsert_tna_graph(&self, key: &str, snapshot: &TnaSnapshot) -> Result<()> {
+        let json = serde_json::to_string(snapshot).context("encode tna graph")?;
+        self.conn.execute(
+            "INSERT INTO tna_graphs (key, snapshot_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET snapshot_json = excluded.snapshot_json, updated_at = excluded.updated_at",
+            params![key, json, stamp()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_tna_graph(&self, key: &str) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM tna_graphs WHERE key = ?1", params![key])?;
+        Ok(n > 0)
+    }
 }
 
 fn stamp() -> String {
@@ -413,4 +451,16 @@ mod tests {
         assert!(store.delete_memory(&mem.id).unwrap());
         assert!(store.list_memories().unwrap().is_empty());
     }
+    #[test]
+    fn tna_graph_persist_roundtrip() {
+        use crate::tna::{TnaScope, TnaSnapshot};
+        let store = Store::memory().unwrap();
+        let snap = TnaSnapshot::empty(TnaScope::Collection);
+        store.upsert_tna_graph("desk", &snap).unwrap();
+        let loaded = store.get_tna_graph("desk").unwrap().unwrap();
+        assert_eq!(loaded.title, "TNA · collection");
+        assert!(store.delete_tna_graph("desk").unwrap());
+        assert!(store.get_tna_graph("desk").unwrap().is_none());
+    }
+
 }

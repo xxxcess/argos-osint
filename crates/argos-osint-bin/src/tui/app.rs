@@ -26,7 +26,7 @@ use argos_osint_core::tna::{self, desk_key, report_key, TnaCluster, TnaNode, Tna
 use chrono::Local;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::layout::Rect;
-use ratatui::widgets::{ScrollbarState, TableState};
+use ratatui::widgets::{ListState, ScrollbarState, TableState};
 use sysinfo::System;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -432,6 +432,12 @@ pub struct App {
     pub brain_card: bool,
     /// 0 edit, 1 save, 2 cancel, 3 delete.
     pub brain_action: usize,
+    /// Stock List selection (kept in sync with `brain_sel`).
+    pub brain_list_state: ListState,
+    /// Memory-list scrollbar (ITEM_HEIGHT = 1).
+    pub brain_list_scroll: ScrollbarState,
+    /// Hit area for Brain list (wheel scroll).
+    pub brain_list_area: Rect,
     pub reports: Vec<ReportMeta>,
     /// Research that has started and has not filed a markdown report yet.
     pub pending_reports: Vec<PendingReport>,
@@ -566,6 +572,9 @@ impl App {
             brain_edit_id: None,
             brain_card: false,
             brain_action: 0,
+            brain_list_state: ListState::default().with_selected(Some(0)),
+            brain_list_scroll: ScrollbarState::new(0),
+            brain_list_area: Rect::default(),
             reports: Vec::new(),
             pending_reports: Vec::new(),
             report_sel: 0,
@@ -646,6 +655,7 @@ impl App {
         } else if self.report_sel >= rows {
             self.report_sel = rows - 1;
         }
+        self.sync_brain_list_ui();
         Ok(())
     }
 
@@ -1685,6 +1695,17 @@ impl App {
 
     fn scroll_chat_at(&mut self, x: u16, y: u16, delta: isize) {
         let pos = ratatui::layout::Position { x, y };
+        if self.on_case_desk() && self.case_page == CasePage::Brain {
+            // ScrollUp (delta>0) → previous row; ScrollDown → next (match Table).
+            if self.brain_list_area == Rect::default() || self.brain_list_area.contains(pos) {
+                let steps = delta.unsigned_abs().max(1);
+                let dir = if delta > 0 { -1 } else { 1 };
+                for _ in 0..steps {
+                    self.move_brain_sel(dir);
+                }
+            }
+            return;
+        }
         if self.on_case_desk()
             && self.case_page == CasePage::Network
             && self.tna_view == TnaView::Table
@@ -2853,9 +2874,32 @@ impl App {
         let n = self.shown_memories().len();
         if n == 0 {
             self.brain_sel = 0;
+            self.sync_brain_list_ui();
             return;
         }
         self.brain_sel = (self.brain_sel as isize + delta).rem_euclid(n as isize) as usize;
+        self.sync_brain_list_ui();
+    }
+
+    const BRAIN_LIST_ITEM_HEIGHT: usize = 1;
+
+    /// Keep `ListState` / memory-list scrollbar aligned with `brain_sel`.
+    pub fn sync_brain_list_ui(&mut self) {
+        let n = self.shown_memories().len();
+        if n == 0 {
+            self.brain_sel = 0;
+            self.brain_list_state.select(None);
+            self.brain_list_scroll = ScrollbarState::new(0).position(0);
+            return;
+        }
+        if self.brain_sel >= n {
+            self.brain_sel = n - 1;
+        }
+        let i = self.brain_sel;
+        self.brain_list_state.select(Some(i));
+        let content = n.saturating_sub(1) * Self::BRAIN_LIST_ITEM_HEIGHT;
+        self.brain_list_scroll =
+            ScrollbarState::new(content).position(i * Self::BRAIN_LIST_ITEM_HEIGHT);
     }
 
     fn on_case_desk(&self) -> bool {
@@ -4141,6 +4185,7 @@ Could not write the report: {err}",
             .position(|memory| memory.id == id)
         {
             self.brain_sel = index;
+            self.sync_brain_list_ui();
         }
     }
 
@@ -4778,6 +4823,67 @@ mod tests {
         assert!(text.contains("Memory"), "{text}");
         assert!(text.contains("Close"), "{text}");
         assert!(!text.contains("Edit"), "{text}");
+    }
+
+    #[test]
+    fn brain_list_scroll_state_tracks_selection() {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        for i in 0..12 {
+            app.memories.push(Memory::fact(
+                format!("m{i}"),
+                format!("memory-row-{i}"),
+                "t",
+            ));
+        }
+        app.open_module(ModuleId::Brain);
+        assert_eq!(app.case_page, CasePage::Brain);
+        app.sync_brain_list_ui();
+        assert_eq!(app.brain_list_state.selected(), Some(0));
+        app.move_brain_sel(1);
+        assert_eq!(app.brain_sel, 1);
+        assert_eq!(app.brain_list_state.selected(), Some(1));
+        // Mid-list: selection and scrollbar stay aligned (ITEM_HEIGHT = 1).
+        for _ in 0..5 {
+            app.move_brain_sel(1);
+        }
+        assert_eq!(app.brain_sel, 6);
+        assert_eq!(app.brain_list_state.selected(), Some(6));
+        // Clamp when list shrinks.
+        app.memories.truncate(3);
+        app.sync_brain_list_ui();
+        assert_eq!(app.brain_sel, 2);
+        assert_eq!(app.brain_list_state.selected(), Some(2));
+        app.memories.clear();
+        app.sync_brain_list_ui();
+        assert_eq!(app.brain_sel, 0);
+        assert_eq!(app.brain_list_state.selected(), None);
+        // Render long list: scrollbar + selection symbol visible.
+        for i in 0..20 {
+            app.memories.push(Memory::fact(
+                format!("r{i}"),
+                format!("scroll-fact-{i}"),
+                "t",
+            ));
+        }
+        app.brain_sel = 10;
+        app.sync_brain_list_ui();
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Memories"), "{text}");
+        assert!(text.contains("Enter views a fact"), "{text}");
+        assert!(text.contains("scroll-fact-10"), "{text}");
+        assert_eq!(app.brain_list_state.selected(), Some(10));
     }
 
     #[test]

@@ -4,13 +4,15 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::symbols::Marker;
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
-use ratatui::widgets::{Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs, Wrap};
+use ratatui::widgets::{BorderType, Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs, Wrap};
 use ratatui::Frame;
+use tui_nodes::{Connection, NodeGraph, NodeLayout};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, CasePage, Focus, ModuleId, ProviderPage, SystemPage, TnaDisplayItem, TnaView, tna_glyph_for_cluster, tna_glyph_for_kind};
+use super::app::{
+    App, CasePage, Focus, ModuleId, ProviderPage, SystemPage, TnaDisplayItem, TnaView,
+    TNA_GRAPH_BOX_BUDGET, tna_glyph_for_cluster, tna_glyph_for_kind,
+};
 use super::theme::{self, panel};
 use argos_osint_core::paths::fit_status;
 use argos_osint_core::tna::TnaCluster;
@@ -1507,8 +1509,10 @@ fn split_v(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
 
 #[cfg(test)]
 mod tests {
-    use super::markdown_lines;
+    use super::{markdown_lines, tna_box_connections};
     use crate::tui::theme;
+    use ratatui::style::Style;
+    use tui_nodes::{NodeGraph, NodeLayout};
 
     #[test]
     fn chat_markdown_hides_markers() {
@@ -1525,6 +1529,31 @@ mod tests {
         assert!(text.contains("/tmp/report.md"));
         assert!(!text.contains("**"));
         assert!(!text.contains('`'));
+    }
+
+    #[test]
+    fn tna_many_edges_ports_zero_no_panic() {
+        // Many duplicate directed edges between 4 boxes → one unordered Connection each, ports 0.
+        let mut pairs = Vec::new();
+        for _ in 0..6 {
+            for i in 0..4usize {
+                for j in 0..4usize {
+                    if i != j {
+                        pairs.push((i, j, Style::default()));
+                    }
+                }
+            }
+        }
+        assert!(pairs.len() > 4 * 3 / 2);
+        let conns = tna_box_connections(pairs);
+        assert_eq!(conns.len(), 4 * 3 / 2);
+        for c in &conns {
+            assert_eq!(c.from_port, 0);
+            assert_eq!(c.to_port, 0);
+        }
+        let nodes: Vec<_> = (0..4).map(|_| NodeLayout::new((16, 4))).collect();
+        let mut graph = NodeGraph::new(nodes, conns, 100, 40);
+        graph.calculate();
     }
 }
 
@@ -1614,102 +1643,152 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let items = app.tna_display_nodes();
-    let selected = items.get(app.tna_sel).cloned();
-    let nodes = snap.nodes.clone();
-    let edges = snap.edges.clone();
-    let visible_ids: std::collections::HashSet<String> = items
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No nodes in ego view (try / find or Esc).").style(theme::dim()),
+            inner,
+        );
+        return;
+    }
+    debug_assert!(
+        items.len() <= TNA_GRAPH_BOX_BUDGET,
+        "graph box budget exceeded: {}",
+        items.len()
+    );
+
+    // Owned titles so NodeLayout can borrow &'a str for the frame.
+    let mut titles: Vec<String> = Vec::with_capacity(items.len());
+    let mut border_styles: Vec<Style> = Vec::with_capacity(items.len());
+    let mut id_to_box: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for (box_i, item) in items.iter().enumerate() {
+        let selected = box_i == app.tna_sel;
+        match item {
+            TnaDisplayItem::Real { idx } => {
+                let node = &snap.nodes[*idx];
+                let mut color = cluster_color(node.cluster);
+                if selected {
+                    color = theme::TEXT;
+                }
+                titles.push(short_label(&node.label, 12));
+                let mut style = Style::default().fg(color);
+                if selected {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                border_styles.push(style);
+                id_to_box.insert(node.id.clone(), box_i);
+            }
+            TnaDisplayItem::Super {
+                hub_id, count, ..
+            } => {
+                let hub = snap.nodes.iter().find(|n| n.id == *hub_id);
+                let mut color = hub
+                    .map(|n| cluster_color(n.cluster))
+                    .unwrap_or(theme::DIM);
+                if selected {
+                    color = theme::TEXT;
+                }
+                titles.push(format!("▣×{count}"));
+                let mut style = Style::default().fg(color);
+                if selected {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                border_styles.push(style);
+            }
+        }
+    }
+
+    let nodes: Vec<NodeLayout<'_>> = titles
         .iter()
-        .filter_map(|it| match it {
-            TnaDisplayItem::Real { idx } => nodes.get(*idx).map(|n| n.id.clone()),
-            TnaDisplayItem::Super { .. } => None,
+        .zip(border_styles.iter())
+        .map(|(title, style)| {
+            NodeLayout::new((16, 4))
+                .with_title(title.as_str())
+                .with_border_type(BorderType::Rounded)
+                .with_border_style(*style)
         })
         .collect();
-    let selected_real = match &selected {
-        Some(TnaDisplayItem::Real { idx }) => Some(*idx),
-        _ => None,
-    };
-    let selected_label = selected_real.and_then(|i| nodes.get(i).map(|n| n.label.clone()));
-    let selected_xy = selected_real.map(|i| (nodes[i].x, nodes[i].y));
 
-    let canvas = Canvas::default()
-        .marker(Marker::Braille)
-        .x_bounds([0.0, 1.0])
-        .y_bounds([0.0, 1.0])
-        .paint(move |ctx| {
-            for edge in &edges {
-                if !visible_ids.contains(&edge.from) || !visible_ids.contains(&edge.to) {
-                    continue;
-                }
-                let Some(a) = nodes.iter().find(|n| n.id == edge.from) else {
-                    continue;
-                };
-                let Some(b) = nodes.iter().find(|n| n.id == edge.to) else {
-                    continue;
-                };
-                let color = cluster_color(a.cluster);
-                let steps = 8;
-                for i in 0..steps {
-                    if i % 2 == 1 {
-                        continue;
-                    }
-                    let t0 = i as f64 / steps as f64;
-                    let t1 = (i + 1) as f64 / steps as f64;
-                    let x0 = a.x + (b.x - a.x) * t0;
-                    let y0 = 1.0 - (a.y + (b.y - a.y) * t0);
-                    let x1 = a.x + (b.x - a.x) * t1;
-                    let y1 = 1.0 - (a.y + (b.y - a.y) * t1);
-                    ctx.draw(&CanvasLine {
-                        x1: x0,
-                        y1: y0,
-                        x2: x1,
-                        y2: y1,
-                        color,
-                    });
-                }
+    // Boxes are (16,4): ports must stay in 0..(height-2) → port 0 only.
+    // One Connection per unordered visible pair; never invent unique ports.
+    let mut pairs: Vec<(usize, usize, Style)> = Vec::new();
+    for edge in &snap.edges {
+        let Some(&a) = id_to_box.get(&edge.from) else {
+            continue;
+        };
+        let Some(&b) = id_to_box.get(&edge.to) else {
+            continue;
+        };
+        let color = snap
+            .nodes
+            .iter()
+            .find(|n| n.id == edge.from)
+            .map(|n| cluster_color(n.cluster))
+            .unwrap_or(theme::DIM);
+        pairs.push((a, b, Style::default().fg(color)));
+    }
+    let connections = tna_box_connections(pairs);
+
+    let mut graph = NodeGraph::new(
+        nodes,
+        connections,
+        inner.width as usize,
+        inner.height as usize,
+    );
+    // tui-nodes can panic (e.g. ALIAS_CHARS OOB) on dense graphs; keep TUI alive.
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        graph.calculate();
+    }))
+    .is_err()
+    {
+        frame.render_widget(
+            Paragraph::new("Graph layout failed — try Outline or Table.")
+                .style(theme::dim()),
+            inner,
+        );
+        return;
+    }
+    let zones = graph.split(inner);
+    for (idx, zone) in zones.into_iter().enumerate() {
+        if zone.width == 0 || zone.height == 0 {
+            continue;
+        }
+        let body = match &items[idx] {
+            TnaDisplayItem::Real { idx: ni } => {
+                let n = &snap.nodes[*ni];
+                format!("{} {}", tna_glyph_for_kind(n.kind), n.kind.as_str())
             }
-            for item in &items {
-                match item {
-                    TnaDisplayItem::Real { idx } => {
-                        let node = &nodes[*idx];
-                        let mut color = cluster_color(node.cluster);
-                        if Some(*idx) == selected_real {
-                            color = theme::TEXT;
-                        }
-                        let y = 1.0 - node.y;
-                        let glyph = tna_glyph_for_kind(node.kind);
-                        ctx.print(node.x, y, Span::styled(glyph.to_string(), Style::default().fg(color)));
-                    }
-                    TnaDisplayItem::Super {
-                        hub_id,
-                        count,
-                        x,
-                        y,
-                    } => {
-                        let hub = nodes.iter().find(|n| n.id == *hub_id);
-                        let mut color = hub
-                            .map(|n| cluster_color(n.cluster))
-                            .unwrap_or(theme::DIM);
-                        let selected_super = matches!(
-                            &selected,
-                            Some(TnaDisplayItem::Super { hub_id: h, .. }) if h == hub_id
-                        );
-                        if selected_super {
-                            color = theme::TEXT;
-                        }
-                        let label = format!("▣×{count}");
-                        ctx.print(*x, 1.0 - *y, Span::styled(label, Style::default().fg(color)));
-                    }
-                }
-            }
-            if let (Some(label), Some((x, y))) = (&selected_label, selected_xy) {
-                ctx.print(
-                    x,
-                    (1.0 - y - 0.05).clamp(0.0, 1.0),
-                    Span::styled(short_label(label, 28), Style::default().fg(theme::TEXT)),
-                );
-            }
-        });
-    frame.render_widget(canvas, inner);
+            TnaDisplayItem::Super { count, .. } => format!("hub · {count}"),
+        };
+        let style = if idx == app.tna_sel {
+            Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
+        } else {
+            theme::dim()
+        };
+        frame.render_widget(Paragraph::new(body).style(style), zone);
+    }
+    frame.render_stateful_widget(graph, inner, &mut ());
+}
+
+/// One wire per unordered visible box pair; both ports always 0.
+/// Compact (16×4) boxes only expose port 0 safely for tui-nodes.
+fn tna_box_connections(
+    pairs: impl IntoIterator<Item = (usize, usize, Style)>,
+) -> Vec<Connection> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (a, b, style) in pairs {
+        if a == b {
+            continue;
+        }
+        let (from, to) = if a < b { (a, b) } else { (b, a) };
+        if !seen.insert((from, to)) {
+            continue;
+        }
+        out.push(Connection::new(from, 0, to, 0).with_line_style(style));
+    }
+    out
 }
 
 fn draw_tna_outline(frame: &mut Frame, app: &App, area: Rect) {

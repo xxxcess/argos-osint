@@ -126,6 +126,9 @@ impl CasePage {
     }
 }
 
+/// Hard visible budget for Graph boxed nodes (FR #15 / research #14).
+pub const TNA_GRAPH_BOX_BUDGET: usize = 16;
+
 /// Network canvas presentation mode (FR-4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TnaView {
@@ -1883,6 +1886,7 @@ impl App {
     }
 
     /// Graph canvas items: egocentric 1–2 hops with hub collapse to ▣×N.
+    /// Hard budget ≤ [`TNA_GRAPH_BOX_BUDGET`] compact boxes (never full 120/80).
     pub fn tna_display_nodes(&self) -> Vec<TnaDisplayItem> {
         let Some(snap) = self.tna_snapshot() else {
             return Vec::new();
@@ -1940,24 +1944,51 @@ impl App {
             });
         }
 
+        let push_real = |items: &mut Vec<TnaDisplayItem>, idx: usize| {
+            let n = &snap.nodes[idx];
+            if collapsed.contains(&n.id) {
+                return;
+            }
+            if !Self::tna_node_matches(n, &q) {
+                return;
+            }
+            if items.iter().any(|it| matches!(it, TnaDisplayItem::Real { idx: i } if *i == idx)) {
+                return;
+            }
+            items.push(TnaDisplayItem::Real { idx });
+        };
+
+        // Prefer ego1 (focus + 1 hop); fill with ego2 only while under budget.
         let mut items: Vec<TnaDisplayItem> = Vec::new();
-        let mut order: Vec<usize> = ego2
+        let mut order1: Vec<usize> = ego1
             .iter()
             .filter_map(|id| id_to_idx.get(id.as_str()).copied())
             .collect();
-        order.sort_unstable();
-        for idx in order {
-            let n = &snap.nodes[idx];
-            if collapsed.contains(&n.id) {
-                continue;
+        order1.sort_unstable();
+        for idx in order1 {
+            if items.len() >= TNA_GRAPH_BOX_BUDGET {
+                break;
             }
-            if !Self::tna_node_matches(n, &q) {
-                continue;
+            push_real(&mut items, idx);
+        }
+
+        let mut order2: Vec<usize> = ego2
+            .iter()
+            .filter(|id| !ego1.contains(*id))
+            .filter_map(|id| id_to_idx.get(id.as_str()).copied())
+            .collect();
+        order2.sort_unstable();
+        for idx in order2 {
+            if items.len() >= TNA_GRAPH_BOX_BUDGET {
+                break;
             }
-            items.push(TnaDisplayItem::Real { idx });
+            push_real(&mut items, idx);
         }
 
         for s in supers {
+            if items.len() >= TNA_GRAPH_BOX_BUDGET {
+                break;
+            }
             if let TnaDisplayItem::Super {
                 ref hub_id,
                 count,
@@ -1990,6 +2021,9 @@ impl App {
                     });
                 }
             }
+        }
+        if items.len() > TNA_GRAPH_BOX_BUDGET {
+            items.truncate(TNA_GRAPH_BOX_BUDGET);
         }
         items
     }
@@ -4690,6 +4724,143 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
         app.on_tna_key(key);
         assert_eq!(app.tna_view, TnaView::Outline);
+        app.on_tna_key(key);
+        assert_eq!(app.tna_view, TnaView::Table);
+        app.on_tna_key(key);
+        assert_eq!(app.tna_view, TnaView::Graph);
+    }
+
+    #[test]
+    fn tna_graph_box_budget_caps_display() {
+        // Star: focus + 30 leaves → ego1 alone is 31; Graph boxes must stay ≤ budget.
+        let mut nodes = vec![TnaNode {
+            id: "F".into(),
+            label: "focus".into(),
+            kind: TnaNodeKind::Person,
+            cluster: TnaCluster::Identity,
+            mentions: 1,
+            degree: 30,
+            x: 0.5,
+            y: 0.5,
+        }];
+        let mut edges = Vec::new();
+        for i in 0..30 {
+            let id = format!("n{i}");
+            nodes.push(TnaNode {
+                id: id.clone(),
+                label: id.clone(),
+                kind: TnaNodeKind::Handle,
+                cluster: TnaCluster::Identity,
+                mentions: 1,
+                degree: 1,
+                x: 0.1 * ((i % 10) as f64),
+                y: 0.1 * ((i / 10) as f64),
+            });
+            edges.push(argos_osint_core::tna::TnaEdge {
+                from: "F".into(),
+                to: id,
+                weight: 1,
+            });
+        }
+        let snap = TnaSnapshot {
+            scope: argos_osint_core::tna::TnaScope::Collection,
+            title: "TNA · budget".into(),
+            nodes,
+            edges,
+            clusters: vec![],
+            anchors: vec![],
+            gaps: vec![],
+            built_at: "t".into(),
+        };
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        app.tna_desk = Some(snap);
+        app.run_slash("/network");
+        // select_case_page clears focus/expanded — restore after open.
+        app.tna_focus_id = Some("F".into());
+        app.tna_expanded.insert("F".into());
+        let items = app.tna_display_nodes();
+        assert!(
+            items.len() <= TNA_GRAPH_BOX_BUDGET,
+            "budget {} exceeded: {}",
+            TNA_GRAPH_BOX_BUDGET,
+            items.len()
+        );
+        assert!(!items.is_empty());
+    }
+
+    #[test]
+    fn network_page_smoke_view_cycle_and_graph_title() {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        // Minimal two-node snapshot so Graph has boxes to draw.
+        app.tna_desk = Some(TnaSnapshot {
+            scope: argos_osint_core::tna::TnaScope::Collection,
+            title: "TNA · smoke".into(),
+            nodes: vec![
+                TnaNode {
+                    id: "a".into(),
+                    label: "alpha.example".into(),
+                    kind: TnaNodeKind::Domain,
+                    cluster: TnaCluster::Infrastructure,
+                    mentions: 2,
+                    degree: 1,
+                    x: 0.2,
+                    y: 0.4,
+                },
+                TnaNode {
+                    id: "b".into(),
+                    label: "bob".into(),
+                    kind: TnaNodeKind::Person,
+                    cluster: TnaCluster::Identity,
+                    mentions: 1,
+                    degree: 1,
+                    x: 0.7,
+                    y: 0.6,
+                },
+            ],
+            edges: vec![argos_osint_core::tna::TnaEdge {
+                from: "a".into(),
+                to: "b".into(),
+                weight: 1,
+            }],
+            clusters: vec![],
+            anchors: vec![],
+            gaps: vec![],
+            built_at: "t".into(),
+        });
+        app.run_slash("/network");
+        assert_eq!(app.case_page, CasePage::Network);
+        assert_eq!(app.tna_view, TnaView::Graph);
+        assert_eq!(app.focus, Focus::Graph);
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Network") || text.contains("graph"), "{text}");
+        assert!(text.contains("TNA") || text.contains("smoke") || text.contains("alpha"), "{text}");
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        app.on_tna_key(key);
+        assert_eq!(app.tna_view, TnaView::Outline);
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("outline"), "{text}");
         app.on_tna_key(key);
         assert_eq!(app.tna_view, TnaView::Table);
         app.on_tna_key(key);

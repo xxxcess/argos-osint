@@ -1495,6 +1495,18 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
+/// Center a `w`×`h` rect inside `outer` (clamped to outer). No modal min-size.
+fn center_rect(outer: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(outer.width);
+    let h = h.min(outer.height);
+    Rect {
+        x: outer.x + (outer.width.saturating_sub(w)) / 2,
+        y: outer.y + (outer.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    }
+}
+
 fn split_h(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
     Layout::default()
         .direction(Direction::Horizontal)
@@ -1514,8 +1526,8 @@ fn split_v(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::{
-        markdown_lines, tna_box_connections, tna_ego_box_fit, tna_table_detail_split,
-        tna_table_master_split,
+        center_rect, markdown_lines, tna_box_connections, tna_ego_box_fit,
+        tna_table_detail_split, tna_table_master_split,
     };
     use ratatui::layout::Rect;
     use crate::tui::theme;
@@ -1620,6 +1632,20 @@ mod tests {
         let (ego_tiny, ctx_tiny) = tna_table_detail_split(tiny);
         assert!(ego_tiny.is_none());
         assert_eq!(ctx_tiny, tiny);
+    }
+
+    #[test]
+    fn center_rect_centers_in_outer() {
+        let outer = Rect::new(10, 20, 100, 40);
+        let r = center_rect(outer, 40, 10);
+        assert_eq!(r, Rect::new(40, 35, 40, 10));
+        // Larger than outer → clamp to outer (no offset).
+        assert_eq!(center_rect(outer, 200, 200), outer);
+        // Exact fit → same origin.
+        assert_eq!(center_rect(outer, 100, 40), outer);
+        // Odd slack: floor division.
+        let odd = center_rect(Rect::new(0, 0, 11, 9), 4, 2);
+        assert_eq!(odd, Rect::new(3, 3, 4, 2));
     }
 }
 
@@ -1847,11 +1873,17 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
     }
     let connections = tna_box_connections(pairs);
 
+    // tui-nodes mirrors placements (`pos.x = area.width - pos.right()`), so a
+    // full-bleed rect packs boxes to the right. Center a content-sized sub-rect
+    // so Graph and Table-detail ego look balanced in the reserved band.
+    let (cw, ch) = tna_ego_content_size(items.len(), area);
+    let graph_area = center_rect(area, cw, ch);
+
     let mut graph = NodeGraph::new(
         nodes,
         connections,
-        area.width as usize,
-        area.height as usize,
+        graph_area.width as usize,
+        graph_area.height as usize,
     );
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         graph.calculate();
@@ -1864,7 +1896,7 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
         );
         return false;
     }
-    let zones = graph.split(area);
+    let zones = graph.split(graph_area);
     for (idx, zone) in zones.into_iter().enumerate() {
         if zone.width == 0 || zone.height == 0 {
             continue;
@@ -1899,7 +1931,7 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
         };
         frame.render_widget(Paragraph::new(body).style(style), zone);
     }
-    frame.render_stateful_widget(graph, area, &mut ());
+    frame.render_stateful_widget(graph, graph_area, &mut ());
     true
 }
 
@@ -1910,6 +1942,25 @@ fn tna_ego_neighbor_fallback(app: &App) -> String {
     } else {
         lines.into_iter().take(8).collect::<Vec<_>>().join("\n")
     }
+}
+
+/// Conservative visual size for `n` ego boxes (16×4, MARGIN 5) inside `area`.
+/// Caps horizontal span at ~3 columns (ego layouts rarely fan wider) so the
+/// NodeGraph rect can be centered instead of full-bleed / right-hugging.
+fn tna_ego_content_size(n: usize, area: Rect) -> (u16, u16) {
+    const BOX_W: u16 = 16;
+    const BOX_H: u16 = 4;
+    const MARGIN: u16 = 5;
+    const SLACK: u16 = 4;
+    let extra_cols = (n.saturating_sub(1)).min(2) as u16;
+    let w = BOX_W
+        .saturating_add(extra_cols.saturating_mul(BOX_W.saturating_add(MARGIN)))
+        .saturating_add(SLACK);
+    let h = (n as u16)
+        .saturating_mul(BOX_H)
+        .saturating_add(SLACK)
+        .max(BOX_H.saturating_add(SLACK));
+    (w.min(area.width).max(1), h.min(area.height).max(1))
 }
 
 /// Area-fit budget for (16×4) ego boxes inside a NodeGraph of `width`×`height`.

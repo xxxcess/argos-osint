@@ -1513,7 +1513,11 @@ fn split_v(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
 
 #[cfg(test)]
 mod tests {
-    use super::{markdown_lines, tna_box_connections, tna_ego_box_fit};
+    use super::{
+        markdown_lines, tna_box_connections, tna_ego_box_fit, tna_table_detail_split,
+        tna_table_master_split,
+    };
+    use ratatui::layout::Rect;
     use crate::tui::theme;
     use crate::tui::app::TNA_GRAPH_BOX_BUDGET;
     use ratatui::style::Style;
@@ -1586,6 +1590,36 @@ mod tests {
         let conns = tna_box_connections(pairs);
         let mut graph = NodeGraph::new(nodes, conns, w as usize, h as usize);
         graph.calculate(); // must not panic
+    }
+
+    #[test]
+    fn tna_table_qa_size_reserves_ego_height_above_context() {
+        // 160×48 Cases+Network ≈ body 43 − tabs 3 = 40 canvas → table border → inner 38.
+        let table_inner = Rect::new(0, 0, 108, 38);
+        let (_list, detail) = tna_table_master_split(table_inner);
+        // More-details panel border eats 2 rows.
+        let detail_inner = Rect::new(0, 0, detail.width, detail.height.saturating_sub(2));
+        let (ego, ctx) = tna_table_detail_split(detail_inner);
+        let ego = ego.expect("QA ~160×48 must allocate ego pane above context");
+        assert!(
+            ego.height >= 8,
+            "ego height {} < 8 (detail_outer={}, detail_inner={}, ctx={})",
+            ego.height,
+            detail.height,
+            detail_inner.height,
+            ctx.height
+        );
+        assert!(
+            ego.height >= 10,
+            "prefer ego ≥ 10 at QA size, got {}",
+            ego.height
+        );
+        assert!(ctx.height >= 4, "context Min(4), got {}", ctx.height);
+        // Tiny detail: text-only fallback (no ego rect).
+        let tiny = Rect::new(0, 0, 40, 10);
+        let (ego_tiny, ctx_tiny) = tna_table_detail_split(tiny);
+        assert!(ego_tiny.is_none());
+        assert_eq!(ctx_tiny, tiny);
     }
 }
 
@@ -2056,6 +2090,39 @@ fn draw_tna_outline(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+
+/// Vertical master–detail split for Table canvas inner: list top / detail bottom.
+/// At typical heights prefer detail (~58%) so ego boxes get ≥8–10 rows after
+/// the More-details border; tiny panes use Min(8)/Min(10).
+fn tna_table_master_split(inner: Rect) -> (Rect, Rect) {
+    let rows = if inner.height >= 20 {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Min(10)])
+            .split(inner)
+    };
+    (rows[0], rows[1])
+}
+
+/// Ego (top) + context (bottom) inside More details inner.
+/// Returns `None` ego when too small for boxes (height < 12 or width < 24).
+fn tna_table_detail_split(inner: Rect) -> (Option<Rect>, Rect) {
+    if inner.height >= 12 && inner.width >= 24 {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(10), Constraint::Min(4)])
+            .split(inner);
+        (Some(rows[0]), rows[1])
+    } else {
+        (None, inner)
+    }
+}
+
 fn draw_tna_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = app
         .tna_snapshot()
@@ -2092,19 +2159,8 @@ fn draw_tna_table(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Always vertical stack: initiative list on top, More details below.
-    // (Horizontal side-by-side removed — layout lock for Table master–detail.)
-    let rows = if inner.height >= 20 {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(inner)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(8), Constraint::Min(10)])
-            .split(inner)
-    };
-    let (list_area, detail_area) = (rows[0], rows[1]);
+    // Prefer detail height so ego boxes (≥8–10 rows) fit at ~160×48.
+    let (list_area, detail_area) = tna_table_master_split(inner);
     app.tna_table_list_area = list_area;
     app.tna_table_detail_area = detail_area;
 
@@ -2253,22 +2309,8 @@ fn draw_tna_table_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Ego on top (fixed); context below (scrollable). Skip ego if pane tiny.
-    let (ego_area, ctx_area) = if inner.height >= 12 && inner.width >= 24 {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .split(inner);
-        (Some(rows[0]), rows[1])
-    } else if inner.height >= 8 && inner.width >= 24 {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(8), Constraint::Min(3)])
-            .split(inner);
-        (Some(rows[0]), rows[1])
-    } else {
-        (None, inner)
-    };
+    // Ego on top; context below (scrollable). Text-only when detail inner < ~12.
+    let (ego_area, ctx_area) = tna_table_detail_split(inner);
 
     if let Some(ego) = ego_area {
         let _ = draw_tna_ego_boxes(frame, app, ego);

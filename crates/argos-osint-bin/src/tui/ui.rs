@@ -1,10 +1,13 @@
 //! Apps column on the left, the open app on the right, prompt at the bottom.
 //! The prompt talks to the case desk or the selected case.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{BorderType, Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs, Wrap};
+use ratatui::widgets::{
+    BorderType, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, ListState, Paragraph, Row,
+    Scrollbar, ScrollbarOrientation, Sparkline, Table, Tabs, Wrap,
+};
 use ratatui::Frame;
 use tui_nodes::{Connection, NodeGraph, NodeLayout};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -15,7 +18,7 @@ use super::app::{
 };
 use super::theme::{self, panel};
 use argos_osint_core::paths::fit_status;
-use argos_osint_core::tna::TnaCluster;
+use argos_osint_core::tna::{TnaCluster, TnaSnapshot};
 use argos_osint_core::secrets::mask;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -1122,6 +1125,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let right = match app.focus {
         Focus::Prompt => "[Tab] Jump Focus | [Esc] Exit App",
         Focus::Canvas | Focus::Graph => "[Up/Down] Scroll chat  [Wheel] Scroll  [Tab] Jump",
+        Focus::TableDetail => "[j/k] Detail scroll  [Tab] Jump",
         Focus::Reports => "[j/k] Move  [Enter] Open  [Tab] Jump",
         Focus::Launcher | Focus::TnaSide => "[Tab] Jump Focus | [Esc] Exit App",
     };
@@ -1491,6 +1495,18 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
+/// Center a `w`×`h` rect inside `outer` (clamped to outer). No modal min-size.
+fn center_rect(outer: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(outer.width);
+    let h = h.min(outer.height);
+    Rect {
+        x: outer.x + (outer.width.saturating_sub(w)) / 2,
+        y: outer.y + (outer.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    }
+}
+
 fn split_h(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
     Layout::default()
         .direction(Direction::Horizontal)
@@ -1509,8 +1525,13 @@ fn split_v(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
 
 #[cfg(test)]
 mod tests {
-    use super::{markdown_lines, tna_box_connections};
+    use super::{
+        center_rect, markdown_lines, tna_box_connections, tna_ego_box_fit,
+        tna_table_detail_split, tna_table_master_split,
+    };
+    use ratatui::layout::Rect;
     use crate::tui::theme;
+    use crate::tui::app::TNA_GRAPH_BOX_BUDGET;
     use ratatui::style::Style;
     use tui_nodes::{NodeGraph, NodeLayout};
 
@@ -1555,6 +1576,77 @@ mod tests {
         let mut graph = NodeGraph::new(nodes, conns, 100, 40);
         graph.calculate();
     }
+
+    #[test]
+    fn tna_ego_small_area_clamp_dense_edges_no_panic() {
+        // Detail ego Rect can be tiny (e.g. 36×12). Unclamped ≤16 boxes of (16,4)
+        // stack past height → ConnectionsLayout::block_port OOB. After clamp: safe.
+        let w = 36u16;
+        let h = 12u16;
+        let fit = tna_ego_box_fit(w, h);
+        assert!(fit >= 1);
+        assert!(fit <= TNA_GRAPH_BOX_BUDGET);
+        assert!(fit <= ((h as usize).saturating_sub(2) / 4).max(1));
+
+        let n = fit;
+        let nodes: Vec<_> = (0..n).map(|_| NodeLayout::new((16, 4))).collect();
+        let mut pairs = Vec::new();
+        // Dense star + clique among visible boxes (mirrors Table detail ego).
+        for i in 0..n {
+            for j in 0..n {
+                if i != j {
+                    pairs.push((i, j, Style::default()));
+                }
+            }
+        }
+        let conns = tna_box_connections(pairs);
+        let mut graph = NodeGraph::new(nodes, conns, w as usize, h as usize);
+        graph.calculate(); // must not panic
+    }
+
+    #[test]
+    fn tna_table_qa_size_reserves_ego_height_above_context() {
+        // 160×48 Cases+Network ≈ body 43 − tabs 3 = 40 canvas → table border → inner 38.
+        let table_inner = Rect::new(0, 0, 108, 38);
+        let (_list, detail) = tna_table_master_split(table_inner);
+        // More-details panel border eats 2 rows.
+        let detail_inner = Rect::new(0, 0, detail.width, detail.height.saturating_sub(2));
+        let (ego, ctx) = tna_table_detail_split(detail_inner);
+        let ego = ego.expect("QA ~160×48 must allocate ego pane above context");
+        assert!(
+            ego.height >= 8,
+            "ego height {} < 8 (detail_outer={}, detail_inner={}, ctx={})",
+            ego.height,
+            detail.height,
+            detail_inner.height,
+            ctx.height
+        );
+        assert!(
+            ego.height >= 10,
+            "prefer ego ≥ 10 at QA size, got {}",
+            ego.height
+        );
+        assert!(ctx.height >= 4, "context Min(4), got {}", ctx.height);
+        // Tiny detail: text-only fallback (no ego rect).
+        let tiny = Rect::new(0, 0, 40, 10);
+        let (ego_tiny, ctx_tiny) = tna_table_detail_split(tiny);
+        assert!(ego_tiny.is_none());
+        assert_eq!(ctx_tiny, tiny);
+    }
+
+    #[test]
+    fn center_rect_centers_in_outer() {
+        let outer = Rect::new(10, 20, 100, 40);
+        let r = center_rect(outer, 40, 10);
+        assert_eq!(r, Rect::new(40, 35, 40, 10));
+        // Larger than outer → clamp to outer (no offset).
+        assert_eq!(center_rect(outer, 200, 200), outer);
+        // Exact fit → same origin.
+        assert_eq!(center_rect(outer, 100, 40), outer);
+        // Odd slack: floor division.
+        let odd = center_rect(Rect::new(0, 0, 11, 9), 4, 2);
+        assert_eq!(odd, Rect::new(3, 3, 4, 2));
+    }
 }
 
 fn tail(mut lines: Vec<Line<'static>>, height: usize) -> Vec<Line<'static>> {
@@ -1595,7 +1687,7 @@ fn draw_network(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_tna_sidebar(frame, app, cols[1]);
 }
 
-fn draw_tna_canvas(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_tna_canvas(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.tna_view {
         TnaView::Graph => draw_tna_graph(frame, app, area),
         TnaView::Outline => draw_tna_outline(frame, app, area),
@@ -1650,20 +1742,73 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
+    let _ = draw_tna_ego_boxes(frame, app, inner);
+}
+
+/// Shared ego-graph boxes for Graph canvas and Table details pane.
+/// Ports stay 0; area-fit clamp ≤ `TNA_GRAPH_BOX_BUDGET`; pair dedupe; `catch_unwind`.
+/// Returns `false` when boxes were skipped (too small / panic / empty) and a fallback was drawn.
+fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
+    if area.height < 8 || area.width < 24 {
+        let fallback = tna_ego_neighbor_fallback(app);
+        frame.render_widget(
+            Paragraph::new(fallback).style(theme::dim()).wrap(Wrap { trim: false }),
+            area,
+        );
+        return false;
+    }
+    let Some(snap) = app.tna_snapshot() else {
+        frame.render_widget(
+            Paragraph::new("No graph yet.").style(theme::dim()),
+            area,
+        );
+        return false;
+    };
+    let mut items = app.tna_display_nodes();
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No ego nodes.").style(theme::dim()),
+            area,
+        );
+        return false;
+    }
+    let fit = tna_ego_box_fit(area.width, area.height);
+    items = tna_clamp_ego_items(items, fit, app.tna_focus_id.as_deref(), snap);
     debug_assert!(
         items.len() <= TNA_GRAPH_BOX_BUDGET,
         "graph box budget exceeded: {}",
         items.len()
     );
+    debug_assert!(
+        items.len() <= fit,
+        "area-fit budget exceeded: {} > {}",
+        items.len(),
+        fit
+    );
 
-    // Owned titles so NodeLayout can borrow &'a str for the frame.
     let mut titles: Vec<String> = Vec::with_capacity(items.len());
     let mut border_styles: Vec<Style> = Vec::with_capacity(items.len());
     let mut id_to_box: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
 
+    let focus = app.tna_focus_id.as_deref();
     for (box_i, item) in items.iter().enumerate() {
-        let selected = box_i == app.tna_sel;
+        let selected = match item {
+            TnaDisplayItem::Real { idx } => {
+                if app.tna_view == TnaView::Graph {
+                    box_i == app.tna_sel
+                } else {
+                    focus.map(|id| snap.nodes[*idx].id == id).unwrap_or(false)
+                }
+            }
+            TnaDisplayItem::Super { hub_id, .. } => {
+                if app.tna_view == TnaView::Graph {
+                    box_i == app.tna_sel
+                } else {
+                    focus == Some(hub_id.as_str())
+                }
+            }
+        };
         match item {
             TnaDisplayItem::Real { idx } => {
                 let node = &snap.nodes[*idx];
@@ -1710,8 +1855,6 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    // Boxes are (16,4): ports must stay in 0..(height-2) → port 0 only.
-    // One Connection per unordered visible pair; never invent unique ports.
     let mut pairs: Vec<(usize, usize, Style)> = Vec::new();
     for edge in &snap.edges {
         let Some(&a) = id_to_box.get(&edge.from) else {
@@ -1730,26 +1873,30 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
     }
     let connections = tna_box_connections(pairs);
 
+    // tui-nodes mirrors placements (`pos.x = area.width - pos.right()`), so a
+    // full-bleed rect packs boxes to the right. Center a content-sized sub-rect
+    // so Graph and Table-detail ego look balanced in the reserved band.
+    let (cw, ch) = tna_ego_content_size(items.len(), area);
+    let graph_area = center_rect(area, cw, ch);
+
     let mut graph = NodeGraph::new(
         nodes,
         connections,
-        inner.width as usize,
-        inner.height as usize,
+        graph_area.width as usize,
+        graph_area.height as usize,
     );
-    // tui-nodes can panic (e.g. ALIAS_CHARS OOB) on dense graphs; keep TUI alive.
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         graph.calculate();
     }))
     .is_err()
     {
         frame.render_widget(
-            Paragraph::new("Graph layout failed — try Outline or Table.")
-                .style(theme::dim()),
-            inner,
+            Paragraph::new(tna_ego_neighbor_fallback(app)).style(theme::dim()),
+            area,
         );
-        return;
+        return false;
     }
-    let zones = graph.split(inner);
+    let zones = graph.split(graph_area);
     for (idx, zone) in zones.into_iter().enumerate() {
         if zone.width == 0 || zone.height == 0 {
             continue;
@@ -1761,14 +1908,102 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
             }
             TnaDisplayItem::Super { count, .. } => format!("hub · {count}"),
         };
-        let style = if idx == app.tna_sel {
+        let zone_selected = match &items[idx] {
+            TnaDisplayItem::Real { idx: ni } => {
+                if app.tna_view == TnaView::Graph {
+                    idx == app.tna_sel
+                } else {
+                    focus.map(|id| snap.nodes[*ni].id == id).unwrap_or(false)
+                }
+            }
+            TnaDisplayItem::Super { hub_id, .. } => {
+                if app.tna_view == TnaView::Graph {
+                    idx == app.tna_sel
+                } else {
+                    focus == Some(hub_id.as_str())
+                }
+            }
+        };
+        let style = if zone_selected {
             Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
         } else {
             theme::dim()
         };
         frame.render_widget(Paragraph::new(body).style(style), zone);
     }
-    frame.render_stateful_widget(graph, inner, &mut ());
+    frame.render_stateful_widget(graph, graph_area, &mut ());
+    true
+}
+
+fn tna_ego_neighbor_fallback(app: &App) -> String {
+    let lines = app.tna_detail_context_lines();
+    if lines.is_empty() {
+        "Ego layout unavailable — try Outline.".into()
+    } else {
+        lines.into_iter().take(8).collect::<Vec<_>>().join("\n")
+    }
+}
+
+/// Conservative visual size for `n` ego boxes (16×4, MARGIN 5) inside `area`.
+/// Caps horizontal span at ~3 columns (ego layouts rarely fan wider) so the
+/// NodeGraph rect can be centered instead of full-bleed / right-hugging.
+fn tna_ego_content_size(n: usize, area: Rect) -> (u16, u16) {
+    const BOX_W: u16 = 16;
+    const BOX_H: u16 = 4;
+    const MARGIN: u16 = 5;
+    const SLACK: u16 = 4;
+    let extra_cols = (n.saturating_sub(1)).min(2) as u16;
+    let w = BOX_W
+        .saturating_add(extra_cols.saturating_mul(BOX_W.saturating_add(MARGIN)))
+        .saturating_add(SLACK);
+    let h = (n as u16)
+        .saturating_mul(BOX_H)
+        .saturating_add(SLACK)
+        .max(BOX_H.saturating_add(SLACK));
+    (w.min(area.width).max(1), h.min(area.height).max(1))
+}
+
+/// Area-fit budget for (16×4) ego boxes inside a NodeGraph of `width`×`height`.
+/// Conservative: product of row/col estimates, capped so a worst-case vertical
+/// stack (star ego) never drives `ConnectionsLayout::block_port` past the field
+/// (`port y = top+port+1`, South indexes `y+1`).
+fn tna_ego_box_fit(width: u16, height: u16) -> usize {
+    let by_h = (height as usize).saturating_sub(2) / 4;
+    let by_w = (width as usize).saturating_sub(2) / (16 + 5);
+    let grid = by_h.max(1).saturating_mul(by_w.max(1));
+    // Cap to vertical rows — tui-nodes may stack every box in one column.
+    let stack_safe = by_h.max(1);
+    TNA_GRAPH_BOX_BUDGET.min(grid.min(stack_safe))
+}
+
+/// Truncate display items to `fit`, keeping the focus node when present.
+fn tna_clamp_ego_items(
+    items: Vec<TnaDisplayItem>,
+    fit: usize,
+    focus: Option<&str>,
+    snap: &TnaSnapshot,
+) -> Vec<TnaDisplayItem> {
+    if fit == 0 || items.is_empty() {
+        return Vec::new();
+    }
+    if items.len() <= fit {
+        return items;
+    }
+    let is_focus = |it: &TnaDisplayItem| match it {
+        TnaDisplayItem::Real { idx } => {
+            focus.is_some_and(|id| snap.nodes.get(*idx).is_some_and(|n| n.id == id))
+        }
+        TnaDisplayItem::Super { hub_id, .. } => focus == Some(hub_id.as_str()),
+    };
+    let mut out: Vec<TnaDisplayItem> = items.iter().take(fit).cloned().collect();
+    if focus.is_some() && !out.iter().any(is_focus) {
+        if let Some(focused) = items.into_iter().find(is_focus) {
+            if let Some(last) = out.last_mut() {
+                *last = focused;
+            }
+        }
+    }
+    out
 }
 
 /// One wire per unordered visible box pair; both ports always 0.
@@ -1906,69 +2141,260 @@ fn draw_tna_outline(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_tna_table(frame: &mut Frame, app: &App, area: Rect) {
-    let snap = app.tna_snapshot();
-    let title = snap.map(|s| s.title.as_str()).unwrap_or("TNA");
-    let focused = app.focus == Focus::Graph;
-    let border = if focused {
-        format!(" {title} · table · focused ")
+
+/// Vertical master–detail split for Table canvas inner: list top / detail bottom.
+/// At typical heights prefer detail (~58%) so ego boxes get ≥8–10 rows after
+/// the More-details border; tiny panes use Min(8)/Min(10).
+fn tna_table_master_split(inner: Rect) -> (Rect, Rect) {
+    let rows = if inner.height >= 20 {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Min(10)])
+            .split(inner)
+    };
+    (rows[0], rows[1])
+}
+
+/// Ego (top) + context (bottom) inside More details inner.
+/// Returns `None` ego when too small for boxes (height < 12 or width < 24).
+fn tna_table_detail_split(inner: Rect) -> (Option<Rect>, Rect) {
+    if inner.height >= 12 && inner.width >= 24 {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(10), Constraint::Min(4)])
+            .split(inner);
+        (Some(rows[0]), rows[1])
+    } else {
+        (None, inner)
+    }
+}
+
+fn draw_tna_table(frame: &mut Frame, app: &mut App, area: Rect) {
+    let title = app
+        .tna_snapshot()
+        .map(|s| s.title.clone())
+        .unwrap_or_else(|| "TNA".into());
+    let has_snap = app.tna_snapshot().is_some();
+    let list_focused = app.focus == Focus::Graph;
+    let detail_focused = app.focus == Focus::TableDetail;
+    let border = if list_focused {
+        format!(" {title} · table · list ")
+    } else if detail_focused {
+        format!(" {title} · table · detail ")
     } else {
         format!(" {title} · table ")
     };
-    let find = app
-        .tna_find
-        .as_ref()
-        .map(|q| format!(" /{q}"))
-        .unwrap_or_default();
+    let find = if let Some(q) = app.tna_find.as_ref() {
+        let n = app.tna_visible_nodes().len();
+        format!(" Filter: {q} ({n} matches)")
+    } else {
+        String::new()
+    };
     let block = panel(&format!("{border}{find}"));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(snap) = snap else {
+    if !has_snap {
+        app.tna_table_list_area = Rect::default();
+        app.tna_table_detail_area = Rect::default();
         frame.render_widget(
             Paragraph::new("No graph yet.").style(theme::dim()),
             inner,
         );
         return;
+    }
+
+    // Always vertical stack: initiative list on top, More details below.
+    // Prefer detail height so ego boxes (≥8–10 rows) fit at ~160×48.
+    let (list_area, detail_area) = tna_table_master_split(inner);
+    app.tna_table_list_area = list_area;
+    app.tna_table_detail_area = detail_area;
+
+    draw_tna_table_list(frame, app, list_area);
+    draw_tna_table_detail(frame, app, detail_area);
+}
+
+fn cluster_abbr(cluster: TnaCluster) -> &'static str {
+    match cluster {
+        TnaCluster::Infrastructure => "Infra",
+        TnaCluster::Campaign => "Camp",
+        TnaCluster::Identity => "Ident",
+        TnaCluster::FiledReports => "Filed",
+    }
+}
+
+fn draw_tna_table_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    let list_focused = app.focus == Focus::Graph;
+    let title = if list_focused {
+        " Initiative list · focused "
+    } else {
+        " Initiative list "
     };
+    let block = panel(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     let visible = app.tna_visible_nodes();
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(
-        Line::from(format!(
-            "  {:<6} {:<22} {:>6} {}",
-            "Type", "Label", "Degree", "Cluster"
-        ))
-        .style(theme::accent()),
-    );
-    for (row, &idx) in visible.iter().enumerate() {
-        let n = &snap.nodes[idx];
-        let sel = row == app.tna_sel;
-        let prefix = if sel { "▶" } else { " " };
-        let style = if sel {
-            Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(cluster_color(n.cluster))
+    let show_cluster = inner.width >= 60;
+    let constraints = if show_cluster {
+        vec![
+            Constraint::Length(7),
+            Constraint::Min(12),
+            Constraint::Length(4),
+            Constraint::Length(6),
+        ]
+    } else {
+        vec![
+            Constraint::Length(7),
+            Constraint::Min(12),
+            Constraint::Length(4),
+        ]
+    };
+
+    let header_cells = if show_cluster {
+        vec!["Type", "Label", "Deg", "Clust"]
+    } else {
+        vec!["Type", "Label", "Deg"]
+    };
+    let header = Row::new(header_cells.into_iter().map(Cell::from))
+        .style(theme::accent().add_modifier(Modifier::BOLD))
+        .height(1);
+
+    // Copy row data so we do not hold a snapshot borrow across stateful render.
+    let row_data: Vec<(String, String, String, String, TnaCluster)> = {
+        let Some(snap) = app.tna_snapshot() else {
+            return;
         };
-        lines.push(
-            Line::from(format!(
-                "{prefix} {} {:<4} {:<22} {:>6} {}",
-                tna_glyph_for_kind(n.kind),
-                n.kind.as_str(),
-                short_label(&n.label, 22),
-                n.degree,
-                n.cluster.as_str()
-            ))
-            .style(style),
+        visible
+            .iter()
+            .filter_map(|&idx| {
+                let n = snap.nodes.get(idx)?;
+                Some((
+                    format!("{} {}", tna_glyph_for_kind(n.kind), short_label(n.kind.as_str(), 5)),
+                    short_label(&n.label, 40),
+                    n.degree.to_string(),
+                    cluster_abbr(n.cluster).to_string(),
+                    n.cluster,
+                ))
+            })
+            .collect()
+    };
+
+    let rows: Vec<Row> = if row_data.is_empty() {
+        let cols = if show_cluster { 4 } else { 3 };
+        let mut cells = vec![Cell::from("No nodes match")];
+        while cells.len() < cols {
+            cells.push(Cell::from(""));
+        }
+        vec![Row::new(cells).style(theme::dim()).height(1)]
+    } else {
+        row_data
+            .into_iter()
+            .map(|(ty, label, deg, clust, cluster)| {
+                let mut cells = vec![
+                    Cell::from(ty),
+                    Cell::from(label),
+                    Cell::from(deg),
+                ];
+                if show_cluster {
+                    cells.push(Cell::from(clust));
+                }
+                Row::new(cells)
+                    .style(Style::default().fg(cluster_color(cluster)))
+                    .height(1)
+            })
+            .collect()
+    };
+
+    let selected_style = Style::default()
+        .add_modifier(Modifier::REVERSED)
+        .fg(theme::ACCENT);
+
+    app.sync_tna_table_ui();
+
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .row_highlight_style(selected_style)
+        .highlight_symbol("▶ ")
+        .highlight_spacing(HighlightSpacing::Always);
+
+    frame.render_stateful_widget(table, inner, &mut app.tna_table_state);
+
+    // Scrollbar synced to selection (ITEM_HEIGHT = 1).
+    if !visible.is_empty() {
+        frame.render_stateful_widget(
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut app.tna_table_scroll,
         );
     }
-    if visible.is_empty() {
-        lines.push(Line::from("  (empty)").style(theme::dim()));
+}
+
+fn draw_tna_table_detail(frame: &mut Frame, app: &mut App, area: Rect) {
+    let detail_focused = app.focus == Focus::TableDetail;
+    let title = if detail_focused {
+        " More details · focused "
+    } else {
+        " More details "
+    };
+    let block = panel(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.tna_selected_item().is_none() {
+        frame.render_widget(
+            Paragraph::new("Select a node in the list.").style(theme::dim()),
+            inner,
+        );
+        return;
     }
+
+    // Ego on top; context below (scrollable). Text-only when detail inner < ~12.
+    let (ego_area, ctx_area) = tna_table_detail_split(inner);
+
+    if let Some(ego) = ego_area {
+        let _ = draw_tna_ego_boxes(frame, app, ego);
+    }
+
+    let ctx_lines = app.tna_detail_context_lines();
+    let total = ctx_lines.len();
+    app.sync_tna_detail_scroll_state();
+    let skip = app.tna_detail_scroll.min(total.saturating_sub(1));
+    let visible_h = ctx_area.height as usize;
+    let shown: Vec<Line<'static>> = ctx_lines
+        .into_iter()
+        .skip(skip)
+        .take(visible_h.max(1))
+        .map(|s| Line::from(s).style(theme::text()))
+        .collect();
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        inner,
+        Paragraph::new(shown).wrap(Wrap { trim: false }),
+        ctx_area,
     );
+    if total > visible_h && ctx_area.width > 1 {
+        frame.render_stateful_widget(
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            ctx_area.inner(Margin {
+                vertical: 0,
+                horizontal: 0,
+            }),
+            &mut app.tna_detail_scroll_state,
+        );
+    }
 }
 
 fn draw_tna_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -2123,7 +2549,11 @@ fn draw_network_footer(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Esc desk"
     };
-    let left = format!("hjkl  / find  v views  {esc}");
+    let left = if app.tna_view == TnaView::Table {
+        format!("j/k pane  Tab list/detail  / find  v views  {esc}")
+    } else {
+        format!("hjkl  / find  v views  {esc}")
+    };
     let mid = format!("{view} · {scope} {n}n/{e}e");
     let model = app.active_model();
     let gap = area.width as usize;

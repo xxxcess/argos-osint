@@ -26,6 +26,7 @@ use argos_osint_core::tna::{self, desk_key, report_key, TnaCluster, TnaNode, Tna
 use chrono::Local;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::layout::Rect;
+use ratatui::widgets::{ScrollbarState, TableState};
 use sysinfo::System;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -334,6 +335,8 @@ pub enum Focus {
     Reports,
     Prompt,
     Graph,
+    /// Table master–detail: details pane (list uses Focus::Graph).
+    TableDetail,
     TnaSide,
 }
 
@@ -475,6 +478,17 @@ pub struct App {
     pub tna_expanded: HashSet<String>,
     /// Egocentric pin for Graph collapse (node id).
     pub tna_focus_id: Option<String>,
+    /// Stock Table selection (kept in sync with `tna_sel`).
+    pub tna_table_state: TableState,
+    /// Initiative-list scrollbar (ITEM_HEIGHT = 1).
+    pub tna_table_scroll: ScrollbarState,
+    /// Detail-pane context scroll offset (lines); ego boxes stay fixed.
+    pub tna_detail_scroll: usize,
+    /// Detail-pane scrollbar state.
+    pub tna_detail_scroll_state: ScrollbarState,
+    /// Hit areas for Table master–detail (wheel / focus).
+    pub tna_table_list_area: Rect,
+    pub tna_table_detail_area: Rect,
 }
 
 impl App {
@@ -591,6 +605,12 @@ impl App {
             tna_view: TnaView::Graph,
             tna_expanded: HashSet::new(),
             tna_focus_id: None,
+            tna_table_state: TableState::default().with_selected(Some(0)),
+            tna_table_scroll: ScrollbarState::new(0),
+            tna_detail_scroll: 0,
+            tna_detail_scroll_state: ScrollbarState::new(0),
+            tna_table_list_area: Rect::default(),
+            tna_table_detail_area: Rect::default(),
         };
         app.reload_lists()?;
         app.load_transcript(&app.session_id());
@@ -1501,6 +1521,8 @@ impl App {
             self.tna_view = TnaView::Graph;
             self.tna_expanded.clear();
             self.tna_focus_id = None;
+            self.tna_detail_scroll = 0;
+            self.sync_tna_table_ui();
             self.ensure_tna_snapshot(false);
             return;
         }
@@ -1624,7 +1646,9 @@ impl App {
             _ if self.focus == Focus::Prompt => self.on_prompt_key(key),
             _ if self.focus == Focus::Launcher => self.on_launcher_key(key),
             _ if self.focus == Focus::Reports => self.on_reports_key(key),
-            _ if self.focus == Focus::Graph || self.focus == Focus::TnaSide => self.on_tna_key(key),
+            _ if self.focus == Focus::Graph
+                || self.focus == Focus::TableDetail
+                || self.focus == Focus::TnaSide => self.on_tna_key(key),
             _ => self.on_canvas_key(key),
         }
     }
@@ -1661,14 +1685,52 @@ impl App {
 
     fn scroll_chat_at(&mut self, x: u16, y: u16, delta: isize) {
         let pos = ratatui::layout::Position { x, y };
+        if self.on_case_desk()
+            && self.case_page == CasePage::Network
+            && self.tna_view == TnaView::Table
+        {
+            self.scroll_tna_table_at(pos, delta);
+            return;
+        }
         if self.focus == Focus::Canvas || self.canvas_area.contains(pos) {
             self.scroll_chat(delta);
+        }
+    }
+
+    /// Wheel on Table master–detail: only the focused pane moves.
+    fn scroll_tna_table_at(&mut self, _pos: ratatui::layout::Position, delta: isize) {
+        let steps = delta.unsigned_abs().max(1);
+        match self.focus {
+            Focus::TableDetail => {
+                if delta > 0 {
+                    self.tna_detail_scroll = self.tna_detail_scroll.saturating_sub(steps);
+                } else {
+                    self.tna_detail_scroll = self.tna_detail_scroll.saturating_add(steps);
+                }
+                self.sync_tna_detail_scroll_state();
+            }
+            Focus::Graph => {
+                // ScrollUp (delta>0) → previous row; ScrollDown → next.
+                let dir = if delta > 0 { -1 } else { 1 };
+                for _ in 0..steps {
+                    self.tna_step_sel(dir);
+                }
+            }
+            Focus::TnaSide => {
+                if delta > 0 {
+                    self.tna_side_scroll = self.tna_side_scroll.saturating_sub(steps);
+                } else {
+                    self.tna_side_scroll = self.tna_side_scroll.saturating_add(steps);
+                }
+            }
+            _ => {}
         }
     }
 
     fn next_focus(&self) -> Focus {
         let reports = self.on_case_desk() && self.case_page == CasePage::Closed;
         let network = self.on_case_desk() && self.case_page == CasePage::Network;
+        let table = network && self.tna_view == TnaView::Table;
         match self.focus {
             Focus::Launcher => {
                 if network {
@@ -1677,7 +1739,9 @@ impl App {
                     Focus::Canvas
                 }
             }
+            Focus::Graph if table => Focus::TableDetail,
             Focus::Graph => Focus::TnaSide,
+            Focus::TableDetail => Focus::TnaSide,
             Focus::TnaSide => Focus::Prompt,
             Focus::Canvas if reports => Focus::Reports,
             Focus::Canvas | Focus::Reports => Focus::Prompt,
@@ -2119,6 +2183,114 @@ impl App {
                 self.tna_focus_id = Some(hub_id);
             }
         }
+        self.sync_tna_table_ui();
+    }
+
+    const TNA_TABLE_ITEM_HEIGHT: usize = 1;
+
+    /// Keep `TableState` / list scrollbar aligned with `tna_sel`.
+    pub fn sync_tna_table_ui(&mut self) {
+        let n = if self.tna_view == TnaView::Table {
+            self.tna_visible_nodes().len()
+        } else {
+            self.tna_selectable_count()
+        };
+        if n == 0 {
+            self.tna_table_state.select(None);
+            self.tna_table_scroll = ScrollbarState::new(0).position(0);
+        } else {
+            let i = self.tna_sel.min(n - 1);
+            self.tna_table_state.select(Some(i));
+            let content = n.saturating_sub(1) * Self::TNA_TABLE_ITEM_HEIGHT;
+            self.tna_table_scroll = ScrollbarState::new(content).position(i * Self::TNA_TABLE_ITEM_HEIGHT);
+        }
+        self.sync_tna_detail_scroll_state();
+    }
+
+    pub fn sync_tna_detail_scroll_state(&mut self) {
+        let len = self.tna_detail_context_line_count();
+        let max_pos = len.saturating_sub(1);
+        if self.tna_detail_scroll > max_pos {
+            self.tna_detail_scroll = max_pos;
+        }
+        self.tna_detail_scroll_state = ScrollbarState::new(max_pos).position(self.tna_detail_scroll);
+    }
+
+    /// Context lines shown under the detail ego graph (for scroll sizing).
+    pub fn tna_detail_context_line_count(&self) -> usize {
+        self.tna_detail_context_lines().len()
+    }
+
+    /// Build truncated context lines for the Table details pane.
+    pub fn tna_detail_context_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let Some(snap) = self.tna_snapshot() else {
+            lines.push("No snapshot.".into());
+            return lines;
+        };
+        let Some(TnaDisplayItem::Real { idx }) = self.tna_selected_item() else {
+            lines.push("No node selected.".into());
+            return lines;
+        };
+        let Some(n) = snap.nodes.get(idx) else {
+            lines.push("No node selected.".into());
+            return lines;
+        };
+        lines.push(format!(
+            "{} {} · {}",
+            tna_glyph_for_kind(n.kind),
+            n.kind.as_str(),
+            n.label
+        ));
+        lines.push(format!(
+            "cluster {} · deg {} · mentions {}",
+            n.cluster.as_str(),
+            n.degree,
+            n.mentions
+        ));
+        let is_anchor = snap.anchors.iter().any(|a| a.node_id == n.id);
+        lines.push(if is_anchor {
+            "anchor: yes".into()
+        } else {
+            "anchor: no".into()
+        });
+        let gap_hits: Vec<String> = snap
+            .gaps
+            .iter()
+            .filter(|g| g.cluster_a == n.cluster || g.cluster_b == n.cluster)
+            .map(|g| format!("{}↔{}", g.cluster_a.as_str(), g.cluster_b.as_str()))
+            .collect();
+        if gap_hits.is_empty() {
+            lines.push("gaps: none".into());
+        } else {
+            let joined = gap_hits.into_iter().take(3).collect::<Vec<_>>().join(", ");
+            lines.push(format!("gaps: {joined}"));
+        }
+        // Evidence stand-in = mentions + truncated 1-hop neighbors.
+        lines.push(format!("evidence: {m} mentions", m = n.mentions));
+        let adj = Self::tna_adjacency(snap);
+        let mut neighbors: Vec<&str> = adj
+            .get(&n.id)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| snap.nodes.iter().find(|x| x.id == *id).map(|x| x.label.as_str()))
+            .collect();
+        neighbors.sort_unstable();
+        neighbors.dedup();
+        if neighbors.is_empty() {
+            lines.push("neighbors: none".into());
+        } else {
+            lines.push(format!("neighbors ({})", neighbors.len()));
+            for label in neighbors.into_iter().take(12) {
+                let short = if label.chars().count() > 40 {
+                    label.chars().take(40).collect::<String>()
+                } else {
+                    label.to_string()
+                };
+                lines.push(format!("  · {short}"));
+            }
+        }
+        lines
     }
 
     /// Pure helper: which node indices stay visible under ego + collapse.
@@ -2250,6 +2422,7 @@ impl App {
                 _ => {}
             }
             self.clamp_tna_sel();
+            self.sync_tna_table_ui();
             return false;
         }
         match key.code {
@@ -2258,11 +2431,29 @@ impl App {
                 self.focus = Focus::Graph;
             }
             KeyCode::Char('v') => {
+                let prev = self.tna_view;
                 self.tna_view = self.tna_view.next();
                 self.tna_sel = 0;
+                self.tna_detail_scroll = 0;
+                // Leaving Table detail focus when cycling away from Table.
+                if prev == TnaView::Table && self.focus == Focus::TableDetail {
+                    self.focus = Focus::Graph;
+                }
+                if self.tna_view != TnaView::Table && self.focus == Focus::TableDetail {
+                    self.focus = Focus::Graph;
+                }
                 self.clamp_tna_sel();
+                self.sync_tna_table_ui();
             }
-            KeyCode::Enter => self.tna_activate_selection(),
+            KeyCode::Enter => {
+                if self.tna_view == TnaView::Table {
+                    // Focus sync only — hub expand stays Graph (#18/#19).
+                    let item = self.tna_selected_item();
+                    self.pin_tna_selection(item);
+                } else {
+                    self.tna_activate_selection();
+                }
+            }
             KeyCode::Char('h') | KeyCode::Left => {
                 if self.tna_view == TnaView::Graph {
                     self.walk_tna_node(-1, 0);
@@ -2276,6 +2467,9 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.focus == Focus::TnaSide {
                     self.tna_side_scroll = self.tna_side_scroll.saturating_sub(1);
+                } else if self.focus == Focus::TableDetail {
+                    self.tna_detail_scroll = self.tna_detail_scroll.saturating_sub(1);
+                    self.sync_tna_detail_scroll_state();
                 } else if self.tna_view == TnaView::Graph {
                     self.walk_tna_node(0, -1);
                 } else {
@@ -2285,6 +2479,9 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.focus == Focus::TnaSide {
                     self.tna_side_scroll = self.tna_side_scroll.saturating_add(1);
+                } else if self.focus == Focus::TableDetail {
+                    self.tna_detail_scroll = self.tna_detail_scroll.saturating_add(1);
+                    self.sync_tna_detail_scroll_state();
                 } else if self.tna_view == TnaView::Graph {
                     self.walk_tna_node(0, 1);
                 } else {
@@ -2292,10 +2489,12 @@ impl App {
                 }
             }
             KeyCode::Tab => {
-                self.focus = if self.focus == Focus::Graph {
-                    Focus::TnaSide
-                } else {
-                    Focus::Graph
+                // Unreachable via global Tab (handled in on_key); kept for completeness.
+                self.focus = match (self.tna_view, self.focus) {
+                    (TnaView::Table, Focus::Graph) => Focus::TableDetail,
+                    (TnaView::Table, Focus::TableDetail) => Focus::TnaSide,
+                    (_, Focus::Graph) => Focus::TnaSide,
+                    _ => Focus::Graph,
                 };
             }
             _ => {}
@@ -2307,11 +2506,13 @@ impl App {
         let n = self.tna_selectable_count();
         if n == 0 {
             self.tna_sel = 0;
+            self.sync_tna_table_ui();
             return;
         }
         let cur = self.tna_sel as i32;
         let next = (cur + delta).rem_euclid(n as i32) as usize;
         self.tna_sel = next;
+        self.tna_detail_scroll = 0;
         // Outline/Table: keep focus id in sync for when user switches back to Graph.
         if let Some(TnaDisplayItem::Real { idx }) = self.tna_selected_item() {
             if let Some(snap) = self.tna_snapshot() {
@@ -2320,6 +2521,7 @@ impl App {
                 }
             }
         }
+        self.sync_tna_table_ui();
     }
 
     fn tna_activate_selection(&mut self) {
@@ -2425,6 +2627,7 @@ impl App {
         if self.case_page == CasePage::Network {
             if self.tna_find.is_some() {
                 self.tna_find = None;
+                self.clamp_tna_sel();
                 return;
             }
             if self.chat_report.is_some() {
@@ -4865,6 +5068,90 @@ mod tests {
         assert_eq!(app.tna_view, TnaView::Table);
         app.on_tna_key(key);
         assert_eq!(app.tna_view, TnaView::Graph);
+    }
+
+    #[test]
+    fn tna_table_master_detail_focus_and_scroll_independent() {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        app.tna_desk = Some(TnaSnapshot {
+            scope: argos_osint_core::tna::TnaScope::Collection,
+            title: "TNA · table".into(),
+            nodes: (0..5)
+                .map(|i| TnaNode {
+                    id: format!("n{i}"),
+                    label: format!("node-{i}"),
+                    kind: TnaNodeKind::Domain,
+                    cluster: TnaCluster::Infrastructure,
+                    mentions: i as u32 + 1,
+                    degree: i as u32,
+                    x: 0.1 * i as f64,
+                    y: 0.5,
+                })
+                .collect(),
+            edges: vec![argos_osint_core::tna::TnaEdge {
+                from: "n0".into(),
+                to: "n1".into(),
+                weight: 1,
+            }],
+            clusters: vec![],
+            anchors: vec![],
+            gaps: vec![],
+            built_at: "t".into(),
+        });
+        app.run_slash("/network");
+        while app.tna_view != TnaView::Table {
+            app.on_tna_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        }
+        assert_eq!(app.focus, Focus::Graph);
+        assert_eq!(app.tna_sel, 0);
+        app.on_tna_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.tna_sel, 1);
+        assert_eq!(app.tna_table_state.selected(), Some(1));
+        assert_eq!(app.tna_focus_id.as_deref(), Some("n1"));
+        // Tab cycles list → detail in Table mode.
+        app.focus = app.next_focus();
+        assert_eq!(app.focus, Focus::TableDetail);
+        let list_sel = app.tna_sel;
+        app.on_tna_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.tna_sel, list_sel, "detail j/k must not move list");
+        assert!(app.tna_detail_scroll >= 1);
+        app.on_tna_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        // Filter empty-state + reclamp.
+        app.focus = Focus::Graph;
+        app.tna_find = Some("zzz-nomatch".into());
+        app.clamp_tna_sel();
+        assert_eq!(app.tna_visible_nodes().len(), 0);
+        assert_eq!(app.tna_table_state.selected(), None);
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("No nodes match") || text.contains("Filter"), "{text}");
+        app.tna_find = None;
+        app.clamp_tna_sel();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("Initiative") || text.contains("More details") || text.contains("table"),
+            "{text}"
+        );
     }
 
     #[test]

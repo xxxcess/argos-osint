@@ -6,11 +6,11 @@ use serde_json::{json, Value};
 use url::Url;
 
 use super::{
-    clip, get_json, keyed, merge_adapter_results, post_json, searx_base, tag, Job, SearchHit,
+    clip, get_json, keyed, merge_adapter_results, post_json, searx_base, tag, Job, MergeOutcome, SearchHit,
     SourcePlan,
 };
 
-pub async fn gather(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit>, String> {
+pub async fn gather(query: &str, plan: &SourcePlan) -> Result<MergeOutcome, String> {
     let query = query.to_string();
     let mut jobs: Vec<Job> = Vec::new();
     let primary_query = query.clone();

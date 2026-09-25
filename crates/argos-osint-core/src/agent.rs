@@ -98,10 +98,15 @@ async fn run_turn_inner(
     }
 
     if intent == Intent::Investigate && !answering_reports {
-        let _ = tx.send(TurnEvent::Status("researching public sources".into()));
+        let _ = tx.send(TurnEvent::Status(
+            "researching public sources · Ctrl+C cancels".into(),
+        ));
         match search::research(&input.user_text, &input.plan).await {
-            Ok(hits) => {
-                sources = hits;
+            Ok(outcome) => {
+                sources = outcome.hits;
+                for status in &outcome.adapters {
+                    let _ = tx.send(TurnEvent::Note(status.summary_line()));
+                }
                 gathered.push_str(&format_hits(&sources));
                 let _ = tx.send(TurnEvent::Note(format!("{} public hits", sources.len())));
             }

@@ -35,6 +35,46 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// How one named adapter finished inside a stage merge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdapterStatus {
+    pub name: String,
+    pub state: AdapterState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdapterState {
+    Ok { hits: usize },
+    Empty,
+    Error { message: String },
+}
+
+impl AdapterStatus {
+    pub fn summary_line(&self) -> String {
+        match &self.state {
+            AdapterState::Ok { hits } => format!("adapter {}: ok ({hits})", self.name),
+            AdapterState::Empty => format!("adapter {}: empty", self.name),
+            AdapterState::Error { message } => {
+                format!("adapter {}: error ({message})", self.name)
+            }
+        }
+    }
+}
+
+/// Hits plus per-adapter outcomes from one stage merge.
+#[derive(Clone, Debug, Default)]
+pub struct MergeOutcome {
+    pub hits: Vec<SearchHit>,
+    pub adapters: Vec<AdapterStatus>,
+}
+
+/// Full research result: merged hits and every adapter status collected.
+#[derive(Clone, Debug, Default)]
+pub struct ResearchOutcome {
+    pub hits: Vec<SearchHit>,
+    pub adapters: Vec<AdapterStatus>,
+}
+
 /// A user-configured public source. `url_template` must contain `{query}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OsintSource {
@@ -163,6 +203,7 @@ pub fn scheduled_adapters(query: &str, plan: &SourcePlan) -> Vec<String> {
     }
     if gates.identity {
         names.push("github".into());
+        names.push("leakcheck".into());
     }
     for source in plan.extra.iter().filter(|source| source.enabled) {
         names.push(format!("extra:{}", source.name));
@@ -172,7 +213,7 @@ pub fn scheduled_adapters(query: &str, plan: &SourcePlan) -> Vec<String> {
 
 /// Search every stage that applies. A dead adapter is recorded and skipped.
 /// The case fails only when every stage that actually ran returns nothing.
-pub async fn research(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit>, String> {
+pub async fn research(query: &str, plan: &SourcePlan) -> Result<ResearchOutcome, String> {
     let query = query.trim();
     if query.is_empty() {
         return Err("empty search".into());
@@ -193,56 +234,103 @@ pub async fn research(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit>, 
         return Err("no OSINT sources are enabled. Turn some on in OSINT Providers.".into());
     }
 
-    let mut jobs: Vec<Pin<Box<dyn Future<Output = Result<Vec<SearchHit>, String>> + Send>>> =
-        Vec::new();
+    type StageFut = Pin<Box<dyn Future<Output = Result<MergeOutcome, String>> + Send>>;
+    let mut facts_web: Vec<StageFut> = Vec::new();
+    let mut other: Vec<StageFut> = Vec::new();
     if gates.facts {
         let terms = parsed.fact_terms();
-        jobs.push(Box::pin(facts::gather(terms)));
+        facts_web.push(Box::pin(facts::gather(terms)));
     }
     if gates.web {
         let q = query.to_string();
         let plan = plan.clone();
-        jobs.push(Box::pin(async move { web::gather(&q, &plan).await }));
+        facts_web.push(Box::pin(async move { web::gather(&q, &plan).await }));
     }
     if gates.news {
         let q = query.to_string();
         let searx = plan.searx_url.clone();
-        jobs.push(Box::pin(news::gather(q, searx)));
+        other.push(Box::pin(news::gather(q, searx)));
     }
     if gates.domain {
-        jobs.push(Box::pin(domain::gather(parsed.domains.clone())));
+        other.push(Box::pin(domain::gather(parsed.domains.clone())));
     }
     if gates.social {
         let q = parsed.social_query();
         let youtube = keyed(&plan.youtube_key);
-        jobs.push(Box::pin(social::gather(q, youtube)));
+        other.push(Box::pin(social::gather(q, youtube)));
     }
     if gates.identity {
         let terms = parsed.identity_terms();
         let token = keyed(&plan.github_token);
-        jobs.push(Box::pin(identity::gather(terms, token)));
+        other.push(Box::pin(identity::gather(terms, token)));
     }
     for source in plan.extra.iter().filter(|source| source.enabled).cloned() {
         let q = query.to_string();
-        jobs.push(Box::pin(async move {
+        other.push(Box::pin(async move {
             match template_source(&source, &q).await {
-                Ok(rows) => Ok(tag(rows, &source.name)),
+                Ok(rows) => {
+                    let hits = tag(rows, &source.name);
+                    let state = if hits.is_empty() {
+                        AdapterState::Empty
+                    } else {
+                        AdapterState::Ok { hits: hits.len() }
+                    };
+                    Ok(MergeOutcome {
+                        hits,
+                        adapters: vec![AdapterStatus {
+                            name: format!("extra:{}", source.name),
+                            state,
+                        }],
+                    })
+                }
                 Err(err) => Err(format!("{}: {err}", source.name)),
             }
         }));
     }
 
-    let attempted = jobs.len();
-    let results = join_all(jobs).await;
     let mut hits = Vec::new();
+    let mut adapters = Vec::new();
     let mut errors = Vec::new();
-    for result in results {
+    let mut attempted = 0usize;
+    let mut pivot_pool = Vec::new();
+
+    for result in join_all(facts_web).await {
+        attempted += 1;
         match result {
-            Ok(rows) => hits.extend(rows),
+            Ok(outcome) => {
+                pivot_pool.extend(outcome.hits.iter().cloned());
+                hits.extend(outcome.hits);
+                adapters.extend(outcome.adapters);
+            }
             Err(err) => errors.push(err),
         }
     }
-    combine_source_results(attempted, hits, errors)
+    for result in join_all(other).await {
+        attempted += 1;
+        match result {
+            Ok(outcome) => {
+                hits.extend(outcome.hits);
+                adapters.extend(outcome.adapters);
+            }
+            Err(err) => errors.push(err),
+        }
+    }
+
+    if plan.domain {
+        let pivoted = pivoted_domains(&pivot_pool, &parsed.domains);
+        if !pivoted.is_empty() {
+            attempted += 1;
+            match domain::gather(pivoted).await {
+                Ok(outcome) => {
+                    hits.extend(outcome.hits);
+                    adapters.extend(outcome.adapters);
+                }
+                Err(err) => errors.push(err),
+            }
+        }
+    }
+
+    combine_source_results(attempted, hits, errors, adapters)
 }
 
 pub async fn web_search(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit>, String> {
@@ -250,7 +338,7 @@ pub async fn web_search(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit>
     if query.is_empty() {
         return Err("empty search".into());
     }
-    web::gather(query, plan).await
+    Ok(web::gather(query, plan).await?.hits)
 }
 
 pub async fn news_search(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit>, String> {
@@ -258,7 +346,7 @@ pub async fn news_search(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit
     if query.is_empty() {
         return Err("empty search".into());
     }
-    news::gather(query.to_string(), plan.searx_url.clone()).await
+    Ok(news::gather(query.to_string(), plan.searx_url.clone()).await?.hits)
 }
 
 pub async fn domain_lookup(query: &str, _plan: &SourcePlan) -> Result<Vec<SearchHit>, String> {
@@ -266,7 +354,7 @@ pub async fn domain_lookup(query: &str, _plan: &SourcePlan) -> Result<Vec<Search
     if domains.is_empty() {
         return Ok(Vec::new());
     }
-    domain::gather(domains).await
+    Ok(domain::gather(domains).await?.hits)
 }
 
 pub async fn social_search(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit>, String> {
@@ -274,7 +362,7 @@ pub async fn social_search(query: &str, plan: &SourcePlan) -> Result<Vec<SearchH
     if query.is_empty() {
         return Err("empty search".into());
     }
-    social::gather(query.to_string(), keyed(&plan.youtube_key)).await
+    Ok(social::gather(query.to_string(), keyed(&plan.youtube_key)).await?.hits)
 }
 
 pub async fn identity_lookup(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit>, String> {
@@ -289,7 +377,7 @@ pub async fn identity_lookup(query: &str, plan: &SourcePlan) -> Result<Vec<Searc
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    identity::gather(terms, keyed(&plan.github_token)).await
+    Ok(identity::gather(terms, keyed(&plan.github_token)).await?.hits)
 }
 
 /// Keep hits from the sources that found something. Fail only when none did.
@@ -297,9 +385,10 @@ pub fn combine_source_results(
     attempted: usize,
     hits: Vec<SearchHit>,
     errors: Vec<String>,
-) -> Result<Vec<SearchHit>, String> {
+    adapters: Vec<AdapterStatus>,
+) -> Result<ResearchOutcome, String> {
     if !hits.is_empty() {
-        return Ok(hits);
+        return Ok(ResearchOutcome { hits, adapters });
     }
     if attempted == 0 {
         return Err("no OSINT sources are enabled. Turn some on in OSINT Providers.".into());
@@ -315,21 +404,94 @@ pub fn combine_source_results(
 
 pub(crate) fn merge_adapter_results(
     parts: Vec<(&str, Result<Vec<SearchHit>, String>)>,
-) -> Result<Vec<SearchHit>, String> {
+) -> Result<MergeOutcome, String> {
     let mut hits = Vec::new();
+    let mut adapters = Vec::new();
     let mut errors = Vec::new();
     for (name, result) in parts {
         match result {
-            Ok(rows) => hits.extend(rows),
-            Err(err) => errors.push(format!("{name}: {err}")),
+            Ok(rows) if rows.is_empty() => {
+                adapters.push(AdapterStatus {
+                    name: name.to_string(),
+                    state: AdapterState::Empty,
+                });
+            }
+            Ok(rows) => {
+                adapters.push(AdapterStatus {
+                    name: name.to_string(),
+                    state: AdapterState::Ok { hits: rows.len() },
+                });
+                hits.extend(rows);
+            }
+            Err(err) => {
+                adapters.push(AdapterStatus {
+                    name: name.to_string(),
+                    state: AdapterState::Error {
+                        message: err.clone(),
+                    },
+                });
+                errors.push(format!("{name}: {err}"));
+            }
         }
     }
     if !hits.is_empty() || errors.is_empty() {
-        Ok(hits)
+        Ok(MergeOutcome { hits, adapters })
     } else {
         Err(errors.join("; "))
     }
 }
+
+/// Host from a hit URL when it is a public domain (not loopback/private).
+pub(crate) fn public_host_from_url(raw: &str) -> Option<String> {
+    let url = Url::parse(raw.trim()).ok()?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return None;
+    }
+    let host = url.host_str()?.to_string();
+    let host_l = host.to_ascii_lowercase();
+    if host_l == "localhost"
+        || host_l.ends_with(".local")
+        || host_l.ends_with(".internal")
+        || host_l == "metadata.google.internal"
+    {
+        return None;
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip_blocked(ip) {
+            return None;
+        }
+        return Some(host_l);
+    }
+    query::normalize_domain(&host)
+}
+
+/// Up to three public domains from hit URLs that are not already in the query.
+pub(crate) fn pivoted_domains(hits: &[SearchHit], already: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for hit in hits {
+        let Some(domain) = public_host_from_url(&hit.url) else {
+            continue;
+        };
+        if already
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(&domain))
+        {
+            continue;
+        }
+        if out
+            .iter()
+            .any(|item: &String| item.eq_ignore_ascii_case(&domain))
+        {
+            continue;
+        }
+        out.push(domain);
+        if out.len() >= 3 {
+            break;
+        }
+    }
+    out
+}
+
 
 pub(crate) fn tag(mut hits: Vec<SearchHit>, label: &str) -> Vec<SearchHit> {
     let prefix = format!("[{label}] ");
@@ -636,15 +798,20 @@ mod tests {
 
     #[test]
     fn one_empty_source_does_not_fail_the_report() {
-        let kept =
-            combine_source_results(2, vec![hit("harbor")], vec!["wikipedia: no hits".into()]);
-        assert_eq!(kept.unwrap().len(), 1);
-        let none = combine_source_results(2, Vec::new(), Vec::new()).unwrap_err();
+        let kept = combine_source_results(
+            2,
+            vec![hit("harbor")],
+            vec!["wikipedia: no hits".into()],
+            Vec::new(),
+        );
+        assert_eq!(kept.unwrap().hits.len(), 1);
+        let none = combine_source_results(2, Vec::new(), Vec::new(), Vec::new()).unwrap_err();
         assert_eq!(none, "no sources returned hits");
         let all_failed = combine_source_results(
             2,
             Vec::new(),
             vec!["web: down".into(), "wikipedia: down".into()],
+            Vec::new(),
         )
         .unwrap_err();
         assert!(all_failed.contains("web: down"));
@@ -658,7 +825,14 @@ mod tests {
             ("wikidata", Ok(vec![hit("Ada")])),
         ])
         .unwrap();
-        assert_eq!(kept.len(), 1);
+        assert_eq!(kept.hits.len(), 1);
+        assert!(kept.adapters.iter().any(|status| {
+            status.name == "wikipedia"
+                && matches!(status.state, AdapterState::Error { ref message } if message == "down")
+        }));
+        assert!(kept.adapters.iter().any(|status| {
+            status.name == "wikidata" && matches!(status.state, AdapterState::Ok { hits: 1 })
+        }));
         let failed = merge_adapter_results(vec![
             ("rdap", Err("http 500".into())),
             ("crt.sh", Err("timeout".into())),
@@ -667,6 +841,54 @@ mod tests {
         assert!(failed.contains("rdap"));
         assert!(failed.contains("crt.sh"));
     }
+
+    #[test]
+    fn public_host_from_url_extracts_hosts() {
+        assert_eq!(
+            public_host_from_url("https://www.Example.com/path?q=1"),
+            query::normalize_domain("www.example.com")
+        );
+        assert_eq!(
+            public_host_from_url("http://Ada.Lovelace.org/wiki"),
+            Some("ada.lovelace.org".into())
+        );
+        assert!(public_host_from_url("http://127.0.0.1/").is_none());
+        assert!(public_host_from_url("http://192.168.1.1/").is_none());
+        assert!(public_host_from_url("http://localhost/x").is_none());
+        assert!(public_host_from_url("not a url").is_none());
+        let hits = vec![
+            SearchHit {
+                title: "a".into(),
+                url: "https://alpha.example/a".into(),
+                snippet: "x".into(),
+            },
+            SearchHit {
+                title: "b".into(),
+                url: "https://beta.example/b".into(),
+                snippet: "y".into(),
+            },
+            SearchHit {
+                title: "c".into(),
+                url: "https://gamma.example/c".into(),
+                snippet: "z".into(),
+            },
+            SearchHit {
+                title: "d".into(),
+                url: "https://delta.example/d".into(),
+                snippet: "w".into(),
+            },
+        ];
+        let pivoted = pivoted_domains(&hits, &["beta.example".into()]);
+        assert_eq!(
+            pivoted,
+            vec![
+                "alpha.example".to_string(),
+                "gamma.example".to_string(),
+                "delta.example".to_string()
+            ]
+        );
+    }
+
 
     #[test]
     fn domain_stage_skips_rdap_without_a_domain() {

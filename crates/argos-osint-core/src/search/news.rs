@@ -4,9 +4,9 @@ use futures_util::future::join_all;
 use serde_json::Value;
 
 use super::web::searx;
-use super::{clip, get_json, merge_adapter_results, tag, Job, SearchHit};
+use super::{clip, get_json, merge_adapter_results, tag, Job, MergeOutcome, SearchHit};
 
-pub async fn gather(query: String, searx_url: Option<String>) -> Result<Vec<SearchHit>, String> {
+pub async fn gather(query: String, searx_url: Option<String>) -> Result<MergeOutcome, String> {
     let mut jobs: Vec<Job> = Vec::new();
     if let Some(base) = searx_url.filter(|url| !url.trim().is_empty()) {
         let news_query = query.clone();

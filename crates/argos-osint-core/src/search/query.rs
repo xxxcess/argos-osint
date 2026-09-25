@@ -249,7 +249,7 @@ fn trim_name(name: &str) -> String {
         .to_string()
 }
 
-fn normalize_domain(raw: &str) -> Option<String> {
+pub(crate) fn normalize_domain(raw: &str) -> Option<String> {
     let name = raw
         .trim()
         .trim_end_matches('.')

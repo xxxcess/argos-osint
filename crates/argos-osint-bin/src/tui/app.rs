@@ -2044,13 +2044,16 @@ impl App {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = match argos_osint_core::search::research(&query, &plan).await {
-                Ok(hits) => {
+                Ok(outcome) => {
+                    let hits = outcome.hits;
                     let md = report::source_pack(&query, Some(&case_id), &query, &hits);
                     match report::write_report(&report_dir, &query, Some(&case_id), &md) {
                         Ok(meta) => Ok((summarize_hits(&hits), Some(meta))),
                         Err(err) => Ok((
                             format!(
-                                "{}\n\nCould not write the report: {err}",
+                                "{}
+
+Could not write the report: {err}",
                                 summarize_hits(&hits)
                             ),
                             None,
@@ -2579,7 +2582,7 @@ impl App {
             return;
         }
         self.running = true;
-        self.status = "searching".into();
+        self.status = "searching · Ctrl+C cancels".into();
         self.push_line("user", &format!("/search {query}"));
         self.push_line("assistant", "");
         self.log_event("search", &format!("search {query}"));

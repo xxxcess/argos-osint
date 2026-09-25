@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use argos_osint_core::agent::{self, HistMsg, TurnEvent, TurnInput};
-use chrono::Local;
 use argos_osint_core::brain::{self, Memory};
 use argos_osint_core::gmail::{self, GmailConfig};
 use argos_osint_core::hardware::{self, HardwareProfile};
@@ -19,10 +18,11 @@ use argos_osint_core::paths::{self, db_label};
 use argos_osint_core::prompt::{self, Intent};
 use argos_osint_core::provider::{self, SettingsFile};
 use argos_osint_core::report::{self, ReportMeta};
-use argos_osint_core::search::SearchHit;
+use argos_osint_core::search::{SearchHit, SourcePlan};
 use argos_osint_core::secrets::{self, AuthFile, GmailSecret, ProviderSecret};
 use argos_osint_core::session::{self, Case};
 use argos_osint_core::store::{ChatLine, Store};
+use chrono::Local;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::layout::Rect;
 use sysinfo::System;
@@ -153,6 +153,33 @@ pub struct LogEntry {
     pub text: String,
 }
 
+/// Stage toggles for one case worker. Copied from settings, then changed
+/// only for this run.
+#[derive(Clone, Debug)]
+pub struct ScopeDraft {
+    pub query: String,
+    pub echo_on_desk: bool,
+    pub restore_prompt: bool,
+    pub facts: bool,
+    pub web: bool,
+    pub news: bool,
+    pub domain: bool,
+    pub social: bool,
+    pub identity: bool,
+    pub selected: usize,
+}
+
+/// Which saved role the model card writes to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ModelTarget {
+    /// The connection model on the provider.
+    Connection,
+    /// The model that answers the user.
+    Writer,
+    /// The model that calls research tools.
+    Tool,
+}
+
 /// Research that has started and has not filed markdown yet.
 /// `failed` is set when the worker stops without a report.
 #[derive(Clone, Debug)]
@@ -254,7 +281,7 @@ pub enum AppMsg {
         result: Result<Vec<SearchHit>, String>,
     },
     Models(Result<Vec<String>, String>),
-    ModelList(Result<Vec<String>, String>),
+    ModelList(Result<Vec<provider::ListedModel>, String>),
     Voice(Result<String, String>),
     GmailTest(Result<String, String>),
     Research {
@@ -286,6 +313,8 @@ pub struct App {
     /// Query waiting on the case-worker confirmation popup.
     pub confirm_query: Option<String>,
     pub confirm_sel: usize,
+    /// Source toggles for the case worker that is about to start.
+    pub scope: Option<ScopeDraft>,
     /// Completed report waiting on the open-chat confirmation popup.
     pub confirm_report: Option<String>,
     pub confirm_report_sel: usize,
@@ -295,9 +324,16 @@ pub struct App {
     pub confirm_delete_report: Option<String>,
     pub confirm_delete_sel: usize,
     pub model_picker: bool,
+    pub model_target: ModelTarget,
     pub model_query: String,
     pub model_sel: usize,
     pub remote_models: Vec<String>,
+    pub catalog: Vec<provider::ListedModel>,
+    /// Concrete models behind `openrouter/free`.
+    pub free_picker: bool,
+    pub free_query: String,
+    pub free_sel: usize,
+    pub free_loading: bool,
     pub prompt: String,
     pub cursor: usize,
     pub history: Vec<String>,
@@ -400,15 +436,22 @@ impl App {
             help: false,
             confirm_query: None,
             confirm_sel: 0,
+            scope: None,
             confirm_report: None,
             confirm_report_sel: 0,
             desk_memory_answer: None,
             confirm_delete_report: None,
             confirm_delete_sel: 1,
             model_picker: false,
+            model_target: ModelTarget::Connection,
             model_query: String::new(),
             model_sel: 0,
             remote_models: Vec::new(),
+            catalog: Vec::new(),
+            free_picker: false,
+            free_query: String::new(),
+            free_sel: 0,
+            free_loading: false,
             prompt: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -583,7 +626,24 @@ impl App {
     }
 
     pub fn active_model(&self) -> String {
-        self.text_secret().model
+        self.role_secret(&self.settings.writer_model).model
+    }
+
+    /// Connection provider with a role model, or the connection model when the role is empty.
+    pub fn role_secret(&self, model: &str) -> argos_osint_core::secrets::ProviderSecret {
+        let mut secret = self.text_secret();
+        if !model.trim().is_empty() {
+            secret.model = model.trim().to_string();
+        }
+        secret
+    }
+
+    fn role_label(&self, model: &str) -> String {
+        if model.trim().is_empty() {
+            format!("connection ({})", self.text_secret().model)
+        } else {
+            model.trim().to_string()
+        }
     }
 
     pub fn model_choices(&self) -> Vec<(String, String)> {
@@ -616,7 +676,13 @@ impl App {
     }
 
     fn open_model_picker(&mut self) {
+        self.model_target = ModelTarget::Connection;
+        self.open_model_card();
+    }
+
+    fn open_model_card(&mut self) {
         self.model_picker = true;
+        self.free_picker = false;
         self.model_query.clear();
         self.model_sel = 0;
         self.refresh_model_list();
@@ -626,28 +692,91 @@ impl App {
         let secret = self.text_secret();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let result = provider::list_models(&secret)
+            let result = provider::list_catalog(&secret)
                 .await
                 .map_err(|err| err.to_string());
             let _ = tx.send(AppMsg::ModelList(result));
         });
     }
 
+    pub fn filtered_free_models(&self) -> Vec<(String, String)> {
+        let q = self.free_query.trim().to_lowercase();
+        provider::concrete_free_models(&self.catalog)
+            .into_iter()
+            .filter(|model| {
+                q.is_empty()
+                    || model.id.to_lowercase().contains(&q)
+                    || model.name.to_lowercase().contains(&q)
+            })
+            .map(|model| (model.id, model.name))
+            .collect()
+    }
+
+    fn open_free_picker(&mut self) {
+        self.free_picker = true;
+        self.free_query.clear();
+        self.free_sel = 0;
+        if self.filtered_free_models().is_empty() {
+            self.free_loading = true;
+            self.refresh_model_list();
+        }
+    }
+
     pub(crate) fn select_model(&mut self, id: &str) {
-        self.settings.model = id.to_string();
-        let _ = self.settings.save();
-        match self.auth.text.as_mut() {
-            Some(slot) => slot.model = id.to_string(),
-            None => {
-                let mut secret = self.text_secret();
-                secret.model = id.to_string();
-                self.auth.text = Some(secret);
+        if provider::is_free_router(id) {
+            self.open_free_picker();
+            return;
+        }
+        match self.model_target {
+            ModelTarget::Writer => {
+                self.settings.writer_model = id.to_string();
+                let _ = self.settings.save();
+                self.status = format!("writer {id}");
+                self.log_event("system", &format!("writer model {id}"));
+            }
+            ModelTarget::Tool => {
+                self.settings.tool_model = id.to_string();
+                let _ = self.settings.save();
+                self.status = format!("tool caller {id}");
+                self.log_event("system", &format!("tool model {id}"));
+            }
+            ModelTarget::Connection => {
+                self.settings.model = id.to_string();
+                let _ = self.settings.save();
+                match self.auth.text.as_mut() {
+                    Some(slot) => slot.model = id.to_string(),
+                    None => {
+                        let mut secret = self.text_secret();
+                        secret.model = id.to_string();
+                        self.auth.text = Some(secret);
+                    }
+                }
+                let _ = self.auth.save();
+                self.status = format!("model {id}");
+                self.log_event("system", &format!("model set to {id}"));
             }
         }
-        let _ = self.auth.save();
         self.model_picker = false;
-        self.status = format!("model {id}");
-        self.log_event("system", &format!("model set to {id}"));
+        self.free_picker = false;
+        if self.form_module() == Some(ModuleId::Providers) {
+            self.load_fields(ModuleId::Providers);
+        }
+    }
+
+    pub fn picker_current(&self) -> String {
+        match self.model_target {
+            ModelTarget::Writer => self.settings.writer_model.trim().to_string(),
+            ModelTarget::Tool => self.settings.tool_model.trim().to_string(),
+            ModelTarget::Connection => self.text_secret().model,
+        }
+    }
+
+    pub fn picker_title(&self) -> &'static str {
+        match self.model_target {
+            ModelTarget::Writer => "Writer model",
+            ModelTarget::Tool => "Tool model",
+            ModelTarget::Connection => "Models",
+        }
     }
 
     fn on_model_key(&mut self, key: KeyEvent) -> bool {
@@ -681,6 +810,44 @@ impl App {
             KeyCode::Char(ch) if !ctrl => {
                 self.model_query.push(ch);
                 self.model_sel = 0;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn on_free_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if key.code == KeyCode::Esc {
+            self.free_picker = false;
+            self.free_loading = false;
+            return false;
+        }
+        let count = self.filtered_free_models().len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if count > 0 {
+                    self.free_sel = (self.free_sel + count - 1) % count;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if count > 0 {
+                    self.free_sel = (self.free_sel + 1) % count;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some((id, _)) = self.filtered_free_models().get(self.free_sel) {
+                    let id = id.clone();
+                    self.select_model(&id);
+                }
+            }
+            KeyCode::Backspace => {
+                self.free_query.pop();
+                self.free_sel = 0;
+            }
+            KeyCode::Char(ch) if !ctrl => {
+                self.free_query.push(ch);
+                self.free_sel = 0;
             }
             _ => {}
         }
@@ -884,15 +1051,21 @@ impl App {
         match widget {
             ModuleId::Hardware => self.hardware.one_line(),
             ModuleId::Osint => format!(
-                "Internet {}, Wikipedia {}, {} extra sources.",
-                if self.settings.internet { "on" } else { "off" },
-                if self.settings.wikipedia { "on" } else { "off" },
+                "Facts {}, Web {}, News {}, Domain {}, Social {}, Identity {}, {} extra sources.",
+                on_off(self.settings.facts),
+                on_off(self.settings.web),
+                on_off(self.settings.news),
+                on_off(self.settings.domain),
+                on_off(self.settings.social),
+                on_off(self.settings.identity),
                 self.settings.sources.len()
             ),
             ModuleId::Providers => format!(
-                "Text: {}. Voice: {}.",
+                "Connection: {}. Voice: {}. Writer: {}. Tool caller: {}.",
                 provider_label(self.auth.text.as_ref()),
-                provider_label(self.auth.voice.as_ref())
+                provider_label(self.auth.voice.as_ref()),
+                self.role_label(&self.settings.writer_model),
+                self.role_label(&self.settings.tool_model)
             ),
             ModuleId::Brain => format!("{} memories stored.", self.memories.len()),
             ModuleId::Gmail => self
@@ -989,11 +1162,16 @@ impl App {
             AppMsg::Note(text) => self.log_event("api", &text),
             AppMsg::Search { query, result } => self.finish_search(query, result),
             AppMsg::ModelList(result) => match result {
-                Ok(names) => {
-                    self.log_event("api", &format!("models listed: {}", names.len()));
-                    self.remote_models = names;
+                Ok(models) => {
+                    self.log_event("api", &format!("models listed: {}", models.len()));
+                    self.remote_models = models.iter().map(|model| model.id.clone()).collect();
+                    self.catalog = models;
+                    self.free_loading = false;
                 }
-                Err(err) => self.log_event("api", &format!("models failed: {err}")),
+                Err(err) => {
+                    self.free_loading = false;
+                    self.log_event("api", &format!("models failed: {err}"));
+                }
             },
             AppMsg::Models(result) => match result {
                 Ok(names) => {
@@ -1118,9 +1296,7 @@ impl App {
             }
             Err(err) => {
                 self.log_event("search", &format!("search failed: {err}"));
-                self.replace_last_assistant(
-                    "The search failed. The detail is in the System log.",
-                );
+                self.replace_last_assistant("The search failed. The detail is in the System log.");
             }
         }
         self.status = "ready".into();
@@ -1149,7 +1325,10 @@ impl App {
     }
 
     fn click(&mut self, x: u16, y: u16) {
-        if self.confirm_query.is_some()
+        if self.free_picker
+            || self.model_picker
+            || self.scope.is_some()
+            || self.confirm_query.is_some()
             || self.confirm_report.is_some()
             || self.confirm_delete_report.is_some()
             || self.brain_card
@@ -1244,6 +1423,9 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.scope.is_some() && !(ctrl && key.code == KeyCode::Char('c')) {
+            return self.on_scope_key(key);
+        }
         if self.confirm_query.is_some() && !(ctrl && key.code == KeyCode::Char('c')) {
             return self.on_confirm_key(key);
         }
@@ -1259,6 +1441,9 @@ impl App {
         if self.help {
             self.help = false;
             return false;
+        }
+        if self.free_picker && !(ctrl && key.code == KeyCode::Char('c')) {
+            return self.on_free_key(key);
         }
         if self.model_picker && !(ctrl && key.code == KeyCode::Char('c')) {
             return self.on_model_key(key);
@@ -1742,10 +1927,85 @@ impl App {
         }
         self.prompt.clear();
         self.cursor = 0;
-        self.launch_case_worker(query, true);
+        self.open_scope(query, true, true);
     }
 
-    fn launch_case_worker(&mut self, query: String, echo_on_desk: bool) {
+    fn open_scope(&mut self, query: String, echo_on_desk: bool, restore_prompt: bool) {
+        self.scope = Some(ScopeDraft {
+            query,
+            echo_on_desk,
+            restore_prompt,
+            facts: self.settings.facts,
+            web: self.settings.web,
+            news: self.settings.news,
+            domain: self.settings.domain,
+            social: self.settings.social,
+            identity: self.settings.identity,
+            selected: 0,
+        });
+        self.confirm_query = None;
+        self.confirm_sel = 0;
+        self.status = "choose sources for this case".into();
+    }
+
+    fn on_scope_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(scope) = self.scope.as_mut() {
+                    scope.selected = (scope.selected + 5) % 6;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(scope) = self.scope.as_mut() {
+                    scope.selected = (scope.selected + 1) % 6;
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(scope) = self.scope.as_mut() {
+                    let flag = match scope.selected {
+                        0 => &mut scope.facts,
+                        1 => &mut scope.web,
+                        2 => &mut scope.news,
+                        3 => &mut scope.domain,
+                        4 => &mut scope.social,
+                        _ => &mut scope.identity,
+                    };
+                    *flag = !*flag;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(scope) = self.scope.take() {
+                    let plan = self.plan_for_scope(&scope);
+                    self.launch_case_worker(scope.query, scope.echo_on_desk, plan);
+                }
+            }
+            KeyCode::Esc => {
+                if let Some(scope) = self.scope.take() {
+                    if scope.restore_prompt {
+                        self.prompt = scope.query;
+                        self.cursor = self.prompt.chars().count();
+                        self.focus = Focus::Prompt;
+                    }
+                    self.status = "case worker cancelled".into();
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn plan_for_scope(&self, scope: &ScopeDraft) -> SourcePlan {
+        let mut plan = self.settings.source_plan();
+        plan.facts = scope.facts;
+        plan.web = scope.web;
+        plan.news = scope.news;
+        plan.domain = scope.domain;
+        plan.social = scope.social;
+        plan.identity = scope.identity;
+        plan
+    }
+
+    fn launch_case_worker(&mut self, query: String, echo_on_desk: bool, plan: SourcePlan) {
         let case = match self.store.create_case(&query) {
             Ok(case) => case,
             Err(err) => {
@@ -1779,7 +2039,6 @@ impl App {
         self.append_to_session("desk", "assistant", ack);
         self.status = "ready".into();
         self.log_event("task", &format!("case research {}", case.title));
-        let plan = self.source_plan();
         let case_id = case.id.clone();
         let report_dir = report_dir(&self.settings);
         let tx = self.tx.clone();
@@ -1802,15 +2061,6 @@ impl App {
             };
             let _ = tx.send(AppMsg::Research { case_id, result });
         });
-    }
-
-    fn source_plan(&self) -> argos_osint_core::search::SourcePlan {
-        argos_osint_core::search::SourcePlan {
-            internet: self.settings.internet,
-            wikipedia: self.settings.wikipedia,
-            searx_url: Some(self.settings.searx_url.clone()).filter(|url| !url.trim().is_empty()),
-            extra: self.settings.sources.clone(),
-        }
     }
 
     fn finish_research(
@@ -1899,9 +2149,17 @@ impl App {
     }
 
     fn save_osint_toggles(&mut self) {
-        self.settings.internet = self.field_value("internet").eq_ignore_ascii_case("yes");
-        self.settings.wikipedia = self.field_value("wikipedia").eq_ignore_ascii_case("yes");
+        self.settings.facts = self.field_value("facts").eq_ignore_ascii_case("yes");
+        self.settings.web = self.field_value("web").eq_ignore_ascii_case("yes");
+        self.settings.news = self.field_value("news").eq_ignore_ascii_case("yes");
+        self.settings.domain = self.field_value("domain").eq_ignore_ascii_case("yes");
+        self.settings.social = self.field_value("social").eq_ignore_ascii_case("yes");
+        self.settings.identity = self.field_value("identity").eq_ignore_ascii_case("yes");
         self.settings.searx_url = self.field_value("searx_url");
+        self.settings.brave_key = self.field_value("brave_key");
+        self.settings.tavily_key = self.field_value("tavily_key");
+        self.settings.youtube_key = self.field_value("youtube_key");
+        self.settings.github_token = self.field_value("github_token");
         match self.settings.save() {
             Ok(()) => self.status = "saved OSINT sources".into(),
             Err(err) => {
@@ -2147,7 +2405,7 @@ impl App {
         };
         if start {
             self.desk_memory_answer = None;
-            self.launch_case_worker(query, false);
+            self.open_scope(query, false, false);
         } else if let Some(material) = self.desk_memory_answer.take() {
             self.spawn_answered_turn(query, material, false, true, true);
         } else {
@@ -2168,7 +2426,7 @@ impl App {
                 if arg.is_empty() {
                     self.status = "Type a research query, then press +".into();
                 } else {
-                    self.launch_case_worker(arg, true);
+                    self.open_scope(arg, true, true);
                 }
             }
             "use" => match session::resolve_case(&self.cases, &arg) {
@@ -2325,14 +2583,10 @@ impl App {
         self.push_line("user", &format!("/search {query}"));
         self.push_line("assistant", "");
         self.log_event("search", &format!("search {query}"));
-        let searx = self.settings.searx_url.clone();
+        let plan = self.settings.source_plan();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let result = argos_osint_core::search::web_search(
-                &query,
-                Some(searx.as_str()).filter(|s| !s.is_empty()),
-            )
-            .await;
+            let result = argos_osint_core::search::web_search(&query, &plan).await;
             let _ = tx.send(AppMsg::Search { query, result });
         });
     }
@@ -2411,8 +2665,9 @@ impl App {
             view_context: self.view_context(),
             hardware_line: self.hardware.one_line(),
             modality: self.settings.modality.clone(),
-            provider: Some(self.text_secret()),
-            searx_url: Some(self.settings.searx_url.clone()).filter(|s| !s.is_empty()),
+            provider: Some(self.role_secret(&self.settings.writer_model)),
+            tool_provider: Some(self.role_secret(&self.settings.tool_model)),
+            plan: self.settings.source_plan(),
             report_dir: report_dir(&self.settings),
             case_id: self.case_id(),
             gmail: self.auth.gmail.as_ref().map(GmailConfig::from),
@@ -2549,22 +2804,70 @@ impl App {
             ModuleId::Osint => {
                 self.fields = vec![
                     field(
-                        "internet",
-                        "Internet search (enter toggles)",
-                        yes_no(self.settings.internet),
+                        "facts",
+                        "Facts (enter toggles)",
+                        yes_no(self.settings.facts),
                         false,
                     ),
                     field(
-                        "wikipedia",
-                        "Wikipedia (enter toggles)",
-                        yes_no(self.settings.wikipedia),
+                        "web",
+                        "Web (enter toggles)",
+                        yes_no(self.settings.web),
+                        false,
+                    ),
+                    field(
+                        "news",
+                        "News (enter toggles)",
+                        yes_no(self.settings.news),
+                        false,
+                    ),
+                    field(
+                        "domain",
+                        "Domain (enter toggles)",
+                        yes_no(self.settings.domain),
+                        false,
+                    ),
+                    field(
+                        "social",
+                        "Social (enter toggles)",
+                        yes_no(self.settings.social),
+                        false,
+                    ),
+                    field(
+                        "identity",
+                        "Identity (enter toggles)",
+                        yes_no(self.settings.identity),
                         false,
                     ),
                     field(
                         "searx_url",
-                        "SearXNG URL (empty uses DuckDuckGo for internet)",
+                        "SearXNG URL (empty uses DuckDuckGo)",
                         self.settings.searx_url.clone(),
                         false,
+                    ),
+                    field(
+                        "brave_key",
+                        "Brave API key",
+                        self.settings.brave_key.clone(),
+                        true,
+                    ),
+                    field(
+                        "tavily_key",
+                        "Tavily API key",
+                        self.settings.tavily_key.clone(),
+                        true,
+                    ),
+                    field(
+                        "youtube_key",
+                        "YouTube API key",
+                        self.settings.youtube_key.clone(),
+                        true,
+                    ),
+                    field(
+                        "github_token",
+                        "GitHub token",
+                        self.settings.github_token.clone(),
+                        true,
                     ),
                     field("source_name", "Extra source name", String::new(), false),
                     field(
@@ -2597,6 +2900,7 @@ impl App {
                     .unwrap_or_else(|| "local".into());
                 let chosen = provider::preset(&kind).unwrap_or(fallback);
                 self.fields = vec![
+                    field("__h_connection", "Connection", String::new(), false),
                     field(
                         "kind",
                         "Provider (enter cycles grok / openai / openrouter / local)",
@@ -2653,8 +2957,21 @@ impl App {
                         self.provider_slot.into(),
                         false,
                     ),
-                    field("__save", "Save this slot", "enter".into(), false),
+                    field("__save", "Save connection", "enter".into(), false),
                     field("__test", "Test /models", "enter".into(), false),
+                    field("__h_roles", "Roles", String::new(), false),
+                    field(
+                        "__role_writer",
+                        "Writer model",
+                        self.role_label(&self.settings.writer_model),
+                        false,
+                    ),
+                    field(
+                        "__role_tool",
+                        "Tool model",
+                        self.role_label(&self.settings.tool_model),
+                        false,
+                    ),
                 ];
             }
             ModuleId::Gmail => {
@@ -2724,12 +3041,25 @@ impl App {
             .unwrap_or_default();
         if key == "kind" {
             self.cycle_provider();
+        } else if key == "__role_writer" {
+            self.model_target = ModelTarget::Writer;
+            self.open_model_card();
+        } else if key == "__role_tool" {
+            self.model_target = ModelTarget::Tool;
+            self.open_model_card();
+        } else if key.starts_with("__h_") {
+        } else if key == "model" && provider::is_free_router(&self.field_value("model")) {
+            self.model_target = ModelTarget::Connection;
+            self.open_free_picker();
         } else if self.form_module() == Some(ModuleId::Brain)
             && matches!(key.as_str(), "category" | "pin")
         {
             self.cycle_brain_field(&key);
         } else if self.form_module() == Some(ModuleId::Osint)
-            && matches!(key.as_str(), "internet" | "wikipedia")
+            && matches!(
+                key.as_str(),
+                "facts" | "web" | "news" | "domain" | "social" | "identity"
+            )
         {
             let next = if self.field_value(&key).eq_ignore_ascii_case("yes") {
                 "no"
@@ -2892,8 +3222,7 @@ impl App {
             (Some(ModuleId::Gmail), "__save") => self.save_gmail_fields(),
             (Some(ModuleId::Gmail), "__test") => self.test_gmail(),
             (Some(ModuleId::Gmail), "__mcp") => self.write_mcp(),
-            (Some(ModuleId::Settings), "__save")
-            | (Some(ModuleId::System), "__save")
+            (Some(ModuleId::Settings), "__save") | (Some(ModuleId::System), "__save")
                 if self.form_module() == Some(ModuleId::Settings) =>
             {
                 self.save_settings_fields()
@@ -2928,6 +3257,17 @@ impl App {
         let chosen = provider::preset(&kind);
         let mut base_url = self.field_value("base_url");
         let mut model = self.field_value("model");
+        let picking_free = self.provider_slot == "text" && provider::is_free_router(&model);
+        if picking_free {
+            model = if self.settings.model.trim().is_empty() {
+                chosen
+                    .as_ref()
+                    .map(|preset| preset.text_model.to_string())
+                    .unwrap_or_default()
+            } else {
+                self.settings.model.clone()
+            };
+        }
         if let Some(chosen) = chosen {
             if base_url.trim().is_empty() {
                 base_url = chosen.base_url.into();
@@ -2975,6 +3315,11 @@ impl App {
                 }
                 self.status = format!("saved {} slot", self.provider_slot);
                 self.log_event("system", &note);
+                if picking_free {
+                    self.model_target = ModelTarget::Connection;
+                    self.open_free_picker();
+                    self.status = "pick a free model".into();
+                }
             }
             Err(err) => {
                 self.status = "provider save failed".into();
@@ -3136,6 +3481,9 @@ fn note_kind(text: &str) -> &'static str {
     let lower = text.to_lowercase();
     if lower.contains("search")
         || lower.contains("web_search")
+        || lower.contains("news_search")
+        || lower.contains("social_search")
+        || lower.contains("lookup")
         || lower.contains("fetch_page")
         || lower.contains("public hits")
     {
@@ -3149,6 +3497,14 @@ fn note_kind(text: &str) -> &'static str {
 
 fn module_session(module: ModuleId) -> String {
     format!("module:{}", module.title().to_lowercase().replace(' ', "-"))
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 fn yes_no(on: bool) -> String {
@@ -3384,6 +3740,7 @@ mod tests {
     use super::*;
     use argos_osint_core::provider::SettingsFile;
     use argos_osint_core::secrets::AuthFile;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -3521,6 +3878,156 @@ mod tests {
         assert!(text.contains("Settings"), "{text}");
         assert_eq!(app.system_tab_hits.len(), 3);
         assert_eq!(app.system_page, SystemPage::Log);
+    }
+
+    #[test]
+    fn free_route_lists_concrete_models_and_roles_are_separate() {
+        use argos_osint_core::provider::ListedModel;
+        use argos_osint_core::secrets::ProviderSecret;
+
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        app.auth.text = Some(ProviderSecret {
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "openai/gpt-4.1".into(),
+            api_key: None,
+            stt_model: None,
+            device: None,
+        });
+        app.settings.model = "openai/gpt-4.1".into();
+        app.catalog = vec![
+            ListedModel {
+                id: "openrouter/free".into(),
+                name: "Free Models Router".into(),
+                free: false,
+            },
+            ListedModel {
+                id: "meta-llama/llama-3.2-3b-instruct:free".into(),
+                name: "Llama 3.2 3B".into(),
+                free: true,
+            },
+        ];
+        app.remote_models = vec![
+            "openrouter/free".into(),
+            "meta-llama/llama-3.2-3b-instruct:free".into(),
+            "openai/gpt-4.1".into(),
+        ];
+        app.model_picker = true;
+        app.model_sel = app
+            .filtered_model_choices()
+            .iter()
+            .position(|(id, _)| id == "openrouter/free")
+            .unwrap();
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.free_picker);
+        assert_eq!(app.settings.model, "openai/gpt-4.1");
+        assert_eq!(app.filtered_free_models().len(), 1);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Free models"), "{text}");
+        assert!(text.contains("Llama 3.2 3B"), "{text}");
+        assert!(text.contains("at random"), "{text}");
+
+        app.on_event(key(KeyCode::Enter));
+        assert!(!app.free_picker);
+        assert_eq!(app.settings.model, "meta-llama/llama-3.2-3b-instruct:free");
+        assert!(app.settings.writer_model.is_empty());
+
+        app.model_target = ModelTarget::Tool;
+        app.model_picker = true;
+        app.model_sel = app
+            .filtered_model_choices()
+            .iter()
+            .position(|(id, _)| id == "openai/gpt-4.1")
+            .unwrap();
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.settings.tool_model, "openai/gpt-4.1");
+        assert_eq!(app.settings.model, "meta-llama/llama-3.2-3b-instruct:free");
+
+        app.open_module(ModuleId::Providers);
+        let labels: Vec<_> = app
+            .fields
+            .iter()
+            .map(|field| field.label.as_str())
+            .collect();
+        assert!(labels.contains(&"Connection"));
+        assert!(labels.contains(&"Writer model"));
+        assert!(labels.contains(&"Tool model"));
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn plus_opens_scope_and_escape_restores_the_query() {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        app.prompt = "who is ada".into();
+        app.cursor = app.prompt.chars().count();
+        app.on_event(key(KeyCode::Char('+')));
+        let scope = app.scope.as_ref().expect("scope card");
+        assert!(scope.facts);
+        assert!(scope.domain);
+        assert_eq!(scope.query, "who is ada");
+        assert!(app.prompt.is_empty());
+        assert!(app.pending_reports.is_empty());
+
+        app.on_event(key(KeyCode::Char(' ')));
+        assert!(!app.scope.as_ref().unwrap().facts);
+        assert!(app.settings.facts);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &mut app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Facts"), "{text}");
+        assert!(text.contains("Identity"), "{text}");
+        assert!(text.contains("Space toggles"), "{text}");
+
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.scope.is_none());
+        assert_eq!(app.prompt, "who is ada");
+        assert!(app.pending_reports.is_empty());
+    }
+
+    #[test]
+    fn start_case_worker_opens_scope_before_research() {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        app.confirm_query = Some("example.com".into());
+        app.confirm_sel = 0;
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.confirm_query.is_none());
+        assert_eq!(
+            app.scope.as_ref().map(|scope| scope.query.as_str()),
+            Some("example.com")
+        );
+        assert!(app.pending_reports.is_empty());
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Char(' ')));
+        assert!(!app.scope.as_ref().unwrap().web);
+        assert!(app.settings.web);
     }
 }
 

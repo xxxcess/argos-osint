@@ -617,7 +617,79 @@ pub async fn transcribe(secret: &ProviderSecret, wav: &[u8]) -> Result<String> {
         .to_string())
 }
 
-pub async fn list_models(secret: &ProviderSecret) -> Result<Vec<String>> {
+/// One model from `GET /models`. `free` is a concrete zero-cost model, not
+/// the `openrouter/free` router that picks one of those at random.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedModel {
+    pub id: String,
+    pub name: String,
+    pub free: bool,
+}
+
+/// The OpenRouter route that chooses a free model at random.
+pub fn is_free_router(id: &str) -> bool {
+    id.trim().eq_ignore_ascii_case("openrouter/free")
+}
+
+/// Free models a person can pin. The router id itself is not one of them.
+pub fn concrete_free_models(models: &[ListedModel]) -> Vec<ListedModel> {
+    let mut free: Vec<ListedModel> = models
+        .iter()
+        .filter(|model| model.free && !is_free_router(&model.id))
+        .filter(|model| !model.id.to_ascii_lowercase().starts_with("openrouter/"))
+        .cloned()
+        .collect();
+    free.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    free
+}
+
+pub fn parse_model_catalog(value: &Value) -> Vec<ListedModel> {
+    let Some(data) = value.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+    let mut models = Vec::new();
+    for item in data {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()).map(str::trim) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(id);
+        models.push(ListedModel {
+            id: id.to_string(),
+            name: name.to_string(),
+            free: is_concrete_free(id, item),
+        });
+    }
+    models.sort_by(|a, b| a.id.to_lowercase().cmp(&b.id.to_lowercase()));
+    models
+}
+
+fn is_concrete_free(id: &str, item: &Value) -> bool {
+    if is_free_router(id) || id.to_ascii_lowercase().starts_with("openrouter/") {
+        return false;
+    }
+    if id.to_ascii_lowercase().ends_with(":free") {
+        return true;
+    }
+    let prompt = item.pointer("/pricing/prompt").and_then(json_number);
+    let completion = item.pointer("/pricing/completion").and_then(json_number);
+    matches!((prompt, completion), (Some(p), Some(c)) if p == 0.0 && c == 0.0)
+}
+
+fn json_number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+}
+
+pub async fn list_catalog(secret: &ProviderSecret) -> Result<Vec<ListedModel>> {
     let client = http()?;
     let url = format!("{}/models", normalize_base(&secret.base_url));
     let req = authorize(client.get(&url), secret).await?;
@@ -628,16 +700,15 @@ pub async fn list_models(secret: &ProviderSecret) -> Result<Vec<String>> {
         return Err(anyhow!("models {status}: {text}"));
     }
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    let mut names = Vec::new();
-    if let Some(data) = v.get("data").and_then(|d| d.as_array()) {
-        for item in data {
-            if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
-                names.push(id.to_string());
-            }
-        }
-    }
-    names.sort();
-    Ok(names)
+    Ok(parse_model_catalog(&v))
+}
+
+pub async fn list_models(secret: &ProviderSecret) -> Result<Vec<String>> {
+    Ok(list_catalog(secret)
+        .await?
+        .into_iter()
+        .map(|model| model.id)
+        .collect())
 }
 
 fn http() -> Result<reqwest::Client> {
@@ -655,16 +726,39 @@ pub struct SettingsFile {
     pub report_dir: String,
     #[serde(default = "default_modality")]
     pub modality: String,
-    /// Selected text model. Empty means the provider's own default, which
+    /// Connection model. Empty means the provider's own default, which
     /// is `grok-4.6` until another provider is signed in.
     #[serde(default)]
     pub model: String,
-    /// Public web search (DuckDuckGo, or SearXNG when `searx_url` is set).
+    /// User-facing model. Empty uses `model`.
+    #[serde(default)]
+    pub writer_model: String,
+    /// Tool-calling model. Empty uses `model`.
+    #[serde(default)]
+    pub tool_model: String,
+    /// Wikipedia and Wikidata. `wikipedia` is the old name.
+    #[serde(default = "default_true", alias = "wikipedia")]
+    pub facts: bool,
+    /// SearXNG, or DuckDuckGo, plus Brave and Tavily when a key is set.
+    /// `internet` is the old name.
+    #[serde(default = "default_true", alias = "internet")]
+    pub web: bool,
     #[serde(default = "default_true")]
-    pub internet: bool,
-    /// English Wikipedia opensearch.
+    pub news: bool,
     #[serde(default = "default_true")]
-    pub wikipedia: bool,
+    pub domain: bool,
+    #[serde(default = "default_true")]
+    pub social: bool,
+    #[serde(default = "default_true")]
+    pub identity: bool,
+    #[serde(default)]
+    pub brave_key: String,
+    #[serde(default)]
+    pub tavily_key: String,
+    #[serde(default)]
+    pub youtube_key: String,
+    #[serde(default)]
+    pub github_token: String,
     /// Extra public sources. Each URL template must contain `{query}`.
     #[serde(default)]
     pub sources: Vec<crate::search::OsintSource>,
@@ -685,14 +779,61 @@ impl Default for SettingsFile {
             report_dir: String::new(),
             modality: default_modality(),
             model: String::new(),
-            internet: true,
-            wikipedia: true,
+            writer_model: String::new(),
+            tool_model: String::new(),
+            facts: true,
+            web: true,
+            news: true,
+            domain: true,
+            social: true,
+            identity: true,
+            brave_key: String::new(),
+            tavily_key: String::new(),
+            youtube_key: String::new(),
+            github_token: String::new(),
             sources: Vec::new(),
         }
     }
 }
 
+fn filled(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn secret_or_env(value: &str, env_name: &str) -> Option<String> {
+    if let Some(value) = filled(value) {
+        return Some(value);
+    }
+    std::env::var(env_name)
+        .ok()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
 impl SettingsFile {
+    /// Global OSINT defaults. Empty key fields fall back to the process environment.
+    pub fn source_plan(&self) -> crate::search::SourcePlan {
+        crate::search::SourcePlan {
+            facts: self.facts,
+            web: self.web,
+            news: self.news,
+            domain: self.domain,
+            social: self.social,
+            identity: self.identity,
+            searx_url: filled(&self.searx_url),
+            brave_key: secret_or_env(&self.brave_key, "BRAVE_API_KEY"),
+            tavily_key: secret_or_env(&self.tavily_key, "TAVILY_API_KEY"),
+            youtube_key: secret_or_env(&self.youtube_key, "YOUTUBE_API_KEY"),
+            github_token: secret_or_env(&self.github_token, "GITHUB_TOKEN"),
+            extra: self.sources.clone(),
+        }
+    }
+
     pub fn load() -> Result<Self> {
         let path = crate::paths::config_path();
         if !path.exists() {
@@ -715,6 +856,18 @@ impl SettingsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_osint_toggles_load_as_stages() {
+        let settings: SettingsFile =
+            toml::from_str("internet = false\nwikipedia = false\n").unwrap();
+        assert!(!settings.web);
+        assert!(!settings.facts);
+        assert!(settings.news);
+        assert!(settings.domain);
+        assert!(settings.social);
+        assert!(settings.identity);
+    }
 
     #[test]
     fn parses_tool_completion_and_sse() {
@@ -807,6 +960,37 @@ mod tests {
         assert_eq!(secret.base_url, "https://api.x.ai/v1");
         let picked = active_text_secret(&crate::secrets::AuthFile::default(), "grok-4.5");
         assert_eq!(picked.model, "grok-4.5");
+    }
+
+    #[test]
+    fn free_router_opens_onto_concrete_free_models() {
+        let raw = r#"{"data":[
+            {"id":"openrouter/free","name":"Free Models Router","pricing":{"prompt":"0","completion":"0"}},
+            {"id":"meta-llama/llama-3.2-3b-instruct:free","name":"Meta: Llama 3.2 3B Instruct (free)","pricing":{"prompt":"0","completion":"0"}},
+            {"id":"openai/gpt-4.1","name":"OpenAI: GPT-4.1","pricing":{"prompt":"0.002","completion":"0.008"}},
+            {"id":"stealth/space-bunny","name":"Space Bunny","pricing":{"prompt":"0","completion":"0"}}
+        ]}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let catalog = parse_model_catalog(&value);
+        assert!(is_free_router("openrouter/free"));
+        assert!(
+            !catalog
+                .iter()
+                .find(|m| m.id == "openrouter/free")
+                .unwrap()
+                .free
+        );
+        let free = concrete_free_models(&catalog);
+        let ids: Vec<_> = free.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "meta-llama/llama-3.2-3b-instruct:free",
+                "stealth/space-bunny"
+            ]
+        );
+        assert!(!ids.contains(&"openai/gpt-4.1"));
+        assert!(!ids.contains(&"openrouter/free"));
     }
 
     #[test]

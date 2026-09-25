@@ -37,7 +37,7 @@ State lives in `~/.argos` (`ARGOS_HOME` overrides it):
 
 | Path | What |
 | --- | --- |
-| `config.toml` | SearXNG URL, report directory, text/voice modality |
+| `config.toml` | SearXNG URL, source stages, API keys, report directory, text/voice modality |
 | `auth.json` | provider keys and the Gmail app password, mode `0600` |
 | `argos.db` | cases, transcripts, brain, report index |
 | `hardware.json` | cached host profile |
@@ -81,10 +81,10 @@ from Apps. The prompt stays at the bottom.
 1. Classify the message (investigate, remember, hardware, gmail, chat).
 2. Recall a few brain notes and inject them into the system prompt, along with
    the open view and a one-line host profile.
-3. For an investigation, search before the model speaks, so a local model that
-   cannot call tools still sees the hits.
-4. Ask the signed-in text provider, honoring tool calls for another public
-   search, a public page fetch, a memory, or a report.
+3. For an investigation, research the enabled public stages before the model
+   speaks, so a local model that cannot call tools still sees the hits.
+4. Ask the signed-in text provider, honoring tool calls for another web, news,
+   domain, social, or identity lookup, a public page fetch, a memory, or a report.
 5. Write `./reports/<id>-<slug>.md` with YAML front matter, findings, and sources.
 
 Without a provider, `/search` and an investigate turn still write a source
@@ -99,9 +99,9 @@ covert surveillance.
 
 The launcher is Case Desk, Providers, and System. Case Desk tabs are Desk and Brain. Brain replaces the desk and the report list. Brain lists fact memories and opens a card to read one. New facts come from report-chat replies. The report list stays beside the desk and shows pending and completed reports. A failed task stays marked failed there; the reason is only in the System log. Providers' side pages are Mail, OSINT, and LLM. System tabs are Log, Hardware, and Settings. Left and right move between those pages. The log is timestamped and holds system calls, API calls, failed tasks, and searches. Settings is the SearXNG URL and the report folder.
 
-OSINT, under Providers, turns internet search and Wikipedia on or off, sets a SearXNG URL, and adds extra public sources whose URL contains `{query}`. Private addresses are refused.
+OSINT, under Providers, turns Facts, Web, News, Domain, Social, and Identity on or off for every run, sets a SearXNG URL, and can store Brave, Tavily, YouTube, and GitHub keys. Extra public sources whose URL contains `{query}` still work. Private addresses are refused.
 
-On the case desk, type a query and press **+** to start a case worker immediately. **Tab** focuses the report list. **Enter** or a click asks you to confirm. Confirming replaces the case desk chat with that report's chat, including any earlier questions. **Esc** returns to the desk. Questions there are answered only from that report, and the reply says when the file does not cover them. **Esc** returns to the desk. A normal desk message is checked against fact memories from completed reports first. A hit is answered from those facts, and the reply names the reports to open. If nothing matches, or the question asks for a new case anyway, a confirmation offers to just answer or start a case worker. The report list shows that task as pending, failed, or completed. **J**/**K** move the highlight. **x** deletes that case.
+On the case desk, type a query and press **+** to choose Facts, Web, News, Domain, Social, and Identity for that run, then start a case worker. Space toggles a source, Enter starts, and Esc cancels. The defaults come from OSINT settings and the card does not change them. Domain tools still skip registration and certificate lookups when the query has no domain. **Tab** focuses the report list. **Enter** or a click asks you to confirm. Confirming replaces the case desk chat with that report's chat, including any earlier questions. **Esc** returns to the desk. Questions there are answered only from that report, and the reply says when the file does not cover them. **Esc** returns to the desk. A normal desk message is checked against fact memories from completed reports first. A hit is answered from those facts, and the reply names the reports to open. If nothing matches, or the question asks for a new case anyway, a confirmation offers to just answer or start a case worker. Starting a case worker opens the same source card before research begins. The report list shows that task as pending, failed, or completed. **J**/**K** move the highlight. **x** deletes that case.
 
 The agent loop is vendor-neutral. Text and voice both speak the
 OpenAI-compatible HTTP API. Login only selects who hosts that API. The text
@@ -129,9 +129,13 @@ already set, Argos can keep using it and leave `auth.json` without a copy.
 OpenRouter requests also send `HTTP-Referer` and `X-Title`. The base URL
 stays editable, so a proxy in front of the same provider still works.
 
-On the Providers LLM page, Enter on the provider row cycles `grok`, `openai`,
+On the Providers LLM page, Connection is the saved provider. Enter on that row cycles `grok`, `openai`,
 `openrouter`, and `local`, and fills the default URL and model when you have
-not customized them.
+not customized them. Roles sit under that: the writer answers from the report
+list, the open report chat, and tool results, and the tool caller runs the
+research tools. Both roles pick a model from the connection's catalog. Choosing
+`openrouter/free` opens the free models on that route so the turn uses one of
+them instead of the router's random choice.
 
 Voice posts the recording to `{base}/audio/transcriptions`. Ctrl+R runs
 `rec` (sox) or `ffmpeg` for five seconds. The transcript lands in the prompt
@@ -166,8 +170,14 @@ Sending mail is not implemented.
 ## Search endpoint
 
 Set `searx_url` on the System settings tab or in `~/.argos/config.toml` to a SearXNG base URL.
-Argos calls `GET /search?q=&format=json`. JSON output has to be enabled on
-that instance. An empty URL falls back to the public DuckDuckGo HTML results.
+Argos calls `GET /search?q=&format=json`, and `categories=news` for the news stage.
+JSON output has to be enabled on that instance. An empty URL falls back to the
+DuckDuckGo instant-answer JSON API. Brave and Tavily run as well when
+`brave_key` or `tavily_key` is set (or `BRAVE_API_KEY` / `TAVILY_API_KEY`).
+Facts use the Wikipedia and Wikidata JSON APIs. News also uses GDELT. A domain
+in the question adds RDAP, crt.sh, DNS-over-HTTPS, Wayback, and InternetDB.
+A topic or handle adds Bluesky, Hacker News, Mastodon, and YouTube when
+`youtube_key` or `YOUTUBE_API_KEY` is set. A handle or email adds GitHub.
 
 ## Tests
 

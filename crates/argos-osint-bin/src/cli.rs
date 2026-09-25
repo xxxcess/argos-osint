@@ -252,6 +252,26 @@ fn ask(label: &str, default: &str) -> Result<String> {
     }
 }
 
+fn writer_model_id(settings: &SettingsFile, override_model: Option<&str>) -> String {
+    if let Some(model) = override_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        return model.to_string();
+    }
+    if !settings.writer_model.trim().is_empty() {
+        return settings.writer_model.trim().to_string();
+    }
+    settings.model.clone()
+}
+
+fn tool_model_id(settings: &SettingsFile, override_model: Option<&str>) -> String {
+    if !settings.tool_model.trim().is_empty() {
+        return settings.tool_model.trim().to_string();
+    }
+    writer_model_id(settings, override_model)
+}
+
 async fn headless(prompt: String, model: Option<String>) -> Result<()> {
     paths::ensure_home()?;
     let store = Store::open(&paths::db_path())?;
@@ -270,12 +290,13 @@ async fn headless(prompt: String, model: Option<String>) -> Result<()> {
         modality: settings.modality.clone(),
         provider: Some(provider::active_text_secret(
             &auth,
-            model.as_deref().unwrap_or(settings.model.as_str()),
+            &writer_model_id(&settings, model.as_deref()),
         )),
-        searx_url: {
-            let url = settings.searx_url.clone();
-            Some(url).filter(|s| !s.is_empty())
-        },
+        tool_provider: Some(provider::active_text_secret(
+            &auth,
+            &tool_model_id(&settings, model.as_deref()),
+        )),
+        plan: settings.source_plan(),
         report_dir: crate::tui::report_dir(&settings),
         case_id: None,
         gmail: auth.gmail.as_ref().map(GmailConfig::from),

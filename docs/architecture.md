@@ -32,7 +32,14 @@ Hardware detection shells out the same way a host probe has to: `sysctl` and
 `sysinfo` for CPU, RAM, and disks. The Metal budget helper is pure and tested
 without a Mac GPU.
 
-Search prefers SearXNG's JSON API. The DuckDuckGo HTML parser is a fallback
-and is tested against a fixture, not the live site. `fetch_page` checks the
-host before the request and refuses private, loopback, and link-local
-answers, including IPv4-mapped IPv6.
+An investigation calls `search::research` before the model speaks. The
+question is split with regular expressions into person, organization, domain,
+handle, email, and topic. Facts (Wikipedia, Wikidata), web (SearXNG, or
+DuckDuckGo, plus Brave and Tavily when a key is set), and news (SearXNG news
+and GDELT) run when those stages are on. Domain tools (RDAP, crt.sh, DNS,
+Wayback, InternetDB) run only when a domain was extracted. Social tools run
+for a topic or handle. GitHub runs for a handle or email. One adapter that
+fails does not fail the case. `fetch_page` checks the host before the request
+and refuses private, loopback, and link-local answers, including IPv4-mapped
+IPv6. The DuckDuckGo HTML parser remains for fixtures; the live fallback is
+the instant-answer JSON API.

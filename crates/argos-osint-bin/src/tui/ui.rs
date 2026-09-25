@@ -33,8 +33,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.model_picker {
         draw_model_picker(frame, app, area);
     }
+    if app.free_picker {
+        draw_free_picker(frame, app, area);
+    }
     if app.help {
         draw_help(frame, area);
+    }
+    if app.scope.is_some() {
+        draw_scope(frame, app, area);
     }
     if app.confirm_query.is_some() {
         draw_case_confirm(frame, app, area);
@@ -562,6 +568,14 @@ fn field_lines(app: &App) -> Vec<Line<'static>> {
         .iter()
         .enumerate()
         .map(|(i, field)| {
+            if field.key.starts_with("__h_") {
+                let style = if i == app.field_sel {
+                    theme::selected()
+                } else {
+                    theme::accent()
+                };
+                return Line::from(field.label.clone()).style(style);
+            }
             let shown = if field.secret {
                 mask(&field.value)
             } else {
@@ -1050,7 +1064,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.settings.modality == "voice" {
         vec![Line::from("voice · Ctrl+R record · Enter send").style(hint_style)]
     } else {
-        vec![Line::from("Enter send · + new case · /help").style(hint_style)]
+        vec![Line::from("Enter send · + case scope · /help").style(hint_style)]
     };
     let mut lines = vec![input];
     lines.extend(hint);
@@ -1153,9 +1167,13 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: Rect) {
     );
     frame.render_widget(Clear, modal);
     let choices = app.filtered_model_choices();
-    let current = app.active_model();
+    let current = app.picker_current();
+    let router_selected = choices
+        .get(app.model_sel)
+        .map(|(id, _)| argos_osint_core::provider::is_free_router(id))
+        .unwrap_or(false);
     let mut lines = vec![
-        Line::from("Models").style(theme::accent()),
+        Line::from(app.picker_title()).style(theme::accent()),
         Line::from(format!(
             "> {}",
             if app.model_query.is_empty() {
@@ -1184,10 +1202,65 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from("No models match").style(theme::dim()));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("[Enter] Use model   [Esc] Close   Ctrl+M").style(theme::dim()));
+    let hint = if router_selected {
+        "[Enter] List free models   [Esc] Close"
+    } else {
+        "[Enter] Use model   [Esc] Close   Ctrl+M"
+    };
+    lines.push(Line::from(hint).style(theme::dim()));
     frame.render_widget(
         Paragraph::new(lines)
             .block(panel(" Model "))
+            .wrap(Wrap { trim: false }),
+        modal,
+    );
+}
+
+fn draw_free_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let modal = centered(
+        area,
+        area.width.saturating_mul(3) / 4,
+        area.height.saturating_mul(3) / 4,
+    );
+    frame.render_widget(Clear, modal);
+    let choices = app.filtered_free_models();
+    let mut lines = vec![
+        Line::from("Free models").style(theme::accent()),
+        Line::from("openrouter/free would choose one of these at random.").style(theme::dim()),
+        Line::from(format!(
+            "> {}",
+            if app.free_query.is_empty() {
+                "type to filter"
+            } else {
+                app.free_query.as_str()
+            }
+        )),
+        Line::from(""),
+    ];
+    if app.free_loading && choices.is_empty() {
+        lines.push(Line::from("Loading free models…").style(theme::dim()));
+    }
+    for (i, (id, label)) in choices.iter().enumerate() {
+        let style = if i == app.free_sel {
+            theme::selected()
+        } else {
+            theme::text()
+        };
+        let name = if label == id {
+            id.clone()
+        } else {
+            format!("{label}  {id}")
+        };
+        lines.push(Line::from(name).style(style));
+    }
+    if !app.free_loading && choices.is_empty() {
+        lines.push(Line::from("No free models were listed.").style(theme::dim()));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("[Enter] Use this model   [Esc] Back").style(theme::dim()));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel(" Free models "))
             .wrap(Wrap { trim: false }),
         modal,
     );
@@ -1281,6 +1354,53 @@ fn draw_delete_report_confirm(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn draw_scope(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(scope) = app.scope.as_ref() else {
+        return;
+    };
+    let modal = centered(
+        area,
+        area.width.saturating_mul(2) / 3,
+        area.height.saturating_mul(3) / 4,
+    );
+    frame.render_widget(Clear, modal);
+    let rows = [
+        ("Facts", scope.facts),
+        ("Web", scope.web),
+        ("News", scope.news),
+        ("Domain", scope.domain),
+        ("Social", scope.social),
+        ("Identity", scope.identity),
+    ];
+    let mut text = vec![
+        Line::from("Research scope").style(theme::accent()),
+        Line::from(""),
+        Line::from(scope.query.clone()).style(theme::text()),
+        Line::from("This run only. Defaults come from OSINT settings.").style(theme::dim()),
+        Line::from("Domain lookups run only when the query names a domain.").style(theme::dim()),
+        Line::from(""),
+    ];
+    for (index, (label, on)) in rows.iter().enumerate() {
+        let mark = if *on { "[x]" } else { "[ ]" };
+        let style = if index == scope.selected {
+            theme::selected()
+        } else {
+            theme::text()
+        };
+        text.push(Line::from(format!("{mark} {label}")).style(style));
+    }
+    text.push(Line::from(""));
+    text.push(
+        Line::from("Space toggles · Enter starts · Esc cancels · j/k move").style(theme::dim()),
+    );
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(panel(" Case scope "))
+            .wrap(Wrap { trim: false }),
+        modal,
+    );
+}
+
 fn draw_case_confirm(frame: &mut Frame, app: &App, area: Rect) {
     let modal = centered(
         area,
@@ -1329,7 +1449,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, modal);
     let text = vec![
         Line::from("Argos OSINT").style(theme::accent()),
-        Line::from("Enter talks on the case desk. + starts a case worker. Report status stays in the list beside the desk."),
+        Line::from("Enter talks on the case desk. + opens the source scope, then starts a case worker. Report status stays in the list beside the desk."),
         Line::from("Ctrl+P app search    Ctrl+M models    Tab cycle focus    Ctrl+C cancel or quit"),
         Line::from("/model lists Grok 4.6 and Grok 4.5. /model grok-4.5 switches. The default is grok-4.6."),
         Line::from("PgUp and PgDn scroll the case desk or report chat. End jumps to the latest. The wheel does the same over the chat."),

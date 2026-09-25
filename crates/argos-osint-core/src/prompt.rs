@@ -15,6 +15,8 @@ pub struct PromptParts<'a> {
     pub evidence_only: bool,
     /// The included evidence is fact memories from completed reports, not the files.
     pub from_memory: bool,
+    /// Tool results are already in the conversation. This call only writes.
+    pub writer_only: bool,
 }
 
 pub fn system_prompt(parts: &PromptParts<'_>) -> String {
@@ -51,8 +53,10 @@ The user may be speaking or typing. Treat the latest user message as what they j
             "SCOPE: Answer only from the report evidence included with this question. \
              Paraphrase or quote that report. If it does not contain the answer, say that the report does not cover the question. \
              Do not search, do not use brain memories, do not invent sources, and do not start a new case."
+        } else if parts.writer_only {
+            "A tool caller already ran. Its results are plain text in the user message under TOOL RESULTS, alongside any material gathered before you were asked. Use that, the report list, and the open report chat. Answer the user. Do not call tools. Prefer a short answer, then the report. If a tool or API call failed, do not quote the error. Say that the step failed and that the detail is in the System log."
         } else {
-            "When a public search was already run for this turn, use those hits. If you need another public page, call fetch_page. If the user asked you to remember a fact about themselves, call remember. Prefer a short answer, then the report. If a tool, search, or API call fails, do not quote the error. Say that the step failed and that the detail is in the System log."
+            "When a public search was already run for this turn, use those hits. Call web_search, news_search, domain_lookup, social_search, or identity_lookup for another public source, and fetch_page for a URL. If the user asked you to remember a fact about themselves, call remember. Prefer a short answer, then the report. If a tool, search, or API call fails, do not quote the error. Say that the step failed and that the detail is in the System log."
         },
     )
 }
@@ -122,6 +126,7 @@ mod tests {
             modality: "text",
             evidence_only: false,
             from_memory: false,
+            writer_only: false,
         });
         assert!(prompt.contains("My name is Ada"));
         assert!(prompt.contains("ACTIVE VIEW: Brain"));
@@ -139,9 +144,27 @@ mod tests {
             modality: "text",
             evidence_only: true,
             from_memory: false,
+            writer_only: false,
         });
         assert!(prompt.contains("Answer only from the report evidence"));
         assert!(prompt.contains("Do not search"));
+    }
+
+    #[test]
+    fn writer_reads_tool_results_as_text() {
+        let prompt = system_prompt(&PromptParts {
+            view_name: "Case Desk",
+            view_context: "Three reports are listed.",
+            hardware_line: "macos arm64",
+            memories: &[],
+            modality: "text",
+            evidence_only: false,
+            from_memory: false,
+            writer_only: true,
+        });
+        assert!(prompt.contains("TOOL RESULTS"));
+        assert!(prompt.contains("Do not call tools"));
+        assert!(prompt.contains("Three reports are listed."));
     }
 
     #[test]

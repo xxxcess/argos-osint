@@ -136,6 +136,14 @@ pub fn slash_commands() -> &'static [SlashCommand] {
             summary: "Open recall, or /brain <fact> to remember",
         },
         SlashCommand {
+            name: "network",
+            summary: "Open the Network text graph",
+        },
+        SlashCommand {
+            name: "find",
+            summary: "Find nodes on the Network graph",
+        },
+        SlashCommand {
             name: "gmail",
             summary: "Open the Gmail MCP setup",
         },

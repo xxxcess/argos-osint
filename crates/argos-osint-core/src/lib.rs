@@ -17,5 +17,6 @@ pub mod search;
 pub mod secrets;
 pub mod session;
 pub mod store;
+pub mod tna;
 
 pub use session::{resolve_case, Card, CardOption, Case};

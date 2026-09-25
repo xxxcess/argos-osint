@@ -5,12 +5,12 @@ use futures_util::future::join_all;
 use serde_json::Value;
 
 use super::{
-    clip, get_json, get_json_headers, merge_adapter_results, strip_tags, tag, Job, SearchHit,
+    clip, get_json, get_json_headers, merge_adapter_results, strip_tags, tag, Job, MergeOutcome, SearchHit,
 };
 
 const MASTODON: &str = "https://mastodon.social";
 
-pub async fn gather(query: String, youtube_key: Option<String>) -> Result<Vec<SearchHit>, String> {
+pub async fn gather(query: String, youtube_key: Option<String>) -> Result<MergeOutcome, String> {
     let mut jobs: Vec<Job> = Vec::new();
     let bsky = query.clone();
     jobs.push(Box::pin(async move { ("bluesky", bluesky(&bsky).await) }));

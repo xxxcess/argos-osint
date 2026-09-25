@@ -66,6 +66,11 @@ pub fn render_report(
             out.push_str(&format!("### {n}. {title}\n\n"));
             out.push_str(&format!("- URL: {}\n", hit.url.trim()));
             out.push_str(&format!("- Retrieved: {created}\n"));
+            if hit.snippet.trim().is_empty() {
+                out.push_str("- Excerpt: no excerpt was stored\n");
+            } else {
+                out.push_str(&format!("- Excerpt: {}\n", one_line(&hit.snippet)));
+            }
             out.push_str(&format!(
                 "- Use: Judgment {n} restates this source only.\n\n"
             ));
@@ -100,6 +105,9 @@ pub fn render_report(
             ));
         }
     }
+    if hits.iter().any(|hit| hit.title.starts_with("[leakcheck]")) {
+        out.push_str("\nPowered by [LeakCheck](https://leakcheck.io)\n");
+    }
     out
 }
 
@@ -126,16 +134,10 @@ fn discovery_summary(hits: &[SearchHit]) -> String {
     let mut sentences = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for hit in hits {
-        let sentence = if hit.snippet.trim().is_empty() {
-            let title = one_line(&hit.title);
-            if title.is_empty() {
-                String::new()
-            } else {
-                format!("{title}.")
-            }
-        } else {
-            first_sentence(&hit.snippet)
-        };
+        if hit.snippet.trim().is_empty() {
+            continue;
+        }
+        let sentence = first_sentence(&hit.snippet);
         if sentence.is_empty() {
             continue;
         }
@@ -405,14 +407,29 @@ mod tests {
         assert!(bluf.contains("A page about the harbor."));
         assert!(bluf.contains("The channel closed overnight."));
         let evidence = &md[md.find("## Evidence").unwrap()..md.find("## Analyst note").unwrap()];
-        assert!(!evidence.contains("Excerpt"));
-        assert!(!evidence.contains("A page about the harbor."));
+        assert!(evidence.contains("Excerpt"));
+        assert!(evidence.contains("A page about the harbor."));
         assert!(md.contains("https://example.com"));
         assert!(md.contains("The tide turned."));
         assert!(md.contains("Confidence: low"));
         assert!(md.contains("AM") || md.contains("PM"));
         let shown = short_when("2026-09-24 14:05:00");
         assert_eq!(shown, "Sep 24 02:05 PM");
+    }
+
+    #[test]
+    fn empty_snippet_is_not_a_bluf_finding() {
+        let hits = vec![SearchHit {
+            title: "Secret Title Alone".into(),
+            url: "https://example.com/empty".into(),
+            snippet: "".into(),
+        }];
+        let md = render_report("Empty", None, "what happened?", "", &hits);
+        let bluf = &md[md.find("## BLUF").unwrap()..md.find("## Key judgments").unwrap()];
+        assert!(!bluf.contains("Secret Title Alone"), "{bluf}");
+        assert!(bluf.contains("no excerpt") || bluf.contains("no finding"), "{bluf}");
+        let evidence = &md[md.find("## Evidence").unwrap()..];
+        assert!(evidence.contains("Excerpt: no excerpt was stored"));
     }
 
     #[test]

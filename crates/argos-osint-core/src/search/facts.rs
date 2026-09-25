@@ -3,9 +3,9 @@
 use futures_util::future::join_all;
 use serde_json::Value;
 
-use super::{clip, get_json, merge_adapter_results, tag, Job, SearchHit};
+use super::{clip, get_json, merge_adapter_results, tag, Job, MergeOutcome, SearchHit};
 
-pub async fn gather(terms: Vec<String>) -> Result<Vec<SearchHit>, String> {
+pub async fn gather(terms: Vec<String>) -> Result<MergeOutcome, String> {
     let mut jobs: Vec<Job> = Vec::new();
     for term in terms.into_iter().take(2) {
         let wiki = term.clone();
@@ -15,7 +15,7 @@ pub async fn gather(terms: Vec<String>) -> Result<Vec<SearchHit>, String> {
         jobs.push(Box::pin(async move { ("wikidata", wikidata(&term).await) }));
     }
     if jobs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(MergeOutcome::default());
     }
     merge_adapter_results(join_all(jobs).await)
 }

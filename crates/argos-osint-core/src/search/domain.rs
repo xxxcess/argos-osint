@@ -8,10 +8,10 @@ use futures_util::future::join_all;
 use serde_json::Value;
 
 use super::{
-    clip, get_json, ip_blocked, merge_adapter_results, request, tag, Job, RawHttp, SearchHit,
+    clip, get_json, ip_blocked, merge_adapter_results, request, tag, Job, MergeOutcome, RawHttp, SearchHit,
 };
 
-pub async fn gather(domains: Vec<String>) -> Result<Vec<SearchHit>, String> {
+pub async fn gather(domains: Vec<String>) -> Result<MergeOutcome, String> {
     let mut jobs: Vec<Job> = Vec::new();
     for domain in domains.into_iter().take(2) {
         let rdap_domain = domain.clone();
@@ -29,7 +29,7 @@ pub async fn gather(domains: Vec<String>) -> Result<Vec<SearchHit>, String> {
         }));
     }
     if jobs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(MergeOutcome::default());
     }
     merge_adapter_results(join_all(jobs).await)
 }

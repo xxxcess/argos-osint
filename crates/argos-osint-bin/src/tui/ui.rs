@@ -18,7 +18,7 @@ use super::app::{
 };
 use super::theme::{self, panel};
 use argos_osint_core::paths::fit_status;
-use argos_osint_core::tna::TnaCluster;
+use argos_osint_core::tna::{TnaCluster, TnaSnapshot};
 use argos_osint_core::secrets::mask;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -1513,8 +1513,9 @@ fn split_v(area: Rect, constraints: &[Constraint]) -> Vec<Rect> {
 
 #[cfg(test)]
 mod tests {
-    use super::{markdown_lines, tna_box_connections};
+    use super::{markdown_lines, tna_box_connections, tna_ego_box_fit};
     use crate::tui::theme;
+    use crate::tui::app::TNA_GRAPH_BOX_BUDGET;
     use ratatui::style::Style;
     use tui_nodes::{NodeGraph, NodeLayout};
 
@@ -1558,6 +1559,33 @@ mod tests {
         let nodes: Vec<_> = (0..4).map(|_| NodeLayout::new((16, 4))).collect();
         let mut graph = NodeGraph::new(nodes, conns, 100, 40);
         graph.calculate();
+    }
+
+    #[test]
+    fn tna_ego_small_area_clamp_dense_edges_no_panic() {
+        // Detail ego Rect can be tiny (e.g. 36×12). Unclamped ≤16 boxes of (16,4)
+        // stack past height → ConnectionsLayout::block_port OOB. After clamp: safe.
+        let w = 36u16;
+        let h = 12u16;
+        let fit = tna_ego_box_fit(w, h);
+        assert!(fit >= 1);
+        assert!(fit <= TNA_GRAPH_BOX_BUDGET);
+        assert!(fit <= ((h as usize).saturating_sub(2) / 4).max(1));
+
+        let n = fit;
+        let nodes: Vec<_> = (0..n).map(|_| NodeLayout::new((16, 4))).collect();
+        let mut pairs = Vec::new();
+        // Dense star + clique among visible boxes (mirrors Table detail ego).
+        for i in 0..n {
+            for j in 0..n {
+                if i != j {
+                    pairs.push((i, j, Style::default()));
+                }
+            }
+        }
+        let conns = tna_box_connections(pairs);
+        let mut graph = NodeGraph::new(nodes, conns, w as usize, h as usize);
+        graph.calculate(); // must not panic
     }
 }
 
@@ -1658,7 +1686,7 @@ fn draw_tna_graph(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Shared ego-graph boxes for Graph canvas and Table details pane.
-/// Ports stay 0; budget ≤ `TNA_GRAPH_BOX_BUDGET`; `catch_unwind` around layout.
+/// Ports stay 0; area-fit clamp ≤ `TNA_GRAPH_BOX_BUDGET`; pair dedupe; `catch_unwind`.
 /// Returns `false` when boxes were skipped (too small / panic / empty) and a fallback was drawn.
 fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
     if area.height < 8 || area.width < 24 {
@@ -1676,7 +1704,7 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
         );
         return false;
     };
-    let items = app.tna_display_nodes();
+    let mut items = app.tna_display_nodes();
     if items.is_empty() {
         frame.render_widget(
             Paragraph::new("No ego nodes.").style(theme::dim()),
@@ -1684,10 +1712,18 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
         );
         return false;
     }
+    let fit = tna_ego_box_fit(area.width, area.height);
+    items = tna_clamp_ego_items(items, fit, app.tna_focus_id.as_deref(), snap);
     debug_assert!(
         items.len() <= TNA_GRAPH_BOX_BUDGET,
         "graph box budget exceeded: {}",
         items.len()
+    );
+    debug_assert!(
+        items.len() <= fit,
+        "area-fit budget exceeded: {} > {}",
+        items.len(),
+        fit
     );
 
     let mut titles: Vec<String> = Vec::with_capacity(items.len());
@@ -1840,6 +1876,49 @@ fn tna_ego_neighbor_fallback(app: &App) -> String {
     } else {
         lines.into_iter().take(8).collect::<Vec<_>>().join("\n")
     }
+}
+
+/// Area-fit budget for (16×4) ego boxes inside a NodeGraph of `width`×`height`.
+/// Conservative: product of row/col estimates, capped so a worst-case vertical
+/// stack (star ego) never drives `ConnectionsLayout::block_port` past the field
+/// (`port y = top+port+1`, South indexes `y+1`).
+fn tna_ego_box_fit(width: u16, height: u16) -> usize {
+    let by_h = (height as usize).saturating_sub(2) / 4;
+    let by_w = (width as usize).saturating_sub(2) / (16 + 5);
+    let grid = by_h.max(1).saturating_mul(by_w.max(1));
+    // Cap to vertical rows — tui-nodes may stack every box in one column.
+    let stack_safe = by_h.max(1);
+    TNA_GRAPH_BOX_BUDGET.min(grid.min(stack_safe))
+}
+
+/// Truncate display items to `fit`, keeping the focus node when present.
+fn tna_clamp_ego_items(
+    items: Vec<TnaDisplayItem>,
+    fit: usize,
+    focus: Option<&str>,
+    snap: &TnaSnapshot,
+) -> Vec<TnaDisplayItem> {
+    if fit == 0 || items.is_empty() {
+        return Vec::new();
+    }
+    if items.len() <= fit {
+        return items;
+    }
+    let is_focus = |it: &TnaDisplayItem| match it {
+        TnaDisplayItem::Real { idx } => {
+            focus.is_some_and(|id| snap.nodes.get(*idx).is_some_and(|n| n.id == id))
+        }
+        TnaDisplayItem::Super { hub_id, .. } => focus == Some(hub_id.as_str()),
+    };
+    let mut out: Vec<TnaDisplayItem> = items.iter().take(fit).cloned().collect();
+    if focus.is_some() && !out.iter().any(is_focus) {
+        if let Some(focused) = items.into_iter().find(is_focus) {
+            if let Some(last) = out.last_mut() {
+                *last = focused;
+            }
+        }
+    }
+    out
 }
 
 /// One wire per unordered visible box pair; both ports always 0.
@@ -2012,27 +2091,20 @@ fn draw_tna_table(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Master–detail split inside Table canvas only.
-    let (list_area, detail_area) = if inner.width >= 72 {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
+    // Always vertical stack: initiative list on top, More details below.
+    // (Horizontal side-by-side removed — layout lock for Table master–detail.)
+    let rows = if inner.height >= 20 {
+        Layout::default()
+            .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(inner);
-        (cols[0], cols[1])
-    } else if inner.width < 70 {
-        let rows = Layout::default()
+            .split(inner)
+    } else {
+        Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(8), Constraint::Min(10)])
-            .split(inner);
-        (rows[0], rows[1])
-    } else {
-        // ~70–71: prefer horizontal when it still fits.
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
-            .split(inner);
-        (cols[0], cols[1])
+            .split(inner)
     };
+    let (list_area, detail_area) = (rows[0], rows[1]);
     app.tna_table_list_area = list_area;
     app.tna_table_detail_area = detail_area;
 

@@ -17,7 +17,6 @@ const WINDOW: usize = 3;
 const COLLECTION_CAP: usize = 120;
 const TARGETED_CAP: usize = 80;
 const ANCHOR_LIMIT: usize = 8;
-const GAP_PROXIMITY: f64 = 0.55;
 
 /// Build a complete snapshot from a prepared corpus. Pure CPU; safe for
 /// `tokio::task::spawn_blocking`.
@@ -231,15 +230,6 @@ fn apply_cap(
         .collect();
     // Drop Topic nodes first, then lowest-mention others.
     items.sort_by(|a, b| {
-        let a_topic = a.1 == TnaNodeKind::Topic;
-        let b_topic = b.1 == TnaNodeKind::Topic;
-        b_topic
-            .cmp(&a_topic) // topics sort first for dropping (true > false in reverse... wait)
-            .then(a.3.cmp(&b.3))
-            .then(a.0.cmp(&b.0))
-    });
-    // We want to DROP topics first: sort so topics come first in drop order.
-    items.sort_by(|a, b| {
         let a_drop = drop_priority(a.1, keep_docs);
         let b_drop = drop_priority(b.1, keep_docs);
         a_drop
@@ -326,19 +316,11 @@ fn hash_jitter(id: &str) -> f64 {
 }
 
 fn structural_gaps(nodes: &[TnaNode], edges: &[TnaEdge]) -> Vec<TnaGap> {
-    let mut centroids: HashMap<TnaCluster, (f64, f64, u32)> = HashMap::new();
-    for node in nodes {
-        let entry = centroids.entry(node.cluster).or_insert((0.0, 0.0, 0));
-        entry.0 += node.x;
-        entry.1 += node.y;
-        entry.2 += 1;
-    }
-    let mut present: Vec<(TnaCluster, f64, f64)> = centroids
+    let mut present: Vec<TnaCluster> = TnaCluster::all()
         .into_iter()
-        .filter(|(_, (_, _, n))| *n > 0)
-        .map(|(c, (sx, sy, n))| (c, sx / n as f64, sy / n as f64))
+        .filter(|c| nodes.iter().any(|n| n.cluster == *c))
         .collect();
-    present.sort_by_key(|(c, _, _)| c.as_str());
+    present.sort_by_key(|c| c.as_str());
 
     let mut cross = std::collections::HashSet::new();
     let cluster_of: HashMap<&str, TnaCluster> =
@@ -358,23 +340,20 @@ fn structural_gaps(nodes: &[TnaNode], edges: &[TnaEdge]) -> Vec<TnaGap> {
     let mut gaps = Vec::new();
     for i in 0..present.len() {
         for j in (i + 1)..present.len() {
-            let (ca, xa, ya) = present[i];
-            let (cb, xb, yb) = present[j];
+            let ca = present[i];
+            let cb = present[j];
             if cross.contains(&ordered_pair(ca, cb)) {
                 continue;
             }
-            let dist = ((xa - xb).hypot(ya - yb)).abs();
-            if dist <= GAP_PROXIMITY {
-                gaps.push(TnaGap {
-                    cluster_a: ca,
-                    cluster_b: cb,
-                    note: format!(
-                        "{} and {} sit close in layout but share no edge",
-                        ca.as_str(),
-                        cb.as_str()
-                    ),
-                });
-            }
+            gaps.push(TnaGap {
+                cluster_a: ca,
+                cluster_b: cb,
+                note: format!(
+                    "{} and {} share no edge in this snapshot",
+                    ca.label(),
+                    cb.label()
+                ),
+            });
         }
     }
     gaps
@@ -538,5 +517,22 @@ mod tests {
         assert_eq!(col.title, "TNA · collection");
         let tgt = build_snapshot(&targeted("example.com"));
         assert_eq!(tgt.title, "TNA · Sample");
+    }
+
+    #[test]
+    fn gaps_are_missing_cross_cluster_edges() {
+        let isolated = targeted("only-one-kind.example");
+        let snap = build_snapshot(&isolated);
+        let nclusters = snap
+            .nodes
+            .iter()
+            .map(|n| n.cluster)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert!(
+            snap.gaps.is_empty() || nclusters < 2,
+            "{:?}",
+            snap.gaps
+        );
     }
 }

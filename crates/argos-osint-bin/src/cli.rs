@@ -72,7 +72,7 @@ pub async fn dispatch() -> Result<()> {
     }
     let mut app = App::boot()?;
     if let Some(model) = cli.model {
-        app.select_model(&model);
+        app.set_writer_model(&model);
     }
     tui::run(app).await
 }
@@ -132,6 +132,7 @@ fn logout(gmail: bool) -> Result<()> {
     let mut auth = AuthFile::load()?;
     auth.text = None;
     auth.voice = None;
+    auth.accounts.clear();
     if gmail {
         auth.gmail = None;
     }
@@ -145,13 +146,21 @@ fn logout(gmail: bool) -> Result<()> {
 
 async fn login() -> Result<()> {
     println!("Argos provider login");
-    println!("Chat and voice use the OpenAI-compatible API. The provider only changes the host and the key.");
+    println!("Grok and OpenAI use subscription sign-in. OpenRouter keeps its own API account.");
     println!(
         "Credentials are stored in {} with owner-only permissions.",
         paths::auth_path().display()
     );
     println!();
     for preset in provider::presets() {
+        if preset.id == "grok" {
+            println!("  grok         Grok subscription (Grok Build CLI)");
+            continue;
+        }
+        if preset.id == "openai" {
+            println!("  openai       ChatGPT subscription (Codex CLI, Writer only)");
+            continue;
+        }
         let auth = match preset.env_key {
             Some(name) if preset.key_required => format!("key or {name}"),
             Some(name) => format!("optional key or {name}"),
@@ -162,6 +171,33 @@ async fn login() -> Result<()> {
     println!();
     let modality = ask("Modality [text/voice]", "text")?;
     let choice = ask("Provider [grok/openai/openrouter/local]", "grok")?;
+    if provider::normalize_kind(&choice) == "grok" {
+        if modality == "voice" {
+            return Err(anyhow!("Grok subscription setup is for Writer and Tools. Voice uses a separately configured transcription API."));
+        }
+        println!(
+            "{}",
+            argos_osint_core::grok_oauth::login(|line| println!("{line}")).await?
+        );
+        println!("Connected Grok subscription. Open Providers → Models to assign Writer or Tools. Saved account keys remain unchanged.");
+        return Ok(());
+    }
+    if matches!(
+        provider::normalize_kind(&choice).as_str(),
+        "openai" | "openai-chatgpt"
+    ) {
+        if modality == "voice" {
+            return Err(anyhow!(
+                "ChatGPT subscription is for the Writer. Voice needs a transcription API provider."
+            ));
+        }
+        println!(
+            "{}",
+            argos_osint_core::subscription::login(|line| println!("{line}")).await?
+        );
+        println!("Connected ChatGPT. Open Providers → Models to assign it to Writer; API account keys remain unchanged.");
+        return Ok(());
+    }
     let Some(preset) = provider::preset(&choice) else {
         return Err(anyhow!(
             "unknown provider {choice}. Choose grok, openai, openrouter, or local."
@@ -191,6 +227,7 @@ async fn login() -> Result<()> {
     if modality == "voice" {
         auth.voice = Some(secret);
     } else {
+        auth.set_account(secret.clone());
         auth.text = Some(secret);
     }
     auth.save()?;
@@ -252,26 +289,6 @@ fn ask(label: &str, default: &str) -> Result<String> {
     }
 }
 
-fn writer_model_id(settings: &SettingsFile, override_model: Option<&str>) -> String {
-    if let Some(model) = override_model
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-    {
-        return model.to_string();
-    }
-    if !settings.writer_model.trim().is_empty() {
-        return settings.writer_model.trim().to_string();
-    }
-    settings.model.clone()
-}
-
-fn tool_model_id(settings: &SettingsFile, override_model: Option<&str>) -> String {
-    if !settings.tool_model.trim().is_empty() {
-        return settings.tool_model.trim().to_string();
-    }
-    writer_model_id(settings, override_model)
-}
-
 async fn headless(prompt: String, model: Option<String>) -> Result<()> {
     paths::ensure_home()?;
     let store = Store::open(&paths::db_path())?;
@@ -288,14 +305,14 @@ async fn headless(prompt: String, model: Option<String>) -> Result<()> {
         view_context: "Headless turn. No canvas is open.".into(),
         hardware_line: profile.one_line(),
         modality: settings.modality.clone(),
-        provider: Some(provider::active_text_secret(
-            &auth,
-            &writer_model_id(&settings, model.as_deref()),
-        )),
-        tool_provider: Some(provider::active_text_secret(
-            &auth,
-            &tool_model_id(&settings, model.as_deref()),
-        )),
+        provider: Some({
+            let mut secret = provider::role_secret(&auth, &settings, true);
+            if let Some(model) = model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+                secret.model = model.into();
+            }
+            secret
+        }),
+        tool_provider: Some(provider::role_secret(&auth, &settings, false)),
         plan: settings.source_plan(),
         report_dir: crate::tui::report_dir(&settings),
         case_id: None,

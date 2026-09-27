@@ -21,7 +21,14 @@ use argos_osint_core::paths::fit_status;
 use argos_osint_core::secrets::mask;
 use argos_osint_core::tna::TnaCluster;
 
+#[path = "network.rs"]
+mod network;
+
+#[path = "providers.rs"]
+mod providers;
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.provider_field_hits.clear();
     let area = frame.area();
     frame.render_widget(Paragraph::new("").style(theme::text()), area);
     let chunks = Layout::default()
@@ -33,8 +40,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(area);
     draw_body(frame, app, chunks[0]);
-    draw_prompt(frame, app, chunks[1]);
-    draw_footer(frame, app, chunks[2]);
+    if app.chat_report.is_some() {
+        let bottom = split_v(
+            Rect::new(area.x, chunks[1].y, area.width, 5.min(area.height)),
+            &[Constraint::Length(1), Constraint::Length(4)],
+        );
+        draw_footer(frame, app, bottom[0]);
+        draw_prompt(frame, app, bottom[1]);
+        network::draw_answer(frame, app, chunks[0]);
+    } else {
+        draw_prompt(frame, app, chunks[1]);
+        draw_footer(frame, app, chunks[2]);
+    }
+    if app.provider_picker.is_some() {
+        providers::draw_picker(frame, app, area);
+    }
     if app.modal {
         draw_modal(frame, app, area);
     }
@@ -45,7 +65,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_free_picker(frame, app, area);
     }
     if app.help {
-        draw_help(frame, area);
+        if app.chat_report.is_some() {
+            network::draw_help(frame, area);
+        } else {
+            draw_help(frame, area);
+        }
     }
     if app.scope.is_some() {
         draw_scope(frame, app, area);
@@ -72,7 +96,9 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
-    if on_case_desk(app) {
+    if app.chat_report.is_some() {
+        draw_network(frame, app, area);
+    } else if on_case_desk(app) {
         let work = under_case_tabs(frame, app, area);
         draw_desk_and_reports(frame, app, work);
     } else {
@@ -84,10 +110,14 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_desk_row(frame: &mut Frame, app: &mut App, area: Rect) {
-    let cols = split_h(
-        area,
-        &[Constraint::Percentage(26), Constraint::Percentage(74)],
-    );
+    let cols = if app.chat_report.is_some() || app.module == Some(ModuleId::Providers) {
+        split_h(area, &[Constraint::Length(18), Constraint::Min(0)])
+    } else {
+        split_h(
+            area,
+            &[Constraint::Percentage(26), Constraint::Percentage(74)],
+        )
+    };
     draw_launcher(frame, app, cols[0]);
     draw_main(frame, app, cols[1]);
 }
@@ -363,23 +393,7 @@ fn draw_canvas(frame: &mut Frame, app: &App, area: Rect) {
 
 fn canvas_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
     let transcript = transcript_lines(app, width);
-    let lines = if app.chat_report.is_some() {
-        let mut lines = vec![
-            Line::from(
-                "This report chat replaces the case desk. Answers use only this file. Earlier questions in this report stay here. Esc returns to the desk. /clear wipes this chat.",
-            )
-            .style(theme::dim()),
-            Line::from(""),
-        ];
-        if transcript.is_empty() {
-            lines.push(
-                Line::from("Ask a question about this report.".to_string()).style(theme::dim()),
-            );
-        } else {
-            lines.extend(transcript);
-        }
-        lines
-    } else if transcript.is_empty() {
+    let lines = if transcript.is_empty() {
         vec![
             Line::from(
                 "Ask about the reports, or type a query and press + to start a case. /clear wipes this chat.",
@@ -528,6 +542,10 @@ fn draw_widget(frame: &mut Frame, app: &mut App, area: Rect) {
         app.system_tab_area = Rect::default();
         app.system_tab_hits.clear();
     }
+    if app.module == Some(ModuleId::Providers) && app.provider_page != ProviderPage::Osint {
+        providers::draw(frame, app, area);
+        return;
+    }
     if widget == ModuleId::Hardware && area.width >= 40 && area.height >= 8 {
         draw_gauges(frame, app, area, 2);
         return;
@@ -672,9 +690,8 @@ fn case_side_lines(app: &App, height: usize) -> Vec<Line<'static>> {
 fn provider_lines(app: &App, height: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let body = match app.provider_page {
-        ProviderPage::Mail => field_lines(app),
         ProviderPage::Osint => osint_lines(app, height.saturating_sub(3)),
-        ProviderPage::Llm => field_lines(app),
+        _ => field_lines(app),
     };
     lines.extend(body);
     tail(lines, height)
@@ -1110,7 +1127,16 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         theme::dim()
     };
-    let hint = if app.prompt.starts_with('/') && !app.prompt.contains(' ') {
+    let hint = if app.chat_report.is_some() && app.status != "ready" && !app.running {
+        vec![Line::from(app.status.clone()).style(hint_style)]
+    } else if app.chat_report.is_some() {
+        vec![Line::from(if app.running {
+            "Enter replaces question · Ctrl+C cancels"
+        } else {
+            "Enter asks about report evidence · /clear dismisses answer"
+        })
+        .style(hint_style)]
+    } else if app.prompt.starts_with('/') && !app.prompt.contains(' ') {
         let card = super::slash_menu(&app.prompt);
         card.options
             .iter()
@@ -1135,6 +1161,12 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn prompt_line(app: &App) -> Line<'static> {
+    if app.chat_report.is_some() && app.prompt.is_empty() {
+        return Line::from(vec![
+            Span::styled("❯ ", theme::accent()),
+            Span::styled("ask the open graph…", theme::dim()),
+        ]);
+    }
     let chars: Vec<char> = app.prompt.chars().collect();
     let cursor = app.cursor.min(chars.len());
     let before: String = chars[..cursor].iter().collect();
@@ -1164,6 +1196,18 @@ fn prompt_line(app: &App) -> Line<'static> {
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     if app.case_page == CasePage::Network && matches!(app.module, None | Some(ModuleId::Cases)) {
         draw_network_footer(frame, app, area);
+        return;
+    }
+    if app.module == Some(ModuleId::Providers) {
+        frame.render_widget(
+            Paragraph::new(if app.editing {
+                "Editing · Ctrl+U clear · Enter finish · Save keeps this account"
+            } else {
+                "←/→ section · j/k field · Enter select/edit · Tab focus · Esc Desk"
+            })
+            .style(theme::dim()),
+            area,
+        );
         return;
     }
     let left = "[Ctrl+P] App Search";
@@ -1236,7 +1280,14 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(id, _)| argos_osint_core::provider::is_free_router(id))
         .unwrap_or(false);
     let mut lines = vec![
-        Line::from(app.picker_title()).style(theme::accent()),
+        Line::from(format!(
+            "{} · {}",
+            app.picker_title(),
+            super::app::provider_name(&argos_osint_core::provider::effective_kind(
+                &app.picker_secret()
+            ))
+        ))
+        .style(theme::accent()),
         Line::from(format!(
             "> {}",
             if app.model_query.is_empty() {
@@ -1247,7 +1298,9 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(""),
     ];
-    for (i, (id, label)) in choices.iter().enumerate() {
+    let visible = modal.height.saturating_sub(9).max(1) as usize;
+    let offset = app.model_sel.saturating_sub(visible.saturating_sub(1));
+    for (i, (id, label)) in choices.iter().enumerate().skip(offset).take(visible) {
         let mark = if *id == current { "●" } else { " " };
         let style = if i == app.model_sel {
             theme::selected()
@@ -1268,7 +1321,7 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: Rect) {
     let hint = if router_selected {
         "[Enter] List free models   [Esc] Close"
     } else {
-        "[Enter] Use model   [Esc] Close   Ctrl+M"
+        "[Enter] Use model   [F5] Refresh   [Esc] Close"
     };
     lines.push(Line::from(hint).style(theme::dim()));
     frame.render_widget(
@@ -1355,11 +1408,11 @@ fn draw_report_confirm(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(title).style(theme::text()),
         Line::from(""),
         Line::from(
-            "Opening replaces the case desk chat. Deleting removes the markdown file and the facts taken from this report.",
+            "Opening presents the report network workspace. Answers are temporary; insights file to Brain. Deleting removes the markdown file and its facts.",
         )
         .style(theme::dim()),
         Line::from(""),
-        Line::from("Open report chat").style(style_for(0)),
+        Line::from("Open report network").style(style_for(0)),
         Line::from("Delete report").style(style_for(1)),
         Line::from("Cancel").style(style_for(2)),
         Line::from(""),
@@ -1515,10 +1568,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("Enter talks on the case desk. + opens the source scope, then starts a case worker. Report status stays in the list beside the desk."),
         Line::from("Ctrl+P app search    Ctrl+M models    Tab cycle focus    Ctrl+C cancel or quit"),
         Line::from("/model lists Grok 4.6 and Grok 4.5. /model grok-4.5 switches. The default is grok-4.6."),
-        Line::from("PgUp and PgDn scroll the case desk or report chat. End jumps to the latest. The wheel does the same over the chat."),
-        Line::from("/clear wipes the case desk chat, or the open report chat. /search /new /use /system /log /quit"),
+        Line::from("PgUp and PgDn scroll the case desk. End jumps to the latest. The wheel does the same over the chat."),
+        Line::from("/clear wipes the case desk chat. Open a report for its network workspace. /search /new /use /system /log /quit"),
         Line::from("System keeps the log, hardware, and settings. Configuration and task errors stay in that log."),
-        Line::from("Public search only. Gmail is imap.gmail.com, read-only, app password."),
+        Line::from("Providers separates Grok, OpenAI ChatGPT, and OpenRouter accounts. Models assigns Writer and Tools independently."),
         Line::from("Esc or any key closes this card."),
     ];
     frame.render_widget(
@@ -1672,24 +1725,7 @@ fn tail(mut lines: Vec<Line<'static>>, height: usize) -> Vec<Line<'static>> {
 }
 
 fn draw_network(frame: &mut Frame, app: &mut App, area: Rect) {
-    app.report_area = Rect::default();
-    app.report_line_index.clear();
-    let mut work = area;
-    if app.chat_report.is_some() && work.height > 2 {
-        let rows = split_v(work, &[Constraint::Length(1), Constraint::Min(4)]);
-        let title = app
-            .open_report()
-            .map(|r| r.title.as_str())
-            .unwrap_or("report");
-        frame.render_widget(
-            Paragraph::new(format!("Report chat · {title} · Esc returns to desk"))
-                .style(theme::dim()),
-            rows[0],
-        );
-        work = rows[1];
-    }
-    app.canvas_area = work;
-    draw_tna_table(frame, app, work);
+    network::draw_workspace(frame, app, area);
 }
 
 fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
@@ -1735,7 +1771,7 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
             TnaDisplayItem::Real { idx } => {
                 let id = snap.nodes[*idx].id.as_str();
                 let focused = focus == Some(id);
-                let selected = focused;
+                let selected = focused || app.tna_ledger_neighbor() == Some(id);
                 (selected, focused)
             }
         };
@@ -1821,7 +1857,7 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
             TnaDisplayItem::Real { idx: ni } => {
                 let n = &snap.nodes[*ni];
                 let focused = focus.map(|id| n.id == id).unwrap_or(false);
-                let selected = focused;
+                let selected = focused || app.tna_ledger_neighbor() == Some(n.id.as_str());
                 (n.label.clone(), focused, selected)
             }
         };
@@ -1897,66 +1933,6 @@ fn tna_box_connections(pairs: impl IntoIterator<Item = (usize, usize, Style)>) -
     out
 }
 
-/// Vertical master–detail split for Table canvas inner: list top / detail bottom.
-/// At typical heights prefer detail (~58%) so ego boxes get ≥8–10 rows after
-/// the More-details border; tiny panes use Min(8)/Min(10).
-fn tna_table_master_split(inner: Rect) -> (Rect, Rect) {
-    let rows = if inner.height >= 20 {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-            .split(inner)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(8), Constraint::Min(10)])
-            .split(inner)
-    };
-    (rows[0], rows[1])
-}
-
-fn draw_tna_table(frame: &mut Frame, app: &mut App, area: Rect) {
-    let title = app
-        .tna_snapshot()
-        .map(|s| s.title.clone())
-        .unwrap_or_else(|| "TNA".into());
-    let has_snap = app.tna_snapshot().is_some();
-    let list_focused = app.focus == Focus::Graph;
-    let detail_focused = app.focus == Focus::TableDetail;
-    let border = if list_focused {
-        format!(" {title} · table · list ")
-    } else if detail_focused {
-        format!(" {title} · table · detail ")
-    } else {
-        format!(" {title} · table ")
-    };
-    let find = if let Some(q) = app.tna_find.as_ref() {
-        let n = app.tna_visible_nodes().len();
-        format!(" Filter: {q} ({n} matches)")
-    } else {
-        String::new()
-    };
-    let block = panel(&format!("{border}{find}"));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if !has_snap {
-        app.tna_table_list_area = Rect::default();
-        app.tna_table_detail_area = Rect::default();
-        frame.render_widget(Paragraph::new("No graph yet.").style(theme::dim()), inner);
-        return;
-    }
-
-    // Always vertical stack: initiative list on top, More details below.
-    // Prefer detail height so ego boxes (≥8–10 rows) fit at ~160×48.
-    let (list_area, detail_area) = tna_table_master_split(inner);
-    app.tna_table_list_area = list_area;
-    app.tna_table_detail_area = detail_area;
-
-    draw_tna_table_list(frame, app, list_area);
-    draw_tna_table_detail(frame, app, detail_area);
-}
-
 fn cluster_abbr(cluster: TnaCluster) -> &'static str {
     match cluster {
         TnaCluster::Infrastructure => "Infra",
@@ -1969,9 +1945,9 @@ fn cluster_abbr(cluster: TnaCluster) -> &'static str {
 fn draw_tna_table_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let list_focused = app.focus == Focus::Graph;
     let title = if list_focused {
-        " Initiative list · focused "
+        " Entity list · focused "
     } else {
-        " Initiative list "
+        " Entity list "
     };
     let block = panel(title);
     let inner = block.inner(area);
@@ -1981,16 +1957,16 @@ fn draw_tna_table_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_cluster = inner.width >= 60;
     let constraints = if show_cluster {
         vec![
-            Constraint::Length(9),
-            Constraint::Min(12),
-            Constraint::Length(4),
+            Constraint::Length(8),
+            Constraint::Min(1),
+            Constraint::Length(3),
             Constraint::Length(6),
         ]
     } else {
         vec![
-            Constraint::Length(9),
-            Constraint::Min(12),
-            Constraint::Length(4),
+            Constraint::Length(8),
+            Constraint::Min(1),
+            Constraint::Length(3),
         ]
     };
 
@@ -2014,7 +1990,13 @@ fn draw_tna_table_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 let n = snap.nodes.get(idx)?;
                 Some((
                     format!("{} {}", tna_glyph_for_kind(n.kind), n.kind.as_str()),
-                    short_label(&n.label, 40),
+                    fit_label(
+                        &n.label,
+                        inner
+                            .width
+                            .saturating_sub(if show_cluster { 22 } else { 15 })
+                            as usize,
+                    ),
                     n.degree.to_string(),
                     cluster_abbr(n.cluster).to_string(),
                     n.cluster,
@@ -2060,7 +2042,7 @@ fn draw_tna_table_list(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, inner, &mut app.tna_table_state);
 
     // Scrollbar synced to selection (ITEM_HEIGHT = 1).
-    if !visible.is_empty() {
+    if visible.len() > inner.height.saturating_sub(1) as usize {
         frame.render_stateful_widget(
             Scrollbar::default()
                 .orientation(ScrollbarOrientation::VerticalRight)
@@ -2075,28 +2057,6 @@ fn draw_tna_table_list(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_tna_table_detail(frame: &mut Frame, app: &mut App, area: Rect) {
-    let detail_focused = app.focus == Focus::TableDetail;
-    let title = if detail_focused {
-        " More details · 5 hops · focused "
-    } else {
-        " More details · 5 hops "
-    };
-    let block = panel(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if app.tna_selected_item().is_none() {
-        frame.render_widget(
-            Paragraph::new("Select a node in the list.").style(theme::dim()),
-            inner,
-        );
-        return;
-    }
-
-    let _ = draw_tna_ego_boxes(frame, app, inner);
-}
-
 fn draw_network_footer(frame: &mut Frame, app: &App, area: Rect) {
     let snap = app.tna_snapshot();
     let (n, e) = snap
@@ -2107,28 +2067,40 @@ fn draw_network_footer(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "collection"
     };
-    let view = "table";
+    let view = app.tna_layout.title();
     let esc = if app.tna_find.is_some() {
         "Esc clear find"
+    } else if app.tna_answer.is_some() {
+        "Esc dismiss answer"
     } else {
         "Esc close report"
     };
-    let left = format!("j/k list/graph  Tab focus  / find  {esc}");
+    let controls = match app.tna_layout {
+        super::app::TnaLayout::Cockpit => "j/k select  [/] links",
+        super::app::TnaLayout::Clusters => "j/k select  Enter Cockpit",
+        super::app::TnaLayout::Path => "f/t pins  Tab paths",
+        super::app::TnaLayout::Matrix => "hjkl cursor  Enter Cockpit",
+        super::app::TnaLayout::Ribbon => "h/l scrub  d rejected",
+    };
+    let state = if app.tna_find_editing {
+        "Find"
+    } else if app.focus == Focus::Prompt {
+        "Ask"
+    } else {
+        "Tab Ask"
+    };
+    let left = format!("{controls}  ←/→ layout  / find  {state}  {esc}");
     let mid = format!("{view} · {scope} {n}n/{e}e");
     let model = app.active_model();
-    let gap = area.width as usize;
-    let used = left.chars().count() + mid.chars().count() + model.chars().count() + 4;
-    let spaces = gap.saturating_sub(used).max(1);
-    let pad_left = spaces / 2;
-    let pad_right = spaces - pad_left;
-    let line = Line::from(vec![
-        Span::styled(left, theme::accent()),
-        Span::raw(" ".repeat(pad_left)),
-        Span::styled(mid, Style::default().fg(theme::WARN).bg(theme::BG)),
-        Span::raw(" ".repeat(pad_right)),
-        Span::styled(model, theme::dim()),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    let text = if area.width < 110 {
+        format!("{view} {n}n/{e}e · {state} · / Find · {esc}")
+    } else {
+        format!("{mid} · {left}")
+    };
+    frame.render_widget(
+        Paragraph::new(fit_status(area.width as usize, &text, &model)).style(theme::accent()),
+        area,
+    );
 }
 
 fn cluster_color(cluster: TnaCluster) -> ratatui::style::Color {
@@ -2138,6 +2110,27 @@ fn cluster_color(cluster: TnaCluster) -> ratatui::style::Color {
         TnaCluster::Identity => theme::GREEN,
         TnaCluster::FiledReports => theme::DIM,
     }
+}
+
+fn fit_label(label: &str, width: usize) -> String {
+    if label.width() <= width {
+        return label.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in label.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > width.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 fn short_label(label: &str, max: usize) -> String {

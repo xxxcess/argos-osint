@@ -1,7 +1,9 @@
 //! Session shell. The bottom prompt always talks to the view that is open:
 //! the desk, the selected case, or the module on the canvas.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -12,14 +14,14 @@ use std::time::Duration;
 use anyhow::Result;
 use argos_osint_core::agent::{self, HistMsg, TurnEvent, TurnInput};
 use argos_osint_core::brain::{self, Memory};
-use argos_osint_core::gmail::{self, GmailConfig};
+use argos_osint_core::gmail::GmailConfig;
 use argos_osint_core::hardware::{self, HardwareProfile};
 use argos_osint_core::paths::{self, db_label};
 use argos_osint_core::prompt::{self, Intent};
 use argos_osint_core::provider::{self, SettingsFile};
 use argos_osint_core::report::{self, ReportMeta};
 use argos_osint_core::search::{SearchHit, SourcePlan};
-use argos_osint_core::secrets::{self, AuthFile, GmailSecret, ProviderSecret};
+use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::session::{self, Case};
 use argos_osint_core::store::{ChatLine, Store};
 use argos_osint_core::tna::{
@@ -67,7 +69,7 @@ impl ModuleId {
             Self::Cases => "Desk for new queries, with reports beside it",
             Self::System => "Log, hardware, and settings",
             Self::Hardware => "Cores, RAM, VRAM, architecture",
-            Self::Providers => "Mail, OSINT sources, and LLM login",
+            Self::Providers => "Provider accounts and Writer / Tools models",
             Self::Osint => "Public search sources for case research",
             Self::Brain => "fact, identity, preference, contact, project, goal, task",
             Self::Gmail => "Gmail IMAP app password and MCP",
@@ -116,8 +118,8 @@ pub enum CasePage {
 }
 
 impl CasePage {
-    pub fn all() -> [Self; 3] {
-        [Self::Closed, Self::Brain, Self::Network]
+    pub fn all() -> [Self; 2] {
+        [Self::Closed, Self::Brain]
     }
 
     pub fn title(self) -> &'static str {
@@ -259,24 +261,41 @@ impl ReportRow {
     }
 }
 
-/// Side pages on Providers: mail, OSINT sources, and the LLM login.
+/// Account credentials and role assignments are separate destinations.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProviderPage {
-    Mail,
+    Grok,
+    Openai,
+    Openrouter,
+    Models,
     Osint,
-    Llm,
 }
 
 impl ProviderPage {
-    pub fn all() -> [Self; 3] {
-        [Self::Mail, Self::Osint, Self::Llm]
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Grok,
+            Self::Openai,
+            Self::Openrouter,
+            Self::Models,
+            Self::Osint,
+        ]
     }
-
     pub fn title(self) -> &'static str {
         match self {
-            Self::Mail => "Mail",
-            Self::Osint => "OSINT",
-            Self::Llm => "LLM",
+            Self::Grok => "Grok",
+            Self::Openai => "OpenAI",
+            Self::Openrouter => "OpenRouter",
+            Self::Models => "Models",
+            Self::Osint => "Sources",
+        }
+    }
+    pub fn account(self) -> Option<&'static str> {
+        match self {
+            Self::Grok => Some("grok"),
+            Self::Openai => Some("openai-chatgpt"),
+            Self::Openrouter => Some("openrouter"),
+            _ => None,
         }
     }
 }
@@ -292,6 +311,54 @@ pub enum Focus {
     TableDetail,
 }
 
+/// Session-only presentations of the same persisted report graph.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TnaLayout {
+    #[default]
+    Cockpit,
+    Clusters,
+    Path,
+    Matrix,
+    Ribbon,
+}
+
+impl TnaLayout {
+    pub const ALL: [Self; 5] = [
+        Self::Cockpit,
+        Self::Clusters,
+        Self::Path,
+        Self::Matrix,
+        Self::Ribbon,
+    ];
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Cockpit => "Cockpit",
+            Self::Clusters => "Clusters",
+            Self::Path => "Path",
+            Self::Matrix => "Matrix",
+            Self::Ribbon => "Ribbon",
+        }
+    }
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|v| *v == self).unwrap_or(0)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TnaAnswer {
+    pub question: String,
+    pub answer: String,
+    pub pending: bool,
+    pub error: Option<String>,
+    pub filed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TnaPath {
+    pub nodes: Vec<String>,
+    pub strength: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Field {
     pub key: String,
@@ -302,17 +369,36 @@ pub struct Field {
 
 #[derive(Clone, Debug)]
 pub enum AppMsg {
+    #[cfg(test)]
     Turn(TurnEvent),
+    ScopedTurn {
+        generation: u64,
+        report_id: Option<String>,
+        event: TurnEvent,
+    },
     Hardware(HardwareProfile),
     Note(String),
     Search {
         query: String,
         result: Result<Vec<SearchHit>, String>,
     },
-    Models(Result<Vec<String>, String>),
-    ModelList(Result<Vec<provider::ListedModel>, String>),
+    ModelList {
+        kind: String,
+        generation: u64,
+        draft: bool,
+        result: Result<Vec<provider::ListedModel>, String>,
+    },
+    SubscriptionCheck(Result<String, String>),
+    SubscriptionProgress(String),
+    GrokSubscriptionProgress {
+        generation: u64,
+        line: String,
+    },
+    GrokSubscriptionCheck {
+        generation: u64,
+        result: Result<Vec<provider::ListedModel>, String>,
+    },
     Voice(Result<String, String>),
-    GmailTest(Result<String, String>),
     Research {
         case_id: String,
         result: Result<(String, Option<ReportMeta>), String>,
@@ -320,6 +406,7 @@ pub enum AppMsg {
     Insight {
         report_id: String,
         fact: String,
+        generation: u64,
     },
     TnaReady {
         targeted: bool,
@@ -349,7 +436,7 @@ pub struct App {
     pub confirm_sel: usize,
     /// Source toggles for the case worker that is about to start.
     pub scope: Option<ScopeDraft>,
-    /// Completed report waiting on the open-chat confirmation popup.
+    /// Completed report waiting on the open-workspace confirmation popup.
     pub confirm_report: Option<String>,
     pub confirm_report_sel: usize,
     /// Fact text held when a desk question already has memories but the user asked for a new case.
@@ -377,7 +464,7 @@ pub struct App {
     pub case_sel: usize,
     /// None means the prompt is talking to the case desk. Some is a selected case.
     pub chat_case: Option<String>,
-    /// Completed report whose chat replaces the case-desk canvas.
+    /// Active dedicated report network workspace; no transcript is loaded.
     pub chat_report: Option<String>,
     pub memories: Vec<Memory>,
     pub brain_sel: usize,
@@ -407,7 +494,22 @@ pub struct App {
     pub fields: Vec<Field>,
     pub field_sel: usize,
     pub editing: bool,
-    pub provider_slot: &'static str,
+    pub provider_picker: Option<bool>,
+    pub provider_choice: usize,
+    #[cfg(test)]
+    test_config_home: tempfile::TempDir,
+    pub provider_checks: HashMap<String, String>,
+    pub provider_draft_checks: HashMap<String, String>,
+    pub model_catalogs: HashMap<String, Vec<provider::ListedModel>>,
+    catalog_generation: HashMap<String, u64>,
+    pub grok_subscription_status: String,
+    pub grok_subscription_pending: bool,
+    pub grok_subscription_instructions: Vec<String>,
+    pub subscription_status: String,
+    pub subscription_pending: bool,
+    pub subscription_instructions: Vec<String>,
+    pub provider_field_hits: Vec<(usize, Rect)>,
+    pub provider_advanced: bool,
     pub running: bool,
     pub cancel: Arc<AtomicBool>,
     pub spinner: usize,
@@ -430,6 +532,24 @@ pub struct App {
     pub system_tab_area: Rect,
     /// Clickable label for each System tab, in tab order.
     pub system_tab_hits: Vec<Rect>,
+    pub tna_layout: TnaLayout,
+    pub tna_answer: Option<TnaAnswer>,
+    pub tna_from: Option<String>,
+    pub tna_to: Option<String>,
+    pub tna_path_sel: usize,
+    pub tna_matrix_row: usize,
+    pub tna_matrix_col: usize,
+    pub tna_ribbon_pos: usize,
+    pub tna_show_rejected: bool,
+    pub tna_find_editing: bool,
+    pub tna_source: String,
+    pub tna_source_error: Option<String>,
+    pub tna_tab_hits: Vec<Rect>,
+    pub tna_ledger_sel: usize,
+    pub tna_answer_scroll: u16,
+    turn_generation: u64,
+    pending_tna_insights: HashMap<u64, (String, String)>,
+    tna_path_cache: RefCell<Option<(String, String, u64, Vec<TnaPath>)>>,
     pub tna_desk: Option<TnaSnapshot>,
     pub tna_report: Option<TnaSnapshot>,
     pub tna_find: Option<String>,
@@ -452,6 +572,8 @@ pub struct App {
     /// Tests use an in-memory store and leave this `None` (sync rebuild).
     tna_db_path: Option<PathBuf>,
     tna_rebuild_gen: u64,
+    tna_pending_report: Option<String>,
+    pub tna_path_search_limited: Cell<bool>,
 }
 
 impl App {
@@ -469,7 +591,7 @@ impl App {
             Ok(settings) => (settings, None),
             Err(err) => (SettingsFile::default(), Some(err.to_string())),
         };
-        let auth = AuthFile::load().unwrap_or_default();
+        let auth = AuthFile::load()?;
         let mut app = Self::from_parts(store, settings, auth)?;
         app.tna_db_path = Some(paths::db_path());
         if let Some(err) = config_error {
@@ -491,7 +613,7 @@ impl App {
             module: Some(ModuleId::Cases),
             case_page: CasePage::Closed,
             system_page: SystemPage::Log,
-            provider_page: ProviderPage::Llm,
+            provider_page: ProviderPage::Models,
             source_sel: 0,
             modal: false,
             modal_query: String::new(),
@@ -544,7 +666,22 @@ impl App {
             fields: Vec::new(),
             field_sel: 0,
             editing: false,
-            provider_slot: "text",
+            provider_picker: None,
+            provider_choice: 0,
+            #[cfg(test)]
+            test_config_home: tempfile::tempdir()?,
+            provider_checks: HashMap::new(),
+            provider_draft_checks: HashMap::new(),
+            model_catalogs: HashMap::new(),
+            catalog_generation: HashMap::new(),
+            grok_subscription_status: "Not checked · Sign in or Check existing login".into(),
+            grok_subscription_pending: false,
+            grok_subscription_instructions: Vec::new(),
+            subscription_status: "Not checked · Sign in or Check existing login".into(),
+            subscription_pending: false,
+            subscription_instructions: Vec::new(),
+            provider_field_hits: Vec::new(),
+            provider_advanced: false,
             running: false,
             cancel: Arc::new(AtomicBool::new(false)),
             spinner: 0,
@@ -563,6 +700,24 @@ impl App {
             provider_tab_hits: Vec::new(),
             system_tab_area: Rect::default(),
             system_tab_hits: Vec::new(),
+            tna_layout: TnaLayout::Cockpit,
+            tna_answer: None,
+            tna_from: None,
+            tna_to: None,
+            tna_path_sel: 0,
+            tna_matrix_row: 0,
+            tna_matrix_col: 0,
+            tna_ribbon_pos: 0,
+            tna_show_rejected: false,
+            tna_find_editing: false,
+            tna_source: String::new(),
+            tna_source_error: None,
+            tna_tab_hits: Vec::new(),
+            tna_ledger_sel: 0,
+            tna_answer_scroll: 0,
+            turn_generation: 0,
+            pending_tna_insights: HashMap::new(),
+            tna_path_cache: RefCell::new(None),
             tna_desk: None,
             tna_report: None,
             tna_find: None,
@@ -576,6 +731,8 @@ impl App {
             tna_table_detail_area: Rect::default(),
             tna_db_path: None,
             tna_rebuild_gen: 0,
+            tna_pending_report: None,
+            tna_path_search_limited: Cell::new(false),
         };
         app.reload_lists()?;
         app.load_transcript(&app.session_id());
@@ -625,7 +782,7 @@ impl App {
 
     pub fn view_name(&self) -> String {
         if let Some(report) = self.open_report() {
-            return format!("Report · {}", report.title);
+            return format!("TNA · {}", report.title);
         }
         match self
             .chat_case
@@ -677,9 +834,8 @@ impl App {
                 SystemPage::Log => None,
             },
             Some(ModuleId::Providers) => match self.provider_page {
-                ProviderPage::Mail => Some(ModuleId::Gmail),
                 ProviderPage::Osint => Some(ModuleId::Osint),
-                ProviderPage::Llm => Some(ModuleId::Providers),
+                _ => Some(ModuleId::Providers),
             },
             Some(ModuleId::Settings) => Some(ModuleId::Settings),
             Some(ModuleId::Hardware) => Some(ModuleId::Hardware),
@@ -687,10 +843,20 @@ impl App {
         }
     }
 
+    pub fn turn_spinner(&self) -> &'static str {
+        ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][self.spinner % 10]
+    }
+
     pub fn mode_label(&self) -> String {
+        if self.module == Some(ModuleId::Providers) && self.chat_report.is_none() {
+            return format!(
+                "Providers · {} · Writer {}",
+                self.provider_page.title(),
+                self.active_model()
+            );
+        }
         let run = if self.running {
-            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            format!(" {} {}", frames[self.spinner % frames.len()], self.status)
+            format!(" {} {}", self.turn_spinner(), self.status)
         } else {
             String::new()
         };
@@ -707,57 +873,127 @@ impl App {
     }
 
     pub fn active_model(&self) -> String {
-        self.role_secret(&self.settings.writer_model).model
+        self.role_secret(true).model
     }
 
-    /// Connection provider with a role model, or the connection model when the role is empty.
-    pub fn role_secret(&self, model: &str) -> argos_osint_core::secrets::ProviderSecret {
-        let mut secret = self.text_secret();
-        if !model.trim().is_empty() {
-            secret.model = model.trim().to_string();
+    pub fn role_secret(&self, writer: bool) -> ProviderSecret {
+        provider::role_secret(&self.auth, &self.settings, writer)
+    }
+
+    pub fn role_label(&self, writer: bool) -> String {
+        let secret = self.role_secret(writer);
+        format!(
+            "{} / {}",
+            provider_name(&provider::effective_kind(&secret)),
+            if secret.model.is_empty() {
+                "Codex default"
+            } else {
+                &secret.model
+            }
+        )
+    }
+
+    pub fn picker_secret(&self) -> ProviderSecret {
+        match self.model_target {
+            ModelTarget::Writer => self.role_secret(true),
+            ModelTarget::Tool => self.role_secret(false),
+            ModelTarget::Connection => self.text_secret(),
         }
-        secret
     }
 
-    fn role_label(&self, model: &str) -> String {
-        if model.trim().is_empty() {
-            format!("connection ({})", self.text_secret().model)
+    pub fn account_status(&self, kind: &str) -> String {
+        if kind == "grok" {
+            return self.grok_subscription_status.clone();
+        }
+        if let Some(status) = self.provider_checks.get(kind) {
+            return status.clone();
+        }
+        let secret = provider::account_secret(&self.auth, kind);
+        if secret
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty())
+        {
+            "Key saved · not verified".into()
+        } else if provider::resolved_key(&secret).is_some() {
+            format!(
+                "Using {} · not verified",
+                provider::preset(kind)
+                    .and_then(|p| p.env_key)
+                    .unwrap_or("environment")
+            )
         } else {
-            model.trim().to_string()
+            "Not connected".into()
         }
     }
 
     pub fn model_choices(&self) -> Vec<(String, String)> {
-        let secret = self.text_secret();
+        let secret = self.picker_secret();
+        let kind = provider::effective_kind(&secret);
         let mut choices = Vec::new();
         if provider::effective_kind(&secret) == "grok" {
             for model in provider::grok_models() {
                 choices.push((model.id.to_string(), model.name.to_string()));
             }
         }
-        for id in &self.remote_models {
+        let remote = self
+            .model_catalogs
+            .get(&kind)
+            .map(|catalog| catalog.iter().map(|m| m.id.clone()).collect::<Vec<_>>())
+            .unwrap_or_else(|| {
+                if kind == provider::effective_kind(&self.text_secret()) {
+                    self.remote_models.clone()
+                } else {
+                    Vec::new()
+                }
+            });
+        for id in &remote {
             if !choices.iter().any(|(existing, _)| existing == id) {
                 choices.push((id.clone(), id.clone()));
             }
         }
-        if choices.is_empty() {
+        if !secret.model.is_empty() && !choices.iter().any(|(id, _)| id == &secret.model) {
             choices.push((secret.model.clone(), secret.model.clone()));
+        }
+        if kind == "openai-chatgpt" {
+            choices.insert(
+                0,
+                (
+                    "codex-default".into(),
+                    "Codex default (subscription)".into(),
+                ),
+            );
         }
         choices
     }
 
     pub fn filtered_model_choices(&self) -> Vec<(String, String)> {
         let q = self.model_query.trim().to_lowercase();
-        self.model_choices()
+        let mut choices: Vec<_> = self
+            .model_choices()
             .into_iter()
             .filter(|(id, label)| {
                 q.is_empty() || id.to_lowercase().contains(&q) || label.to_lowercase().contains(&q)
             })
-            .collect()
+            .collect();
+        let query = self.model_query.trim();
+        if choices.is_empty()
+            && !query.is_empty()
+            && query.len() <= 160
+            && query
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "/:._-".contains(c))
+        {
+            choices.push((
+                query.into(),
+                format!("Use model ID: {query} (not verified)"),
+            ));
+        }
+        choices
     }
 
     fn open_model_picker(&mut self) {
-        self.model_target = ModelTarget::Connection;
+        self.model_target = ModelTarget::Writer;
         self.open_model_card();
     }
 
@@ -769,20 +1005,49 @@ impl App {
         self.refresh_model_list();
     }
 
-    fn refresh_model_list(&self) {
-        let secret = self.text_secret();
+    fn request_catalog(&mut self, secret: ProviderSecret, draft: bool) {
+        let kind = provider::effective_kind(&secret);
+        if kind == "openai-chatgpt" || (kind == "grok" && self.grok_subscription_pending) {
+            return;
+        }
+        let generation = self.catalog_generation.get(&kind).copied().unwrap_or(0) + 1;
+        self.catalog_generation.insert(kind.clone(), generation);
+        let checks = if draft {
+            &mut self.provider_draft_checks
+        } else {
+            &mut self.provider_checks
+        };
+        checks.insert(kind.clone(), "Checking connection…".into());
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let result = provider::list_catalog(&secret)
+            let result = provider::verified_catalog(&secret)
                 .await
                 .map_err(|err| err.to_string());
-            let _ = tx.send(AppMsg::ModelList(result));
+            let _ = tx.send(AppMsg::ModelList {
+                kind,
+                generation,
+                draft,
+                result,
+            });
         });
+    }
+
+    fn refresh_model_list(&mut self) {
+        let secret = self.picker_secret();
+        if !self
+            .model_catalogs
+            .contains_key(&provider::effective_kind(&secret))
+        {
+            self.request_catalog(secret, false);
+        }
     }
 
     pub fn filtered_free_models(&self) -> Vec<(String, String)> {
         let q = self.free_query.trim().to_lowercase();
-        provider::concrete_free_models(&self.catalog)
+        let secret = self.picker_secret();
+        let kind = provider::effective_kind(&secret);
+        let catalog = self.model_catalogs.get(&kind).unwrap_or(&self.catalog);
+        provider::concrete_free_models(catalog)
             .into_iter()
             .filter(|model| {
                 q.is_empty()
@@ -803,40 +1068,49 @@ impl App {
         }
     }
 
+    pub(crate) fn set_writer_model(&mut self, id: &str) {
+        self.model_target = ModelTarget::Writer;
+        self.select_model(id);
+    }
+
     pub(crate) fn select_model(&mut self, id: &str) {
-        if provider::is_free_router(id) {
+        if provider::is_free_router(id)
+            && provider::effective_kind(&self.picker_secret()) == "openrouter"
+        {
             self.open_free_picker();
             return;
         }
+        let mut next = self.settings.clone();
         match self.model_target {
             ModelTarget::Writer => {
-                self.settings.writer_model = id.to_string();
-                let _ = self.settings.save();
-                self.status = format!("writer {id}");
-                self.log_event("system", &format!("writer model {id}"));
+                next.writer_provider = provider::effective_kind(&self.picker_secret());
+                next.writer_model = id.into();
             }
             ModelTarget::Tool => {
-                self.settings.tool_model = id.to_string();
-                let _ = self.settings.save();
-                self.status = format!("tool caller {id}");
-                self.log_event("system", &format!("tool model {id}"));
+                next.tool_provider = provider::effective_kind(&self.picker_secret());
+                next.tool_model = id.into();
             }
             ModelTarget::Connection => {
-                self.settings.model = id.to_string();
-                let _ = self.settings.save();
-                match self.auth.text.as_mut() {
-                    Some(slot) => slot.model = id.to_string(),
-                    None => {
-                        let mut secret = self.text_secret();
-                        secret.model = id.to_string();
-                        self.auth.text = Some(secret);
-                    }
-                }
-                let _ = self.auth.save();
-                self.status = format!("model {id}");
-                self.log_event("system", &format!("model set to {id}"));
+                next.model = id.into();
             }
         }
+        if let Err(err) = self.save_settings_config(&next) {
+            self.status = "Model save failed".into();
+            self.log_event("system", &format!("model save failed: {err}"));
+            return;
+        }
+        self.settings = next;
+        if self.model_target == ModelTarget::Connection {
+            let mut secret = self.text_secret();
+            secret.model = id.into();
+            self.auth.set_account(secret.clone());
+            self.auth.text = Some(secret);
+            if let Err(err) = self.save_auth_config(&self.auth) {
+                self.log_event("system", &format!("legacy connection save failed: {err}"));
+            }
+        }
+        self.status = format!("{} · {id}", self.picker_title());
+        self.log_event("system", &self.status.clone());
         self.model_picker = false;
         self.free_picker = false;
         if self.form_module() == Some(ModuleId::Providers) {
@@ -846,8 +1120,8 @@ impl App {
 
     pub fn picker_current(&self) -> String {
         match self.model_target {
-            ModelTarget::Writer => self.settings.writer_model.trim().to_string(),
-            ModelTarget::Tool => self.settings.tool_model.trim().to_string(),
+            ModelTarget::Writer => self.role_secret(true).model,
+            ModelTarget::Tool => self.role_secret(false).model,
             ModelTarget::Connection => self.text_secret().model,
         }
     }
@@ -868,12 +1142,13 @@ impl App {
         }
         let count = self.filtered_model_choices().len();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::F(5) => self.request_catalog(self.picker_secret(), false),
+            KeyCode::Up => {
                 if count > 0 {
                     self.model_sel = (self.model_sel + count - 1) % count;
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 if count > 0 {
                     self.model_sel = (self.model_sel + 1) % count;
                 }
@@ -936,6 +1211,9 @@ impl App {
     }
 
     pub fn transcript(&self) -> &[ChatLine] {
+        if self.chat_report.is_some() {
+            return &[];
+        }
         self.transcripts
             .get(&self.session_id())
             .map(|v| v.as_slice())
@@ -943,6 +1221,9 @@ impl App {
     }
 
     fn load_transcript(&mut self, id: &str) {
+        if self.chat_report.is_some() && id.starts_with("report:") {
+            return;
+        }
         if self.transcripts.contains_key(id) {
             return;
         }
@@ -951,6 +1232,10 @@ impl App {
     }
 
     fn push_line(&mut self, role: &str, body: &str) {
+        if self.chat_report.is_some() {
+            self.status = body.into();
+            return;
+        }
         let id = self.session_id();
         let _ = self.store.append_message(&id, role, body);
         let line = ChatLine {
@@ -971,11 +1256,9 @@ impl App {
             return;
         }
         let question = self
-            .transcript()
-            .iter()
-            .rev()
-            .find(|line| line.role == "user")
-            .map(|line| line.body.clone())
+            .tna_answer
+            .as_ref()
+            .map(|a| a.question.clone())
             .unwrap_or_default();
         let title = self
             .reports
@@ -983,22 +1266,52 @@ impl App {
             .find(|report| report.id == report_id)
             .map(|report| report.title.clone())
             .unwrap_or_else(|| "report".into());
-        let secret = self.text_secret();
+        let secret = self.role_secret(true);
+        let generation = self.turn_generation;
+        // No configured provider: preserve the existing clipping fallback without a network call.
+        let kind = provider::effective_kind(&secret);
+        if kind != "openai-chatgpt"
+            && (secret.base_url.trim().is_empty()
+                || secret.model.trim().is_empty()
+                || (provider::resolved_key(&secret).is_none()
+                    && kind != "local"
+                    && !(kind == "grok" && argos_osint_core::grok_oauth::auth_path().exists())
+                    && secret.device.is_none()))
+        {
+            self.store_report_insight(report_id, brain::clip_fact(&answer), generation);
+            return;
+        }
+        self.pending_tna_insights
+            .insert(generation, (report_id.clone(), brain::clip_fact(&answer)));
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let fact = match distill_insight(&secret, &title, &question, &answer).await {
-                Ok(text) => text,
-                Err(_) => brain::clip_fact(&answer),
+                Ok(text) if !text.trim().is_empty() => text,
+                _ => brain::clip_fact(&answer),
             };
             let fact = brain::clip_fact(&fact);
             if fact.is_empty() {
                 return;
             }
-            let _ = tx.send(AppMsg::Insight { report_id, fact });
+            let _ = tx.send(AppMsg::Insight {
+                report_id,
+                fact,
+                generation,
+            });
         });
     }
 
-    fn store_report_insight(&mut self, report_id: String, fact: String) {
+    /// Distillation interrupted by normal shutdown uses the existing clipped-fact fallback.
+    fn persist_pending_insights(&mut self) {
+        for (generation, (report_id, fact)) in std::mem::take(&mut self.pending_tna_insights) {
+            self.store_report_insight(report_id, fact, generation);
+        }
+    }
+
+    fn store_report_insight(&mut self, report_id: String, fact: String, generation: u64) {
+        if fact.trim().is_empty() || !self.reports.iter().any(|r| r.id == report_id) {
+            return;
+        }
         let title = self
             .reports
             .iter()
@@ -1013,15 +1326,45 @@ impl App {
         if self.memories.iter().any(|memory| {
             memory.report_id.as_deref() == Some(report_id.as_str()) && memory.text == text
         }) {
+            if generation == self.turn_generation {
+                if let Some(answer) = self.tna_answer.as_mut() {
+                    answer.filed = true;
+                }
+            }
             return;
         }
-        if let Ok(memory) = self.store.add_report_fact(&text, &report_id) {
-            self.memories.insert(0, memory);
-            self.log_event("system", "fact filed from report chat");
+        match self.store.add_report_fact(&text, &report_id) {
+            Ok(memory) => {
+                self.memories.insert(0, memory);
+                self.log_event("system", "fact filed from report network");
+                if self.chat_report.as_deref() == Some(report_id.as_str())
+                    && generation == self.turn_generation
+                {
+                    if let Some(answer) = self.tna_answer.as_mut() {
+                        answer.filed = true;
+                    }
+                }
+            }
+            Err(err) => {
+                self.log_event("system", &format!("report insight save failed: {err}"));
+                if self.chat_report.as_deref() == Some(report_id.as_str())
+                    && generation == self.turn_generation
+                {
+                    self.status = "insight error".into();
+                    if let Some(answer) = self.tna_answer.as_mut() {
+                        answer.error = Some(format!(
+                            "Answer completed, but its insight could not be filed: {err}"
+                        ));
+                    }
+                }
+            }
         }
     }
 
     fn replace_last_assistant(&mut self, body: &str) {
+        if self.chat_report.is_some() {
+            return;
+        }
         let id = self.session_id();
         let _ = self.store.update_last_message(&id, "assistant", body);
         if let Some(lines) = self.transcripts.get_mut(&id) {
@@ -1037,6 +1380,9 @@ impl App {
 
     /// Write the reply currently on screen so a later visit reloads it.
     fn persist_visible_chat(&mut self) {
+        if self.chat_report.is_some() {
+            return;
+        }
         let id = self.session_id();
         let Some(body) = self
             .transcripts
@@ -1053,8 +1399,8 @@ impl App {
     pub fn view_context(&self) -> String {
         if let Some(report) = self.open_report() {
             return format!(
-                "The user is in the chat for report {} — {}. Answer only from that report's content. Do not use brain memories or other reports. If this report does not contain the answer, say so.",
-                report.id, report.title
+                "Evidence-only TNA workspace for report {} — {}. Answer only from this report and its existing graph. No investigation, research tools, Brain memories or old chat history. Missing links indicate absent co-occurrence, not intelligence gaps. If the evidence is unavailable, say so.\n{}",
+                report.id, report.title, self.tna_digest()
             );
         }
         let mut ctx = match self
@@ -1142,11 +1488,8 @@ impl App {
                 self.settings.sources.len()
             ),
             ModuleId::Providers => format!(
-                "Connection: {}. Voice: {}. Writer: {}. Tool caller: {}.",
-                provider_label(self.auth.text.as_ref()),
-                provider_label(self.auth.voice.as_ref()),
-                self.role_label(&self.settings.writer_model),
-                self.role_label(&self.settings.tool_model)
+                "Providers / {}. Grok setup is subscription-only through Grok Build. OpenRouter has its own API account. OpenAI setup is ChatGPT subscription only, through Codex CLI (Writer only). No OpenAI API-key setup and no Mail/MCP configuration in this app. Models assigns Writer {} and Tools {} independently. Account setup never changes the other provider's credentials.",
+                self.provider_page.title(), self.role_label(true), self.role_label(false)
             ),
             ModuleId::Brain => format!("{} memories stored.", self.memories.len()),
             ModuleId::Gmail => self
@@ -1223,7 +1566,17 @@ impl App {
 
     pub fn on_msg(&mut self, msg: AppMsg) {
         match msg {
+            #[cfg(test)]
             AppMsg::Turn(ev) => self.on_turn(ev),
+            AppMsg::ScopedTurn {
+                generation,
+                report_id,
+                event,
+            } => {
+                if generation == self.turn_generation && report_id == self.chat_report {
+                    self.on_turn(event);
+                }
+            }
             AppMsg::Hardware(profile) => {
                 let cpu = self.cpu_now;
                 let hist_cores = self.hardware.logical_cores;
@@ -1242,37 +1595,131 @@ impl App {
             }
             AppMsg::Note(text) => self.log_event("api", &text),
             AppMsg::Search { query, result } => self.finish_search(query, result),
-            AppMsg::ModelList(result) => match result {
-                Ok(models) => {
-                    self.log_event("api", &format!("models listed: {}", models.len()));
-                    self.remote_models = models.iter().map(|model| model.id.clone()).collect();
-                    self.catalog = models;
-                    self.free_loading = false;
+            AppMsg::ModelList {
+                kind,
+                generation,
+                draft,
+                result,
+            } => {
+                if self.catalog_generation.get(&kind).copied() != Some(generation) {
+                    return;
                 }
-                Err(err) => {
-                    self.free_loading = false;
-                    self.log_event("api", &format!("models failed: {err}"));
+                match result {
+                    Ok(models) => {
+                        let checks = if draft {
+                            &mut self.provider_draft_checks
+                        } else {
+                            &mut self.provider_checks
+                        };
+                        checks.insert(
+                            kind.clone(),
+                            format!(
+                                "{} · {} models",
+                                if draft {
+                                    "Draft verified · Save to use"
+                                } else {
+                                    "Connected"
+                                },
+                                models.len()
+                            ),
+                        );
+                        if !draft && provider::effective_kind(&self.text_secret()) == kind {
+                            self.remote_models = models.iter().map(|m| m.id.clone()).collect();
+                            self.catalog = models.clone();
+                        }
+                        if !draft {
+                            self.model_catalogs.insert(kind.clone(), models);
+                        }
+                        self.status = format!("{} connected", provider_name(&kind));
+                        self.log_event(
+                            "api",
+                            &format!("{} connection verified", provider_name(&kind)),
+                        );
+                    }
+                    Err(err) => {
+                        let checks = if draft {
+                            &mut self.provider_draft_checks
+                        } else {
+                            &mut self.provider_checks
+                        };
+                        checks.insert(kind.clone(), "Connection failed · see System log".into());
+                        self.status = format!("{} connection failed", provider_name(&kind));
+                        self.log_event(
+                            "api",
+                            &format!("{} connection failed: {err}", provider_name(&kind)),
+                        );
+                    }
                 }
-            },
-            AppMsg::Models(result) => match result {
-                Ok(names) => {
-                    let shown = if names.is_empty() {
-                        "endpoint answered, no model ids".to_string()
-                    } else {
-                        format!(
-                            "{} models, first: {}",
-                            names.len(),
-                            names.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
-                        )
-                    };
-                    self.status = "provider ok".into();
-                    self.log_event("api", &shown);
+                if kind == "grok" {
+                    self.grok_subscription_status = self
+                        .provider_checks
+                        .get("grok")
+                        .cloned()
+                        .unwrap_or_else(|| "Grok subscription not checked".into());
                 }
-                Err(err) => {
-                    self.status = "provider error".into();
-                    self.log_event("api", &format!("provider: {err}"));
+                self.free_loading = false;
+            }
+            AppMsg::GrokSubscriptionProgress { generation, line } => {
+                if self.catalog_generation.get("grok").copied() != Some(generation) {
+                    return;
                 }
-            },
+                if self.grok_subscription_instructions.len() == 8 {
+                    self.grok_subscription_instructions.remove(0);
+                }
+                self.grok_subscription_instructions.push(line);
+                self.grok_subscription_status = "Grok sign-in in progress…".into();
+            }
+            AppMsg::GrokSubscriptionCheck { generation, result } => {
+                if self.catalog_generation.get("grok").copied() != Some(generation) {
+                    return;
+                }
+                self.grok_subscription_pending = false;
+                self.grok_subscription_instructions.clear();
+                match result {
+                    Ok(models) => {
+                        self.grok_subscription_status =
+                            format!("Grok subscription connected · {} models", models.len());
+                        self.provider_checks
+                            .insert("grok".into(), self.grok_subscription_status.clone());
+                        if provider::effective_kind(&self.text_secret()) == "grok" {
+                            self.remote_models = models.iter().map(|m| m.id.clone()).collect();
+                            self.catalog = models.clone();
+                        }
+                        self.model_catalogs.insert("grok".into(), models);
+                    }
+                    Err(err) => {
+                        self.model_catalogs.remove("grok");
+                        if provider::effective_kind(&self.text_secret()) == "grok" {
+                            self.remote_models.clear();
+                            self.catalog.clear();
+                        }
+                        self.grok_subscription_status = err.clone();
+                        self.provider_checks.insert(
+                            "grok".into(),
+                            "Grok subscription verification failed".into(),
+                        );
+                        self.log_event("api", &format!("Grok subscription: {err}"));
+                    }
+                }
+            }
+            AppMsg::SubscriptionProgress(line) => {
+                if self.subscription_instructions.len() == 8 {
+                    self.subscription_instructions.remove(0);
+                }
+                self.subscription_instructions.push(line);
+                self.subscription_status = "Waiting for ChatGPT sign-in…".into();
+            }
+            AppMsg::SubscriptionCheck(result) => {
+                self.subscription_pending = false;
+                self.subscription_instructions.clear();
+                self.subscription_status = match result {
+                    Ok(status) => status,
+                    Err(err) => {
+                        self.log_event("api", &err);
+                        err
+                    }
+                };
+            }
             AppMsg::Voice(result) => match result {
                 Ok(text) => {
                     self.prompt = text;
@@ -1286,26 +1733,27 @@ impl App {
                 }
             },
             AppMsg::Research { case_id, result } => self.finish_research(case_id, result),
-            AppMsg::Insight { report_id, fact } => self.store_report_insight(report_id, fact),
+            AppMsg::Insight {
+                report_id,
+                fact,
+                generation,
+            } => {
+                self.pending_tna_insights.remove(&generation);
+                self.store_report_insight(report_id, fact, generation);
+            }
             AppMsg::TnaReady {
                 targeted,
                 report_id,
                 result,
             } => self.on_tna_ready(targeted, report_id, result),
-            AppMsg::GmailTest(result) => match result {
-                Ok(text) => {
-                    self.status = "gmail ok".into();
-                    self.log_event("api", &text);
-                }
-                Err(err) => {
-                    self.status = "gmail error".into();
-                    self.log_event("api", &format!("gmail: {err}"));
-                }
-            },
         }
     }
 
     fn on_turn(&mut self, ev: TurnEvent) {
+        if self.chat_report.is_some() {
+            self.on_tna_turn(ev);
+            return;
+        }
         match ev {
             TurnEvent::Status(text) => self.status = text,
             TurnEvent::Delta(text) => {
@@ -1396,6 +1844,23 @@ impl App {
     pub fn on_event(&mut self, ev: Event) -> bool {
         match ev {
             Event::Key(key) => self.on_key(key),
+            Event::Paste(text) if self.editing => {
+                if let Some(kind) = self
+                    .provider_page
+                    .account()
+                    .filter(|_| self.module == Some(ModuleId::Providers))
+                {
+                    self.provider_draft_checks.remove(kind);
+                    self.catalog_generation
+                        .entry(kind.into())
+                        .and_modify(|g| *g += 1)
+                        .or_insert(1);
+                }
+                if let Some(field) = self.fields.get_mut(self.field_sel) {
+                    field.value.push_str(&text.replace(['\r', '\n'], ""));
+                }
+                false
+            }
             Event::Mouse(mouse) => {
                 match mouse.kind {
                     MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
@@ -1412,7 +1877,8 @@ impl App {
     }
 
     fn click(&mut self, x: u16, y: u16) {
-        if self.free_picker
+        if self.provider_picker.is_some()
+            || self.free_picker
             || self.model_picker
             || self.scope.is_some()
             || self.confirm_query.is_some()
@@ -1434,6 +1900,12 @@ impl App {
             }
             return;
         }
+        if self.chat_report.is_some() {
+            if let Some(index) = self.tna_tab_hits.iter().position(|tab| tab.contains(pos)) {
+                self.set_tna_layout(TnaLayout::ALL[index]);
+                return;
+            }
+        }
         if let Some(index) = self.case_tab_hits.iter().position(|tab| tab.contains(pos)) {
             if let Some(page) = self.case_pages().get(index).copied() {
                 self.select_case_page(page);
@@ -1447,6 +1919,18 @@ impl App {
         {
             self.select_provider_page(ProviderPage::all()[index]);
             return;
+        }
+        if self.module == Some(ModuleId::Providers) {
+            if let Some((index, _)) = self
+                .provider_field_hits
+                .iter()
+                .find(|(_, area)| area.contains(pos))
+            {
+                self.field_sel = *index;
+                self.focus = Focus::Canvas;
+                self.activate_field();
+                return;
+            }
         }
         if let Some(index) = self
             .system_tab_hits
@@ -1477,7 +1961,11 @@ impl App {
             }
         }
         if self.canvas_area.contains(pos) {
-            self.focus = Focus::Canvas;
+            self.focus = if self.chat_report.is_some() {
+                Focus::Graph
+            } else {
+                Focus::Canvas
+            };
             return;
         }
         if self.launcher_area.contains(pos) {
@@ -1490,13 +1978,18 @@ impl App {
     }
 
     pub fn case_pages(&self) -> Vec<CasePage> {
-        CasePage::all()
-            .into_iter()
-            .filter(|page| *page != CasePage::Network || self.open_report().is_some())
-            .collect()
+        if self.chat_report.is_some() {
+            Vec::new()
+        } else {
+            CasePage::all().to_vec()
+        }
     }
 
     fn select_case_page(&mut self, page: CasePage) {
+        if self.chat_report.is_some() && page != CasePage::Network {
+            self.status = "Esc closes the report workspace".into();
+            return;
+        }
         if page == CasePage::Network && self.open_report().is_none() {
             self.status = "open a filed report to view its network".into();
             return;
@@ -1554,6 +2047,9 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.provider_picker.is_some() && !(ctrl && key.code == KeyCode::Char('c')) {
+            return self.on_provider_picker_key(key);
+        }
         if self.scope.is_some() && !(ctrl && key.code == KeyCode::Char('c')) {
             return self.on_scope_key(key);
         }
@@ -1585,7 +2081,7 @@ impl App {
         if self.modal {
             return self.on_modal_key(key);
         }
-        if self.on_case_desk() && !self.editing {
+        if self.on_case_desk() && self.chat_report.is_none() && !self.editing {
             if key.code == KeyCode::Char('+') {
                 self.start_case_from_prompt();
                 return false;
@@ -1610,6 +2106,27 @@ impl App {
         if ctrl && key.code == KeyCode::Char('r') && self.focus == Focus::Prompt {
             self.record_voice();
             return false;
+        }
+        if self.chat_report.is_some() && self.on_case_desk() {
+            if key.code == KeyCode::Esc {
+                self.on_esc();
+                return false;
+            }
+            if key.code == KeyCode::Tab {
+                self.tna_find_editing = false;
+                self.focus = self.next_focus();
+                return false;
+            }
+            if self.tna_find_editing {
+                return self.on_tna_key(key);
+            }
+            if self.focus == Focus::Prompt || !self.prompt.is_empty() {
+                self.focus = Focus::Prompt;
+                return self.on_prompt_key(key);
+            }
+            if self.focus != Focus::Launcher {
+                return self.on_tna_key(key);
+            }
         }
         if self.editing {
             return self.on_field_key(key);
@@ -1658,6 +2175,14 @@ impl App {
         if self.running {
             self.cancel.store(true, Ordering::Relaxed);
             self.status = "cancelling".into();
+            if self.chat_report.is_some() {
+                self.turn_generation = self.turn_generation.wrapping_add(1);
+                self.running = false;
+                if let Some(answer) = self.tna_answer.as_mut() {
+                    answer.pending = false;
+                    answer.error = Some("Cancelled; no insight filed.".into());
+                }
+            }
             false
         } else if !self.prompt.is_empty() && self.focus == Focus::Prompt {
             self.prompt.clear();
@@ -1870,11 +2395,7 @@ impl App {
         }
         self.transcripts.remove(&format!("report:{id}"));
         if self.chat_report.as_deref() == Some(id) {
-            self.chat_report = None;
-            self.case_page = CasePage::Closed;
-            self.focus = Focus::Prompt;
-            self.load_transcript("desk");
-            self.scroll_back = 0;
+            self.close_report_workspace();
         }
         self.after_report_deleted(id);
         let _ = self.reload_lists();
@@ -1929,11 +2450,11 @@ impl App {
         let Some(snap) = self.tna_snapshot() else {
             return Vec::new();
         };
-        let Some(focus) = self
-            .tna_focus_id
-            .as_deref()
-            .or_else(|| snap.nodes.first().map(|n| n.id.as_str()))
-        else {
+        let Some(focus) = self.tna_focus_id.as_deref().or_else(|| {
+            self.tna_visible_nodes()
+                .get(self.tna_sel)
+                .map(|i| snap.nodes[*i].id.as_str())
+        }) else {
             return Vec::new();
         };
         let adj = Self::tna_adjacency(snap);
@@ -1985,7 +2506,25 @@ impl App {
         }
         let offset = self.tna_detail_scroll.min(items.len().saturating_sub(2));
         let mut shown = vec![items[0].clone()];
-        shown.extend(items.into_iter().skip(1 + offset).take(fit - 1));
+        shown.extend(items.iter().skip(1 + offset).take(fit - 1).cloned());
+        if fit > 1 && offset == 0 {
+            if let (Some(neighbor), Some(snap)) = (self.tna_ledger_neighbor(), self.tna_snapshot())
+            {
+                if let Some(item) = items
+                    .iter()
+                    .find(|TnaDisplayItem::Real { idx }| snap.nodes[*idx].id == neighbor)
+                {
+                    if let Some(index) = shown
+                        .iter()
+                        .position(|TnaDisplayItem::Real { idx }| snap.nodes[*idx].id == neighbor)
+                    {
+                        shown.swap(1, index);
+                    } else if shown.len() > 1 {
+                        shown[1] = item.clone();
+                    }
+                }
+            }
+        }
         shown
     }
 
@@ -2030,7 +2569,13 @@ impl App {
         } else if self.tna_sel >= n {
             self.tna_sel = n - 1;
         }
-        if self.tna_focus_id.is_none() {
+        if self.tna_focus_id.as_ref().is_none_or(|id| {
+            !self
+                .tna_visible_nodes()
+                .iter()
+                .any(|i| self.tna_snapshot().is_some_and(|s| s.nodes[*i].id == *id))
+        }) {
+            self.tna_focus_id = None;
             if let Some(TnaDisplayItem::Real { idx }) = self.tna_selected_item() {
                 if let Some(snap) = self.tna_snapshot() {
                     if let Some(n) = snap.nodes.get(idx) {
@@ -2066,9 +2611,6 @@ impl App {
     }
 
     fn ensure_tna_snapshot(&mut self, force: bool) {
-        if self.tna_rebuilding {
-            return;
-        }
         let Some(id) = self.open_report().map(|report| report.id.clone()) else {
             return;
         };
@@ -2082,12 +2624,17 @@ impl App {
                 return;
             }
         }
-        self.spawn_tna_rebuild(true);
+        if self.tna_pending_report.as_deref() != Some(id.as_str()) {
+            self.spawn_tna_rebuild(true);
+        }
     }
 
     fn spawn_tna_rebuild(&mut self, targeted: bool) {
         if targeted && self.chat_report.is_none() {
             return;
+        }
+        if targeted {
+            self.tna_pending_report = self.chat_report.clone();
         }
         if let Some(path) = self.tna_db_path.clone() {
             self.tna_rebuilding = true;
@@ -2134,6 +2681,7 @@ impl App {
             }
         }
         self.tna_rebuilding = false;
+        self.tna_pending_report = None;
         self.clamp_tna_sel();
     }
 
@@ -2143,7 +2691,10 @@ impl App {
         report_id: Option<String>,
         result: Result<TnaSnapshot, String>,
     ) {
-        self.tna_rebuilding = false;
+        if targeted && report_id == self.tna_pending_report {
+            self.tna_pending_report = None;
+        }
+        self.tna_rebuilding = self.tna_pending_report.is_some();
         match result {
             Ok(snap) => {
                 if targeted {
@@ -2256,11 +2807,741 @@ impl App {
         }
     }
 
+    fn dismiss_tna_answer(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.running = false;
+        self.tna_answer = None;
+        self.tna_answer_scroll = 0;
+        self.status = "ready".into();
+    }
+
+    fn close_report_workspace(&mut self) {
+        self.dismiss_tna_answer();
+        self.chat_report = None;
+        self.chat_case = None;
+        self.tna_report = None;
+        self.tna_pending_report = None;
+        self.tna_rebuilding = false;
+        self.tna_source.clear();
+        self.tna_source_error = None;
+        self.tna_find = None;
+        self.tna_find_editing = false;
+        self.tna_from = None;
+        self.tna_to = None;
+        self.tna_tab_hits.clear();
+        *self.tna_path_cache.borrow_mut() = None;
+        self.tna_table_list_area = Rect::default();
+        self.tna_table_detail_area = Rect::default();
+        self.module = Some(ModuleId::Cases);
+        self.case_page = CasePage::Closed;
+        self.focus = Focus::Prompt;
+        self.prompt.clear();
+        self.cursor = 0;
+        self.load_transcript("desk");
+        self.scroll_back = 0;
+    }
+
+    fn on_tna_turn(&mut self, ev: TurnEvent) {
+        if self.tna_answer.is_none() {
+            return;
+        }
+        match ev {
+            TurnEvent::Status(text) => self.status = text,
+            TurnEvent::Delta(text) => {
+                if let Some(answer) = self.tna_answer.as_mut().filter(|a| a.pending) {
+                    answer.answer.push_str(&text);
+                }
+            }
+            TurnEvent::Note(text) => self.log_event(note_kind(&text), &text),
+            TurnEvent::Done(text) => {
+                if self.cancel.load(Ordering::Relaxed)
+                    || !self.tna_answer.as_ref().is_some_and(|a| a.pending)
+                {
+                    return;
+                }
+                if text.trim().is_empty() {
+                    self.on_tna_turn(TurnEvent::Failed(
+                        "Provider returned an empty answer.".into(),
+                    ));
+                    return;
+                }
+                self.running = false;
+                self.status = "ready".into();
+                if let Some(answer) = self.tna_answer.as_mut() {
+                    answer.pending = false;
+                    answer.answer = text.clone();
+                }
+                self.capture_report_insight(&text);
+            }
+            TurnEvent::Failed(err) => {
+                self.running = false;
+                self.status = "answer error".into();
+                self.log_event("api", &err);
+                if let Some(answer) = self.tna_answer.as_mut() {
+                    answer.pending = false;
+                    answer.error = Some(err);
+                }
+            }
+            // Evidence-only turns cannot write raw memories or file reports.
+            TurnEvent::Memory(_) | TurnEvent::Report(_) => {}
+        }
+    }
+
+    pub fn tna_focus_node(&self) -> Option<&TnaNode> {
+        let snap = self.tna_snapshot()?;
+        self.tna_focus_id
+            .as_ref()
+            .and_then(|id| snap.nodes.iter().find(|n| &n.id == id))
+            .or_else(|| {
+                self.tna_visible_nodes()
+                    .get(self.tna_sel)
+                    .and_then(|i| snap.nodes.get(*i))
+            })
+    }
+
+    pub fn set_tna_layout(&mut self, layout: TnaLayout) {
+        self.tna_layout = layout;
+        self.focus = Focus::Graph;
+        self.tna_path_sel = 0;
+    }
+
+    pub fn tna_focus_entity(&mut self, id: &str) {
+        if let Some(index) = self
+            .tna_visible_nodes()
+            .iter()
+            .position(|i| self.tna_snapshot().is_some_and(|s| s.nodes[*i].id == id))
+        {
+            self.tna_sel = index;
+        }
+        self.tna_focus_id = Some(id.into());
+        self.tna_detail_scroll = 0;
+        self.tna_ledger_sel = 0;
+        self.sync_tna_table_ui();
+    }
+
+    fn workspace_key(&mut self, key: KeyEvent) -> bool {
+        let code = key.code;
+        let layout = match code {
+            KeyCode::Char('g') => Some(TnaLayout::Cockpit),
+            KeyCode::Char('q') => Some(TnaLayout::Clusters),
+            KeyCode::Char('p') => Some(TnaLayout::Path),
+            KeyCode::Char('m') => Some(TnaLayout::Matrix),
+            KeyCode::Char('r') => Some(TnaLayout::Ribbon),
+            KeyCode::Left => Some(TnaLayout::ALL[(self.tna_layout.index() + 4) % 5]),
+            KeyCode::Right => Some(TnaLayout::ALL[(self.tna_layout.index() + 1) % 5]),
+            _ => None,
+        };
+        if let Some(layout) = layout {
+            self.set_tna_layout(layout);
+            return true;
+        }
+        match code {
+            KeyCode::Char('?') => {
+                self.help = true;
+                return true;
+            }
+            KeyCode::PageUp => {
+                self.tna_answer_scroll = self.tna_answer_scroll.saturating_sub(6);
+                return true;
+            }
+            KeyCode::PageDown => {
+                self.tna_answer_scroll = self.tna_answer_scroll.saturating_add(6);
+                return true;
+            }
+            KeyCode::Enter if self.tna_answer.is_some() => {
+                self.focus = Focus::Prompt;
+                return true;
+            }
+            KeyCode::Enter if self.tna_layout == TnaLayout::Clusters => {
+                self.set_tna_layout(TnaLayout::Cockpit);
+                return true;
+            }
+            KeyCode::Char('[') | KeyCode::Char(']') if self.tna_layout == TnaLayout::Cockpit => {
+                let neighbors = self.tna_links();
+                if !neighbors.is_empty() {
+                    self.tna_ledger_sel = if code == KeyCode::Char(']') {
+                        (self.tna_ledger_sel + 1) % neighbors.len()
+                    } else {
+                        (self.tna_ledger_sel + neighbors.len() - 1) % neighbors.len()
+                    };
+                    self.tna_detail_scroll = 0;
+                }
+                return true;
+            }
+            _ => {}
+        }
+        match self.tna_layout {
+            TnaLayout::Clusters if self.focus == Focus::TableDetail => {
+                if matches!(code, KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k')) {
+                    let ids: Vec<_> = self
+                        .tna_snapshot()
+                        .into_iter()
+                        .flat_map(|s| &s.anchors)
+                        .map(|a| a.node_id.clone())
+                        .collect();
+                    if !ids.is_empty() {
+                        let current = ids
+                            .iter()
+                            .position(|id| Some(id) == self.tna_focus_id.as_ref())
+                            .unwrap_or(0);
+                        let index = if matches!(code, KeyCode::Up | KeyCode::Char('k')) {
+                            (current + ids.len() - 1) % ids.len()
+                        } else {
+                            (current + 1) % ids.len()
+                        };
+                        self.tna_focus_entity(&ids[index]);
+                    }
+                    return true;
+                }
+            }
+            TnaLayout::Path => match code {
+                KeyCode::Char('f') | KeyCode::Char('t') => {
+                    let id = self.tna_focus_node().map(|n| n.id.clone());
+                    if code == KeyCode::Char('f') {
+                        self.tna_from = id;
+                    } else {
+                        self.tna_to = id;
+                    }
+                    self.tna_path_sel = 0;
+                    return true;
+                }
+                KeyCode::Up | KeyCode::Char('k') if self.focus == Focus::TableDetail => {
+                    self.tna_path_sel = self.tna_path_sel.saturating_sub(1);
+                    return true;
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.focus == Focus::TableDetail => {
+                    self.tna_path_sel =
+                        (self.tna_path_sel + 1).min(self.tna_paths().len().saturating_sub(1));
+                    return true;
+                }
+                _ => {}
+            },
+            TnaLayout::Matrix => {
+                let len = self.tna_matrix_nodes().len();
+                if len > 0 {
+                    self.tna_matrix_row = self.tna_matrix_row.min(len - 1);
+                    self.tna_matrix_col = self.tna_matrix_col.min(len - 1);
+                    match code {
+                        KeyCode::Char('h') => {
+                            self.tna_matrix_col = self.tna_matrix_col.saturating_sub(1)
+                        }
+                        KeyCode::Char('l') => {
+                            self.tna_matrix_col = (self.tna_matrix_col + 1).min(len - 1)
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            self.tna_matrix_row = self.tna_matrix_row.saturating_sub(1)
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            self.tna_matrix_row = (self.tna_matrix_row + 1).min(len - 1)
+                        }
+                        KeyCode::Enter => {
+                            let index = self.tna_matrix_nodes()[self.tna_matrix_row];
+                            if let Some(node) = self.tna_snapshot().and_then(|s| s.nodes.get(index))
+                            {
+                                let id = node.id.clone();
+                                let other = self
+                                    .tna_matrix_nodes()
+                                    .get(self.tna_matrix_col)
+                                    .and_then(|i| self.tna_snapshot().and_then(|s| s.nodes.get(*i)))
+                                    .map(|n| n.id.clone());
+                                self.tna_focus_entity(&id);
+                                self.set_tna_layout(TnaLayout::Cockpit);
+                                if let Some(other) = other {
+                                    self.tna_ledger_sel = self
+                                        .tna_links()
+                                        .iter()
+                                        .position(|e| e.from == other || e.to == other)
+                                        .unwrap_or(0);
+                                }
+                            }
+                        }
+                        _ => return false,
+                    }
+                }
+                return matches!(
+                    code,
+                    KeyCode::Char('h' | 'j' | 'k' | 'l')
+                        | KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Enter
+                );
+            }
+            TnaLayout::Ribbon => match code {
+                KeyCode::Char('d') => {
+                    self.tna_show_rejected = !self.tna_show_rejected;
+                    return true;
+                }
+                KeyCode::Char('h' | 'k') | KeyCode::Up => {
+                    self.tna_ribbon_pos = self.tna_ribbon_pos.saturating_sub(1);
+                    return true;
+                }
+                KeyCode::Char('l' | 'j') | KeyCode::Down => {
+                    self.tna_ribbon_pos = (self.tna_ribbon_pos + 1)
+                        .min(self.tna_ribbon_positions().len().saturating_sub(1));
+                    return true;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        false
+    }
+
+    pub fn tna_links(&self) -> Vec<&argos_osint_core::tna::TnaEdge> {
+        let Some(snap) = self.tna_snapshot() else {
+            return Vec::new();
+        };
+        let Some(node) = self.tna_focus_node() else {
+            return Vec::new();
+        };
+        let mut edges: Vec<_> = snap
+            .edges
+            .iter()
+            .filter(|e| e.from == node.id || e.to == node.id)
+            .collect();
+        edges.sort_by(|a, b| {
+            b.weight
+                .cmp(&a.weight)
+                .then(a.from.cmp(&b.from))
+                .then(a.to.cmp(&b.to))
+        });
+        edges
+    }
+
+    pub fn tna_label(&self, id: &str) -> String {
+        self.tna_snapshot()
+            .and_then(|s| s.nodes.iter().find(|n| n.id == id))
+            .map(|n| n.label.clone())
+            .unwrap_or_else(|| id.into())
+    }
+
+    pub fn tna_edge_weight(&self, a: &str, b: &str) -> u32 {
+        self.tna_snapshot()
+            .and_then(|s| {
+                s.edges
+                    .iter()
+                    .find(|e| (e.from == a && e.to == b) || (e.to == a && e.from == b))
+            })
+            .map(|e| e.weight)
+            .unwrap_or(0)
+    }
+
+    pub fn tna_edge_evidence(&self, a: &str, b: &str) -> String {
+        if self.tna_snapshot().is_none() {
+            return "Evidence unavailable.".into();
+        }
+        let accepted = self.tna_accepted_mentions();
+        // Match the existing three-mention window, including the two-mention case.
+        for (i, d) in accepted.iter().enumerate() {
+            if d.canonical_id.as_deref() != Some(a) {
+                continue;
+            }
+            for (_, other) in accepted
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| i.abs_diff(*j) <= 2)
+            {
+                if other.canonical_id.as_deref() != Some(b) {
+                    continue;
+                }
+                let start = d.start.min(other.start);
+                let end = d.end.max(other.end);
+                if let Some(text) = self.tna_source.get(start..end).filter(|_| {
+                    self.tna_source.get(d.start..d.end) == Some(d.original.as_str())
+                        && self.tna_source.get(other.start..other.end)
+                            == Some(other.original.as_str())
+                }) {
+                    let excerpt: String = text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(360)
+                        .collect();
+                    return format!(
+                        "{} · {} · bytes {}–{}\n{}",
+                        d.report_id, d.section, start, end, excerpt
+                    );
+                }
+                return format!(
+                    "{} · {} · bytes {}–{}\n{}: {} / {}: {}",
+                    d.report_id,
+                    d.section,
+                    start,
+                    end,
+                    d.original,
+                    d.reason,
+                    other.original,
+                    other.reason
+                );
+            }
+        }
+        let reasons: Vec<_> = accepted
+            .iter()
+            .filter(|d| matches!(d.canonical_id.as_deref(), Some(id) if id == a || id == b))
+            .take(2)
+            .map(|d| {
+                format!(
+                    "{} · {} · bytes {}–{}: {} — {}",
+                    d.report_id, d.section, d.start, d.end, d.original, d.reason
+                )
+            })
+            .collect();
+        if reasons.is_empty() {
+            "Evidence unavailable in this snapshot; edge weight is existing co-occurrence, not a verified relationship.".into()
+        } else {
+            format!("No joint excerpt recovered.\n{}", reasons.join("\n"))
+        }
+    }
+
+    pub fn tna_matrix_nodes(&self) -> Vec<usize> {
+        let Some(snap) = self.tna_snapshot() else {
+            return Vec::new();
+        };
+        let mut nodes = self.tna_visible_nodes();
+        nodes.sort_by(|a, b| {
+            snap.nodes[*b]
+                .degree
+                .cmp(&snap.nodes[*a].degree)
+                .then(snap.nodes[*a].id.cmp(&snap.nodes[*b].id))
+        });
+        nodes.truncate(24);
+        nodes
+    }
+
+    pub fn tna_cluster_counts(&self) -> [[u32; 4]; 4] {
+        let mut counts = [[0; 4]; 4];
+        if let Some(snap) = self.tna_snapshot() {
+            for edge in &snap.edges {
+                let a = snap
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == edge.from)
+                    .map(|n| n.cluster);
+                let b = snap
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == edge.to)
+                    .map(|n| n.cluster);
+                if let (Some(a), Some(b)) = (a, b) {
+                    let i = TnaCluster::all().iter().position(|c| *c == a).unwrap_or(0);
+                    let j = TnaCluster::all().iter().position(|c| *c == b).unwrap_or(0);
+                    counts[i][j] += 1;
+                    if i != j {
+                        counts[j][i] += 1;
+                    }
+                }
+            }
+        }
+        counts
+    }
+
+    pub fn tna_paths(&self) -> Vec<TnaPath> {
+        let (Some(from), Some(to), Some(snap)) =
+            (&self.tna_from, &self.tna_to, self.tna_snapshot())
+        else {
+            return Vec::new();
+        };
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        for edge in &snap.edges {
+            (&edge.from, &edge.to, edge.weight).hash(&mut hash);
+        }
+        let fingerprint = hash.finish();
+        if let Some((a, b, version, paths)) = &*self.tna_path_cache.borrow() {
+            if a == from && b == to && *version == fingerprint {
+                return paths.clone();
+            }
+        }
+        let paths = self.find_tna_paths();
+        *self.tna_path_cache.borrow_mut() =
+            Some((from.clone(), to.clone(), fingerprint, paths.clone()));
+        paths
+    }
+
+    fn find_tna_paths(&self) -> Vec<TnaPath> {
+        let (Some(from), Some(to), Some(snap)) =
+            (&self.tna_from, &self.tna_to, self.tna_snapshot())
+        else {
+            return Vec::new();
+        };
+        self.tna_path_search_limited.set(false);
+        if from == to {
+            return vec![TnaPath {
+                nodes: vec![from.clone()],
+                strength: 0,
+            }];
+        }
+        let mut adj: HashMap<&str, Vec<(&str, u32)>> = HashMap::new();
+        let mut max_weight = 0;
+        for edge in &snap.edges {
+            adj.entry(&edge.from)
+                .or_default()
+                .push((&edge.to, edge.weight));
+            adj.entry(&edge.to)
+                .or_default()
+                .push((&edge.from, edge.weight));
+            max_weight = max_weight.max(edge.weight);
+        }
+        let mut distances = HashMap::from([(to.as_str(), 0usize)]);
+        let mut frontier = VecDeque::from([to.as_str()]);
+        while let Some(id) = frontier.pop_front() {
+            let distance = distances[id];
+            if distance == 4 {
+                continue;
+            }
+            for (next, _) in adj.get(id).into_iter().flatten() {
+                if !distances.contains_key(next) {
+                    distances.insert(*next, distance + 1);
+                    frontier.push_back(*next);
+                }
+            }
+        }
+        if !distances.contains_key(from.as_str()) {
+            return Vec::new();
+        }
+        let mut results = Vec::new();
+        let mut expanded = 0;
+        // Upper-bound priority finds stronger equal-length paths first. Bound work
+        // for dense graphs; no new graph metrics or persisted data are introduced.
+        for hops in 1..=4usize {
+            let mut queue = std::collections::BinaryHeap::new();
+            queue.push((max_weight as u64 * hops as u64, 0u32, vec![from.clone()]));
+            while let Some((_, strength, nodes)) = queue.pop() {
+                expanded += 1;
+                if expanded > 20_000 {
+                    self.tna_path_search_limited.set(true);
+                    return results;
+                }
+                let last = nodes.last().unwrap();
+                if last == to {
+                    if nodes.len() == hops + 1 {
+                        results.push(TnaPath { nodes, strength });
+                    }
+                    if results.len() == 5 {
+                        return results;
+                    }
+                    continue;
+                }
+                if nodes.len() > hops {
+                    continue;
+                }
+                for (next, weight) in adj.get(last.as_str()).into_iter().flatten() {
+                    let remaining = hops + 1 - (nodes.len() + 1);
+                    if nodes.iter().any(|n| n == next)
+                        || distances
+                            .get(next)
+                            .is_none_or(|distance| *distance > remaining)
+                    {
+                        continue;
+                    }
+                    if queue.len() >= 20_000 {
+                        self.tna_path_search_limited.set(true);
+                        return results;
+                    }
+                    let mut next_nodes = nodes.clone();
+                    next_nodes.push((*next).into());
+                    let next_strength = strength.saturating_add(*weight);
+                    let remaining = hops + 1 - next_nodes.len();
+                    queue.push((
+                        next_strength as u64 + max_weight as u64 * remaining as u64,
+                        next_strength,
+                        next_nodes,
+                    ));
+                }
+            }
+        }
+        results
+    }
+
+    /// Scrub source lines, including sections with no extracted candidates.
+    pub fn tna_ribbon_positions(&self) -> Vec<usize> {
+        let mut positions = Vec::new();
+        let mut offset = 0;
+        for line in self.tna_source.split_inclusive('\n') {
+            if !line.trim().is_empty() {
+                positions.push(offset);
+            }
+            offset += line.len();
+        }
+        positions
+    }
+
+    fn tna_report_material(&self, report: &ReportMeta) -> String {
+        let prefix: String = self.tna_source.chars().take(3500).collect();
+        let mut out = format!(
+            "OPEN REPORT: {} ({})\n{}\n",
+            report.title, report.id, prefix
+        );
+        if prefix.len() < self.tna_source.len() {
+            out.push_str("[Report prefix clipped; additional focused evidence follows. Absence from these excerpts does not establish absence from the full report.]\n");
+        }
+        let mut ids: Vec<&str> = self
+            .tna_focus_node()
+            .map(|n| n.id.as_str())
+            .into_iter()
+            .collect();
+        if self.tna_layout == TnaLayout::Path {
+            ids.extend(self.tna_from.as_deref());
+            ids.extend(self.tna_to.as_deref());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for d in self
+            .tna_accepted_mentions()
+            .into_iter()
+            .filter(|d| {
+                d.canonical_id
+                    .as_deref()
+                    .is_some_and(|id| ids.contains(&id))
+            })
+            .take(4)
+        {
+            if !seen.insert(d.start) {
+                continue;
+            }
+            out.push_str(&format!(
+                "\nFocused source: {} · bytes {}–{}\n{}\n",
+                d.section,
+                d.start,
+                d.end,
+                self.tna_source_around(d.start, 500)
+            ));
+        }
+        if self.tna_layout == TnaLayout::Ribbon {
+            if let Some(position) = self.tna_ribbon_positions().get(self.tna_ribbon_pos) {
+                out.push_str(&format!(
+                    "\nRibbon source at byte {position}:\n{}",
+                    self.tna_source_around(*position, 700)
+                ));
+            }
+        }
+        out
+    }
+
+    fn tna_source_around(&self, position: usize, radius: usize) -> &str {
+        let mut start = position.saturating_sub(radius).min(self.tna_source.len());
+        let mut end = position.saturating_add(radius).min(self.tna_source.len());
+        while !self.tna_source.is_char_boundary(start) {
+            start = start.saturating_sub(1);
+        }
+        while !self.tna_source.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        self.tna_source.get(start..end).unwrap_or("")
+    }
+
+    pub fn tna_ribbon_decisions(&self) -> Vec<&argos_osint_core::tna::TnaDecision> {
+        let mut decisions: Vec<_> = self
+            .tna_snapshot()
+            .into_iter()
+            .flat_map(|s| &s.decisions)
+            .filter(|d| {
+                Some(d.report_id.as_str()) == self.chat_report.as_deref()
+                    && (self.tna_show_rejected || d.canonical_id.is_some())
+            })
+            .collect();
+        decisions.sort_by_key(|d| (d.start, d.end));
+        decisions
+    }
+
+    fn tna_accepted_mentions(&self) -> Vec<&argos_osint_core::tna::TnaDecision> {
+        let mut decisions: Vec<_> = self
+            .tna_snapshot()
+            .into_iter()
+            .flat_map(|s| &s.decisions)
+            .filter(|d| {
+                d.canonical_id.is_some()
+                    && Some(d.report_id.as_str()) == self.chat_report.as_deref()
+            })
+            .collect();
+        decisions.sort_by_key(|d| d.start);
+        let mut seen = std::collections::HashSet::new();
+        decisions.retain(|d| seen.insert((d.start, d.canonical_id.as_deref())));
+        decisions
+    }
+
+    pub fn tna_ledger_neighbor(&self) -> Option<&str> {
+        let focus = self.tna_focus_node()?;
+        let edges = self.tna_links();
+        let edge = edges.get(self.tna_ledger_sel.min(edges.len().saturating_sub(1)))?;
+        Some(if edge.from == focus.id {
+            &edge.to
+        } else {
+            &edge.from
+        })
+    }
+
+    pub fn tna_ribbon_window(&self, position: usize) -> Vec<&argos_osint_core::tna::TnaDecision> {
+        let accepted = self.tna_accepted_mentions();
+        let nearest = accepted
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, d)| d.start.abs_diff(position))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let start = nearest
+            .saturating_sub(1)
+            .min(accepted.len().saturating_sub(3));
+        accepted.into_iter().skip(start).take(3).collect()
+    }
+
+    fn tna_digest(&self) -> String {
+        let mut lines = vec![format!("Layout: {}", self.tna_layout.title())];
+        if let Some(node) = self.tna_focus_node() {
+            lines.push(format!(
+                "Selected: {} ({}, degree {})",
+                node.label,
+                node.kind.as_str(),
+                node.degree
+            ));
+            let neighbors: Vec<_> = self
+                .tna_links()
+                .iter()
+                .take(8)
+                .map(|e| {
+                    format!(
+                        "{} [w{}]",
+                        self.tna_label(if e.from == node.id { &e.to } else { &e.from }),
+                        e.weight
+                    )
+                })
+                .collect();
+            lines.push(format!("Neighbors: {}", neighbors.join(", ")));
+        }
+        if self.tna_layout == TnaLayout::Path {
+            lines.push(format!(
+                "Path FROM: {}; TO: {}",
+                self.tna_from
+                    .as_ref()
+                    .map(|id| self.tna_label(id))
+                    .unwrap_or_else(|| "unset".into()),
+                self.tna_to
+                    .as_ref()
+                    .map(|id| self.tna_label(id))
+                    .unwrap_or_else(|| "unset".into())
+            ));
+        }
+        if let Some(snap) = self.tna_snapshot() {
+            for gap in snap.gaps.iter().take(3) {
+                lines.push(format!(
+                    "No co-occurrence: {} / {}",
+                    gap.cluster_a.label(),
+                    gap.cluster_b.label()
+                ));
+            }
+        }
+        lines.join("\n").chars().take(1600).collect()
+    }
+
     fn on_tna_key(&mut self, key: KeyEvent) -> bool {
-        if self.tna_find.is_some() {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        if self.tna_find_editing {
             match key.code {
                 KeyCode::Esc => {
                     self.tna_find = None;
+                    self.tna_find_editing = false;
                 }
                 KeyCode::Backspace => {
                     if let Some(q) = self.tna_find.as_mut() {
@@ -2268,7 +3549,7 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    // keep filter active but stop editing
+                    self.tna_find_editing = false;
                 }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(q) = self.tna_find.as_mut() {
@@ -2281,9 +3562,13 @@ impl App {
             self.sync_tna_table_ui();
             return false;
         }
+        if self.workspace_key(key) {
+            return false;
+        }
         match key.code {
             KeyCode::Char('/') => {
                 self.tna_find = Some(String::new());
+                self.tna_find_editing = true;
                 self.focus = Focus::Graph;
             }
             KeyCode::Enter => {
@@ -2344,25 +3629,18 @@ impl App {
             self.editing = false;
             return;
         }
-        if self.case_page == CasePage::Network {
+        if self.chat_report.is_some() {
             if self.tna_find.is_some() {
                 self.tna_find = None;
+                self.tna_find_editing = false;
                 self.clamp_tna_sel();
                 return;
             }
-            if self.chat_report.is_some() {
-                self.persist_visible_chat();
-                self.chat_report = None;
-                self.tna_report = None;
-                self.load_transcript("desk");
-                self.scroll_back = 0;
-                self.case_page = CasePage::Closed;
-                self.focus = Focus::Prompt;
+            if self.tna_answer.is_some() {
+                self.dismiss_tna_answer();
                 return;
             }
-            self.case_page = CasePage::Closed;
-            self.fields.clear();
-            self.focus = Focus::Prompt;
+            self.close_report_workspace();
             return;
         }
         if self.widget().is_some() {
@@ -2851,7 +4129,7 @@ Could not write the report: {err}",
         self.settings.tavily_key = self.field_value("tavily_key");
         self.settings.youtube_key = self.field_value("youtube_key");
         self.settings.github_token = self.field_value("github_token");
-        match self.settings.save() {
+        match self.save_settings_config(&self.settings) {
             Ok(()) => self.status = "saved OSINT sources".into(),
             Err(err) => {
                 self.status = "could not save OSINT sources".into();
@@ -2879,7 +4157,7 @@ Could not write the report: {err}",
                 url_template,
                 enabled: true,
             });
-        if let Err(err) = self.settings.save() {
+        if let Err(err) = self.save_settings_config(&self.settings) {
             self.status = err.to_string();
             return;
         }
@@ -2898,14 +4176,14 @@ Could not write the report: {err}",
         if self.source_sel >= self.settings.sources.len() {
             self.source_sel = self.settings.sources.len().saturating_sub(1);
         }
-        let _ = self.settings.save();
+        let _ = self.save_settings_config(&self.settings);
     }
 
     fn toggle_osint_source(&mut self) {
         if let Some(source) = self.settings.sources.get_mut(self.source_sel) {
             source.enabled = !source.enabled;
         }
-        let _ = self.settings.save();
+        let _ = self.save_settings_config(&self.settings);
     }
 
     fn bind_case(&mut self) {
@@ -2988,7 +4266,9 @@ Could not write the report: {err}",
         if line.is_empty() {
             return;
         }
-        self.history.push(line.clone());
+        if self.chat_report.is_none() {
+            self.history.push(line.clone());
+        }
         self.hist_pos = None;
         self.prompt.clear();
         self.cursor = 0;
@@ -3010,38 +4290,50 @@ Could not write the report: {err}",
             self.status = "that report is no longer on file".into();
             return;
         };
-        let session = format!("report:{}", report.id);
-        if self
-            .store
-            .ensure_session(&session, &report.title, "report")
-            .is_err()
-        {
-            self.status = "could not open the report chat".into();
-            return;
-        }
-        if self.chat_report.as_deref() != Some(report.id.as_str()) {
-            self.persist_visible_chat();
-        }
-        if self.chat_report.as_deref() != Some(report.id.as_str()) {
+        self.persist_visible_chat();
+        self.cancel.store(true, Ordering::Relaxed);
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.running = false;
+        if self.chat_report.as_deref() != Some(id) {
             self.tna_report = None;
         }
         self.chat_case = None;
         self.chat_report = Some(report.id.clone());
-        if self.case_page == CasePage::Network {
-            self.module = Some(ModuleId::Cases);
-            self.scroll_back = 0;
-            self.focus = Focus::Graph;
-            self.tna_report = None;
-            self.ensure_tna_snapshot(true);
-        } else {
-            self.case_page = CasePage::Closed;
-            self.module = Some(ModuleId::Cases);
-            self.scroll_back = 0;
-            self.focus = Focus::Prompt;
+        self.case_page = CasePage::Network;
+        self.module = Some(ModuleId::Cases);
+        self.focus = Focus::Graph;
+        self.brain_card = false;
+        self.editing = false;
+        self.tna_layout = TnaLayout::Cockpit;
+        self.tna_answer = None;
+        self.tna_from = None;
+        self.tna_to = None;
+        self.tna_path_sel = 0;
+        self.tna_matrix_row = 0;
+        self.tna_matrix_col = 0;
+        self.tna_ribbon_pos = 0;
+        self.tna_show_rejected = false;
+        self.tna_find = None;
+        self.tna_find_editing = false;
+        self.tna_sel = 0;
+        self.tna_focus_id = None;
+        self.tna_detail_scroll = 0;
+        self.tna_ledger_sel = 0;
+        self.prompt.clear();
+        self.cursor = 0;
+        self.transcripts.remove(&format!("report:{id}"));
+        match std::fs::read_to_string(&report.path) {
+            Ok(text) => {
+                self.tna_source = text;
+                self.tna_source_error = None;
+            }
+            Err(err) => {
+                self.tna_source.clear();
+                self.tna_source_error = Some(format!("Report evidence unavailable: {err}"));
+            }
         }
-        self.transcripts.remove(&session);
-        self.load_transcript(&self.session_id());
         self.status = "ready".into();
+        self.ensure_tna_snapshot(false);
     }
 
     fn route_desk_message(&mut self, text: String) {
@@ -3120,6 +4412,25 @@ Could not write the report: {err}",
         let mut parts = rest.splitn(2, char::is_whitespace);
         let cmd = parts.next().unwrap_or("").to_lowercase();
         let arg = parts.next().unwrap_or("").trim().to_string();
+        if self.chat_report.is_some()
+            && !matches!(
+                cmd.as_str(),
+                "help"
+                    | "?"
+                    | "clear"
+                    | "find"
+                    | "network"
+                    | "model"
+                    | "m"
+                    | "models"
+                    | "quit"
+                    | "exit"
+                    | "q"
+            )
+        {
+            self.status = format!("/{cmd} is Desk-only; Esc closes the report workspace");
+            return;
+        }
         match cmd.as_str() {
             "help" | "?" => self.help = true,
             "quit" | "exit" | "q" => self.quit = true,
@@ -3159,6 +4470,7 @@ Could not write the report: {err}",
             "provider" | "login" => self.open_module(ModuleId::Providers),
             "osint" | "sources" => self.open_module(ModuleId::Osint),
             "model" | "m" | "models" => {
+                self.model_target = ModelTarget::Writer;
                 if arg.is_empty() || cmd == "models" {
                     self.open_model_picker();
                 } else {
@@ -3179,7 +4491,8 @@ Could not write the report: {err}",
                     self.select_case_page(CasePage::Network);
                 }
                 if self.case_page == CasePage::Network {
-                    self.tna_find = Some(String::new());
+                    self.tna_find = Some(arg);
+                    self.tna_find_editing = true;
                     self.focus = Focus::Graph;
                 }
             }
@@ -3213,7 +4526,7 @@ Could not write the report: {err}",
             "gmail" => self.open_module(ModuleId::Gmail),
             "voice" => {
                 self.settings.modality = "voice".into();
-                let _ = self.settings.save();
+                let _ = self.save_settings_config(&self.settings);
                 self.push_line(
                     "assistant",
                     "Modality is voice. Ctrl+R records, Enter sends the transcript.",
@@ -3221,7 +4534,7 @@ Could not write the report: {err}",
             }
             "text" => {
                 self.settings.modality = "text".into();
-                let _ = self.settings.save();
+                let _ = self.save_settings_config(&self.settings);
                 self.push_line("assistant", "Modality is text.");
             }
             "open" => {
@@ -3240,6 +4553,10 @@ Could not write the report: {err}",
     }
 
     fn clear_chat_view(&mut self) {
+        if self.chat_report.is_some() {
+            self.dismiss_tna_answer();
+            return;
+        }
         if self.running {
             self.status = "busy".into();
             return;
@@ -3319,10 +4636,16 @@ Could not write the report: {err}",
         from_memory: bool,
     ) {
         if self.running {
-            self.status = "busy".into();
-            return;
+            if self.chat_report.is_none() {
+                self.status = "busy".into();
+                return;
+            }
+            self.cancel.store(true, Ordering::Relaxed);
         }
-        if prior_reports.is_empty() && prompt::classify(&text) == Intent::Remember {
+        if self.chat_report.is_none()
+            && prior_reports.is_empty()
+            && prompt::classify(&text) == Intent::Remember
+        {
             let fact = prompt::remember_text(&text);
             self.push_line("user", &text);
             if let Ok(mem) = self.store.add_memory(&fact) {
@@ -3331,22 +4654,34 @@ Could not write the report: {err}",
             }
             return;
         }
+        if self.chat_report.is_some() {
+            self.tna_answer = Some(TnaAnswer {
+                question: text.clone(),
+                pending: true,
+                ..Default::default()
+            });
+            self.tna_answer_scroll = 0;
+            if let Some(err) = self.tna_source_error.clone() {
+                self.on_tna_turn(TurnEvent::Failed(err));
+                return;
+            }
+        }
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        let generation = self.turn_generation;
+        let report_id = self.chat_report.clone();
         self.running = true;
         self.cancel = Arc::new(AtomicBool::new(false));
         self.status = "starting".into();
-        if echo_user {
-            self.push_line("user", &text);
+        if self.chat_report.is_none() {
+            if echo_user {
+                self.push_line("user", &text);
+            }
+            self.push_line("assistant", "");
         }
-        self.push_line("assistant", "");
         self.log_event("api", &format!("chat {}", self.active_model()));
         let (prior_reports, evidence_only, from_memory, memories) =
             if let Some(report) = self.open_report().cloned() {
-                (
-                    prior_report_material(std::slice::from_ref(&report)),
-                    true,
-                    false,
-                    Vec::new(),
-                )
+                (self.tna_report_material(&report), true, false, Vec::new())
             } else {
                 (
                     prior_reports,
@@ -3378,10 +4713,14 @@ Could not write the report: {err}",
             memories,
             view_name: self.view_name(),
             view_context: self.view_context(),
-            hardware_line: self.hardware.one_line(),
+            hardware_line: if report_id.is_some() {
+                String::new()
+            } else {
+                self.hardware.one_line()
+            },
             modality: self.settings.modality.clone(),
-            provider: Some(self.role_secret(&self.settings.writer_model)),
-            tool_provider: Some(self.role_secret(&self.settings.tool_model)),
+            provider: Some(self.role_secret(true)),
+            tool_provider: Some(self.role_secret(false)),
             plan: self.settings.source_plan(),
             report_dir: report_dir(&self.settings),
             case_id: self.case_id(),
@@ -3398,7 +4737,14 @@ Could not write the report: {err}",
                 agent::run_turn(input, atx, cancel).await;
             });
             while let Some(ev) = arx.recv().await {
-                if tx.send(AppMsg::Turn(ev)).is_err() {
+                if tx
+                    .send(AppMsg::ScopedTurn {
+                        generation,
+                        report_id: report_id.clone(),
+                        event: ev,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -3407,6 +4753,18 @@ Could not write the report: {err}",
     }
 
     pub fn open_module(&mut self, module: ModuleId) {
+        if self.chat_report.is_some() {
+            if module == ModuleId::Brain {
+                self.status = "Brain is available after closing the report".into();
+                return;
+            }
+            if matches!(module, ModuleId::Cases | ModuleId::Reports) {
+                self.module = Some(ModuleId::Cases);
+                self.focus = Focus::Graph;
+                return;
+            }
+            self.close_report_workspace();
+        }
         match module {
             ModuleId::Brain => {
                 self.module = Some(ModuleId::Cases);
@@ -3438,7 +4796,7 @@ Could not write the report: {err}",
             }
             ModuleId::Gmail => {
                 self.module = Some(ModuleId::Providers);
-                self.provider_page = ProviderPage::Mail;
+                self.provider_page = ProviderPage::Models;
             }
             ModuleId::Osint => {
                 self.module = Some(ModuleId::Providers);
@@ -3446,7 +4804,7 @@ Could not write the report: {err}",
             }
             ModuleId::Providers => {
                 self.module = Some(ModuleId::Providers);
-                self.provider_page = ProviderPage::Llm;
+                self.provider_page = ProviderPage::Models;
             }
         }
         let module = self.module.unwrap_or(ModuleId::Cases);
@@ -3473,6 +4831,12 @@ Could not write the report: {err}",
     }
 
     fn cycle_group_page(&mut self, delta: isize) {
+        if self.chat_report.is_some() {
+            self.set_tna_layout(
+                TnaLayout::ALL[(self.tna_layout.index() as isize + delta).rem_euclid(5) as usize],
+            );
+            return;
+        }
         match self.module {
             Some(ModuleId::Cases) => {
                 let pages = self.case_pages();
@@ -3607,110 +4971,120 @@ Could not write the report: {err}",
                 self.set_brain_action_label();
             }
             ModuleId::Providers => {
-                let secret = self.slot_secret();
-                let fallback = provider::preset("local").expect("local preset");
-                let kind = secret
-                    .as_ref()
-                    .map(|slot| provider::normalize_kind(&slot.kind))
-                    .filter(|kind| provider::preset(kind).is_some())
-                    .unwrap_or_else(|| "local".into());
-                let chosen = provider::preset(&kind).unwrap_or(fallback);
-                self.fields = vec![
-                    field("__h_connection", "Connection", String::new(), false),
-                    field(
-                        "kind",
-                        "Provider (enter cycles grok / openai / openrouter / local)",
-                        kind,
-                        false,
-                    ),
-                    field(
-                        "base_url",
-                        "Base URL",
-                        secret
-                            .as_ref()
-                            .map(|slot| slot.base_url.clone())
-                            .filter(|url| !url.is_empty())
-                            .unwrap_or_else(|| chosen.base_url.into()),
-                        false,
-                    ),
-                    field(
-                        "model",
-                        "Model",
-                        secret
-                            .as_ref()
-                            .map(|slot| slot.model.clone())
-                            .filter(|model| !model.is_empty())
-                            .unwrap_or_else(|| {
-                                if self.provider_slot == "voice" {
-                                    chosen.voice_model.into()
-                                } else {
-                                    chosen.text_model.into()
-                                }
-                            }),
-                        false,
-                    ),
-                    field(
-                        "api_key",
-                        "API key (empty uses XAI_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY)",
-                        secret
-                            .as_ref()
-                            .and_then(|slot| slot.api_key.clone())
-                            .unwrap_or_default(),
-                        true,
-                    ),
-                    field(
-                        "stt_model",
-                        "Voice model",
-                        secret
-                            .as_ref()
-                            .and_then(|slot| slot.stt_model.clone())
-                            .unwrap_or_else(|| chosen.voice_model.into()),
-                        false,
-                    ),
-                    field(
-                        "__slot",
-                        "Slot action: press enter to flip text/voice",
-                        self.provider_slot.into(),
-                        false,
-                    ),
-                    field("__save", "Save connection", "enter".into(), false),
-                    field("__test", "Test /models", "enter".into(), false),
-                    field("__h_roles", "Roles", String::new(), false),
-                    field(
-                        "__role_writer",
-                        "Writer model",
-                        self.role_label(&self.settings.writer_model),
-                        false,
-                    ),
-                    field(
-                        "__role_tool",
-                        "Tool model",
-                        self.role_label(&self.settings.tool_model),
-                        false,
-                    ),
-                ];
+                if self.provider_page == ProviderPage::Models {
+                    self.fields = vec![
+                        field(
+                            "__writer_provider",
+                            "Provider",
+                            provider_name(&provider::effective_kind(&self.role_secret(true)))
+                                .into(),
+                            false,
+                        ),
+                        field(
+                            "__role_writer",
+                            "Model",
+                            self.role_secret(true).model,
+                            false,
+                        ),
+                        field(
+                            "__tool_provider",
+                            "Provider",
+                            provider_name(&provider::effective_kind(&self.role_secret(false)))
+                                .into(),
+                            false,
+                        ),
+                        field("__role_tool", "Model", self.role_secret(false).model, false),
+                    ];
+                } else if let Some(kind) = self.provider_page.account() {
+                    let secret = provider::account_secret(&self.auth, kind);
+                    self.fields = Vec::new();
+                    if kind == "grok" {
+                        self.fields.push(field(
+                            "__grok_subscription_login",
+                            "Sign in with Grok",
+                            "Enter".into(),
+                            false,
+                        ));
+                        self.fields.push(field(
+                            "__grok_subscription_check",
+                            "Check existing login",
+                            "Enter".into(),
+                            false,
+                        ));
+                        self.fields.push(field(
+                            "__models",
+                            "Choose Writer / Tools",
+                            "Models".into(),
+                            false,
+                        ));
+                    } else if kind == "openai-chatgpt" {
+                        self.fields.push(field(
+                            "__subscription_login",
+                            "Sign in with ChatGPT",
+                            "Enter".into(),
+                            false,
+                        ));
+                        self.fields.push(field(
+                            "__subscription_check",
+                            "Check existing login",
+                            "Enter".into(),
+                            false,
+                        ));
+                        self.fields.push(field(
+                            "__models",
+                            "Choose Writer model",
+                            "Models → Writer".into(),
+                            false,
+                        ));
+                    } else {
+                        self.fields.push(field(
+                            "api_key",
+                            &format!("{} API key", provider_name(kind)),
+                            secret.api_key.clone().unwrap_or_default(),
+                            true,
+                        ));
+                        self.fields.push(field(
+                            "__save",
+                            &format!("Save {} key", provider_name(kind)),
+                            "Enter".into(),
+                            false,
+                        ));
+                        self.fields.push(field(
+                            "__test",
+                            "Verify connection",
+                            "Enter".into(),
+                            false,
+                        ));
+                        self.fields.push(field(
+                            "__models",
+                            "Choose Writer / Tools",
+                            "Models".into(),
+                            false,
+                        ));
+                        self.fields.push(field(
+                            "__advanced",
+                            "Advanced endpoint",
+                            if self.provider_advanced {
+                                "Hide"
+                            } else {
+                                "Show"
+                            }
+                            .into(),
+                            false,
+                        ));
+                        if self.provider_advanced {
+                            self.fields.push(field(
+                                "base_url",
+                                "API endpoint",
+                                secret.base_url,
+                                false,
+                            ));
+                        }
+                    }
+                }
             }
             ModuleId::Gmail => {
-                let g = self.auth.gmail.clone();
-                self.fields = vec![
-                    field(
-                        "email",
-                        "Gmail address",
-                        g.as_ref().map(|g| g.email.clone()).unwrap_or_default(),
-                        false,
-                    ),
-                    field(
-                        "app_password",
-                        "App password",
-                        g.as_ref()
-                            .map(|g| g.app_password.clone())
-                            .unwrap_or_default(),
-                        true,
-                    ),
-                    field("__save", "Save Gmail", "enter".into(), false),
-                    field("__test", "Test INBOX", "enter".into(), false),
-                    field("__mcp", "Write MCP config", "enter".into(), false),
-                ];
+                self.fields.clear();
             }
             ModuleId::Settings => {
                 self.fields = vec![
@@ -3733,14 +5107,6 @@ Could not write the report: {err}",
         }
     }
 
-    fn slot_secret(&self) -> Option<ProviderSecret> {
-        if self.provider_slot == "voice" {
-            self.auth.voice.clone()
-        } else {
-            self.auth.text.clone()
-        }
-    }
-
     fn field_value(&self, key: &str) -> String {
         self.fields
             .iter()
@@ -3755,8 +5121,8 @@ Could not write the report: {err}",
             .get(self.field_sel)
             .map(|f| f.key.clone())
             .unwrap_or_default();
-        if key == "kind" {
-            self.cycle_provider();
+        if key == "__writer_provider" || key == "__tool_provider" {
+            self.open_role_provider_picker(key == "__writer_provider");
         } else if key == "__role_writer" {
             self.model_target = ModelTarget::Writer;
             self.open_model_card();
@@ -3790,37 +5156,102 @@ Could not write the report: {err}",
         }
     }
 
-    fn cycle_provider(&mut self) {
-        let current = provider::normalize_kind(&self.field_value("kind"));
-        let order = provider::presets();
-        let index = order
+    pub fn role_provider_choices(&self, writer: bool) -> Vec<&'static str> {
+        let mut choices = vec!["grok", "openrouter"];
+        if writer {
+            choices.insert(1, "openai-chatgpt");
+        }
+        if self.auth.account("local").is_some() {
+            choices.push("local");
+        }
+        choices
+    }
+
+    fn open_role_provider_picker(&mut self, writer: bool) {
+        let current = provider::effective_kind(&self.role_secret(writer));
+        self.provider_choice = self
+            .role_provider_choices(writer)
             .iter()
-            .position(|preset| preset.id == current)
-            .unwrap_or(order.len() - 1);
-        let next = &order[(index + 1) % order.len()];
-        let url = self.field_value("base_url");
-        let model = self.field_value("model");
-        let stt = self.field_value("stt_model");
-        let url_is_default = url.is_empty() || order.iter().any(|preset| preset.base_url == url);
-        let model_is_default = model.is_empty()
-            || order
-                .iter()
-                .any(|preset| preset.text_model == model || preset.voice_model == model);
-        let stt_is_default = stt.is_empty() || order.iter().any(|preset| preset.voice_model == stt);
-        self.field_set("kind", next.id.into());
-        if url_is_default {
-            self.field_set("base_url", next.base_url.into());
+            .position(|kind| *kind == current)
+            .unwrap_or(0);
+        self.provider_picker = Some(writer);
+    }
+
+    fn on_provider_picker_key(&mut self, key: KeyEvent) -> bool {
+        let Some(writer) = self.provider_picker else {
+            return false;
+        };
+        let choices = self.role_provider_choices(writer);
+        match key.code {
+            KeyCode::Esc => self.provider_picker = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.provider_choice = (self.provider_choice + choices.len() - 1) % choices.len()
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.provider_choice = (self.provider_choice + 1) % choices.len()
+            }
+            KeyCode::Enter => {
+                self.select_role_provider(writer, choices[self.provider_choice]);
+                self.provider_picker = None;
+            }
+            _ => {}
         }
-        if model_is_default {
-            let model = if self.provider_slot == "voice" {
-                next.voice_model
-            } else {
-                next.text_model
-            };
-            self.field_set("model", model.into());
+        false
+    }
+
+    fn select_role_provider(&mut self, writer: bool, kind: &str) {
+        if !self.role_provider_choices(writer).contains(&kind) {
+            return;
         }
-        if stt_is_default {
-            self.field_set("stt_model", next.voice_model.into());
+        if provider::effective_kind(&self.role_secret(writer)) == kind {
+            return;
+        }
+        let secret = provider::account_secret(&self.auth, kind);
+        let mut next = self.settings.clone();
+        let model = if kind == "openai-chatgpt" {
+            "codex-default".into()
+        } else {
+            secret.model
+        };
+        if writer {
+            next.writer_provider = kind.into();
+            next.writer_model = model;
+        } else {
+            next.tool_provider = kind.into();
+            next.tool_model = model;
+        }
+        match self.save_settings_config(&next) {
+            Ok(()) => {
+                self.settings = next;
+                self.status = "Model role saved".into();
+            }
+            Err(err) => {
+                self.status = "Model role save failed".into();
+                self.log_event("system", &format!("model role save failed: {err}"));
+            }
+        }
+        self.load_fields(ModuleId::Providers);
+    }
+
+    fn save_settings_config(&self, settings: &SettingsFile) -> Result<()> {
+        #[cfg(test)]
+        {
+            settings.save_to(&self.test_config_home.path().join("config.toml"))
+        }
+        #[cfg(not(test))]
+        {
+            settings.save()
+        }
+    }
+
+    fn save_auth_config(&self, auth: &AuthFile) -> Result<()> {
+        #[cfg(test)]
+        {
+            auth.save_to(&self.test_config_home.path().join("auth.json"))
+        }
+        #[cfg(not(test))]
+        {
+            auth.save()
         }
     }
 
@@ -3926,19 +5357,60 @@ Could not write the report: {err}",
             return;
         }
         match (self.module, key) {
-            (Some(ModuleId::Providers), "__slot") => {
-                self.provider_slot = if self.provider_slot == "text" {
-                    "voice"
-                } else {
-                    "text"
-                };
-                self.load_fields(ModuleId::Providers);
+            (Some(ModuleId::Providers), "__grok_subscription_login") => {
+                self.start_grok_subscription(true)
+            }
+            (Some(ModuleId::Providers), "__grok_subscription_check") => {
+                self.start_grok_subscription(false)
             }
             (Some(ModuleId::Providers), "__save") => self.save_provider_fields(),
             (Some(ModuleId::Providers), "__test") => self.test_provider(),
-            (Some(ModuleId::Gmail), "__save") => self.save_gmail_fields(),
-            (Some(ModuleId::Gmail), "__test") => self.test_gmail(),
-            (Some(ModuleId::Gmail), "__mcp") => self.write_mcp(),
+            (Some(ModuleId::Providers), "__models") => {
+                self.select_provider_page(ProviderPage::Models)
+            }
+            (Some(ModuleId::Providers), "__advanced") => {
+                // Keep the in-progress key while expanding the advanced field.
+                let key = self.field_value("api_key");
+                let endpoint = self.field_value("base_url");
+                self.provider_advanced = !self.provider_advanced;
+                self.load_fields(ModuleId::Providers);
+                self.field_set("api_key", key);
+                if !endpoint.is_empty() {
+                    self.field_set("base_url", endpoint);
+                }
+            }
+            (Some(ModuleId::Providers), "__subscription_login") => {
+                if self.subscription_pending {
+                    return;
+                }
+                self.subscription_pending = true;
+                self.subscription_status = "Starting ChatGPT sign-in…".into();
+                self.subscription_instructions.clear();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let progress_tx = tx.clone();
+                    let result = argos_osint_core::subscription::login(move |line| {
+                        let _ = progress_tx.send(AppMsg::SubscriptionProgress(line.into()));
+                    })
+                    .await
+                    .map_err(|err| err.to_string());
+                    let _ = tx.send(AppMsg::SubscriptionCheck(result));
+                });
+            }
+            (Some(ModuleId::Providers), "__subscription_check") => {
+                if self.subscription_pending {
+                    return;
+                }
+                self.subscription_pending = true;
+                self.subscription_status = "Checking ChatGPT sign-in…".into();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = argos_osint_core::subscription::check_login()
+                        .await
+                        .map_err(|err| err.to_string());
+                    let _ = tx.send(AppMsg::SubscriptionCheck(result));
+                });
+            }
             (Some(ModuleId::Settings), "__save") | (Some(ModuleId::System), "__save")
                 if self.form_module() == Some(ModuleId::Settings) =>
             {
@@ -3952,14 +5424,32 @@ Could not write the report: {err}",
     }
 
     fn on_field_key(&mut self, key: KeyEvent) -> bool {
+        if matches!(key.code, KeyCode::Char(_) | KeyCode::Backspace) {
+            if let Some(kind) = self
+                .provider_page
+                .account()
+                .filter(|_| self.module == Some(ModuleId::Providers))
+            {
+                self.provider_draft_checks.remove(kind);
+                self.catalog_generation
+                    .entry(kind.into())
+                    .and_modify(|g| *g += 1)
+                    .or_insert(1);
+            }
+        }
         match key.code {
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(field) = self.fields.get_mut(self.field_sel) {
+                    field.value.clear();
+                }
+            }
             KeyCode::Esc | KeyCode::Enter => self.editing = false,
             KeyCode::Backspace => {
                 if let Some(field) = self.fields.get_mut(self.field_sel) {
                     field.value.pop();
                 }
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(field) = self.fields.get_mut(self.field_sel) {
                     field.value.push(c);
                 }
@@ -3969,169 +5459,130 @@ Could not write the report: {err}",
         false
     }
 
-    fn save_provider_fields(&mut self) {
-        let kind = provider::normalize_kind(&empty_fallback(&self.field_value("kind"), "local"));
-        let chosen = provider::preset(&kind);
-        let mut base_url = self.field_value("base_url");
-        let mut model = self.field_value("model");
-        let picking_free = self.provider_slot == "text" && provider::is_free_router(&model);
-        if picking_free {
-            model = if self.settings.model.trim().is_empty() {
-                chosen
-                    .as_ref()
-                    .map(|preset| preset.text_model.to_string())
-                    .unwrap_or_default()
-            } else {
-                self.settings.model.clone()
-            };
+    fn start_grok_subscription(&mut self, login: bool) {
+        if self.grok_subscription_pending {
+            return;
         }
-        if let Some(chosen) = chosen {
-            if base_url.trim().is_empty() {
-                base_url = chosen.base_url.into();
-            }
-            if model.trim().is_empty() {
-                model = if self.provider_slot == "voice" {
-                    chosen.voice_model.into()
-                } else {
-                    chosen.text_model.into()
-                };
-            }
-        }
-        let secret = ProviderSecret {
-            kind: if chosen.is_some() {
-                kind.clone()
-            } else {
-                "local".into()
-            },
-            base_url,
-            model,
-            api_key: Some(self.field_value("api_key")).filter(|key| !key.is_empty()),
-            stt_model: Some(self.field_value("stt_model")).filter(|model| !model.is_empty()),
-            device: None,
-        };
-        let missing_key = chosen
-            .filter(|preset| preset.key_required)
-            .filter(|_| secret.api_key.is_none())
-            .filter(|preset| provider::resolved_key(&secret).is_none() || preset.env_key.is_none());
-        if self.provider_slot == "text" {
-            self.settings.model = secret.model.clone();
-            let _ = self.settings.save();
-        }
-        if self.provider_slot == "voice" {
-            self.auth.voice = Some(secret);
+        self.grok_subscription_pending = true;
+        self.grok_subscription_instructions.clear();
+        self.grok_subscription_status = if login {
+            "Starting Grok sign-in…"
         } else {
-            self.auth.text = Some(secret);
+            "Checking Grok subscription…"
         }
-        match self.auth.save() {
+        .into();
+        let generation = self.catalog_generation.get("grok").copied().unwrap_or(0) + 1;
+        self.catalog_generation.insert("grok".into(), generation);
+        let secret = provider::account_secret(&self.auth, "grok");
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = async {
+                if login {
+                    let progress_tx = tx.clone();
+                    argos_osint_core::grok_oauth::login(move |line| {
+                        let _ = progress_tx.send(AppMsg::GrokSubscriptionProgress {
+                            generation,
+                            line: line.into(),
+                        });
+                    })
+                    .await
+                    .map_err(|err| err.to_string())?;
+                } else {
+                    argos_osint_core::grok_oauth::check_login()
+                        .await
+                        .map_err(|err| err.to_string())?;
+                }
+                provider::verified_catalog(&secret)
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            .await;
+            let _ = tx.send(AppMsg::GrokSubscriptionCheck { generation, result });
+        });
+    }
+
+    fn provider_form_secret(&self) -> Option<ProviderSecret> {
+        let kind = self.provider_page.account()?;
+        if kind != "openrouter" {
+            return None;
+        }
+        let mut secret = provider::account_secret(&self.auth, kind);
+        secret.api_key =
+            Some(self.field_value("api_key").trim().to_string()).filter(|key| !key.is_empty());
+        if self.provider_advanced {
+            secret.base_url = provider::normalize_base(&self.field_value("base_url"));
+        }
+        Some(secret)
+    }
+
+    fn validate_provider_endpoint(secret: &ProviderSecret) -> Result<(), String> {
+        let url = url::Url::parse(&secret.base_url)
+            .map_err(|_| "Enter a valid HTTPS API endpoint".to_string())?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("Use an HTTPS endpoint without credentials, query, or fragment".into());
+        }
+        Ok(())
+    }
+
+    fn save_provider_fields(&mut self) {
+        let Some(secret) = self.provider_form_secret() else {
+            return;
+        };
+        if let Err(err) = Self::validate_provider_endpoint(&secret) {
+            self.status = err;
+            return;
+        }
+        let kind = provider::effective_kind(&secret);
+        let mut auth = self.auth.clone();
+        auth.set_account(secret);
+        match self.save_auth_config(&auth) {
             Ok(()) => {
-                let mut note = format!("Saved the {} slot on {kind}.", self.provider_slot);
-                if let Some(preset) = missing_key {
-                    if let Some(name) = preset.env_key {
-                        note.push_str(&format!(" No key stored and {name} is unset."));
-                    }
+                self.auth = auth;
+                self.catalog_generation
+                    .entry(kind.clone())
+                    .and_modify(|g| *g += 1)
+                    .or_insert(1);
+                self.model_catalogs.remove(&kind);
+                self.provider_checks.remove(&kind);
+                self.provider_draft_checks.remove(&kind);
+                if kind == provider::effective_kind(&self.text_secret()) {
+                    self.catalog.clear();
+                    self.remote_models.clear();
                 }
-                self.status = format!("saved {} slot", self.provider_slot);
-                self.log_event("system", &note);
-                if picking_free {
-                    self.model_target = ModelTarget::Connection;
-                    self.open_free_picker();
-                    self.status = "pick a free model".into();
-                }
+                self.status = format!("{} account saved", provider_name(&kind));
+                self.log_event("system", &self.status.clone());
             }
             Err(err) => {
-                self.status = "provider save failed".into();
+                self.status = "Account save failed".into();
                 self.log_event("system", &format!("provider save failed: {err}"));
             }
         }
     }
 
     fn test_provider(&mut self) {
-        self.save_provider_fields();
-        let Some(secret) = self.slot_secret() else {
+        // Test the current form without implicitly saving it or changing a role.
+        let Some(secret) = self.provider_form_secret() else {
             return;
         };
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let result = provider::list_models(&secret)
-                .await
-                .map_err(|e| e.to_string());
-            let _ = tx.send(AppMsg::Models(result));
-        });
-        self.status = "contacting provider".into();
-    }
-
-    fn save_gmail_fields(&mut self) {
-        let secret = GmailSecret {
-            email: self.field_value("email").trim().to_string(),
-            app_password: self.field_value("app_password"),
-        };
-        let cfg = GmailConfig::from(&secret);
-        if let Err(err) = gmail::validate(&cfg) {
-            self.status = "gmail settings need a correction".into();
-            self.log_event("system", &format!("gmail: {err}"));
+        if let Err(err) = Self::validate_provider_endpoint(&secret) {
+            self.status = err;
             return;
         }
-        self.auth.gmail = Some(secret);
-        match self.auth.save() {
-            Ok(()) => {
-                self.status = "gmail saved".into();
-                self.log_event(
-                    "system",
-                    "Saved Gmail. The app password stays in ~/.argos/auth.json.",
-                );
-            }
-            Err(err) => {
-                self.status = "gmail save failed".into();
-                self.log_event("system", &format!("gmail save failed: {err}"));
-            }
-        }
-    }
-
-    fn test_gmail(&mut self) {
-        self.save_gmail_fields();
-        let Some(cfg) = self.auth.gmail.as_ref().map(GmailConfig::from) else {
-            return;
-        };
-        let tx = self.tx.clone();
-        tokio::task::spawn_blocking(move || {
-            let result =
-                gmail::inbox_count(&cfg).map(|n| format!("INBOX is reachable. {n} messages."));
-            let _ = tx.send(AppMsg::GmailTest(result));
-        });
-        self.status = "checking gmail".into();
-    }
-
-    fn write_mcp(&mut self) {
-        let exe = std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "argos".into());
-        let body = gmail::mcp_config_json(&exe);
-        let path = paths::mcp_path();
-        match secrets::write_private(
-            &path,
-            &serde_json::to_string_pretty(
-                &serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({})),
-            )
-            .unwrap_or(body),
-        ) {
-            Ok(()) => {
-                self.status = "gmail mcp config written".into();
-                self.log_event(
-                    "system",
-                    &format!("Wrote {}. Launch with `argos mcp gmail`.", path.display()),
-                );
-            }
-            Err(err) => {
-                self.status = "gmail mcp write failed".into();
-                self.log_event("system", &format!("mcp write failed: {err}"));
-            }
-        }
+        let saved = provider::account_secret(&self.auth, &provider::effective_kind(&secret));
+        let draft = secret.api_key != saved.api_key || secret.base_url != saved.base_url;
+        self.request_catalog(secret, draft);
     }
 
     fn save_settings_fields(&mut self) {
         self.settings.searx_url = self.field_value("searx_url");
         self.settings.report_dir = self.field_value("report_dir");
-        match self.settings.save() {
+        match self.save_settings_config(&self.settings) {
             Ok(()) => {
                 self.status = "settings saved".into();
                 self.log_event("system", "settings saved");
@@ -4241,11 +5692,14 @@ fn field(key: &str, label: &str, value: String, secret: bool) -> Field {
     }
 }
 
-fn empty_fallback(value: &str, fallback: &str) -> String {
-    if value.trim().is_empty() {
-        fallback.into()
-    } else {
-        value.trim().into()
+pub fn provider_name(kind: &str) -> &str {
+    match kind {
+        "grok" => "Grok · subscription",
+        "openai" => "OpenAI API",
+        "openai-chatgpt" => "OpenAI · ChatGPT",
+        "openrouter" => "OpenRouter",
+        "local" => "Local",
+        _ => kind,
     }
 }
 
@@ -4285,30 +5739,6 @@ fn memory_answer_material(app: &App, hits: &[brain::ScoredMemory]) -> String {
     out
 }
 
-fn prior_report_material(reports: &[ReportMeta]) -> String {
-    let mut out = String::from(
-        "RELEVANT REPORTS ALREADY ON FILE. Answer from these reports. Do not open a new investigation.\n",
-    );
-    for report in reports {
-        out.push_str(&format!("\n# {}\n", report.title));
-        match std::fs::read_to_string(&report.path) {
-            Ok(body) => {
-                let clipped: String = body.chars().take(3500).collect();
-                out.push_str(&clipped);
-                if body.chars().count() > 3500 {
-                    out.push_str("\n…\n");
-                } else {
-                    out.push('\n');
-                }
-            }
-            Err(err) => {
-                out.push_str(&format!("(could not read {}: {err})\n", report.path));
-            }
-        }
-    }
-    out
-}
-
 async fn distill_insight(
     secret: &argos_osint_core::secrets::ProviderSecret,
     report: &str,
@@ -4321,8 +5751,8 @@ async fn distill_insight(
     let messages = vec![provider::ChatMessage {
         role: "user".into(),
         content: format!(
-            "Summarize this report-chat exchange as one or two concise sentences.\n\
-             Keep the new insight from the user's question and the answer.\n\
+            "Distill this completed report-network answer as one or two concise fact sentences.\n\
+             Keep only an insight supported by the answer. The question sets scope; it is not evidence. Do not store or repeat the raw question or its unsupported claims.\n\
              Paraphrase. Do not quote the whole reply. No preamble and no bullet list.\n\
              The fact is about report \"{report}\".\n\n\
              Question:\n{question}\n\n\
@@ -4442,6 +5872,7 @@ pub async fn run(mut app: App) -> Result<()> {
             break;
         }
     }
+    app.persist_pending_insights();
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -4470,6 +5901,570 @@ mod tests {
             created_at: "now".into(),
         });
         app.chat_report = Some("r1".into());
+    }
+
+    fn workspace_fixture() -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("workspace.sqlite")).unwrap();
+        store.ensure_session("desk", "Desk", "desk").unwrap();
+        store
+            .append_message("desk", "assistant", "Desk transcript remains")
+            .unwrap();
+        let meta = report::write_report(dir.path(), "Lovelace evidence", None,
+            "# Lovelace evidence\n\n## Requirement\nwho is Ada Lovelace?\n\n## Evidence\nAda Lovelace works with Acme Corporation at example.com.\nContact ada@example.com or @ada_research at 8.8.8.8.\n\n## Themes\nTheme: computational history\n\n## Analyst note\nReview report.md and Case Desk.\n\n## Sources\nhttps://source.example/article\n").unwrap();
+        store.add_report(&meta).unwrap();
+        let session = format!("report:{}", meta.id);
+        store
+            .ensure_session(&session, &meta.title, "report")
+            .unwrap();
+        store
+            .append_message(&session, "user", "OLD REPORT CHAT MUST NOT APPEAR")
+            .unwrap();
+        let mut app = App::from_parts(
+            store,
+            SettingsFile::default(),
+            AuthFile {
+                text: Some(ProviderSecret {
+                    kind: "test".into(),
+                    base_url: "".into(),
+                    model: "test-model".into(),
+                    api_key: None,
+                    stt_model: None,
+                    device: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        app.open_report_chat(&meta.id);
+        (app, dir)
+    }
+
+    fn workspace_key_event(app: &mut App, code: KeyCode) {
+        app.on_event(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    fn render_workspace(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, app))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn report_opens_cockpit_without_loading_or_creating_transcript() {
+        let (mut app, _dir) = workspace_fixture();
+        assert_eq!(app.tna_layout, TnaLayout::Cockpit);
+        assert_eq!(app.focus, Focus::Graph);
+        assert!(app.tna_snapshot().is_some());
+        assert!(app
+            .tna_snapshot()
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|n| n.kind == TnaNodeKind::Topic && n.label == "computational history"));
+        assert!(app.transcript().is_empty());
+        assert!(!app.transcripts.contains_key(&app.session_id()));
+        assert!(app.case_pages().is_empty());
+        let text = render_workspace(&mut app, 120, 40);
+        assert!(text.contains("NETWORK · Lovelace evidence"), "{text}");
+        assert!(text.contains("Cockpit") && text.contains("ask the open graph…"));
+        assert!(
+            !text.contains("OLD REPORT CHAT")
+                && !text.contains("Desk transcript remains")
+                && !text.contains("Report chat")
+        );
+        assert!(app.case_tab_hits.is_empty());
+        app.close_report_workspace();
+        assert!(app
+            .transcript()
+            .iter()
+            .any(|l| l.body == "Desk transcript remains"));
+        assert_eq!(app.case_pages(), [CasePage::Closed, CasePage::Brain]);
+        app.open_module(ModuleId::Brain);
+        assert_eq!(app.case_page, CasePage::Brain);
+        app.select_case_page(CasePage::Closed);
+        assert!(app.routes_desk_message());
+    }
+
+    #[test]
+    fn five_layout_shortcuts_find_typing_and_navigation() {
+        let (mut app, _dir) = workspace_fixture();
+        for (key, layout) in [
+            ('q', TnaLayout::Clusters),
+            ('p', TnaLayout::Path),
+            ('m', TnaLayout::Matrix),
+            ('r', TnaLayout::Ribbon),
+            ('g', TnaLayout::Cockpit),
+        ] {
+            workspace_key_event(&mut app, KeyCode::Char(key));
+            assert_eq!(app.tna_layout, layout);
+        }
+        workspace_key_event(&mut app, KeyCode::Left);
+        assert_eq!(app.tna_layout, TnaLayout::Ribbon);
+        workspace_key_event(&mut app, KeyCode::Right);
+        assert_eq!(app.tna_layout, TnaLayout::Cockpit);
+        workspace_key_event(&mut app, KeyCode::Char('/'));
+        workspace_key_event(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.tna_find.as_deref(), Some("q"));
+        assert_eq!(app.tna_layout, TnaLayout::Cockpit);
+        workspace_key_event(&mut app, KeyCode::Enter);
+        assert!(!app.tna_find_editing);
+        workspace_key_event(&mut app, KeyCode::Esc);
+        assert!(app.tna_find.is_none());
+        app.focus = Focus::Prompt;
+        app.prompt = "who is ".into();
+        app.cursor = app.prompt.chars().count();
+        workspace_key_event(&mut app, KeyCode::Char('p'));
+        assert_eq!(app.prompt, "who is p");
+        assert_eq!(app.tna_layout, TnaLayout::Cockpit);
+        let cursor = app.cursor;
+        workspace_key_event(&mut app, KeyCode::Left);
+        assert_eq!(app.cursor, cursor - 1);
+        assert_eq!(app.tna_layout, TnaLayout::Cockpit);
+    }
+
+    #[tokio::test]
+    async fn tna_submission_streams_ephemerally_and_completed_insight_survives_restart() {
+        let (mut app, dir) = workspace_fixture();
+        let report_id = app.chat_report.clone().unwrap();
+        let session = app.session_id();
+        let before = app.store.load_messages(&session).unwrap();
+        app.prompt = "who is Ada Lovelace".into();
+        app.cursor = app.prompt.len();
+        app.submit();
+        assert!(
+            app.confirm_query.is_none() && app.scope.is_none() && app.pending_reports.is_empty()
+        );
+        assert!(app.history.is_empty());
+        assert!(app.transcript().is_empty());
+        assert_eq!(
+            app.tna_answer.as_ref().unwrap().question,
+            "who is Ada Lovelace"
+        );
+        let generation = app.turn_generation;
+        app.on_msg(AppMsg::ScopedTurn {
+            generation,
+            report_id: Some(report_id.clone()),
+            event: TurnEvent::Delta("Ada Lovelace works with ".into()),
+        });
+        assert_eq!(
+            app.tna_answer.as_ref().unwrap().answer,
+            "Ada Lovelace works with "
+        );
+        assert!(app.memories.is_empty());
+        let text = render_workspace(&mut app, 120, 40);
+        assert!(
+            text.contains("TNA · Lovelace evidence") && text.contains("Ada Lovelace works with"),
+            "{text}"
+        );
+        assert!(text.contains("ask the open graph…"));
+        app.on_msg(AppMsg::ScopedTurn {
+            generation,
+            report_id: Some(report_id.clone()),
+            event: TurnEvent::Done(
+                "Ada Lovelace works with Acme Corporation in this report.".into(),
+            ),
+        });
+        assert!(app.tna_answer.as_ref().unwrap().filed);
+        let facts = app.store.list_memories().unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].report_id.as_deref(), Some(report_id.as_str()));
+        assert!(!facts[0].text.contains("who is Ada"));
+        assert_eq!(
+            app.store.load_messages(&session).unwrap().len(),
+            before.len()
+        );
+        app.persist_visible_chat();
+        assert_eq!(
+            app.store.load_messages(&session).unwrap().len(),
+            before.len()
+        );
+        app.set_tna_layout(TnaLayout::Ribbon);
+        assert!(app.tna_answer.is_some());
+        app.run_slash("/clear");
+        assert!(app.tna_answer.is_none());
+        assert_eq!(app.store.list_memories().unwrap().len(), 1);
+        app.close_report_workspace();
+        drop(app);
+        let mut restarted = App::from_parts(
+            Store::open(&dir.path().join("workspace.sqlite")).unwrap(),
+            SettingsFile::default(),
+            AuthFile::default(),
+        )
+        .unwrap();
+        assert!(restarted.tna_answer.is_none() && restarted.chat_report.is_none());
+        restarted.open_module(ModuleId::Brain);
+        assert_eq!(restarted.memories.len(), 1);
+        assert_eq!(
+            restarted.memories[0].report_id.as_deref(),
+            Some(report_id.as_str())
+        );
+    }
+
+    #[test]
+    fn cancelled_failed_and_stale_tna_turns_never_file_insights() {
+        let (mut app, _dir) = workspace_fixture();
+        app.tna_answer = Some(TnaAnswer {
+            question: "Who?".into(),
+            pending: true,
+            ..Default::default()
+        });
+        app.running = true;
+        let generation = app.turn_generation;
+        let report_id = app.chat_report.clone();
+        app.on_turn(TurnEvent::Delta("partial".into()));
+        app.cancel_or_quit();
+        app.on_msg(AppMsg::ScopedTurn {
+            generation,
+            report_id: report_id.clone(),
+            event: TurnEvent::Done("Late completion".into()),
+        });
+        assert!(app.memories.is_empty());
+        assert!(app.tna_answer.as_ref().unwrap().error.is_some());
+        app.tna_answer = Some(TnaAnswer {
+            question: "Who?".into(),
+            pending: true,
+            ..Default::default()
+        });
+        app.cancel = Arc::new(AtomicBool::new(false));
+        app.on_turn(TurnEvent::Failed("provider failure".into()));
+        app.on_turn(TurnEvent::Done("Should be ignored".into()));
+        assert!(app.memories.is_empty());
+        app.on_turn(TurnEvent::Memory(Memory::fact(
+            "raw",
+            "raw user question",
+            "",
+        )));
+        assert!(app.memories.is_empty());
+        app.close_report_workspace();
+        app.on_msg(AppMsg::ScopedTurn {
+            generation,
+            report_id,
+            event: TurnEvent::Delta("LEAK".into()),
+        });
+        assert!(!app.transcript().iter().any(|l| l.body.contains("LEAK")));
+    }
+
+    #[test]
+    fn escape_order_and_desk_only_actions() {
+        let (mut app, _dir) = workspace_fixture();
+        app.tna_find = Some("Ada".into());
+        app.tna_find_editing = true;
+        app.tna_answer = Some(TnaAnswer {
+            question: "Who?".into(),
+            answer: "Answer".into(),
+            ..Default::default()
+        });
+        workspace_key_event(&mut app, KeyCode::Esc);
+        assert!(app.tna_find.is_none());
+        assert!(app.tna_answer.is_some() && app.chat_report.is_some());
+        workspace_key_event(&mut app, KeyCode::Esc);
+        assert!(app.tna_answer.is_none() && app.chat_report.is_some());
+        for cmd in [
+            "/brain",
+            "/brain fact raw question",
+            "/new who is Ada",
+            "/search Ada",
+            "/report copy",
+            "/use missing",
+        ] {
+            app.run_slash(cmd);
+            assert!(app.chat_report.is_some());
+            assert!(app.scope.is_none());
+            assert_eq!(app.case_page, CasePage::Network);
+        }
+        app.open_module(ModuleId::Brain);
+        assert_eq!(app.case_page, CasePage::Network);
+        assert!(!app.brain_card);
+        workspace_key_event(&mut app, KeyCode::Char('+'));
+        assert!(app.scope.is_none());
+        workspace_key_event(&mut app, KeyCode::Esc);
+        assert!(app.chat_report.is_none());
+        assert_eq!(app.focus, Focus::Prompt);
+        app.prompt = "who is Ada Lovelace".into();
+        workspace_key_event(&mut app, KeyCode::Char('+'));
+        assert!(app.scope.is_some());
+    }
+
+    #[test]
+    fn path_pins_rank_simple_paths_and_limit_hops() {
+        let mut app = five_hop_report_app();
+        app.set_tna_layout(TnaLayout::Path);
+        workspace_key_event(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.tna_from.as_deref(), Some("a"));
+        assert!(app.tna_paths().is_empty());
+        app.tna_focus_entity("e");
+        workspace_key_event(&mut app, KeyCode::Char('t'));
+        let paths = app.tna_paths();
+        assert_eq!(paths[0].nodes, ["a", "b", "c", "d", "e"]);
+        app.tna_to = Some("f".into());
+        assert!(app.tna_paths().is_empty());
+        let snap = app.tna_report.as_mut().unwrap();
+        snap.edges.extend(
+            [("a", "c", 4), ("c", "e", 4), ("a", "d", 1), ("d", "e", 1)].map(|(a, b, weight)| {
+                argos_osint_core::tna::TnaEdge {
+                    from: a.into(),
+                    to: b.into(),
+                    weight,
+                }
+            }),
+        );
+        app.tna_to = Some("e".into());
+        let paths = app.tna_paths();
+        assert!(paths.len() <= 5);
+        assert_eq!(paths[0].nodes, ["a", "c", "e"]);
+        for pair in paths.windows(2) {
+            assert!(pair[0].nodes.len() <= pair[1].nodes.len());
+            if pair[0].nodes.len() == pair[1].nodes.len() {
+                assert!(pair[0].strength >= pair[1].strength);
+            }
+        }
+        for path in paths {
+            let unique: std::collections::HashSet<_> = path.nodes.iter().collect();
+            assert_eq!(unique.len(), path.nodes.len());
+            assert!(path.nodes.len() <= 5);
+        }
+        app.tna_to = Some("h".into());
+        assert!(app.tna_paths().is_empty());
+    }
+
+    #[test]
+    fn matrix_filter_navigation_and_ribbon_provenance() {
+        let (mut app, _dir) = workspace_fixture();
+        app.set_tna_layout(TnaLayout::Matrix);
+        let nodes = app.tna_matrix_nodes();
+        assert!(nodes.len() <= 24);
+        workspace_key_event(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.tna_matrix_col, 1);
+        workspace_key_event(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.tna_matrix_row, 1);
+        let selected = app.tna_snapshot().unwrap().nodes[nodes[1]].id.clone();
+        workspace_key_event(&mut app, KeyCode::Enter);
+        assert_eq!(app.tna_layout, TnaLayout::Cockpit);
+        assert_eq!(app.tna_focus_id.as_deref(), Some(selected.as_str()));
+        app.tna_find = Some("Ada Lovelace".into());
+        let filtered = app.tna_matrix_nodes();
+        assert_eq!(filtered.len(), 1);
+        app.tna_find = None;
+        app.set_tna_layout(TnaLayout::Ribbon);
+        let accepted = app.tna_ribbon_decisions().len();
+        workspace_key_event(&mut app, KeyCode::Char('d'));
+        assert!(app.tna_show_rejected);
+        assert!(app.tna_ribbon_decisions().len() >= accepted);
+        let decision = app
+            .tna_ribbon_decisions()
+            .iter()
+            .find(|d| d.canonical_id.is_some())
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            app.tna_source.get(decision.start..decision.end),
+            Some(decision.original.as_str())
+        );
+        let nearby = app.tna_ribbon_window(decision.start);
+        assert!(nearby.len() <= 3);
+        assert!(nearby.iter().all(|d| d.canonical_id.is_some()));
+        let snap = app.tna_snapshot().unwrap();
+        let edge = snap.edges.first().unwrap();
+        let evidence = app.tna_edge_evidence(&edge.from, &edge.to);
+        assert!(
+            evidence.contains("bytes") && !evidence.contains("Evidence unavailable"),
+            "{evidence}"
+        );
+        workspace_key_event(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.tna_ribbon_pos, 1);
+    }
+
+    #[test]
+    fn all_workspace_layouts_render_at_normal_and_narrow_sizes() {
+        let (mut app, dir) = workspace_fixture();
+        for (width, height) in [(160, 48), (120, 40), (80, 24), (60, 18)] {
+            for layout in TnaLayout::ALL {
+                app.set_tna_layout(layout);
+                if layout == TnaLayout::Path {
+                    app.tna_from = app
+                        .tna_snapshot()
+                        .unwrap()
+                        .nodes
+                        .first()
+                        .map(|n| n.id.clone());
+                    app.tna_to = app
+                        .tna_snapshot()
+                        .unwrap()
+                        .nodes
+                        .last()
+                        .map(|n| n.id.clone());
+                }
+                if layout == TnaLayout::Ribbon {
+                    app.tna_show_rejected = true;
+                }
+                let text = render_workspace(&mut app, width, height);
+                assert!(
+                    text.contains("NETWORK") && text.contains("ask the open graph…"),
+                    "{width}x{height} {}\n{text}",
+                    layout.title()
+                );
+                assert!(!text.contains("OLD REPORT CHAT"));
+                if width == 120 && height == 40 {
+                    std::fs::write(dir.path().join(format!("{}.txt", layout.title())), &text)
+                        .unwrap();
+                    println!("120x40 {}\n{text}", layout.title());
+                }
+            }
+        }
+        app.set_tna_layout(TnaLayout::Cockpit);
+        let text = render_workspace(&mut app, 160, 48);
+        assert!(
+            text.contains("Entity list")
+                && text.contains("Ego network")
+                && text.contains("Link Ledger")
+        );
+        let text = render_workspace(&mut app, 80, 24);
+        assert!(text.contains("Entity list") && !text.contains("Link Ledger"));
+        let text = render_workspace(&mut app, 80, 16);
+        assert!(text.contains("Link Ledger"));
+    }
+    #[test]
+    fn completed_insight_survives_shutdown_during_distillation_and_is_deduplicated() {
+        let (mut app, dir) = workspace_fixture();
+        let id = app.chat_report.clone().unwrap();
+        app.pending_tna_insights.insert(
+            app.turn_generation,
+            (id.clone(), "Completed evidence answer".into()),
+        );
+        app.close_report_workspace();
+        app.persist_pending_insights();
+        assert!(app.pending_tna_insights.is_empty());
+        app.store_report_insight(id.clone(), "Completed evidence answer".into(), 0);
+        assert_eq!(app.store.list_memories().unwrap().len(), 1);
+        drop(app);
+        let restarted = App::from_parts(
+            Store::open(&dir.path().join("workspace.sqlite")).unwrap(),
+            SettingsFile::default(),
+            AuthFile::default(),
+        )
+        .unwrap();
+        assert_eq!(restarted.memories.len(), 1);
+        assert_eq!(
+            restarted.memories[0].report_id.as_deref(),
+            Some(id.as_str())
+        );
+        assert!(restarted.tna_answer.is_none());
+    }
+
+    #[test]
+    fn missing_source_is_visible_and_rebuilds_do_not_block_cached_report_opening() {
+        let (mut app, _dir) = workspace_fixture();
+        let id = app.chat_report.clone().unwrap();
+        let expected = app.store.get_tna_graph(&report_key(&id)).unwrap().unwrap();
+        app.close_report_workspace();
+        app.tna_rebuilding = true;
+        app.tna_pending_report = Some("another-report".into());
+        app.open_report_chat(&id);
+        assert_eq!(app.tna_snapshot().unwrap(), &expected);
+        let path = app.open_report().unwrap().path.clone();
+        std::fs::remove_file(path).unwrap();
+        app.close_report_workspace();
+        app.open_report_chat(&id);
+        assert!(app.tna_source_error.is_some());
+        app.spawn_turn("who is Ada Lovelace".into());
+        assert!(app
+            .tna_answer
+            .as_ref()
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("evidence unavailable"));
+        assert!(!app.running && app.memories.is_empty());
+    }
+
+    #[test]
+    fn workspace_context_is_small_and_source_windows_are_exact() {
+        let (mut app, _dir) = workspace_fixture();
+        let person = app
+            .tna_snapshot()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.kind == TnaNodeKind::Person)
+            .unwrap()
+            .id
+            .clone();
+        app.tna_focus_entity(&person);
+        app.tna_from = Some(person.clone());
+        app.tna_to = app
+            .tna_snapshot()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.kind == TnaNodeKind::Domain)
+            .map(|n| n.id.clone());
+        app.set_tna_layout(TnaLayout::Path);
+        let context = app.view_context();
+        assert!(
+            context.contains("Evidence-only")
+                && context.contains("Layout: Path")
+                && context.contains("Path FROM: Ada Lovelace")
+                && context.contains("TO: example.com")
+        );
+        assert!(context.contains("degree") && context.contains("Neighbors"));
+        assert!(!context.contains("OLD REPORT CHAT"));
+        assert!(context.len() < 2200);
+        let evidence = app.tna_report_material(app.open_report().unwrap());
+        assert!(evidence.contains("Focused source:") && !evidence.contains("OLD REPORT CHAT"));
+        // A span outside the original 3-mention window must never be quoted as joint evidence.
+        let snap = app.tna_report.as_mut().unwrap();
+        snap.decisions = (0..5)
+            .map(|i| argos_osint_core::tna::TnaDecision {
+                report_id: "r1".into(),
+                section: "Evidence".into(),
+                start: i * 2,
+                end: i * 2 + 1,
+                original: char::from(b'a' + i as u8).to_string(),
+                kind: TnaNodeKind::Handle,
+                label: Some(format!("n{i}")),
+                canonical_id: Some(format!("n{i}")),
+                reason: "accepted".into(),
+            })
+            .collect();
+        app.chat_report = Some("r1".into());
+        snap.scope = argos_osint_core::tna::TnaScope::Targeted {
+            report_id: "r1".into(),
+            title: "test".into(),
+        };
+        app.tna_source = "a b c d e".into();
+        assert!(app
+            .tna_edge_evidence("n0", "n4")
+            .contains("No joint excerpt recovered"));
+        assert!(app.tna_edge_evidence("n0", "n2").contains("a b c"));
+        app.set_tna_layout(TnaLayout::Ribbon);
+        app.tna_source =
+            "## Evidence\nfirst line without entities\nlast line without entities\n".into();
+        workspace_key_event(&mut app, KeyCode::Char('l'));
+        workspace_key_event(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.tna_ribbon_pos, 2);
+    }
+    #[test]
+    fn cockpit_neighbor_cycle_keeps_the_selected_link_visible() {
+        let mut app = five_hop_report_app();
+        app.tna_focus_entity("b");
+        workspace_key_event(&mut app, KeyCode::Char(']'));
+        assert_eq!(app.tna_ledger_neighbor(), Some("c"));
+        let boxes = app.tna_detail_box_items(2);
+        assert!(boxes
+            .iter()
+            .any(|TnaDisplayItem::Real { idx }| app.tna_snapshot().unwrap().nodes[*idx].id == "c"));
+        assert_eq!(app.tna_focus_id.as_deref(), Some("b"));
     }
 
     #[test]
@@ -4602,12 +6597,12 @@ mod tests {
     }
 
     #[test]
-    fn case_page_all_includes_network() {
+    fn case_pages_keep_network_inside_open_report() {
         let pages = CasePage::all();
-        assert_eq!(pages.len(), 3);
-        assert!(pages.contains(&CasePage::Network));
+        assert_eq!(pages.len(), 2);
+        assert!(!pages.contains(&CasePage::Network));
         assert_eq!(CasePage::Network.title(), "Network");
-        assert_eq!(pages.map(|p| p.title()), ["Desk", "Brain", "Network"]);
+        assert_eq!(pages.map(|p| p.title()), ["Desk", "Brain"]);
     }
 
     #[test]
@@ -4723,7 +6718,7 @@ mod tests {
                 .join("\n");
             println!("{width}x{height}\n{text}");
             assert!(
-                text.contains("Ada Lovelace") && text.contains("More details · 5 hops"),
+                text.contains("Ada Lovelace") && text.contains("Ego network · 5 hops"),
                 "{text}"
             );
             assert!(
@@ -4759,7 +6754,7 @@ mod tests {
     #[test]
     fn network_tab_disappears_when_report_closes_and_never_uses_other_report() {
         let mut app = five_hop_report_app();
-        assert!(app.case_pages().contains(&CasePage::Network));
+        assert!(app.case_pages().is_empty());
         app.chat_report = Some("other".into());
         assert!(app.tna_snapshot().is_none());
         app.chat_report = Some("r1".into());
@@ -4966,7 +6961,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(
-            text.contains("No nodes match") || text.contains("Filter"),
+            text.contains("No nodes") || text.contains("Filter"),
             "{text}"
         );
         app.tna_find = None;
@@ -4982,7 +6977,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(
-            text.contains("Initiative") || text.contains("More details") || text.contains("table"),
+            text.contains("Entity list") || text.contains("Ego network"),
             "{text}"
         );
     }
@@ -5002,7 +6997,13 @@ mod tests {
             result: Err(marker.into()),
         });
         app.on_msg(AppMsg::Turn(TurnEvent::Failed(format!("api {marker}"))));
-        app.on_msg(AppMsg::Models(Err(format!("provider {marker}"))));
+        app.catalog_generation.insert("grok".into(), 1);
+        app.on_msg(AppMsg::ModelList {
+            kind: "grok".into(),
+            generation: 1,
+            draft: false,
+            result: Err(format!("provider {marker}")),
+        });
 
         let chat = app
             .transcript()
@@ -5137,13 +7138,371 @@ mod tests {
             .iter()
             .map(|field| field.label.as_str())
             .collect();
-        assert!(labels.contains(&"Connection"));
-        assert!(labels.contains(&"Writer model"));
-        assert!(labels.contains(&"Tool model"));
+        assert_eq!(app.provider_page, ProviderPage::Models);
+        assert_eq!(labels, vec!["Provider", "Model", "Provider", "Model"]);
     }
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn provider_fixture() -> App {
+        let mut auth = AuthFile::default();
+        for (kind, key) in [
+            ("grok", "xai-SAVED-PRIVATE"),
+            ("openrouter", "router-SAVED-PRIVATE"),
+        ] {
+            let mut secret = provider::account_secret(&auth, kind);
+            secret.api_key = Some(key.into());
+            auth.set_account(secret);
+        }
+        let settings = SettingsFile {
+            writer_provider: "grok".into(),
+            writer_model: "grok-writer".into(),
+            tool_provider: "openrouter".into(),
+            tool_model: "vendor/research".into(),
+            ..Default::default()
+        };
+        App::from_parts(Store::memory().unwrap(), settings, auth).unwrap()
+    }
+
+    #[test]
+    fn provider_account_forms_do_not_copy_or_overwrite_keys() {
+        let mut app = provider_fixture();
+        let role_settings = serde_json::to_value(&app.settings).unwrap();
+        app.select_provider_page(ProviderPage::Grok);
+        let before = serde_json::to_value(&app.auth).unwrap();
+        assert!(!app
+            .fields
+            .iter()
+            .any(|f| matches!(f.key.as_str(), "api_key" | "base_url" | "__save" | "__test")));
+        assert!(app
+            .fields
+            .iter()
+            .any(|f| f.key == "__grok_subscription_login"));
+        assert!(app
+            .fields
+            .iter()
+            .any(|f| f.key == "__grok_subscription_check"));
+        app.save_provider_fields();
+        assert_eq!(serde_json::to_value(&app.auth).unwrap(), before);
+        app.select_provider_page(ProviderPage::Openrouter);
+        assert_eq!(app.field_value("api_key"), "router-SAVED-PRIVATE");
+        app.save_provider_fields();
+        assert_eq!(serde_json::to_value(&app.settings).unwrap(), role_settings);
+        let saved: AuthFile = serde_json::from_str(
+            &std::fs::read_to_string(app.test_config_home.path().join("auth.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved.account("grok").unwrap().api_key.as_deref(),
+            Some("xai-SAVED-PRIVATE")
+        );
+        assert_eq!(
+            saved.account("openrouter").unwrap().api_key.as_deref(),
+            Some("router-SAVED-PRIVATE")
+        );
+    }
+
+    #[test]
+    fn switching_writer_and_tools_never_changes_saved_accounts() {
+        let mut app = provider_fixture();
+        app.open_module(ModuleId::Providers);
+        let before = serde_json::to_value(&app.auth).unwrap();
+        for (writer, kind, model) in [
+            (true, "openrouter", "vendor/writer"),
+            (false, "grok", "grok-tools"),
+            (true, "grok", "grok-writer-again"),
+        ] {
+            app.select_role_provider(writer, kind);
+            app.model_target = if writer {
+                ModelTarget::Writer
+            } else {
+                ModelTarget::Tool
+            };
+            app.select_model(model);
+            let runtime = app.role_secret(writer);
+            assert_eq!(provider::effective_kind(&runtime), kind);
+            assert_eq!(runtime.model, model);
+            if kind == "grok" {
+                assert_eq!(runtime.kind, "grok-subscription");
+                assert!(runtime.api_key.is_none());
+            } else {
+                assert_eq!(runtime.api_key, app.auth.account(kind).unwrap().api_key);
+            }
+            assert_eq!(serde_json::to_value(&app.auth).unwrap(), before);
+        }
+        assert_eq!(app.settings.tool_model, "grok-tools");
+        let restarted = App::from_parts(
+            Store::memory().unwrap(),
+            app.settings.clone(),
+            serde_json::from_value(before).unwrap(),
+        )
+        .unwrap();
+        assert!(restarted.role_secret(true).api_key.is_none());
+        assert_eq!(
+            restarted.auth.account("grok").unwrap().api_key.as_deref(),
+            Some("xai-SAVED-PRIVATE")
+        );
+        assert_eq!(restarted.role_secret(false).model, "grok-tools");
+        let config =
+            std::fs::read_to_string(app.test_config_home.path().join("config.toml")).unwrap();
+        assert!(config.contains("grok-writer-again"));
+        assert!(!config.contains("SAVED-PRIVATE"));
+    }
+
+    #[test]
+    fn grok_subscription_results_are_scoped_and_preserve_credentials() {
+        let mut app = provider_fixture();
+        let before = serde_json::to_value(&app.auth).unwrap();
+        let openai_status = app.subscription_status.clone();
+        app.catalog_generation.insert("grok".into(), 2);
+        app.grok_subscription_pending = true;
+        // Refresh during sign-in must not invalidate its completion callback.
+        app.request_catalog(provider::account_secret(&app.auth, "grok"), false);
+        assert_eq!(app.catalog_generation["grok"], 2);
+        app.on_msg(AppMsg::GrokSubscriptionProgress {
+            generation: 1,
+            line: "stale".into(),
+        });
+        assert!(app.grok_subscription_instructions.is_empty());
+        app.on_msg(AppMsg::GrokSubscriptionProgress {
+            generation: 2,
+            line: "device code".into(),
+        });
+        assert_eq!(app.grok_subscription_instructions, ["device code"]);
+        app.on_msg(AppMsg::GrokSubscriptionCheck {
+            generation: 2,
+            result: Ok(vec![provider::ListedModel {
+                id: "grok-verified".into(),
+                name: "Grok verified".into(),
+                free: false,
+            }]),
+        });
+        assert!(!app.grok_subscription_pending);
+        assert!(app.grok_subscription_status.contains("connected"));
+        assert_eq!(app.model_catalogs["grok"][0].id, "grok-verified");
+        assert_eq!(app.subscription_status, openai_status);
+        assert_eq!(serde_json::to_value(&app.auth).unwrap(), before);
+        app.on_msg(AppMsg::GrokSubscriptionCheck {
+            generation: 1,
+            result: Err("stale".into()),
+        });
+        assert!(app.grok_subscription_status.contains("connected"));
+        app.on_msg(AppMsg::GrokSubscriptionCheck {
+            generation: 2,
+            result: Err("Subscription model access unavailable".into()),
+        });
+        assert!(!app.model_catalogs.contains_key("grok"));
+        assert!(app.grok_subscription_status.contains("unavailable"));
+        assert_eq!(serde_json::to_value(&app.auth).unwrap(), before);
+        for writer in [true, false] {
+            app.select_role_provider(writer, "grok");
+            assert_eq!(app.role_secret(writer).kind, "grok-subscription");
+            assert!(app.role_secret(writer).api_key.is_none());
+        }
+    }
+
+    #[test]
+    fn openai_setup_is_subscription_only_and_not_a_tool_provider() {
+        let mut app = provider_fixture();
+        app.select_provider_page(ProviderPage::Openai);
+        assert!(!app
+            .fields
+            .iter()
+            .any(|f| f.key == "api_key" || f.key == "base_url"));
+        assert!(app.fields.iter().any(|f| f.key == "__subscription_login"));
+        assert!(app.role_provider_choices(true).contains(&"openai-chatgpt"));
+        assert!(!app.role_provider_choices(true).contains(&"openai"));
+        assert!(!app.role_provider_choices(false).contains(&"openai-chatgpt"));
+        app.select_role_provider(true, "openai-chatgpt");
+        assert_eq!(app.role_secret(true).kind, "openai-chatgpt");
+        assert!(app.role_secret(true).api_key.is_none());
+        assert_eq!(
+            app.role_secret(false).api_key.as_deref(),
+            Some("router-SAVED-PRIVATE")
+        );
+        app.select_role_provider(false, "openai-chatgpt");
+        assert_eq!(app.settings.tool_provider, "openrouter");
+    }
+
+    #[test]
+    fn provider_picker_keyboard_and_section_navigation_are_separate() {
+        let mut app = provider_fixture();
+        app.open_module(ModuleId::Providers);
+        assert_eq!(app.provider_page, ProviderPage::Models);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.provider_picker, Some(true));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.provider_picker.is_none());
+        assert_eq!(app.settings.writer_provider, "openai-chatgpt");
+        assert_eq!(app.settings.tool_provider, "openrouter");
+        app.on_event(key(KeyCode::Left));
+        assert_eq!(app.provider_page, ProviderPage::Openrouter);
+        app.on_event(key(KeyCode::Left));
+        assert_eq!(app.provider_page, ProviderPage::Openai);
+        app.on_event(key(KeyCode::Right));
+        assert_eq!(app.provider_page, ProviderPage::Openrouter);
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.module, Some(ModuleId::Cases));
+    }
+
+    #[test]
+    fn model_catalogs_stay_scoped_and_stale_results_are_ignored() {
+        let mut app = provider_fixture();
+        let model = |id: &str| provider::ListedModel {
+            id: id.into(),
+            name: id.into(),
+            free: false,
+        };
+        app.catalog_generation.insert("grok".into(), 2);
+        app.catalog_generation.insert("openrouter".into(), 1);
+        app.on_msg(AppMsg::ModelList {
+            kind: "grok".into(),
+            generation: 1,
+            draft: false,
+            result: Ok(vec![model("STALE")]),
+        });
+        assert!(!app.model_catalogs.contains_key("grok"));
+        app.on_msg(AppMsg::ModelList {
+            kind: "openrouter".into(),
+            generation: 1,
+            draft: false,
+            result: Ok(vec![model("vendor/router-model")]),
+        });
+        app.on_msg(AppMsg::ModelList {
+            kind: "grok".into(),
+            generation: 2,
+            draft: false,
+            result: Ok(vec![model("grok-account-model")]),
+        });
+        app.model_target = ModelTarget::Writer;
+        assert!(app
+            .model_choices()
+            .iter()
+            .any(|(id, _)| id == "grok-account-model"));
+        assert!(!app
+            .model_choices()
+            .iter()
+            .any(|(id, _)| id == "vendor/router-model"));
+        app.model_target = ModelTarget::Tool;
+        assert!(app
+            .model_choices()
+            .iter()
+            .any(|(id, _)| id == "vendor/router-model"));
+        assert!(!app
+            .model_choices()
+            .iter()
+            .any(|(id, _)| id == "grok-account-model"));
+        app.catalog_generation.insert("openrouter".into(), 3);
+        app.on_msg(AppMsg::ModelList {
+            kind: "openrouter".into(),
+            generation: 3,
+            draft: true,
+            result: Ok(vec![model("draft-only")]),
+        });
+        assert!(!app.model_choices().iter().any(|(id, _)| id == "draft-only"));
+        assert!(app.provider_draft_checks["openrouter"].contains("Save to use"));
+        assert!(!app.account_status("openrouter").contains("Draft"));
+    }
+
+    #[test]
+    fn model_query_keeps_letters_and_custom_ids_without_touching_credentials() {
+        let mut app = provider_fixture();
+        app.model_target = ModelTarget::Writer;
+        app.model_picker = true;
+        for ch in "grok-new-id".chars() {
+            app.on_event(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(app.model_query, "grok-new-id");
+        assert_eq!(app.filtered_model_choices()[0].0, "grok-new-id");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.settings.writer_model, "grok-new-id");
+        assert_eq!(app.settings.tool_model, "vendor/research");
+        assert!(app.role_secret(true).api_key.is_none());
+        app.select_provider_page(ProviderPage::Openrouter);
+        app.activate_field();
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        app.on_event(Event::Paste("router-pasted\n".into()));
+        assert_eq!(app.field_value("api_key"), "router-pasted");
+    }
+
+    #[test]
+    fn grok_recovery_actions_remain_visible_after_failure_on_short_screens() {
+        let mut app = provider_fixture();
+        app.select_provider_page(ProviderPage::Grok);
+        app.grok_subscription_status = "Signed in · Grok model access blocked (spending limit). Check this account's subscription/usage at grok.com, then Check existing login.".into();
+        for (width, height) in [(160, 20), (120, 20), (80, 24), (80, 18)] {
+            let text = render_workspace(&mut app, width, height);
+            for action in [
+                "Sign in with Grok",
+                "Check existing login",
+                "Choose Writer / Tools",
+            ] {
+                assert!(
+                    text.contains(action),
+                    "{width}x{height}: Missing {action}\n{text}"
+                );
+            }
+            assert_eq!(app.provider_field_hits.len(), 3);
+            println!("Grok recovery {width}x{height}\n{text}");
+        }
+        app.focus = Focus::Canvas;
+        app.on_event(key(KeyCode::Char('j')));
+        assert_eq!(app.fields[app.field_sel].key, "__grok_subscription_check");
+    }
+
+    #[test]
+    fn provider_pages_render_at_normal_and_narrow_sizes_without_secrets_or_mail_setup() {
+        let mut app = provider_fixture();
+        for (width, height) in [(120, 40), (100, 30), (80, 24), (60, 18)] {
+            for page in [
+                ProviderPage::Grok,
+                ProviderPage::Openai,
+                ProviderPage::Openrouter,
+                ProviderPage::Models,
+            ] {
+                app.select_provider_page(page);
+                let text = render_workspace(&mut app, width, height);
+                assert!(text.contains(page.title()), "{width}x{height}: {text}");
+                for unwanted in [
+                    "SAVED-PRIVATE",
+                    "Mail",
+                    "MCP",
+                    "OpenAI API key",
+                    "text/voice",
+                    "LLM",
+                ] {
+                    assert!(!text.contains(unwanted), "{unwanted} in {text}");
+                }
+                if matches!((width, height), (120, 40) | (80, 24)) {
+                    println!("{page:?} {width}x{height}\n{text}");
+                }
+            }
+        }
+        app.select_provider_page(ProviderPage::Openai);
+        app.subscription_pending = true;
+        app.subscription_instructions = vec![
+            "Visit https://auth.openai.com/codex/device".into(),
+            "Enter code: TEST-1234".into(),
+        ];
+        assert!(render_workspace(&mut app, 80, 24).contains("TEST-1234"));
+        app.select_provider_page(ProviderPage::Grok);
+        app.grok_subscription_pending = true;
+        app.grok_subscription_instructions = vec![
+            "Opening browser for Grok sign-in".into(),
+            "https://auth.x.ai/oauth2/authorize?test=GROK-1234".into(),
+        ];
+        for (w, h) in [(120, 40), (80, 24)] {
+            let text = render_workspace(&mut app, w, h);
+            assert!(text.contains("GROK-1234"), "{text}");
+            assert!(!text.contains("xAI key"), "{text}");
+            println!("Grok browser sign-in {w}x{h}\n{text}");
+        }
     }
 
     #[test]

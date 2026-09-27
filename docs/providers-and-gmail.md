@@ -1,42 +1,63 @@
-# Providers, voice, and Gmail
+# Provider accounts and model roles
 
-Argos does not bind the agent loop to one model vendor. Every signed-in
-provider is called the same way: `POST {base}/chat/completions` for text and
-`POST {base}/audio/transcriptions` for voice. Login chooses Grok, OpenAI,
-OpenRouter, or a local server, and that choice only changes the host, the
-default model, the key, and OpenRouter's attribution headers.
+The Providers app separates **accounts** from **models**:
 
-## Terminal login
+- **Grok**: subscription sign-in through Grok Build CLI only. Sign in with Grok
+  opens browser sign-in; Check existing login reuses `grok login --oauth`.
+  Install Grok Build CLI on `PATH`. Both Writer and Tools can use this account;
+  model availability depends on account access. No API-key setup or fallback.
+- **OpenAI**: ChatGPT subscription sign-in through Codex CLI only. No API-key
+  setup. Sign in with ChatGPT displays the device verification URL/code; Check
+  existing login reuses `codex login`. Install a recent Codex CLI on `PATH`.
+- **OpenRouter**: OpenRouter API key, or `OPENROUTER_API_KEY`. API model IDs are
+  provider-qualified, such as `vendor/model`. Attribution headers are preserved.
+- **Models**: independent Writer (answers/reports) and Tools (research calls)
+  cards. Choose each account and model here. Selections save immediately without
+  modifying account credentials. ChatGPT is Writer-only; Tools supports Grok and
+  OpenRouter. Existing local configurations remain selectable.
+- **Sources**: existing OSINT source toggles and source-specific keys. Search
+  service credentials never share an LLM key field.
 
-`argos login` prints the four providers, then asks:
+OpenRouter API keys are masked. Enter edits a field; Ctrl+U clears its contents; paste is
+supported. Save stores only the displayed account. Verify checks the form without
+saving. OpenRouter verification checks its authenticated `/key` endpoint before
+loading the public model catalog; an unsaved successful check says “Draft verified · Save to use”. Advanced
+endpoint settings are optional and require HTTPS without embedded credentials.
+Keys remain in owner-only `~/.argos/auth.json` (`ARGOS_HOME` overrides the root).
+Legacy text/voice/Gmail data round-trips, and the existing text account is migrated
+before another account can replace it. A corrupt auth file stops startup instead
+of silently replacing existing credentials with empty defaults.
 
-1. Modality, `text` or `voice`. Each slot is independent.
-2. Provider, `grok`, `openai`, `openrouter`, or `local`.
-3. Base URL. The default is that provider's public API. Change it only for a proxy or a local port.
-4. Model. Defaults are `grok-4.6`, `gpt-4.1`, `openai/gpt-4.1`, and `llama3.2`. Voice defaults are `whisper-1`, `openai/whisper-1`, or `whisper`.
+Enter on a model opens the selected account's catalog. Search or enter an exact
+model ID; unavailable custom IDs are marked unverified. F5 refreshes the catalog.
+Catalogs and asynchronous results stay scoped to their account. Selecting the
+OpenRouter free router opens a list of concrete free models to pin. Ctrl+M,
+`/model`, and `-m` target Writer. Both TUI and headless turns resolve role accounts
+independently.
 
-Nothing saved means the text slot is already Grok on `https://api.x.ai/v1`
-with `grok-4.6`. That is the model id in Grok Build's `default_models.json`.
-`Ctrl+M`, `/model`, and `argos models` list `grok-4.6` and `grok-4.5`, then
-merge the live `/v1/models` catalog when the key can reach the endpoint.
-`/model grok-4.5` and `argos -m grok-4.5` select one. The choice is stored in
-`~/.argos/config.toml` as `model`. Chat still uses chat completions, which
-is the API Grok documents for `grok-4.6` alongside the Responses API.
-5. API key, read with echo off.
+Grok sign-in runs `grok login --oauth` with API-key environment
+variables removed and a five-minute timeout. Grok Build owns the OAuth credential
+file; Argos reuses the existing token refresh adapter for model requests. API-only
+Grok logins are rejected. Saved legacy Grok API keys remain untouched but are
+ignored, including `XAI_API_KEY` and `GROK_API_KEY`. Checking a login also verifies
+its model catalog; failed checks clear the old Grok catalog and show the error.
+A spending-limit denial is shown as signed in with model access blocked, rather
+than a failed login. Short terminals keep all subscription actions visible.
+This does not guarantee model access for every Grok subscription tier.
 
-Cloud providers require a key. When `XAI_API_KEY`, `OPENAI_API_KEY`, or
-`OPENROUTER_API_KEY` is already set, the prompt offers to use that variable
-and does not copy it into `auth.json`. A local server may leave the key empty.
+ChatGPT access remains managed by Codex, including credential refresh, account
+entitlements, and model availability. Argos checks for ChatGPT authentication
+before running; an API-key Codex login is rejected for this mode. There is no API
+billing fallback. Each answer uses `codex exec --ephemeral --json` in a temporary
+workspace, ignoring user configuration and repository rules with read-only
+permissions and shell, web, apps, plugins, and multi-agent features disabled.
+Message chunks are forwarded into the existing answer/insight flow. A recent
+Codex CLI is required; sign-in and completion have bounded timeouts. No live
+provider calls are required by the test suite.
 
-The Providers app edits the same file. Enter on the provider row cycles the
-four ids and refreshes the URL and model while they still match a preset.
-The key field is masked. "Test /models" calls `GET {base}/models` with the
-same key and headers a chat turn would use.
-
-OpenRouter requests include `HTTP-Referer`, `X-Title`, and
-`X-OpenRouter-Title`. Grok and OpenAI use bearer auth only. A saved kind of
-`api` from an older file is classified from the host, so an OpenRouter URL
-still gets those headers.
+Mail and MCP configuration have been removed from Providers. The legacy Gmail
+CLI/MCP backend remains compatible with previously configured installations;
+this screen does not request mailbox credentials or generate MCP configuration.
 
 ## Voice
 
@@ -46,31 +67,3 @@ Ctrl+R records about five seconds with `rec` (from sox) or `ffmpeg`
 `whisper-1` unless you set another. The transcript replaces the prompt. You
 send it with Enter. If neither recorder is installed, the stream says so and
 nothing is invented.
-
-## Gmail
-
-Google app passwords are the credential Odysseus documents for IMAP
-username/password accounts. Outlook-style OAuth is out of scope. Argos pins
-the host to `imap.gmail.com` port 993 and strips spaces out of the app
-password before login.
-
-The Gmail app actions:
-
-* Save, after the address and password pass a local check.
-* Test INBOX, which selects the mailbox and reports how many messages exist.
-* Write MCP config, which stores `~/.argos/mcp.json` pointing at
-  `argos mcp gmail`.
-
-The stdio server accepts one JSON-RPC message per line, and also a
-`Content-Length` frame. `initialize`, `tools/list`, `tools/call`, and `ping`
-are implemented. Tools:
-
-* `gmail_list_recent` with optional `limit` (1–20)
-* `gmail_search` with `query` and optional `limit`
-
-Search text cannot contain quotes or line breaks. The tools return headers
-(uid, date, from, subject), not a mailbox export, and they never send mail.
-Logs go to stderr. stdout is reserved for MCP messages.
-
-The agent may list recent headers when you ask about Gmail and an account is
-saved. The app password stays in `auth.json` and is not copied into the prompt.

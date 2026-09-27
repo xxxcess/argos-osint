@@ -17,6 +17,9 @@ pub struct AuthFile {
     pub voice: Option<ProviderSecret>,
     #[serde(default)]
     pub gmail: Option<GmailSecret>,
+    /// Independent provider accounts. Legacy text/voice slots still round-trip.
+    #[serde(default)]
+    pub accounts: std::collections::BTreeMap<String, ProviderSecret>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +55,35 @@ pub struct GmailSecret {
 }
 
 impl AuthFile {
+    /// Resolve an account without copying another vendor's credentials.
+    pub fn account(&self, kind: &str) -> Option<ProviderSecret> {
+        let kind = crate::provider::normalize_kind(kind);
+        self.accounts.get(&kind).cloned().or_else(|| {
+            self.text
+                .as_ref()
+                .filter(|secret| crate::provider::effective_kind(secret) == kind)
+                .cloned()
+        })
+    }
+
+    pub fn set_account(&mut self, secret: ProviderSecret) {
+        let kind = crate::provider::effective_kind(&secret);
+        if let Some(legacy) = &self.text {
+            self.accounts
+                .entry(crate::provider::effective_kind(legacy))
+                .or_insert_with(|| legacy.clone());
+        }
+        // Preserve the existing default connection for CLI and legacy configs.
+        if self
+            .text
+            .as_ref()
+            .is_some_and(|old| crate::provider::effective_kind(old) == kind)
+        {
+            self.text = Some(secret.clone());
+        }
+        self.accounts.insert(kind, secret);
+    }
+
     pub fn load() -> Result<Self> {
         let path = auth_path();
         if !path.exists() {
@@ -66,8 +98,11 @@ impl AuthFile {
 
     pub fn save(&self) -> Result<()> {
         ensure_home()?;
-        let path = auth_path();
-        write_private(&path, &serde_json::to_string_pretty(self)?)
+        self.save_to(&auth_path())
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        write_private(path, &serde_json::to_string_pretty(self)?)
     }
 }
 
@@ -120,5 +155,61 @@ mod tests {
     fn mask_keeps_tail() {
         assert_eq!(mask("xai-secret-key1"), "••••key1");
         assert_eq!(mask(""), "(empty)");
+    }
+
+    #[test]
+    fn legacy_connection_migrates_without_overwriting_other_accounts() {
+        let legacy = r#"{"text":{"kind":"grok","base_url":"https://api.x.ai/v1","model":"grok-custom","api_key":"xai-existing"},"voice":null,"gmail":{"email":"test@example.com","app_password":"existing-mail"}}"#;
+        let mut auth: AuthFile = serde_json::from_str(legacy).unwrap();
+        let mut router = crate::provider::account_secret(&auth, "openrouter");
+        assert!(router.api_key.is_none());
+        router.api_key = Some("router-existing".into());
+        auth.set_account(router);
+        assert_eq!(
+            auth.account("grok").unwrap().api_key.as_deref(),
+            Some("xai-existing")
+        );
+        assert_eq!(
+            auth.account("openrouter").unwrap().api_key.as_deref(),
+            Some("router-existing")
+        );
+        assert!(auth.account("openai").is_none());
+        assert!(auth.account("openai-chatgpt").is_none());
+        assert_eq!(auth.gmail.as_ref().unwrap().app_password, "existing-mail");
+
+        // A legacy CLI login may change text, but cannot discard its previous account.
+        auth.text = auth.account("openrouter");
+        let restored: AuthFile =
+            serde_json::from_str(&serde_json::to_string(&auth).unwrap()).unwrap();
+        assert_eq!(restored.account("grok").unwrap().model, "grok-custom");
+        assert_eq!(
+            restored.account("openrouter").unwrap().api_key.as_deref(),
+            Some("router-existing")
+        );
+    }
+
+    #[test]
+    fn accounts_persist_with_owner_only_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut auth = AuthFile::default();
+        let mut grok = crate::provider::account_secret(&auth, "grok");
+        grok.api_key = Some("xai-existing".into());
+        auth.set_account(grok);
+        auth.save_to(&path).unwrap();
+        let restored: AuthFile =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            restored.account("grok").unwrap().api_key.as_deref(),
+            Some("xai-existing")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 }

@@ -24,6 +24,7 @@ serde_json.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
 unicode-width.workspace = true
+url.workspace = true
 tui-nodes = "0.10"
 
 [dev-dependencies]

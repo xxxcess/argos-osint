@@ -121,6 +121,7 @@ dependencies = [
  "tokio",
  "tui-nodes",
  "unicode-width",
+ "url",
 ]
 
 [[package]]

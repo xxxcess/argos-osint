@@ -78,7 +78,11 @@ async fn run_turn_inner(
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
     }
-    let intent = prompt::classify(&input.user_text);
+    let intent = if input.evidence_only {
+        Intent::Chat
+    } else {
+        prompt::classify(&input.user_text)
+    };
     if intent == Intent::Remember {
         let fact = prompt::remember_text(&input.user_text);
         if fact.is_empty() {
@@ -706,6 +710,49 @@ mod tests {
     use super::{format_tool_digest, same_model};
     use crate::secrets::ProviderSecret;
 
+    #[tokio::test]
+    async fn evidence_only_questions_cannot_classify_as_research_or_raw_memory() {
+        use super::*;
+        for question in ["who is Ada Lovelace", "remember: an unverified user claim"] {
+            let input = TurnInput {
+                session_id: "ephemeral-report".into(),
+                user_text: question.into(),
+                history: vec![],
+                memories: vec![],
+                view_name: "TNA report".into(),
+                view_context: "Evidence-only network workspace".into(),
+                hardware_line: String::new(),
+                modality: "text".into(),
+                provider: None,
+                tool_provider: None,
+                plan: SourcePlan::default(),
+                report_dir: PathBuf::new(),
+                case_id: None,
+                gmail: None,
+                prior_reports: "Ada Lovelace works with Acme Corporation.".into(),
+                evidence_only: true,
+                from_memory: false,
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            run_turn(input, tx, Arc::new(AtomicBool::new(false))).await;
+            let mut completed = false;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    TurnEvent::Done(answer) => {
+                        assert!(answer.contains("Ada Lovelace works with Acme Corporation"));
+                        completed = true;
+                    }
+                    TurnEvent::Memory(_) | TurnEvent::Report(_) => {
+                        panic!("evidence-only turn performed a write")
+                    }
+                    TurnEvent::Status(status) => assert!(!status.contains("researching")),
+                    TurnEvent::Failed(err) => panic!("unexpected failure: {err}"),
+                    _ => {}
+                }
+            }
+            assert!(completed);
+        }
+    }
     #[test]
     fn tool_digest_is_plain_text_for_the_writer() {
         let digest = format_tool_digest(

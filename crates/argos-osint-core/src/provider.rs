@@ -223,6 +223,72 @@ pub fn active_text_secret(
             .unwrap_or_else(|| default_grok_model())
             .to_string();
     }
+    subscription_connection(secret)
+}
+
+/// Account defaults contain no credentials from another provider.
+pub fn account_secret(auth: &crate::secrets::AuthFile, kind: &str) -> ProviderSecret {
+    let kind = normalize_kind(kind);
+    if let Some(secret) = auth.account(&kind) {
+        return subscription_connection(secret);
+    }
+    let preset = preset(&kind);
+    subscription_connection(ProviderSecret {
+        kind: kind.clone(),
+        // A transport identifier lets the existing agent distinguish this
+        // configured CLI connection from an absent HTTP provider.
+        base_url: preset
+            .map(|p| p.base_url)
+            .unwrap_or(if kind == "openai-chatgpt" {
+                "codex://chatgpt"
+            } else {
+                ""
+            })
+            .into(),
+        model: preset
+            .map(|p| p.text_model)
+            .unwrap_or(if kind == "openai-chatgpt" {
+                "codex-default"
+            } else {
+                ""
+            })
+            .into(),
+        api_key: None,
+        stt_model: None,
+        device: None,
+    })
+}
+
+/// Keep archived API credentials in AuthFile, but Grok account selection
+/// always resolves to subscription auth on the official endpoint.
+fn subscription_connection(mut secret: ProviderSecret) -> ProviderSecret {
+    if effective_kind(&secret) == "grok" {
+        secret.kind = "grok-subscription".into();
+        secret.api_key = None;
+        secret.base_url = preset("grok").expect("Grok preset").base_url.into();
+    }
+    secret
+}
+
+/// Resolve a role independently; old configurations retain their text connection.
+pub fn role_secret(
+    auth: &crate::secrets::AuthFile,
+    settings: &SettingsFile,
+    writer: bool,
+) -> ProviderSecret {
+    let (kind, model) = if writer {
+        (&settings.writer_provider, &settings.writer_model)
+    } else {
+        (&settings.tool_provider, &settings.tool_model)
+    };
+    let mut secret = if kind.trim().is_empty() {
+        active_text_secret(auth, &settings.model)
+    } else {
+        account_secret(auth, kind)
+    };
+    if !model.trim().is_empty() {
+        secret.model = model.trim().into();
+    }
     secret
 }
 
@@ -237,7 +303,9 @@ pub fn normalize_kind(kind: &str) -> String {
         .collect();
     match compact.as_str() {
         "grok" | "xai" | "x.ai" => "grok".into(),
+        "groksubscription" => "grok-subscription".into(),
         "openai" => "openai".into(),
+        "chatgpt" | "openaichatgpt" => "openai-chatgpt".into(),
         "openrouter" => "openrouter".into(),
         "local" | "ollama" | "llama" | "llamacpp" | "lmstudio" => "local".into(),
         _ => kind.trim().to_lowercase(),
@@ -248,7 +316,10 @@ pub fn normalize_kind(kind: &str) -> String {
 /// Older files that only have a base URL are classified from the host.
 pub fn effective_kind(secret: &ProviderSecret) -> String {
     let kind = normalize_kind(&secret.kind);
-    if preset(&kind).is_some() {
+    if kind == "grok-subscription" {
+        return "grok".into();
+    }
+    if kind == "openai-chatgpt" || preset(&kind).is_some() {
         return kind;
     }
     detect_kind_from_url(&secret.base_url)
@@ -282,6 +353,12 @@ fn resolved_key_with(
     secret: &ProviderSecret,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
+    if matches!(
+        normalize_kind(&secret.kind).as_str(),
+        "grok-subscription" | "openai-chatgpt"
+    ) {
+        return None;
+    }
     if let Some(key) = secret
         .api_key
         .as_ref()
@@ -310,6 +387,9 @@ pub fn provider_headers(secret: &ProviderSecret) -> Vec<(&'static str, &'static 
 }
 
 async fn bearer_token(secret: &ProviderSecret) -> Result<Option<String>, String> {
+    if normalize_kind(&secret.kind) == "grok-subscription" {
+        return crate::grok_oauth::bearer().await;
+    }
     if let Some(key) = resolved_key(secret) {
         return Ok(Some(key));
     }
@@ -327,8 +407,11 @@ async fn authorize(
         Ok(Some(key)) => req = req.bearer_auth(key),
         Ok(None) if effective_kind(secret) == "grok" => {
             return Err(anyhow!(
-                "No Grok credentials. Run `grok login` or `argos login`, or set XAI_API_KEY."
+                "No Grok subscription login. Sign in at Providers → Grok, or run `grok login --oauth`."
             ));
+        }
+        Ok(None) if preset(&effective_kind(secret)).is_some_and(|p| p.key_required) => {
+            return Err(anyhow!("{} credentials are not configured. Connect this account in Providers before selecting its models.", effective_kind(secret)));
         }
         Ok(None) => {}
         Err(err) => return Err(anyhow!(err)),
@@ -345,6 +428,9 @@ pub async fn complete(
     tools: &[ToolSpec],
     mut on_delta: impl FnMut(&str),
 ) -> Result<Completion> {
+    if effective_kind(secret) == "openai-chatgpt" {
+        return crate::subscription::complete(secret, messages, tools, on_delta).await;
+    }
     let client = http()?;
     let url = format!("{}/chat/completions", normalize_base(&secret.base_url));
     let body = chat_body(secret, messages, tools, true);
@@ -690,6 +776,11 @@ fn json_number(value: &Value) -> Option<f64> {
 }
 
 pub async fn list_catalog(secret: &ProviderSecret) -> Result<Vec<ListedModel>> {
+    if effective_kind(secret) == "openai-chatgpt" {
+        return Err(anyhow!(
+            "ChatGPT models are chosen by Codex; enter a model ID or use its default."
+        ));
+    }
     let client = http()?;
     let url = format!("{}/models", normalize_base(&secret.base_url));
     let req = authorize(client.get(&url), secret).await?;
@@ -697,10 +788,73 @@ pub async fn list_catalog(secret: &ProviderSecret) -> Result<Vec<ListedModel>> {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("models {status}: {text}"));
+        return Err(catalog_error(secret, status, &text));
     }
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     Ok(parse_model_catalog(&v))
+}
+
+fn catalog_error(
+    secret: &ProviderSecret,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> anyhow::Error {
+    if normalize_kind(&secret.kind) == "grok-subscription" {
+        let payload: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+        let code = payload
+            .get("code")
+            .or_else(|| payload.pointer("/error/code"))
+            .and_then(Value::as_str);
+        if status == reqwest::StatusCode::FORBIDDEN
+            && code == Some("personal-team-blocked:spending-limit")
+        {
+            return anyhow!("Signed in · Grok model access blocked (spending limit). Check this account's subscription/usage at grok.com, then Check existing login.");
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return anyhow!("Grok rejected the saved login (401). Sign in with Grok again; saved API keys are not used.");
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return anyhow!("Grok denied model access (403). Check the signed-in account's subscription and permissions, then Check existing login.");
+        }
+    }
+    anyhow!("models {status}: {body}")
+}
+
+/// OpenRouter's catalog is public. Verify the key against its authenticated
+/// endpoint before presenting an account as connected in the setup UI.
+pub async fn verified_catalog(secret: &ProviderSecret) -> Result<Vec<ListedModel>> {
+    if effective_kind(secret) == "openrouter" {
+        let client = http()?;
+        let url = format!("{}/key", normalize_base(&secret.base_url));
+        let resp = authorize(client.get(&url), secret)
+            .await?
+            .send()
+            .await
+            .context("check OpenRouter key")?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow!("OpenRouter rejected this key ({status}). Check the OpenRouter account key in Providers; your other accounts are unchanged."));
+        }
+        let info: Value = resp
+            .json()
+            .await
+            .context("read OpenRouter key verification")?;
+        if !info.get("data").is_some_and(Value::is_object) {
+            return Err(anyhow!(
+                "OpenRouter did not return key details; check the API endpoint"
+            ));
+        }
+        if info
+            .pointer("/data/is_management_key")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Err(anyhow!(
+                "This OpenRouter management key cannot run models. Use an inference API key."
+            ));
+        }
+    }
+    list_catalog(secret).await
 }
 
 pub async fn list_models(secret: &ProviderSecret) -> Result<Vec<String>> {
@@ -736,6 +890,11 @@ pub struct SettingsFile {
     /// Tool-calling model. Empty uses `model`.
     #[serde(default)]
     pub tool_model: String,
+    /// Empty preserves the legacy text connection.
+    #[serde(default)]
+    pub writer_provider: String,
+    #[serde(default)]
+    pub tool_provider: String,
     /// Wikipedia and Wikidata. `wikipedia` is the old name.
     #[serde(default = "default_true", alias = "wikipedia")]
     pub facts: bool,
@@ -781,6 +940,8 @@ impl Default for SettingsFile {
             model: String::new(),
             writer_model: String::new(),
             tool_model: String::new(),
+            writer_provider: String::new(),
+            tool_provider: String::new(),
             facts: true,
             web: true,
             news: true,
@@ -848,14 +1009,231 @@ impl SettingsFile {
 
     pub fn save(&self) -> Result<()> {
         crate::paths::ensure_home()?;
-        std::fs::write(crate::paths::config_path(), toml::to_string_pretty(self)?)?;
-        Ok(())
+        self.save_to(&crate::paths::config_path())
+    }
+
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
+        crate::secrets::write_private(path, &toml::to_string_pretty(self)?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_catalog_distinguishes_login_failure_from_subscription_limits() {
+        let account = account_secret(&crate::secrets::AuthFile::default(), "grok");
+        let body = r#"{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription."}"#;
+        let blocked = catalog_error(&account, reqwest::StatusCode::FORBIDDEN, body).to_string();
+        assert!(blocked.starts_with("Signed in"));
+        assert!(blocked.contains("spending limit"));
+        assert!(blocked.contains("Check existing login"));
+        let expired = catalog_error(&account, reqwest::StatusCode::UNAUTHORIZED, body).to_string();
+        assert!(expired.contains("Sign in with Grok again"));
+        assert!(!expired.starts_with("Signed in"));
+        let router = account_secret(&crate::secrets::AuthFile::default(), "openrouter");
+        assert!(catalog_error(&router, reqwest::StatusCode::FORBIDDEN, body)
+            .to_string()
+            .starts_with("models"));
+    }
+
+    #[test]
+    fn writer_and_tools_resolve_independent_accounts_and_models() {
+        let mut auth = crate::secrets::AuthFile::default();
+        auth.set_account(secret("grok", "https://api.x.ai/v1", Some("xai-existing")));
+        auth.set_account(secret(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            Some("router-existing"),
+        ));
+        let settings = SettingsFile {
+            writer_provider: "grok".into(),
+            writer_model: "grok-custom".into(),
+            tool_provider: "openrouter".into(),
+            tool_model: "vendor/research-model".into(),
+            model: "legacy-ignored".into(),
+            ..Default::default()
+        };
+        let writer = role_secret(&auth, &settings, true);
+        let tools = role_secret(&auth, &settings, false);
+        assert_eq!(
+            (
+                &writer.kind[..],
+                &writer.model[..],
+                writer.api_key.as_deref()
+            ),
+            ("grok-subscription", "grok-custom", None)
+        );
+        assert_eq!(
+            (&tools.kind[..], &tools.model[..], tools.api_key.as_deref()),
+            (
+                "openrouter",
+                "vendor/research-model",
+                Some("router-existing")
+            )
+        );
+        let changed = SettingsFile {
+            writer_provider: "openai-chatgpt".into(),
+            writer_model: "codex-default".into(),
+            ..settings
+        };
+        let subscription = role_secret(&auth, &changed, true);
+        assert_eq!(effective_kind(&subscription), "openai-chatgpt");
+        assert!(
+            !subscription.base_url.is_empty(),
+            "agent must not treat a subscription Writer as offline"
+        );
+        assert!(!subscription.model.is_empty());
+        assert!(subscription.api_key.is_none());
+        assert_eq!(
+            role_secret(&auth, &changed, false).api_key.as_deref(),
+            Some("router-existing")
+        );
+    }
+
+    #[test]
+    fn legacy_grok_connections_use_subscription_without_mutating_saved_keys() {
+        let auth = crate::secrets::AuthFile {
+            text: Some(secret(
+                "grok",
+                "https://old-grok-proxy.example/v1",
+                Some("xai-existing"),
+            )),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&auth).unwrap();
+        for writer in [true, false] {
+            let runtime = role_secret(&auth, &SettingsFile::default(), writer);
+            assert_eq!(runtime.kind, "grok-subscription");
+            assert_eq!(runtime.base_url, "https://api.x.ai/v1");
+            assert!(runtime.api_key.is_none());
+            assert_eq!(
+                resolved_key_with(&runtime, |_| Some("environment-key".into())),
+                None
+            );
+        }
+        assert_eq!(serde_json::to_value(&auth).unwrap(), before);
+    }
+
+    #[test]
+    fn older_role_configs_keep_their_connection_and_models() {
+        let settings: SettingsFile = toml::from_str("model = 'legacy-default'\nwriter_model = 'legacy-writer'\ntool_model = 'legacy-tools'\n").unwrap();
+        let auth = crate::secrets::AuthFile {
+            text: Some(secret(
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                Some("router-existing"),
+            )),
+            ..Default::default()
+        };
+        assert_eq!(role_secret(&auth, &settings, true).model, "legacy-writer");
+        assert_eq!(role_secret(&auth, &settings, false).model, "legacy-tools");
+        assert_eq!(
+            role_secret(&auth, &settings, true).api_key.as_deref(),
+            Some("router-existing")
+        );
+        // A disconnected account must never borrow another vendor's key.
+        assert!(account_secret(&auth, "grok").api_key.is_none());
+    }
+
+    #[test]
+    fn environment_keys_are_vendor_scoped() {
+        let router = account_secret(&crate::secrets::AuthFile::default(), "openrouter");
+        assert_eq!(
+            resolved_key_with(&router, |name| (name == "OPENROUTER_API_KEY")
+                .then(|| "correct-key".into())),
+            Some("correct-key".into())
+        );
+        assert_eq!(
+            resolved_key_with(&router, |name| (name == "XAI_API_KEY")
+                .then(|| "wrong-key".into())),
+            None
+        );
+        for kind in ["grok", "openai-chatgpt"] {
+            let mut subscription = account_secret(&crate::secrets::AuthFile::default(), kind);
+            subscription.api_key = Some("archived-api-key".into());
+            assert_eq!(
+                resolved_key_with(&subscription, |_| Some("wrong-api-key".into())),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_authorization_follows_the_selected_role_account() {
+        let mut auth = crate::secrets::AuthFile::default();
+        auth.set_account(secret("grok", "https://api.x.ai/v1", Some("xai-existing")));
+        auth.set_account(secret(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            Some("router-existing"),
+        ));
+        let mut settings = SettingsFile {
+            writer_provider: "grok".into(),
+            tool_provider: "openrouter".into(),
+            ..Default::default()
+        };
+        let client = reqwest::Client::new();
+        let subscription = role_secret(&auth, &settings, true);
+        assert_eq!(subscription.kind, "grok-subscription");
+        assert!(subscription.api_key.is_none());
+        let account = role_secret(&auth, &settings, false);
+        let request = authorize(
+            client.post(format!("{}/chat/completions", account.base_url)),
+            &account,
+        )
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(request.headers()["authorization"], "Bearer router-existing");
+        assert!(request.headers().contains_key("X-OpenRouter-Title"));
+        settings.writer_provider = "openrouter".into();
+        let account = role_secret(&auth, &settings, true);
+        let request = authorize(
+            client.post(format!("{}/chat/completions", account.base_url)),
+            &account,
+        )
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(request.headers()["authorization"], "Bearer router-existing");
+        assert_eq!(
+            auth.account("grok").unwrap().api_key.as_deref(),
+            Some("xai-existing")
+        );
+    }
+
+    #[tokio::test]
+    async fn router_verification_rejects_a_key_before_loading_the_public_catalog() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/api/v1", server.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = vec![0; 4096];
+            let n = stream.read(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes[..n]).to_lowercase();
+            assert!(request.starts_with("get /api/v1/key "));
+            assert!(request.contains("authorization: bearer router-existing"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let result = verified_catalog(&secret("openrouter", &base, Some("router-existing"))).await;
+        handle.join().unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("OpenRouter rejected this key (401"));
+    }
 
     #[test]
     fn legacy_osint_toggles_load_as_stages() {
@@ -955,7 +1333,7 @@ mod tests {
         assert!(resolve_model_choice(&choices, "grok").is_none());
         assert!(resolve_model_choice(&choices, "  ").is_none());
         let secret = active_text_secret(&crate::secrets::AuthFile::default(), "");
-        assert_eq!(secret.kind, "grok");
+        assert_eq!(secret.kind, "grok-subscription");
         assert_eq!(secret.model, "grok-4.6");
         assert_eq!(secret.base_url, "https://api.x.ai/v1");
         let picked = active_text_secret(&crate::secrets::AuthFile::default(), "grok-4.5");

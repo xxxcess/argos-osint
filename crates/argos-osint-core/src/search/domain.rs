@@ -352,7 +352,7 @@ pub(crate) fn parse_doh(domain: &str, kind: &str, value: &Value) -> DnsAnswer {
     }
 }
 
-async fn internetdb(ip: &str) -> Result<Vec<SearchHit>, String> {
+pub async fn internetdb(ip: &str) -> Result<Vec<SearchHit>, String> {
     let Ok(addr) = ip.parse::<IpAddr>() else {
         return Ok(Vec::new());
     };

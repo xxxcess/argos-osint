@@ -280,6 +280,7 @@ pub fn insists_on_new_case(text: &str) -> bool {
         "don't use the memory",
         "do not use the memory",
         "fresh search",
+        "fresh research",
     ]
     .iter()
     .any(|phrase| lower.contains(phrase))

@@ -47,6 +47,8 @@ pub struct TurnInput {
     pub gmail: Option<GmailConfig>,
     /// Markdown already on file whose titles match this question.
     pub prior_reports: String,
+    /// Authoritative identifiers, kept separate from untrusted passage text.
+    pub citation_ids: Vec<String>,
     /// When set, the turn may not search or leave the supplied report text.
     pub evidence_only: bool,
     /// Answer from fact memories of completed reports, and cite those reports.
@@ -65,7 +67,14 @@ pub enum TurnEvent {
 }
 
 pub async fn run_turn(input: TurnInput, tx: UnboundedSender<TurnEvent>, cancel: Arc<AtomicBool>) {
-    if let Err(err) = run_turn_inner(input, &tx, &cancel).await {
+    let work = run_turn_inner(input, &tx, &cancel);
+    let stopped = async {
+        while !cancel.load(Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
+    let result = tokio::select! {result=work=>result,_=stopped=>Err("cancelled".into())};
+    if let Err(err) = result {
         let _ = tx.send(TurnEvent::Failed(err));
     }
 }
@@ -147,13 +156,28 @@ async fn run_turn_inner(
         gathered.push('\n');
     }
 
+    if answering_reports && input.prior_reports.starts_with("No supporting passages") {
+        let _=tx.send(TurnEvent::Done("No supporting passages in the selected scope. The available evidence does not answer this question. Use focused research to address the gap.".into()));
+        return Ok(());
+    }
     let provider = match &input.provider {
-        Some(p) if !p.base_url.trim().is_empty() && !p.model.trim().is_empty() => p.clone(),
+        Some(p)
+            if !p.base_url.trim().is_empty()
+                && !p.model.trim().is_empty()
+                && (provider::effective_kind(p) == "local"
+                    || provider::effective_kind(p) == "openai-chatgpt"
+                    || provider::resolved_key(p).is_some()
+                    || (provider::effective_kind(p) == "grok"
+                        && crate::grok_oauth::auth_path().exists())
+                    || p.device.is_some()) =>
+        {
+            p.clone()
+        }
         _ => {
             let answer = if answering_reports {
                 format!(
                     "No text provider is signed in. This is drawn from the matching report already on file.\n\n{}",
-                    truncate_chars(gathered.trim(), 1600)
+                    report_evidence_fallback(gathered.trim())
                 )
             } else {
                 offline_answer(intent, &input, &sources, &gathered)
@@ -313,10 +337,16 @@ async fn run_turn_inner(
             }));
             let tx_delta = tx.clone();
             let completion = provider::complete(&provider, &messages, &tools, move |delta| {
-                let _ = tx_delta.send(TurnEvent::Delta(delta.to_string()));
+                if !answering_reports {
+                    let _ = tx_delta.send(TurnEvent::Delta(delta.to_string()));
+                }
             })
             .await
             .map_err(|e| e.to_string())?;
+            if answering_reports && !completion.tool_calls.is_empty() {
+                final_text = report_evidence_fallback(&input.prior_reports);
+                break;
+            }
             if completion.tool_calls.is_empty() {
                 final_text = completion.content;
                 break;
@@ -344,6 +374,20 @@ async fn run_turn_inner(
         }
     }
 
+    if answering_reports && input.prior_reports.starts_with("COMPLETED REPORT EVIDENCE") {
+        let cited = regex::Regex::new(r"\[[^\]\n]+@v\d+:L\d+\]").expect("citation regex");
+        let found = cited.find_iter(&final_text).collect::<Vec<_>>();
+        if found.is_empty()
+            || found.iter().any(|m| {
+                !input
+                    .citation_ids
+                    .iter()
+                    .any(|id| m.as_str() == format!("[{id}]"))
+            })
+        {
+            final_text = report_evidence_fallback(&input.prior_reports);
+        }
+    }
     if final_text.trim().is_empty() {
         final_text = "The model returned no text.".into();
     }
@@ -607,6 +651,9 @@ async fn exec_tool(
     call: &ToolCall,
     tx: &UnboundedSender<TurnEvent>,
 ) -> (String, String, Vec<SearchHit>) {
+    if input.evidence_only || !input.prior_reports.trim().is_empty() {
+        return ("tool refused in evidence-only discussion".into(),"Source text and ordinary discussion cannot authorize tool execution or durable writes.".into(),Vec::new());
+    }
     let args: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
     match call.name.as_str() {
         "web_search" => {
@@ -729,6 +776,7 @@ mod tests {
                 report_dir: PathBuf::new(),
                 case_id: None,
                 gmail: None,
+                citation_ids: Vec::new(),
                 prior_reports: "Ada Lovelace works with Acme Corporation.".into(),
                 evidence_only: true,
                 from_memory: false,
@@ -786,4 +834,12 @@ mod tests {
         tool.model = "tool".into();
         assert!(!same_model(&writer, &tool));
     }
+}
+
+fn report_evidence_fallback(material: &str) -> String {
+    let evidence = material
+        .split_once('\n')
+        .map(|(_, body)| body)
+        .unwrap_or(material);
+    format!("Retrieved supporting passages (attributed source statements; completeness and identity remain unassessed):\n\n{}",truncate_chars(evidence.trim(),16000))
 }

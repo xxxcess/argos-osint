@@ -874,6 +874,8 @@ fn http() -> Result<reqwest::Client> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsFile {
+    #[serde(default = "crate::research::defaults")]
+    pub research: std::collections::BTreeMap<String, crate::research::ResearchConfig>,
     #[serde(default)]
     pub searx_url: String,
     #[serde(default)]
@@ -934,6 +936,7 @@ fn default_modality() -> String {
 impl Default for SettingsFile {
     fn default() -> Self {
         Self {
+            research: crate::research::defaults(),
             searx_url: String::new(),
             report_dir: String::new(),
             modality: default_modality(),
@@ -970,6 +973,11 @@ fn secret_or_env(value: &str, env_name: &str) -> Option<String> {
     if let Some(value) = filled(value) {
         return Some(value);
     }
+    if let Ok(auth) = crate::secrets::AuthFile::load() {
+        if let Some(secret) = auth.research.get(env_name).and_then(|s| filled(s)) {
+            return Some(secret);
+        }
+    }
     std::env::var(env_name)
         .ok()
         .map(|item| item.trim().to_string())
@@ -1004,7 +1012,44 @@ impl SettingsFile {
         if raw.trim().is_empty() {
             return Ok(Self::default());
         }
-        Ok(toml::from_str(&raw)?)
+        let mut settings: Self = toml::from_str(&raw)?;
+        let mut auth = crate::secrets::AuthFile::load()?;
+        if settings.migrate_research_secrets(&mut auth) {
+            // Persist credentials before removing their legacy config copies.
+            auth.save()?;
+            settings.save_to(&path)?;
+        }
+        for (name, config) in crate::research::defaults() {
+            settings.research.entry(name).or_insert(config);
+        }
+        Ok(settings)
+    }
+
+    pub fn migrate_research_secrets(&mut self, auth: &mut crate::secrets::AuthFile) -> bool {
+        let mut changed = false;
+        for (name, value) in [
+            ("BRAVE_API_KEY", &mut self.brave_key),
+            ("TAVILY_API_KEY", &mut self.tavily_key),
+            ("YOUTUBE_API_KEY", &mut self.youtube_key),
+            ("GITHUB_TOKEN", &mut self.github_token),
+        ] {
+            if !value.is_empty() {
+                if auth.research.get(name).is_some_and(|saved| saved != value) {
+                    use sha2::{Digest, Sha256};
+                    let fingerprint = format!("{:x}", Sha256::digest(value.as_bytes()));
+                    auth.research
+                        .entry(format!("{name}_legacy_{}", &fingerprint[..12]))
+                        .or_insert_with(|| value.clone());
+                } else {
+                    auth.research
+                        .entry(name.into())
+                        .or_insert_with(|| value.clone());
+                }
+                value.clear();
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn save(&self) -> Result<()> {
@@ -1020,6 +1065,22 @@ impl SettingsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_credential_migration_preserves_existing_and_legacy_values() {
+        let mut settings = SettingsFile::default();
+        settings.brave_key = "legacy-secret".into();
+        let mut auth = crate::secrets::AuthFile::default();
+        auth.research
+            .insert("BRAVE_API_KEY".into(), "current-secret".into());
+        assert!(settings.migrate_research_secrets(&mut auth));
+        assert!(settings.brave_key.is_empty());
+        assert_eq!(auth.research["BRAVE_API_KEY"], "current-secret");
+        assert!(auth.research.values().any(|value| value == "legacy-secret"));
+        assert!(!toml::to_string(&settings)
+            .unwrap()
+            .contains("legacy-secret"));
+    }
 
     #[test]
     fn grok_catalog_distinguishes_login_failure_from_subscription_limits() {

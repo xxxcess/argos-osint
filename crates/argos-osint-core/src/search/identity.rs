@@ -12,6 +12,19 @@ use super::{
 };
 
 pub async fn gather(terms: Vec<String>, token: Option<String>) -> Result<MergeOutcome, String> {
+    gather_with_exposure(terms, token, true).await
+}
+pub async fn gather_profiles(
+    terms: Vec<String>,
+    token: Option<String>,
+) -> Result<MergeOutcome, String> {
+    gather_with_exposure(terms, token, false).await
+}
+async fn gather_with_exposure(
+    terms: Vec<String>,
+    token: Option<String>,
+    exposure: bool,
+) -> Result<MergeOutcome, String> {
     let token = token.filter(|token| !token.trim().is_empty());
     let mut jobs: Vec<Job> = Vec::new();
     let leak_terms: Vec<String> = terms
@@ -36,7 +49,7 @@ pub async fn gather(terms: Vec<String>, token: Option<String>) -> Result<MergeOu
             )
         }));
     }
-    if !leak_terms.is_empty() {
+    if exposure && !leak_terms.is_empty() {
         jobs.push(Box::pin(async move {
             ("leakcheck", leakcheck_terms(leak_terms).await)
         }));
@@ -76,7 +89,7 @@ async fn leakcheck_terms(terms: Vec<String>) -> Result<Vec<SearchHit>, String> {
     Ok(hits)
 }
 
-async fn leakcheck_one(query: &str) -> Result<Vec<SearchHit>, String> {
+pub async fn leakcheck_one(query: &str) -> Result<Vec<SearchHit>, String> {
     let url = format!(
         "https://leakcheck.io/api/public?check={}",
         urlencoding::encode(query)

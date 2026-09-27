@@ -23,8 +23,11 @@ pub(super) fn draw_workspace(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|r| r.title.as_str())
         .unwrap_or("report");
     frame.render_widget(
-        Paragraph::new(format!("NETWORK · {title}"))
-            .style(theme::accent().add_modifier(Modifier::BOLD)),
+        Paragraph::new(format!(
+            "NETWORK · {title} · scope {:?} · R read · i inspect",
+            app.evidence_scope
+        ))
+        .style(theme::accent().add_modifier(Modifier::BOLD)),
         rows[0],
     );
     let shortcuts = ["g", "q", "p", "m", "r"];
@@ -56,6 +59,37 @@ pub(super) fn draw_workspace(frame: &mut Frame, app: &mut App, area: Rect) {
         x = x.saturating_add(width + 3);
     }
     app.canvas_area = rows[2];
+    if app.workspace_reading {
+        let mut text = Vec::new();
+        if !app.originating_question.is_empty() {
+            text.push(
+                Line::from(format!(
+                    "Question: {}",
+                    app.originating_question
+                        .chars()
+                        .take(100)
+                        .collect::<String>()
+                ))
+                .style(theme::dim()),
+            );
+        }
+        text.extend(
+            app.report_read_source
+                .as_deref()
+                .unwrap_or(&app.tna_source)
+                .lines()
+                .enumerate()
+                .skip(app.report_read_line)
+                .map(|(n, line)| Line::from(format!("{:>5}  {}", n + 1, line))),
+        );
+        frame.render_widget(
+            Paragraph::new(text).wrap(Wrap { trim: false }).block(panel(
+                " Report · j/k scroll · g Explore Network · /cite · /scope ",
+            )),
+            rows[2],
+        );
+        return;
+    }
     if app.tna_snapshot().is_none() {
         let message = app
             .tna_source_error
@@ -304,7 +338,12 @@ fn clusters(frame: &mut Frame, app: &mut App, area: Rect) {
                 break;
             };
             used.insert(row);
-            let text = format!("{} {}", tna_glyph_for_kind(node.kind), node.label);
+            let text = format!(
+                "{} {} · {}",
+                tna_glyph_for_kind(node.kind),
+                node.label,
+                app.entity_coverage(&node.id)
+            );
             let width = (text.width() as u16).min(inner.width);
             let x = ((node.x.clamp(0.0, 1.0) * inner.width as f64) as u16)
                 .min(inner.width.saturating_sub(width));
@@ -331,7 +370,8 @@ fn clusters(frame: &mut Frame, app: &mut App, area: Rect) {
         cols[1],
         &[Constraint::Percentage(55), Constraint::Percentage(45)],
     );
-    let mut anchors = vec![Line::from("Ranked by existing degree").style(theme::dim())];
+    let mut anchors =
+        vec![Line::from("Degree, then source mention support; not confidence").style(theme::dim())];
     for anchor in snap.anchors.iter().take(10) {
         anchors.push(
             Line::from(format!(
@@ -356,14 +396,7 @@ fn clusters(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     let mut gaps = vec![Line::from("Absent co-occurrence; type groups").style(theme::dim())];
     for gap in &snap.gaps {
-        gaps.push(
-            Line::from(format!(
-                "{} ↔ {}: no edge",
-                gap.cluster_a.label(),
-                gap.cluster_b.label()
-            ))
-            .style(Style::default().fg(theme::WARN)),
-        );
+        gaps.push(Line::from(format!("{}", gap.note)).style(Style::default().fg(theme::WARN)));
     }
     if snap.gaps.is_empty() {
         gaps.push(Line::from("No missing group links."));
@@ -487,17 +520,34 @@ fn paths(frame: &mut Frame, app: &mut App, area: Rect) {
             Rect::new(rows[1].x, rows[1].bottom() - 1, rows[1].width, 1),
         );
     }
-    let evidence = paths.get(app.tna_path_sel).and_then(|path| path.nodes.windows(2).max_by_key(|pair|app.tna_edge_weight(&pair[0],&pair[1]))).map(|pair|app.tna_edge_evidence(&pair[0],&pair[1])).unwrap_or_else(|| "Select a path to inspect its strongest hop. Co-occurrence is not proof of a relationship.".into());
+    let evidence = paths
+        .get(app.tna_path_sel)
+        .and_then(|path| {
+            path.nodes
+                .windows(2)
+                .nth(app.tna_hop_sel.min(path.nodes.len().saturating_sub(2)))
+        })
+        .map(|pair| app.tna_edge_evidence(&pair[0], &pair[1]))
+        .unwrap_or_else(|| {
+            "Select a path to inspect each hop. Co-occurrence is not proof of a relationship."
+                .into()
+        });
     frame.render_widget(
         Paragraph::new(evidence)
             .wrap(Wrap { trim: false })
             .style(theme::dim())
-            .block(panel(" Evidence · strongest hop ")),
+            .block(panel(
+                " Evidence · [ / ] every hop · /corroborate · /weakest ",
+            )),
         rows[2],
     );
 }
 
 fn matrix(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.tna_matrix_coverage {
+        coverage_matrix(frame, app, area);
+        return;
+    }
     let rows = split_v(area, &[Constraint::Length(9), Constraint::Min(0)]);
     let counts = app.tna_cluster_counts();
     let snap = app.tna_snapshot().unwrap();
@@ -542,7 +592,7 @@ fn matrix(frame: &mut Frame, app: &mut App, area: Rect) {
         .block(panel(" Cluster edge counts · gap = no co-occurrence ")),
         rows[0],
     );
-    let block = panel(" Adjacency · top 24 after Find · hjkl cursor · Enter Cockpit ");
+    let block = panel(" Adjacency · top 24 · c coverage · hjkl · Enter Cockpit ");
     let inner = block.inner(rows[1]);
     frame.render_widget(block, rows[1]);
     let nodes = app.tna_matrix_nodes();
@@ -894,4 +944,88 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
             .block(panel(" TNA help ")),
         modal,
     );
+}
+
+fn coverage_matrix(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block =
+        panel(" Theme × report coverage · c adjacency · hjkl · Enter passage · limit 24 × 24 ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut lines=vec![Line::from("Metric: distinct supporting passages; 0 = no indexed match, ? = unavailable. Not confidence.").style(theme::dim())];
+    let col_start = app
+        .tna_matrix_col
+        .saturating_sub((inner.width.saturating_sub(24) / 5).saturating_sub(1) as usize);
+    let row_start = app
+        .tna_matrix_row
+        .saturating_sub(inner.height.saturating_sub(4) as usize);
+    if let Some(row) = app.coverage_rows.first() {
+        let mut head = vec![Span::styled(format!("{:<24}", "Theme"), theme::accent())];
+        for (n, c) in row
+            .cells
+            .iter()
+            .enumerate()
+            .skip(col_start)
+            .take((inner.width.saturating_sub(24) / 5) as usize)
+        {
+            head.push(Span::styled(
+                format!("{:>4} ", n + 1),
+                if n == app.tna_matrix_col {
+                    theme::selected()
+                } else {
+                    theme::dim()
+                },
+            ));
+            if n == app.tna_matrix_col {
+                lines.push(
+                    Line::from(format!("Selected report: {} ({})", c.title, c.report_id))
+                        .style(theme::accent()),
+                );
+            }
+        }
+        lines.push(Line::from(head));
+    }
+    for (i, row) in app
+        .coverage_rows
+        .iter()
+        .enumerate()
+        .skip(row_start)
+        .take(inner.height.saturating_sub(4) as usize)
+    {
+        let mut spans = vec![Span::styled(
+            format!("{:<24}", short_label(&row.theme, 23)),
+            if i == app.tna_matrix_row {
+                theme::selected()
+            } else {
+                theme::text()
+            },
+        )];
+        for (j, cell) in row
+            .cells
+            .iter()
+            .enumerate()
+            .skip(col_start)
+            .take((inner.width.saturating_sub(24) / 5) as usize)
+        {
+            spans.push(Span::styled(
+                format!(
+                    "{:>4} ",
+                    cell.passages
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "?".into())
+                ),
+                if i == app.tna_matrix_row && j == app.tna_matrix_col {
+                    theme::selected()
+                } else {
+                    theme::text()
+                },
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    if app.coverage_rows.is_empty() {
+        lines.push(Line::from(
+            "No extracted themes in this scope, or coverage is still loading.",
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

@@ -27,7 +27,7 @@ pub struct TnaCorpus {
 
 impl TnaCorpus {
     pub fn is_collection(&self) -> bool {
-        matches!(self.scope, TnaScope::Collection)
+        !matches!(self.scope, TnaScope::Targeted { .. })
     }
 
     /// Desk / collection: every completed report in the store.
@@ -48,6 +48,37 @@ impl TnaCorpus {
         })
     }
 
+    pub fn scoped(store: &Store, scope: &crate::evidence::EvidenceScope) -> Result<Self> {
+        if let crate::evidence::EvidenceScope::Report(id) = scope {
+            return Self::targeted(store, id);
+        }
+        let reports = store
+            .list_reports()?
+            .into_iter()
+            .filter(|r| scope.contains(r))
+            .collect::<Vec<_>>();
+        let ids = reports.iter().map(|r| r.id.clone()).collect();
+        let docs = reports
+            .iter()
+            .map(|r| {
+                Ok(CorpusDoc {
+                    report_id: r.id.clone(),
+                    title: r.title.clone(),
+                    text: store
+                        .report_version(&r.id, None)?
+                        .or_else(|| report_corpus_text(r).ok())
+                        .ok_or_else(|| anyhow::anyhow!("Source unavailable for {}", r.id))?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            scope: TnaScope::Selected {
+                report_ids: ids,
+                label: format!("{:?}", scope),
+            },
+            docs,
+        })
+    }
     /// Targeted: one report only (no Doc node in the graph).
     pub fn targeted(store: &Store, report_id: &str) -> Result<Self> {
         let reports = store.list_reports()?;

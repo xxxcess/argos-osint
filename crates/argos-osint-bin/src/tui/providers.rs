@@ -5,6 +5,10 @@ use crate::tui::app::{provider_name, ProviderPage};
 use argos_osint_core::provider;
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.provider_page == ProviderPage::Research {
+        draw_research(frame, app, area);
+        return;
+    }
     app.provider_field_hits.clear();
     app.canvas_area = area;
     let rows = split_v(area, &[Constraint::Length(3), Constraint::Min(0)]);
@@ -414,4 +418,97 @@ pub fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: false }),
         modal,
     );
+}
+
+fn draw_research(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.provider_field_hits.clear();
+    app.canvas_area = area;
+    let name = app.research_name();
+    let c = app
+        .settings
+        .research
+        .get(&name)
+        .cloned()
+        .unwrap_or_default();
+    let mut intro = vec![
+        Line::from(format!(
+            "{name} · {:?} · enabled {}",
+            c.readiness, c.enabled
+        ))
+        .style(theme::accent()),
+        Line::from(argos_osint_core::research::capabilities(&name)).style(theme::dim()),
+        Line::from(format!(
+            "Supported {} · detected {} · profile {} · capabilities {} · quota {}",
+            c.supported_version,
+            if c.detected_version.is_empty() {
+                "unverified"
+            } else {
+                &c.detected_version
+            },
+            c.scan_profile,
+            c.account_capabilities,
+            c.quota
+        ))
+        .style(theme::dim()),
+    ];
+    if let Some((_, _, plan)) = &app.tool_plan {
+        intro.push(
+            Line::from(format!(
+                "PLAN: {} {} from {} to {}",
+                plan.tool,
+                plan.version,
+                plan.source,
+                plan.destination.display()
+            ))
+            .style(theme::accent()),
+        );
+        intro.push(
+            Line::from(format!(
+                "Prerequisites: {}. Official SHA-256 verified before activation. Apply to start.",
+                plan.prerequisites.join(", ")
+            ))
+            .style(theme::dim()),
+        );
+    }
+    let rows = split_v(
+        area,
+        &[
+            Constraint::Length(if app.tool_plan.is_some() { 8 } else { 5 }),
+            Constraint::Min(0),
+        ],
+    );
+    frame.render_widget(Paragraph::new(intro).wrap(Wrap { trim: false }), rows[0]);
+    let visible = rows[1].height.saturating_sub(2) as usize;
+    let first = app.field_sel.saturating_sub(visible.saturating_sub(1));
+    let block =
+        panel(" Research settings · Enter edit/action · j/k navigate · keyboard remains active ");
+    let inner = block.inner(rows[1]);
+    frame.render_widget(block, rows[1]);
+    for (position, index) in (first..app.fields.len()).take(visible).enumerate() {
+        let field = &app.fields[index];
+        let active = index == app.field_sel;
+        let value = if field.secret {
+            mask(&field.value)
+        } else {
+            field.value.clone()
+        };
+        let cursor = if active && app.editing { "▍" } else { "" };
+        let line = format!(
+            "{} {}: {}{}",
+            if active { "›" } else { " " },
+            field.label,
+            value,
+            cursor
+        );
+        let rect = Rect::new(inner.x, inner.y + position as u16, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(line).style(if active {
+                theme::selected()
+            } else {
+                theme::text()
+            }),
+            rect,
+        );
+        app.provider_field_hits.push((index, rect));
+    }
 }

@@ -21,6 +21,13 @@ const ANCHOR_LIMIT: usize = 8;
 /// Build a complete snapshot from a prepared corpus. Pure CPU; safe for
 /// `tokio::task::spawn_blocking`.
 pub fn build_snapshot(corpus: &TnaCorpus) -> TnaSnapshot {
+    build_snapshot_corrected(corpus, &[])
+}
+
+pub fn build_snapshot_corrected(
+    corpus: &TnaCorpus,
+    corrections: &[crate::evidence::Correction],
+) -> TnaSnapshot {
     let mut snap = TnaSnapshot::empty(corpus.scope.clone());
     let mut mentions: HashMap<String, (TnaNodeKind, String, u32)> = HashMap::new();
     // doc_id -> entity ids found in that report (collection Doc edges).
@@ -28,9 +35,55 @@ pub fn build_snapshot(corpus: &TnaCorpus) -> TnaSnapshot {
     let mut pair_weights: HashMap<(String, String), u32> = HashMap::new();
 
     for doc in &corpus.docs {
-        let (occ, decisions) = clean_document(doc);
+        let (mut occ, mut decisions) = clean_document(doc);
+        for correction in corrections.iter().filter(|c| c.report_id == doc.report_id) {
+            if !doc
+                .text
+                .get(correction.start..)
+                .is_some_and(|s| s.starts_with(&correction.original))
+            {
+                continue;
+            }
+            occ.retain(|o| o.start != correction.start);
+            if let (Some(label), Some(kind)) = (&correction.replacement, correction.entity_type) {
+                occ.push(Occurrence {
+                    kind,
+                    label: label.clone(),
+                    start: correction.start,
+                });
+            }
+            for d in decisions
+                .iter_mut()
+                .filter(|d| d.start == correction.start && d.original == correction.original)
+            {
+                d.label = correction.replacement.clone();
+                d.kind = correction.entity_type.unwrap_or(d.kind);
+                d.canonical_id = d.label.as_ref().map(|l| node_id(d.kind, l));
+                d.reason = format!(
+                    "analyst correction {}: {}",
+                    correction.id, correction.reason
+                );
+            }
+        }
+        occ.sort_by_key(|o| o.start);
         snap.decisions.extend(decisions);
-        let ids = accumulate_occurrences(&occ, &mut mentions, &mut pair_weights);
+        // A graph window never bridges unrelated source lines or paragraphs.
+        let mut groups: std::collections::BTreeMap<usize, Vec<Occurrence>> = Default::default();
+        for o in occ {
+            let line = doc.text[..o.start.min(doc.text.len())]
+                .bytes()
+                .filter(|b| *b == b'\n')
+                .count();
+            groups.entry(line).or_default().push(o);
+        }
+        let mut ids = Vec::new();
+        for group in groups.values() {
+            for id in accumulate_occurrences(group, &mut mentions, &mut pair_weights) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
         if corpus.is_collection() {
             let doc_id = node_id(TnaNodeKind::Doc, &doc.report_id);
             let entry =
@@ -53,6 +106,7 @@ pub fn build_snapshot(corpus: &TnaCorpus) -> TnaSnapshot {
     } else {
         TARGETED_CAP
     };
+    let omitted = mentions.len().saturating_sub(cap);
     let kept = apply_cap(mentions, cap, corpus.is_collection());
 
     // Rebuild edges only among kept nodes.
@@ -97,7 +151,9 @@ pub fn build_snapshot(corpus: &TnaCorpus) -> TnaSnapshot {
 
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     match &corpus.scope {
-        crate::tna::types::TnaScope::Collection => layout_nodes(&mut nodes),
+        crate::tna::types::TnaScope::Collection | crate::tna::types::TnaScope::Selected { .. } => {
+            layout_nodes(&mut nodes)
+        }
         crate::tna::types::TnaScope::Targeted { .. } => layout_hierarchy(&mut nodes),
     }
 
@@ -140,7 +196,10 @@ pub fn build_snapshot(corpus: &TnaCorpus) -> TnaSnapshot {
     });
     anchors.truncate(ANCHOR_LIMIT);
 
-    let gaps = structural_gaps(&nodes, &edges);
+    let mut gaps = structural_gaps(&nodes, &edges);
+    if omitted > 0 {
+        gaps.push(TnaGap {cluster_a:TnaCluster::Infrastructure,cluster_b:TnaCluster::Infrastructure,note:format!("Display cap {cap}: {omitted} extracted entities omitted; source audit retains them. Ranking: entity kind, mention support, then stable identifier; connectivity is not confidence.")});
+    }
     let clusters = cluster_summary(&nodes);
 
     snap.nodes = nodes;
@@ -533,4 +592,82 @@ mod tests {
             .len();
         assert!(snap.gaps.is_empty() || nclusters < 2, "{:?}", snap.gaps);
     }
+}
+
+/// Only explicit analyst decisions resolve identity. Original mention labels/spans remain.
+pub fn apply_identity_decisions(
+    snapshot: &mut TnaSnapshot,
+    decisions: &[crate::evidence::IdentityDecision],
+) {
+    for decision in decisions {
+        let Some(canonical) = &decision.canonical_entity else {
+            continue;
+        };
+        let Some(target) = snapshot.nodes.iter().find(|n| &n.id == canonical).cloned() else {
+            continue;
+        };
+        if snapshot
+            .nodes
+            .iter()
+            .filter(|n| decision.entities.contains(&n.id))
+            .any(|n| n.kind != target.kind)
+        {
+            continue;
+        }
+        let removed = snapshot
+            .nodes
+            .iter()
+            .filter(|n| decision.entities.contains(&n.id) && &n.id != canonical)
+            .map(|n| n.mentions)
+            .sum::<u32>();
+        snapshot
+            .nodes
+            .retain(|n| &n.id == canonical || !decision.entities.contains(&n.id));
+        if let Some(n) = snapshot.nodes.iter_mut().find(|n| &n.id == canonical) {
+            n.mentions = n.mentions.saturating_add(removed);
+        }
+        for edge in &mut snapshot.edges {
+            if decision.entities.contains(&edge.from) {
+                edge.from = canonical.clone();
+            }
+            if decision.entities.contains(&edge.to) {
+                edge.to = canonical.clone();
+            }
+        }
+        for d in &mut snapshot.decisions {
+            if d.canonical_id
+                .as_ref()
+                .is_some_and(|id| decision.entities.contains(id))
+            {
+                d.canonical_id = Some(canonical.clone());
+                d.reason = format!("{}; identity decision {}", d.reason, decision.id);
+            }
+        }
+    }
+    let mut pairs: std::collections::BTreeMap<(String, String), u32> = Default::default();
+    for edge in &snapshot.edges {
+        if edge.from != edge.to {
+            let pair = if edge.from < edge.to {
+                (edge.from.clone(), edge.to.clone())
+            } else {
+                (edge.to.clone(), edge.from.clone())
+            };
+            let entry = pairs.entry(pair).or_default();
+            *entry = entry.saturating_add(edge.weight);
+        }
+    }
+    snapshot.edges = pairs
+        .into_iter()
+        .map(|((from, to), weight)| TnaEdge { from, to, weight })
+        .collect();
+    for node in &mut snapshot.nodes {
+        node.degree = snapshot
+            .edges
+            .iter()
+            .filter(|e| e.from == node.id || e.to == node.id)
+            .count() as u32;
+    }
+    snapshot
+        .anchors
+        .retain(|a| snapshot.nodes.iter().any(|n| n.id == a.node_id));
 }

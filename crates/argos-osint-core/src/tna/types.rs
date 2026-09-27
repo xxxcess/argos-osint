@@ -6,7 +6,14 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TnaScope {
     Collection,
-    Targeted { report_id: String, title: String },
+    Targeted {
+        report_id: String,
+        title: String,
+    },
+    Selected {
+        report_ids: Vec<String>,
+        label: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -145,6 +152,7 @@ impl TnaSnapshot {
         let title = match &scope {
             TnaScope::Collection => "TNA · collection".into(),
             TnaScope::Targeted { title, .. } => format!("TNA · {title}"),
+            TnaScope::Selected { label, .. } => format!("TNA · {label}"),
         };
         Self {
             pipeline_version: PIPELINE_VERSION,
@@ -173,7 +181,7 @@ pub fn report_key(report_id: &str) -> String {
 }
 
 /// Increment when extraction or cleanup semantics change. Missing versions are stale.
-pub const PIPELINE_VERSION: u32 = 2;
+pub const PIPELINE_VERSION: u32 = 3;
 
 /// Source-backed audit record; rejected candidates never enter the graph.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -187,4 +195,14 @@ pub struct TnaDecision {
     pub label: Option<String>,
     pub canonical_id: Option<String>,
     pub reason: String,
+}
+
+impl TnaEdge {
+    pub fn relationship_type(&self) -> crate::evidence::RelationshipType {
+        if self.from.starts_with("doc:") || self.to.starts_with("doc:") {
+            crate::evidence::RelationshipType::EntityMentionedInReport
+        } else {
+            crate::evidence::RelationshipType::TextCooccurrence
+        }
+    }
 }

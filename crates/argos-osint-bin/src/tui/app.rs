@@ -269,16 +269,18 @@ pub enum ProviderPage {
     Openrouter,
     Models,
     Osint,
+    Research,
 }
 
 impl ProviderPage {
-    pub fn all() -> [Self; 5] {
+    pub fn all() -> [Self; 6] {
         [
             Self::Grok,
             Self::Openai,
             Self::Openrouter,
             Self::Models,
             Self::Osint,
+            Self::Research,
         ]
     }
     pub fn title(self) -> &'static str {
@@ -288,6 +290,7 @@ impl ProviderPage {
             Self::Openrouter => "OpenRouter",
             Self::Models => "Models",
             Self::Osint => "Sources",
+            Self::Research => "Research",
         }
     }
     pub fn account(self) -> Option<&'static str> {
@@ -369,6 +372,39 @@ pub struct Field {
 
 #[derive(Clone, Debug)]
 pub enum AppMsg {
+    Retrieved {
+        generation: u64,
+        query: String,
+        result: Result<Vec<argos_osint_core::evidence::PassageHit>, String>,
+    },
+    ReportSource {
+        report_id: String,
+        generation: u64,
+        version: Option<i64>,
+        result: Result<String, String>,
+    },
+    ResearchJob(argos_osint_core::research::ResearchJob),
+    ResearchProgress(argos_osint_core::research::ResearchJob),
+    ToolManaged {
+        name: String,
+        result: Result<Option<String>, String>,
+    },
+    ResearchTest {
+        name: String,
+        state: argos_osint_core::research::Readiness,
+        detail: String,
+    },
+    EvidenceSurface {
+        report_id: Option<String>,
+        title: String,
+        result: Result<String, String>,
+    },
+    ReportUpdated(Result<ReportMeta, String>),
+    Coverage {
+        report_id: Option<String>,
+        result: Result<Vec<argos_osint_core::evidence::CoverageRow>, String>,
+    },
+    OpenPassage(Result<Option<argos_osint_core::evidence::PassageHit>, String>),
     #[cfg(test)]
     Turn(TurnEvent),
     ScopedTurn {
@@ -411,6 +447,7 @@ pub enum AppMsg {
     TnaReady {
         targeted: bool,
         report_id: Option<String>,
+        scope: Option<argos_osint_core::evidence::EvidenceScope>,
         result: Result<TnaSnapshot, String>,
     },
 }
@@ -536,12 +573,31 @@ pub struct App {
     pub tna_answer: Option<TnaAnswer>,
     pub tna_from: Option<String>,
     pub tna_to: Option<String>,
+    pub tna_hop_sel: usize,
     pub tna_path_sel: usize,
+    pub tna_matrix_coverage: bool,
+    pub coverage_rows: Vec<argos_osint_core::evidence::CoverageRow>,
     pub tna_matrix_row: usize,
     pub tna_matrix_col: usize,
     pub tna_ribbon_pos: usize,
     pub tna_show_rejected: bool,
     pub tna_find_editing: bool,
+    pub tool_plan: Option<(String, String, argos_osint_core::tool_manager::InstallPlan)>,
+    pub research_sel: usize,
+    pub research_jobs: Vec<argos_osint_core::research::ResearchJob>,
+    pub research_active: usize,
+    research_queue: Option<argos_osint_core::research::ResearchQueue>,
+    pub recommendations: Vec<argos_osint_core::evidence::PassageHit>,
+    pub evidence_scope: argos_osint_core::evidence::EvidenceScope,
+    pub workspace_reading: bool,
+    pub report_read_line: usize,
+    pub originating_question: String,
+    pub selected_passage: Option<(String, usize, usize, i64)>,
+    pub report_source_version: Option<i64>,
+    pub report_read_source: Option<String>,
+    report_source_generation: u64,
+    desk_return_scroll: usize,
+    desk_return_prompt: String,
     pub tna_source: String,
     pub tna_source_error: Option<String>,
     pub tna_tab_hits: Vec<Rect>,
@@ -581,7 +637,6 @@ impl App {
         paths::ensure_home()?;
         let store = Store::open(&paths::db_path())?;
         store.ensure_session("desk", "Desk", "desk")?;
-        store.clear_messages("desk")?;
         for module in ModuleId::all() {
             if module != ModuleId::Cases {
                 store.ensure_session(&module_session(module), module.title(), "module")?;
@@ -594,6 +649,12 @@ impl App {
         let auth = AuthFile::load()?;
         let mut app = Self::from_parts(store, settings, auth)?;
         app.tna_db_path = Some(paths::db_path());
+        app.store.recover_jobs()?;
+        app.research_jobs = app.store.jobs()?;
+        app.research_queue = Some(argos_osint_core::research::ResearchQueue::new(
+            paths::db_path(),
+            4,
+        ));
         if let Some(err) = config_error {
             app.log_event("system", &format!("config load failed: {err}"));
         }
@@ -704,12 +765,31 @@ impl App {
             tna_answer: None,
             tna_from: None,
             tna_to: None,
+            tna_hop_sel: 0,
             tna_path_sel: 0,
+            tna_matrix_coverage: false,
+            coverage_rows: Vec::new(),
             tna_matrix_row: 0,
             tna_matrix_col: 0,
             tna_ribbon_pos: 0,
             tna_show_rejected: false,
             tna_find_editing: false,
+            tool_plan: None,
+            research_sel: 0,
+            research_jobs: Vec::new(),
+            research_active: 0,
+            research_queue: None,
+            recommendations: Vec::new(),
+            evidence_scope: Default::default(),
+            workspace_reading: false,
+            report_read_line: 0,
+            originating_question: String::new(),
+            selected_passage: None,
+            report_source_version: None,
+            report_read_source: None,
+            report_source_generation: 0,
+            desk_return_scroll: 0,
+            desk_return_prompt: String::new(),
             tna_source: String::new(),
             tna_source_error: None,
             tna_tab_hits: Vec::new(),
@@ -743,6 +823,26 @@ impl App {
         let (tx, rx) = unbounded_channel();
         self.tx = tx;
         rx
+    }
+
+    fn attach_research_progress(&self) {
+        if let Some(queue) = &self.research_queue {
+            let mut rx = queue.subscribe();
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(job) => {
+                            if tx.send(AppMsg::ResearchProgress(job)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
     }
 
     pub fn reload_lists(&mut self) -> Result<()> {
@@ -1399,7 +1499,7 @@ impl App {
     pub fn view_context(&self) -> String {
         if let Some(report) = self.open_report() {
             return format!(
-                "Evidence-only TNA workspace for report {} — {}. Answer only from this report and its existing graph. No investigation, research tools, Brain memories or old chat history. Missing links indicate absent co-occurrence, not intelligence gaps. If the evidence is unavailable, say so.\n{}",
+                "Evidence-only TNA workspace for report {} — {}. Answer only from the supplied passages in the explicit scope and its existing graph. No investigation, research tools, Brain memories or old chat history. Missing links indicate absent co-occurrence, not intelligence gaps. If the evidence is unavailable, say so.\n{}",
                 report.id, report.title, self.tna_digest()
             );
         }
@@ -1441,7 +1541,27 @@ impl App {
                 failed: pending.failed.clone(),
             })
             .collect();
-        rows.extend(self.reports.iter().cloned().map(ReportRow::Completed));
+        let mut reports: Vec<_> = self
+            .reports
+            .iter()
+            .filter(|r| match &self.evidence_scope {
+                argos_osint_core::evidence::EvidenceScope::Desk => true,
+                argos_osint_core::evidence::EvidenceScope::Case(id) => {
+                    r.case_id.as_ref() == Some(id)
+                }
+                argos_osint_core::evidence::EvidenceScope::Report(id) => &r.id == id,
+                argos_osint_core::evidence::EvidenceScope::Reports(ids) => ids.contains(&r.id),
+                argos_osint_core::evidence::EvidenceScope::Collection => true,
+            })
+            .cloned()
+            .collect();
+        reports.sort_by_key(|r| {
+            self.recommendations
+                .iter()
+                .position(|h| h.report_id == r.id)
+                .unwrap_or(usize::MAX)
+        });
+        rows.extend(reports.into_iter().map(ReportRow::Completed));
         rows
     }
 
@@ -1557,7 +1677,8 @@ impl App {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let profile =
-                tokio::task::spawn_blocking(move || hardware::profile_cached(fresh)).await;
+                argos_osint_core::workers::spawn_blocking(move || hardware::profile_cached(fresh))
+                    .await;
             if let Ok(profile) = profile {
                 let _ = tx.send(AppMsg::Hardware(profile));
             }
@@ -1566,6 +1687,46 @@ impl App {
 
     pub fn on_msg(&mut self, msg: AppMsg) {
         match msg {
+            AppMsg::Coverage {report_id,result} => {if report_id==self.chat_report {match result {Ok(rows)=>self.coverage_rows=rows,Err(err)=>self.status=err}}},
+            AppMsg::OpenPassage(result) => match result {Ok(Some(hit))=>{let citation=hit.citation();self.recommendations.push(hit);self.run_slash(&format!("/cite {citation}"));},Ok(None)=>self.status="No supporting passage in this cell; unavailable evidence is not a zero finding".into(),Err(err)=>self.status=err},
+            AppMsg::ToolManaged {name,result} => {
+                self.research_active=self.research_active.saturating_sub(1);
+                match result {
+                    Ok(path)=>{if let Some(c)=self.settings.research.get_mut(&name){c.executable=path.unwrap_or_default();c.readiness=if c.executable.is_empty(){argos_osint_core::research::Readiness::NotInstalled}else{argos_osint_core::research::Readiness::Degraded};}let _=self.save_settings_config(&self.settings);self.status="Managed tool action completed; collection readiness shown separately".into();},
+                    Err(err)=>{if let Some(c)=self.settings.research.get_mut(&name){c.readiness=if c.executable.is_empty(){argos_osint_core::research::Readiness::Failed}else{argos_osint_core::research::Readiness::Degraded};}self.status=format!("Tool action failed: {err}");self.log_event("system",&self.status.clone());}
+                }
+                if self.provider_page==ProviderPage::Research {self.load_research_fields();}
+            },
+            AppMsg::ResearchProgress(job)=>{self.research_jobs.retain(|j|j.id!=job.id);self.research_jobs.insert(0,job);self.research_jobs.truncate(200);},
+            AppMsg::ResearchJob(job) => {
+                self.research_active=self.research_active.saturating_sub(1);
+                self.status=format!("{}: {:?} · {}",job.provider,job.state,job.progress);
+                self.log_event("task",&format!("{} {:?}: {}",job.provider,job.state,job.error.as_deref().unwrap_or(&job.progress)));
+                self.research_jobs.retain(|j|j.id!=job.id);self.research_jobs.insert(0,job);
+                self.research_jobs.truncate(200);
+            },
+            AppMsg::ResearchTest {name,state,detail} => {
+                if let Some(c)=self.settings.research.get_mut(&name){if detail.starts_with("Version matched"){c.detected_version=c.supported_version.clone();}c.readiness=state;}
+                self.status=detail.clone();self.log_event("system",&format!("{name}: {detail}"));
+                if self.provider_page==ProviderPage::Research {self.load_research_fields();}
+            },
+            AppMsg::EvidenceSurface {report_id,title,result} => {
+                if report_id==self.chat_report {
+                    let text=result.unwrap_or_else(|e|format!("Evidence unavailable: {e}"));
+                    if self.chat_report.is_some() {self.tna_answer=Some(TnaAnswer {question:title,answer:text,..Default::default()});self.tna_answer_scroll=0;}
+                    else {self.push_line("assistant",&format!("{title}\n\n{text}"));}
+                }
+            },
+            AppMsg::ReportUpdated(result) => match result {
+                Ok(report)=>{let id=report.id.clone();let _=self.reload_lists();self.recommendations.clear();self.after_report_filed(&id);self.status="Report update saved; earlier citations retained".into();if self.chat_report.as_deref()==Some(id.as_str()){self.open_report_chat(&id);}},
+                Err(err)=>self.status=format!("Report update failed: {err}"),
+            },
+            AppMsg::Retrieved {generation,query,result} => self.answer_retrieval(generation,query,result),
+            AppMsg::ReportSource {report_id,generation,version,result} => {
+                if self.chat_report.as_ref()==Some(&report_id) && generation==self.report_source_generation {
+                    match result {Ok(text)=>{if version.is_some(){self.report_read_source=Some(text);}else{self.tna_source=text;}self.tna_source_error=None;self.focus_selected_passage();},Err(err)=>self.tna_source_error=Some(err)}
+                }
+            },
             #[cfg(test)]
             AppMsg::Turn(ev) => self.on_turn(ev),
             AppMsg::ScopedTurn {
@@ -1744,8 +1905,9 @@ impl App {
             AppMsg::TnaReady {
                 targeted,
                 report_id,
+                scope,
                 result,
-            } => self.on_tna_ready(targeted, report_id, result),
+            } => {if !targeted || scope.as_ref()==Some(&self.evidence_scope) {self.on_tna_ready(targeted, report_id, result);}},
         }
     }
 
@@ -1767,7 +1929,7 @@ impl App {
             }
             TurnEvent::Note(text) => self.log_event(note_kind(&text), &text),
             TurnEvent::Report(meta) => {
-                let _ = self.store.add_report(&meta);
+                let _ = self.store.add_report_metadata(&meta);
                 self.log_event("task", &format!("report {}", meta.path));
                 let _ = self.reload_lists();
                 self.after_report_filed(&meta.id);
@@ -1782,7 +1944,7 @@ impl App {
                 self.running = false;
                 self.status = "ready".into();
                 self.replace_last_assistant(&text);
-                self.capture_report_insight(&text);
+                // Discussion remains ephemeral. Saving knowledge is an explicit analyst action.
             }
             TurnEvent::Failed(err) => {
                 self.running = false;
@@ -1813,7 +1975,7 @@ impl App {
                     &md,
                 ) {
                     Ok(meta) => {
-                        let _ = self.store.add_report(&meta);
+                        let _ = self.store.add_report_metadata(&meta);
                         let _ = self.reload_lists();
                         self.push_line(
                             "assistant",
@@ -2344,7 +2506,18 @@ impl App {
             return;
         };
         match self.confirm_report_sel {
-            0 => self.open_report_chat(&id),
+            0 => {
+                if let Some(hit) = self
+                    .recommendations
+                    .iter()
+                    .find(|h| h.report_id == id)
+                    .cloned()
+                {
+                    self.run_slash(&format!("/cite {}", hit.citation()));
+                } else {
+                    self.open_report_chat(&id);
+                }
+            }
             1 => {
                 self.confirm_delete_report = Some(id);
                 self.confirm_delete_sel = 1;
@@ -2404,7 +2577,13 @@ impl App {
 
     pub fn tna_snapshot(&self) -> Option<&TnaSnapshot> {
         let report_id = self.chat_report.as_deref()?;
-        self.tna_report.as_ref().filter(|snap| matches!(&snap.scope, argos_osint_core::tna::TnaScope::Targeted { report_id: id, .. } if id == report_id))
+        self.tna_report.as_ref().filter(|snap| match &snap.scope {
+            argos_osint_core::tna::TnaScope::Targeted { report_id: id, .. } => id == report_id,
+            argos_osint_core::tna::TnaScope::Selected { report_ids, .. } => {
+                report_ids.iter().any(|id| id == report_id)
+            }
+            _ => false,
+        })
     }
 
     /// Find-filter over the report network table.
@@ -2618,13 +2797,15 @@ impl App {
             if self.tna_snapshot().is_some() {
                 return;
             }
-            if let Ok(Some(snap)) = self.store.get_tna_graph(&report_key(&id)) {
-                self.tna_report = Some(snap);
-                self.clamp_tna_sel();
-                return;
+            if self.tna_db_path.is_none() {
+                if let Ok(Some(snap)) = self.store.get_tna_graph(&report_key(&id)) {
+                    self.tna_report = Some(snap);
+                    self.clamp_tna_sel();
+                    return;
+                }
             }
         }
-        if self.tna_pending_report.as_deref() != Some(id.as_str()) {
+        if force || self.tna_pending_report.as_deref() != Some(id.as_str()) {
             self.spawn_tna_rebuild(true);
         }
     }
@@ -2637,6 +2818,8 @@ impl App {
             self.tna_pending_report = self.chat_report.clone();
         }
         if let Some(path) = self.tna_db_path.clone() {
+            let evidence_scope = self.evidence_scope.clone();
+            let event_scope = evidence_scope.clone();
             self.tna_rebuilding = true;
             self.tna_rebuild_gen = self.tna_rebuild_gen.saturating_add(1);
             let report_id = if targeted {
@@ -2645,11 +2828,39 @@ impl App {
                 None
             };
             let tx = self.tx.clone();
-            tokio::task::spawn_blocking(move || {
+            argos_osint_core::workers::spawn_blocking(move || {
                 let opened = Store::open(&path).map_err(|err| err.to_string());
                 let result = opened.and_then(|store| {
                     if let Some(id) = report_id.as_deref() {
-                        tna::rebuild_for_report(&store, id).map_err(|err| err.to_string())
+                        store.sync_report_index().map_err(|err| err.to_string())?;
+                        if matches!(
+                            evidence_scope,
+                            argos_osint_core::evidence::EvidenceScope::Case(_)
+                                | argos_osint_core::evidence::EvidenceScope::Reports(_)
+                                | argos_osint_core::evidence::EvidenceScope::Collection
+                        ) {
+                            let corpus = tna::TnaCorpus::scoped(&store, &evidence_scope)
+                                .map_err(|err| err.to_string())?;
+                            let corrections = corpus
+                                .docs
+                                .iter()
+                                .filter_map(|d| store.corrections(&d.report_id).ok())
+                                .flatten()
+                                .collect::<Vec<_>>();
+                            let mut snapshot = tna::build_snapshot_corrected(&corpus, &corrections);
+                            let decisions = corpus
+                                .docs
+                                .iter()
+                                .filter_map(|d| store.identity_decisions(&d.report_id).ok())
+                                .flatten()
+                                .collect::<Vec<_>>();
+                            tna::apply_identity_decisions(&mut snapshot, &decisions);
+                            Ok(snapshot)
+                        } else if let Ok(Some(snapshot)) = store.get_tna_graph(&report_key(id)) {
+                            Ok(snapshot)
+                        } else {
+                            tna::rebuild_for_report(&store, id).map_err(|err| err.to_string())
+                        }
                     } else {
                         tna::rebuild_collection(&store).map_err(|err| err.to_string())
                     }
@@ -2657,6 +2868,7 @@ impl App {
                 let _ = tx.send(AppMsg::TnaReady {
                     targeted,
                     report_id,
+                    scope: Some(event_scope),
                     result,
                 });
             });
@@ -2700,6 +2912,7 @@ impl App {
                 if targeted {
                     if report_id.as_deref() == self.chat_report.as_deref() {
                         self.tna_report = Some(snap);
+                        self.focus_selected_passage();
                     }
                 } else {
                     self.tna_desk = Some(snap);
@@ -2715,9 +2928,13 @@ impl App {
             self.tna_rebuilding = true;
             let id = report_id.to_string();
             let tx = self.tx.clone();
-            tokio::task::spawn_blocking(move || {
+            argos_osint_core::workers::spawn_blocking(move || {
                 let opened = Store::open(&path).map_err(|err| err.to_string());
                 match opened.and_then(|store| {
+                    store.sync_report_index().map_err(|err| err.to_string())?;
+                    store
+                        .attach_case_evidence_to_report(&id)
+                        .map_err(|err| err.to_string())?;
                     tna::rebuild_after_file(&store, &id).map_err(|err| err.to_string())?;
                     let collection = store
                         .get_tna_graph(desk_key())
@@ -2732,12 +2949,16 @@ impl App {
                             let _ = tx.send(AppMsg::TnaReady {
                                 targeted: false,
                                 report_id: None,
+                                scope: None,
                                 result: Ok(snap),
                             });
                         }
                         if let Some(snap) = targeted {
                             let _ = tx.send(AppMsg::TnaReady {
                                 targeted: true,
+                                scope: Some(argos_osint_core::evidence::EvidenceScope::Report(
+                                    id.clone(),
+                                )),
                                 report_id: Some(id),
                                 result: Ok(snap),
                             });
@@ -2747,6 +2968,7 @@ impl App {
                         let _ = tx.send(AppMsg::TnaReady {
                             targeted: false,
                             report_id: None,
+                            scope: None,
                             result: Err(err),
                         });
                     }
@@ -2777,7 +2999,7 @@ impl App {
             self.tna_rebuilding = true;
             let id = report_id.to_string();
             let tx = self.tx.clone();
-            tokio::task::spawn_blocking(move || {
+            argos_osint_core::workers::spawn_blocking(move || {
                 let result = Store::open(&path)
                     .and_then(|store| {
                         tna::rebuild_after_delete(&store, &id)?;
@@ -2790,6 +3012,7 @@ impl App {
                 let _ = tx.send(AppMsg::TnaReady {
                     targeted: false,
                     report_id: None,
+                    scope: None,
                     result,
                 });
             });
@@ -2839,7 +3062,11 @@ impl App {
         self.prompt.clear();
         self.cursor = 0;
         self.load_transcript("desk");
-        self.scroll_back = 0;
+        self.scroll_back = self.desk_return_scroll;
+        self.prompt = std::mem::take(&mut self.desk_return_prompt);
+        self.cursor = self.prompt.chars().count();
+        self.evidence_scope = Default::default();
+        self.workspace_reading = false;
     }
 
     fn on_tna_turn(&mut self, ev: TurnEvent) {
@@ -2872,7 +3099,7 @@ impl App {
                     answer.pending = false;
                     answer.answer = text.clone();
                 }
-                self.capture_report_insight(&text);
+                // Discussion remains ephemeral. Saving knowledge is an explicit analyst action.
             }
             TurnEvent::Failed(err) => {
                 self.running = false;
@@ -2904,6 +3131,7 @@ impl App {
         self.tna_layout = layout;
         self.focus = Focus::Graph;
         self.tna_path_sel = 0;
+        self.tna_hop_sel = 0;
     }
 
     pub fn tna_focus_entity(&mut self, id: &str) {
@@ -2918,6 +3146,34 @@ impl App {
         self.tna_detail_scroll = 0;
         self.tna_ledger_sel = 0;
         self.sync_tna_table_ui();
+    }
+
+    fn focus_selected_passage(&mut self) {
+        let Some((report_id, start, end, _)) = &self.selected_passage else {
+            return;
+        };
+        let Some(snapshot) = self.tna_report.as_ref() else {
+            return;
+        };
+        let entity = snapshot
+            .decisions
+            .iter()
+            .find(|d| {
+                d.report_id == *report_id
+                    && d.start >= *start
+                    && d.start < *end
+                    && self.tna_source.get(d.start..d.end) == Some(d.original.as_str())
+                    && self
+                        .report_read_source
+                        .as_deref()
+                        .unwrap_or(&self.tna_source)
+                        .get(d.start..d.end)
+                        == Some(d.original.as_str())
+            })
+            .and_then(|d| d.canonical_id.clone());
+        if let Some(id) = entity {
+            self.tna_focus_entity(&id);
+        }
     }
 
     fn workspace_key(&mut self, key: KeyEvent) -> bool {
@@ -3004,6 +3260,7 @@ impl App {
                         self.tna_to = id;
                     }
                     self.tna_path_sel = 0;
+                    self.tna_hop_sel = 0;
                     return true;
                 }
                 KeyCode::Up | KeyCode::Char('k') if self.focus == Focus::TableDetail => {
@@ -3145,6 +3402,14 @@ impl App {
                 if other.canonical_id.as_deref() != Some(b) {
                     continue;
                 }
+                if d.report_id != other.report_id
+                    || self
+                        .tna_source
+                        .get(d.start.min(other.start)..d.start.max(other.start))
+                        .is_none_or(|s| s.contains('\n'))
+                {
+                    continue;
+                }
                 let start = d.start.min(other.start);
                 let end = d.end.max(other.end);
                 if let Some(text) = self.tna_source.get(start..end).filter(|_| {
@@ -3160,7 +3425,7 @@ impl App {
                         .take(360)
                         .collect();
                     return format!(
-                        "{} · {} · bytes {}–{}\n{}",
+                        "Text co-occurrence · confidence unassessed · not ownership/identity\n{} · {} · bytes {}–{}\n{}",
                         d.report_id, d.section, start, end, excerpt
                     );
                 }
@@ -3534,6 +3799,102 @@ impl App {
     }
 
     fn on_tna_key(&mut self, key: KeyEvent) -> bool {
+        if self.tna_layout == TnaLayout::Matrix && self.focus != Focus::Prompt {
+            if key.code == KeyCode::Char('c') {
+                self.tna_matrix_coverage = !self.tna_matrix_coverage;
+                self.tna_matrix_row = 0;
+                self.tna_matrix_col = 0;
+                if self.tna_matrix_coverage {
+                    self.load_coverage();
+                }
+                return false;
+            }
+            if self.tna_matrix_coverage {
+                let rows = self.coverage_rows.len();
+                let columns = self
+                    .coverage_rows
+                    .first()
+                    .map(|r| r.cells.len())
+                    .unwrap_or(0);
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.tna_matrix_row = (self.tna_matrix_row + 1).min(rows.saturating_sub(1))
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.tna_matrix_row = self.tna_matrix_row.saturating_sub(1)
+                    }
+                    KeyCode::Char('l') => {
+                        self.tna_matrix_col =
+                            (self.tna_matrix_col + 1).min(columns.saturating_sub(1))
+                    }
+                    KeyCode::Char('h') => {
+                        self.tna_matrix_col = self.tna_matrix_col.saturating_sub(1)
+                    }
+                    KeyCode::Enter => self.open_coverage_passage(),
+                    _ => {}
+                }
+                if matches!(
+                    key.code,
+                    KeyCode::Char('h' | 'j' | 'k' | 'l')
+                        | KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Enter
+                ) {
+                    return false;
+                }
+            }
+        }
+        if self.tna_layout == TnaLayout::Path
+            && self.focus != Focus::Prompt
+            && matches!(key.code, KeyCode::Char('[' | ']'))
+        {
+            let hops = self
+                .tna_paths()
+                .get(self.tna_path_sel)
+                .map(|p| p.nodes.len().saturating_sub(1))
+                .unwrap_or(0);
+            if hops > 0 {
+                self.tna_hop_sel = if key.code == KeyCode::Char('[') {
+                    (self.tna_hop_sel + hops - 1) % hops
+                } else {
+                    (self.tna_hop_sel + 1) % hops
+                };
+            }
+            return false;
+        }
+        if key.code == KeyCode::Char('i') && self.focus != Focus::Prompt {
+            self.show_evidence_surface("inspect", "");
+            return false;
+        }
+        if key.code == KeyCode::Char('R') && self.focus != Focus::Prompt {
+            self.workspace_reading = true;
+            return false;
+        }
+        if self.workspace_reading && self.focus != Focus::Prompt {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.report_read_line = self.report_read_line.saturating_sub(1);
+                    return false;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.report_read_line = (self.report_read_line + 1).min(
+                        self.report_read_source
+                            .as_deref()
+                            .unwrap_or(&self.tna_source)
+                            .lines()
+                            .count()
+                            .saturating_sub(1),
+                    );
+                    return false;
+                }
+                KeyCode::Char('g') => {
+                    self.workspace_reading = false;
+                    self.set_tna_layout(TnaLayout::Cockpit);
+                    return false;
+                }
+                _ => {}
+            }
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
         }
@@ -3971,6 +4332,16 @@ impl App {
     }
 
     fn launch_case_worker(&mut self, query: String, echo_on_desk: bool, plan: SourcePlan) {
+        if self
+            .pending_reports
+            .iter()
+            .filter(|p| p.failed.is_none())
+            .count()
+            >= 4
+        {
+            self.status = "Four investigations are already active; review jobs or cancel".into();
+            return;
+        }
         let case = match self.store.create_case(&query) {
             Ok(case) => case,
             Err(err) => {
@@ -4007,25 +4378,60 @@ impl App {
         let case_id = case.id.clone();
         let report_dir = report_dir(&self.settings);
         let tx = self.tx.clone();
+        let queue = self.research_queue.clone();
+        let configs = self.settings.research.clone();
+        let secrets = self.auth.research.clone();
+        let prior = self
+            .recommendations
+            .iter()
+            .map(|p| {
+                format!(
+                    "[{}] {} · {} · report date {}\n{}\n",
+                    p.citation(),
+                    p.title,
+                    p.section,
+                    p.created_at,
+                    p.text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         tokio::spawn(async move {
-            let result = match argos_osint_core::search::research(&query, &plan).await {
-                Ok(outcome) => {
-                    let hits = outcome.hits;
-                    let md = report::source_pack(&query, Some(&case_id), &query, &hits);
-                    match report::write_report(&report_dir, &query, Some(&case_id), &md) {
-                        Ok(meta) => Ok((summarize_hits(&hits), Some(meta))),
-                        Err(err) => Ok((
-                            format!(
-                                "{}
-
-Could not write the report: {err}",
-                                summarize_hits(&hits)
-                            ),
-                            None,
-                        )),
-                    }
+            let result = if let Some(queue) = queue {
+                let input = argos_osint_core::research::ResearchInput {
+                    case_id: Some(case_id.clone()),
+                    report_id: None,
+                    entity_id: query.clone(),
+                    label: query.clone(),
+                    action: "workflow".into(),
+                    depth: 0,
+                };
+                let outcome = queue.workflow(input, configs, plan, secrets).await;
+                for job in outcome.stages.iter().flat_map(|s| s.jobs.iter()) {
+                    let _ = tx.send(AppMsg::ResearchJob(job.clone()));
                 }
-                Err(err) => Err(err),
+                let hits = outcome.hits;
+                if hits.is_empty() {
+                    Err("No new sources returned supporting evidence. Successful empty and failed jobs remain in /jobs; existing evidence was preserved.".into())
+                } else {
+                    let query_copy = query.clone();
+                    let id = case_id.clone();
+                    argos_osint_core::workers::spawn_blocking(move || {
+                        let mut md =
+                            report::source_pack(&query_copy, Some(&id), &query_copy, &hits);
+                        if !prior.is_empty() {
+                            md.push_str("\n\n## Previously completed evidence (attributed)\n\n");
+                            md.push_str(&prior);
+                        }
+                        report::write_report(&report_dir, &query_copy, Some(&id), &md)
+                            .map(|meta| (summarize_hits(&hits), Some(meta)))
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+                }
+            } else {
+                Err("Research queue requires a file-backed workspace".into())
             };
             let _ = tx.send(AppMsg::Research { case_id, result });
         });
@@ -4042,7 +4448,7 @@ Could not write the report: {err}",
                 self.pending_reports
                     .retain(|pending| pending.case_id != case_id);
                 self.log_event("task", &format!("report {}", report.path));
-                let _ = self.store.add_report(&report);
+                let _ = self.store.add_report_metadata(&report);
                 let _ = self.reload_lists();
                 self.after_report_filed(&report.id);
             }
@@ -4125,10 +4531,27 @@ Could not write the report: {err}",
         self.settings.social = self.field_value("social").eq_ignore_ascii_case("yes");
         self.settings.identity = self.field_value("identity").eq_ignore_ascii_case("yes");
         self.settings.searx_url = self.field_value("searx_url");
-        self.settings.brave_key = self.field_value("brave_key");
-        self.settings.tavily_key = self.field_value("tavily_key");
-        self.settings.youtube_key = self.field_value("youtube_key");
-        self.settings.github_token = self.field_value("github_token");
+        for (field, name) in [
+            ("brave_key", "BRAVE_API_KEY"),
+            ("tavily_key", "TAVILY_API_KEY"),
+            ("youtube_key", "YOUTUBE_API_KEY"),
+            ("github_token", "GITHUB_TOKEN"),
+        ] {
+            let value = self.field_value(field);
+            if value.is_empty() {
+                self.auth.research.remove(name);
+            } else {
+                self.auth.research.insert(name.into(), value);
+            }
+        }
+        if let Err(err) = self.save_auth_config(&self.auth) {
+            self.status = format!("Secret save failed: {err}");
+            return;
+        }
+        self.settings.brave_key.clear();
+        self.settings.tavily_key.clear();
+        self.settings.youtube_key.clear();
+        self.settings.github_token.clear();
         match self.save_settings_config(&self.settings) {
             Ok(()) => self.status = "saved OSINT sources".into(),
             Err(err) => {
@@ -4189,6 +4612,7 @@ Could not write the report: {err}",
     fn bind_case(&mut self) {
         if let Some(case) = self.cases.get(self.case_sel) {
             let id = case.id.clone();
+            self.evidence_scope = argos_osint_core::evidence::EvidenceScope::Case(id.clone());
             self.chat_case = Some(id.clone());
             self.load_transcript(&id);
         }
@@ -4276,6 +4700,8 @@ Could not write the report: {err}",
             self.run_slash(&line);
         } else if self.routes_desk_message() {
             self.route_desk_message(line);
+        } else if self.chat_report.is_some() || self.chat_case.is_some() {
+            self.retrieve_question(line);
         } else {
             self.spawn_turn(line);
         }
@@ -4290,15 +4716,39 @@ Could not write the report: {err}",
             self.status = "that report is no longer on file".into();
             return;
         };
+        if self.chat_report.is_none() {
+            self.originating_question = self
+                .transcripts
+                .get(&self.session_id())
+                .and_then(|lines| {
+                    lines
+                        .iter()
+                        .rev()
+                        .find(|line| line.role == "user" && !line.body.starts_with('/'))
+                })
+                .map(|line| line.body.clone())
+                .unwrap_or_default();
+        }
         self.persist_visible_chat();
         self.cancel.store(true, Ordering::Relaxed);
         self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.report_source_generation = self.report_source_generation.wrapping_add(1);
         self.running = false;
         if self.chat_report.as_deref() != Some(id) {
             self.tna_report = None;
         }
+        if self.chat_report.is_none() {
+            self.desk_return_scroll = self.scroll_back;
+            self.desk_return_prompt = self.prompt.clone();
+        }
         self.chat_case = None;
         self.chat_report = Some(report.id.clone());
+        self.evidence_scope = argos_osint_core::evidence::EvidenceScope::Report(report.id.clone());
+        self.workspace_reading = false;
+        self.report_read_line = 0;
+        self.selected_passage = None;
+        self.report_source_version = None;
+        self.report_read_source = None;
         self.case_page = CasePage::Network;
         self.module = Some(ModuleId::Cases);
         self.focus = Focus::Graph;
@@ -4309,6 +4759,7 @@ Could not write the report: {err}",
         self.tna_from = None;
         self.tna_to = None;
         self.tna_path_sel = 0;
+        self.tna_hop_sel = 0;
         self.tna_matrix_row = 0;
         self.tna_matrix_col = 0;
         self.tna_ribbon_pos = 0;
@@ -4322,14 +4773,38 @@ Could not write the report: {err}",
         self.prompt.clear();
         self.cursor = 0;
         self.transcripts.remove(&format!("report:{id}"));
-        match std::fs::read_to_string(&report.path) {
-            Ok(text) => {
-                self.tna_source = text;
-                self.tna_source_error = None;
-            }
-            Err(err) => {
-                self.tna_source.clear();
-                self.tna_source_error = Some(format!("Report evidence unavailable: {err}"));
+        if let Some(path) = self.tna_db_path.clone() {
+            self.tna_source.clear();
+            self.tna_source_error = None;
+            let tx = self.tx.clone();
+            let report_id = report.id.clone();
+            let generation = self.report_source_generation;
+            argos_osint_core::workers::spawn_blocking(move || {
+                let result = Store::open(&path)
+                    .and_then(|store| {
+                        store.sync_report_index()?;
+                        store
+                            .report_version(&report_id, None)?
+                            .ok_or_else(|| anyhow::anyhow!("Report text unavailable"))
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(AppMsg::ReportSource {
+                    report_id,
+                    generation,
+                    version: None,
+                    result,
+                });
+            });
+        } else {
+            match std::fs::read_to_string(&report.path) {
+                Ok(text) => {
+                    self.tna_source = text;
+                    self.tna_source_error = None;
+                }
+                Err(err) => {
+                    self.tna_source.clear();
+                    self.tna_source_error = Some(format!("Report evidence unavailable: {err}"));
+                }
             }
         }
         self.status = "ready".into();
@@ -4345,40 +4820,97 @@ Could not write the report: {err}",
             self.spawn_turn(text);
             return;
         }
-        let facts = brain::recall_report_facts(&self.memories, &text, 4);
-        if !facts.is_empty() {
-            let material = memory_answer_material(self, &facts);
-            if brain::insists_on_new_case(&text) {
-                self.push_line("user", &text);
-                self.desk_memory_answer = Some(material);
-                self.confirm_query = Some(text);
-                self.confirm_sel = 0;
-            } else {
-                self.desk_memory_answer = None;
-                self.spawn_answered_turn(text, material, true, true, true);
+        self.retrieve_question(text);
+    }
+
+    fn retrieve_question(&mut self, query: String) {
+        if self.running {
+            self.status = "busy".into();
+            return;
+        }
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        let generation = self.turn_generation;
+        let scope = if let Some(id) = &self.chat_report {
+            match &self.evidence_scope {
+                argos_osint_core::evidence::EvidenceScope::Reports(_)
+                | argos_osint_core::evidence::EvidenceScope::Case(_)
+                | argos_osint_core::evidence::EvidenceScope::Collection => {
+                    self.evidence_scope.clone()
+                }
+                _ => argos_osint_core::evidence::EvidenceScope::Report(id.clone()),
             }
+        } else {
+            self.evidence_scope.clone()
+        };
+        self.running = true;
+        self.status = "searching completed report passages".into();
+        if let Some(path) = self.tna_db_path.clone() {
+            let tx = self.tx.clone();
+            argos_osint_core::workers::spawn_blocking(move || {
+                let result = Store::open(&path)
+                    .and_then(|store| {
+                        store.sync_report_index()?;
+                        store.retrieve_passages(&query, &scope, 8)
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(AppMsg::Retrieved {
+                    generation,
+                    query,
+                    result,
+                });
+            });
+        } else {
+            let result = self
+                .store
+                .sync_report_index()
+                .and_then(|_| self.store.retrieve_passages(&query, &scope, 8))
+                .map_err(|e| e.to_string());
+            self.on_msg(AppMsg::Retrieved {
+                generation,
+                query,
+                result,
+            });
+        }
+    }
+
+    fn answer_retrieval(
+        &mut self,
+        generation: u64,
+        query: String,
+        result: Result<Vec<argos_osint_core::evidence::PassageHit>, String>,
+    ) {
+        if generation != self.turn_generation {
             return;
         }
-        if let Some(pending) = self
-            .pending_reports
-            .iter()
-            .filter(|pending| pending.failed.is_none())
-            .find(|pending| report::title_matches(&text, &pending.title))
+        self.running = false;
+        let hits = match result {
+            Ok(hits) => hits,
+            Err(err) => {
+                self.status = format!("Passage retrieval failed: {err}");
+                return;
+            }
+        };
+        self.recommendations = hits;
+        let material = argos_osint_core::evidence::answer_material(&self.recommendations);
+        if brain::insists_on_new_case(&query) && self.chat_report.is_none() {
+            self.desk_memory_answer = Some(material);
+            self.push_line("user", &query);
+            self.open_scope(query, false, false);
+        } else if self.chat_report.is_some() || !self.recommendations.is_empty() {
+            self.spawn_answered_turn(query, material, true, true, false);
+        } else if brain::insists_on_new_case(&query)
+            || prompt::classify(&query) == Intent::Investigate
         {
-            let title = pending.title.clone();
-            self.push_line("user", &text);
-            self.push_line(
-                "assistant",
-                &format!(
-                    "A case worker is already researching “{title}”. The report list shows it as pending."
-                ),
-            );
-            return;
+            self.push_line("user", &query);
+            self.push_line("assistant", "No supporting report passages in this scope. Proposed investigation: public sources addressing this question, with bounded domain and identity pivots. Review sources before starting.");
+            self.desk_memory_answer = Some(material);
+            self.confirm_query = Some(query);
+            self.confirm_sel = 0;
+        } else {
+            self.push_line("user", &query);
+            self.push_line("assistant", "No supporting report passages in this scope. I cannot infer findings. Use /new <focused question> to review a proposed investigation, or /scope case <id> to change scope.");
+            self.status = "no supporting passages".into();
         }
-        self.push_line("user", &text);
-        self.desk_memory_answer = None;
-        self.confirm_query = Some(text);
-        self.confirm_sel = 0;
     }
 
     fn on_confirm_key(&mut self, key: KeyEvent) -> bool {
@@ -4403,10 +4935,686 @@ Could not write the report: {err}",
         } else if let Some(material) = self.desk_memory_answer.take() {
             self.spawn_answered_turn(query, material, false, true, true);
         } else {
-            self.spawn_answered_turn(query, String::new(), false, false, false);
+            self.spawn_answered_turn(
+                query,
+                argos_osint_core::evidence::answer_material(&[]),
+                false,
+                true,
+                false,
+            );
         }
     }
 
+    pub fn research_name(&self) -> String {
+        self.settings
+            .research
+            .keys()
+            .nth(self.research_sel)
+            .cloned()
+            .unwrap_or_else(|| "search".into())
+    }
+    fn load_research_fields(&mut self) {
+        let name = self.research_name();
+        let c = self
+            .settings
+            .research
+            .get(&name)
+            .cloned()
+            .unwrap_or_default();
+        self.fields = vec![
+            field(
+                "__research_next",
+                "Integration",
+                format!("{name} · select next"),
+                false,
+            ),
+            field(
+                "research_enabled",
+                "Enabled (true/false)",
+                c.enabled.to_string(),
+                false,
+            ),
+            field("research_endpoint", "Endpoint", c.endpoint.clone(), false),
+            field(
+                "research_secret",
+                "Credential (masked)",
+                self.auth
+                    .research
+                    .get(&c.secret_ref)
+                    .cloned()
+                    .unwrap_or_default(),
+                true,
+            ),
+            field(
+                "research_secret_ref",
+                "Secret reference",
+                c.secret_ref.clone(),
+                false,
+            ),
+            field(
+                "research_executable",
+                "Executable path",
+                c.executable.clone(),
+                false,
+            ),
+            field(
+                "research_container",
+                "Pinned container",
+                c.container.clone(),
+                false,
+            ),
+            field(
+                "research_mode",
+                "Mode: native/local/container",
+                format!("{:?}", c.mode),
+                false,
+            ),
+            field(
+                "research_config",
+                "Configuration path",
+                c.config_path.clone(),
+                false,
+            ),
+            field(
+                "research_dataset",
+                "Dataset path",
+                c.dataset_path.clone(),
+                false,
+            ),
+            field(
+                "research_sites",
+                "Selected sites (comma separated)",
+                c.selected_sites.join(","),
+                false,
+            ),
+            field(
+                "research_dataset_version",
+                "Dataset version",
+                c.dataset_version.clone(),
+                false,
+            ),
+            field(
+                "research_refresh",
+                "Dataset refresh days (manual)",
+                c.refresh_days.to_string(),
+                false,
+            ),
+            field(
+                "research_modules",
+                "Selected modules (comma separated)",
+                c.selected_modules.join(","),
+                false,
+            ),
+            field(
+                "research_hosts",
+                "Allowed hosts (comma separated)",
+                c.allowed_hosts.join(","),
+                false,
+            ),
+            field(
+                "research_timeout",
+                "Timeout seconds",
+                c.timeout_secs.to_string(),
+                false,
+            ),
+            field(
+                "research_concurrency",
+                "Concurrency",
+                c.concurrency.to_string(),
+                false,
+            ),
+            field(
+                "research_rate",
+                "Request interval ms",
+                c.rate_interval_ms.to_string(),
+                false,
+            ),
+            field(
+                "research_results",
+                "Result limit",
+                c.result_limit.to_string(),
+                false,
+            ),
+            field(
+                "research_cache",
+                "Cache freshness seconds",
+                c.cache_secs.to_string(),
+                false,
+            ),
+            field(
+                "research_retries",
+                "Retry limit",
+                c.retries.to_string(),
+                false,
+            ),
+            field(
+                "research_depth",
+                "Pivot/crawl depth",
+                c.depth.to_string(),
+                false,
+            ),
+            field(
+                "research_sensitive",
+                "Allow exposure lookups (true/false)",
+                c.allow_sensitive.to_string(),
+                false,
+            ),
+            field(
+                "research_duration",
+                "Collection duration seconds",
+                c.duration_secs.to_string(),
+                false,
+            ),
+            field(
+                "research_profile",
+                "Scan profile",
+                c.scan_profile.clone(),
+                false,
+            ),
+            field(
+                "research_verified_domains",
+                "Verified domains (monitoring unavailable)",
+                c.verified_domains.join(","),
+                false,
+            ),
+            field(
+                "research_active",
+                "Allow active crawling (true/false)",
+                c.allow_active.to_string(),
+                false,
+            ),
+            field(
+                "__research_save",
+                "Save Research Configuration",
+                "enter".into(),
+                false,
+            ),
+            field(
+                "__research_test",
+                "Test Configuration (offline)",
+                "enter".into(),
+                false,
+            ),
+            field(
+                "__research_install",
+                "Install · show plan",
+                "enter".into(),
+                false,
+            ),
+            field(
+                "__research_update",
+                "Update · show plan",
+                "enter".into(),
+                false,
+            ),
+            field(
+                "__research_verify",
+                "Verify installation",
+                "enter".into(),
+                false,
+            ),
+            field(
+                "__research_remove",
+                "Remove Argos-managed installation",
+                "enter".into(),
+                false,
+            ),
+        ];
+        if self.tool_plan.is_some() {
+            self.fields.push(field(
+                "__research_apply",
+                "Apply the displayed install/update plan",
+                "enter".into(),
+                false,
+            ));
+        }
+        self.field_sel = self.field_sel.min(self.fields.len().saturating_sub(1));
+    }
+    fn research_field_action(&mut self, key: &str) {
+        use argos_osint_core::research::{test_configuration, ExecutionMode};
+        if key == "__research_next" {
+            self.research_sel = (self.research_sel + 1) % self.settings.research.len().max(1);
+            self.load_research_fields();
+            return;
+        }
+        let name = self.research_name();
+        let mut c = self
+            .settings
+            .research
+            .get(&name)
+            .cloned()
+            .unwrap_or_default();
+        if key == "__research_save" {
+            c.enabled = self.field_value("research_enabled") == "true";
+            c.endpoint = self.field_value("research_endpoint");
+            c.executable = self.field_value("research_executable");
+            c.config_path = self.field_value("research_config");
+            c.dataset_path = self.field_value("research_dataset");
+            c.dataset_version = self.field_value("research_dataset_version");
+            c.refresh_days = self
+                .field_value("research_refresh")
+                .parse()
+                .unwrap_or(30)
+                .max(1);
+            c.secret_ref = self.field_value("research_secret_ref");
+            c.container = self.field_value("research_container");
+            c.mode = match self.field_value("research_mode").to_lowercase().as_str() {
+                "local" | "localexecutable" => ExecutionMode::LocalExecutable,
+                "container" => ExecutionMode::Container,
+                _ => ExecutionMode::NativeHttp,
+            };
+            c.selected_sites = self
+                .field_value("research_sites")
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            c.selected_modules = self
+                .field_value("research_modules")
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            c.allowed_hosts = self
+                .field_value("research_hosts")
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            c.timeout_secs = self
+                .field_value("research_timeout")
+                .parse()
+                .unwrap_or(30)
+                .clamp(1, 600);
+            c.concurrency = self
+                .field_value("research_concurrency")
+                .parse()
+                .unwrap_or(1)
+                .clamp(1, 4);
+            c.rate_interval_ms = self
+                .field_value("research_rate")
+                .parse()
+                .unwrap_or(1000)
+                .clamp(100, 3600000);
+            c.result_limit = self
+                .field_value("research_results")
+                .parse()
+                .unwrap_or(20)
+                .clamp(1, 200);
+            c.cache_secs = self.field_value("research_cache").parse().unwrap_or(86400);
+            c.retries = self
+                .field_value("research_retries")
+                .parse()
+                .unwrap_or(1)
+                .min(3);
+            c.depth = self
+                .field_value("research_depth")
+                .parse()
+                .unwrap_or(1)
+                .min(3);
+            c.duration_secs = self
+                .field_value("research_duration")
+                .parse()
+                .unwrap_or(30)
+                .clamp(1, 600);
+            c.scan_profile = self.field_value("research_profile");
+            c.verified_domains = self
+                .field_value("research_verified_domains")
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            c.allow_sensitive = self.field_value("research_sensitive") == "true";
+            c.allow_active = self.field_value("research_active") == "true";
+            let secret = self.field_value("research_secret");
+            if !secret.is_empty() && c.secret_ref.is_empty() {
+                self.status = "Set a secret reference before saving a credential".into();
+                return;
+            }
+            if !c.secret_ref.is_empty() {
+                if secret.is_empty() {
+                    self.auth.research.remove(&c.secret_ref);
+                } else {
+                    self.auth.research.insert(c.secret_ref.clone(), secret);
+                }
+            }
+            if let Err(e) = self.save_auth_config(&self.auth) {
+                self.status = format!("Credential save failed: {e}");
+                return;
+            }
+            self.settings.research.insert(name, c);
+            self.status = match self.save_settings_config(&self.settings) {
+                Ok(()) => "Research configuration saved".into(),
+                Err(e) => format!("Configuration save failed: {e}"),
+            };
+            return;
+        }
+        if matches!(key, "__research_test" | "__research_verify") {
+            let has_secret = self.auth.research.contains_key(&c.secret_ref);
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                let (state, detail) = test_configuration(&name, &c, has_secret).await;
+                let _ = tx.send(AppMsg::ResearchTest {
+                    name,
+                    state,
+                    detail,
+                });
+            });
+            self.status = "Testing configuration in background".into();
+            return;
+        }
+        if key == "__research_apply" {
+            self.apply_research_tool_plan();
+            return;
+        }
+        if matches!(
+            key,
+            "__research_install" | "__research_update" | "__research_remove"
+        ) {
+            self.manage_research_tool(&name, key);
+            return;
+        }
+    }
+    fn load_coverage(&mut self) {
+        let Some(path) = self.tna_db_path.clone() else {
+            return;
+        };
+        let scope = self.evidence_scope.clone();
+        let report_id = self.chat_report.clone();
+        let tx = self.tx.clone();
+        let themes = self
+            .tna_snapshot()
+            .map(|s| {
+                s.nodes
+                    .iter()
+                    .filter(|n| n.kind == TnaNodeKind::Topic)
+                    .map(|n| n.label.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        argos_osint_core::workers::spawn_blocking(move || {
+            let result = Store::open(&path)
+                .and_then(|s| {
+                    s.sync_report_index()?;
+                    s.coverage(&scope, &themes)
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppMsg::Coverage { report_id, result });
+        });
+    }
+    fn open_coverage_passage(&mut self) {
+        let Some(path) = self.tna_db_path.clone() else {
+            return;
+        };
+        let Some(row) = self.coverage_rows.get(self.tna_matrix_row) else {
+            return;
+        };
+        let Some(cell) = row.cells.get(self.tna_matrix_col) else {
+            return;
+        };
+        let query = row.theme.clone();
+        let scope = argos_osint_core::evidence::EvidenceScope::Report(cell.report_id.clone());
+        let tx = self.tx.clone();
+        argos_osint_core::workers::spawn_blocking(move || {
+            let result = Store::open(&path)
+                .and_then(|s| Ok(s.retrieve_passages(&query, &scope, 1)?.into_iter().next()))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppMsg::OpenPassage(result));
+        });
+    }
+    pub fn entity_coverage(&self, entity_id: &str) -> String {
+        let jobs = self
+            .research_jobs
+            .iter()
+            .filter(|j| j.input.entity_id == entity_id && j.input.report_id == self.chat_report)
+            .collect::<Vec<_>>();
+        if jobs.is_empty() {
+            return "uninvestigated".into();
+        }
+        if jobs.iter().any(|j| {
+            matches!(
+                j.state,
+                argos_osint_core::research::JobState::Running
+                    | argos_osint_core::research::JobState::Queued
+            )
+        }) {
+            return "partial".into();
+        }
+        if jobs.iter().all(|j| {
+            matches!(
+                j.state,
+                argos_osint_core::research::JobState::Failed
+                    | argos_osint_core::research::JobState::RateLimited
+            )
+        }) {
+            return "blocked".into();
+        }
+        if let Some(job) = jobs.first() {
+            let freshness = self
+                .settings
+                .research
+                .get(&job.provider)
+                .map(|c| c.cache_secs)
+                .unwrap_or(86400);
+            if job
+                .finished_at
+                .as_ref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .is_some_and(|t| {
+                    chrono::Utc::now().signed_duration_since(t).num_seconds() > freshness as i64
+                })
+            {
+                return "stale".into();
+            }
+        }
+        if jobs
+            .iter()
+            .all(|j| j.state == argos_osint_core::research::JobState::Completed)
+        {
+            "fresh".into()
+        } else {
+            "partial".into()
+        }
+    }
+    fn manage_research_tool(&mut self, name: &str, action: &str) {
+        let root = paths::home_dir().join("tools");
+        if action == "__research_remove" {
+            let Some(queue) = self.research_queue.clone() else {
+                self.status = "File-backed research queue required".into();
+                return;
+            };
+            let c = self
+                .settings
+                .research
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            let name = name.to_string();
+            let tx = self.tx.clone();
+            if c.executable.is_empty() {
+                self.status = "No managed installation to remove".into();
+                return;
+            }
+            self.research_active += 1;
+            tokio::spawn(async move {
+                let (_job, result) = queue
+                    .manage_tool(&name, "remove", None, Some(PathBuf::from(c.executable)))
+                    .await;
+                let _ = tx.send(AppMsg::ToolManaged { name, result });
+            });
+            return;
+        }
+        match argos_osint_core::tool_manager::plan(name, &root) {
+            Ok(plan) => {
+                self.tool_plan = Some((name.into(), action.into(), plan));
+                self.load_research_fields();
+                self.field_sel = self.fields.len().saturating_sub(1);
+                self.status =
+                    "Review the installation plan; Apply starts the visible background job".into();
+            }
+            Err(err) => {
+                self.status = err.to_string();
+                self.log_event("system", &format!("{name} setup: {err}"));
+            }
+        }
+    }
+    fn apply_research_tool_plan(&mut self) {
+        let Some(queue) = self.research_queue.clone() else {
+            self.status = "File-backed research queue required".into();
+            return;
+        };
+        let Some((name, action, plan)) = self.tool_plan.take() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        self.research_active += 1;
+        self.status = format!(
+            "Installing {} {} in background · keyboard remains available",
+            plan.tool, plan.version
+        );
+        if let Some(c) = self.settings.research.get_mut(&name) {
+            c.readiness = argos_osint_core::research::Readiness::Installing;
+        }
+        tokio::spawn(async move {
+            let (_job, result) = queue
+                .manage_tool(
+                    &name,
+                    if action == "__research_update" {
+                        "update"
+                    } else {
+                        "install"
+                    },
+                    Some(plan),
+                    None,
+                )
+                .await;
+            let _ = tx.send(AppMsg::ToolManaged { name, result });
+        });
+    }
+    fn submit_enrichment(&mut self, arg: &str) {
+        if self.research_active >= 8 {
+            self.status = "Research queue limit reached; wait for a job or cancel".into();
+            return;
+        }
+        let mut parts = arg.splitn(2, ' ');
+        let provider = parts.next().unwrap_or("");
+        let typed = parts.next().unwrap_or("").trim();
+        let selected = self.tna_focus_node().cloned();
+        let label = if typed.is_empty() {
+            selected
+                .as_ref()
+                .map(|n| n.label.clone())
+                .unwrap_or_default()
+        } else {
+            typed.to_string()
+        };
+        let Some(config) = self.settings.research.get(provider).cloned() else {
+            self.status="/investigate <integration> [selected entity or focused query] · i opens cached evidence and actions".into();
+            return;
+        };
+        let Some(queue) = self.research_queue.clone() else {
+            self.status = "Research queue requires a file-backed workspace".into();
+            return;
+        };
+        let entity_id = selected.map(|n| n.id).unwrap_or_else(|| label.clone());
+        let input = argos_osint_core::research::ResearchInput {
+            case_id: self
+                .open_report()
+                .and_then(|r| r.case_id.clone())
+                .or_else(|| self.chat_case.clone()),
+            report_id: self.chat_report.clone(),
+            entity_id,
+            label,
+            action: provider.into(),
+            depth: 0,
+        };
+        let plan = self.settings.source_plan();
+        let secret = self.auth.research.get(&config.secret_ref).cloned();
+        let provider = provider.to_string();
+        let tx = self.tx.clone();
+        self.research_active += 1;
+        self.status = "Research queued · /jobs · /cancel-jobs".into();
+        tokio::spawn(async move {
+            let job = queue.execute(input, &provider, config, plan, secret).await;
+            let _ = tx.send(AppMsg::ResearchJob(job));
+        });
+    }
+    fn show_evidence_surface(&mut self, action: &str, arg: &str) {
+        let Some(path) = self.tna_db_path.clone() else {
+            self.status = "Evidence review requires a file-backed workspace".into();
+            return;
+        };
+        let report_id = self.chat_report.clone();
+        let evidence_scope = self.evidence_scope.clone();
+        let entity = self.tna_focus_node().cloned();
+        let action = action.to_string();
+        let arg = arg.to_string();
+        let tx = self.tx.clone();
+        let title = action.clone();
+        argos_osint_core::workers::spawn_blocking(move || {
+            let result=(||->Result<String>{
+                use argos_osint_core::evidence::{Correction,ReviewDecision};
+                let store=Store::open(&path)?;
+                if action=="review" {let mut parts=arg.splitn(3,' ');let id=parts.next().unwrap_or("");if !store.findings_scoped(&evidence_scope)?.iter().any(|f|f.observation.id==id){anyhow::bail!("Observation is not in the selected evidence scope");}let decision=match parts.next().unwrap_or(""){"retain"=>ReviewDecision::Retain,"accept"=>ReviewDecision::Accept,"reject"=>ReviewDecision::Reject,"defer"=>ReviewDecision::Defer,_=>anyhow::bail!("/review <observation id> retain|accept|reject|defer <reason>")};store.review_finding(id,decision,parts.next().unwrap_or("Analyst decision"))?;return Ok("Review decision saved with history. /findings to inspect; /save-update addendum|revision|followup".into());}
+                if action=="merge" || action=="unmerge" {
+                    let report=report_id.clone().ok_or_else(||anyhow::anyhow!("Open a report first"))?;
+                    let tokens=arg.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+                    let decision=argos_osint_core::evidence::IdentityDecision{id:argos_osint_core::store::new_id("identity-decision"),entities:if action=="merge"{tokens.clone()}else{vec![]},canonical_entity:if action=="merge"{tokens.first().cloned()}else{None},reason:"Explicit analyst identity resolution; original identifiers and mentions retained".into(),evidence:vec![],reverses:if action=="unmerge"{tokens.first().cloned()}else{None}};
+                    store.save_identity_decision(&report,&decision)?;tna::rebuild_for_report(&store,&report)?;
+                    return Ok(format!("Identity decision {} saved. /unmerge {} reverses it. Reopen network to refresh.",decision.id,decision.id));
+                }
+                if action=="correct" || action=="undo-correction" {
+                    let id=report_id.clone().ok_or_else(||anyhow::anyhow!("Open a report first"))?;
+                    let correction=if action=="undo-correction" {Correction{id:argos_osint_core::store::new_id("correction"),report_id:id,start:0,original:String::new(),replacement:None,entity_type:None,reason:"Analyst reversal".into(),reverses:Some(arg.clone())}}
+                    else {let mut parts=arg.splitn(3,' ');let start=parts.next().unwrap_or("").parse::<usize>()?;let change=parts.next().unwrap_or("suppress");let reason=parts.next().unwrap_or("Analyst correction");let snap=tna::rebuild_for_report(&store,&id)?;let d=snap.decisions.iter().find(|d|d.start==start).ok_or_else(||anyhow::anyhow!("Source mention offset not found"))?;Correction{id:argos_osint_core::store::new_id("correction"),report_id:id,start,original:d.original.clone(),replacement:if change=="suppress"{None}else{Some(change.replace('_'," "))},entity_type:Some(d.kind),reason:reason.into(),reverses:None}};
+                    store.save_correction(&correction)?;tna::rebuild_for_report(&store,&correction.report_id)?;
+                    return Ok(format!("Correction {} saved. /undo-correction {} reverses it. Reopen the network to refresh.",correction.id,correction.id));
+                }
+                if action=="timeline" {store.sync_report_index()?;return Ok(store.timeline_scoped(&evidence_scope)?.iter().map(|e|format!("{} · event {} · published {} · retrieved {}\n{}\n{}\n{}",e.lane,e.event_time.as_deref().unwrap_or("undated"),e.published_at.as_deref().unwrap_or("unknown"),if e.retrieved_at.is_empty(){"unknown"}else{&e.retrieved_at},e.statement,e.uncertainty.as_deref().unwrap_or(""),e.evidence.iter().filter_map(|r|r.passage_id.as_ref()).filter_map(|id|store.passage(id).ok().flatten()).map(|p|format!("[{}]",p.citation())).collect::<Vec<_>>().join(" "))).collect::<Vec<_>>().join("\n\n"));}
+                let findings=store.findings_scoped(&evidence_scope)?;
+                let mut out=if action=="inspect" {format!("Selected: {}\nCached evidence; cursor movement never collects.\n\nNext actions: /investigate search|domain|internetdb|leakcheck|shodan|xposedornot|whatsmyname [input]\nCollections require configured tools and privacy/scope opt-ins.\n\n",entity.as_ref().map(|n|n.label.as_str()).unwrap_or("none"))}else{"New observations are separate from conclusions. /review <id> retain|accept|reject|defer <reason>\n/save-update addendum|revision|followup\n\n".into()};
+                for f in findings.iter().filter(|f|action!="inspect" || entity.as_ref().is_none_or(|e|e.id==f.observation.entity_id)) {out.push_str(&format!("{} · {:?} · {} · retrieved {}\n{}\n{}\nAttribution: {}\nSources: {}\n\n",f.observation.id,f.decision,f.observation.provider,f.observation.retrieved_at,f.category,f.observation.statement,f.observation.attribution,f.observation.evidence.iter().filter_map(|e|e.source_url.clone()).collect::<Vec<_>>().join(", ")));}
+                let relationships=store.records_scoped::<argos_osint_core::evidence::Relationship>("relationship",&evidence_scope)?;
+                for relationship in relationships.iter().filter(|r|action!="inspect" || entity.as_ref().is_none_or(|e|e.id==r.from || e.id==r.to)) {out.push_str(&format!("Relationship: {} → {} · {:?} · {:?}\n{}\n\n",relationship.from,relationship.to,relationship.kind,relationship.basis,relationship.uncertainty));}
+                if findings.is_empty(){out.push_str("No collected observations in this scope. Evidence is uncollected, not a negative finding.");}
+                Ok(out)
+            })().map_err(|e|e.to_string());
+            let _ = tx.send(AppMsg::EvidenceSurface {
+                report_id,
+                title,
+                result,
+            });
+        });
+    }
+    fn save_findings_update(&mut self, arg: &str) {
+        use argos_osint_core::evidence::ReportUpdateMode;
+        let mode = match arg {
+            "addendum" => ReportUpdateMode::Addendum,
+            "revision" => ReportUpdateMode::Revision,
+            "followup" => ReportUpdateMode::FollowUp,
+            _ => {
+                self.status = "/save-update addendum|revision|followup".into();
+                return;
+            }
+        };
+        let (Some(path), Some(id)) = (self.tna_db_path.clone(), self.chat_report.clone()) else {
+            self.status = "Open a saved report first".into();
+            return;
+        };
+        let directory = report_dir(&self.settings);
+        let tx = self.tx.clone();
+        argos_osint_core::workers::spawn_blocking(move || {
+            let result = Store::open(&path)
+                .and_then(|store| store.save_report_update(&id, mode, &directory))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppMsg::ReportUpdated(result));
+        });
+        self.status = "Saving reviewed report update in background".into();
+    }
     fn run_slash(&mut self, line: &str) {
         let rest = line.trim_start_matches('/').trim();
         let mut parts = rest.splitn(2, char::is_whitespace);
@@ -4420,6 +5628,26 @@ Could not write the report: {err}",
                     | "clear"
                     | "find"
                     | "network"
+                    | "read"
+                    | "cite"
+                    | "scope"
+                    | "related"
+                    | "entities"
+                    | "retain-answer"
+                    | "investigate"
+                    | "inspect"
+                    | "findings"
+                    | "review"
+                    | "save-update"
+                    | "timeline"
+                    | "correct"
+                    | "undo-correction"
+                    | "merge"
+                    | "unmerge"
+                    | "corroborate"
+                    | "weakest"
+                    | "jobs"
+                    | "cancel-jobs"
                     | "model"
                     | "m"
                     | "models"
@@ -4432,6 +5660,188 @@ Could not write the report: {err}",
             return;
         }
         match cmd.as_str() {
+            "jobs" => {
+                let text = self
+                    .research_jobs
+                    .iter()
+                    .take(20)
+                    .map(|j| {
+                        format!(
+                            "{} · {} · {:?} · {}ms · {}",
+                            j.id,
+                            j.provider,
+                            j.state,
+                            j.elapsed_ms,
+                            j.error.as_deref().unwrap_or(&j.progress)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if self.chat_report.is_some() {
+                    self.tna_answer = Some(TnaAnswer {
+                        question: "Background research".into(),
+                        answer: text,
+                        ..Default::default()
+                    });
+                } else {
+                    self.push_line("assistant", &text);
+                }
+            }
+            "cancel-jobs" => {
+                if let Some(q) = self.research_queue.take() {
+                    q.cancel.store(true, Ordering::Relaxed);
+                    self.research_queue = Some(argos_osint_core::research::ResearchQueue::new(
+                        paths::db_path(),
+                        4,
+                    ));
+                }
+                self.attach_research_progress();
+                self.status =
+                    "Cancellation requested for queued/running research and installers".into();
+            }
+            "investigate" => self.submit_enrichment(&arg),
+            "inspect" | "findings" | "timeline" => self.show_evidence_surface(&cmd, &arg),
+            "review" => self.show_evidence_surface("review", &arg),
+            "correct" | "undo-correction" | "merge" | "unmerge" => {
+                self.show_evidence_surface(&cmd, &arg)
+            }
+            "corroborate" | "weakest" => {
+                let pair = if cmd == "weakest" {
+                    self.tna_paths().get(self.tna_path_sel).and_then(|p| {
+                        p.nodes
+                            .windows(2)
+                            .min_by_key(|pair| self.tna_edge_weight(&pair[0], &pair[1]))
+                            .map(|pair| (pair[0].clone(), pair[1].clone()))
+                    })
+                } else {
+                    self.tna_links()
+                        .get(self.tna_ledger_sel)
+                        .map(|e| (e.from.clone(), e.to.clone()))
+                };
+                if let Some((a, b)) = pair {
+                    self.submit_enrichment(&format!(
+                        "search {} {}",
+                        self.tna_label(&a),
+                        self.tna_label(&b)
+                    ));
+                } else {
+                    self.status = "Select an edge or path hop first".into();
+                }
+            }
+            "save-update" => self.save_findings_update(&arg),
+            "scope" => {
+                use argos_osint_core::evidence::EvidenceScope;
+                self.evidence_scope = if arg == "desk" {
+                    EvidenceScope::Desk
+                } else if arg == "collection" {
+                    EvidenceScope::Collection
+                } else if arg == "report" {
+                    self.chat_report
+                        .clone()
+                        .map(EvidenceScope::Report)
+                        .unwrap_or_default()
+                } else if let Some(id) = arg.strip_prefix("case ") {
+                    EvidenceScope::Case(id.to_string())
+                } else if let Some(ids) = arg.strip_prefix("reports ") {
+                    EvidenceScope::Reports(ids.split_whitespace().map(str::to_string).collect())
+                } else {
+                    self.status = "/scope desk|report|case <id>|reports <ids>|collection".into();
+                    return;
+                };
+                self.recommendations.clear();
+                self.status = format!("Evidence scope: {:?}", self.evidence_scope);
+                if self.chat_report.is_some() {
+                    self.tna_report = None;
+                    self.ensure_tna_snapshot(true);
+                }
+            }
+            "read" => {
+                self.workspace_reading = true;
+                self.focus = Focus::Graph;
+            }
+            "cite" => {
+                let selected = arg
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| self.recommendations.get(n.saturating_sub(1)))
+                    .cloned()
+                    .or_else(|| {
+                        self.recommendations
+                            .iter()
+                            .find(|h| h.citation() == arg || h.id == arg)
+                            .cloned()
+                    });
+                if let Some(hit) = selected {
+                    self.open_report_chat(&hit.report_id);
+                    self.selected_passage =
+                        Some((hit.report_id.clone(), hit.start, hit.end, hit.version));
+                    self.report_source_version = Some(hit.version);
+                    if let Some(path) = self.tna_db_path.clone() {
+                        let tx = self.tx.clone();
+                        let report_id = hit.report_id.clone();
+                        let generation = self.report_source_generation;
+                        let version = hit.version;
+                        argos_osint_core::workers::spawn_blocking(move || {
+                            let result = Store::open(&path)
+                                .and_then(|s| {
+                                    s.report_version(&report_id, Some(version))?
+                                        .ok_or_else(|| anyhow::anyhow!("Citation version missing"))
+                                })
+                                .map_err(|e| e.to_string());
+                            let _ = tx.send(AppMsg::ReportSource {
+                                report_id,
+                                generation,
+                                version: Some(version),
+                                result,
+                            });
+                        });
+                    } else if let Ok(Some(text)) =
+                        self.store.report_version(&hit.report_id, Some(hit.version))
+                    {
+                        self.report_read_source = Some(text);
+                    }
+                    self.report_read_line = hit.line.saturating_sub(1);
+                    self.workspace_reading = true;
+                    self.focus_selected_passage();
+                    self.status = format!(
+                        "Citation [{}] · {} · network uses latest report evidence",
+                        hit.citation(),
+                        hit.section
+                    );
+                } else if let Some(path) = self.tna_db_path.clone() {
+                    let tx = self.tx.clone();
+                    let citation = arg.clone();
+                    argos_osint_core::workers::spawn_blocking(move || {
+                        let result = Store::open(&path)
+                            .and_then(|s| s.passage_citation(&citation))
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(AppMsg::OpenPassage(result));
+                    });
+                } else {
+                    self.status = "/cite <recommendation number or report@version:line>".into();
+                }
+            }
+            "related" => {
+                let query = self
+                    .open_report()
+                    .map(|r| r.title.clone())
+                    .unwrap_or_default();
+                self.retrieve_question(query);
+            }
+            "entities" => {
+                self.workspace_reading = false;
+                self.set_tna_layout(TnaLayout::Cockpit);
+            }
+            "retain-answer" => {
+                if let Some(a) = self
+                    .tna_answer
+                    .as_ref()
+                    .filter(|a| !a.pending && a.error.is_none())
+                {
+                    let text = a.answer.clone();
+                    self.capture_report_insight(&text);
+                }
+            }
             "help" | "?" => self.help = true,
             "quit" | "exit" | "q" => self.quit = true,
             "dashboard" | "home" => self.on_esc(),
@@ -4484,6 +5894,7 @@ Could not write the report: {err}",
                 }
             }
             "network" => {
+                self.workspace_reading = false;
                 self.select_case_page(CasePage::Network);
             }
             "find" => {
@@ -4590,7 +6001,7 @@ Could not write the report: {err}",
             &md,
         ) {
             Ok(meta) => {
-                let _ = self.store.add_report(&meta);
+                let _ = self.store.add_report_metadata(&meta);
                 let _ = self.reload_lists();
                 self.after_report_filed(&meta.id);
                 self.push_line("assistant", &format!("Report: {}", meta.path));
@@ -4681,7 +6092,16 @@ Could not write the report: {err}",
         self.log_event("api", &format!("chat {}", self.active_model()));
         let (prior_reports, evidence_only, from_memory, memories) =
             if let Some(report) = self.open_report().cloned() {
-                (self.tna_report_material(&report), true, false, Vec::new())
+                (
+                    if prior_reports.is_empty() {
+                        self.tna_report_material(&report)
+                    } else {
+                        prior_reports
+                    },
+                    true,
+                    false,
+                    Vec::new(),
+                )
             } else {
                 (
                     prior_reports,
@@ -4725,6 +6145,7 @@ Could not write the report: {err}",
             report_dir: report_dir(&self.settings),
             case_id: self.case_id(),
             gmail: self.auth.gmail.as_ref().map(GmailConfig::from),
+            citation_ids: self.recommendations.iter().map(|h| h.citation()).collect(),
             prior_reports,
             evidence_only,
             from_memory,
@@ -4824,6 +6245,11 @@ Could not write the report: {err}",
     }
 
     fn load_group_fields(&mut self) {
+        if self.module == Some(ModuleId::Providers) && self.provider_page == ProviderPage::Research
+        {
+            self.load_research_fields();
+            return;
+        }
         match self.form_module() {
             Some(module) => self.load_fields(module),
             None => self.fields.clear(),
@@ -4928,25 +6354,41 @@ Could not write the report: {err}",
                     field(
                         "brave_key",
                         "Brave API key",
-                        self.settings.brave_key.clone(),
+                        self.auth
+                            .research
+                            .get("BRAVE_API_KEY")
+                            .cloned()
+                            .unwrap_or_else(|| self.settings.brave_key.clone()),
                         true,
                     ),
                     field(
                         "tavily_key",
                         "Tavily API key",
-                        self.settings.tavily_key.clone(),
+                        self.auth
+                            .research
+                            .get("TAVILY_API_KEY")
+                            .cloned()
+                            .unwrap_or_else(|| self.settings.tavily_key.clone()),
                         true,
                     ),
                     field(
                         "youtube_key",
                         "YouTube API key",
-                        self.settings.youtube_key.clone(),
+                        self.auth
+                            .research
+                            .get("YOUTUBE_API_KEY")
+                            .cloned()
+                            .unwrap_or_else(|| self.settings.youtube_key.clone()),
                         true,
                     ),
                     field(
                         "github_token",
                         "GitHub token",
-                        self.settings.github_token.clone(),
+                        self.auth
+                            .research
+                            .get("GITHUB_TOKEN")
+                            .cloned()
+                            .unwrap_or_else(|| self.settings.github_token.clone()),
                         true,
                     ),
                     field("source_name", "Extra source name", String::new(), false),
@@ -5352,6 +6794,11 @@ Could not write the report: {err}",
     }
 
     fn run_field_action(&mut self, key: &str) {
+        if self.module == Some(ModuleId::Providers) && self.provider_page == ProviderPage::Research
+        {
+            self.research_field_action(key);
+            return;
+        }
         if self.form_module() == Some(ModuleId::Brain) && key == "__save" {
             self.save_brain_memory();
             return;
@@ -5627,6 +7074,7 @@ Could not write the report: {err}",
 
     fn log_event(&mut self, kind: &str, text: &str) {
         let at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let text = self.auth.redact(text);
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -5717,26 +7165,6 @@ pub fn report_dir(settings: &SettingsFile) -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("reports")
-}
-
-fn memory_answer_material(app: &App, hits: &[brain::ScoredMemory]) -> String {
-    let mut out = String::from(
-        "FACTS FROM COMPLETED REPORTS. Answer only from these facts. Name the report each fact came from so the user can open it. Do not read the report files and do not start a search.\n",
-    );
-    for hit in hits {
-        let source = hit
-            .memory
-            .report_id
-            .as_deref()
-            .and_then(|id| app.reports.iter().find(|report| report.id == id))
-            .map(|report| report.title.as_str())
-            .unwrap_or("completed report");
-        out.push_str(&format!(
-            "- {}\n  source: {source}\n",
-            hit.memory.text.trim()
-        ));
-    }
-    out
 }
 
 async fn distill_insight(
@@ -5836,6 +7264,7 @@ pub async fn run(mut app: App) -> Result<()> {
     use std::io::stdout;
 
     let mut inbox = app.take_inbox();
+    app.attach_research_progress();
     app.spawn_hardware(false);
     enable_raw_mode()?;
     let mut out = stdout();
@@ -5855,22 +7284,18 @@ pub async fn run(mut app: App) -> Result<()> {
         }
         tokio::select! {
             biased;
-            msg = inbox.recv() => {
-                if let Some(msg) = msg {
-                    app.on_msg(msg);
-                }
-            }
             ev = reader.next() => {
-                match ev {
-                    Some(Ok(ev)) => { app.on_event(ev); }
-                    Some(Err(_)) | None => break,
-                }
+                match ev {Some(Ok(ev))=>{app.on_event(ev);},Some(Err(_))|None=>break,}
             }
+            msg=inbox.recv()=>{if let Some(msg)=msg {app.on_msg(msg);for _ in 0..31 {match inbox.try_recv(){Ok(msg)=>app.on_msg(msg),Err(_)=>break}}}}
             _ = tokio::time::sleep(Duration::from_millis(200)) => app.tick(),
         }
         if app.quit {
             break;
         }
+    }
+    if let Some(queue) = &app.research_queue {
+        queue.cancel.store(true, Ordering::Relaxed);
     }
     app.persist_pending_insights();
     disable_raw_mode()?;
@@ -5996,6 +7421,50 @@ mod tests {
     }
 
     #[test]
+    fn report_source_loading_is_independent_of_questions_and_historic_reading() {
+        let (mut app, _dir) = workspace_fixture();
+        let id = app.chat_report.clone().unwrap();
+        let generation = app.report_source_generation;
+        app.turn_generation = app.turn_generation.wrapping_add(1);
+        app.on_msg(AppMsg::ReportSource {
+            report_id: id.clone(),
+            generation,
+            version: None,
+            result: Ok("Latest graph source".into()),
+        });
+        app.on_msg(AppMsg::ReportSource {
+            report_id: id,
+            generation,
+            version: Some(1),
+            result: Ok("Historic cited source".into()),
+        });
+        assert_eq!(app.tna_source, "Latest graph source");
+        assert_eq!(
+            app.report_read_source.as_deref(),
+            Some("Historic cited source")
+        );
+        app.workspace_reading = true;
+        let text = render_workspace(&mut app, 54, 18);
+        assert!(text.contains("Historic cited source"));
+        assert!(!text.contains("Latest graph source"));
+    }
+
+    #[test]
+    fn stale_graph_results_cannot_expand_the_current_scope() {
+        let (mut app, _dir) = workspace_fixture();
+        let count = app.tna_snapshot().unwrap().nodes.len();
+        app.on_msg(AppMsg::TnaReady {
+            targeted: true,
+            report_id: app.chat_report.clone(),
+            scope: Some(argos_osint_core::evidence::EvidenceScope::Collection),
+            result: Ok(TnaSnapshot::empty(
+                argos_osint_core::tna::TnaScope::Collection,
+            )),
+        });
+        assert_eq!(app.tna_snapshot().unwrap().nodes.len(), count);
+    }
+
+    #[test]
     fn five_layout_shortcuts_find_typing_and_navigation() {
         let (mut app, _dir) = workspace_fixture();
         for (key, layout) in [
@@ -6033,7 +7502,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tna_submission_streams_ephemerally_and_completed_insight_survives_restart() {
+    async fn discussion_is_ephemeral_and_explicitly_retained_insight_survives_restart() {
         let (mut app, dir) = workspace_fixture();
         let report_id = app.chat_report.clone().unwrap();
         let session = app.session_id();
@@ -6074,6 +7543,9 @@ mod tests {
                 "Ada Lovelace works with Acme Corporation in this report.".into(),
             ),
         });
+        assert!(!app.tna_answer.as_ref().unwrap().filed);
+        assert!(app.store.list_memories().unwrap().is_empty());
+        app.run_slash("/retain-answer");
         assert!(app.tna_answer.as_ref().unwrap().filed);
         let facts = app.store.list_memories().unwrap();
         assert_eq!(facts.len(), 1);

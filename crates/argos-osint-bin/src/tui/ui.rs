@@ -131,6 +131,22 @@ fn draw_desk_and_reports(frame: &mut Frame, app: &mut App, area: Rect) {
         draw_network(frame, app, area);
         return;
     }
+    let rows = split_v(area, &[Constraint::Length(2), Constraint::Min(0)]);
+    let current = app
+        .research_jobs
+        .first()
+        .map(|j| format!("{} {:?}: {}", j.provider, j.state, j.progress))
+        .unwrap_or_else(|| "No background findings yet".into());
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Scope {:?} · {} research/install jobs active · /jobs · /findings\n{}",
+            app.evidence_scope, app.research_active, current
+        ))
+        .style(theme::dim())
+        .wrap(Wrap { trim: false }),
+        rows[0],
+    );
+    let area = rows[1];
     let cols = split_h(
         area,
         &[Constraint::Percentage(64), Constraint::Percentage(36)],
@@ -318,6 +334,23 @@ fn report_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<Option<usiz
         );
         lines.push(Line::from(title_line).style(status_style));
         index.push(Some(i));
+        if let super::app::ReportRow::Completed(report) = row {
+            if let Some((n, hit)) = app
+                .recommendations
+                .iter()
+                .enumerate()
+                .find(|(_, h)| h.report_id == report.id)
+            {
+                lines.push(
+                    Line::from(clip_chars(
+                        &format!("/cite {} · {} · {}", n + 1, hit.section, hit.reason),
+                        width,
+                    ))
+                    .style(theme::accent()),
+                );
+                index.push(Some(i));
+            }
+        }
         if let Some(when) = row.when() {
             lines.push(Line::from(when).style(theme::dim()));
             index.push(Some(i));

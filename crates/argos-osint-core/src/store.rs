@@ -30,7 +30,7 @@ pub struct ChatLine {
 }
 
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl Store {
@@ -96,6 +96,7 @@ impl Store {
             "#,
         )?;
         self.ensure_memory_columns()?;
+        self.ensure_evidence_schema()?;
         Ok(())
     }
 
@@ -306,6 +307,18 @@ impl Store {
     }
 
     pub fn delete_report_bundle(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM passage_fts WHERE report_id=?1", [id])?;
+        self.conn
+            .execute("DELETE FROM report_passages WHERE report_id=?1", [id])?;
+        self.conn
+            .execute("DELETE FROM report_versions WHERE report_id=?1", [id])?;
+        self.conn.execute(
+            "DELETE FROM evidence_records WHERE report_id=?1 AND kind IN ('claim','mention')",
+            [id],
+        )?;
+        self.delete_tna_graph(&crate::tna::report_key(id))?;
+        self.delete_tna_graph("desk")?;
         let session = format!("report:{id}");
         self.conn
             .execute("DELETE FROM memories WHERE report_id = ?1", params![id])?;
@@ -327,11 +340,20 @@ impl Store {
         Ok(n > 0)
     }
 
-    pub fn add_report(&self, report: &ReportMeta) -> Result<()> {
+    pub fn add_report_metadata(&self, report: &ReportMeta) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO reports (id, case_id, title, path, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![report.id, report.case_id, report.title, report.path, report.created_at],
         )?;
+
+        Ok(())
+    }
+
+    pub fn add_report(&self, report: &ReportMeta) -> Result<()> {
+        self.add_report_metadata(report)?;
+        if let Ok(body) = std::fs::read_to_string(&report.path) {
+            self.index_report(report, &body)?;
+        }
         Ok(())
     }
 

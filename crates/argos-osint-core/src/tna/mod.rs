@@ -6,7 +6,9 @@ mod corpus;
 mod extract;
 mod types;
 
-pub use build::{build_snapshot, build_snapshot_blocking};
+pub use build::{
+    apply_identity_decisions, build_snapshot, build_snapshot_blocking, build_snapshot_corrected,
+};
 pub use corpus::{CorpusDoc, TnaCorpus};
 pub use extract::{extract_occurrences, ip_is_blocked_label, Occurrence};
 pub use types::{
@@ -21,7 +23,25 @@ use crate::store::Store;
 /// Rebuild the targeted snapshot for one filed report and upsert it.
 pub fn rebuild_for_report(store: &Store, report_id: &str) -> Result<TnaSnapshot> {
     let corpus = TnaCorpus::targeted(store, report_id)?;
-    let snap = build_snapshot(&corpus);
+    let corrections = corpus
+        .docs
+        .iter()
+        .map(|d| store.corrections(&d.report_id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut snap = build_snapshot_corrected(&corpus, &corrections);
+    let decisions = corpus
+        .docs
+        .iter()
+        .map(|d| store.identity_decisions(&d.report_id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    apply_identity_decisions(&mut snap, &decisions);
+    store.persist_snapshot_evidence(&snap)?;
     store.upsert_tna_graph(&report_key(report_id), &snap)?;
     Ok(snap)
 }
@@ -29,29 +49,33 @@ pub fn rebuild_for_report(store: &Store, report_id: &str) -> Result<TnaSnapshot>
 /// Rebuild the desk collection snapshot from every completed report.
 pub fn rebuild_collection(store: &Store) -> Result<TnaSnapshot> {
     let corpus = TnaCorpus::collection(store)?;
-    let snap = build_snapshot(&corpus);
+    let corrections = corpus
+        .docs
+        .iter()
+        .map(|d| store.corrections(&d.report_id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut snap = build_snapshot_corrected(&corpus, &corrections);
+    let decisions = corpus
+        .docs
+        .iter()
+        .map(|d| store.identity_decisions(&d.report_id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    apply_identity_decisions(&mut snap, &decisions);
+    store.persist_snapshot_evidence(&snap)?;
     store.upsert_tna_graph(desk_key(), &snap)?;
     Ok(snap)
 }
 
 /// After a report is filed: refresh targeted + collection.
 pub fn rebuild_after_file(store: &Store, report_id: &str) -> Result<()> {
-    let corpus = TnaCorpus::collection(store)?;
-    let doc = corpus
-        .docs
-        .iter()
-        .find(|d| d.report_id == report_id)
-        .ok_or_else(|| anyhow::anyhow!("report {report_id} not found"))?
-        .clone();
-    let targeted = TnaCorpus {
-        scope: TnaScope::Targeted {
-            report_id: doc.report_id.clone(),
-            title: doc.title.clone(),
-        },
-        docs: vec![doc],
-    };
-    store.upsert_tna_graph(&report_key(report_id), &build_snapshot(&targeted))?;
-    store.upsert_tna_graph(desk_key(), &build_snapshot(&corpus))?;
+    let _ = rebuild_for_report(store, report_id)?;
+    let _ = rebuild_collection(store)?;
     Ok(())
 }
 

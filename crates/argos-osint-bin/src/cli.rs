@@ -296,6 +296,26 @@ async fn headless(prompt: String, model: Option<String>) -> Result<()> {
     let settings = SettingsFile::load().unwrap_or_default();
     let auth = AuthFile::load().unwrap_or_default();
     let profile = hardware::profile_cached(false);
+    let explicit = argos_osint_core::brain::insists_on_new_case(&prompt)
+        || prompt.trim_start().starts_with("/search ")
+        || prompt.trim_start().starts_with("investigate ");
+    let lookup = prompt.clone();
+    let db = paths::db_path();
+    let prior =
+        argos_osint_core::workers::spawn_blocking(move || -> Result<(String, Vec<String>)> {
+            let store = Store::open(&db)?;
+            store.sync_report_index()?;
+            let hits = store.retrieve_passages(
+                &lookup,
+                &argos_osint_core::evidence::EvidenceScope::Desk,
+                8,
+            )?;
+            Ok((
+                argos_osint_core::evidence::answer_material(&hits),
+                hits.iter().map(|h| h.citation()).collect::<Vec<_>>(),
+            ))
+        })
+        .await??;
     let input = TurnInput {
         session_id: "desk".into(),
         user_text: prompt,
@@ -317,8 +337,9 @@ async fn headless(prompt: String, model: Option<String>) -> Result<()> {
         report_dir: crate::tui::report_dir(&settings),
         case_id: None,
         gmail: auth.gmail.as_ref().map(GmailConfig::from),
-        prior_reports: String::new(),
-        evidence_only: false,
+        citation_ids: prior.1,
+        prior_reports: if explicit { String::new() } else { prior.0 },
+        evidence_only: !explicit,
         from_memory: false,
     };
     let (tx, mut rx) = unbounded_channel();

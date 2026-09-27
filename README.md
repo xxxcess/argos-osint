@@ -2,11 +2,10 @@
 
 Argos is a terminal research desk. It keeps the Grok Build shape that matters
 for a long session: a full-screen TUI, a launcher, and a prompt fixed to the
-bottom. The main canvas is the case desk. The prompt talks to that desk, or
-to the one case you have selected. System, providers, and brain open
-beside it. A turn searches
-public sources, recalls what Argos knows about you, and writes a markdown
-report.
+bottom. The main canvas is the Case Desk. Ask it about completed reports,
+open a cited passage, inspect its report network, and explicitly start
+focused research when the saved evidence has a gap. System and Providers
+remain beside it.
 
 There is no browser UI. Every screen is the terminal.
 
@@ -37,9 +36,9 @@ State lives in `~/.argos` (`ARGOS_HOME` overrides it):
 
 | Path | What |
 | --- | --- |
-| `config.toml` | SearXNG URL, source stages, API keys, report directory, text/voice modality |
-| `auth.json` | provider keys and the Gmail app password, mode `0600` |
-| `argos.db` | cases, transcripts, brain, report index |
+| `config.toml` | SearXNG URL, source stages, research tool settings, report directory, text/voice modality |
+| `auth.json` | model and research credentials and the Gmail app password, mode `0600` |
+| `argos.db` | cases, transcripts, passage index, research jobs, evidence, and graph snapshots |
 | `hardware.json` | cached host profile |
 | `mcp.json` | optional legacy Gmail MCP client config; Providers does not create it |
 
@@ -69,6 +68,58 @@ Ctrl+C cancels a turn, clears a draft, or quits when the prompt is empty.
 `/search`, `/new`, `/use`, `/report`, `/hardware`, `/provider`, `/brain`,
 `/gmail`, `/voice`, `/text`, `/open`, `/dashboard`, `/clear`, `/quit`.
 
+## Case Desk and report evidence
+
+See [configuration, migration, and implementation status](docs/case-desk-research.md)
+for the supported execution paths and remaining work.
+
+Ordinary Desk questions search completed report passages first. Matching
+passages are ranked by text relevance and shown with report dates; answers
+cite `report-id@vN:Lline`. `/cite 1` opens the first recommended passage,
+and `/cite report-id@vN:Lline` opens a saved citation, including earlier
+report versions. If no passage supports a claim, the Desk reports the gap
+instead of creating an investigation. `/new <question>` opens a scope card;
+an explicit fresh-research request also opens that card and carries any
+relevant saved passages into the turn. Use `/scope report`, `/scope reports
+<ids>`, `/scope case <id>`, or `/scope collection` to expand the default
+report/case boundary deliberately.
+
+In a report, `R` or `/read` opens its text, `j/k` moves through lines, and
+`g` explores the current report graph from the cited passage. `/related`
+retrieves related passages and `/entities` opens the graph. Report questions
+are evidence-only by default and do not file facts or new reports;
+`/retain-answer` explicitly keeps a completed answer. Historic citations
+remain readable after revisions; the graph always reflects the latest
+report text.
+
+The Research tab under Providers is separate from model accounts. It exposes
+provider readiness, execution mode, scope and privacy controls, limits,
+masked credentials, and Test Configuration. Existing search, domain,
+InternetDB, GitHub identity, and LeakCheck paths remain available. Shodan,
+XposedOrNot, and selected WhatsMyName checking have structured adapters;
+credentials, provider entitlements, and privacy settings may still be
+required. Katana has an explicit pinned, checksum-verified managed installer.
+SpiderFoot, Mosint, and Maigret appear as configured capabilities but their
+collection paths remain unavailable until an installed version's output and
+scope contract can be verified. Opening Providers never installs tools or
+starts a scan.
+
+`/investigate <provider> [input]` submits a bounded background enrichment
+job; `/jobs` shows job state and `/cancel-jobs` cancels queued/running work.
+In a report network, `i` opens the cached evidence inspector. `/findings`
+shows observations; `/review <observation-id> accept|retain|reject|defer
+<reason>` records an analyst decision. `/save-update addendum|revision|followup`
+saves accepted observations with attribution while retaining earlier files,
+versions, and citations. `/timeline` shows dated and undated observations
+without treating retrieval time as event time. `/correct` and `/merge` have
+reversal commands; original labels and mentions are retained.
+
+On first run, existing report files are imported into a versioned SQLite
+passage index. Legacy OSINT keys in `config.toml` move into `auth.json`.
+The index and graph snapshots rebuild when reports or extraction rules
+change. Research jobs interrupted by a restart are marked partial; Argos
+does not replay completed paid requests automatically.
+
 `/clear` wipes the chat on screen: the case desk, or the report chat when one is open.
 
 `/use` matches a case by exact id or title, then by one unambiguous prefix.
@@ -78,17 +129,17 @@ from Apps. The prompt stays at the bottom.
 
 ## What a turn does
 
-1. Classify the message (investigate, remember, hardware, gmail, chat).
-2. Recall a few brain notes and inject them into the system prompt, along with
-   the open view and a one-line host profile.
-3. For an investigation, research the enabled public stages before the model
-   speaks, so a local model that cannot call tools still sees the hits.
-4. Ask the signed-in text provider, honoring tool calls for another web, news,
-   domain, social, or identity lookup, a public page fetch, a memory, or a report.
-5. Write `./reports/<id>-<slug>.md` with YAML front matter, findings, and sources.
+1. Search completed report passages for ordinary questions and preserve
+   case/report scope.
+2. Answer from cited evidence, identify gaps, or open a research scope card
+   when fresh investigation is explicitly requested.
+3. Run selected public sources in bounded background jobs for investigations;
+   keep partial results when a provider fails.
+4. Review collected observations before promoting them into a report update.
 
-Without a provider, `/search` and an investigate turn still write a source
-pack. The narrative waits until a model is signed in.
+Without a model provider, the Desk still lists supporting passages and
+citations. Explicit `/search` and investigation turns still write a source
+pack; the narrative waits until a model is signed in.
 
 Public page fetches allow http and https on ports 80 and 443, and refuse
 loopback, link-local, and private addresses. Argos does not open a general
@@ -97,13 +148,13 @@ covert surveillance.
 
 ## Chat Providers
 
-The launcher is Case Desk, Providers, and System. Case Desk tabs are Desk and Brain. Brain replaces the desk and the report list. Brain lists fact memories and opens a card to read one. New facts come from completed answers in the open-report network workspace. The report list stays beside the desk and shows pending and completed reports. A failed task stays marked failed there; the reason is only in the System log. Providers has dedicated Grok, OpenAI ChatGPT, and OpenRouter account pages, a separate Models page for Writer / Tools assignments, and a Sources page for OSINT. Mail and MCP setup are not part of Providers. System tabs are Log, Hardware, and Settings. Left and right move between those pages. The log is timestamped and holds system calls, API calls, failed tasks, and searches. Settings is the SearXNG URL and the report folder.
+The launcher is Case Desk, Providers, and System. Case Desk keeps Desk, Brain, and the report network. The report list shows pending and completed reports; selecting a recommended report opens its supporting passage. Providers has separate model accounts, Models, Sources, and Research pages. Mail and MCP setup remain separate. System has Log, Hardware, and Settings.
 
 OSINT, under Providers, turns Facts, Web, News, Domain, Social, and Identity on or off for every run, sets a SearXNG URL, and can store Brave, Tavily, YouTube, and GitHub keys. Extra public sources whose URL contains `{query}` still work. Private addresses are refused.
 
-On the case desk, type a query and press **+** to choose Facts, Web, News, Domain, Social, and Identity for that run, then start a case worker. Space toggles a source, Enter starts, and Esc cancels. The defaults come from OSINT settings and the card does not change them. Domain tools still skip registration and certificate lookups when the query has no domain. **Tab** focuses the report list. **Enter** or a click asks you to confirm. Confirming opens that report’s network Cockpit. The report workspace hides Desk/Brain tabs and keeps the bottom composer for evidence-only questions. Answers stream into a temporary popup; questions and answers are never stored as chat messages. Completed answers still produce report-tagged Brain facts. **Esc** clears Find, then dismisses the answer, then closes the report and restores Desk. A normal desk message is checked against fact memories from completed reports first. A hit is answered from those facts, and the reply names the reports to open. If nothing matches, or the question asks for a new case anyway, a confirmation offers to just answer or start a case worker. Starting a case worker opens the same source card before research begins. The report list shows that task as pending, failed, or completed. **J**/**K** move the highlight. **x** deletes that case.
+On the Case Desk, type a question to search existing reports, or press **+** to choose Facts, Web, News, Domain, Social, and Identity for a new run. Space toggles a source, Enter starts, and Esc cancels. Domain-specific sources skip registration and certificate lookups without a domain. **Tab** focuses the report list. **Enter** opens a relevant passage when one is recommended, or opens the selected report workspace. Report questions remain temporary until explicitly retained. **Esc** returns to the Desk with its prompt and scroll position. **J**/**K** move the report highlight. **x** deletes the selected case after its existing confirmation flow.
 
-The report workspace has five layouts over the same saved graph: **g** Cockpit (entities, ego boxes, link ledger), **q** Clusters (four type regions, degree-ranked anchors, missing co-occurrence links), **p** Path (FROM/TO pins and up to five paths within four hops), **m** Matrix (group counts and up to 24 entities), and **r** Ribbon (report-order evidence and extraction decisions). **Left/Right** switch layouts, **/** opens entity Find, **Enter** finishes Find, and **Tab** cycles workspace focus and Ask. In Cockpit, **[ / ]** cycle links and detail **j/k** pages ego boxes. In Path, **f/t** set pins and detail **j/k** selects paths. Matrix uses **hjkl** and **Enter** returns to Cockpit. Ribbon uses **h/l** to scrub report lines and **d** to show rejected candidates. **?** opens workspace help. Research commands and Brain editing are Desk-only.
+The report workspace has five layouts over the same saved graph: **g** Cockpit, **q** Clusters, **p** Path, **m** Matrix, and **r** Ribbon. **Left/Right** switch layouts, **/** opens entity Find, and **Tab** cycles workspace focus and Ask. Path exposes each hop's evidence; Matrix retains adjacency and adds theme-by-report coverage with **c**; Ribbon scrubs report text and accepted/rejected extraction. **i** opens the shared cached evidence inspector. Graph links derived from text proximity are labeled co-occurrence, never ownership or verified identity. **?** opens workspace help.
 
 The agent loop supports independently selected Writer and Tools connections.
 Grok and OpenRouter use the OpenAI-compatible HTTP API. OpenAI subscription

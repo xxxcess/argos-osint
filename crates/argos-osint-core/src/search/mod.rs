@@ -3,11 +3,11 @@
 //! social, and identity. One adapter that is down does not fail the case.
 //! Page fetches still refuse loopback, link-local, and private addresses.
 
-mod domain;
+pub mod domain;
 mod facts;
-mod identity;
+pub mod identity;
 mod news;
-mod query;
+pub mod query;
 mod social;
 mod web;
 
@@ -27,6 +27,18 @@ pub use web::{parse_ddg_html, parse_ddg_instant};
 
 pub(crate) type Job =
     Pin<Box<dyn Future<Output = (&'static str, Result<Vec<SearchHit>, String>)> + Send>>;
+
+#[derive(Clone, Copy)]
+pub(crate) struct HttpPolicy {
+    pub timeout_secs: u64,
+    pub retries: usize,
+    pub rate_interval_ms: u64,
+    pub cache_secs: u64,
+}
+tokio::task_local! {static HTTP_POLICY:HttpPolicy;}
+pub(crate) async fn with_http_policy<T>(policy: HttpPolicy, future: impl Future<Output = T>) -> T {
+    HTTP_POLICY.scope(policy, future).await
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -540,6 +552,7 @@ pub(crate) fn redact(message: &str, secret: &str) -> String {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct RawHttp {
     pub status: u16,
     pub bytes: Vec<u8>,
@@ -561,7 +574,9 @@ pub(crate) async fn get_json_headers(url: &str, headers: &[(&str, &str)]) -> Res
         .filter(|(name, _)| !name.eq_ignore_ascii_case("accept"))
         .collect();
     let raw = request(reqwest::Method::GET, url, None, accept, &filtered).await?;
-    parse_json_ok(raw)
+    crate::workers::spawn_blocking(move || parse_json_ok(raw))
+        .await
+        .map_err(|_| "JSON parser worker failed".to_string())?
 }
 
 pub(crate) async fn post_json(
@@ -577,7 +592,9 @@ pub(crate) async fn post_json(
         headers,
     )
     .await?;
-    parse_json_ok(raw)
+    crate::workers::spawn_blocking(move || parse_json_ok(raw))
+        .await
+        .map_err(|_| "JSON parser worker failed".to_string())?
 }
 
 pub(crate) fn parse_json_ok(raw: RawHttp) -> Result<Value, String> {
@@ -594,29 +611,192 @@ pub(crate) async fn request(
     accept: &str,
     headers: &[(&str, &str)],
 ) -> Result<RawHttp, String> {
-    let url = check_public_http(url)?;
-    let client = client()?;
-    let mut req = match method {
-        reqwest::Method::POST => client.post(url.as_str()),
-        _ => client.get(url.as_str()),
+    request_limited(method, url, body, accept, headers, 512_000).await
+}
+
+pub(crate) async fn request_limited(
+    method: reqwest::Method,
+    url: &str,
+    body: Option<&Value>,
+    accept: &str,
+    headers: &[(&str, &str)],
+    output_limit: usize,
+) -> Result<RawHttp, String> {
+    use std::{
+        collections::HashMap,
+        hash::{Hash, Hasher},
+        sync::{Arc, OnceLock},
     };
-    if let Some(body) = body {
-        req = req.json(body);
+    use tokio::sync::{Mutex, Semaphore};
+    static GLOBAL: OnceLock<Semaphore> = OnceLock::new();
+    type ProviderLocks = Mutex<HashMap<String, Arc<Mutex<std::time::Instant>>>>;
+    static HOSTS: OnceLock<ProviderLocks> = OnceLock::new();
+    type Cache = Mutex<HashMap<u64, (std::time::Instant, RawHttp)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let policy = HTTP_POLICY
+        .try_with(|policy| *policy)
+        .unwrap_or(HttpPolicy {
+            timeout_secs: 25,
+            retries: 1,
+            rate_interval_ms: 100,
+            cache_secs: 60,
+        });
+    let mut parsed = Url::parse(url).map_err(|_| "Invalid public URL")?;
+    let initial_host = parsed.host_str().ok_or("Missing host")?.to_string();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    headers.hash(&mut hasher);
+    body.map(|b| b.to_string()).hash(&mut hasher);
+    method.as_str().hash(&mut hasher);
+    output_limit.hash(&mut hasher);
+    let key = hasher.finish();
+    let cache = CACHE.get_or_init(Default::default);
+    let lock = {
+        HOSTS
+            .get_or_init(Default::default)
+            .lock()
+            .await
+            .entry(initial_host.clone())
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(
+                    std::time::Instant::now() - Duration::from_secs(3600),
+                ))
+            })
+            .clone()
+    };
+    let mut last = lock.lock().await;
+    if let Some((time, result)) = cache.lock().await.get(&key) {
+        if time.elapsed() < Duration::from_secs(policy.cache_secs) {
+            return Ok(result.clone());
+        }
     }
-    req = req.header(reqwest::header::ACCEPT, accept);
-    for (name, value) in headers {
-        req = req.header(*name, *value);
+    let _global = GLOBAL
+        .get_or_init(|| Semaphore::new(8))
+        .acquire()
+        .await
+        .map_err(|_| "HTTP queue closed")?;
+    let minimum_interval = if initial_host == "api.xposedornot.com" {
+        Duration::from_secs(150)
+    } else if initial_host == "leakcheck.io" {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_millis(100)
+    };
+    let interval =
+        minimum_interval.max(Duration::from_millis(policy.rate_interval_ms.min(3600000)));
+    let due = *last + interval;
+    if let Some(wait) = due.checked_duration_since(std::time::Instant::now()) {
+        tokio::time::sleep(wait).await;
     }
-    let resp = req.send().await.map_err(|err| err.to_string())?;
-    let status = resp.status().as_u16();
-    let bytes = resp.bytes().await.map_err(|err| err.to_string())?;
-    if bytes.len() > 512_000 {
-        return Err("response too large".into());
+    *last = std::time::Instant::now();
+    let original_host = initial_host;
+    let mut retries = 0;
+    for hop in 0..7 {
+        if !matches!(parsed.scheme(), "http" | "https")
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err("Only public HTTP URLs without credentials are allowed".into());
+        }
+        let host = parsed
+            .host_str()
+            .ok_or("Missing host")?
+            .trim_matches(['[', ']'])
+            .to_string();
+        let port = parsed.port_or_known_default().ok_or("Missing port")?;
+        if !matches!(port, 80 | 443)
+            || host == "localhost"
+            || host.ends_with(".local")
+            || host.ends_with(".internal")
+        {
+            return Err("Private targets and nonstandard ports are refused".into());
+        }
+        let addresses: Vec<_> = tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|_| "Public target DNS lookup failed")?
+            .collect();
+        if addresses.is_empty() || addresses.iter().any(|a| ip_blocked(a.ip())) {
+            return Err("Target resolves to private or reserved addresses".into());
+        }
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(policy.timeout_secs.clamp(1, 600)))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(&host, &addresses)
+            .user_agent("argos-osint/0.1 (public research)")
+            .build()
+            .map_err(|_| "HTTP client unavailable")?;
+        let mut req = client
+            .request(method.clone(), parsed.as_str())
+            .header(reqwest::header::ACCEPT, accept);
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let mut resp = req.send().await.map_err(|_| "Public HTTP request failed")?;
+        if resp.status().is_redirection() {
+            if hop >= 4 {
+                return Err("Redirect limit reached".into());
+            }
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("Redirect without Location")?;
+            let next = parsed.join(location).map_err(|_| "Invalid redirect")?;
+            if (!headers.is_empty()
+                || body.is_some()
+                || parsed.query().is_some_and(|q| q.contains("key=")))
+                && next.host_str() != Some(original_host.as_str())
+            {
+                return Err("Cross-host redirect with credentials or request body refused".into());
+            }
+            parsed = next;
+            continue;
+        }
+        if resp.status().as_u16() == 429 {
+            let delay = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    v.parse::<u64>().ok().or_else(|| {
+                        chrono::DateTime::parse_from_rfc2822(v).ok().map(|at| {
+                            at.signed_duration_since(chrono::Utc::now())
+                                .num_seconds()
+                                .max(1) as u64
+                        })
+                    })
+                })
+                .unwrap_or(2);
+            *last = std::time::Instant::now() + Duration::from_secs(delay.min(3600));
+            if retries >= policy.retries.min(3) || delay > 10 {
+                return Err(format!("http 429: rate-limited; Retry-After {delay}s"));
+            }
+            retries += 1;
+            tokio::time::sleep(Duration::from_secs(delay.max(1))).await;
+            continue;
+        }
+        let status = resp.status().as_u16();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|_| "Response stream failed")? {
+            if bytes.len() + chunk.len() > output_limit {
+                return Err("response too large".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let raw = RawHttp { status, bytes };
+        if (200..300).contains(&status) && raw.bytes.len() <= 512000 {
+            let mut entries = cache.lock().await;
+            if entries.len() >= 64 {
+                entries.clear();
+            }
+            entries.insert(key, (std::time::Instant::now(), raw.clone()));
+        }
+        return Ok(raw);
     }
-    Ok(RawHttp {
-        status,
-        bytes: bytes.to_vec(),
-    })
+    Err("Request retry/redirect limit reached".into())
 }
 
 async fn template_source(source: &OsintSource, query: &str) -> Result<Vec<SearchHit>, String> {
@@ -639,39 +819,25 @@ async fn template_source(source: &OsintSource, query: &str) -> Result<Vec<Search
 }
 
 pub async fn fetch_page(raw: &str) -> Result<String, String> {
-    let url = check_public_http(raw)?;
-    let client = client()?;
-    let resp = client
-        .get(url.as_str())
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("{} {}", url, resp.status()));
+    let raw = request(
+        reqwest::Method::GET,
+        raw,
+        None,
+        "text/html, text/plain, application/json",
+        &[],
+    )
+    .await?;
+    if !(200..300).contains(&raw.status) {
+        return Err(format!("http {}", raw.status));
     }
-    let ctype = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    if !(ctype.starts_with("text/")
-        || ctype.contains("json")
-        || ctype.contains("xml")
-        || ctype.is_empty())
-    {
-        return Err(format!("refusing non-text content type {ctype}"));
-    }
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    let slice = &bytes[..bytes.len().min(48_000)];
+    let slice = &raw.bytes[..raw.bytes.len().min(48_000)];
     let text = String::from_utf8_lossy(slice);
-    let plain = if ctype.contains("html") || text.contains("<html") {
+    let plain = if text.contains('<') {
         strip_tags(&text)
     } else {
         text.to_string()
     };
-    let collapsed = collapse_ws(&plain);
-    Ok(collapsed.chars().take(8_000).collect())
+    Ok(collapse_ws(&plain).chars().take(8_000).collect())
 }
 
 pub fn check_public_http(raw: &str) -> Result<Url, String> {
@@ -752,15 +918,6 @@ fn is_ula(v6: std::net::Ipv6Addr) -> bool {
 
 fn is_link_local_v6(v6: std::net::Ipv6Addr) -> bool {
     (v6.segments()[0] & 0xffc0) == 0xfe80
-}
-
-fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(25))
-        .redirect(reqwest::redirect::Policy::limited(4))
-        .user_agent("argos-osint/0.1 (public research)")
-        .build()
-        .map_err(|e| e.to_string())
 }
 
 pub fn strip_tags(html: &str) -> String {

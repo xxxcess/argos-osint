@@ -37,7 +37,7 @@ pub(super) fn clean_document(doc: &CorpusDoc) -> (Vec<Occurrence>, Vec<TnaDecisi
             && (!frontmatter || explicit_theme)
             && (matches!(
                 section.to_ascii_lowercase().as_str(),
-                "evidence" | "requirement" | "analyst note" | "themes" | "theme"
+                "evidence" | "analyst note" | "themes" | "theme" | "findings" | "observations"
             ))
             && ![
                 "- url:",
@@ -75,6 +75,30 @@ pub(super) fn clean_document(doc: &CorpusDoc) -> (Vec<Occurrence>, Vec<TnaDecisi
         }
         let working = String::from_utf8(working).expect("mask preserves UTF-8");
         let mut candidates = extract_occurrences(&working);
+        // Conservative contextual themes retain exact source spans outside typed fields.
+        if !explicit_theme && section.eq_ignore_ascii_case("Evidence") {
+            for theme in [
+                "supply chain compromise",
+                "credential theft",
+                "data breach",
+                "cyber security",
+                "ransomware",
+                "disinformation",
+                "money laundering",
+                "human trafficking",
+                "sanctions evasion",
+                "election interference",
+                "phishing",
+            ] {
+                for (start, _) in working.to_ascii_lowercase().match_indices(theme) {
+                    candidates.push(Occurrence {
+                        kind: TnaNodeKind::Topic,
+                        label: working[start..start + theme.len()].into(),
+                        start,
+                    });
+                }
+            }
+        }
         if explicit_theme || matches!(section.to_ascii_lowercase().as_str(), "theme" | "themes") {
             let value_start = if explicit_theme {
                 line.find(':').unwrap() + 1
@@ -198,12 +222,10 @@ fn host(raw: &str) -> Option<String> {
     if labels.len() < 2
         || name.len() > 253
         || name.parse::<IpAddr>().is_ok()
-        || !((tld.len() == 2 && !matches!(tld, "md" | "js"))
-            || [
-                "com", "org", "net", "edu", "gov", "mil", "int", "info", "biz", "online", "site",
-                "app", "dev", "social", "io", "ai", "cloud", "tech", "xyz", "example",
-            ]
-            .contains(&tld))
+        || !(tld == "example"
+            || include_str!("tlds.txt")
+                .lines()
+                .any(|s| s.eq_ignore_ascii_case(tld)))
         || !labels.iter().all(|s| {
             !s.is_empty()
                 && s.len() <= 63
@@ -264,6 +286,9 @@ fn normalize(item: &Occurrence, line: &str, explicit_theme: bool) -> Option<Stri
             } else if before.ends_with(['-', '_', '.']) {
                 return None;
             }
+            if line.trim_start().starts_with("Files ") && label.ends_with(".md") {
+                return None;
+            }
             host(label)
         }
         TnaNodeKind::Ip => label
@@ -295,7 +320,27 @@ fn normalize(item: &Occurrence, line: &str, explicit_theme: bool) -> Option<Stri
         }
         TnaNodeKind::Person | TnaNodeKind::Org | TnaNodeKind::Topic => {
             if item.kind == TnaNodeKind::Topic
-                && (!explicit_theme || item.start < line.find(':').map(|p| p + 1).unwrap_or(0))
+                && explicit_theme
+                && item.start < line.find(':').map(|p| p + 1).unwrap_or(0)
+            {
+                return None;
+            }
+            if item.kind == TnaNodeKind::Topic
+                && !explicit_theme
+                && ![
+                    "supply chain compromise",
+                    "credential theft",
+                    "data breach",
+                    "cyber security",
+                    "ransomware",
+                    "disinformation",
+                    "money laundering",
+                    "human trafficking",
+                    "sanctions evasion",
+                    "election interference",
+                    "phishing",
+                ]
+                .contains(&label.to_ascii_lowercase().as_str())
             {
                 return None;
             }
@@ -421,8 +466,27 @@ fn normalize(item: &Occurrence, line: &str, explicit_theme: bool) -> Option<Stri
             ];
             if words
                 .iter()
-                .any(|w| STOP.contains(&w.to_ascii_lowercase().as_str()))
+                .all(|w| STOP.contains(&w.to_ascii_lowercase().as_str()))
             {
+                return None;
+            }
+            if words.first().is_some_and(|w| {
+                [
+                    "who",
+                    "what",
+                    "review",
+                    "public",
+                    "generic",
+                    "no",
+                    "unknown",
+                    "selected",
+                    "case",
+                    "report",
+                    "analyst",
+                    "strategic",
+                ]
+                .contains(&w.to_ascii_lowercase().as_str())
+            }) {
                 return None;
             }
             if item.kind == TnaNodeKind::Org

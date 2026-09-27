@@ -12,6 +12,8 @@ use crate::paths::{auth_path, ensure_home};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuthFile {
     #[serde(default)]
+    pub research: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     pub text: Option<ProviderSecret>,
     #[serde(default)]
     pub voice: Option<ProviderSecret>,
@@ -55,6 +57,23 @@ pub struct GmailSecret {
 }
 
 impl AuthFile {
+    pub fn redact(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        for secret in self
+            .research
+            .values()
+            .map(String::as_str)
+            .chain(self.accounts.values().filter_map(|s| s.api_key.as_deref()))
+            .chain(self.text.iter().filter_map(|s| s.api_key.as_deref()))
+            .chain(self.voice.iter().filter_map(|s| s.api_key.as_deref()))
+            .chain(self.gmail.iter().map(|s| s.app_password.as_str()))
+        {
+            if !secret.is_empty() {
+                result = result.replace(secret, "[redacted]");
+            }
+        }
+        result
+    }
     /// Resolve an account without copying another vendor's credentials.
     pub fn account(&self, kind: &str) -> Option<ProviderSecret> {
         let kind = crate::provider::normalize_kind(kind);

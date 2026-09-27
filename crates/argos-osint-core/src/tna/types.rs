@@ -73,6 +73,16 @@ impl TnaCluster {
             Self::FiledReports => "Filed reports",
         }
     }
+
+    /// Analyst-facing name. Campaign is org+topic co-occurrence, not a detected campaign.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Infrastructure => "Infrastructure",
+            Self::Campaign => "Themes / orgs",
+            Self::Identity => "Identity",
+            Self::FiledReports => "Filed reports",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

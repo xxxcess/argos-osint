@@ -1793,33 +1793,41 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
 
     let focus = app.tna_focus_id.as_deref();
     for (box_i, item) in items.iter().enumerate() {
-        let selected = match item {
+        let (selected, is_focus) = match item {
             TnaDisplayItem::Real { idx } => {
-                if app.tna_view == TnaView::Graph {
+                let id = snap.nodes[*idx].id.as_str();
+                let focused = focus == Some(id);
+                let selected = if app.tna_view == TnaView::Graph {
                     box_i == app.tna_sel
                 } else {
-                    focus.map(|id| snap.nodes[*idx].id == id).unwrap_or(false)
-                }
+                    focused
+                };
+                (selected, focused)
             }
             TnaDisplayItem::Super { hub_id, .. } => {
-                if app.tna_view == TnaView::Graph {
+                let focused = focus == Some(hub_id.as_str());
+                let selected = if app.tna_view == TnaView::Graph {
                     box_i == app.tna_sel
                 } else {
-                    focus == Some(hub_id.as_str())
-                }
+                    focused
+                };
+                (selected, focused)
             }
         };
         match item {
             TnaDisplayItem::Real { idx } => {
                 let node = &snap.nodes[*idx];
                 let mut color = cluster_color(node.cluster);
-                if selected {
+                if selected || is_focus {
                     color = theme::TEXT;
                 }
-                titles.push(short_label(&node.label, 12));
+                let mark = if is_focus { "*" } else { "" };
+                titles.push(format!("{mark}{}", short_label(&node.label, 11)));
                 let mut style = Style::default().fg(color);
-                if selected {
-                    style = style.add_modifier(Modifier::BOLD);
+                if is_focus {
+                    style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+                } else if selected {
+                    style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
                 }
                 border_styles.push(style);
                 id_to_box.insert(node.id.clone(), box_i);
@@ -1831,13 +1839,16 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
                 let mut color = hub
                     .map(|n| cluster_color(n.cluster))
                     .unwrap_or(theme::DIM);
-                if selected {
+                if selected || is_focus {
                     color = theme::TEXT;
                 }
-                titles.push(format!("▣×{count}"));
+                let mark = if is_focus { "*" } else { "" };
+                titles.push(format!("{mark}▣×{count}"));
                 let mut style = Style::default().fg(color);
-                if selected {
-                    style = style.add_modifier(Modifier::BOLD);
+                if is_focus {
+                    style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+                } else if selected {
+                    style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
                 }
                 border_styles.push(style);
             }
@@ -1901,30 +1912,50 @@ fn draw_tna_ego_boxes(frame: &mut Frame, app: &App, area: Rect) -> bool {
         if zone.width == 0 || zone.height == 0 {
             continue;
         }
-        let body = match &items[idx] {
+        let (body, is_focus, zone_selected) = match &items[idx] {
             TnaDisplayItem::Real { idx: ni } => {
                 let n = &snap.nodes[*ni];
-                format!("{} {}", tna_glyph_for_kind(n.kind), n.kind.as_str())
-            }
-            TnaDisplayItem::Super { count, .. } => format!("hub · {count}"),
-        };
-        let zone_selected = match &items[idx] {
-            TnaDisplayItem::Real { idx: ni } => {
-                if app.tna_view == TnaView::Graph {
+                let focused = focus.map(|id| n.id == id).unwrap_or(false);
+                let selected = if app.tna_view == TnaView::Graph {
                     idx == app.tna_sel
                 } else {
-                    focus.map(|id| snap.nodes[*ni].id == id).unwrap_or(false)
-                }
+                    focused
+                };
+                let tag = if focused {
+                    "FOCUS"
+                } else if selected {
+                    "SEL"
+                } else {
+                    n.kind.as_str()
+                };
+                (
+                    format!("{} {tag}", tna_glyph_for_kind(n.kind)),
+                    focused,
+                    selected,
+                )
             }
-            TnaDisplayItem::Super { hub_id, .. } => {
-                if app.tna_view == TnaView::Graph {
+            TnaDisplayItem::Super { hub_id, count, .. } => {
+                let focused = focus == Some(hub_id.as_str());
+                let selected = if app.tna_view == TnaView::Graph {
                     idx == app.tna_sel
                 } else {
-                    focus == Some(hub_id.as_str())
-                }
+                    focused
+                };
+                let tag = if focused {
+                    "FOCUS"
+                } else if selected {
+                    "SEL"
+                } else {
+                    "hub"
+                };
+                (format!("{tag} · {count}"), focused, selected)
             }
         };
-        let style = if zone_selected {
+        let style = if is_focus {
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else if zone_selected {
             Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
         } else {
             theme::dim()
@@ -2078,7 +2109,7 @@ fn draw_tna_outline(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(format!(
                 "{} {}",
                 tna_glyph_for_cluster(cluster),
-                cluster.as_str()
+                cluster.label()
             ))
             .style(Style::default().fg(cluster_color(cluster)).add_modifier(Modifier::BOLD)),
         );
@@ -2135,8 +2166,24 @@ fn draw_tna_outline(frame: &mut Frame, app: &App, area: Rect) {
     if lines.is_empty() {
         lines.push(Line::from("No nodes match.").style(theme::dim()));
     }
+    let selected_line = lines.iter().position(|line| {
+        line.spans.iter().any(|s| s.content.contains('▶'))
+    });
+    let height = inner.height as usize;
+    let skip = if let Some(sel) = selected_line {
+        if height == 0 || lines.len() <= height {
+            0
+        } else {
+            let mid = height / 2;
+            sel.saturating_sub(mid)
+                .min(lines.len().saturating_sub(height))
+        }
+    } else {
+        0
+    };
+    let shown: Vec<Line<'static>> = lines.into_iter().skip(skip).collect();
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Paragraph::new(shown).wrap(Wrap { trim: false }),
         inner,
     );
 }
@@ -2222,7 +2269,7 @@ fn draw_tna_table(frame: &mut Frame, app: &mut App, area: Rect) {
 fn cluster_abbr(cluster: TnaCluster) -> &'static str {
     match cluster {
         TnaCluster::Infrastructure => "Infra",
-        TnaCluster::Campaign => "Camp",
+        TnaCluster::Campaign => "Theme",
         TnaCluster::Identity => "Ident",
         TnaCluster::FiledReports => "Filed",
     }
@@ -2460,6 +2507,9 @@ fn tna_sidebar_lines(app: &App, height: usize) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
     lines.push(Line::from("Topical Clusters").style(theme::accent()));
+    lines.push(
+        Line::from("  type buckets, not detected campaigns").style(theme::dim()),
+    );
     for summary in &snap.clusters {
         if !collection && summary.cluster == TnaCluster::FiledReports {
             continue;
@@ -2469,7 +2519,7 @@ fn tna_sidebar_lines(app: &App, height: usize) -> Vec<Line<'static>> {
             Line::from(format!(
                 "  {} {:<14} {:>3}",
                 tna_glyph_for_cluster(summary.cluster),
-                summary.cluster.as_str(),
+                summary.cluster.label(),
                 summary.node_count
             ))
             .style(style),
@@ -2477,6 +2527,9 @@ fn tna_sidebar_lines(app: &App, height: usize) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(""));
     lines.push(Line::from("Strategic Anchors").style(theme::accent()));
+    lines.push(
+        Line::from("  highest degree in this snapshot").style(theme::dim()),
+    );
     let max_score = snap
         .anchors
         .iter()
@@ -2507,6 +2560,9 @@ fn tna_sidebar_lines(app: &App, height: usize) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(""));
     lines.push(Line::from("Structural Gaps").style(theme::accent()));
+    lines.push(
+        Line::from("  cluster pairs with no shared edge").style(theme::dim()),
+    );
     if snap.gaps.is_empty() {
         lines.push(Line::from("  none".to_string()).style(theme::dim()));
     } else {
@@ -2514,13 +2570,13 @@ fn tna_sidebar_lines(app: &App, height: usize) -> Vec<Line<'static>> {
             lines.push(
                 Line::from(format!(
                     "  ! {} ↔ {}",
-                    gap.cluster_a.as_str(),
-                    gap.cluster_b.as_str()
+                    gap.cluster_a.label(),
+                    gap.cluster_b.label()
                 ))
                 .style(Style::default().fg(theme::RED).bg(theme::BG)),
             );
             lines.push(
-                Line::from("    proximity, no edge".to_string()).style(theme::dim()),
+                Line::from("    no co-occurrence edge".to_string()).style(theme::dim()),
             );
         }
     }
@@ -2549,10 +2605,10 @@ fn draw_network_footer(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Esc desk"
     };
-    let left = if app.tna_view == TnaView::Table {
-        format!("j/k pane  Tab list/detail  / find  v views  {esc}")
-    } else {
-        format!("hjkl  / find  v views  {esc}")
+    let left = match app.tna_view {
+        TnaView::Table => format!("j/k pane  Tab list/detail  / find  v views  {esc}"),
+        TnaView::Graph => format!("←/→ neighbor  Enter focus  Shift+arrows spatial  / find  v views  {esc}"),
+        TnaView::Outline => format!("j/k list  / find  v views  {esc}"),
     };
     let mid = format!("{view} · {scope} {n}n/{e}e");
     let model = app.active_model();

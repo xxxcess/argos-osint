@@ -369,6 +369,11 @@ pub enum AppMsg {
         report_id: String,
         fact: String,
     },
+    TnaReady {
+        targeted: bool,
+        report_id: Option<String>,
+        result: Result<TnaSnapshot, String>,
+    },
 }
 
 pub struct App {
@@ -489,6 +494,10 @@ pub struct App {
     /// Hit areas for Table master–detail (wheel / focus).
     pub tna_table_list_area: Rect,
     pub tna_table_detail_area: Rect,
+    /// File-backed DB path so TNA rebuilds can run on a second SQLite connection.
+    /// Tests use an in-memory store and leave this `None` (sync rebuild).
+    tna_db_path: Option<PathBuf>,
+    tna_rebuild_gen: u64,
 }
 
 impl App {
@@ -508,6 +517,7 @@ impl App {
         };
         let auth = AuthFile::load().unwrap_or_default();
         let mut app = Self::from_parts(store, settings, auth)?;
+        app.tna_db_path = Some(paths::db_path());
         if let Some(err) = config_error {
             app.log_event("system", &format!("config load failed: {err}"));
         }
@@ -602,7 +612,7 @@ impl App {
             tna_sel: 0,
             tna_side_scroll: 0,
             tna_rebuilding: false,
-            tna_view: TnaView::Graph,
+            tna_view: TnaView::Table,
             tna_expanded: HashSet::new(),
             tna_focus_id: None,
             tna_table_state: TableState::default().with_selected(Some(0)),
@@ -611,6 +621,8 @@ impl App {
             tna_detail_scroll_state: ScrollbarState::new(0),
             tna_table_list_area: Rect::default(),
             tna_table_detail_area: Rect::default(),
+            tna_db_path: None,
+            tna_rebuild_gen: 0,
         };
         app.reload_lists()?;
         app.load_transcript(&app.session_id());
@@ -1321,6 +1333,11 @@ impl App {
             },
             AppMsg::Research { case_id, result } => self.finish_research(case_id, result),
             AppMsg::Insight { report_id, fact } => self.store_report_insight(report_id, fact),
+            AppMsg::TnaReady {
+                targeted,
+                report_id,
+                result,
+            } => self.on_tna_ready(targeted, report_id, result),
             AppMsg::GmailTest(result) => match result {
                 Ok(text) => {
                     self.status = "gmail ok".into();
@@ -1518,7 +1535,6 @@ impl App {
             self.tna_find = None;
             self.tna_sel = 0;
             self.tna_side_scroll = 0;
-            self.tna_view = TnaView::Graph;
             self.tna_expanded.clear();
             self.tna_focus_id = None;
             self.tna_detail_scroll = 0;
@@ -2121,21 +2137,24 @@ impl App {
         }
     }
 
-    /// Update egocentric focus and re-pin selection index in the new display list.
-    fn pin_tna_selection(&mut self, item: Option<TnaDisplayItem>) {
+    /// Re-pin selection index in the display list. When `move_focus` is set,
+    /// the selected node becomes the egocentric center (rebuilds the 16-box view).
+    fn pin_tna_selection(&mut self, item: Option<TnaDisplayItem>, move_focus: bool) {
         let Some(item) = item else {
             return;
         };
-        match &item {
-            TnaDisplayItem::Real { idx } => {
-                if let Some(snap) = self.tna_snapshot() {
-                    if let Some(n) = snap.nodes.get(*idx) {
-                        self.tna_focus_id = Some(n.id.clone());
+        if move_focus {
+            match &item {
+                TnaDisplayItem::Real { idx } => {
+                    if let Some(snap) = self.tna_snapshot() {
+                        if let Some(n) = snap.nodes.get(*idx) {
+                            self.tna_focus_id = Some(n.id.clone());
+                        }
                     }
                 }
-            }
-            TnaDisplayItem::Super { hub_id, .. } => {
-                self.tna_focus_id = Some(hub_id.clone());
+                TnaDisplayItem::Super { hub_id, .. } => {
+                    self.tna_focus_id = Some(hub_id.clone());
+                }
             }
         }
         if self.tna_view != TnaView::Graph {
@@ -2347,16 +2366,67 @@ impl App {
         if self.tna_rebuilding {
             return;
         }
-        if self.chat_report.is_some() {
-            if force || self.tna_report.is_none() {
-                self.spawn_tna_rebuild(true);
+        if let Some(id) = self.chat_report.clone() {
+            if !force {
+                if self.tna_report.is_some() {
+                    return;
+                }
+                if let Ok(Some(snap)) = self.store.get_tna_graph(&report_key(&id)) {
+                    self.tna_report = Some(snap);
+                    self.clamp_tna_sel();
+                    return;
+                }
             }
-        } else if force || self.tna_desk.is_none() {
+            self.spawn_tna_rebuild(true);
+        } else if !force {
+            if self.tna_desk.is_some() {
+                return;
+            }
+            if let Ok(Some(snap)) = self.store.get_tna_graph(desk_key()) {
+                self.tna_desk = Some(snap);
+                self.clamp_tna_sel();
+                return;
+            }
+            self.spawn_tna_rebuild(false);
+        } else {
             self.spawn_tna_rebuild(false);
         }
     }
 
     fn spawn_tna_rebuild(&mut self, targeted: bool) {
+        if targeted && self.chat_report.is_none() {
+            return;
+        }
+        if let Some(path) = self.tna_db_path.clone() {
+            self.tna_rebuilding = true;
+            self.tna_rebuild_gen = self.tna_rebuild_gen.saturating_add(1);
+            let report_id = if targeted {
+                self.chat_report.clone()
+            } else {
+                None
+            };
+            let tx = self.tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let opened = Store::open(&path).map_err(|err| err.to_string());
+                let result = opened.and_then(|store| {
+                    if let Some(id) = report_id.as_deref() {
+                        tna::rebuild_for_report(&store, id).map_err(|err| err.to_string())
+                    } else {
+                        tna::rebuild_collection(&store).map_err(|err| err.to_string())
+                    }
+                });
+                let _ = tx.send(AppMsg::TnaReady {
+                    targeted,
+                    report_id,
+                    result,
+                });
+            });
+            return;
+        }
+        self.rebuild_tna_sync(targeted);
+    }
+
+    fn rebuild_tna_sync(&mut self, targeted: bool) {
         self.tna_rebuilding = true;
         if targeted {
             if let Some(id) = self.chat_report.clone() {
@@ -2375,7 +2445,72 @@ impl App {
         self.clamp_tna_sel();
     }
 
+    fn on_tna_ready(
+        &mut self,
+        targeted: bool,
+        report_id: Option<String>,
+        result: Result<TnaSnapshot, String>,
+    ) {
+        self.tna_rebuilding = false;
+        match result {
+            Ok(snap) => {
+                if targeted {
+                    if report_id.as_deref() == self.chat_report.as_deref() {
+                        self.tna_report = Some(snap);
+                    }
+                } else {
+                    self.tna_desk = Some(snap);
+                }
+            }
+            Err(err) => self.log_event("task", &format!("tna rebuild failed: {err}")),
+        }
+        self.clamp_tna_sel();
+    }
+
     fn after_report_filed(&mut self, report_id: &str) {
+        if let Some(path) = self.tna_db_path.clone() {
+            self.tna_rebuilding = true;
+            let id = report_id.to_string();
+            let tx = self.tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let opened = Store::open(&path).map_err(|err| err.to_string());
+                match opened.and_then(|store| {
+                    tna::rebuild_after_file(&store, &id).map_err(|err| err.to_string())?;
+                    let collection = store
+                        .get_tna_graph(desk_key())
+                        .map_err(|err| err.to_string())?;
+                    let targeted = store
+                        .get_tna_graph(&report_key(&id))
+                        .map_err(|err| err.to_string())?;
+                    Ok((collection, targeted))
+                }) {
+                    Ok((collection, targeted)) => {
+                        if let Some(snap) = collection {
+                            let _ = tx.send(AppMsg::TnaReady {
+                                targeted: false,
+                                report_id: None,
+                                result: Ok(snap),
+                            });
+                        }
+                        if let Some(snap) = targeted {
+                            let _ = tx.send(AppMsg::TnaReady {
+                                targeted: true,
+                                report_id: Some(id),
+                                result: Ok(snap),
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.send(AppMsg::TnaReady {
+                            targeted: false,
+                            report_id: None,
+                            result: Err(err),
+                        });
+                    }
+                }
+            });
+            return;
+        }
         let _ = tna::rebuild_after_file(&self.store, report_id);
         if let Ok(Some(snap)) = self.store.get_tna_graph(desk_key()) {
             self.tna_desk = Some(snap);
@@ -2391,6 +2526,29 @@ impl App {
     }
 
     fn after_report_deleted(&mut self, report_id: &str) {
+        if let Some(path) = self.tna_db_path.clone() {
+            self.tna_report = None;
+            self.tna_rebuilding = true;
+            let id = report_id.to_string();
+            let tx = self.tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = Store::open(&path)
+                    .and_then(|store| {
+                        tna::rebuild_after_delete(&store, &id)?;
+                        let snap = store.get_tna_graph(desk_key())?.unwrap_or_else(|| {
+                            TnaSnapshot::empty(argos_osint_core::tna::TnaScope::Collection)
+                        });
+                        Ok(snap)
+                    })
+                    .map_err(|err| err.to_string());
+                let _ = tx.send(AppMsg::TnaReady {
+                    targeted: false,
+                    report_id: None,
+                    result,
+                });
+            });
+            return;
+        }
         let _ = tna::rebuild_after_delete(&self.store, report_id);
         self.tna_report = None;
         if let Ok(Some(snap)) = self.store.get_tna_graph(desk_key()) {
@@ -2449,19 +2607,27 @@ impl App {
                 if self.tna_view == TnaView::Table {
                     // Focus sync only — hub expand stays Graph (#18/#19).
                     let item = self.tna_selected_item();
-                    self.pin_tna_selection(item);
+                    self.pin_tna_selection(item, true);
                 } else {
                     self.tna_activate_selection();
                 }
             }
             KeyCode::Char('h') | KeyCode::Left => {
                 if self.tna_view == TnaView::Graph {
-                    self.walk_tna_node(-1, 0);
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.walk_tna_node(-1, 0);
+                    } else {
+                        self.walk_tna_neighbor(-1);
+                    }
                 }
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 if self.tna_view == TnaView::Graph {
-                    self.walk_tna_node(1, 0);
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.walk_tna_node(1, 0);
+                    } else {
+                        self.walk_tna_neighbor(1);
+                    }
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
@@ -2471,7 +2637,11 @@ impl App {
                     self.tna_detail_scroll = self.tna_detail_scroll.saturating_sub(1);
                     self.sync_tna_detail_scroll_state();
                 } else if self.tna_view == TnaView::Graph {
-                    self.walk_tna_node(0, -1);
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.walk_tna_node(0, -1);
+                    } else {
+                        self.walk_tna_neighbor(-1);
+                    }
                 } else {
                     self.tna_step_sel(-1);
                 }
@@ -2483,7 +2653,11 @@ impl App {
                     self.tna_detail_scroll = self.tna_detail_scroll.saturating_add(1);
                     self.sync_tna_detail_scroll_state();
                 } else if self.tna_view == TnaView::Graph {
-                    self.walk_tna_node(0, 1);
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.walk_tna_node(0, 1);
+                    } else {
+                        self.walk_tna_neighbor(1);
+                    }
                 } else {
                     self.tna_step_sel(1);
                 }
@@ -2539,7 +2713,7 @@ impl App {
                     .tna_snapshot()
                     .and_then(|s| s.nodes.iter().position(|n| n.id == hub_id));
                 if let Some(idx) = hub_idx {
-                    self.pin_tna_selection(Some(TnaDisplayItem::Real { idx }));
+                    self.pin_tna_selection(Some(TnaDisplayItem::Real { idx }), true);
                 } else {
                     self.clamp_tna_sel();
                 }
@@ -2552,9 +2726,11 @@ impl App {
                 let degree = snap.nodes.get(idx).map(|n| n.degree).unwrap_or(0);
                 let threshold = tna_hub_threshold(&snap.nodes);
                 if let Some(id) = id {
-                    if degree >= threshold && self.tna_expanded.contains(&id) {
+                    if self.tna_focus_id.as_deref() != Some(id.as_str()) {
+                        self.pin_tna_selection(Some(TnaDisplayItem::Real { idx }), true);
+                    } else if degree >= threshold && self.tna_expanded.contains(&id) {
                         self.tna_expanded.remove(&id);
-                        self.pin_tna_selection(Some(TnaDisplayItem::Real { idx }));
+                        self.pin_tna_selection(Some(TnaDisplayItem::Real { idx }), true);
                     }
                 }
             }
@@ -2612,7 +2788,100 @@ impl App {
             };
             items.get(next).cloned()
         };
-        self.pin_tna_selection(next_item);
+        self.pin_tna_selection(next_item, false);
+    }
+
+    fn walk_tna_neighbor(&mut self, dir: i32) {
+        if dir == 0 {
+            return;
+        }
+        let items = self.tna_display_nodes();
+        if items.is_empty() {
+            return;
+        }
+        let next_item = {
+            let Some(snap) = self.tna_snapshot() else {
+                return;
+            };
+            let focus_id = self.tna_focus_id.clone().or_else(|| {
+                match items.get(self.tna_sel.min(items.len() - 1)) {
+                    Some(TnaDisplayItem::Real { idx }) => snap.nodes.get(*idx).map(|n| n.id.clone()),
+                    Some(TnaDisplayItem::Super { hub_id, .. }) => Some(hub_id.clone()),
+                    None => None,
+                }
+            });
+            let Some(focus_id) = focus_id else {
+                return;
+            };
+            let adj = Self::tna_adjacency(snap);
+            let mut ring: Vec<TnaDisplayItem> = Vec::new();
+            if let Some(item) = items.iter().find(|it| match it {
+                TnaDisplayItem::Real { idx } => {
+                    snap.nodes.get(*idx).map(|n| n.id.as_str()) == Some(focus_id.as_str())
+                }
+                TnaDisplayItem::Super { hub_id, .. } => *hub_id == focus_id,
+            }) {
+                ring.push(item.clone());
+            }
+            let mut neighbors: Vec<(u32, String)> = Vec::new();
+            if let Some(nbs) = adj.get(&focus_id) {
+                for nid in nbs {
+                    let weight = snap
+                        .edges
+                        .iter()
+                        .find(|e| {
+                            (e.from == focus_id && e.to == *nid)
+                                || (e.to == focus_id && e.from == *nid)
+                        })
+                        .map(|e| e.weight)
+                        .unwrap_or(0);
+                    neighbors.push((weight, nid.clone()));
+                }
+            }
+            neighbors.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            for (_, nid) in neighbors {
+                if let Some(item) = items.iter().find(|it| match it {
+                    TnaDisplayItem::Real { idx } => {
+                        snap.nodes.get(*idx).map(|n| n.id.as_str()) == Some(nid.as_str())
+                    }
+                    TnaDisplayItem::Super { hub_id, .. } => *hub_id == nid,
+                }) {
+                    if !ring.iter().any(|existing| match (existing, item) {
+                        (TnaDisplayItem::Real { idx: a }, TnaDisplayItem::Real { idx: b }) => a == b,
+                        (
+                            TnaDisplayItem::Super { hub_id: a, .. },
+                            TnaDisplayItem::Super { hub_id: b, .. },
+                        ) => a == b,
+                        _ => false,
+                    }) {
+                        ring.push(item.clone());
+                    }
+                }
+            }
+            if ring.len() < 2 {
+                ring = items.clone();
+            }
+            let cur_id = match items.get(self.tna_sel.min(items.len() - 1)) {
+                Some(TnaDisplayItem::Real { idx }) => snap.nodes.get(*idx).map(|n| n.id.clone()),
+                Some(TnaDisplayItem::Super { hub_id, .. }) => Some(hub_id.clone()),
+                None => None,
+            };
+            let cur = ring
+                .iter()
+                .position(|it| match (it, cur_id.as_deref()) {
+                    (TnaDisplayItem::Real { idx }, Some(id)) => {
+                        snap.nodes.get(*idx).map(|n| n.id.as_str()) == Some(id)
+                    }
+                    (TnaDisplayItem::Super { hub_id, .. }, Some(id)) => hub_id == id,
+                    _ => false,
+                })
+                .unwrap_or(0);
+            let n = ring.len();
+            let next = if dir < 0 { (cur + n - 1) % n } else { (cur + 1) % n };
+            ring.get(next).cloned()
+        };
+        self.pin_tna_selection(next_item, false);
+        self.sync_tna_table_ui();
     }
 
     fn on_esc(&mut self) {
@@ -4921,16 +5190,16 @@ mod tests {
         let store = Store::memory().unwrap();
         let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
         app.run_slash("/network");
-        assert_eq!(app.tna_view, TnaView::Graph);
+        assert_eq!(app.tna_view, TnaView::Table);
         assert!(app.tna_selected_real_idx().is_none() || app.tna_selected_item().is_some());
         assert!(app.tna_selected_super_hub().is_none());
         let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
         app.on_tna_key(key);
+        assert_eq!(app.tna_view, TnaView::Graph);
+        app.on_tna_key(key);
         assert_eq!(app.tna_view, TnaView::Outline);
         app.on_tna_key(key);
         assert_eq!(app.tna_view, TnaView::Table);
-        app.on_tna_key(key);
-        assert_eq!(app.tna_view, TnaView::Graph);
     }
 
     #[test]
@@ -5034,7 +5303,7 @@ mod tests {
         });
         app.run_slash("/network");
         assert_eq!(app.case_page, CasePage::Network);
-        assert_eq!(app.tna_view, TnaView::Graph);
+        assert_eq!(app.tna_view, TnaView::Table);
         assert_eq!(app.focus, Focus::Graph);
         let backend = TestBackend::new(140, 40);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -5048,9 +5317,11 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("Network") || text.contains("graph"), "{text}");
+        assert!(text.contains("Network") || text.contains("table"), "{text}");
         assert!(text.contains("TNA") || text.contains("smoke") || text.contains("alpha"), "{text}");
         let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        app.on_tna_key(key);
+        assert_eq!(app.tna_view, TnaView::Graph);
         app.on_tna_key(key);
         assert_eq!(app.tna_view, TnaView::Outline);
         terminal
@@ -5066,8 +5337,6 @@ mod tests {
         assert!(text.contains("outline"), "{text}");
         app.on_tna_key(key);
         assert_eq!(app.tna_view, TnaView::Table);
-        app.on_tna_key(key);
-        assert_eq!(app.tna_view, TnaView::Graph);
     }
 
     #[test]
@@ -5370,6 +5639,76 @@ mod tests {
         app.on_event(key(KeyCode::Char(' ')));
         assert!(!app.scope.as_ref().unwrap().web);
         assert!(app.settings.web);
+    }
+
+    #[test]
+    fn tna_network_remembers_view_and_defaults_to_table() {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        app.run_slash("/network");
+        assert_eq!(app.tna_view, TnaView::Table);
+        app.on_tna_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.tna_view, TnaView::Graph);
+        app.select_case_page(CasePage::Closed);
+        app.run_slash("/network");
+        assert_eq!(app.tna_view, TnaView::Graph);
+    }
+
+    #[test]
+    fn tna_graph_arrows_walk_neighbors_without_moving_focus() {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        app.tna_desk = Some(TnaSnapshot {
+            scope: argos_osint_core::tna::TnaScope::Collection,
+            title: "TNA · walk".into(),
+            nodes: vec![
+                TnaNode {
+                    id: "a".into(),
+                    label: "alpha".into(),
+                    kind: TnaNodeKind::Person,
+                    cluster: TnaCluster::Identity,
+                    mentions: 2,
+                    degree: 1,
+                    x: 0.2,
+                    y: 0.5,
+                },
+                TnaNode {
+                    id: "b".into(),
+                    label: "beta".into(),
+                    kind: TnaNodeKind::Domain,
+                    cluster: TnaCluster::Infrastructure,
+                    mentions: 2,
+                    degree: 1,
+                    x: 0.8,
+                    y: 0.5,
+                },
+            ],
+            edges: vec![argos_osint_core::tna::TnaEdge {
+                from: "a".into(),
+                to: "b".into(),
+                weight: 3,
+            }],
+            clusters: vec![],
+            anchors: vec![],
+            gaps: vec![],
+            built_at: "t".into(),
+        });
+        app.run_slash("/network");
+        while app.tna_view != TnaView::Graph {
+            app.on_tna_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        }
+        app.tna_focus_id = Some("a".into());
+        app.tna_sel = 0;
+        app.on_tna_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.tna_focus_id.as_deref(), Some("a"));
+        match app.tna_selected_item() {
+            Some(TnaDisplayItem::Real { idx }) => {
+                assert_eq!(app.tna_desk.as_ref().unwrap().nodes[idx].id, "b");
+            }
+            other => panic!("expected neighbor b, got {other:?}"),
+        }
+        app.on_tna_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.tna_focus_id.as_deref(), Some("b"));
     }
 }
 

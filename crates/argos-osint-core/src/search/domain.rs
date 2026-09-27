@@ -8,7 +8,8 @@ use futures_util::future::join_all;
 use serde_json::Value;
 
 use super::{
-    clip, get_json, ip_blocked, merge_adapter_results, request, tag, Job, MergeOutcome, RawHttp, SearchHit,
+    clip, get_json, ip_blocked, merge_adapter_results, request, tag, Job, MergeOutcome, RawHttp,
+    SearchHit,
 };
 
 pub async fn gather(domains: Vec<String>) -> Result<MergeOutcome, String> {

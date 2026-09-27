@@ -6,12 +6,12 @@ use std::hash::{Hash, Hasher};
 use petgraph::graph::UnGraph;
 use petgraph::visit::EdgeRef;
 
-use super::extract::{extract_occurrences, Occurrence};
-use super::types::{
-    TnaAnchor, TnaCluster, TnaClusterSummary, TnaEdge, TnaGap, TnaNode, TnaNodeKind,
-    TnaSnapshot,
-};
+use super::clean::{canonical, clean_document};
 use super::corpus::TnaCorpus;
+use super::extract::Occurrence;
+use super::types::{
+    TnaAnchor, TnaCluster, TnaClusterSummary, TnaEdge, TnaGap, TnaNode, TnaNodeKind, TnaSnapshot,
+};
 
 const WINDOW: usize = 3;
 const COLLECTION_CAP: usize = 120;
@@ -28,13 +28,15 @@ pub fn build_snapshot(corpus: &TnaCorpus) -> TnaSnapshot {
     let mut pair_weights: HashMap<(String, String), u32> = HashMap::new();
 
     for doc in &corpus.docs {
-        let occ = extract_occurrences(&doc.text);
+        let (occ, decisions) = clean_document(doc);
+        snap.decisions.extend(decisions);
         let ids = accumulate_occurrences(&occ, &mut mentions, &mut pair_weights);
         if corpus.is_collection() {
             let doc_id = node_id(TnaNodeKind::Doc, &doc.report_id);
-            let entry = mentions
-                .entry(doc_id.clone())
-                .or_insert((TnaNodeKind::Doc, doc.title.clone(), 0));
+            let entry =
+                mentions
+                    .entry(doc_id.clone())
+                    .or_insert((TnaNodeKind::Doc, doc.title.clone(), 0));
             entry.2 = entry.2.saturating_add(1);
             if entry.1.is_empty() {
                 entry.1 = doc.title.clone();
@@ -93,6 +95,7 @@ pub fn build_snapshot(corpus: &TnaCorpus) -> TnaSnapshot {
         })
         .collect();
 
+    nodes.sort_by(|a, b| a.id.cmp(&b.id));
     match &corpus.scope {
         crate::tna::types::TnaScope::Collection => layout_nodes(&mut nodes),
         crate::tna::types::TnaScope::Targeted { .. } => layout_hierarchy(&mut nodes),
@@ -122,6 +125,7 @@ pub fn build_snapshot(corpus: &TnaCorpus) -> TnaSnapshot {
 
     let mut anchors: Vec<TnaAnchor> = nodes
         .iter()
+        .filter(|n| n.kind != TnaNodeKind::Doc)
         .map(|n| TnaAnchor {
             node_id: n.id.clone(),
             degree: n.degree,
@@ -213,7 +217,7 @@ fn bump_pair(map: &mut HashMap<(String, String), u32>, a: &str, b: &str) {
 }
 
 fn node_id(kind: TnaNodeKind, label: &str) -> String {
-    format!("{}:{}", kind.as_str(), label.to_ascii_lowercase())
+    format!("{}:{}", kind.as_str(), canonical(label))
 }
 
 fn apply_cap(
@@ -232,10 +236,7 @@ fn apply_cap(
     items.sort_by(|a, b| {
         let a_drop = drop_priority(a.1, keep_docs);
         let b_drop = drop_priority(b.1, keep_docs);
-        a_drop
-            .cmp(&b_drop)
-            .then(a.3.cmp(&b.3))
-            .then(a.0.cmp(&b.0))
+        a_drop.cmp(&b_drop).then(a.3.cmp(&b.3)).then(a.0.cmp(&b.0))
     });
     let drop_count = items.len().saturating_sub(cap);
     let kept = items.into_iter().skip(drop_count);
@@ -279,7 +280,6 @@ fn layout_nodes(nodes: &mut [TnaNode]) {
     }
 }
 
-
 fn layout_hierarchy(nodes: &mut [TnaNode]) {
     if nodes.is_empty() {
         return;
@@ -299,7 +299,13 @@ fn layout_hierarchy(nodes: &mut [TnaNode]) {
     for (i, idx) in children.into_iter().enumerate() {
         let row = 1 + i / 3;
         let col = i % 3;
-        let cols_in_row = 3.min(nodes.len().saturating_sub(1).saturating_sub(row.saturating_sub(1) * 3).max(1));
+        let cols_in_row = 3.min(
+            nodes
+                .len()
+                .saturating_sub(1)
+                .saturating_sub(row.saturating_sub(1) * 3)
+                .max(1),
+        );
         let x = 0.22 + (col as f64 + 0.5) / cols_in_row as f64 * 0.56;
         let y = 0.18 + row as f64 * 0.28;
         let jitter = hash_jitter(&nodes[idx].id) * 0.04;
@@ -454,9 +460,9 @@ mod tests {
         let mut corpus = targeted(&text);
         // Force many unique topics via many short topical lines + domains.
         for i in 0..90 {
-            corpus.docs[0].text.push_str(&format!(
-                "unique-domain-{i}.com research note {i}\n"
-            ));
+            corpus.docs[0]
+                .text
+                .push_str(&format!("unique-domain-{i}.com research note {i}\n"));
         }
         let snap = build_snapshot(&corpus);
         assert!(snap.nodes.len() <= TARGETED_CAP, "{}", snap.nodes.len());
@@ -480,11 +486,7 @@ mod tests {
 
     #[test]
     fn collection_adds_doc_edges_targeted_has_none() {
-        let col = collection(vec![(
-            "r1",
-            "Harbor",
-            "see example.com and @harbor",
-        )]);
+        let col = collection(vec![("r1", "Harbor", "see example.com and @harbor")]);
         let snap = build_snapshot(&col);
         assert!(
             snap.nodes.iter().any(|n| n.kind == TnaNodeKind::Doc),
@@ -529,10 +531,6 @@ mod tests {
             .map(|n| n.cluster)
             .collect::<std::collections::HashSet<_>>()
             .len();
-        assert!(
-            snap.gaps.is_empty() || nclusters < 2,
-            "{:?}",
-            snap.gaps
-        );
+        assert!(snap.gaps.is_empty() || nclusters < 2, "{:?}", snap.gaps);
     }
 }

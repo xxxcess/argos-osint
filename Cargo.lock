@@ -117,6 +117,7 @@ dependencies = [
  "rpassword",
  "serde_json",
  "sysinfo",
+ "tempfile",
  "tokio",
  "tui-nodes",
  "unicode-width",

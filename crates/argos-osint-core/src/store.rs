@@ -376,9 +376,9 @@ impl Store {
         let mut rows = stmt.query(params![key])?;
         if let Some(row) = rows.next()? {
             let json: String = row.get(0)?;
-            let snap: TnaSnapshot = serde_json::from_str(&json)
-                .with_context(|| format!("decode tna graph {key}"))?;
-            Ok(Some(snap))
+            let snap: TnaSnapshot =
+                serde_json::from_str(&json).with_context(|| format!("decode tna graph {key}"))?;
+            Ok((snap.pipeline_version == crate::tna::PIPELINE_VERSION).then_some(snap))
         } else {
             Ok(None)
         }
@@ -452,6 +452,19 @@ mod tests {
         assert!(store.list_memories().unwrap().is_empty());
     }
     #[test]
+    fn tna_unversioned_snapshot_is_stale() {
+        let store = Store::memory().unwrap();
+        let mut legacy = serde_json::to_value(crate::tna::TnaSnapshot::empty(
+            crate::tna::TnaScope::Collection,
+        ))
+        .unwrap();
+        legacy.as_object_mut().unwrap().remove("pipeline_version");
+        legacy.as_object_mut().unwrap().remove("decisions");
+        store.conn.execute("INSERT INTO tna_graphs (key, snapshot_json, updated_at) VALUES ('desk', ?1, 'old')", params![legacy.to_string()]).unwrap();
+        assert!(store.get_tna_graph("desk").unwrap().is_none());
+    }
+
+    #[test]
     fn tna_graph_persist_roundtrip() {
         use crate::tna::{TnaScope, TnaSnapshot};
         let store = Store::memory().unwrap();
@@ -462,5 +475,4 @@ mod tests {
         assert!(store.delete_tna_graph("desk").unwrap());
         assert!(store.get_tna_graph("desk").unwrap().is_none());
     }
-
 }

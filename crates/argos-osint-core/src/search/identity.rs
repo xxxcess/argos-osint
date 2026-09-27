@@ -278,8 +278,7 @@ mod tests {
             serde_json::from_str(r#"{"success":true,"found":0,"sources":[]}"#).unwrap();
         assert!(parse_leakcheck(&empty, "nobody@example.com").is_empty());
 
-        let no_sources: Value =
-            serde_json::from_str(r#"{"success":true,"found":2}"#).unwrap();
+        let no_sources: Value = serde_json::from_str(r#"{"success":true,"found":2}"#).unwrap();
         assert!(parse_leakcheck(&no_sources, "ghost").is_empty());
     }
 }

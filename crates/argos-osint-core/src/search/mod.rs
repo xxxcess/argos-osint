@@ -346,7 +346,9 @@ pub async fn news_search(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit
     if query.is_empty() {
         return Err("empty search".into());
     }
-    Ok(news::gather(query.to_string(), plan.searx_url.clone()).await?.hits)
+    Ok(news::gather(query.to_string(), plan.searx_url.clone())
+        .await?
+        .hits)
 }
 
 pub async fn domain_lookup(query: &str, _plan: &SourcePlan) -> Result<Vec<SearchHit>, String> {
@@ -362,7 +364,9 @@ pub async fn social_search(query: &str, plan: &SourcePlan) -> Result<Vec<SearchH
     if query.is_empty() {
         return Err("empty search".into());
     }
-    Ok(social::gather(query.to_string(), keyed(&plan.youtube_key)).await?.hits)
+    Ok(social::gather(query.to_string(), keyed(&plan.youtube_key))
+        .await?
+        .hits)
 }
 
 pub async fn identity_lookup(query: &str, plan: &SourcePlan) -> Result<Vec<SearchHit>, String> {
@@ -377,7 +381,9 @@ pub async fn identity_lookup(query: &str, plan: &SourcePlan) -> Result<Vec<Searc
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(identity::gather(terms, keyed(&plan.github_token)).await?.hits)
+    Ok(identity::gather(terms, keyed(&plan.github_token))
+        .await?
+        .hits)
 }
 
 /// Keep hits from the sources that found something. Fail only when none did.
@@ -491,7 +497,6 @@ pub(crate) fn pivoted_domains(hits: &[SearchHit], already: &[String]) -> Vec<Str
     }
     out
 }
-
 
 pub(crate) fn tag(mut hits: Vec<SearchHit>, label: &str) -> Vec<SearchHit> {
     let prefix = format!("[{label}] ");
@@ -888,7 +893,6 @@ mod tests {
             ]
         );
     }
-
 
     #[test]
     fn domain_stage_skips_rdap_without_a_domain() {

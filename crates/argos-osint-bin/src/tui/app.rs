@@ -1,7 +1,7 @@
 //! Session shell. The bottom prompt always talks to the view that is open:
 //! the desk, the selected case, or the module on the canvas.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -22,7 +22,9 @@ use argos_osint_core::search::{SearchHit, SourcePlan};
 use argos_osint_core::secrets::{self, AuthFile, GmailSecret, ProviderSecret};
 use argos_osint_core::session::{self, Case};
 use argos_osint_core::store::{ChatLine, Store};
-use argos_osint_core::tna::{self, desk_key, report_key, TnaCluster, TnaNode, TnaNodeKind, TnaSnapshot};
+use argos_osint_core::tna::{
+    self, desk_key, report_key, TnaCluster, TnaNode, TnaNodeKind, TnaSnapshot,
+};
 use chrono::Local;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::layout::Rect;
@@ -127,45 +129,14 @@ impl CasePage {
     }
 }
 
-/// Hard visible budget for Graph boxed nodes (FR #15 / research #14).
+/// Maximum number of connected entities drawn as detail boxes.
 pub const TNA_GRAPH_BOX_BUDGET: usize = 16;
+pub const TNA_DETAIL_HOPS: u32 = 5;
 
-/// Network canvas presentation mode (FR-4).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TnaView {
-    Graph,
-    Outline,
-    Table,
-}
-
-impl TnaView {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Graph => Self::Outline,
-            Self::Outline => Self::Table,
-            Self::Table => Self::Graph,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Graph => "graph",
-            Self::Outline => "outline",
-            Self::Table => "table",
-        }
-    }
-}
-
-/// Selectable item on the Graph canvas after egocentric collapse.
+/// A real entity in the report table or its connected detail boxes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TnaDisplayItem {
     Real { idx: usize },
-    Super {
-        hub_id: String,
-        count: usize,
-        x: f64,
-        y: f64,
-    },
 }
 
 /// Glyph for a node kind / cluster (FR-4 readable canvas).
@@ -175,24 +146,6 @@ pub fn tna_glyph_for_kind(kind: TnaNodeKind) -> &'static str {
         TnaCluster::Campaign => "▲",
         TnaCluster::Identity => "●",
         TnaCluster::FiledReports => "□",
-    }
-}
-
-pub fn tna_glyph_for_cluster(cluster: TnaCluster) -> &'static str {
-    match cluster {
-        TnaCluster::Infrastructure => "◆",
-        TnaCluster::Campaign => "▲",
-        TnaCluster::Identity => "●",
-        TnaCluster::FiledReports => "□",
-    }
-}
-
-pub fn tna_hub_threshold(nodes: &[TnaNode]) -> u32 {
-    let max_deg = nodes.iter().map(|n| n.degree).max().unwrap_or(0);
-    if max_deg < 15 {
-        8
-    } else {
-        15
     }
 }
 
@@ -337,7 +290,6 @@ pub enum Focus {
     Graph,
     /// Table master–detail: details pane (list uses Focus::Graph).
     TableDetail,
-    TnaSide,
 }
 
 #[derive(Clone, Debug)]
@@ -482,11 +434,8 @@ pub struct App {
     pub tna_report: Option<TnaSnapshot>,
     pub tna_find: Option<String>,
     pub tna_sel: usize,
-    pub tna_side_scroll: usize,
     pub tna_rebuilding: bool,
-    pub tna_view: TnaView,
     /// Hub node ids whose far neighbors are expanded (not collapsed to ▣×N).
-    pub tna_expanded: HashSet<String>,
     /// Egocentric pin for Graph collapse (node id).
     pub tna_focus_id: Option<String>,
     /// Stock Table selection (kept in sync with `tna_sel`).
@@ -496,7 +445,6 @@ pub struct App {
     /// Detail-pane context scroll offset (lines); ego boxes stay fixed.
     pub tna_detail_scroll: usize,
     /// Detail-pane scrollbar state.
-    pub tna_detail_scroll_state: ScrollbarState,
     /// Hit areas for Table master–detail (wheel / focus).
     pub tna_table_list_area: Rect,
     pub tna_table_detail_area: Rect,
@@ -619,15 +567,11 @@ impl App {
             tna_report: None,
             tna_find: None,
             tna_sel: 0,
-            tna_side_scroll: 0,
             tna_rebuilding: false,
-            tna_view: TnaView::Table,
-            tna_expanded: HashSet::new(),
             tna_focus_id: None,
             tna_table_state: TableState::default().with_selected(Some(0)),
             tna_table_scroll: ScrollbarState::new(0),
             tna_detail_scroll: 0,
-            tna_detail_scroll_state: ScrollbarState::new(0),
             tna_table_list_area: Rect::default(),
             tna_table_detail_area: Rect::default(),
             tna_db_path: None,
@@ -1491,7 +1435,9 @@ impl App {
             return;
         }
         if let Some(index) = self.case_tab_hits.iter().position(|tab| tab.contains(pos)) {
-            self.select_case_page(CasePage::all()[index]);
+            if let Some(page) = self.case_pages().get(index).copied() {
+                self.select_case_page(page);
+            }
             return;
         }
         if let Some(index) = self
@@ -1510,6 +1456,26 @@ impl App {
             self.select_system_page(SystemPage::all()[index]);
             return;
         }
+        if self.case_page == CasePage::Network {
+            if self.tna_table_detail_area.contains(pos) {
+                self.focus = Focus::TableDetail;
+                return;
+            }
+            if self.tna_table_list_area.contains(pos) {
+                self.focus = Focus::Graph;
+                if y >= self.tna_table_list_area.y + 2 {
+                    let row = (y - self.tna_table_list_area.y - 2) as usize
+                        + self.tna_table_state.offset();
+                    if row < self.tna_selectable_count() {
+                        self.tna_sel = row;
+                        self.tna_detail_scroll = 0;
+                        self.pin_tna_selection(self.tna_selected_item(), true);
+                        self.sync_tna_table_ui();
+                    }
+                }
+                return;
+            }
+        }
         if self.canvas_area.contains(pos) {
             self.focus = Focus::Canvas;
             return;
@@ -1523,7 +1489,18 @@ impl App {
         }
     }
 
+    pub fn case_pages(&self) -> Vec<CasePage> {
+        CasePage::all()
+            .into_iter()
+            .filter(|page| *page != CasePage::Network || self.open_report().is_some())
+            .collect()
+    }
+
     fn select_case_page(&mut self, page: CasePage) {
+        if page == CasePage::Network && self.open_report().is_none() {
+            self.status = "open a filed report to view its network".into();
+            return;
+        }
         self.module = Some(ModuleId::Cases);
         self.case_page = page;
         self.field_sel = 0;
@@ -1544,11 +1521,9 @@ impl App {
             self.focus = Focus::Graph;
             self.tna_find = None;
             self.tna_sel = 0;
-            self.tna_side_scroll = 0;
-            self.tna_expanded.clear();
             self.tna_focus_id = None;
             self.tna_detail_scroll = 0;
-            self.sync_tna_table_ui();
+            self.clamp_tna_sel();
             self.ensure_tna_snapshot(false);
             return;
         }
@@ -1672,9 +1647,9 @@ impl App {
             _ if self.focus == Focus::Prompt => self.on_prompt_key(key),
             _ if self.focus == Focus::Launcher => self.on_launcher_key(key),
             _ if self.focus == Focus::Reports => self.on_reports_key(key),
-            _ if self.focus == Focus::Graph
-                || self.focus == Focus::TableDetail
-                || self.focus == Focus::TnaSide => self.on_tna_key(key),
+            _ if self.focus == Focus::Graph || self.focus == Focus::TableDetail => {
+                self.on_tna_key(key)
+            }
             _ => self.on_canvas_key(key),
         }
     }
@@ -1722,10 +1697,7 @@ impl App {
             }
             return;
         }
-        if self.on_case_desk()
-            && self.case_page == CasePage::Network
-            && self.tna_view == TnaView::Table
-        {
+        if self.on_case_desk() && self.case_page == CasePage::Network {
             self.scroll_tna_table_at(pos, delta);
             return;
         }
@@ -1753,13 +1725,6 @@ impl App {
                     self.tna_step_sel(dir);
                 }
             }
-            Focus::TnaSide => {
-                if delta > 0 {
-                    self.tna_side_scroll = self.tna_side_scroll.saturating_sub(steps);
-                } else {
-                    self.tna_side_scroll = self.tna_side_scroll.saturating_add(steps);
-                }
-            }
             _ => {}
         }
     }
@@ -1767,7 +1732,7 @@ impl App {
     fn next_focus(&self) -> Focus {
         let reports = self.on_case_desk() && self.case_page == CasePage::Closed;
         let network = self.on_case_desk() && self.case_page == CasePage::Network;
-        let table = network && self.tna_view == TnaView::Table;
+        let table = network;
         match self.focus {
             Focus::Launcher => {
                 if network {
@@ -1777,9 +1742,8 @@ impl App {
                 }
             }
             Focus::Graph if table => Focus::TableDetail,
-            Focus::Graph => Focus::TnaSide,
-            Focus::TableDetail => Focus::TnaSide,
-            Focus::TnaSide => Focus::Prompt,
+            Focus::Graph => Focus::TableDetail,
+            Focus::TableDetail => Focus::Prompt,
             Focus::Canvas if reports => Focus::Reports,
             Focus::Canvas | Focus::Reports => Focus::Prompt,
             Focus::Prompt => Focus::Launcher,
@@ -1907,6 +1871,8 @@ impl App {
         self.transcripts.remove(&format!("report:{id}"));
         if self.chat_report.as_deref() == Some(id) {
             self.chat_report = None;
+            self.case_page = CasePage::Closed;
+            self.focus = Focus::Prompt;
             self.load_transcript("desk");
             self.scroll_back = 0;
         }
@@ -1915,16 +1881,12 @@ impl App {
         self.status = "report deleted".into();
     }
 
-
     pub fn tna_snapshot(&self) -> Option<&TnaSnapshot> {
-        if self.chat_report.is_some() {
-            self.tna_report.as_ref()
-        } else {
-            self.tna_desk.as_ref()
-        }
+        let report_id = self.chat_report.as_deref()?;
+        self.tna_report.as_ref().filter(|snap| matches!(&snap.scope, argos_osint_core::tna::TnaScope::Targeted { report_id: id, .. } if id == report_id))
     }
 
-    /// Find-filter over raw node indices (Outline / Table / legacy).
+    /// Find-filter over the report network table.
     pub fn tna_visible_nodes(&self) -> Vec<usize> {
         let Some(snap) = self.tna_snapshot() else {
             return Vec::new();
@@ -1961,201 +1923,81 @@ impl App {
         adj
     }
 
-    fn tna_hops_from(
-        focus_id: &str,
-        adj: &HashMap<String, Vec<String>>,
-        max_hops: u32,
-    ) -> HashSet<String> {
-        let mut out = HashSet::new();
-        out.insert(focus_id.to_string());
-        let mut frontier = vec![focus_id.to_string()];
-        for _ in 0..max_hops {
-            let mut next = Vec::new();
-            for id in &frontier {
-                for nb in adj.get(id).into_iter().flatten() {
-                    if out.insert(nb.clone()) {
-                        next.push(nb.clone());
-                    }
-                }
-            }
-            frontier = next;
-            if frontier.is_empty() {
-                break;
-            }
-        }
-        out
-    }
-
-    /// Graph canvas items: egocentric 1–2 hops with hub collapse to ▣×N.
-    /// Hard budget ≤ [`TNA_GRAPH_BOX_BUDGET`] compact boxes (never full 120/80).
+    /// All entities within five hops, nearest first. The renderer pages these
+    /// candidates to fit the terminal without dropping deeper connections.
     pub fn tna_display_nodes(&self) -> Vec<TnaDisplayItem> {
         let Some(snap) = self.tna_snapshot() else {
             return Vec::new();
         };
-        if snap.nodes.is_empty() {
-            return Vec::new();
-        }
-        let q = self.tna_find_query();
-        let adj = Self::tna_adjacency(snap);
-        let id_to_idx: HashMap<&str, usize> = snap
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.id.as_str(), i))
-            .collect();
-
-        let focus_id = self
+        let Some(focus) = self
             .tna_focus_id
-            .clone()
-            .filter(|id| snap.nodes.iter().any(|n| n.id == *id))
-            .unwrap_or_else(|| snap.nodes[0].id.clone());
-
-        let ego1 = Self::tna_hops_from(&focus_id, &adj, 1);
-        let ego2 = Self::tna_hops_from(&focus_id, &adj, 2);
-        let threshold = tna_hub_threshold(&snap.nodes);
-
-        let mut collapsed: HashSet<String> = HashSet::new();
-        let mut supers: Vec<TnaDisplayItem> = Vec::new();
-
-        for node in &snap.nodes {
-            if !ego1.contains(&node.id) {
-                continue;
-            }
-            if node.degree < threshold || self.tna_expanded.contains(&node.id) {
-                continue;
-            }
-            let neighbors = adj.get(&node.id).map(|v| v.as_slice()).unwrap_or(&[]);
-            let far: Vec<&String> = neighbors
-                .iter()
-                .filter(|n| !ego1.contains(*n))
-                .collect();
-            if far.is_empty() {
-                continue;
-            }
-            for f in &far {
-                collapsed.insert((*f).clone());
-            }
-            // Offset supernode slightly from the hub so glyphs don't stack.
-            let (x, y) = (node.x + 0.04, (node.y + 0.03).min(1.0));
-            supers.push(TnaDisplayItem::Super {
-                hub_id: node.id.clone(),
-                count: far.len(),
-                x,
-                y,
-            });
-        }
-
-        let push_real = |items: &mut Vec<TnaDisplayItem>, idx: usize| {
-            let n = &snap.nodes[idx];
-            if collapsed.contains(&n.id) {
-                return;
-            }
-            if !Self::tna_node_matches(n, &q) {
-                return;
-            }
-            if items.iter().any(|it| matches!(it, TnaDisplayItem::Real { idx: i } if *i == idx)) {
-                return;
-            }
-            items.push(TnaDisplayItem::Real { idx });
+            .as_deref()
+            .or_else(|| snap.nodes.first().map(|n| n.id.as_str()))
+        else {
+            return Vec::new();
         };
-
-        // Prefer ego1 (focus + 1 hop); fill with ego2 only while under budget.
-        let mut items: Vec<TnaDisplayItem> = Vec::new();
-        let mut order1: Vec<usize> = ego1
-            .iter()
-            .filter_map(|id| id_to_idx.get(id.as_str()).copied())
-            .collect();
-        order1.sort_unstable();
-        for idx in order1 {
-            if items.len() >= TNA_GRAPH_BOX_BUDGET {
-                break;
+        let adj = Self::tna_adjacency(snap);
+        let mut distances = HashMap::from([(focus.to_string(), 0u32)]);
+        let mut queue = std::collections::VecDeque::from([focus.to_string()]);
+        while let Some(id) = queue.pop_front() {
+            let distance = distances[&id];
+            if distance >= TNA_DETAIL_HOPS {
+                continue;
             }
-            push_real(&mut items, idx);
-        }
-
-        let mut order2: Vec<usize> = ego2
-            .iter()
-            .filter(|id| !ego1.contains(*id))
-            .filter_map(|id| id_to_idx.get(id.as_str()).copied())
-            .collect();
-        order2.sort_unstable();
-        for idx in order2 {
-            if items.len() >= TNA_GRAPH_BOX_BUDGET {
-                break;
-            }
-            push_real(&mut items, idx);
-        }
-
-        for s in supers {
-            if items.len() >= TNA_GRAPH_BOX_BUDGET {
-                break;
-            }
-            if let TnaDisplayItem::Super {
-                ref hub_id,
-                count,
-                x,
-                y,
-            } = s
-            {
-                let hub_ok = snap
-                    .nodes
-                    .iter()
-                    .find(|n| n.id == *hub_id)
-                    .map(|n| Self::tna_node_matches(n, &q))
-                    .unwrap_or(false);
-                let far_ok = if q.is_empty() {
-                    true
-                } else {
-                    adj.get(hub_id)
-                        .into_iter()
-                        .flatten()
-                        .filter(|nid| !ego1.contains(*nid))
-                        .filter_map(|nid| id_to_idx.get(nid.as_str()).copied())
-                        .any(|i| Self::tna_node_matches(&snap.nodes[i], &q))
-                };
-                if q.is_empty() || hub_ok || far_ok {
-                    items.push(TnaDisplayItem::Super {
-                        hub_id: hub_id.clone(),
-                        count,
-                        x,
-                        y,
-                    });
+            for neighbor in adj.get(&id).into_iter().flatten() {
+                if !distances.contains_key(neighbor) {
+                    distances.insert(neighbor.clone(), distance + 1);
+                    queue.push_back(neighbor.clone());
                 }
             }
         }
-        if items.len() > TNA_GRAPH_BOX_BUDGET {
-            items.truncate(TNA_GRAPH_BOX_BUDGET);
+        let mut indices: Vec<_> = snap
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| distances.contains_key(&n.id))
+            .map(|(i, _)| i)
+            .collect();
+        indices.sort_by(|&a, &b| {
+            distances[&snap.nodes[a].id]
+                .cmp(&distances[&snap.nodes[b].id])
+                .then(snap.nodes[a].id.cmp(&snap.nodes[b].id))
+        });
+        indices
+            .into_iter()
+            .map(|idx| TnaDisplayItem::Real { idx })
+            .collect()
+    }
+
+    /// Keep focus visible and browse remaining entities with detail j/k/wheel.
+    pub fn tna_detail_box_items(&self, fit: usize) -> Vec<TnaDisplayItem> {
+        let items = self.tna_display_nodes();
+        let fit = fit.min(TNA_GRAPH_BOX_BUDGET);
+        if fit == 0 || items.is_empty() {
+            return Vec::new();
         }
-        items
+        if fit == 1 && self.tna_detail_scroll > 0 {
+            return items
+                .into_iter()
+                .skip(self.tna_detail_scroll)
+                .take(1)
+                .collect();
+        }
+        let offset = self.tna_detail_scroll.min(items.len().saturating_sub(2));
+        let mut shown = vec![items[0].clone()];
+        shown.extend(items.into_iter().skip(1 + offset).take(fit - 1));
+        shown
     }
 
     pub fn tna_selection_list(&self) -> Vec<TnaDisplayItem> {
-        match self.tna_view {
-            TnaView::Graph => self.tna_display_nodes(),
-            TnaView::Outline | TnaView::Table => self
-                .tna_visible_nodes()
-                .into_iter()
-                .map(|idx| TnaDisplayItem::Real { idx })
-                .collect(),
-        }
+        self.tna_visible_nodes()
+            .into_iter()
+            .map(|idx| TnaDisplayItem::Real { idx })
+            .collect()
     }
 
     pub fn tna_selected_item(&self) -> Option<TnaDisplayItem> {
         self.tna_selection_list().get(self.tna_sel).cloned()
-    }
-
-    pub fn tna_selected_real_idx(&self) -> Option<usize> {
-        match self.tna_selected_item()? {
-            TnaDisplayItem::Real { idx } => Some(idx),
-            TnaDisplayItem::Super { .. } => None,
-        }
-    }
-
-    pub fn tna_selected_super_hub(&self) -> Option<String> {
-        match self.tna_selected_item()? {
-            TnaDisplayItem::Super { hub_id, .. } => Some(hub_id),
-            TnaDisplayItem::Real { .. } => None,
-        }
     }
 
     /// Re-pin selection index in the display list. When `move_focus` is set,
@@ -2173,36 +2015,12 @@ impl App {
                         }
                     }
                 }
-                TnaDisplayItem::Super { hub_id, .. } => {
-                    self.tna_focus_id = Some(hub_id.clone());
-                }
             }
-        }
-        if self.tna_view != TnaView::Graph {
-            return;
-        }
-        let items = self.tna_display_nodes();
-        let pos = items.iter().position(|it| match (&item, it) {
-            (TnaDisplayItem::Real { idx: a }, TnaDisplayItem::Real { idx: b }) => a == b,
-            (
-                TnaDisplayItem::Super { hub_id: a, .. },
-                TnaDisplayItem::Super { hub_id: b, .. },
-            ) => a == b,
-            _ => false,
-        });
-        if let Some(pos) = pos {
-            self.tna_sel = pos;
-        } else {
-            let n = items.len();
-            self.tna_sel = if n == 0 { 0 } else { self.tna_sel.min(n - 1) };
         }
     }
 
     pub fn tna_selectable_count(&self) -> usize {
-        match self.tna_view {
-            TnaView::Graph => self.tna_display_nodes().len(),
-            TnaView::Outline | TnaView::Table => self.tna_visible_nodes().len(),
-        }
+        self.tna_visible_nodes().len()
     }
 
     fn clamp_tna_sel(&mut self) {
@@ -2219,8 +2037,6 @@ impl App {
                         self.tna_focus_id = Some(n.id.clone());
                     }
                 }
-            } else if let Some(TnaDisplayItem::Super { hub_id, .. }) = self.tna_selected_item() {
-                self.tna_focus_id = Some(hub_id);
             }
         }
         self.sync_tna_table_ui();
@@ -2230,11 +2046,7 @@ impl App {
 
     /// Keep `TableState` / list scrollbar aligned with `tna_sel`.
     pub fn sync_tna_table_ui(&mut self) {
-        let n = if self.tna_view == TnaView::Table {
-            self.tna_visible_nodes().len()
-        } else {
-            self.tna_selectable_count()
-        };
+        let n = self.tna_visible_nodes().len();
         if n == 0 {
             self.tna_table_state.select(None);
             self.tna_table_scroll = ScrollbarState::new(0).position(0);
@@ -2242,176 +2054,35 @@ impl App {
             let i = self.tna_sel.min(n - 1);
             self.tna_table_state.select(Some(i));
             let content = n.saturating_sub(1) * Self::TNA_TABLE_ITEM_HEIGHT;
-            self.tna_table_scroll = ScrollbarState::new(content).position(i * Self::TNA_TABLE_ITEM_HEIGHT);
+            self.tna_table_scroll =
+                ScrollbarState::new(content).position(i * Self::TNA_TABLE_ITEM_HEIGHT);
         }
         self.sync_tna_detail_scroll_state();
     }
 
     pub fn sync_tna_detail_scroll_state(&mut self) {
-        let len = self.tna_detail_context_line_count();
-        let max_pos = len.saturating_sub(1);
-        if self.tna_detail_scroll > max_pos {
-            self.tna_detail_scroll = max_pos;
-        }
-        self.tna_detail_scroll_state = ScrollbarState::new(max_pos).position(self.tna_detail_scroll);
-    }
-
-    /// Context lines shown under the detail ego graph (for scroll sizing).
-    pub fn tna_detail_context_line_count(&self) -> usize {
-        self.tna_detail_context_lines().len()
-    }
-
-    /// Build truncated context lines for the Table details pane.
-    pub fn tna_detail_context_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        let Some(snap) = self.tna_snapshot() else {
-            lines.push("No snapshot.".into());
-            return lines;
-        };
-        let Some(TnaDisplayItem::Real { idx }) = self.tna_selected_item() else {
-            lines.push("No node selected.".into());
-            return lines;
-        };
-        let Some(n) = snap.nodes.get(idx) else {
-            lines.push("No node selected.".into());
-            return lines;
-        };
-        lines.push(format!(
-            "{} {} · {}",
-            tna_glyph_for_kind(n.kind),
-            n.kind.as_str(),
-            n.label
-        ));
-        lines.push(format!(
-            "cluster {} · deg {} · mentions {}",
-            n.cluster.as_str(),
-            n.degree,
-            n.mentions
-        ));
-        let is_anchor = snap.anchors.iter().any(|a| a.node_id == n.id);
-        lines.push(if is_anchor {
-            "anchor: yes".into()
-        } else {
-            "anchor: no".into()
-        });
-        let gap_hits: Vec<String> = snap
-            .gaps
-            .iter()
-            .filter(|g| g.cluster_a == n.cluster || g.cluster_b == n.cluster)
-            .map(|g| format!("{}↔{}", g.cluster_a.as_str(), g.cluster_b.as_str()))
-            .collect();
-        if gap_hits.is_empty() {
-            lines.push("gaps: none".into());
-        } else {
-            let joined = gap_hits.into_iter().take(3).collect::<Vec<_>>().join(", ");
-            lines.push(format!("gaps: {joined}"));
-        }
-        // Evidence stand-in = mentions + truncated 1-hop neighbors.
-        lines.push(format!("evidence: {m} mentions", m = n.mentions));
-        let adj = Self::tna_adjacency(snap);
-        let mut neighbors: Vec<&str> = adj
-            .get(&n.id)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| snap.nodes.iter().find(|x| x.id == *id).map(|x| x.label.as_str()))
-            .collect();
-        neighbors.sort_unstable();
-        neighbors.dedup();
-        if neighbors.is_empty() {
-            lines.push("neighbors: none".into());
-        } else {
-            lines.push(format!("neighbors ({})", neighbors.len()));
-            for label in neighbors.into_iter().take(12) {
-                let short = if label.chars().count() > 40 {
-                    label.chars().take(40).collect::<String>()
-                } else {
-                    label.to_string()
-                };
-                lines.push(format!("  · {short}"));
-            }
-        }
-        lines
-    }
-
-    /// Pure helper: which node indices stay visible under ego + collapse.
-    pub fn tna_ego_visible_indices(
-        snap: &TnaSnapshot,
-        focus_id: &str,
-        expanded: &HashSet<String>,
-    ) -> (Vec<usize>, Vec<(String, usize)>) {
-        if snap.nodes.is_empty() {
-            return (Vec::new(), Vec::new());
-        }
-        let adj = Self::tna_adjacency(snap);
-        let id_to_idx: HashMap<&str, usize> = snap
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.id.as_str(), i))
-            .collect();
-        let ego1 = Self::tna_hops_from(focus_id, &adj, 1);
-        let ego2 = Self::tna_hops_from(focus_id, &adj, 2);
-        let threshold = tna_hub_threshold(&snap.nodes);
-        let mut collapsed: HashSet<String> = HashSet::new();
-        let mut supers: Vec<(String, usize)> = Vec::new();
-        for node in &snap.nodes {
-            if !ego1.contains(&node.id) {
-                continue;
-            }
-            if node.degree < threshold || expanded.contains(&node.id) {
-                continue;
-            }
-            let neighbors = adj.get(&node.id).map(|v| v.as_slice()).unwrap_or(&[]);
-            let far: Vec<&String> = neighbors
-                .iter()
-                .filter(|n| !ego1.contains(*n))
-                .collect();
-            if far.is_empty() {
-                continue;
-            }
-            for f in &far {
-                collapsed.insert((*f).clone());
-            }
-            supers.push((node.id.clone(), far.len()));
-        }
-        let mut idxs: Vec<usize> = ego2
-            .iter()
-            .filter(|id| !collapsed.contains(*id))
-            .filter_map(|id| id_to_idx.get(id.as_str()).copied())
-            .collect();
-        idxs.sort_unstable();
-        (idxs, supers)
+        let max_pos = self.tna_display_nodes().len().saturating_sub(1);
+        self.tna_detail_scroll = self.tna_detail_scroll.min(max_pos);
     }
 
     fn ensure_tna_snapshot(&mut self, force: bool) {
         if self.tna_rebuilding {
             return;
         }
-        if let Some(id) = self.chat_report.clone() {
-            if !force {
-                if self.tna_report.is_some() {
-                    return;
-                }
-                if let Ok(Some(snap)) = self.store.get_tna_graph(&report_key(&id)) {
-                    self.tna_report = Some(snap);
-                    self.clamp_tna_sel();
-                    return;
-                }
-            }
-            self.spawn_tna_rebuild(true);
-        } else if !force {
-            if self.tna_desk.is_some() {
+        let Some(id) = self.open_report().map(|report| report.id.clone()) else {
+            return;
+        };
+        if !force {
+            if self.tna_snapshot().is_some() {
                 return;
             }
-            if let Ok(Some(snap)) = self.store.get_tna_graph(desk_key()) {
-                self.tna_desk = Some(snap);
+            if let Ok(Some(snap)) = self.store.get_tna_graph(&report_key(&id)) {
+                self.tna_report = Some(snap);
                 self.clamp_tna_sel();
                 return;
             }
-            self.spawn_tna_rebuild(false);
-        } else {
-            self.spawn_tna_rebuild(false);
         }
+        self.spawn_tna_rebuild(true);
     }
 
     fn spawn_tna_rebuild(&mut self, targeted: bool) {
@@ -2532,7 +2203,10 @@ impl App {
             });
             return;
         }
-        let _ = tna::rebuild_after_file(&self.store, report_id);
+        if let Err(err) = tna::rebuild_after_file(&self.store, report_id) {
+            self.log_event("task", &format!("tna rebuild failed: {err}"));
+            return;
+        }
         if let Ok(Some(snap)) = self.store.get_tna_graph(desk_key()) {
             self.tna_desk = Some(snap);
         }
@@ -2542,7 +2216,7 @@ impl App {
             }
         }
         if self.case_page == CasePage::Network {
-            self.ensure_tna_snapshot(true);
+            self.clamp_tna_sel();
         }
     }
 
@@ -2570,7 +2244,10 @@ impl App {
             });
             return;
         }
-        let _ = tna::rebuild_after_delete(&self.store, report_id);
+        if let Err(err) = tna::rebuild_after_delete(&self.store, report_id) {
+            self.log_event("task", &format!("tna rebuild failed: {err}"));
+            return;
+        }
         self.tna_report = None;
         if let Ok(Some(snap)) = self.store.get_tna_graph(desk_key()) {
             self.tna_desk = Some(snap);
@@ -2609,88 +2286,27 @@ impl App {
                 self.tna_find = Some(String::new());
                 self.focus = Focus::Graph;
             }
-            KeyCode::Char('v') => {
-                let prev = self.tna_view;
-                self.tna_view = self.tna_view.next();
-                self.tna_sel = 0;
-                self.tna_detail_scroll = 0;
-                // Leaving Table detail focus when cycling away from Table.
-                if prev == TnaView::Table && self.focus == Focus::TableDetail {
-                    self.focus = Focus::Graph;
-                }
-                if self.tna_view != TnaView::Table && self.focus == Focus::TableDetail {
-                    self.focus = Focus::Graph;
-                }
-                self.clamp_tna_sel();
-                self.sync_tna_table_ui();
-            }
             KeyCode::Enter => {
-                if self.tna_view == TnaView::Table {
-                    // Focus sync only — hub expand stays Graph (#18/#19).
-                    let item = self.tna_selected_item();
-                    self.pin_tna_selection(item, true);
-                } else {
-                    self.tna_activate_selection();
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                if self.tna_view == TnaView::Graph {
-                    if key.modifiers.contains(KeyModifiers::SHIFT) {
-                        self.walk_tna_node(-1, 0);
-                    } else {
-                        self.walk_tna_neighbor(-1);
-                    }
-                }
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                if self.tna_view == TnaView::Graph {
-                    if key.modifiers.contains(KeyModifiers::SHIFT) {
-                        self.walk_tna_node(1, 0);
-                    } else {
-                        self.walk_tna_neighbor(1);
-                    }
-                }
+                self.pin_tna_selection(self.tna_selected_item(), true);
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if self.focus == Focus::TnaSide {
-                    self.tna_side_scroll = self.tna_side_scroll.saturating_sub(1);
-                } else if self.focus == Focus::TableDetail {
+                if self.focus == Focus::TableDetail {
                     self.tna_detail_scroll = self.tna_detail_scroll.saturating_sub(1);
                     self.sync_tna_detail_scroll_state();
-                } else if self.tna_view == TnaView::Graph {
-                    if key.modifiers.contains(KeyModifiers::SHIFT) {
-                        self.walk_tna_node(0, -1);
-                    } else {
-                        self.walk_tna_neighbor(-1);
-                    }
                 } else {
                     self.tna_step_sel(-1);
                 }
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.focus == Focus::TnaSide {
-                    self.tna_side_scroll = self.tna_side_scroll.saturating_add(1);
-                } else if self.focus == Focus::TableDetail {
+                if self.focus == Focus::TableDetail {
                     self.tna_detail_scroll = self.tna_detail_scroll.saturating_add(1);
                     self.sync_tna_detail_scroll_state();
-                } else if self.tna_view == TnaView::Graph {
-                    if key.modifiers.contains(KeyModifiers::SHIFT) {
-                        self.walk_tna_node(0, 1);
-                    } else {
-                        self.walk_tna_neighbor(1);
-                    }
                 } else {
                     self.tna_step_sel(1);
                 }
             }
             KeyCode::Tab => {
-                // Unreachable via global Tab (handled in on_key); kept for completeness.
-                self.focus = match (self.tna_view, self.focus) {
-                    (TnaView::Table, Focus::Graph) => Focus::TableDetail,
-                    (TnaView::Table, Focus::TableDetail) => Focus::TnaSide,
-                    (_, Focus::Graph) => Focus::TnaSide,
-                    _ => Focus::Graph,
-                };
+                self.focus = self.next_focus();
             }
             _ => {}
         }
@@ -2719,192 +2335,6 @@ impl App {
         self.sync_tna_table_ui();
     }
 
-    fn tna_activate_selection(&mut self) {
-        if self.tna_view != TnaView::Graph {
-            return;
-        }
-        let item = match self.tna_selected_item() {
-            Some(i) => i,
-            None => return,
-        };
-        match item {
-            TnaDisplayItem::Super { hub_id, .. } => {
-                self.tna_expanded.insert(hub_id.clone());
-                let hub_idx = self
-                    .tna_snapshot()
-                    .and_then(|s| s.nodes.iter().position(|n| n.id == hub_id));
-                if let Some(idx) = hub_idx {
-                    self.pin_tna_selection(Some(TnaDisplayItem::Real { idx }), true);
-                } else {
-                    self.clamp_tna_sel();
-                }
-            }
-            TnaDisplayItem::Real { idx } => {
-                let Some(snap) = self.tna_snapshot() else {
-                    return;
-                };
-                let id = snap.nodes.get(idx).map(|n| n.id.clone());
-                let degree = snap.nodes.get(idx).map(|n| n.degree).unwrap_or(0);
-                let threshold = tna_hub_threshold(&snap.nodes);
-                if let Some(id) = id {
-                    if self.tna_focus_id.as_deref() != Some(id.as_str()) {
-                        self.pin_tna_selection(Some(TnaDisplayItem::Real { idx }), true);
-                    } else if degree >= threshold && self.tna_expanded.contains(&id) {
-                        self.tna_expanded.remove(&id);
-                        self.pin_tna_selection(Some(TnaDisplayItem::Real { idx }), true);
-                    }
-                }
-            }
-        }
-    }
-
-    fn walk_tna_node(&mut self, dx: i32, dy: i32) {
-        let items = self.tna_display_nodes();
-        if items.is_empty() {
-            return;
-        }
-        let snap = match self.tna_snapshot() {
-            Some(s) => s,
-            None => return,
-        };
-        let cur_i = self.tna_sel.min(items.len() - 1);
-        let (cx, cy) = match &items[cur_i] {
-            TnaDisplayItem::Real { idx } => (snap.nodes[*idx].x, snap.nodes[*idx].y),
-            TnaDisplayItem::Super { x, y, .. } => (*x, *y),
-        };
-        let mut best: Option<(usize, f64)> = None;
-        for (vis_i, item) in items.iter().enumerate() {
-            if vis_i == cur_i {
-                continue;
-            }
-            let (nx, ny) = match item {
-                TnaDisplayItem::Real { idx } => (snap.nodes[*idx].x, snap.nodes[*idx].y),
-                TnaDisplayItem::Super { x, y, .. } => (*x, *y),
-            };
-            let vx = nx - cx;
-            let vy = ny - cy;
-            let aligned = if dx != 0 {
-                vx * dx as f64 > 0.01 && vy.abs() <= vx.abs() + 0.15
-            } else {
-                vy * dy as f64 > 0.01 && vx.abs() <= vy.abs() + 0.15
-            };
-            if !aligned {
-                continue;
-            }
-            let dist = vx.hypot(vy);
-            if best.map(|(_, d)| dist < d).unwrap_or(true) {
-                best = Some((vis_i, dist));
-            }
-        }
-        let next_item = if let Some((vis_i, _)) = best {
-            items.get(vis_i).cloned()
-        } else {
-            let n = items.len();
-            let next = if dx < 0 || dy < 0 {
-                (cur_i + n - 1) % n
-            } else if dx > 0 || dy > 0 {
-                (cur_i + 1) % n
-            } else {
-                cur_i
-            };
-            items.get(next).cloned()
-        };
-        self.pin_tna_selection(next_item, false);
-    }
-
-    fn walk_tna_neighbor(&mut self, dir: i32) {
-        if dir == 0 {
-            return;
-        }
-        let items = self.tna_display_nodes();
-        if items.is_empty() {
-            return;
-        }
-        let next_item = {
-            let Some(snap) = self.tna_snapshot() else {
-                return;
-            };
-            let focus_id = self.tna_focus_id.clone().or_else(|| {
-                match items.get(self.tna_sel.min(items.len() - 1)) {
-                    Some(TnaDisplayItem::Real { idx }) => snap.nodes.get(*idx).map(|n| n.id.clone()),
-                    Some(TnaDisplayItem::Super { hub_id, .. }) => Some(hub_id.clone()),
-                    None => None,
-                }
-            });
-            let Some(focus_id) = focus_id else {
-                return;
-            };
-            let adj = Self::tna_adjacency(snap);
-            let mut ring: Vec<TnaDisplayItem> = Vec::new();
-            if let Some(item) = items.iter().find(|it| match it {
-                TnaDisplayItem::Real { idx } => {
-                    snap.nodes.get(*idx).map(|n| n.id.as_str()) == Some(focus_id.as_str())
-                }
-                TnaDisplayItem::Super { hub_id, .. } => *hub_id == focus_id,
-            }) {
-                ring.push(item.clone());
-            }
-            let mut neighbors: Vec<(u32, String)> = Vec::new();
-            if let Some(nbs) = adj.get(&focus_id) {
-                for nid in nbs {
-                    let weight = snap
-                        .edges
-                        .iter()
-                        .find(|e| {
-                            (e.from == focus_id && e.to == *nid)
-                                || (e.to == focus_id && e.from == *nid)
-                        })
-                        .map(|e| e.weight)
-                        .unwrap_or(0);
-                    neighbors.push((weight, nid.clone()));
-                }
-            }
-            neighbors.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-            for (_, nid) in neighbors {
-                if let Some(item) = items.iter().find(|it| match it {
-                    TnaDisplayItem::Real { idx } => {
-                        snap.nodes.get(*idx).map(|n| n.id.as_str()) == Some(nid.as_str())
-                    }
-                    TnaDisplayItem::Super { hub_id, .. } => *hub_id == nid,
-                }) {
-                    if !ring.iter().any(|existing| match (existing, item) {
-                        (TnaDisplayItem::Real { idx: a }, TnaDisplayItem::Real { idx: b }) => a == b,
-                        (
-                            TnaDisplayItem::Super { hub_id: a, .. },
-                            TnaDisplayItem::Super { hub_id: b, .. },
-                        ) => a == b,
-                        _ => false,
-                    }) {
-                        ring.push(item.clone());
-                    }
-                }
-            }
-            if ring.len() < 2 {
-                ring = items.clone();
-            }
-            let cur_id = match items.get(self.tna_sel.min(items.len() - 1)) {
-                Some(TnaDisplayItem::Real { idx }) => snap.nodes.get(*idx).map(|n| n.id.clone()),
-                Some(TnaDisplayItem::Super { hub_id, .. }) => Some(hub_id.clone()),
-                None => None,
-            };
-            let cur = ring
-                .iter()
-                .position(|it| match (it, cur_id.as_deref()) {
-                    (TnaDisplayItem::Real { idx }, Some(id)) => {
-                        snap.nodes.get(*idx).map(|n| n.id.as_str()) == Some(id)
-                    }
-                    (TnaDisplayItem::Super { hub_id, .. }, Some(id)) => hub_id == id,
-                    _ => false,
-                })
-                .unwrap_or(0);
-            let n = ring.len();
-            let next = if dir < 0 { (cur + n - 1) % n } else { (cur + 1) % n };
-            ring.get(next).cloned()
-        };
-        self.pin_tna_selection(next_item, false);
-        self.sync_tna_table_ui();
-    }
-
     fn on_esc(&mut self) {
         if self.modal {
             self.modal = false;
@@ -2926,8 +2356,8 @@ impl App {
                 self.tna_report = None;
                 self.load_transcript("desk");
                 self.scroll_back = 0;
-                self.focus = Focus::Graph;
-                self.ensure_tna_snapshot(false);
+                self.case_page = CasePage::Closed;
+                self.focus = Focus::Prompt;
                 return;
             }
             self.case_page = CasePage::Closed;
@@ -3592,6 +3022,9 @@ Could not write the report: {err}",
         if self.chat_report.as_deref() != Some(report.id.as_str()) {
             self.persist_visible_chat();
         }
+        if self.chat_report.as_deref() != Some(report.id.as_str()) {
+            self.tna_report = None;
+        }
         self.chat_case = None;
         self.chat_report = Some(report.id.clone());
         if self.case_page == CasePage::Network {
@@ -3739,15 +3172,16 @@ Could not write the report: {err}",
                 }
             }
             "network" => {
-                self.open_module(ModuleId::Cases);
                 self.select_case_page(CasePage::Network);
             }
             "find" => {
                 if self.case_page != CasePage::Network {
                     self.select_case_page(CasePage::Network);
                 }
-                self.tna_find = Some(String::new());
-                self.focus = Focus::Graph;
+                if self.case_page == CasePage::Network {
+                    self.tna_find = Some(String::new());
+                    self.focus = Focus::Graph;
+                }
             }
             "brain" => {
                 if arg.is_empty() {
@@ -4041,13 +3475,14 @@ Could not write the report: {err}",
     fn cycle_group_page(&mut self, delta: isize) {
         match self.module {
             Some(ModuleId::Cases) => {
-                let pages = CasePage::all();
+                let pages = self.case_pages();
                 let index = pages
                     .iter()
                     .position(|page| *page == self.case_page)
                     .unwrap_or(0);
                 let next = (index as isize + delta).rem_euclid(pages.len() as isize) as usize;
-                self.case_page = pages[next];
+                self.select_case_page(pages[next]);
+                return;
             }
             Some(ModuleId::Providers) => {
                 let pages = ProviderPage::all();
@@ -5026,6 +4461,17 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    fn attach_report(app: &mut App) {
+        app.reports.push(ReportMeta {
+            id: "r1".into(),
+            case_id: None,
+            title: "Investigation".into(),
+            path: "/synthetic/report.md".into(),
+            created_at: "now".into(),
+        });
+        app.chat_report = Some("r1".into());
+    }
+
     #[test]
     fn classic_frame_mentions_the_launcher_and_prompt() {
         let store = Store::memory().unwrap();
@@ -5057,7 +4503,7 @@ mod tests {
         let chat = app.canvas_area;
         app.click(chat.x + 2, chat.y + 2);
         assert_eq!(app.focus, Focus::Canvas);
-        assert_eq!(app.case_tab_hits.len(), 3);
+        assert_eq!(app.case_tab_hits.len(), 2);
         assert!(text.contains("System"), "{text}");
         assert!(!text.contains("Search Log"), "{text}");
         let brain = app.case_tab_hits[1];
@@ -5161,10 +4607,7 @@ mod tests {
         assert_eq!(pages.len(), 3);
         assert!(pages.contains(&CasePage::Network));
         assert_eq!(CasePage::Network.title(), "Network");
-        assert_eq!(
-            pages.map(|p| p.title()),
-            ["Desk", "Brain", "Network"]
-        );
+        assert_eq!(pages.map(|p| p.title()), ["Desk", "Brain", "Network"]);
     }
 
     #[test]
@@ -5172,8 +4615,207 @@ mod tests {
         let store = Store::memory().unwrap();
         let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
         app.run_slash("/network");
+        assert_eq!(app.case_page, CasePage::Closed);
+        assert!(!app.case_pages().contains(&CasePage::Network));
+        attach_report(&mut app);
+        app.run_slash("/network");
         assert_eq!(app.case_page, CasePage::Network);
         assert_eq!(app.focus, Focus::Graph);
+    }
+
+    fn five_hop_report_app() -> App {
+        let store = Store::memory().unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        attach_report(&mut app);
+        let mut snap = TnaSnapshot::empty(argos_osint_core::tna::TnaScope::Targeted {
+            report_id: "r1".into(),
+            title: "Investigation".into(),
+        });
+        snap.nodes = [
+            ("a", "Ada Lovelace", TnaNodeKind::Person),
+            ("b", "example.com", TnaNodeKind::Domain),
+            ("c", "ada@example.com", TnaNodeKind::Email),
+            ("d", "third_hop", TnaNodeKind::Handle),
+            ("e", "fourth_hop", TnaNodeKind::Handle),
+            ("f", "fifth_hop", TnaNodeKind::Handle),
+            ("g", "sixth_hop", TnaNodeKind::Handle),
+            ("h", "isolated", TnaNodeKind::Handle),
+        ]
+        .into_iter()
+        .map(|(id, label, kind)| TnaNode {
+            id: id.into(),
+            label: label.into(),
+            kind,
+            cluster: kind.cluster(),
+            mentions: 1,
+            degree: 1,
+            x: 0.5,
+            y: 0.5,
+        })
+        .collect();
+        snap.edges = [
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "d"),
+            ("d", "e"),
+            ("e", "f"),
+            ("f", "g"),
+        ]
+        .into_iter()
+        .map(|(a, b)| argos_osint_core::tna::TnaEdge {
+            from: a.into(),
+            to: b.into(),
+            weight: 1,
+        })
+        .collect();
+        app.tna_report = Some(snap);
+        app.run_slash("/network");
+        app
+    }
+
+    #[test]
+    fn tna_details_follow_five_hops_from_selected_focus() {
+        let mut app = five_hop_report_app();
+        let visible: Vec<_> = app
+            .tna_display_nodes()
+            .into_iter()
+            .map(|TnaDisplayItem::Real { idx }| app.tna_snapshot().unwrap().nodes[idx].id.clone())
+            .collect();
+        assert_eq!(visible, ["a", "b", "c", "d", "e", "f"]);
+        app.focus = Focus::TableDetail;
+        for _ in 0..4 {
+            app.on_tna_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        let page = app.tna_detail_box_items(3);
+        assert!(page
+            .iter()
+            .any(|TnaDisplayItem::Real { idx }| app.tna_snapshot().unwrap().nodes[*idx].id == "f"));
+        app.focus = Focus::Graph;
+        app.on_tna_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.tna_focus_id.as_deref(), Some("a"));
+        app.on_tna_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.tna_focus_id.as_deref(), Some("b"));
+        assert!(app
+            .tna_display_nodes()
+            .iter()
+            .any(|TnaDisplayItem::Real { idx }| app.tna_snapshot().unwrap().nodes[*idx].id == "g"));
+        app.focus = app.next_focus();
+        assert_eq!(app.focus, Focus::TableDetail);
+        app.focus = app.next_focus();
+        assert_eq!(app.focus, Focus::Prompt);
+    }
+
+    #[test]
+    fn tna_table_render_has_type_borders_and_values_inside_boxes() {
+        let mut app = five_hop_report_app();
+        for (width, height) in [(120, 40), (100, 30)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| super::super::ui::draw(frame, &mut app))
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content()
+                .chunks(width as usize)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("{width}x{height}\n{text}");
+            assert!(
+                text.contains("Ada Lovelace") && text.contains("More details · 5 hops"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("v views")
+                    && !text.contains("Most connected entities")
+                    && !text.contains("· outline")
+                    && !text.contains("type group")
+                    && !text.contains("source mentions")
+                    && !text.contains("most connected:")
+                    && !text.contains("unconnected types:"),
+                "{text}"
+            );
+            let border = text
+                .lines()
+                .position(|row| row.contains("╭*person"))
+                .expect("person type in box border");
+            assert!(
+                text.lines()
+                    .nth(border + 1)
+                    .unwrap()
+                    .contains("Ada Lovelace"),
+                "entity value must be inside box: {text}"
+            );
+            if width == 120 {
+                assert!(
+                    text.contains("╭email"),
+                    "second-hop email type border: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn network_tab_disappears_when_report_closes_and_never_uses_other_report() {
+        let mut app = five_hop_report_app();
+        assert!(app.case_pages().contains(&CasePage::Network));
+        app.chat_report = Some("other".into());
+        assert!(app.tna_snapshot().is_none());
+        app.chat_report = Some("r1".into());
+        app.on_esc();
+        assert_eq!(app.case_page, CasePage::Closed);
+        assert!(!app.case_pages().contains(&CasePage::Network));
+        assert!(app.tna_snapshot().is_none());
+        app.run_slash("/find");
+        assert!(app.tna_find.is_none());
+        app.cycle_group_page(1);
+        assert_eq!(app.case_page, CasePage::Brain);
+        app.cycle_group_page(1);
+        assert_eq!(app.case_page, CasePage::Closed);
+    }
+
+    #[test]
+    fn report_network_old_cache_rebuilds_on_first_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::memory().unwrap();
+        let report = argos_osint_core::report::write_report(
+            dir.path(),
+            "Ada",
+            None,
+            "## Evidence\nAda Lovelace operates example.com.\n",
+        )
+        .unwrap();
+        store.add_report(&report).unwrap();
+        let mut old = TnaSnapshot::empty(argos_osint_core::tna::TnaScope::Targeted {
+            report_id: report.id.clone(),
+            title: report.title.clone(),
+        });
+        old.pipeline_version = 0;
+        old.title = "Old noisy graph".into();
+        store
+            .upsert_tna_graph(&report_key(&report.id), &old)
+            .unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        app.open_report_chat(&report.id);
+        app.run_slash("/network");
+        let current = app.tna_snapshot().unwrap().clone();
+        assert_eq!(
+            current.pipeline_version,
+            argos_osint_core::tna::PIPELINE_VERSION
+        );
+        assert_ne!(current.title, old.title);
+        assert!(current.nodes.iter().any(|n| n.label == "Ada Lovelace"));
+        app.ensure_tna_snapshot(false);
+        assert_eq!(app.tna_snapshot().unwrap(), &current);
+        let persisted = app
+            .store
+            .get_tna_graph(&report_key(&report.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.built_at, current.built_at);
+        assert_eq!(persisted.decisions, current.decisions);
+        assert_eq!(persisted.nodes.len(), current.nodes.len());
     }
 
     #[test]
@@ -5187,125 +4829,6 @@ mod tests {
         assert_eq!(tna_glyph_for_kind(TnaNodeKind::Handle), "●");
         assert_eq!(tna_glyph_for_kind(TnaNodeKind::Email), "●");
         assert_eq!(tna_glyph_for_kind(TnaNodeKind::Doc), "□");
-    }
-
-    #[test]
-    fn tna_hub_threshold_drops_to_eight_when_max_degree_low() {
-        let nodes = vec![
-            TnaNode {
-                id: "a".into(),
-                label: "a".into(),
-                kind: TnaNodeKind::Domain,
-                cluster: TnaCluster::Infrastructure,
-                mentions: 1,
-                degree: 10,
-                x: 0.0,
-                y: 0.0,
-            },
-            TnaNode {
-                id: "b".into(),
-                label: "b".into(),
-                kind: TnaNodeKind::Handle,
-                cluster: TnaCluster::Identity,
-                mentions: 1,
-                degree: 3,
-                x: 0.0,
-                y: 0.0,
-            },
-        ];
-        assert_eq!(tna_hub_threshold(&nodes), 8);
-        let mut high = nodes.clone();
-        high[0].degree = 20;
-        assert_eq!(tna_hub_threshold(&high), 15);
-    }
-
-    #[test]
-    fn tna_ego_collapse_counts_far_neighbors() {
-        // Hub H connected to focus F and 8 peripheral nodes (degree 9).
-        // From F, ego1 = {F,H}; far neighbors of H collapse when threshold=8.
-        let mut nodes = vec![TnaNode {
-            id: "F".into(),
-            label: "focus".into(),
-            kind: TnaNodeKind::Person,
-            cluster: TnaCluster::Identity,
-            mentions: 1,
-            degree: 1,
-            x: 0.2,
-            y: 0.5,
-        }, TnaNode {
-            id: "H".into(),
-            label: "hub".into(),
-            kind: TnaNodeKind::Domain,
-            cluster: TnaCluster::Infrastructure,
-            mentions: 1,
-            degree: 9,
-            x: 0.5,
-            y: 0.5,
-        }];
-        let mut edges = vec![argos_osint_core::tna::TnaEdge {
-            from: "F".into(),
-            to: "H".into(),
-            weight: 1,
-        }];
-        for i in 0..8 {
-            let id = format!("p{i}");
-            nodes.push(TnaNode {
-                id: id.clone(),
-                label: id.clone(),
-                kind: TnaNodeKind::Handle,
-                cluster: TnaCluster::Identity,
-                mentions: 1,
-                degree: 1,
-                x: 0.8,
-                y: 0.1 * i as f64,
-            });
-            edges.push(argos_osint_core::tna::TnaEdge {
-                from: "H".into(),
-                to: id,
-                weight: 1,
-            });
-        }
-        let snap = TnaSnapshot {
-            scope: argos_osint_core::tna::TnaScope::Collection,
-            title: "TNA · test".into(),
-            nodes,
-            edges,
-            clusters: vec![],
-            anchors: vec![],
-            gaps: vec![],
-            built_at: "t".into(),
-        };
-        let expanded = HashSet::new();
-        let (visible, supers) = App::tna_ego_visible_indices(&snap, "F", &expanded);
-        assert!(visible.contains(&0), "focus visible: {visible:?}");
-        assert!(visible.contains(&1), "hub visible: {visible:?}");
-        assert_eq!(supers.len(), 1, "one supernode: {supers:?}");
-        assert_eq!(supers[0].0, "H");
-        assert_eq!(supers[0].1, 8);
-        assert_eq!(visible.len(), 2, "peripherals collapsed: {visible:?}");
-
-        let mut expanded = HashSet::new();
-        expanded.insert("H".into());
-        let (visible2, supers2) = App::tna_ego_visible_indices(&snap, "F", &expanded);
-        assert!(supers2.is_empty());
-        assert_eq!(visible2.len(), 10, "all expanded: {visible2:?}");
-    }
-
-    #[test]
-    fn tna_view_key_v_cycles() {
-        let store = Store::memory().unwrap();
-        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
-        app.run_slash("/network");
-        assert_eq!(app.tna_view, TnaView::Table);
-        assert!(app.tna_selected_real_idx().is_none() || app.tna_selected_item().is_some());
-        assert!(app.tna_selected_super_hub().is_none());
-        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
-        app.on_tna_key(key);
-        assert_eq!(app.tna_view, TnaView::Graph);
-        app.on_tna_key(key);
-        assert_eq!(app.tna_view, TnaView::Outline);
-        app.on_tna_key(key);
-        assert_eq!(app.tna_view, TnaView::Table);
     }
 
     #[test]
@@ -5341,6 +4864,8 @@ mod tests {
             });
         }
         let snap = TnaSnapshot {
+            pipeline_version: 2,
+            decisions: Vec::new(),
             scope: argos_osint_core::tna::TnaScope::Collection,
             title: "TNA · budget".into(),
             nodes,
@@ -5352,12 +4877,17 @@ mod tests {
         };
         let store = Store::memory().unwrap();
         let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
-        app.tna_desk = Some(snap);
+        attach_report(&mut app);
+        let mut snap = snap;
+        snap.scope = argos_osint_core::tna::TnaScope::Targeted {
+            report_id: "r1".into(),
+            title: "test".into(),
+        };
+        app.tna_report = Some(snap);
         app.run_slash("/network");
         // select_case_page clears focus/expanded — restore after open.
         app.tna_focus_id = Some("F".into());
-        app.tna_expanded.insert("F".into());
-        let items = app.tna_display_nodes();
+        let items = app.tna_detail_box_items(TNA_GRAPH_BOX_BUDGET);
         assert!(
             items.len() <= TNA_GRAPH_BOX_BUDGET,
             "budget {} exceeded: {}",
@@ -5368,89 +4898,17 @@ mod tests {
     }
 
     #[test]
-    fn network_page_smoke_view_cycle_and_graph_title() {
-        let store = Store::memory().unwrap();
-        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
-        // Minimal two-node snapshot so Graph has boxes to draw.
-        app.tna_desk = Some(TnaSnapshot {
-            scope: argos_osint_core::tna::TnaScope::Collection,
-            title: "TNA · smoke".into(),
-            nodes: vec![
-                TnaNode {
-                    id: "a".into(),
-                    label: "alpha.example".into(),
-                    kind: TnaNodeKind::Domain,
-                    cluster: TnaCluster::Infrastructure,
-                    mentions: 2,
-                    degree: 1,
-                    x: 0.2,
-                    y: 0.4,
-                },
-                TnaNode {
-                    id: "b".into(),
-                    label: "bob".into(),
-                    kind: TnaNodeKind::Person,
-                    cluster: TnaCluster::Identity,
-                    mentions: 1,
-                    degree: 1,
-                    x: 0.7,
-                    y: 0.6,
-                },
-            ],
-            edges: vec![argos_osint_core::tna::TnaEdge {
-                from: "a".into(),
-                to: "b".into(),
-                weight: 1,
-            }],
-            clusters: vec![],
-            anchors: vec![],
-            gaps: vec![],
-            built_at: "t".into(),
-        });
-        app.run_slash("/network");
-        assert_eq!(app.case_page, CasePage::Network);
-        assert_eq!(app.tna_view, TnaView::Table);
-        assert_eq!(app.focus, Focus::Graph);
-        let backend = TestBackend::new(140, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| super::super::ui::draw(frame, &mut app))
-            .unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(text.contains("Network") || text.contains("table"), "{text}");
-        assert!(text.contains("TNA") || text.contains("smoke") || text.contains("alpha"), "{text}");
-        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
-        app.on_tna_key(key);
-        assert_eq!(app.tna_view, TnaView::Graph);
-        app.on_tna_key(key);
-        assert_eq!(app.tna_view, TnaView::Outline);
-        terminal
-            .draw(|frame| super::super::ui::draw(frame, &mut app))
-            .unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(text.contains("outline"), "{text}");
-        app.on_tna_key(key);
-        assert_eq!(app.tna_view, TnaView::Table);
-    }
-
-    #[test]
     fn tna_table_master_detail_focus_and_scroll_independent() {
         let store = Store::memory().unwrap();
         let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
-        app.tna_desk = Some(TnaSnapshot {
-            scope: argos_osint_core::tna::TnaScope::Collection,
+        attach_report(&mut app);
+        app.tna_report = Some(TnaSnapshot {
+            pipeline_version: 2,
+            decisions: Vec::new(),
+            scope: argos_osint_core::tna::TnaScope::Targeted {
+                report_id: "r1".into(),
+                title: "table".into(),
+            },
             title: "TNA · table".into(),
             nodes: (0..5)
                 .map(|i| TnaNode {
@@ -5475,9 +4933,6 @@ mod tests {
             built_at: "t".into(),
         });
         app.run_slash("/network");
-        while app.tna_view != TnaView::Table {
-            app.on_tna_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-        }
         assert_eq!(app.focus, Focus::Graph);
         assert_eq!(app.tna_sel, 0);
         app.on_tna_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -5490,7 +4945,7 @@ mod tests {
         let list_sel = app.tna_sel;
         app.on_tna_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(app.tna_sel, list_sel, "detail j/k must not move list");
-        assert!(app.tna_detail_scroll >= 1);
+        assert_eq!(app.tna_detail_scroll, 1);
         app.on_tna_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         // Filter empty-state + reclamp.
         app.focus = Focus::Graph;
@@ -5510,7 +4965,10 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("No nodes match") || text.contains("Filter"), "{text}");
+        assert!(
+            text.contains("No nodes match") || text.contains("Filter"),
+            "{text}"
+        );
         app.tna_find = None;
         app.clamp_tna_sel();
         terminal
@@ -5745,76 +5203,6 @@ mod tests {
         app.on_event(key(KeyCode::Char(' ')));
         assert!(!app.scope.as_ref().unwrap().web);
         assert!(app.settings.web);
-    }
-
-    #[test]
-    fn tna_network_remembers_view_and_defaults_to_table() {
-        let store = Store::memory().unwrap();
-        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
-        app.run_slash("/network");
-        assert_eq!(app.tna_view, TnaView::Table);
-        app.on_tna_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-        assert_eq!(app.tna_view, TnaView::Graph);
-        app.select_case_page(CasePage::Closed);
-        app.run_slash("/network");
-        assert_eq!(app.tna_view, TnaView::Graph);
-    }
-
-    #[test]
-    fn tna_graph_arrows_walk_neighbors_without_moving_focus() {
-        let store = Store::memory().unwrap();
-        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
-        app.tna_desk = Some(TnaSnapshot {
-            scope: argos_osint_core::tna::TnaScope::Collection,
-            title: "TNA · walk".into(),
-            nodes: vec![
-                TnaNode {
-                    id: "a".into(),
-                    label: "alpha".into(),
-                    kind: TnaNodeKind::Person,
-                    cluster: TnaCluster::Identity,
-                    mentions: 2,
-                    degree: 1,
-                    x: 0.2,
-                    y: 0.5,
-                },
-                TnaNode {
-                    id: "b".into(),
-                    label: "beta".into(),
-                    kind: TnaNodeKind::Domain,
-                    cluster: TnaCluster::Infrastructure,
-                    mentions: 2,
-                    degree: 1,
-                    x: 0.8,
-                    y: 0.5,
-                },
-            ],
-            edges: vec![argos_osint_core::tna::TnaEdge {
-                from: "a".into(),
-                to: "b".into(),
-                weight: 3,
-            }],
-            clusters: vec![],
-            anchors: vec![],
-            gaps: vec![],
-            built_at: "t".into(),
-        });
-        app.run_slash("/network");
-        while app.tna_view != TnaView::Graph {
-            app.on_tna_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-        }
-        app.tna_focus_id = Some("a".into());
-        app.tna_sel = 0;
-        app.on_tna_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        assert_eq!(app.tna_focus_id.as_deref(), Some("a"));
-        match app.tna_selected_item() {
-            Some(TnaDisplayItem::Real { idx }) => {
-                assert_eq!(app.tna_desk.as_ref().unwrap().nodes[idx].id, "b");
-            }
-            other => panic!("expected neighbor b, got {other:?}"),
-        }
-        app.on_tna_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.tna_focus_id.as_deref(), Some("b"));
     }
 }
 

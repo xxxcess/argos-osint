@@ -47,8 +47,7 @@ fn push_from_query(text: &str, out: &mut Vec<Occurrence>) {
         }
         for handle in &query.handles {
             let needle = format!("@{handle}");
-            let start = find_ci(text, &needle, offset)
-                .or_else(|| find_ci(text, handle, offset));
+            let start = find_ci(text, &needle, offset).or_else(|| find_ci(text, handle, offset));
             if let Some(start) = start {
                 out.push(Occurrence {
                     kind: TnaNodeKind::Handle,
@@ -58,11 +57,13 @@ fn push_from_query(text: &str, out: &mut Vec<Occurrence>) {
             }
         }
         for domain in &query.domains {
-            if let Some(start) = find_ci(text, domain, offset) {
+            // The same host may first occur inside an email, then as a subject
+            // hostname. Cleanup needs each source position to distinguish them.
+            for (relative, _) in segment.to_ascii_lowercase().match_indices(domain.as_str()) {
                 out.push(Occurrence {
                     kind: TnaNodeKind::Domain,
                     label: domain.to_string(),
-                    start,
+                    start: offset + relative,
                 });
             }
         }
@@ -101,8 +102,9 @@ fn push_from_query(text: &str, out: &mut Vec<Occurrence>) {
 }
 
 fn push_ips(text: &str, out: &mut Vec<Occurrence>) {
-    let v4 = Regex::new(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b")
-        .expect("v4");
+    let v4 =
+        Regex::new(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b")
+            .expect("v4");
     for m in v4.find_iter(text) {
         if let Ok(ip) = m.as_str().parse::<IpAddr>() {
             if !ip_blocked(ip) {
@@ -140,7 +142,8 @@ fn push_ips(text: &str, out: &mut Vec<Occurrence>) {
 fn push_url_hosts(text: &str, out: &mut Vec<Occurrence>) {
     let re = Regex::new(r#"(?i)\bhttps?://[^\s\)\]>"']+"#).expect("url");
     for m in re.find_iter(text) {
-        if let Some(host) = public_host_from_url(m.as_str().trim_end_matches(['.', ',', ';', ')'])) {
+        if let Some(host) = public_host_from_url(m.as_str().trim_end_matches(['.', ',', ';', ')']))
+        {
             // Prefer domain label; IP hosts already covered when public.
             if host.parse::<IpAddr>().is_ok() {
                 out.push(Occurrence {
@@ -255,7 +258,12 @@ mod tests {
         assert!(labels.iter().any(|l| *l == "ada@example.com"));
         let positions: Vec<_> = occ
             .iter()
-            .filter(|o| matches!(o.kind, TnaNodeKind::Domain | TnaNodeKind::Handle | TnaNodeKind::Email))
+            .filter(|o| {
+                matches!(
+                    o.kind,
+                    TnaNodeKind::Domain | TnaNodeKind::Handle | TnaNodeKind::Email
+                )
+            })
             .map(|o| o.start)
             .collect();
         assert!(positions.windows(2).all(|w| w[0] <= w[1]), "{positions:?}");

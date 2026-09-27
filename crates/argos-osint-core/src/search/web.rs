@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 use url::Url;
 
 use super::{
-    clip, get_json, keyed, merge_adapter_results, post_json, searx_base, tag, Job, MergeOutcome, SearchHit,
-    SourcePlan,
+    clip, get_json, keyed, merge_adapter_results, post_json, searx_base, tag, Job, MergeOutcome,
+    SearchHit, SourcePlan,
 };
 
 pub async fn gather(query: &str, plan: &SourcePlan) -> Result<MergeOutcome, String> {

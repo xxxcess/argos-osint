@@ -25,3 +25,6 @@ sysinfo.workspace = true
 tokio.workspace = true
 unicode-width.workspace = true
 tui-nodes = "0.10"
+
+[dev-dependencies]
+tempfile.workspace = true

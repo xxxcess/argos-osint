@@ -5,7 +5,8 @@ use futures_util::future::join_all;
 use serde_json::Value;
 
 use super::{
-    clip, get_json, get_json_headers, merge_adapter_results, strip_tags, tag, Job, MergeOutcome, SearchHit,
+    clip, get_json, get_json_headers, merge_adapter_results, strip_tags, tag, Job, MergeOutcome,
+    SearchHit,
 };
 
 const MASTODON: &str = "https://mastodon.social";

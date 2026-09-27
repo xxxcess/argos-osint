@@ -427,7 +427,10 @@ mod tests {
         let md = render_report("Empty", None, "what happened?", "", &hits);
         let bluf = &md[md.find("## BLUF").unwrap()..md.find("## Key judgments").unwrap()];
         assert!(!bluf.contains("Secret Title Alone"), "{bluf}");
-        assert!(bluf.contains("no excerpt") || bluf.contains("no finding"), "{bluf}");
+        assert!(
+            bluf.contains("no excerpt") || bluf.contains("no finding"),
+            "{bluf}"
+        );
         let evidence = &md[md.find("## Evidence").unwrap()..];
         assert!(evidence.contains("Excerpt: no excerpt was stored"));
     }

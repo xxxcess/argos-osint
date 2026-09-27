@@ -126,6 +126,10 @@ pub struct TnaClusterSummary {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TnaSnapshot {
+    #[serde(default)]
+    pub pipeline_version: u32,
+    #[serde(default)]
+    pub decisions: Vec<TnaDecision>,
     pub scope: TnaScope,
     pub title: String,
     pub nodes: Vec<TnaNode>,
@@ -143,6 +147,8 @@ impl TnaSnapshot {
             TnaScope::Targeted { title, .. } => format!("TNA · {title}"),
         };
         Self {
+            pipeline_version: PIPELINE_VERSION,
+            decisions: Vec::new(),
             scope,
             title,
             nodes: Vec::new(),
@@ -164,4 +170,21 @@ pub fn desk_key() -> &'static str {
 
 pub fn report_key(report_id: &str) -> String {
     format!("report:{report_id}")
+}
+
+/// Increment when extraction or cleanup semantics change. Missing versions are stale.
+pub const PIPELINE_VERSION: u32 = 2;
+
+/// Source-backed audit record; rejected candidates never enter the graph.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TnaDecision {
+    pub report_id: String,
+    pub section: String,
+    pub start: usize,
+    pub end: usize,
+    pub original: String,
+    pub kind: TnaNodeKind,
+    pub label: Option<String>,
+    pub canonical_id: Option<String>,
+    pub reason: String,
 }

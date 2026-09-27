@@ -117,14 +117,57 @@ fn draw_brain(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_brain_list(frame, app, area);
 }
 
-fn draw_brain_list(frame: &mut Frame, app: &App, area: Rect) {
-    let title = " Memories ";
-    let lines = brain_list_lines(app, area.height.saturating_sub(2) as usize);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel(&title))
-            .wrap(Wrap { trim: false }),
-        area,
+fn draw_brain_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.brain_list_area = area;
+    let title = " Memories · j/k move · Enter views a fact ";
+    let block = panel(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let shown = app.shown_memories();
+    app.sync_brain_list_ui();
+
+    if shown.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No memories in this view.")
+                .style(theme::dim())
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    // Copy rows so we do not hold a memories borrow across stateful render.
+    let row_text: Vec<(bool, String)> = shown
+        .iter()
+        .map(|memory| (memory.pinned, memory.text.clone()))
+        .collect();
+    let items: Vec<ListItem> = row_text
+        .into_iter()
+        .map(|(pinned, text)| {
+            let pin = if pinned { "pin" } else { "   " };
+            ListItem::new(Line::from(format!("{pin}  {text}")).style(theme::text()))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(theme::selected())
+        .highlight_symbol("> ")
+        .highlight_spacing(HighlightSpacing::Always);
+
+    frame.render_stateful_widget(list, inner, &mut app.brain_list_state);
+
+    // Scrollbar synced to selection (ITEM_HEIGHT = 1), same as Table initiative list.
+    frame.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None),
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut app.brain_list_scroll,
     );
 }
 

@@ -2,10 +2,10 @@
 
 Argos is a terminal research desk. It keeps the Grok Build shape that matters
 for a long session: a full-screen TUI, a launcher, and a prompt fixed to the
-bottom. The main canvas is the Case Desk. Ask it about completed reports,
-open a cited passage, inspect its report network, and explicitly start
-focused research when the saved evidence has a gap. System and Providers
-remain beside it.
+bottom. The main canvas is the Case Desk. Ask about reviewed case evidence
+and saved reports, open cited sources, and explicitly investigate an evidence
+gap. A case can have leads and a network before any report exists. System and
+Providers remain beside it.
 
 There is no browser UI. Every screen is the terminal.
 
@@ -68,64 +68,76 @@ Ctrl+C cancels a turn, clears a draft, or quits when the prompt is empty.
 `/search`, `/new`, `/use`, `/report`, `/hardware`, `/provider`, `/brain`,
 `/gmail`, `/voice`, `/text`, `/open`, `/dashboard`, `/clear`, `/quit`.
 
-## Case Desk and report evidence
+## Case Desk and investigations
 
-See [configuration, migration, and implementation status](docs/case-desk-research.md)
-for the supported execution paths and remaining work.
+See [case flow, configuration, migration, and limitations](docs/case-desk-research.md).
+Ordinary questions retrieve reviewed observations and indexed report passages in
+scope and show attributed excerpts with citations, recommendations, and unresolved
+questions. They make no provider or model calls. The default general Desk searches
+the saved collection; `/scope case <id>`, `/scope reports <ids>`, and `/scope report`
+restrict retrieval. `/scope desk` selects legacy unassigned material.
 
-Ordinary Desk questions search completed report passages first. Matching
-passages are ranked by text relevance and shown with report dates; answers
-cite `report-id@vN:Lline`. `/cite 1` opens the first recommended passage,
-and `/cite report-id@vN:Lline` opens a saved citation, including earlier
-report versions. If no passage supports a claim, the Desk reports the gap
-instead of creating an investigation. `/new <question>` opens a scope card;
-an explicit fresh-research request also opens that card and carries any
-relevant saved passages into the turn. Use `/scope report`, `/scope reports
-<ids>`, `/scope case <id>`, or `/scope collection` to expand the default
-report/case boundary deliberately.
+`+` or `/new <question>` opens a scope card. Choose a new or existing case (`c`),
+include existing recommended passages (`e`), and allow sensitive (`s`) or active
+HTTP (`a`) actions if needed. Provider privacy and exact-host controls still apply.
+First actions start unchecked; Space selects sources and Enter saves the case and
+starts only selected actions. Enter with no actions creates a case without a report
+or initial network. Selecting saved cases opens Leads. Esc restores the Desk prompt,
+selection, and scroll position.
 
-In a report, `R` or `/read` opens its text, `j/k` moves through lines, and
-`g` explores the current report graph from the cited passage. `/related`
-retrieves related passages and `/entities` opens the graph. Report questions
-are evidence-only by default and do not file facts or new reports;
-`/retain-answer` explicitly keeps a completed answer. Historic citations
-remain readable after revisions; the graph always reflects the latest
-report text.
+A case has **1 Leads**, **2 Focus map**, **3 Evidence table**, **4 Timeline**,
+**5 Review**, **6 Jobs**, and **7 Path** as separate clickable tabs. The tab bar wraps
+on narrow screens; `1–7` selects tabs and each tab keeps its row/scroll position.
+`j/k` selects cached leads;
+`e` offers eligible provider actions and Enter submits one bounded job. Discovered
+identifiers become candidate leads without recursive collection. Focus shows one-hop
+links with typed basis, uncertainty, source targets, and review state. `←/→` selects
+a link, `x` expands one neighbor, `z` collapses, `o` opens its source, `v` opens its
+review, and `p` opens Path for that pair. Evidence and Timeline open the same source.
+Path also opens with `7`: `j/k` selects an entity, `f/t` pins endpoints, `n/N`
+selects a path, `[ / ]` selects a hop, and `o` opens its source. It uses accepted
+noncandidate links only and never starts research. No recovered path is not proof of
+a real-world gap.
 
-The Research tab under Providers is separate from model accounts. It exposes
-provider readiness, execution mode, scope and privacy controls, limits,
-masked credentials, and Test Configuration. Existing search, domain,
-InternetDB, GitHub identity, and LeakCheck paths remain available. Shodan,
-XposedOrNot, and selected WhatsMyName checking have structured adapters;
-credentials, provider entitlements, and privacy settings may still be
-required. Katana has an explicit pinned, checksum-verified managed installer.
-SpiderFoot, Mosint, and Maigret appear as configured capabilities but their
-collection paths remain unavailable until an installed version's output and
-scope contract can be verified. Opening Providers never installs tools or
-starts a scan.
+`D` opens case data controls. `/clear-case [id or title]` removes case investigation
+data while keeping the empty case; `/delete-case [id or title]` also removes the
+case. Both show counts and require `/confirm-case <exact ID>`; cancel with Esc or
+`/cancel-case-data`. Active case jobs must finish or be cancelled first. Chat,
+case-only evidence, reviews, scope/correction/identity history, jobs/cache, and the
+case network are removed atomically. Saved reports and report-owned evidence are
+retained and detached; historical versions/citations and other cases stay accessible.
+This cannot be undone. Stale jobs cannot restore cleared data.
 
-`/investigate <provider> [input]` submits a bounded background enrichment
-job; `/jobs` shows job state and `/cancel-jobs` cancels queued/running work.
-In a report network, `i` opens the cached evidence inspector. `/findings`
-shows observations; `/review <observation-id> accept|retain|reject|defer
-<reason>` records an analyst decision. `/save-update addendum|revision|followup`
-saves accepted observations with attribution while retaining earlier files,
-versions, and citations. `/timeline` shows dated and undated observations
-without treating retrieval time as event time. `/correct` and `/merge` have
-reversal commands; original labels and mentions are retained.
+`/filter <text/source/state>` filters evidence; `s` cycles entity, relationship, source, event/retrieval date, and review-state sorts.
 
-On first run, existing report files are imported into a versioned SQLite
-passage index. Legacy OSINT keys in `config.toml` move into `auth.json`.
-The index and graph snapshots rebuild when reports or extraction rules
-change. Research jobs interrupted by a restart are marked partial; Argos
-does not replay completed paid requests automatically.
+Review keys `a/r/d/t` prepare accept/reject/defer/retain; add a reason and Enter.
+`/review <observation-id> accept|retain|reject|defer <reason>` keeps history. Accepted
+observed links enter the case network; rejected/deferred evidence cannot promote
+links. Co-occurrence and candidate identity remain candidates even after review.
+Evidence count, acceptance, and network degree are separate. `/jobs` and
+`/cancel-jobs` expose progress and cancel queued/running work; partial successes survive.
 
-`/clear` wipes the chat on screen: the case desk, or the report chat when one is open.
+Reports are explicit outputs: `/draft final|addendum|revision|followup <accepted IDs>`
+writes selected reviewed case evidence, source dates, uncertainties, and pending gaps.
+It leaves case observations independent of report ownership. Historical reports,
+versions, and `report-id@vN:Lline` citations remain readable using `/cite`. `/source
+<observation-id>` opens an observation artifact. Existing report workspaces retain
+`/save-update addendum|revision|followup` and reversible corrections/identity decisions.
 
-`/use` matches a case by exact id or title, then by one unambiguous prefix.
+Providers → Research contains **Discovery**, **Infrastructure**, **Identity &
+contacts**, **Exposure**, and **Analysis & output** tabs (`1–5`). Cards expose purpose,
+input types, mode, readiness, versions, credentials, limits, scope, cache/retries,
+and Test Configuration. Models and account routing remain separate. Katana, Maigret,
+and Mosint collection stays visibly unavailable until output/scope contracts are
+verified. Opening configuration never scans or installs. Managed install/update/remove
+show a plan before Apply starts a background job. No broad scan or paid lookup is
+part of the test suite.
 
-Apps stays on the left. The main area is the case desk, or the app you opened
-from Apps. The prompt stays at the bottom.
+Migration is additive. Reports are indexed without changing their case association.
+Assigned reports or explicitly included passages can propose case mentions and
+co-occurrence for review. Old snapshots and citations remain available; credentials,
+transcripts, raw observations, and decisions are retained. Interrupted research jobs
+become partial; completed paid requests are not automatically replayed on restart.
 
 ## What a turn does
 
@@ -148,13 +160,18 @@ covert surveillance.
 
 ## Chat Providers
 
-The launcher is Case Desk, Providers, and System. Case Desk keeps Desk, Brain, and the report network. The report list shows pending and completed reports; selecting a recommended report opens its supporting passage. Providers has separate model accounts, Models, Sources, and Research pages. Mail and MCP setup remain separate. System has Log, Hardware, and Settings.
+The launcher is Case Desk, Providers, and System. Case Desk opens case investigations and historical reports alongside Brain. Providers keeps separate model accounts, Models, Sources, and its existing Research page. Mail and MCP setup remain separate. System has Log, Hardware, and Settings.
 
 OSINT, under Providers, turns Facts, Web, News, Domain, Social, and Identity on or off for every run, sets a SearXNG URL, and can store Brave, Tavily, YouTube, and GitHub keys. Extra public sources whose URL contains `{query}` still work. Private addresses are refused.
 
-On the Case Desk, type a question to search existing reports, or press **+** to choose Facts, Web, News, Domain, Social, and Identity for a new run. Space toggles a source, Enter starts, and Esc cancels. Domain-specific sources skip registration and certificate lookups without a domain. **Tab** focuses the report list. **Enter** opens a relevant passage when one is recommended, or opens the selected report workspace. Report questions remain temporary until explicitly retained. **Esc** returns to the Desk with its prompt and scroll position. **J**/**K** move the report highlight. **x** deletes the selected case after its existing confirmation flow.
-
-The report workspace has five layouts over the same saved graph: **g** Cockpit, **q** Clusters, **p** Path, **m** Matrix, and **r** Ribbon. **Left/Right** switch layouts, **/** opens entity Find, and **Tab** cycles workspace focus and Ask. Path exposes each hop's evidence; Matrix retains adjacency and adds theme-by-report coverage with **c**; Ribbon scrubs report text and accepted/rejected extraction. **i** opens the shared cached evidence inspector. Graph links derived from text proximity are labeled co-occurrence, never ownership or verified identity. **?** opens workspace help.
+On the Case Desk, ask saved evidence or use **+** to review an investigation
+scope. **Tab** focuses Cases & reports; **Enter** opens a case or historical report.
+The case workspace starts on Leads. Focus map, Evidence table, and Timeline provide
+the main TNA views. **Path** is the only advanced case analysis tool: after reviewing
+findings, choose a pair in Focus and press `p` to inspect supported connections and
+each hop’s original source. Historical report workspaces
+retain their five layout shortcuts (`g/q/p/m/r`), citation reader, and extraction audit.
+Case evidence and typed relationships are the source of truth for investigation TNA.
 
 The agent loop supports independently selected Writer and Tools connections.
 Grok and OpenRouter use the OpenAI-compatible HTTP API. OpenAI subscription
@@ -223,7 +240,7 @@ The probe is cached for 30 minutes. `r` on the System hardware tab rescans. `/ha
 
 ## Brain
 
-Each completed answer in an open-report network is paraphrased into a short fact and tagged with that report. Failed or cancelled answers do not file facts. Questions and answers are temporary; the distilled facts survive restart. Brain only shows those facts. Deleting a report asks again, then removes its markdown file and the facts taken from it.
+Report discussion is temporary. `/retain-answer` explicitly saves a completed answer as a report-tagged fact; ordinary Desk retrieval does not silently file facts. Retained facts survive restart. Deleting a report preserves the existing confirmation flow and removes its report-tagged facts.
 The next turn scores memories by token overlap, with a boost for identity
 notes ("my name is …") when you ask who you are. The matches are injected as
 `USER MEMORY` and shown in the stream as a recall note. API keys and the

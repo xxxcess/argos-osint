@@ -21,6 +21,8 @@ use argos_osint_core::paths::fit_status;
 use argos_osint_core::secrets::mask;
 use argos_osint_core::tna::TnaCluster;
 
+#[path = "case_view.rs"]
+mod case_view;
 #[path = "network.rs"]
 mod network;
 
@@ -110,7 +112,10 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_desk_row(frame: &mut Frame, app: &mut App, area: Rect) {
-    let cols = if app.chat_report.is_some() || app.module == Some(ModuleId::Providers) {
+    let cols = if app.chat_report.is_some()
+        || app.investigation.is_some()
+        || app.module == Some(ModuleId::Providers)
+    {
         split_h(area, &[Constraint::Length(18), Constraint::Min(0)])
     } else {
         split_h(
@@ -125,6 +130,10 @@ fn draw_desk_row(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_desk_and_reports(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.case_page == CasePage::Brain {
         draw_brain(frame, app, area);
+        return;
+    }
+    if app.investigation.is_some() {
+        case_view::draw(frame, app, area);
         return;
     }
     if app.case_page == CasePage::Network {
@@ -289,9 +298,9 @@ fn draw_report_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let (lines, index) = report_lines(app, area.width.saturating_sub(2) as usize);
     app.report_line_index = index;
     let title = if app.focus == Focus::Reports {
-        " Reports · focused "
+        " Cases & reports · focused "
     } else {
-        " Reports "
+        " Cases & reports "
     };
     frame.render_widget(Paragraph::new(lines).block(panel(title)), area);
 }
@@ -301,9 +310,11 @@ fn report_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<Option<usiz
     if rows.is_empty() {
         return (
             vec![
-                Line::from("No reports yet.").style(theme::dim()),
-                Line::from("A case query stays pending here until the markdown is filed.")
-                    .style(theme::dim()),
+                Line::from("No cases or reports yet.").style(theme::dim()),
+                Line::from(
+                    "+ saves a case and selected first actions. Reports are optional after review.",
+                )
+                .style(theme::dim()),
             ],
             vec![None, None],
         );
@@ -429,7 +440,7 @@ fn canvas_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
     let lines = if transcript.is_empty() {
         vec![
             Line::from(
-                "Ask about the reports, or type a query and press + to start a case. /clear wipes this chat.",
+                "Ask saved case evidence and reports. + reviews investigation scope. /case opens saved leads. /clear wipes this chat.",
             )
                 .style(theme::dim()),
         ]
@@ -448,6 +459,9 @@ fn canvas_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
 }
 
 fn under_case_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
+    if app.investigation.is_some() {
+        return case_view::under_tabs(frame, app, area);
+    }
     if app.module != Some(ModuleId::Cases) || area.height < 7 {
         app.case_tab_area = Rect::default();
         app.case_tab_hits.clear();
@@ -714,7 +728,8 @@ fn case_side_lines(app: &App, height: usize) -> Vec<Line<'static>> {
     let body = match app.case_page {
         CasePage::Brain => brain_list_lines(app, height.saturating_sub(3)),
         CasePage::Closed => vec![Line::from("Case desk only.".to_string())],
-        CasePage::Network => vec![Line::from("Report network".to_string())],
+        CasePage::Network => vec![Line::from("Historical report network".to_string())],
+        CasePage::Investigation => vec![Line::from("Case investigation".to_string())],
     };
     lines.extend(body);
     tail(lines, height)
@@ -1227,6 +1242,14 @@ fn prompt_line(app: &App) -> Line<'static> {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    if app.investigation.is_some() && matches!(app.module, None | Some(ModuleId::Cases)) {
+        frame.render_widget(
+            Paragraph::new("1–7 views · j/k select · o source · e enrich · / commands · Esc Desk")
+                .style(theme::dim()),
+            area,
+        );
+        return;
+    }
     if app.case_page == CasePage::Network && matches!(app.module, None | Some(ModuleId::Cases)) {
         draw_network_footer(frame, app, area);
         return;
@@ -1441,7 +1464,7 @@ fn draw_report_confirm(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(title).style(theme::text()),
         Line::from(""),
         Line::from(
-            "Opening presents the report network workspace. Answers are temporary; insights file to Brain. Deleting removes the markdown file and its facts.",
+            "Opening preserves the historical report and citations. Answers are temporary; /retain-answer explicitly saves a fact. Cases can be investigated before any report exists.",
         )
         .style(theme::dim()),
         Line::from(""),
@@ -1525,7 +1548,29 @@ fn draw_scope(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("Research scope").style(theme::accent()),
         Line::from(""),
         Line::from(scope.query.clone()).style(theme::text()),
-        Line::from("This run only. Defaults come from OSINT settings.").style(theme::dim()),
+        Line::from(format!(
+            "Case: {} · c selects existing/new",
+            scope.existing_case.as_deref().unwrap_or("new case")
+        ))
+        .style(theme::dim()),
+        Line::from(format!(
+            "Seeds: {}",
+            argos_osint_core::search::TextQuery::extract(&scope.query)
+                .domains
+                .join(", ")
+        ))
+        .style(theme::dim()),
+        Line::from(format!(
+            "Include {} existing passages: {} · e toggles",
+            app.recommendations.len(),
+            scope.include_evidence
+        ))
+        .style(theme::dim()),
+        Line::from(format!(
+            "Allowed: public sources · sensitive {} (s) · active HTTP {} (a)",
+            scope.allow_sensitive, scope.allow_active
+        ))
+        .style(theme::dim()),
         Line::from("Domain lookups run only when the query names a domain.").style(theme::dim()),
         Line::from(""),
     ];
@@ -1540,7 +1585,8 @@ fn draw_scope(frame: &mut Frame, app: &App, area: Rect) {
     }
     text.push(Line::from(""));
     text.push(
-        Line::from("Space toggles · Enter starts · Esc cancels · j/k move").style(theme::dim()),
+        Line::from("Space selects first actions · Enter saves case · Esc cancels · j/k move")
+            .style(theme::dim()),
     );
     frame.render_widget(
         Paragraph::new(text)
@@ -1569,14 +1615,14 @@ fn draw_case_confirm(frame: &mut Frame, app: &App, area: Rect) {
         theme::text()
     };
     let text = vec![
-        Line::from("Start a case worker?").style(theme::accent()),
+        Line::from("Review an investigation scope?").style(theme::accent()),
         Line::from(""),
         Line::from(title).style(theme::text()),
         Line::from(""),
         Line::from("This researches public sources. The report list shows the task as pending.")
             .style(theme::dim()),
         Line::from(""),
-        Line::from("Start case worker").style(yes),
+        Line::from("Choose case scope").style(yes),
         Line::from("Just answer").style(no),
         Line::from(""),
         Line::from("Enter confirms · Esc cancels · j/k move").style(theme::dim()),
@@ -1598,11 +1644,12 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, modal);
     let text = vec![
         Line::from("Argos OSINT").style(theme::accent()),
-        Line::from("Enter talks on the case desk. + opens the source scope, then starts a case worker. Report status stays in the list beside the desk."),
+        Line::from("Enter asks saved reviewed evidence and reports. + chooses investigation scope and first actions. /case lists saved cases; /case <id> opens Leads without a report."),
         Line::from("Ctrl+P app search    Ctrl+M models    Tab cycle focus    Ctrl+C cancel or quit"),
         Line::from("/model lists Grok 4.6 and Grok 4.5. /model grok-4.5 switches. The default is grok-4.6."),
         Line::from("PgUp and PgDn scroll the case desk. End jumps to the latest. The wheel does the same over the chat."),
-        Line::from("/clear wipes the case desk chat. Open a report for its network workspace. /search /new /use /system /log /quit"),
+        Line::from("Case: 1 Leads · 2 Focus · 3 Evidence · 4 Timeline · 5 Review · 6 Jobs · 7 Path. In Focus, p explores the selected pair after review. e chooses enrichment, o opens the source, Esc returns to Desk."),
+        Line::from("D opens case data controls. /clear-case keeps an empty case; /delete-case removes it. Review the plan, then /confirm-case <exact ID>. /cancel-case-data cancels. Saved reports remain accessible."),
         Line::from("System keeps the log, hardware, and settings. Configuration and task errors stay in that log."),
         Line::from("Providers separates Grok, OpenAI ChatGPT, and OpenRouter accounts. Models assigns Writer and Tools independently."),
         Line::from("Esc or any key closes this card."),

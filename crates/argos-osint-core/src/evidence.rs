@@ -59,7 +59,7 @@ pub struct Entity {
     pub platform: Option<String>,
     pub aliases: Vec<String>,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvidenceRef {
     pub report_id: Option<String>,
     pub passage_id: Option<String>,
@@ -235,7 +235,12 @@ impl Store {
             }
         }
         let version = old.as_ref().map(|o| o.0 + 1).unwrap_or(1);
-        let tx = self.conn.unchecked_transaction()?;
+        let transaction = if self.conn.is_autocommit() {
+            Some(self.conn.unchecked_transaction()?)
+        } else {
+            None
+        };
+        let tx = &self.conn;
         tx.execute(
             "INSERT INTO report_versions VALUES(?1,?2,?3,?4,?5)",
             params![
@@ -285,8 +290,13 @@ impl Store {
                 )?;
             }
         }
-        tx.execute("DELETE FROM tna_graphs", [])?;
-        tx.commit()?;
+        tx.execute(
+            "DELETE FROM tna_graphs WHERE key=?1 OR key='desk'",
+            [crate::tna::report_key(&report.id)],
+        )?;
+        if let Some(transaction) = transaction {
+            transaction.commit()?;
+        }
         Ok(version)
     }
     pub fn report_version(&self, id: &str, version: Option<i64>) -> Result<Option<String>> {
@@ -307,22 +317,8 @@ impl Store {
         }
         let mut expanded = tokens.clone();
         // Persisted alias decisions add search terms without changing original source labels.
-        for entity in self.records::<Entity>("entity", None, None)? {
-            let entity_scope: Option<(Option<String>, Option<String>)> = self
-                .conn
-                .query_row(
-                    "SELECT report_id,case_id FROM evidence_records WHERE id=?1 AND kind='entity'",
-                    [&entity.id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            let in_scope = entity_scope.is_some_and(|(report_id, case_id)| match scope {
-                EvidenceScope::Desk => case_id.is_none(),
-                EvidenceScope::Report(id) => report_id.as_deref() == Some(id),
-                EvidenceScope::Reports(ids) => report_id.as_ref().is_some_and(|r| ids.contains(r)),
-                EvidenceScope::Case(id) => case_id.as_deref() == Some(id),
-                EvidenceScope::Collection => true,
-            });
+        for entity in self.records_scoped::<Entity>("entity", scope)? {
+            let in_scope = true;
             if in_scope
                 && entity
                     .aliases
@@ -397,7 +393,20 @@ impl Store {
         report_id: Option<&str>,
         record: &T,
     ) -> Result<()> {
-        self.conn.execute("INSERT INTO evidence_records VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![id,kind,case_id,report_id,serde_json::to_string(record)?,chrono::Utc::now().to_rfc3339()])?;
+        if let Some(case_id) = case_id {
+            self.check_case_write(case_id, None)?;
+        }
+        let key = if kind == "entity" {
+            format!(
+                "entity:{}:{}:{id}",
+                case_id.unwrap_or(""),
+                report_id.unwrap_or("")
+            )
+        } else {
+            id.to_string()
+        };
+        let changed=self.conn.execute("INSERT INTO evidence_records SELECT ?1,?2,?3,?4,?5,?6 WHERE NOT EXISTS(SELECT 1 FROM case_data_resets WHERE case_id=?3 AND deleted=1) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![key,kind,case_id,report_id,serde_json::to_string(record)?,chrono::Utc::now().to_rfc3339()])?;
+        anyhow::ensure!(changed != 0, "Case was deleted; stale evidence discarded");
         Ok(())
     }
     pub fn records<T: serde::de::DeserializeOwned>(
@@ -439,6 +448,10 @@ impl Store {
         decision: ReviewDecision,
         reason: &str,
     ) -> Result<()> {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM evidence_records WHERE id=?1 AND kind='observation')",
             [observation_id],
@@ -457,6 +470,7 @@ impl Store {
                 chrono::Utc::now().to_rfc3339()
             ],
         )?;
+        transaction.commit()?;
         Ok(())
     }
     pub fn findings(&self, report_id: Option<&str>, case_id: Option<&str>) -> Result<Vec<Finding>> {
@@ -464,7 +478,22 @@ impl Store {
         self.review_observations(observations)
     }
     pub fn findings_scoped(&self, scope: &EvidenceScope) -> Result<Vec<Finding>> {
-        self.review_observations(self.records_scoped("observation", scope)?)
+        let mut observations = self.records_scoped::<Observation>("observation", scope)?;
+        let artifacts = self.records_scoped::<Artifact>("artifact", scope)?;
+        for observation in &mut observations {
+            let id = format!("{}:artifact", observation.id);
+            if let Some(artifact) = artifacts.iter().find(|a| a.id == id) {
+                for reference in &mut observation.evidence {
+                    if reference.artifact_id.is_none()
+                        && reference.passage_id.is_none()
+                        && reference.source_url == artifact.source_url
+                    {
+                        reference.artifact_id = Some(id.clone());
+                    }
+                }
+            }
+        }
+        self.review_observations(observations)
     }
     fn review_observations(&self, observations: Vec<Observation>) -> Result<Vec<Finding>> {
         observations.iter().enumerate().map(|(index,observation)| {
@@ -529,7 +558,11 @@ impl Store {
                 event_time: o.event_time,
                 uncertainty: o.event_uncertainty,
                 retrieved_at: o.retrieved_at,
-                published_at: None,
+                published_at: o
+                    .fields
+                    .get("publication")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
                 discovered_at: None,
                 statement: o.statement,
                 evidence: o.evidence,
@@ -545,14 +578,19 @@ impl Store {
     }
     pub fn timeline_scoped(&self, scope: &EvidenceScope) -> Result<Vec<TimelineEntry>> {
         let mut entries = self
-            .records_scoped::<Observation>("observation", scope)?
+            .findings_scoped(scope)?
             .into_iter()
+            .map(|f| f.observation)
             .map(|o| TimelineEntry {
                 lane: o.provider,
                 event_time: o.event_time,
                 uncertainty: o.event_uncertainty,
                 retrieved_at: o.retrieved_at,
-                published_at: None,
+                published_at: o
+                    .fields
+                    .get("publication")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
                 discovered_at: None,
                 statement: o.statement,
                 evidence: o.evidence,
@@ -684,7 +722,7 @@ fn exact_observables(query: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
-fn exact_observable(text: &str, needle: &str) -> bool {
+pub(crate) fn exact_observable(text: &str, needle: &str) -> bool {
     text.match_indices(needle).any(|(i, _)| {
         let boundary = |c: char| !c.is_alphanumeric() && !"._@-".contains(c);
         (i == 0 || text[..i].chars().next_back().is_some_and(boundary))
@@ -692,7 +730,12 @@ fn exact_observable(text: &str, needle: &str) -> bool {
                 || text[i + needle.len()..]
                     .chars()
                     .next()
-                    .is_some_and(boundary))
+                    .is_some_and(boundary)
+                || text[i + needle.len()..]
+                    .strip_prefix('.')
+                    .is_some_and(|tail| {
+                        tail.is_empty() || tail.chars().next().is_some_and(boundary)
+                    }))
     })
 }
 fn passages(body: &str) -> Vec<(String, String, usize, usize, usize)> {
@@ -1192,8 +1235,8 @@ impl Store {
             };
             // Do not overwrite persistent analyst alias edits during graph rebuilds.
             let exists: bool = self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM evidence_records WHERE id=?1)",
-                [id],
+                "SELECT EXISTS(SELECT 1 FROM evidence_records WHERE kind='entity' AND json_extract(body,'$.id')=?1 AND report_id=?2)",
+                params![id,decision.report_id],
                 |r| r.get(0),
             )?;
             if !exists {
@@ -1377,5 +1420,29 @@ impl Store {
         )?;
         self.conn.execute("DELETE FROM tna_graphs", [])?;
         Ok(())
+    }
+}
+
+impl RelationshipType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::TextCooccurrence => "Same passage",
+            Self::DomainResolvesToIp => "DNS resolution",
+            Self::AddressPublishedOnPage => "Published address",
+            Self::ProfileLinksToDomain => "Profile → domain",
+            Self::ProfileLinksToAccount => "Profile → account",
+            Self::EntityMentionedInReport => "Report mention",
+            Self::IdentifierReportedInBreach => "Reported exposure",
+            Self::CandidateIdentityAssociation => "Candidate identity",
+        }
+    }
+}
+impl Basis {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Inferred => "inferred",
+            Self::AnalystConfirmed => "analyst confirmed",
+        }
     }
 }

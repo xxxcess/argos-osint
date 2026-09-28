@@ -33,6 +33,28 @@ pub struct Store {
     pub(crate) conn: Connection,
 }
 
+/// Reviewable counts for a case-only destructive operation. Reports are retained.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaseDataPlan {
+    pub case_id: String,
+    pub title: String,
+    pub delete_case: bool,
+    pub messages: usize,
+    pub records: usize,
+    pub decisions: usize,
+    pub jobs: usize,
+    pub reports: usize,
+}
+
+impl CaseDataPlan {
+    pub fn describe(&self) -> String {
+        format!("{} case: {} ({})\n\nRemove {} chat messages, {} case evidence/history records, {} review decisions, and {} research jobs/cache entries. Clear the case network and tool-call history.\n{} saved reports and their versions, citations, and report-owned evidence remain available, detached from this case. Other cases, shared evidence, and credentials are preserved.\n\n{}\nThis cannot be undone. /confirm-case {} to apply · /cancel-case-data to cancel",
+            if self.delete_case { "Delete" } else { "Clear" }, self.title, self.case_id,
+            self.messages, self.records, self.decisions, self.jobs, self.reports,
+            if self.delete_case { "The case itself will be removed." } else { "The case will remain empty and can be reused." }, self.case_id)
+    }
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -93,6 +115,11 @@ impl Store {
                 snapshot_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS case_data_resets (
+                case_id TEXT PRIMARY KEY,
+                cleared_at TEXT NOT NULL,
+                deleted INTEGER NOT NULL
+            );
             "#,
         )?;
         self.ensure_memory_columns()?;
@@ -126,6 +153,9 @@ impl Store {
     }
 
     pub fn ensure_session(&self, id: &str, title: &str, kind: &str) -> Result<()> {
+        if kind == "case" {
+            self.check_case_write(id, None)?;
+        }
         let now = stamp();
         self.conn.execute(
             "INSERT INTO sessions (id, title, kind, updated_at) VALUES (?1, ?2, ?3, ?4)
@@ -149,12 +179,88 @@ impl Store {
     }
 
     pub fn delete_case(&self, id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
-        self.conn.execute(
-            "DELETE FROM sessions WHERE id = ?1 AND kind = 'case'",
-            params![id],
+        let plan = self.plan_case_data(id, true)?;
+        self.apply_case_data_plan(&plan)
+    }
+
+    pub fn plan_case_data(&self, id: &str, delete_case: bool) -> Result<CaseDataPlan> {
+        let title = self
+            .conn
+            .query_row(
+                "SELECT title FROM sessions WHERE id=?1 AND kind='case'",
+                [id],
+                |r| r.get(0),
+            )
+            .context("Case not found")?;
+        let count = |sql: &str| -> Result<usize> {
+            Ok(self.conn.query_row(sql, [id], |r| r.get::<_, i64>(0))? as usize)
+        };
+        let active = count("SELECT COUNT(*) FROM research_jobs WHERE json_extract(body,'$.input.case_id')=?1 AND state IN ('\"queued\"','\"running\"')")?;
+        anyhow::ensure!(active == 0, "Cancel or finish this case's {active} active research jobs before clearing or deleting it");
+        Ok(CaseDataPlan {
+            case_id: id.into(), title, delete_case,
+            messages: count("SELECT COUNT(*) FROM messages WHERE session_id=?1")?,
+            records: count("SELECT COUNT(*) FROM evidence_records WHERE case_id=?1 AND (report_id IS NULL OR kind IN ('case_ingestion','investigation_scope','entity_correction','identity_resolution'))")?,
+            decisions: count("SELECT COUNT(*) FROM finding_decisions WHERE observation_id IN (SELECT json_extract(body,'$.id') FROM evidence_records WHERE case_id=?1 AND kind='observation' AND report_id IS NULL)")?,
+            jobs: count("SELECT COUNT(*) FROM research_jobs WHERE json_extract(body,'$.input.case_id')=?1")?,
+            reports: count("SELECT COUNT(*) FROM reports WHERE case_id=?1")?,
+        })
+    }
+
+    /// Atomic case cleanup. Recheck the reviewed counts and active jobs under the write lock.
+    pub fn apply_case_data_plan(&self, plan: &CaseDataPlan) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
         )?;
+        anyhow::ensure!(
+            self.plan_case_data(&plan.case_id, plan.delete_case)? == *plan,
+            "Case data changed; review a fresh clear/delete plan"
+        );
+        let id = &plan.case_id;
+        tx.execute("INSERT INTO case_data_resets VALUES(?1,?2,?3) ON CONFLICT(case_id) DO UPDATE SET cleared_at=excluded.cleared_at,deleted=excluded.deleted", params![id, chrono::Utc::now().to_rfc3339(), plan.delete_case])?;
+        tx.execute("DELETE FROM finding_decisions WHERE observation_id IN (SELECT json_extract(body,'$.id') FROM evidence_records WHERE case_id=?1 AND kind='observation' AND report_id IS NULL)", [id])?;
+        tx.execute("DELETE FROM evidence_records WHERE case_id=?1 AND (report_id IS NULL OR kind IN ('case_ingestion','investigation_scope','entity_correction','identity_resolution'))", [id])?;
+        // Report-backed artifacts and raw history remain reachable by historical citations.
+        tx.execute("UPDATE evidence_records SET case_id=NULL,body=CASE WHEN json_type(body,'$.case_id') IS NOT NULL THEN json_set(body,'$.case_id',NULL) ELSE body END WHERE case_id=?1", [id])?;
+        tx.execute("UPDATE reports SET case_id=NULL WHERE case_id=?1", [id])?;
+        tx.execute(
+            "DELETE FROM research_jobs WHERE json_extract(body,'$.input.case_id')=?1",
+            [id],
+        )?;
+        tx.execute("DELETE FROM messages WHERE session_id=?1", [id])?;
+        tx.execute("DELETE FROM tool_calls WHERE session_id=?1", [id])?;
+        tx.execute(
+            "DELETE FROM tna_graphs WHERE key=?1 OR key='desk'",
+            [format!("case:{id}")],
+        )?;
+        if plan.delete_case {
+            tx.execute("DELETE FROM sessions WHERE id=?1 AND kind='case'", [id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn check_case_write(&self, id: &str, job_created_at: Option<&str>) -> Result<()> {
+        use rusqlite::OptionalExtension;
+        let reset: Option<(String, bool)> = self
+            .conn
+            .query_row(
+                "SELECT cleared_at,deleted FROM case_data_resets WHERE case_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((cleared_at, deleted)) = reset {
+            anyhow::ensure!(!deleted, "Case was deleted; stale work discarded");
+            if let Some(created_at) = job_created_at {
+                anyhow::ensure!(
+                    chrono::DateTime::parse_from_rfc3339(created_at)?
+                        > chrono::DateTime::parse_from_rfc3339(&cleared_at)?,
+                    "Case data was cleared; stale research results discarded"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -190,6 +296,7 @@ impl Store {
     }
 
     pub fn append_message(&self, session_id: &str, role: &str, body: &str) -> Result<()> {
+        self.check_case_write(session_id, None)?;
         self.conn.execute(
             "INSERT INTO messages (session_id, role, body, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![session_id, role, body, stamp()],
@@ -341,6 +448,9 @@ impl Store {
     }
 
     pub fn add_report_metadata(&self, report: &ReportMeta) -> Result<()> {
+        if let Some(id) = &report.case_id {
+            self.check_case_write(id, None)?;
+        }
         self.conn.execute(
             "INSERT OR REPLACE INTO reports (id, case_id, title, path, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![report.id, report.case_id, report.title, report.path, report.created_at],
@@ -431,6 +541,206 @@ fn stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn case_data_fixture(store: &Store) -> (Case, Case) {
+        let case = store.create_case("Clear Harbor").unwrap();
+        let other = store.create_case("Other Harbor").unwrap();
+        for c in [&case, &other] {
+            store
+                .append_message(&c.id, "user", "saved conversation")
+                .unwrap();
+            store
+                .put_record(
+                    &format!("{}:o", c.id),
+                    "observation",
+                    Some(&c.id),
+                    None,
+                    &serde_json::json!({"id":format!("{}:o",c.id)}),
+                )
+                .unwrap();
+            store
+                .review_finding(
+                    &format!("{}:o", c.id),
+                    crate::evidence::ReviewDecision::Accept,
+                    "reviewed",
+                )
+                .unwrap();
+            store
+                .put_record(
+                    "shared-entity",
+                    "entity",
+                    Some(&c.id),
+                    None,
+                    &serde_json::json!({"id":"shared-entity"}),
+                )
+                .unwrap();
+            store
+                .upsert_tna_graph(
+                    &format!("case:{}", c.id),
+                    &TnaSnapshot::empty(crate::tna::TnaScope::Collection),
+                )
+                .unwrap();
+        }
+        (case, other)
+    }
+
+    #[test]
+    fn clear_case_removes_only_case_data_and_preserves_historical_reports() {
+        let store = Store::memory().unwrap();
+        let (case, other) = case_data_fixture(&store);
+        let report = ReportMeta {
+            id: "historic".into(),
+            case_id: Some(case.id.clone()),
+            title: "Historical report".into(),
+            path: "missing-report.md".into(),
+            created_at: "2026-09-27".into(),
+        };
+        store.add_report_metadata(&report).unwrap();
+        store
+            .index_report(&report, "# Historical\n\nSaved citation.")
+            .unwrap();
+        let old_body = store.report_version(&report.id, Some(1)).unwrap();
+        store
+            .put_record(
+                "report-observation",
+                "observation",
+                Some(&case.id),
+                Some(&report.id),
+                &serde_json::json!({"id":"report-observation","case_id":case.id}),
+            )
+            .unwrap();
+        store
+            .review_finding(
+                "report-observation",
+                crate::evidence::ReviewDecision::Accept,
+                "preserve history",
+            )
+            .unwrap();
+        let plan = store.plan_case_data(&case.id, false).unwrap();
+        assert_eq!(
+            (plan.messages, plan.records, plan.decisions, plan.reports),
+            (1, 2, 1, 1)
+        );
+        store.apply_case_data_plan(&plan).unwrap();
+        assert_eq!(store.list_cases().unwrap().len(), 2);
+        assert!(store.load_messages(&case.id).unwrap().is_empty());
+        assert!(store
+            .records::<serde_json::Value>("entity", None, Some(&case.id))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .records::<serde_json::Value>("entity", None, Some(&other.id))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.load_messages(&other.id).unwrap().len(), 1);
+        assert!(store
+            .get_tna_graph(&format!("case:{}", case.id))
+            .unwrap()
+            .is_none());
+        assert!(store
+            .get_tna_graph(&format!("case:{}", other.id))
+            .unwrap()
+            .is_some());
+        assert_eq!(store.report_version(&report.id, Some(1)).unwrap(), old_body);
+        assert!(store.list_reports().unwrap()[0].case_id.is_none());
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM finding_decisions", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(store.case_projection(&case.id).unwrap().findings.len(), 0);
+        store
+            .put_record(
+                "new",
+                "entity",
+                Some(&case.id),
+                None,
+                &serde_json::json!({"id":"new"}),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn delete_case_blocks_stale_writes_and_stale_plans_are_atomic() {
+        let store = Store::memory().unwrap();
+        let (case, other) = case_data_fixture(&store);
+        let plan = store.plan_case_data(&case.id, true).unwrap();
+        store
+            .append_message(&case.id, "assistant", "changed after plan")
+            .unwrap();
+        assert!(store
+            .apply_case_data_plan(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("changed"));
+        assert_eq!(store.list_cases().unwrap().len(), 2);
+        store.delete_case(&case.id).unwrap();
+        assert_eq!(store.list_cases().unwrap()[0].id, other.id);
+        assert!(store
+            .append_message(&case.id, "assistant", "late result")
+            .is_err());
+        assert!(store.ensure_session(&case.id, "resurrect", "case").is_err());
+        assert!(store
+            .put_record(
+                "late",
+                "artifact",
+                Some(&case.id),
+                None,
+                &serde_json::json!({})
+            )
+            .is_err());
+        assert!(store.case_projection(&case.id).is_err());
+    }
+
+    #[test]
+    fn cleanup_requires_idle_jobs_and_rejects_results_from_before_clear() {
+        use crate::research::{JobState, ResearchInput, ResearchJob, Stage};
+        let store = Store::memory().unwrap();
+        let case = store.create_case("Jobs").unwrap();
+        let mut job = ResearchJob {
+            id: "old-job".into(),
+            run_id: "run".into(),
+            input: ResearchInput {
+                case_id: Some(case.id.clone()),
+                report_id: None,
+                entity_id: "domain:harbor.example".into(),
+                label: "harbor.example".into(),
+                action: "domain".into(),
+                depth: 0,
+            },
+            provider: "domain".into(),
+            provider_version: None,
+            metadata: vec![],
+            stage: Stage::InfrastructureIp,
+            state: JobState::Running,
+            progress: "running".into(),
+            created_at: "2020-01-01T00:00:00Z".into(),
+            finished_at: None,
+            elapsed_ms: 0,
+            error: None,
+            hits: vec![],
+        };
+        store.save_job("cache", &job).unwrap();
+        assert!(store.plan_case_data(&case.id, false).is_err());
+        job.state = JobState::Cancelled;
+        store.save_job("cache", &job).unwrap();
+        let plan = store.plan_case_data(&case.id, false).unwrap();
+        assert_eq!(plan.jobs, 1);
+        store.apply_case_data_plan(&plan).unwrap();
+        assert!(store.jobs().unwrap().is_empty());
+        job.state = JobState::Completed;
+        assert!(store.save_job("cache", &job).is_err());
+        job.id = "new-job".into();
+        job.created_at = chrono::Utc::now().to_rfc3339();
+        store.save_job("cache", &job).unwrap();
+        assert_eq!(store.jobs().unwrap().len(), 1);
+    }
 
     #[test]
     fn cases_messages_and_hidden_call_states() {

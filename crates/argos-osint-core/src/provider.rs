@@ -874,6 +874,8 @@ fn http() -> Result<reqwest::Client> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsFile {
+    #[serde(default)]
+    pub analysis: crate::research::AnalysisConfig,
     #[serde(default = "crate::research::defaults")]
     pub research: std::collections::BTreeMap<String, crate::research::ResearchConfig>,
     #[serde(default)]
@@ -936,6 +938,7 @@ fn default_modality() -> String {
 impl Default for SettingsFile {
     fn default() -> Self {
         Self {
+            analysis: Default::default(),
             research: crate::research::defaults(),
             searx_url: String::new(),
             report_dir: String::new(),

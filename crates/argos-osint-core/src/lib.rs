@@ -30,3 +30,5 @@ pub mod research;
 pub mod tool_manager;
 
 pub mod workers;
+
+pub mod investigation;

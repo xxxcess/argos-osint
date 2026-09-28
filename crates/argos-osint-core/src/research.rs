@@ -253,7 +253,17 @@ pub fn stage_for(provider: &str) -> Stage {
     }
 }
 impl Store {
+    pub fn research_job_is_current(&self, job: &ResearchJob) -> Result<bool> {
+        Ok(job
+            .input
+            .case_id
+            .as_ref()
+            .is_none_or(|id| self.check_case_write(id, Some(&job.created_at)).is_ok()))
+    }
     pub fn save_job(&self, key: &str, job: &ResearchJob) -> Result<()> {
+        if let Some(id) = &job.input.case_id {
+            self.check_case_write(id, Some(&job.created_at))?;
+        }
         self.conn.execute("INSERT INTO research_jobs VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET state=excluded.state,body=excluded.body,updated_at=excluded.updated_at",params![job.id,key,serde_json::to_string(&job.state)?,serde_json::to_string(job)?,chrono::Utc::now().to_rfc3339()])?;
         Ok(())
     }
@@ -395,7 +405,37 @@ impl ResearchQueue {
                 .or_default()
                 .clone()
         };
-        let _equivalent = tokio::select! {guard=lock.lock()=>guard,_=wait_cancel(self.cancel.clone())=>{job.state=JobState::Cancelled;job.error=Some("cancelled while queued".into());return job;}};
+        if let Err(err) = self.persist(&key, &job).await {
+            job.state = JobState::Failed;
+            job.error = Some(err.to_string());
+            return job;
+        }
+        let _equivalent = tokio::select! {guard=lock.lock()=>guard,_=wait_cancel(self.cancel.clone())=>{job.state=JobState::Cancelled;job.error=Some("cancelled while queued".into());job.finished_at=Some(chrono::Utc::now().to_rfc3339());let _=self.persist(&key,&job).await;return job;}};
+        if let Some(case_id) = input.case_id.clone() {
+            let db = self.db.clone();
+            let provider_name = provider.to_string();
+            let allowed = crate::workers::spawn_blocking(move || -> Result<bool> {
+                let store = Store::open(&db)?;
+                Ok(store
+                    .records::<crate::investigation::InvestigationScope>(
+                        "investigation_scope",
+                        None,
+                        Some(&case_id),
+                    )?
+                    .last()
+                    .is_none_or(|s| s.allowed_actions.contains(&provider_name)))
+            })
+            .await;
+            if !matches!(allowed, Ok(Ok(true))) {
+                job.state = JobState::Failed;
+                job.error = Some(
+                    "Provider action outside saved investigation scope or scope unavailable".into(),
+                );
+                job.finished_at = Some(chrono::Utc::now().to_rfc3339());
+                let _ = self.persist(&key, &job).await;
+                return job;
+            }
+        }
         let db = self.db.clone();
         let cache_key = key.clone();
         let freshness = config.cache_secs;
@@ -404,11 +444,18 @@ impl ResearchQueue {
         })
         .await
         {
-            cached.progress = "cached evidence reused".into();
-            if cached.input.report_id != input.report_id || cached.input.case_id != input.case_id {
-                cached.id = job.id.clone();
-                cached.input = input.clone();
-                let _ = self.persist(&key, &cached).await;
+            let original = cached.id.clone();
+            // The queued request has its own terminal job record. Reuse source data,
+            // retain the original job/history, and do not leave an orphan queued job.
+            cached.progress = format!("cached evidence reused from {original}");
+            cached.id = job.id.clone();
+            cached.input = input.clone();
+            cached.created_at = job.created_at.clone();
+            if let Err(error) = self.persist(&key, &cached).await {
+                cached.state = JobState::Partial;
+                cached.error = Some(format!(
+                    "Cached evidence reused but result persistence failed: {error}"
+                ));
             }
             return cached;
         }
@@ -533,21 +580,45 @@ impl ResearchQueue {
         let job = job.clone();
         let job_for_event = job.clone();
         crate::workers::spawn_blocking(move|| {
-            let store=Store::open(&db)?;store.save_job(&key,&job)?;
+            let store=Store::open(&db)?;
+            let transaction=rusqlite::Transaction::new_unchecked(&store.conn,rusqlite::TransactionBehavior::Immediate)?;
+            store.save_job(&key,&job)?;
+            if job.input.case_id.is_some() && matches!(job.state,JobState::Queued|JobState::Completed|JobState::Partial) {
+                use crate::evidence::EntityType;
+                let kind=match job.provider.as_str(){"domain"|"contacts"=>EntityType::Domain,"internetdb"|"shodan"=>EntityType::Ip,"xposedornot"=>EntityType::Email,"identity"|"whatsmyname"=>if job.input.label.contains('@'){EntityType::Email}else{EntityType::Account},_=>EntityType::Theme};
+                let existing=store.records::<crate::evidence::Entity>("entity",job.input.report_id.as_deref(),job.input.case_id.as_deref())?.iter().any(|e|e.id==job.input.entity_id);
+                if !existing {if let Ok(mut entity)=crate::investigation::normalize_entity(&job.input.label,kind){entity.id=job.input.entity_id.clone();store.put_record(&entity.id,"entity",job.input.case_id.as_deref(),job.input.report_id.as_deref(),&entity)?;}}
+            }
             if matches!(job.state,JobState::Completed|JobState::Partial) {
                 for (n,hit) in job.hits.iter().enumerate() {
-                    let observation=Observation{id:format!("{}:o{n}",job.id),case_id:job.input.case_id.clone(),report_id:job.input.report_id.clone(),entity_id:job.input.entity_id.clone(),job_id:job.id.clone(),provider:hit.title.strip_prefix('[').and_then(|s|s.split_once(']')).map(|(p,_)|p.to_string()).unwrap_or_else(||job.provider.clone()),provider_version:job.provider_version.clone(),retrieved_at:job.finished_at.clone().unwrap_or_else(||job.created_at.clone()),event_time:job.metadata.get(n).and_then(|m|m.event_time.clone()).or_else(||if job.provider=="leakcheck" {hit.snippet.strip_prefix("date: ").and_then(|s|s.split_whitespace().next()).filter(|date|date.len()>=4).map(str::to_string)}else{None}),event_uncertainty:job.metadata.get(n).and_then(|m|m.event_uncertainty.clone()).or_else(||Some("Event time not supplied; collection time is not event time".into())),basis:Basis::Observed,statement:hit.snippet.clone(),attribution:hit.title.clone(),evidence:vec![EvidenceRef{source_url:Some(hit.url.clone()),..Default::default()}],fields:job.metadata.get(n).map(|m|m.fields.clone()).unwrap_or_else(||serde_json::json!({"title":hit.title,"url":hit.url,"snippet":hit.snippet}))};
+                    let observation=Observation{id:format!("{}:o{n}",job.id),case_id:job.input.case_id.clone(),report_id:job.input.report_id.clone(),entity_id:job.input.entity_id.clone(),job_id:job.id.clone(),provider:hit.title.strip_prefix('[').and_then(|s|s.split_once(']')).map(|(p,_)|p.to_string()).unwrap_or_else(||job.provider.clone()),provider_version:job.provider_version.clone(),retrieved_at:job.finished_at.clone().unwrap_or_else(||job.created_at.clone()),event_time:job.metadata.get(n).and_then(|m|m.event_time.clone()).or_else(||if job.provider=="leakcheck" {hit.snippet.strip_prefix("date: ").and_then(|s|s.split_whitespace().next()).filter(|date|date.len()>=4).map(str::to_string)}else{None}),event_uncertainty:job.metadata.get(n).and_then(|m|m.event_uncertainty.clone()).or_else(||Some("Event time not supplied; collection time is not event time".into())),basis:Basis::Observed,statement:hit.snippet.clone(),attribution:hit.title.clone(),evidence:vec![EvidenceRef{source_url:Some(hit.url.clone()),artifact_id:Some(format!("{}:o{n}:artifact",job.id)),..Default::default()}],fields:job.metadata.get(n).map(|m|m.fields.clone()).unwrap_or_else(||serde_json::json!({"title":hit.title,"url":hit.url,"snippet":hit.snippet}))};
                     store.put_record(&observation.id,"observation",observation.case_id.as_deref(),observation.report_id.as_deref(),&observation)?;
                     use crate::evidence::{Entity,EntityType,Relationship,RelationshipType,Artifact};
-                    let artifact=Artifact{id:format!("{}:artifact",observation.id),source_url:Some(hit.url.clone()),retrieved_at:observation.retrieved_at.clone(),media_type:"application/json+argos-evidence".into(),body:serde_json::to_string(&observation.fields)?};
+                    let artifact=Artifact{id:format!("{}:artifact",observation.id),source_url:Some(hit.url.clone()),retrieved_at:observation.retrieved_at.clone(),media_type:"application/json+argos-evidence".into(),body:serde_json::to_string(&serde_json::json!({"source":hit,"normalized":observation.fields}))?};
                     store.put_record(&artifact.id,"artifact",observation.case_id.as_deref(),observation.report_id.as_deref(),&artifact)?;
                     let mut relations=vec![];
+                    let candidates=crate::search::TextQuery::extract(&hit.snippet);
+                    for (label,kind) in candidates.domains.into_iter().map(|s|(s,EntityType::Domain)).chain(candidates.emails.into_iter().map(|s|(s,EntityType::Email))).take(32) {
+                        match crate::investigation::normalize_entity(&label,kind) {
+                            Ok(entity)=>{store.put_record(&entity.id,"entity",observation.case_id.as_deref(),observation.report_id.as_deref(),&entity)?;
+                                if let Some(start)=hit.snippet.to_ascii_lowercase().find(&label.to_ascii_lowercase()){let mention=crate::evidence::Mention{entity_id:entity.id,original:hit.snippet[start..start+label.len()].into(),start,end:start+label.len(),evidence:observation.evidence[0].clone(),speaker:Some(hit.title.clone()),negated:false,speculative:true};store.put_record(&format!("{}:mention:{start}",observation.id),"mention",observation.case_id.as_deref(),observation.report_id.as_deref(),&mention)?;}
+                            },
+                            Err(error)=>store.put_record(&format!("{}:rejection:{label}",observation.id),"label_rejection",observation.case_id.as_deref(),observation.report_id.as_deref(),&serde_json::json!({"original":label,"reason":error.to_string(),"evidence":observation.evidence}))?,
+                        }
+                    }
+                    if job.provider=="identity" && hit.url.starts_with("https://github.com/") {
+                        if let Ok(url)=url::Url::parse(&hit.url){let label=url.path().trim_matches('/');if !label.is_empty()&&!label.contains('/') {
+                            let id=format!("account:github:{label}");let entity=Entity{id:id.clone(),kind:EntityType::Account,label:label.into(),canonical:id.clone(),platform:Some("github".into()),aliases:vec![]};store.put_record(&id,"entity",observation.case_id.as_deref(),observation.report_id.as_deref(),&entity)?;
+                            relations.push(Relationship{from:job.input.entity_id.clone(),to:id,kind:RelationshipType::CandidateIdentityAssociation,basis:Basis::Inferred,evidence:observation.evidence.clone(),uncertainty:"GitHub profile reference; corroboration required before identity resolution".into()});
+                        }}
+                    }
+
                     if job.provider=="contacts" {
                         if let Some(email)=observation.fields["email"].as_str() {
                             let id=format!("email:{}",email.to_ascii_lowercase());
                             let entity=Entity{id:id.clone(),kind:EntityType::Email,label:email.into(),canonical:id.clone(),platform:None,aliases:vec![email.into()]};
                             store.put_record(&id,"entity",observation.case_id.as_deref(),observation.report_id.as_deref(),&entity)?;
-                            relations.push(Relationship{from:id,to:hit.url.clone(),kind:RelationshipType::AddressPublishedOnPage,basis:Basis::Observed,evidence:observation.evidence.clone(),uncertainty:"Publication establishes a page reference, not ownership or mailbox verification".into()});
+                            relations.push(Relationship{from:job.input.entity_id.clone(),to:id,kind:RelationshipType::AddressPublishedOnPage,basis:Basis::Observed,evidence:observation.evidence.clone(),uncertainty:"Publication establishes a page reference, not ownership or mailbox verification".into()});
                         }
                     }
                     if observation.provider=="doh" && hit.url.starts_with("https://cloudflare-dns.com/dns-query?") {
@@ -560,10 +631,21 @@ impl ResearchQueue {
                         let entity=Entity{id:id.clone(),kind:EntityType::Account,label:job.input.label.clone(),canonical:id.clone(),platform:Some(platform),aliases:vec![]};store.put_record(&id,"entity",observation.case_id.as_deref(),observation.report_id.as_deref(),&entity)?;
                         relations.push(Relationship{from:job.input.entity_id.clone(),to:id,kind:RelationshipType::CandidateIdentityAssociation,basis:Basis::Inferred,evidence:observation.evidence.clone(),uncertainty:"Matching usernames and response signatures do not establish verified identity".into()});
                     }
+                    for relationship in &relations {
+                        for endpoint in [&relationship.from, &relationship.to] {
+                            if let Some((prefix,label)) = endpoint.split_once(':') {
+                                let kind = match prefix { "domain"=>EntityType::Domain,"ip"=>EntityType::Ip,"email"=>EntityType::Email,"breach"=>EntityType::BreachEvent,_=>continue };
+                                match crate::investigation::normalize_entity(label,kind) {
+                                    Ok(mut entity)=>{entity.id=endpoint.clone();store.put_record(endpoint,"entity",observation.case_id.as_deref(),observation.report_id.as_deref(),&entity)?;},
+                                    Err(e)=>store.put_record(&format!("{}:rejection:{endpoint}",observation.id),"label_rejection",observation.case_id.as_deref(),observation.report_id.as_deref(),&serde_json::json!({"original":endpoint,"reason":e.to_string(),"evidence":observation.evidence}))?,
+                                }
+                            }
+                        }
+                    }
                     for (index,relationship) in relations.iter().enumerate(){store.put_record(&format!("{}:relationship:{index}",observation.id),"relationship",observation.case_id.as_deref(),observation.report_id.as_deref(),relationship)?;}
 
                 }
-            }Ok::<(), anyhow::Error>(())
+            }transaction.commit()?;Ok::<(), anyhow::Error>(())
         }).await??;
         let _ = self.events.send(job_for_event);
         Ok(())
@@ -645,7 +727,7 @@ async fn run_adapter(
 ) -> std::result::Result<AdapterOutput, String> {
     let mut metadata = Vec::new();
     let mut warnings = Vec::new();
-    valid_input(provider, &input.label).map_err(|e| e.to_string())?;
+    eligible_action(provider, &input.label, c).map_err(|e| e.to_string())?;
     if input.depth > c.depth.min(3) {
         return Err("Pivot depth limit reached".into());
     }
@@ -1359,5 +1441,362 @@ impl ResearchQueue {
         job.progress = format!("{action}: {:?}", job.state);
         let _ = self.persist(&key, &job).await;
         (job, result)
+    }
+}
+
+/// Configuration tabs are capability groups, never an automatic execution sequence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResearchPhase {
+    #[default]
+    Discovery,
+    Infrastructure,
+    Identity,
+    Exposure,
+    Analysis,
+}
+impl ResearchPhase {
+    pub const ALL: [Self; 5] = [
+        Self::Discovery,
+        Self::Infrastructure,
+        Self::Identity,
+        Self::Exposure,
+        Self::Analysis,
+    ];
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Discovery => "Discovery",
+            Self::Infrastructure => "Infrastructure",
+            Self::Identity => "Identity & contacts",
+            Self::Exposure => "Exposure",
+            Self::Analysis => "Analysis & output",
+        }
+    }
+    pub fn providers(self) -> &'static [&'static str] {
+        match self {
+            Self::Discovery => &["search"],
+            Self::Infrastructure => &["domain", "internetdb", "shodan", "katana", "spiderfoot"],
+            Self::Identity => &["identity", "contacts", "whatsmyname", "maigret", "mosint"],
+            Self::Exposure => &["leakcheck", "xposedornot"],
+            Self::Analysis => &[],
+        }
+    }
+}
+pub fn collection_available(name: &str) -> bool {
+    matches!(
+        name,
+        "search"
+            | "domain"
+            | "internetdb"
+            | "shodan"
+            | "identity"
+            | "contacts"
+            | "whatsmyname"
+            | "leakcheck"
+            | "xposedornot"
+    )
+}
+/// Same input/privacy checks used to present and submit a focused action.
+pub fn eligible_action(name: &str, label: &str, config: &ResearchConfig) -> Result<()> {
+    if !config.enabled {
+        bail!("Integration disabled");
+    }
+    if !collection_available(name) || config.mode != ExecutionMode::NativeHttp {
+        bail!("Collection unavailable: output and scope contracts unverified");
+    }
+    if !matches!(
+        config.readiness,
+        Readiness::Ready | Readiness::Configured | Readiness::Degraded
+    ) {
+        bail!("Configuration is not ready: {:?}", config.readiness);
+    }
+    valid_input(name, label)?;
+    if matches!(name, "identity" | "leakcheck") {
+        let email = crate::search::TextQuery::extract(label).emails == vec![label.to_string()];
+        let handle = label
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
+        if !email && !handle {
+            bail!("Select an exact email or handle");
+        }
+    }
+
+    if matches!(name, "leakcheck" | "xposedornot") && !config.allow_sensitive {
+        bail!("Exposure lookup requires sensitive lookup opt-in");
+    }
+    if name == "contacts"
+        && (!config.allow_active || !config.allowed_hosts.iter().any(|h| h == label))
+    {
+        bail!("Exact allowed host and active HTTP opt-in required");
+    }
+    if name == "whatsmyname" && (config.dataset_path.is_empty() || config.selected_sites.is_empty())
+    {
+        bail!("Versioned dataset and selected sites required");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnalysisConfig {
+    pub report_mode: String,
+    pub lead_limit: usize,
+}
+impl Default for AnalysisConfig {
+    fn default() -> Self {
+        Self {
+            report_mode: "final".into(),
+            lead_limit: 5,
+        }
+    }
+}
+pub fn display_name(name: &str) -> &str {
+    match name {
+        "identity" => "GitHub identity",
+        "contacts" => "Published contacts",
+        "leakcheck" => "LeakCheck Public",
+        "xposedornot" => "XposedOrNot",
+        "whatsmyname" => "WhatsMyName",
+        "internetdb" => "InternetDB",
+        "katana" => "Katana",
+        "shodan" => "Shodan",
+        "maigret" => "Maigret",
+        "mosint" => "Mosint",
+        "spiderfoot" => "SpiderFoot",
+        "domain" => "DNS / RDAP / certificates / Wayback",
+        "search" => "Search & public documents",
+        _ => name,
+    }
+}
+
+#[cfg(test)]
+mod case_job_tests {
+    use super::*;
+    #[tokio::test]
+    async fn queued_cancellation_is_persisted_and_partial_results_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("jobs.sqlite");
+        let store = Store::open(&db).unwrap();
+        let case = store.create_case("DNS").unwrap();
+        let queue = ResearchQueue::new(db.clone(), 1);
+        let _permit = queue.global.acquire().await.unwrap();
+        queue.cancel.store(true, Ordering::Relaxed);
+        let input = ResearchInput {
+            case_id: Some(case.id.clone()),
+            report_id: None,
+            entity_id: "domain:harbor.example".into(),
+            label: "harbor.example".into(),
+            action: "domain".into(),
+            depth: 0,
+        };
+        let cancelled = queue
+            .execute(
+                input.clone(),
+                "domain",
+                defaults()["domain"].clone(),
+                SourcePlan::default(),
+                None,
+            )
+            .await;
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        assert!(store
+            .jobs()
+            .unwrap()
+            .iter()
+            .any(|j| j.id == cancelled.id && j.state == JobState::Cancelled));
+        let partial = ResearchJob {
+            provider_version: None,
+            metadata: vec![],
+            id: "partial-job".into(),
+            run_id: "run".into(),
+            input,
+            provider: "domain".into(),
+            stage: Stage::InfrastructureIp,
+            state: JobState::Partial,
+            progress: "One successful source; another failed".into(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            finished_at: Some(chrono::Utc::now().to_rfc3339()),
+            elapsed_ms: 1,
+            error: Some("RDAP failed".into()),
+            hits: vec![SearchHit {
+                title: "[doh] DNS".into(),
+                url: "https://cloudflare-dns.com/dns-query?name=harbor.example".into(),
+                snippet: "A 8.8.8.8".into(),
+            }],
+        };
+        queue.persist("partial", &partial).await.unwrap();
+        drop(store);
+        let store = Store::open(&db).unwrap();
+        store.recover_jobs().unwrap();
+        let p = store.case_projection(&case.id).unwrap();
+        assert_eq!(p.findings.len(), 1);
+        assert_eq!(p.links.len(), 1);
+        assert!(p.links[0].candidate);
+        assert!(p.entities.iter().any(|e| e.id == "ip:8.8.8.8"));
+        let o = &p.findings[0].observation;
+        assert!(store
+            .resolve_evidence(
+                &o.evidence[0],
+                &crate::evidence::EvidenceScope::Case(case.id.clone())
+            )
+            .unwrap()
+            .contains("A 8.8.8.8"));
+        store
+            .review_finding(
+                &o.id,
+                crate::evidence::ReviewDecision::Accept,
+                "DNS source checked",
+            )
+            .unwrap();
+        assert!(!store.case_projection(&case.id).unwrap().links[0].candidate);
+        assert_eq!(
+            store
+                .jobs()
+                .unwrap()
+                .iter()
+                .find(|j| j.id == partial.id)
+                .unwrap()
+                .state,
+            JobState::Partial
+        );
+        queue.persist("partial", &partial).await.unwrap();
+        assert_eq!(store.case_projection(&case.id).unwrap().findings.len(), 1);
+    }
+    #[test]
+    fn eligibility_refuses_unavailable_collection_and_privacy_or_input_violations() {
+        let mut katana = defaults()["katana"].clone();
+        katana.enabled = true;
+        katana.readiness = Readiness::Ready;
+        assert!(eligible_action("katana", "harbor.example", &katana).is_err());
+        let config = defaults()["domain"].clone();
+        assert!(eligible_action("domain", "harbor.example", &config).is_ok());
+        assert!(eligible_action("domain", "query with domain", &config).is_err());
+        assert!(eligible_action(
+            "leakcheck",
+            "contact@harbor.example",
+            &defaults()["leakcheck"]
+        )
+        .is_err());
+        assert!(eligible_action("internetdb", "127.0.0.1", &defaults()["internetdb"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod investigation_scope_tests {
+    use super::*;
+    #[tokio::test]
+    async fn explicit_job_cannot_bypass_saved_case_source_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("scope.sqlite");
+        let store = Store::open(&db).unwrap();
+        let case = store.create_case("Passive only").unwrap();
+        let scope = crate::investigation::InvestigationScope {
+            question: "DNS only".into(),
+            allowed_actions: vec!["domain".into()],
+            ..Default::default()
+        };
+        store
+            .put_record("scope", "investigation_scope", Some(&case.id), None, &scope)
+            .unwrap();
+        let queue = ResearchQueue::new(db, 1);
+        let mut config = defaults()["leakcheck"].clone();
+        config.allow_sensitive = true;
+        let job = queue
+            .execute(
+                ResearchInput {
+                    case_id: Some(case.id),
+                    report_id: None,
+                    entity_id: "email:contact@harbor.example".into(),
+                    label: "contact@harbor.example".into(),
+                    action: "leakcheck".into(),
+                    depth: 0,
+                },
+                "leakcheck",
+                config,
+                SourcePlan::default(),
+                None,
+            )
+            .await;
+        assert_eq!(job.state, JobState::Failed);
+        assert!(job
+            .error
+            .unwrap()
+            .contains("outside saved investigation scope"));
+        assert!(job.hits.is_empty());
+        assert_eq!(store.jobs().unwrap()[0].state, JobState::Failed);
+    }
+}
+
+#[cfg(test)]
+mod cache_restart_tests {
+    use super::*;
+    #[tokio::test]
+    async fn explicit_cached_request_after_restart_finishes_its_queued_record_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cache.sqlite");
+        let store = Store::open(&db).unwrap();
+        let case = store.create_case("Cache").unwrap();
+        let queue = ResearchQueue::new(db.clone(), 1);
+        queue.cancel.store(true, Ordering::Relaxed);
+        let input = ResearchInput {
+            case_id: Some(case.id),
+            report_id: None,
+            entity_id: "domain:harbor.example".into(),
+            label: "harbor.example".into(),
+            action: "domain".into(),
+            depth: 0,
+        };
+        let config = defaults()["domain"].clone();
+        let mut fixture = queue
+            .execute(
+                input.clone(),
+                "domain",
+                config.clone(),
+                SourcePlan::default(),
+                None,
+            )
+            .await;
+        assert_eq!(fixture.state, JobState::Cancelled);
+        let key: String = store
+            .conn
+            .query_row(
+                "SELECT dedup_key FROM research_jobs WHERE id=?1",
+                [&fixture.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        fixture.state = JobState::Completed;
+        fixture.finished_at = Some(chrono::Utc::now().to_rfc3339());
+        fixture.hits = vec![SearchHit {
+            title: "[doh] DNS".into(),
+            url: "https://cloudflare-dns.com/dns-query?name=harbor.example".into(),
+            snippet: "A 8.8.8.8".into(),
+        }];
+        queue.persist(&key, &fixture).await.unwrap();
+        let restarted = ResearchQueue::new(db, 1);
+        let _permit = restarted.global.acquire().await.unwrap();
+        assert_eq!(store.jobs().unwrap().len(), 1);
+        let cached = tokio::time::timeout(
+            Duration::from_secs(2),
+            restarted.execute(input, "domain", config, SourcePlan::default(), None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached.state, JobState::Completed);
+        assert!(cached.progress.contains("cached evidence reused"));
+        assert_ne!(cached.id, fixture.id);
+        let jobs = store.jobs().unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().all(|j| j.state == JobState::Completed));
+        assert_eq!(cached.hits.len(), 1);
+        let projection = store
+            .case_projection(cached.input.case_id.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(projection.links.len(), 1);
+        assert_eq!(projection.links[0].observations.len(), 2);
+        assert_eq!(projection.links[0].relationship.evidence.len(), 2);
+        assert_eq!(
+            crate::investigation::distinct_findings(projection.findings.iter()),
+            1
+        );
     }
 }

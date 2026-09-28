@@ -89,7 +89,59 @@ pub fn slash_commands() -> &'static [SlashCommand] {
         },
         SlashCommand {
             name: "new",
-            summary: "Open a case: /new <title>",
+            summary: "Review investigation scope: /new <question>",
+        },
+        SlashCommand {
+            name: "case",
+            summary: "List or open a saved investigation without a report",
+        },
+        SlashCommand {
+            name: "draft",
+            summary: "Draft a report from selected accepted case observations",
+        },
+        SlashCommand {
+            name: "case-data",
+            summary: "Show clear/delete controls for case investigation data",
+        },
+        SlashCommand {
+            name: "clear-case",
+            summary: "Review removal of case data while keeping the case",
+        },
+        SlashCommand {
+            name: "delete-case",
+            summary: "Review removal of a case and its investigation data",
+        },
+        SlashCommand {
+            name: "confirm-case",
+            summary: "Apply the reviewed plan with its exact case ID",
+        },
+        SlashCommand {
+            name: "cancel-case-data",
+            summary: "Cancel the pending case removal plan",
+        },
+        SlashCommand {
+            name: "source",
+            summary: "Open an observation artifact within scope",
+        },
+        SlashCommand {
+            name: "filter",
+            summary: "Filter case evidence by source, text, or review state",
+        },
+        SlashCommand {
+            name: "investigate",
+            summary: "Select one bounded focused provider action",
+        },
+        SlashCommand {
+            name: "review",
+            summary: "Review a finding with a decision and reason",
+        },
+        SlashCommand {
+            name: "jobs",
+            summary: "Inspect saved research job progress and errors",
+        },
+        SlashCommand {
+            name: "cancel-jobs",
+            summary: "Cancel queued and running research work",
         },
         SlashCommand {
             name: "use",
@@ -97,7 +149,7 @@ pub fn slash_commands() -> &'static [SlashCommand] {
         },
         SlashCommand {
             name: "search",
-            summary: "Public web search into a markdown report",
+            summary: "Explicit public web search",
         },
         SlashCommand {
             name: "report",
@@ -137,7 +189,7 @@ pub fn slash_commands() -> &'static [SlashCommand] {
         },
         SlashCommand {
             name: "network",
-            summary: "Open the Network text graph",
+            summary: "Open case Focus map or historical report network",
         },
         SlashCommand {
             name: "find",

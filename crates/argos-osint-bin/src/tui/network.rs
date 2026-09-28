@@ -391,7 +391,7 @@ fn clusters(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(
         Paragraph::new(anchors)
             .wrap(Wrap { trim: false })
-            .block(panel(" Strategic Anchors · degree ")),
+            .block(panel(" Connectivity · degree ")),
         side[0],
     );
     let mut gaps = vec![Line::from("Absent co-occurrence; type groups").style(theme::dim())];

@@ -423,6 +423,39 @@ pub fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_research(frame: &mut Frame, app: &mut App, area: Rect) {
     app.provider_field_hits.clear();
     app.canvas_area = area;
+    let phase_rows = split_v(area, &[Constraint::Length(3), Constraint::Min(0)]);
+    let titles = argos_osint_core::research::ResearchPhase::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            Line::from(format!(
+                "{} {}",
+                i + 1,
+                if area.width < 95 {
+                    ["D", "I", "ID", "E", "O"][i]
+                } else {
+                    p.title()
+                }
+            ))
+        })
+        .collect::<Vec<_>>();
+    let selected = argos_osint_core::research::ResearchPhase::ALL
+        .iter()
+        .position(|p| *p == app.research_phase)
+        .unwrap_or(0);
+    frame.render_widget(
+        Tabs::new(titles)
+            .select(selected)
+            .style(theme::dim())
+            .highlight_style(theme::selected())
+            .block(panel(" Capability phase · 1–5 · optional actions ")),
+        phase_rows[0],
+    );
+    let area = phase_rows[1];
+    if app.research_phase == argos_osint_core::research::ResearchPhase::Analysis {
+        draw_analysis(frame, app, area);
+        return;
+    }
     let name = app.research_name();
     let c = app
         .settings
@@ -432,14 +465,27 @@ fn draw_research(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or_default();
     let mut intro = vec![
         Line::from(format!(
-            "{name} · {:?} · enabled {}",
-            c.readiness, c.enabled
+            "{} · {} · {:?} · enabled {}",
+            argos_osint_core::research::display_name(&name),
+            if argos_osint_core::research::collection_available(&name)
+                && c.mode == argos_osint_core::research::ExecutionMode::NativeHttp
+            {
+                "native · entitlement unverified"
+            } else {
+                "COLLECTION UNAVAILABLE: output/scope contracts unverified"
+            },
+            c.readiness,
+            c.enabled
         ))
         .style(theme::accent()),
         Line::from(argos_osint_core::research::capabilities(&name)).style(theme::dim()),
         Line::from(format!(
             "Supported {} · detected {} · profile {} · capabilities {} · quota {}",
-            c.supported_version,
+            if c.supported_version.is_empty() {
+                "unversioned"
+            } else {
+                &c.supported_version
+            },
             if c.detected_version.is_empty() {
                 "unverified"
             } else {
@@ -451,7 +497,30 @@ fn draw_research(frame: &mut Frame, app: &mut App, area: Rect) {
         ))
         .style(theme::dim()),
     ];
-    if let Some((_, _, plan)) = &app.tool_plan {
+    if area.width >= 80 {
+        intro.push(
+            Line::from(
+                app.research_phase
+                    .providers()
+                    .iter()
+                    .map(|name| {
+                        format!(
+                            "{} [{}]",
+                            argos_osint_core::research::display_name(name),
+                            if argos_osint_core::research::collection_available(name) {
+                                "native"
+                            } else {
+                                "unavailable"
+                            }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            )
+            .style(theme::dim()),
+        );
+    }
+    if let Some((_, action, plan)) = &app.tool_plan {
         intro.push(
             Line::from(format!(
                 "PLAN: {} {} from {} to {}",
@@ -464,8 +533,13 @@ fn draw_research(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         intro.push(
             Line::from(format!(
-                "Prerequisites: {}. Official SHA-256 verified before activation. Apply to start.",
-                plan.prerequisites.join(", ")
+                "Prerequisites: {}. {} Apply to start.",
+                plan.prerequisites.join(", "),
+                if action == "__research_remove" {
+                    "Exact managed installation only."
+                } else {
+                    "Official SHA-256 verified before activation."
+                }
             ))
             .style(theme::dim()),
         );
@@ -473,7 +547,7 @@ fn draw_research(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows = split_v(
         area,
         &[
-            Constraint::Length(if app.tool_plan.is_some() { 8 } else { 5 }),
+            Constraint::Length(if app.tool_plan.is_some() { 9 } else { 6 }),
             Constraint::Min(0),
         ],
     );
@@ -510,5 +584,36 @@ fn draw_research(frame: &mut Frame, app: &mut App, area: Rect) {
             rect,
         );
         app.provider_field_hits.push((index, rect));
+    }
+}
+
+fn draw_analysis(frame: &mut Frame, app: &mut App, area: Rect) {
+    let rows = split_v(area, &[Constraint::Length(8), Constraint::Min(0)]);
+    let lines=vec![
+        Line::from("Extraction & normalization · local deterministic parser").style(theme::accent()),
+        Line::from("Conservative labels; original spans and rejection reasons retained. Corrections and identity decisions are reversible."),
+        Line::from("Relationship review · pending by default").style(theme::accent()),
+        Line::from("Observed, inferred, co-occurrence and candidate identity stay distinct. Only explicit acceptance promotes observed links."),
+        Line::from("Report output · reviewed selections only").style(theme::accent()),
+        Line::from("/draft <kind> <accepted IDs> saves attributed sources and dates. No automatic report or collection."),
+        Line::from("These fixed conservative parser/review policies are not selectable provider phases."),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel(" Analysis capabilities ")),
+        rows[0],
+    );
+    let count = app.fields.len();
+    for i in 0..count {
+        let y = rows[1].y + i as u16 * 3;
+        if y < rows[1].bottom() {
+            field_row(
+                frame,
+                app,
+                i,
+                Rect::new(rows[1].x, y, rows[1].width, 3.min(rows[1].bottom() - y)),
+            );
+        }
     }
 }

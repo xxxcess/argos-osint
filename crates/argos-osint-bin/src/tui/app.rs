@@ -1,6 +1,10 @@
 //! Session shell. The bottom prompt always talks to the view that is open:
 //! the desk, the selected case, or the module on the canvas.
 
+#[path = "case_workspace.rs"]
+pub mod case_workspace;
+use case_workspace::CaseWorkspace;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -115,6 +119,7 @@ pub enum CasePage {
     Closed,
     Brain,
     Network,
+    Investigation,
 }
 
 impl CasePage {
@@ -127,6 +132,7 @@ impl CasePage {
             Self::Closed => "Desk",
             Self::Brain => "Brain",
             Self::Network => "Network",
+            Self::Investigation => "Investigation",
         }
     }
 }
@@ -181,10 +187,13 @@ pub struct LogEntry {
     pub text: String,
 }
 
-/// Stage toggles for one case worker. Copied from settings, then changed
-/// only for this run.
+/// Explicit first actions and source permissions for a case investigation.
 #[derive(Clone, Debug)]
 pub struct ScopeDraft {
+    pub existing_case: Option<String>,
+    pub include_evidence: bool,
+    pub allow_sensitive: bool,
+    pub allow_active: bool,
     pub query: String,
     pub echo_on_desk: bool,
     pub restore_prompt: bool,
@@ -226,6 +235,7 @@ pub enum ReportRow {
         failed: Option<String>,
     },
     Completed(ReportMeta),
+    Case(Case),
 }
 
 impl ReportRow {
@@ -233,6 +243,7 @@ impl ReportRow {
         match self {
             Self::Pending { title, .. } => title,
             Self::Completed(report) => &report.title,
+            Self::Case(case) => &case.title,
         }
     }
 
@@ -240,6 +251,7 @@ impl ReportRow {
         match self {
             Self::Pending { case_id, .. } => Some(case_id),
             Self::Completed(report) => report.case_id.as_deref(),
+            Self::Case(case) => Some(&case.id),
         }
     }
 
@@ -250,6 +262,7 @@ impl ReportRow {
             } => "failed",
             Self::Pending { .. } => "pending",
             Self::Completed(_) => "completed",
+            Self::Case(_) => "case",
         }
     }
 
@@ -372,10 +385,38 @@ pub struct Field {
 
 #[derive(Clone, Debug)]
 pub enum AppMsg {
-    Retrieved {
+    CaseDrafted {
+        case_id: String,
+        result: Result<ReportMeta, String>,
+    },
+    CaseDataPlanned {
+        generation: u64,
+        result: Result<argos_osint_core::store::CaseDataPlan, String>,
+    },
+    CaseDataApplied {
+        plan: argos_osint_core::store::CaseDataPlan,
+        result: Result<(), String>,
+    },
+    CaseReady {
+        case_id: String,
+        generation: u64,
+        result: Result<argos_osint_core::investigation::CaseProjection, String>,
+    },
+    CaseSource {
+        case_id: String,
+        generation: u64,
+        result: Result<String, String>,
+    },
+    ReviewedRetrieved {
         generation: u64,
         query: String,
-        result: Result<Vec<argos_osint_core::evidence::PassageHit>, String>,
+        result: Result<
+            (
+                Vec<argos_osint_core::evidence::PassageHit>,
+                Vec<argos_osint_core::evidence::Finding>,
+            ),
+            String,
+        >,
     },
     ReportSource {
         report_id: String,
@@ -398,6 +439,7 @@ pub enum AppMsg {
         report_id: Option<String>,
         title: String,
         result: Result<String, String>,
+        scope: argos_osint_core::evidence::EvidenceScope,
     },
     ReportUpdated(Result<ReportMeta, String>),
     Coverage {
@@ -435,6 +477,7 @@ pub enum AppMsg {
         result: Result<Vec<provider::ListedModel>, String>,
     },
     Voice(Result<String, String>),
+    #[cfg(test)]
     Research {
         case_id: String,
         result: Result<(String, Option<ReportMeta>), String>,
@@ -453,6 +496,13 @@ pub enum AppMsg {
 }
 
 pub struct App {
+    pub investigation: Option<CaseWorkspace>,
+    case_generation: u64,
+    case_source_generation: u64,
+    case_cancel: Arc<AtomicBool>,
+    desk_return_scope: argos_osint_core::evidence::EvidenceScope,
+    reviewed_recommendations: Vec<argos_osint_core::evidence::Finding>,
+    pub research_phase: argos_osint_core::research::ResearchPhase,
     pub tx: UnboundedSender<AppMsg>,
     pub store: Store,
     pub settings: SettingsFile,
@@ -468,10 +518,10 @@ pub struct App {
     pub modal_query: String,
     pub modal_sel: usize,
     pub help: bool,
-    /// Query waiting on the case-worker confirmation popup.
+    /// Suggested question waiting for an explicit scope review.
     pub confirm_query: Option<String>,
     pub confirm_sel: usize,
-    /// Source toggles for the case worker that is about to start.
+    /// Investigation scope and unchecked first actions.
     pub scope: Option<ScopeDraft>,
     /// Completed report waiting on the open-workspace confirmation popup.
     pub confirm_report: Option<String>,
@@ -586,6 +636,10 @@ pub struct App {
     pub research_sel: usize,
     pub research_jobs: Vec<argos_osint_core::research::ResearchJob>,
     pub research_active: usize,
+    pub pending_case_data: Option<argos_osint_core::store::CaseDataPlan>,
+    pub case_data_generation: u64,
+    pub case_data_busy: Option<String>,
+    pub case_pending_work: HashMap<String, usize>,
     research_queue: Option<argos_osint_core::research::ResearchQueue>,
     pub recommendations: Vec<argos_osint_core::evidence::PassageHit>,
     pub evidence_scope: argos_osint_core::evidence::EvidenceScope,
@@ -775,12 +829,23 @@ impl App {
             tna_show_rejected: false,
             tna_find_editing: false,
             tool_plan: None,
+            investigation: None,
+            case_generation: 0,
+            case_source_generation: 0,
+            case_cancel: Arc::new(AtomicBool::new(false)),
+            desk_return_scope: Default::default(),
+            reviewed_recommendations: Vec::new(),
+            research_phase: Default::default(),
             research_sel: 0,
             research_jobs: Vec::new(),
             research_active: 0,
+            pending_case_data: None,
+            case_data_generation: 0,
+            case_data_busy: None,
+            case_pending_work: HashMap::new(),
             research_queue: None,
             recommendations: Vec::new(),
-            evidence_scope: Default::default(),
+            evidence_scope: argos_osint_core::evidence::EvidenceScope::Collection,
             workspace_reading: false,
             report_read_line: 0,
             originating_question: String::new(),
@@ -904,7 +969,7 @@ impl App {
             Some(ModuleId::Cases) => match self.case_page {
                 CasePage::Closed => None,
                 CasePage::Brain => Some(ModuleId::Brain),
-                CasePage::Network => None,
+                CasePage::Network | CasePage::Investigation => None,
             },
             Some(ModuleId::System) => match self.system_page {
                 SystemPage::Log => Some(ModuleId::Log),
@@ -926,7 +991,7 @@ impl App {
         match self.module {
             Some(ModuleId::Cases) => match self.case_page {
                 CasePage::Brain => Some(ModuleId::Brain),
-                CasePage::Closed | CasePage::Network => None,
+                CasePage::Closed | CasePage::Network | CasePage::Investigation => None,
             },
             Some(ModuleId::System) => match self.system_page {
                 SystemPage::Settings => Some(ModuleId::Settings),
@@ -1561,6 +1626,21 @@ impl App {
                 .position(|h| h.report_id == r.id)
                 .unwrap_or(usize::MAX)
         });
+        rows.extend(
+            self.cases
+                .iter()
+                .filter(|c| {
+                    !self.pending_reports.iter().any(|p| p.case_id == c.id)
+                        && match &self.evidence_scope {
+                            argos_osint_core::evidence::EvidenceScope::Desk
+                            | argos_osint_core::evidence::EvidenceScope::Collection => true,
+                            argos_osint_core::evidence::EvidenceScope::Case(id) => &c.id == id,
+                            _ => false,
+                        }
+                })
+                .cloned()
+                .map(ReportRow::Case),
+        );
         rows.extend(reports.into_iter().map(ReportRow::Completed));
         rows
     }
@@ -1583,6 +1663,10 @@ impl App {
                 ReportRow::Pending { title, .. } => {
                     out.push_str(&format!("- pending: {title}\n"));
                 }
+                ReportRow::Case(case) => out.push_str(&format!(
+                    "Case {}: {} · /case {}\n",
+                    case.id, case.title, case.id
+                )),
                 ReportRow::Completed(report) => {
                     out.push_str(&format!(
                         "- completed: {} ({})\n",
@@ -1687,6 +1771,27 @@ impl App {
 
     pub fn on_msg(&mut self, msg: AppMsg) {
         match msg {
+            AppMsg::CaseDrafted {case_id,result} => {
+                if let Some(count)=self.case_pending_work.get_mut(&case_id) {*count=count.saturating_sub(1);}
+                self.on_msg(AppMsg::ReportUpdated(result));
+            },
+            AppMsg::CaseDataPlanned {generation,result} => {
+                if generation == self.case_data_generation {
+                    match result { Ok(plan) => self.show_case_data_plan(plan), Err(err) => self.status=err }
+                }
+            },
+            AppMsg::CaseDataApplied {plan,result} => self.finish_case_data(plan,result),
+            AppMsg::CaseReady {case_id,generation,result} => {
+                if generation==self.case_generation {
+                    if let Some(w)=self.investigation.as_mut().filter(|w|w.case_id==case_id) {w.loading=false;match result {Ok(data)=>{w.snapshot=data.snapshot.clone();if let Some(scope)=&data.scope{w.question=scope.question.clone();}w.data=data;if w.lead_id.as_ref().is_none_or(|id|!w.data.entities.iter().any(|e|&e.id==id)){w.lead_id=w.data.entities.first().map(|e|e.id.clone());}},Err(e)=>self.status=e}}
+                }
+            },
+            AppMsg::CaseSource {case_id,generation,result} => {
+                if generation==self.case_source_generation {if let Some(w)=self.investigation.as_mut().filter(|w|w.case_id==case_id){w.source=Some(result.unwrap_or_else(|e|e));w.scroll=0;}}
+            },
+            AppMsg::ReviewedRetrieved {generation,query,result} => {
+                if generation==self.turn_generation {let passages=result.map(|(p,f)|{self.reviewed_recommendations=f;p});self.answer_retrieval(generation,query,passages);}
+            },
             AppMsg::Coverage {report_id,result} => {if report_id==self.chat_report {match result {Ok(rows)=>self.coverage_rows=rows,Err(err)=>self.status=err}}},
             AppMsg::OpenPassage(result) => match result {Ok(Some(hit))=>{let citation=hit.citation();self.recommendations.push(hit);self.run_slash(&format!("/cite {citation}"));},Ok(None)=>self.status="No supporting passage in this cell; unavailable evidence is not a zero finding".into(),Err(err)=>self.status=err},
             AppMsg::ToolManaged {name,result} => {
@@ -1697,31 +1802,36 @@ impl App {
                 }
                 if self.provider_page==ProviderPage::Research {self.load_research_fields();}
             },
-            AppMsg::ResearchProgress(job)=>{self.research_jobs.retain(|j|j.id!=job.id);self.research_jobs.insert(0,job);self.research_jobs.truncate(200);},
+            AppMsg::ResearchProgress(job)=>{if !self.store.research_job_is_current(&job).unwrap_or(false){return;}if let Some(w)=self.investigation.as_mut().filter(|w|job.input.case_id.as_ref()==Some(&w.case_id)){w.data.jobs.retain(|j|j.id!=job.id);w.data.jobs.insert(0,job.clone());}self.research_jobs.retain(|j|j.id!=job.id);self.research_jobs.insert(0,job);self.research_jobs.truncate(200);},
             AppMsg::ResearchJob(job) => {
+                let affected=self.investigation.as_ref().is_some_and(|w|job.input.case_id.as_ref()==Some(&w.case_id));
                 self.research_active=self.research_active.saturating_sub(1);
+                if let Some(count)=job.input.case_id.as_ref().and_then(|id|self.case_pending_work.get_mut(id)){*count=count.saturating_sub(1);}
+                if !self.store.research_job_is_current(&job).unwrap_or(false){return;}
                 self.status=format!("{}: {:?} · {}",job.provider,job.state,job.progress);
                 self.log_event("task",&format!("{} {:?}: {}",job.provider,job.state,job.error.as_deref().unwrap_or(&job.progress)));
                 self.research_jobs.retain(|j|j.id!=job.id);self.research_jobs.insert(0,job);
                 self.research_jobs.truncate(200);
+                if affected{self.refresh_investigation();}
             },
             AppMsg::ResearchTest {name,state,detail} => {
                 if let Some(c)=self.settings.research.get_mut(&name){if detail.starts_with("Version matched"){c.detected_version=c.supported_version.clone();}c.readiness=state;}
                 self.status=detail.clone();self.log_event("system",&format!("{name}: {detail}"));
                 if self.provider_page==ProviderPage::Research {self.load_research_fields();}
             },
-            AppMsg::EvidenceSurface {report_id,title,result} => {
+            AppMsg::EvidenceSurface {report_id,title,result,scope} => {
+                if scope!=self.evidence_scope{return;}
+                self.refresh_investigation();
                 if report_id==self.chat_report {
                     let text=result.unwrap_or_else(|e|format!("Evidence unavailable: {e}"));
                     if self.chat_report.is_some() {self.tna_answer=Some(TnaAnswer {question:title,answer:text,..Default::default()});self.tna_answer_scroll=0;}
-                    else {self.push_line("assistant",&format!("{title}\n\n{text}"));}
+                    else if let Some(w)=self.investigation.as_mut(){w.source=Some(format!("{title}\n\n{text}"));w.scroll=0;}else {self.push_line("assistant",&format!("{title}\n\n{text}"));}
                 }
             },
             AppMsg::ReportUpdated(result) => match result {
                 Ok(report)=>{let id=report.id.clone();let _=self.reload_lists();self.recommendations.clear();self.after_report_filed(&id);self.status="Report update saved; earlier citations retained".into();if self.chat_report.as_deref()==Some(id.as_str()){self.open_report_chat(&id);}},
                 Err(err)=>self.status=format!("Report update failed: {err}"),
             },
-            AppMsg::Retrieved {generation,query,result} => self.answer_retrieval(generation,query,result),
             AppMsg::ReportSource {report_id,generation,version,result} => {
                 if self.chat_report.as_ref()==Some(&report_id) && generation==self.report_source_generation {
                     match result {Ok(text)=>{if version.is_some(){self.report_read_source=Some(text);}else{self.tna_source=text;}self.tna_source_error=None;self.focus_selected_passage();},Err(err)=>self.tna_source_error=Some(err)}
@@ -1893,6 +2003,7 @@ impl App {
                     self.log_event("api", &format!("voice: {err}"));
                 }
             },
+            #[cfg(test)]
             AppMsg::Research { case_id, result } => self.finish_research(case_id, result),
             AppMsg::Insight {
                 report_id,
@@ -2053,6 +2164,17 @@ impl App {
             return;
         }
         let pos = ratatui::layout::Position { x, y };
+        if self.module == Some(ModuleId::Cases) && self.case_page == CasePage::Investigation {
+            if let Some(view) = self.investigation.as_ref().and_then(|w| {
+                w.tab_hits
+                    .iter()
+                    .find(|(_, rect)| rect.contains(pos))
+                    .map(|(view, _)| *view)
+            }) {
+                self.select_investigation_view(view);
+                return;
+            }
+        }
         if self.report_area.contains(pos) {
             self.focus = Focus::Reports;
             let rel = y.saturating_sub(self.report_area.y + 1) as usize;
@@ -2140,7 +2262,7 @@ impl App {
     }
 
     pub fn case_pages(&self) -> Vec<CasePage> {
-        if self.chat_report.is_some() {
+        if self.chat_report.is_some() || self.investigation.is_some() {
             Vec::new()
         } else {
             CasePage::all().to_vec()
@@ -2243,7 +2365,11 @@ impl App {
         if self.modal {
             return self.on_modal_key(key);
         }
-        if self.on_case_desk() && self.chat_report.is_none() && !self.editing {
+        if self.on_case_desk()
+            && self.chat_report.is_none()
+            && self.investigation.is_none()
+            && !self.editing
+        {
             if key.code == KeyCode::Char('+') {
                 self.start_case_from_prompt();
                 return false;
@@ -2268,6 +2394,23 @@ impl App {
         if ctrl && key.code == KeyCode::Char('r') && self.focus == Focus::Prompt {
             self.record_voice();
             return false;
+        }
+        if self.investigation.is_some() && self.on_case_desk() {
+            return self.on_investigation_key(key);
+        }
+        if self.module == Some(ModuleId::Providers)
+            && self.provider_page == ProviderPage::Research
+            && !self.editing
+            && self.focus == Focus::Canvas
+        {
+            if let KeyCode::Char(c @ '1'..='5') = key.code {
+                self.research_phase =
+                    argos_osint_core::research::ResearchPhase::ALL[(c as u8 - b'1') as usize];
+                self.research_sel = 0;
+                self.field_sel = 0;
+                self.load_research_fields();
+                return false;
+            }
         }
         if self.chat_report.is_some() && self.on_case_desk() {
             if key.code == KeyCode::Esc {
@@ -2334,10 +2477,17 @@ impl App {
     }
 
     fn cancel_or_quit(&mut self) -> bool {
+        if self.investigation.is_some()
+            && (self.research_active > 0 || self.investigation.as_ref().is_some_and(|w| w.loading))
+        {
+            self.case_cancel.store(true, Ordering::Relaxed);
+            self.run_slash("/cancel-jobs");
+            return false;
+        }
         if self.running {
             self.cancel.store(true, Ordering::Relaxed);
             self.status = "cancelling".into();
-            if self.chat_report.is_some() {
+            if self.chat_report.is_some() || self.investigation.is_some() {
                 self.turn_generation = self.turn_generation.wrapping_add(1);
                 self.running = false;
                 if let Some(answer) = self.tna_answer.as_mut() {
@@ -2372,6 +2522,23 @@ impl App {
     }
 
     fn scroll_chat_at(&mut self, x: u16, y: u16, delta: isize) {
+        if self.investigation.is_some()
+            && self
+                .canvas_area
+                .contains(ratatui::layout::Position { x, y })
+        {
+            if let Some(w) = self.investigation.as_mut().filter(|w| w.source.is_some()) {
+                w.scroll = (w.scroll as isize + delta).max(0) as usize;
+            } else {
+                let code = if delta > 0 {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                };
+                self.on_investigation_key(KeyEvent::new(code, KeyModifiers::NONE));
+            }
+            return;
+        }
         let pos = ratatui::layout::Position { x, y };
         if self.on_case_desk() && self.case_page == CasePage::Brain {
             // ScrollUp (delta>0) → previous row; ScrollDown → next (match Table).
@@ -2417,6 +2584,12 @@ impl App {
     }
 
     fn next_focus(&self) -> Focus {
+        if self.investigation.is_some() {
+            return match self.focus {
+                Focus::Prompt => Focus::Graph,
+                _ => Focus::Prompt,
+            };
+        }
         let reports = self.on_case_desk() && self.case_page == CasePage::Closed;
         let network = self.on_case_desk() && self.case_page == CasePage::Network;
         let table = network;
@@ -2471,6 +2644,7 @@ impl App {
             return;
         };
         match row {
+            ReportRow::Case(case) => self.open_investigation(&case.id),
             ReportRow::Completed(report) => {
                 self.confirm_report = Some(report.id);
                 self.confirm_report_sel = 0;
@@ -2576,6 +2750,9 @@ impl App {
     }
 
     pub fn tna_snapshot(&self) -> Option<&TnaSnapshot> {
+        if let Some(w) = &self.investigation {
+            return w.snapshot.as_ref();
+        }
         let report_id = self.chat_report.as_deref()?;
         self.tna_report.as_ref().filter(|snap| match &snap.scope {
             argos_osint_core::tna::TnaScope::Targeted { report_id: id, .. } => id == report_id,
@@ -2932,9 +3109,6 @@ impl App {
                 let opened = Store::open(&path).map_err(|err| err.to_string());
                 match opened.and_then(|store| {
                     store.sync_report_index().map_err(|err| err.to_string())?;
-                    store
-                        .attach_case_evidence_to_report(&id)
-                        .map_err(|err| err.to_string())?;
                     tna::rebuild_after_file(&store, &id).map_err(|err| err.to_string())?;
                     let collection = store
                         .get_tna_graph(desk_key())
@@ -3065,7 +3239,7 @@ impl App {
         self.scroll_back = self.desk_return_scroll;
         self.prompt = std::mem::take(&mut self.desk_return_prompt);
         self.cursor = self.prompt.chars().count();
-        self.evidence_scope = Default::default();
+        self.evidence_scope = self.desk_return_scope.clone();
         self.workspace_reading = false;
     }
 
@@ -3982,6 +4156,10 @@ impl App {
     }
 
     fn on_esc(&mut self) {
+        if self.investigation.is_some() {
+            self.close_investigation();
+            return;
+        }
         if self.modal {
             self.modal = false;
             return;
@@ -4258,15 +4436,19 @@ impl App {
 
     fn open_scope(&mut self, query: String, echo_on_desk: bool, restore_prompt: bool) {
         self.scope = Some(ScopeDraft {
+            existing_case: None,
+            include_evidence: false,
+            allow_sensitive: false,
+            allow_active: false,
             query,
             echo_on_desk,
             restore_prompt,
-            facts: self.settings.facts,
-            web: self.settings.web,
-            news: self.settings.news,
-            domain: self.settings.domain,
-            social: self.settings.social,
-            identity: self.settings.identity,
+            facts: false,
+            web: false,
+            news: false,
+            domain: false,
+            social: false,
+            identity: false,
             selected: 0,
         });
         self.confirm_query = None;
@@ -4299,10 +4481,49 @@ impl App {
                     *flag = !*flag;
                 }
             }
+            KeyCode::Char('c') => {
+                if let Some(scope) = self.scope.as_mut() {
+                    scope.existing_case = match scope
+                        .existing_case
+                        .as_ref()
+                        .and_then(|id| self.cases.iter().position(|c| &c.id == id))
+                    {
+                        Some(index) => self.cases.get(index + 1).map(|c| c.id.clone()),
+                        None => self.cases.first().map(|c| c.id.clone()),
+                    };
+                }
+            }
+            KeyCode::Char('e') => {
+                if let Some(scope) = self.scope.as_mut() {
+                    scope.include_evidence = !scope.include_evidence;
+                }
+            }
+            KeyCode::Char('s') => {
+                if let Some(scope) = self.scope.as_mut() {
+                    scope.allow_sensitive = !scope.allow_sensitive;
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(scope) = self.scope.as_mut() {
+                    scope.allow_active = !scope.allow_active;
+                }
+            }
             KeyCode::Enter => {
                 if let Some(scope) = self.scope.take() {
                     let plan = self.plan_for_scope(&scope);
-                    self.launch_case_worker(scope.query, scope.echo_on_desk, plan);
+                    if scope.restore_prompt {
+                        self.prompt = scope.query.clone();
+                        self.cursor = self.prompt.chars().count();
+                    }
+                    self.start_case_workspace(
+                        scope.query,
+                        scope.echo_on_desk,
+                        plan,
+                        scope.existing_case,
+                        scope.include_evidence,
+                        scope.allow_sensitive,
+                        scope.allow_active,
+                    );
                 }
             }
             KeyCode::Esc => {
@@ -4312,7 +4533,7 @@ impl App {
                         self.cursor = self.prompt.chars().count();
                         self.focus = Focus::Prompt;
                     }
-                    self.status = "case worker cancelled".into();
+                    self.status = "Investigation scope cancelled".into();
                 }
             }
             _ => {}
@@ -4331,112 +4552,7 @@ impl App {
         plan
     }
 
-    fn launch_case_worker(&mut self, query: String, echo_on_desk: bool, plan: SourcePlan) {
-        if self
-            .pending_reports
-            .iter()
-            .filter(|p| p.failed.is_none())
-            .count()
-            >= 4
-        {
-            self.status = "Four investigations are already active; review jobs or cancel".into();
-            return;
-        }
-        let case = match self.store.create_case(&query) {
-            Ok(case) => case,
-            Err(err) => {
-                self.status = err.to_string();
-                return;
-            }
-        };
-        let _ = self.reload_lists();
-        self.case_sel = self
-            .cases
-            .iter()
-            .position(|item| item.id == case.id)
-            .unwrap_or(0);
-        self.module = Some(ModuleId::Cases);
-        self.case_page = CasePage::Closed;
-        self.fields.clear();
-        self.chat_case = None;
-        self.pending_reports.push(PendingReport {
-            case_id: case.id.clone(),
-            title: query.clone(),
-            failed: None,
-        });
-        self.report_sel = 0;
-        self.load_transcript("desk");
-        let ack = "Case worker started to carry out the research.";
-        self.append_to_session(&case.id, "user", &query);
-        self.append_to_session(&case.id, "assistant", ack);
-        if echo_on_desk {
-            self.append_to_session("desk", "user", &query);
-        }
-        self.append_to_session("desk", "assistant", ack);
-        self.status = "ready".into();
-        self.log_event("task", &format!("case research {}", case.title));
-        let case_id = case.id.clone();
-        let report_dir = report_dir(&self.settings);
-        let tx = self.tx.clone();
-        let queue = self.research_queue.clone();
-        let configs = self.settings.research.clone();
-        let secrets = self.auth.research.clone();
-        let prior = self
-            .recommendations
-            .iter()
-            .map(|p| {
-                format!(
-                    "[{}] {} · {} · report date {}\n{}\n",
-                    p.citation(),
-                    p.title,
-                    p.section,
-                    p.created_at,
-                    p.text
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        tokio::spawn(async move {
-            let result = if let Some(queue) = queue {
-                let input = argos_osint_core::research::ResearchInput {
-                    case_id: Some(case_id.clone()),
-                    report_id: None,
-                    entity_id: query.clone(),
-                    label: query.clone(),
-                    action: "workflow".into(),
-                    depth: 0,
-                };
-                let outcome = queue.workflow(input, configs, plan, secrets).await;
-                for job in outcome.stages.iter().flat_map(|s| s.jobs.iter()) {
-                    let _ = tx.send(AppMsg::ResearchJob(job.clone()));
-                }
-                let hits = outcome.hits;
-                if hits.is_empty() {
-                    Err("No new sources returned supporting evidence. Successful empty and failed jobs remain in /jobs; existing evidence was preserved.".into())
-                } else {
-                    let query_copy = query.clone();
-                    let id = case_id.clone();
-                    argos_osint_core::workers::spawn_blocking(move || {
-                        let mut md =
-                            report::source_pack(&query_copy, Some(&id), &query_copy, &hits);
-                        if !prior.is_empty() {
-                            md.push_str("\n\n## Previously completed evidence (attributed)\n\n");
-                            md.push_str(&prior);
-                        }
-                        report::write_report(&report_dir, &query_copy, Some(&id), &md)
-                            .map(|meta| (summarize_hits(&hits), Some(meta)))
-                            .map_err(|e| e.to_string())
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()))
-                }
-            } else {
-                Err("Research queue requires a file-backed workspace".into())
-            };
-            let _ = tx.send(AppMsg::Research { case_id, result });
-        });
-    }
-
+    #[cfg(test)]
     fn finish_research(
         &mut self,
         case_id: String,
@@ -4457,6 +4573,7 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     fn mark_task_failed(&mut self, case_id: &str, reason: &str) {
         self.log_event("task", &format!("case {case_id} failed: {reason}"));
         let reason = reason
@@ -4502,25 +4619,7 @@ impl App {
             self.status = "no case to delete".into();
             return;
         };
-        let Some(case) = self.cases.iter().find(|case| case.id == case_id).cloned() else {
-            self.pending_reports
-                .retain(|pending| pending.case_id != case_id);
-            self.status = "no case to delete".into();
-            return;
-        };
-        if let Err(err) = self.store.delete_case(&case.id) {
-            self.status = err.to_string();
-            return;
-        }
-        if self.chat_case.as_deref() == Some(case.id.as_str()) {
-            self.chat_case = None;
-        }
-        self.pending_reports
-            .retain(|pending| pending.case_id != case.id);
-        let _ = self.reload_lists();
-        self.load_transcript(&self.session_id());
-        self.status = format!("deleted {}", case.title);
-        self.log_event("task", &format!("deleted case {}", case.title));
+        self.prepare_case_data(&case_id, true);
     }
 
     fn save_osint_toggles(&mut self) {
@@ -4607,16 +4706,6 @@ impl App {
             source.enabled = !source.enabled;
         }
         let _ = self.save_settings_config(&self.settings);
-    }
-
-    fn bind_case(&mut self) {
-        if let Some(case) = self.cases.get(self.case_sel) {
-            let id = case.id.clone();
-            self.evidence_scope = argos_osint_core::evidence::EvidenceScope::Case(id.clone());
-            self.chat_case = Some(id.clone());
-            self.load_transcript(&id);
-        }
-        self.scroll_back = 0;
     }
 
     fn on_prompt_key(&mut self, key: KeyEvent) -> bool {
@@ -4712,6 +4801,9 @@ impl App {
     }
 
     fn open_report_chat(&mut self, id: &str) {
+        if self.investigation.is_some() {
+            self.close_investigation();
+        }
         let Some(report) = self.reports.iter().find(|report| report.id == id).cloned() else {
             self.status = "that report is no longer on file".into();
             return;
@@ -4738,6 +4830,7 @@ impl App {
             self.tna_report = None;
         }
         if self.chat_report.is_none() {
+            self.desk_return_scope = self.evidence_scope.clone();
             self.desk_return_scroll = self.scroll_back;
             self.desk_return_prompt = self.prompt.clone();
         }
@@ -4842,18 +4935,22 @@ impl App {
         } else {
             self.evidence_scope.clone()
         };
+        self.cancel = Arc::new(AtomicBool::new(false));
         self.running = true;
-        self.status = "searching completed report passages".into();
+        self.status = "searching reviewed evidence and report passages".into();
         if let Some(path) = self.tna_db_path.clone() {
             let tx = self.tx.clone();
             argos_osint_core::workers::spawn_blocking(move || {
                 let result = Store::open(&path)
                     .and_then(|store| {
                         store.sync_report_index()?;
-                        store.retrieve_passages(&query, &scope, 8)
+                        Ok((
+                            store.retrieve_passages(&query, &scope, 8)?,
+                            store.retrieve_reviewed(&query, &scope, 8)?,
+                        ))
                     })
                     .map_err(|e| e.to_string());
-                let _ = tx.send(AppMsg::Retrieved {
+                let _ = tx.send(AppMsg::ReviewedRetrieved {
                     generation,
                     query,
                     result,
@@ -4863,9 +4960,14 @@ impl App {
             let result = self
                 .store
                 .sync_report_index()
-                .and_then(|_| self.store.retrieve_passages(&query, &scope, 8))
+                .and_then(|_| {
+                    Ok((
+                        self.store.retrieve_passages(&query, &scope, 8)?,
+                        self.store.retrieve_reviewed(&query, &scope, 8)?,
+                    ))
+                })
                 .map_err(|e| e.to_string());
-            self.on_msg(AppMsg::Retrieved {
+            self.on_msg(AppMsg::ReviewedRetrieved {
                 generation,
                 query,
                 result,
@@ -4891,25 +4993,63 @@ impl App {
             }
         };
         self.recommendations = hits;
-        let material = argos_osint_core::evidence::answer_material(&self.recommendations);
+        let mut material = argos_osint_core::evidence::answer_material(&self.recommendations);
+        if !self.reviewed_recommendations.is_empty() {
+            material.push_str("\nREVIEWED CASE EVIDENCE. Acceptance is analyst review, not independent verification. Cite observation IDs, preserve attribution.\n");
+            for f in &self.reviewed_recommendations {
+                let o = &f.observation;
+                material.push_str(&format!(
+                    "[{}] {} · {} · event {} · retrieved {}\n{}\n",
+                    o.id,
+                    o.case_id.as_deref().unwrap_or("unassigned"),
+                    o.attribution,
+                    o.event_time.as_deref().unwrap_or("undated"),
+                    o.retrieved_at,
+                    o.statement
+                ));
+            }
+        }
         if brain::insists_on_new_case(&query) && self.chat_report.is_none() {
             self.desk_memory_answer = Some(material);
             self.push_line("user", &query);
             self.open_scope(query, false, false);
-        } else if self.chat_report.is_some() || !self.recommendations.is_empty() {
-            self.spawn_answered_turn(query, material, true, true, false);
-        } else if brain::insists_on_new_case(&query)
-            || prompt::classify(&query) == Intent::Investigate
-        {
-            self.push_line("user", &query);
-            self.push_line("assistant", "No supporting report passages in this scope. Proposed investigation: public sources addressing this question, with bounded domain and identity pivots. Review sources before starting.");
-            self.desk_memory_answer = Some(material);
-            self.confirm_query = Some(query);
-            self.confirm_sel = 0;
         } else {
-            self.push_line("user", &query);
-            self.push_line("assistant", "No supporting report passages in this scope. I cannot infer findings. Use /new <focused question> to review a proposed investigation, or /scope case <id> to change scope.");
-            self.status = "no supporting passages".into();
+            let mut answer = String::new();
+            if self.recommendations.is_empty() && self.reviewed_recommendations.is_empty() {
+                answer.push_str("No supporting reviewed evidence in this scope.\n");
+            } else {
+                answer.push_str("Supported saved material (attributed excerpts):\n");
+            }
+            for (i, p) in self.recommendations.iter().enumerate() {
+                answer.push_str(&format!(
+                    "\n[{}] {} · {}\n{}\nRecommended passage: /cite {}\n",
+                    p.citation(),
+                    p.title,
+                    p.created_at,
+                    p.text,
+                    i + 1
+                ));
+            }
+            for f in &self.reviewed_recommendations {
+                let o = &f.observation;
+                answer.push_str(&format!("\n[{}] {}\nAttribution: {} · reviewed · event {} · retrieved {}\nRecommended entity: {} · case /case {} · source /source {}\n",o.id,o.statement,o.attribution,o.event_time.as_deref().unwrap_or("undated"),o.retrieved_at,o.entity_id,o.case_id.as_deref().unwrap_or("unassigned"),o.id));
+            }
+            answer.push_str(&format!("\nUnresolved: retrieval does not establish completeness or answer unsupported parts of the question.\nSuggested investigation: collect public sources addressing ‘{query}’. Open its scope with /new {query}. No research or report has started."));
+            if let Some(w) = self.investigation.as_mut() {
+                w.source = Some(answer);
+                w.scroll = 0;
+            } else if self.chat_report.is_some() {
+                self.tna_answer = Some(TnaAnswer {
+                    question: query,
+                    answer,
+                    ..Default::default()
+                });
+                self.tna_answer_scroll = 0;
+            } else {
+                self.push_line("user", &query);
+                self.push_line("assistant", &answer);
+            }
+            self.status = "Saved evidence · explicit investigation available".into();
         }
     }
 
@@ -4946,14 +5086,36 @@ impl App {
     }
 
     pub fn research_name(&self) -> String {
-        self.settings
-            .research
-            .keys()
-            .nth(self.research_sel)
-            .cloned()
-            .unwrap_or_else(|| "search".into())
+        self.research_phase
+            .providers()
+            .get(self.research_sel)
+            .unwrap_or(&"search")
+            .to_string()
     }
     fn load_research_fields(&mut self) {
+        if self.research_phase == argos_osint_core::research::ResearchPhase::Analysis {
+            self.fields = vec![
+                field(
+                    "analysis_report_mode",
+                    "Default report kind: final/addendum/revision/followup",
+                    self.settings.analysis.report_mode.clone(),
+                    false,
+                ),
+                field(
+                    "analysis_lead_limit",
+                    "Visible lead limit (1–10)",
+                    self.settings.analysis.lead_limit.to_string(),
+                    false,
+                ),
+                field(
+                    "__analysis_save",
+                    "Save output preferences",
+                    "enter".into(),
+                    false,
+                ),
+            ];
+            return;
+        }
         let name = self.research_name();
         let c = self
             .settings
@@ -5172,8 +5334,27 @@ impl App {
     }
     fn research_field_action(&mut self, key: &str) {
         use argos_osint_core::research::{test_configuration, ExecutionMode};
+        if key == "__analysis_save" {
+            let mode = self.field_value("analysis_report_mode");
+            if !["final", "addendum", "revision", "followup"].contains(&mode.as_str()) {
+                self.status = "Choose final/addendum/revision/followup".into();
+                return;
+            }
+            self.settings.analysis.report_mode = mode;
+            self.settings.analysis.lead_limit = self
+                .field_value("analysis_lead_limit")
+                .parse::<usize>()
+                .unwrap_or(5)
+                .clamp(1, 10);
+            self.status = match self.save_settings_config(&self.settings) {
+                Ok(()) => "Output preferences saved".into(),
+                Err(e) => e.to_string(),
+            };
+            return;
+        }
         if key == "__research_next" {
-            self.research_sel = (self.research_sel + 1) % self.settings.research.len().max(1);
+            self.research_sel =
+                (self.research_sel + 1) % self.research_phase.providers().len().max(1);
             self.load_research_fields();
             return;
         }
@@ -5423,29 +5604,35 @@ impl App {
     fn manage_research_tool(&mut self, name: &str, action: &str) {
         let root = paths::home_dir().join("tools");
         if action == "__research_remove" {
-            let Some(queue) = self.research_queue.clone() else {
-                self.status = "File-backed research queue required".into();
-                return;
-            };
             let c = self
                 .settings
                 .research
                 .get(name)
                 .cloned()
                 .unwrap_or_default();
-            let name = name.to_string();
-            let tx = self.tx.clone();
             if c.executable.is_empty() {
                 self.status = "No managed installation to remove".into();
                 return;
             }
-            self.research_active += 1;
-            tokio::spawn(async move {
-                let (_job, result) = queue
-                    .manage_tool(&name, "remove", None, Some(PathBuf::from(c.executable)))
-                    .await;
-                let _ = tx.send(AppMsg::ToolManaged { name, result });
-            });
+            self.tool_plan = Some((
+                name.into(),
+                action.into(),
+                argos_osint_core::tool_manager::InstallPlan {
+                    tool: name.into(),
+                    version: c.detected_version,
+                    source: "Remove this Argos-managed installation only".into(),
+                    destination: PathBuf::from(c.executable),
+                    prerequisites: vec![
+                        "Managed manifest and exact binary required; other installations retained"
+                            .into(),
+                    ],
+                    archive: String::new(),
+                    checksums: String::new(),
+                },
+            ));
+            self.load_research_fields();
+            self.field_sel = self.fields.len().saturating_sub(1);
+            self.status = "Review removal destination; Apply starts the background job".into();
             return;
         }
         match argos_osint_core::tool_manager::plan(name, &root) {
@@ -5480,22 +5667,41 @@ impl App {
             c.readiness = argos_osint_core::research::Readiness::Installing;
         }
         tokio::spawn(async move {
+            let removing = action == "__research_remove";
+            let remove_path = if removing {
+                Some(plan.destination.clone())
+            } else {
+                None
+            };
             let (_job, result) = queue
                 .manage_tool(
                     &name,
-                    if action == "__research_update" {
+                    if removing {
+                        "remove"
+                    } else if action == "__research_update" {
                         "update"
                     } else {
                         "install"
                     },
-                    Some(plan),
-                    None,
+                    if removing { None } else { Some(plan) },
+                    remove_path,
                 )
                 .await;
             let _ = tx.send(AppMsg::ToolManaged { name, result });
         });
     }
     fn submit_enrichment(&mut self, arg: &str) {
+        self.submit_enrichment_with_plan(arg, self.settings.source_plan());
+    }
+    fn submit_enrichment_with_plan(&mut self, arg: &str, plan: SourcePlan) {
+        if self.case_data_busy.is_some() {
+            self.status = "Wait for case data removal to finish".into();
+            return;
+        }
+        if self.chat_case.is_none() && self.chat_report.is_none() {
+            self.status = "Create or open a case first: + or /case <id>".into();
+            return;
+        }
         if self.research_active >= 8 {
             self.status = "Research queue limit reached; wait for a job or cancel".into();
             return;
@@ -5503,12 +5709,19 @@ impl App {
         let mut parts = arg.splitn(2, ' ');
         let provider = parts.next().unwrap_or("");
         let typed = parts.next().unwrap_or("").trim();
+        let case_lead = self.investigation.as_ref().and_then(|w| w.lead()).cloned();
         let selected = self.tna_focus_node().cloned();
         let label = if typed.is_empty() {
-            selected
+            case_lead
                 .as_ref()
-                .map(|n| n.label.clone())
-                .unwrap_or_default()
+                .map(|e| e.label.clone())
+                .or_else(|| selected.as_ref().map(|n| n.label.clone()))
+                .unwrap_or_else(|| {
+                    self.investigation
+                        .as_ref()
+                        .map(|w| w.question.clone())
+                        .unwrap_or_default()
+                })
         } else {
             typed.to_string()
         };
@@ -5520,7 +5733,57 @@ impl App {
             self.status = "Research queue requires a file-backed workspace".into();
             return;
         };
-        let entity_id = selected.map(|n| n.id).unwrap_or_else(|| label.clone());
+        if self
+            .investigation
+            .as_ref()
+            .and_then(|w| w.data.scope.as_ref())
+            .is_some_and(|s| !s.allowed_actions.contains(&provider.to_string()))
+        {
+            self.status = "Action outside investigation scope".into();
+            return;
+        }
+        if provider == "shodan"
+            && self
+                .auth
+                .research
+                .get(&config.secret_ref)
+                .is_none_or(|s| s.is_empty())
+        {
+            self.status = "Shodan credential unavailable; configure Providers → Research".into();
+            return;
+        }
+        if let Err(e) = argos_osint_core::research::eligible_action(provider, &label, &config) {
+            self.status = e.to_string();
+            return;
+        }
+        let entity_id = if typed.is_empty() {
+            case_lead
+                .map(|e| e.id)
+                .or_else(|| selected.map(|n| n.id))
+                .unwrap_or_else(|| label.clone())
+        } else {
+            let parsed = argos_osint_core::search::TextQuery::extract(&label);
+            let kind = if label.parse::<std::net::IpAddr>().is_ok() {
+                argos_osint_core::evidence::EntityType::Ip
+            } else if parsed.emails == vec![label.clone()] {
+                argos_osint_core::evidence::EntityType::Email
+            } else if parsed.domains == vec![label.clone()] {
+                argos_osint_core::evidence::EntityType::Domain
+            } else {
+                argos_osint_core::evidence::EntityType::Theme
+            };
+            let e = argos_osint_core::investigation::normalize_entity(&label, kind).ok();
+            if let Some(e) = &e {
+                let _ = self.store.put_record(
+                    &e.id,
+                    "entity",
+                    self.chat_case.as_deref(),
+                    self.chat_report.as_deref(),
+                    e,
+                );
+            }
+            e.map(|e| e.id).unwrap_or_else(|| label.clone())
+        };
         let input = argos_osint_core::research::ResearchInput {
             case_id: self
                 .open_report()
@@ -5532,11 +5795,13 @@ impl App {
             action: provider.into(),
             depth: 0,
         };
-        let plan = self.settings.source_plan();
         let secret = self.auth.research.get(&config.secret_ref).cloned();
         let provider = provider.to_string();
         let tx = self.tx.clone();
         self.research_active += 1;
+        if let Some(id) = &input.case_id {
+            *self.case_pending_work.entry(id.clone()).or_default() += 1;
+        }
         self.status = "Research queued · /jobs · /cancel-jobs".into();
         tokio::spawn(async move {
             let job = queue.execute(input, &provider, config, plan, secret).await;
@@ -5544,6 +5809,10 @@ impl App {
         });
     }
     fn show_evidence_surface(&mut self, action: &str, arg: &str) {
+        if self.case_data_busy.is_some() {
+            self.status = "Wait for case data removal to finish".into();
+            return;
+        }
         let Some(path) = self.tna_db_path.clone() else {
             self.status = "Evidence review requires a file-backed workspace".into();
             return;
@@ -5559,7 +5828,23 @@ impl App {
             let result=(||->Result<String>{
                 use argos_osint_core::evidence::{Correction,ReviewDecision};
                 let store=Store::open(&path)?;
-                if action=="review" {let mut parts=arg.splitn(3,' ');let id=parts.next().unwrap_or("");if !store.findings_scoped(&evidence_scope)?.iter().any(|f|f.observation.id==id){anyhow::bail!("Observation is not in the selected evidence scope");}let decision=match parts.next().unwrap_or(""){"retain"=>ReviewDecision::Retain,"accept"=>ReviewDecision::Accept,"reject"=>ReviewDecision::Reject,"defer"=>ReviewDecision::Defer,_=>anyhow::bail!("/review <observation id> retain|accept|reject|defer <reason>")};store.review_finding(id,decision,parts.next().unwrap_or("Analyst decision"))?;return Ok("Review decision saved with history. /findings to inspect; /save-update addendum|revision|followup".into());}
+                if action=="review" {let mut parts=arg.splitn(3,' ');let id=parts.next().unwrap_or("");if !store.findings_scoped(&evidence_scope)?.iter().any(|f|f.observation.id==id){anyhow::bail!("Observation is not in the selected evidence scope");}let decision=match parts.next().unwrap_or(""){"retain"=>ReviewDecision::Retain,"accept"=>ReviewDecision::Accept,"reject"=>ReviewDecision::Reject,"defer"=>ReviewDecision::Defer,_=>anyhow::bail!("/review <observation id> retain|accept|reject|defer <reason>")};let reason=parts.next().unwrap_or("").trim();if reason.is_empty(){anyhow::bail!("Add a review reason");}store.review_finding(id,decision,reason)?;return Ok("Review decision saved with history. /findings to inspect; /save-update addendum|revision|followup".into());}
+                if let argos_osint_core::evidence::EvidenceScope::Case(case_id)=&evidence_scope {
+                    if action=="merge"||action=="unmerge" {
+                        let (ids,reason)=arg.split_once(" --reason ").unwrap_or((&arg,""));
+                        let entities=ids.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+                        if reason.trim().is_empty(){anyhow::bail!("/merge <canonical> <other IDs> --reason <reason>; /unmerge <id> --reason <reason>");}
+                        let evidence=store.findings_scoped(&evidence_scope)?.into_iter().filter(|f|f.decision==Some(ReviewDecision::Accept)&&entities.contains(&f.observation.entity_id)).flat_map(|f|f.observation.evidence).collect();
+                        let decision=argos_osint_core::evidence::IdentityDecision{id:argos_osint_core::store::new_id("identity-decision"),canonical_entity:if action=="merge"{entities.first().cloned()}else{None},reverses:if action=="unmerge"{entities.first().cloned()}else{None},entities,reason:reason.into(),evidence};
+                        store.save_case_identity(case_id,&decision)?;return Ok(format!("Identity decision {} saved. /unmerge {} --reason <reason> reverses it.",decision.id,decision.id));
+                    }
+                    if action=="correct"||action=="undo-correction" {
+                        use argos_osint_core::investigation::EntityCorrection;
+                        let correction=if action=="undo-correction"{EntityCorrection{id:argos_osint_core::store::new_id("entity-correction"),entity_id:String::new(),original:String::new(),replacement:None,reason:"Explicit analyst reversal".into(),reverses:Some(arg.clone())}}
+                        else {let mut words=arg.splitn(3,' ');let id=words.next().unwrap_or("");let replacement=words.next().unwrap_or("suppress");let reason=words.next().unwrap_or("");let entity=store.records_scoped::<argos_osint_core::evidence::Entity>("entity",&evidence_scope)?.into_iter().find(|e|e.id==id).ok_or_else(||anyhow::anyhow!("Entity not found in case"))?;EntityCorrection{id:argos_osint_core::store::new_id("entity-correction"),entity_id:id.into(),original:entity.label,replacement:if replacement=="suppress"{None}else{Some(replacement.replace('_'," "))},reason:reason.into(),reverses:None}};
+                        store.correct_case_entity(case_id,&correction)?;return Ok(format!("Correction {} saved. /undo-correction {} reverses it.",correction.id,correction.id));
+                    }
+                }
                 if action=="merge" || action=="unmerge" {
                     let report=report_id.clone().ok_or_else(||anyhow::anyhow!("Open a report first"))?;
                     let tokens=arg.split_whitespace().map(str::to_string).collect::<Vec<_>>();
@@ -5587,6 +5872,7 @@ impl App {
                 report_id,
                 title,
                 result,
+                scope: evidence_scope,
             });
         });
     }
@@ -5620,6 +5906,60 @@ impl App {
         let mut parts = rest.splitn(2, char::is_whitespace);
         let cmd = parts.next().unwrap_or("").to_lowercase();
         let arg = parts.next().unwrap_or("").trim().to_string();
+        match cmd.as_str() {
+            "case-data" => {
+                self.show_case_data_controls();
+                return;
+            }
+            "clear-case" | "delete-case" => {
+                self.prepare_case_data(&arg, cmd == "delete-case");
+                return;
+            }
+            "confirm-case" => {
+                self.confirm_case_data(&arg);
+                return;
+            }
+            "cancel-case-data" => {
+                self.cancel_case_data_plan();
+                return;
+            }
+            _ => {}
+        }
+        if cmd == "source" {
+            self.open_observation_source(&arg);
+            return;
+        }
+        if cmd == "case" {
+            if arg.is_empty() {
+                self.push_line(
+                    "assistant",
+                    &self
+                        .cases
+                        .iter()
+                        .map(|c| format!("{} · {}", c.id, c.title))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            } else if let Some(case) = session::resolve_case(&self.cases, &arg) {
+                let id = case.id.clone();
+                self.open_investigation(&id);
+            } else {
+                self.status = "No single matching case".into();
+            }
+            return;
+        }
+        if cmd == "filter" {
+            if let Some(w) = self.investigation.as_mut() {
+                w.filter = arg;
+                w.row = 0;
+            }
+            return;
+        }
+        if cmd == "draft" {
+            self.draft_investigation(&arg);
+            return;
+        }
+
         if self.chat_report.is_some()
             && !matches!(
                 cmd.as_str(),
@@ -5730,6 +6070,12 @@ impl App {
             }
             "save-update" => self.save_findings_update(&arg),
             "scope" => {
+                if self.investigation.is_some() {
+                    self.status =
+                        "Case workspace scope is fixed; Esc to Desk to change retrieval scope"
+                            .into();
+                    return;
+                }
                 use argos_osint_core::evidence::EvidenceScope;
                 self.evidence_scope = if arg == "desk" {
                     EvidenceScope::Desk
@@ -5856,7 +6202,7 @@ impl App {
                 Some(case) => {
                     self.case_sel = self.cases.iter().position(|c| c.id == case.id).unwrap_or(0);
                     self.open_module(ModuleId::Cases);
-                    self.bind_case();
+                    self.open_investigation(&case.id);
                 }
                 None => self.push_line("assistant", "No single case matches that query."),
             },
@@ -5894,6 +6240,11 @@ impl App {
                 }
             }
             "network" => {
+                if let Some(w) = self.investigation.as_mut() {
+                    w.view = case_workspace::CaseView::Focus;
+                    self.focus = Focus::Graph;
+                    return;
+                }
                 self.workspace_reading = false;
                 self.select_case_page(CasePage::Network);
             }
@@ -6174,6 +6525,9 @@ impl App {
     }
 
     pub fn open_module(&mut self, module: ModuleId) {
+        if self.investigation.is_some() {
+            self.close_investigation();
+        }
         if self.chat_report.is_some() {
             if module == ModuleId::Brain {
                 self.status = "Brain is available after closing the report".into();
@@ -7519,6 +7873,20 @@ mod tests {
             app.tna_answer.as_ref().unwrap().question,
             "who is Ada Lovelace"
         );
+        assert!(!app.running); // ordinary evidence retrieval makes no model/provider call
+        assert!(app
+            .tna_answer
+            .as_ref()
+            .unwrap()
+            .answer
+            .contains("Supported saved material"));
+        app.tna_answer = Some(TnaAnswer {
+            question: "who is Ada Lovelace".into(),
+            pending: true,
+            ..Default::default()
+        });
+        app.cancel.store(false, Ordering::Relaxed);
+        app.running = true; // simulate a separately requested model discussion
         let generation = app.turn_generation;
         app.on_msg(AppMsg::ScopedTurn {
             generation,
@@ -7959,8 +8327,8 @@ mod tests {
             .collect();
         assert!(text.contains("Apps"), "{text}");
         assert!(text.contains("Case Desk"), "{text}");
-        assert!(text.contains("Reports"), "{text}");
-        assert!(text.contains("No reports yet"), "{text}");
+        assert!(text.contains("Cases & reports"), "{text}");
+        assert!(text.contains("No cases or reports yet"), "{text}");
         assert!(
             !text.contains("Reports  Brain") && !text.contains("Reports Brain"),
             "{text}"
@@ -8985,14 +9353,14 @@ mod tests {
         app.cursor = app.prompt.chars().count();
         app.on_event(key(KeyCode::Char('+')));
         let scope = app.scope.as_ref().expect("scope card");
-        assert!(scope.facts);
-        assert!(scope.domain);
+        assert!(!scope.facts);
+        assert!(!scope.domain);
         assert_eq!(scope.query, "who is ada");
         assert!(app.prompt.is_empty());
         assert!(app.pending_reports.is_empty());
 
         app.on_event(key(KeyCode::Char(' ')));
-        assert!(!app.scope.as_ref().unwrap().facts);
+        assert!(app.scope.as_ref().unwrap().facts);
         assert!(app.settings.facts);
 
         let backend = TestBackend::new(120, 40);
@@ -9009,7 +9377,7 @@ mod tests {
             .collect();
         assert!(text.contains("Facts"), "{text}");
         assert!(text.contains("Identity"), "{text}");
-        assert!(text.contains("Space toggles"), "{text}");
+        assert!(text.contains("Space selects"), "{text}");
 
         app.on_event(key(KeyCode::Esc));
         assert!(app.scope.is_none());
@@ -9032,7 +9400,7 @@ mod tests {
         assert!(app.pending_reports.is_empty());
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Char(' ')));
-        assert!(!app.scope.as_ref().unwrap().web);
+        assert!(app.scope.as_ref().unwrap().web);
         assert!(app.settings.web);
     }
 }

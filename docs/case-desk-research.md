@@ -1,133 +1,181 @@
-# Case Desk, evidence, and research
+# Case Desk, case evidence, and research
 
-Ordinary Case Desk questions retrieve completed report passages before invoking
-the writer. The default Desk scope includes reports without a case; an open
-report defaults to that report. Expand deliberately with `/scope case <id>`,
-`/scope reports <ids>`, or `/scope collection`. Results show relevance separately
-from report dates. Exact domains, IPs, and email addresses require exact passage
-matches. Aliases remain inside the selected scope.
+## Ask saved evidence, then investigate explicitly
 
-An answer cites `report-id@vN:Lline`. `/cite 1` opens the first recommendation;
-`/cite <citation>` also resolves citations retained from earlier versions. The
-reader keeps the originating question and its line position. `g` opens the
-network and focuses a matching mention when its source span still matches the
-latest report. Historic text is separate from the latest graph source. Esc
-returns to the Desk prompt and scroll position. Report discussion is temporary;
-`/retain-answer` explicitly saves an answer as a report-tagged fact.
+The default general Desk scope is the saved collection. `/scope case <id>`,
+`/scope reports <ids>`, or `/scope report` narrows retrieval; `/scope desk` retains
+legacy unassigned-only retrieval. Ordinary questions search accepted observations
+and indexed report passages, return attributed excerpts and stable citations, and
+recommend source passages, entities, and cases. Unresolved parts stay unresolved.
+No ordinary question makes provider or model calls. Exact domains/emails use exact
+identifier boundaries. Observations without resolvable local sources are excluded.
 
-No matching passage produces an evidence gap, not an invented answer. A model
-is optional: without one, attributed passages and their citations remain
-available. Evidence-only turns advertise no tool definitions and reject tool
-calls returned by a model. Source text is never authority to execute a tool.
+A gap suggests `/new <question>`. This opens a compact scope screen with the question,
+new/existing case (`c` cycles), seeds, included recommendations (`e`), and allowed
+public/sensitive (`s`)/active (`a`) source scope. Global provider host/privacy limits
+also apply. First-action checkboxes start empty. Space selects first sources; Enter
+saves the case and starts only those actions. An empty selection saves a usable case
+without a report, job, or graph. Search respects the selected Facts/Web/News/Social
+sources; domain and identity first actions use exact seeds rather than a broad query.
+Source scope is saved with the case; later focused actions cannot bypass it.
 
-## Research configuration
+`/case` lists saved cases and `/case <id-or-title>` opens Leads. The Cases & reports
+list also opens cases, including cases without reports, across restarts. Esc returns
+to the preserved Desk prompt, highlight, scope, and scroll position.
 
-Open Providers → Research. Select an integration, enable it, configure its
-limits/scope, and save. Model-provider accounts remain independent. Credentials
-are masked and stored by reference in `auth.json`, not in ordinary research
-configuration. Test Configuration is offline and reports what it could verify;
-it does not spend API credits or prove account entitlement.
+## Case workspace
 
-| Integration | Current execution path | Setup / limits |
-| --- | --- | --- |
-| Search | Existing Facts/Web/News/Social and configured search sources | Configure Sources and keys as needed. Search operators depend on the selected provider. |
-| Domain | DNS, RDAP, certificates, Wayback and InternetDB | Select an exact public domain. Shared hosting is not ownership evidence. |
-| InternetDB | Keyless HTTP with existing parser | Exact public IP; returns previously observed services, not verified current exposure. |
-| Identity | Selected GitHub profile references | Optional GitHub token; profile/name matches remain candidates. |
-| Published contacts | Scoped native page fetch and email spans | Enable active HTTP and allow the exact host; currently the root page only. |
-| LeakCheck Public | Keyless exposure lookup with attribution | Explicit sensitive-lookup opt-in and shared provider rate gate. No credentials are retrieved. |
-| Shodan | Authenticated minified host lookup and structured parser | Key reference and host-lookup account entitlement required. Quota display remains unverified. |
-| XposedOrNot | Basic email breach analytics and dated/category parser | Sensitive-lookup opt-in; conservative provider-wide rate gate. Domain monitoring is unavailable. |
-| WhatsMyName | Native selected-site response checking | Supply a versioned dataset JSON path and selected site names. Matches are provisional. Dataset refresh is manual. |
-| Katana | Managed installation/version/help verification | Collection is unavailable until external-tool network isolation and installed output are verified. |
-| SpiderFoot / Mosint / Maigret | Configuration and executable version checks | Collection and automatic installation remain unavailable. Use an isolated executable/container manually; no system Python is modified. |
+| Key/view | Behavior |
+| --- | --- |
+| `1` Leads | Small ranked list, selected question, recent changes, pending review, evidence gaps, jobs. Rank is accepted evidence count, not a strategic score. |
+| `2` Focus map | Selected entity and immediate typed links. `j/k` selects entities; `←/→` selects a link; `x` expands one neighbor and `z` collapses. `v` opens its review; `p` opens Path for the pair. |
+| `3` Evidence table | Observation and relationship rows show entity/type, source, retrieval/event dates, and review state. `/filter <text/source/state>` filters and `s` cycles entity, relationship, source, event/retrieval date, and review-state sorts. |
+| `4` Timeline | Observation/provider and research lanes. Event date, publication, and retrieval stay separate; undated events stay undated. |
+| `5` Review | New/repeated/changed/conflicting/candidate identity findings. `a/r/d/t` prepares accept/reject/defer/retain, with an editable reason. |
+| `6` Jobs | Queued/running/partial/completed/failed/cancelled states, provider/input/progress/errors. Enter filters Review to the job's observations. |
+| `7` Path | The only advanced case tool. After review, select a pair in Focus and press `p`; explore up to four hops through accepted supported links. `j/k` selects entities, `f/t` pins endpoints, `n/N` chooses paths, `[ / ]` chooses hops, and `o` opens the original source. Candidate links are excluded; no recovered path is not a real-world negative finding. |
 
-Shodan and XposedOrNot parsing use their official documented contracts and
-fixtures, without routine live lookups. They have not been live-verified with
-this installation's account or network. The local tools have not been installed
-or claimed operational.
+`o` or Enter opens a selected source artifact or report passage. Focus, Evidence,
+and Timeline resolve the same source targets. Narrow terminals stack the inspector
+below the map rather than requiring a dense multi-column layout. Selection, expanded
+neighbors, filter, and source scroll remain stable across background refreshes.
 
-`/investigate <integration> [input]` submits explicit enrichment to the shared
-research queue. With no input it uses the selected entity. `i` opens cached
-evidence and actions; cursor movement does not start network work. `/jobs`
-shows progress/errors; `/cancel-jobs` cancels queued and running jobs.
+`e` offers eligible focused providers for the selected lead (or selected question
+when there are no entities). This is a cached menu. Selecting a lead never collects.
+Enter submits exactly one action. `/investigate <provider> [exact input]` provides
+the same explicit action; open a case or report first. Newly extracted identifiers
+are candidate leads with source mentions and do not trigger recursive enrichment.
 
-Research inputs select eligible logical stages. Unsuitable stages are skipped,
-independent jobs run within global/provider limits, and partial results survive
-adapter failures. Automatic broad recursive discovery is not enabled; search
-discoveries need analyst selection before further pivots. External aggregators
-fail closed because indirect provider requests and target scope cannot yet be
-enforced. Native HTTP validates redirects, resolves and pins public addresses,
-bounds output, and shares request caching/rate gates across adapter calls.
+`/review <id> accept|retain|reject|defer <reason>` validates scope and appends a decision.
+Acceptance enables source-backed observed links. Rejection/defer cannot promote a
+link. Accepting a username match does not verify identity; accepting co-occurrence
+does not establish ownership. Evidence count, acceptance, and link degree are shown
+separately. No absent co-occurrence edge is proof of a real-world evidence gap.
 
-## Managed tool actions
+Case `/correct <entity-id> <replacement_or_suppress> <reason>` changes only the
+projection; underscores represent spaces. `/undo-correction <id>` reverses it.
+`/merge <canonical-id> <other-ids> --reason <reason>` needs in-scope source evidence;
+`/unmerge <decision-id> --reason <reason>` reverses the projection. Original entity
+records, aliases, mentions, source text, and review history are retained. Historical
+report workspaces keep byte-offset corrections and their existing identity commands.
 
-Install and Update show a reviewable version/source/destination/prerequisite
-plan. Apply starts a visible background job. The supported managed installer
-is Katana 1.7.0 on macOS/Linux amd64/arm64, using official release assets and
-their SHA-256 checksum file. It extracts only the named binary and verifies
-version and JSONL/scope/depth flags before activating a new directory. Failure
-retains the configured previous installation. Verify checks without collection.
-Remove accepts only an Argos-managed directory with its manifest. Browser,
-container runtime, and system Python installation are never automatic.
+## Providers → Research
 
-Offline operation, unsupported platforms, or inaccessible releases produce
-actionable failures. No tool download/install is triggered by opening Providers.
+All configuration stays on the existing Research page of Providers. Keys `1–5`
+switch optional capability groups. Enter on Integration selects the next card;
+`j/k` navigates settings, Enter edits/acts, and Save persists the selected integration.
 
-## Review, report versions, and graphs
+| Phase | Cards / capability |
+| --- | --- |
+| Discovery | Search and public document sources; source operators are provider-dependent. |
+| Infrastructure | DNS/RDAP/certificates/Wayback, InternetDB, Shodan, scoped Katana; SpiderFoot remains visibly unavailable. |
+| Identity & contacts | GitHub identity, Published contacts, WhatsMyName, Maigret, Mosint. |
+| Exposure | LeakCheck Public and XposedOrNot; sensitive lookup opt-in required. |
+| Analysis & output | Conservative normalization, pending relationship review, explicit report output; default report kind and visible lead count. |
 
-`/findings` labels new, repeated, changed, and candidate identity observations.
-Changed observations are not automatically labeled contradictions. Explicitly
-flagged conflicts retain their attribution. Typed relationships and their
-uncertainty are visible separately. `/review <id> retain|accept|reject|defer
-<reason>` keeps a decision history and requires the observation to be in scope.
+Cards expose supported inputs, enabled/readiness state, native HTTP/local/container
+mode, credential reference or executable, supported/detected version, limits,
+exact hosts, privacy controls, cache/retries, and offline Test Configuration.
+Credentials are masked and stored by reference in owner-only `auth.json`. Model
+accounts and Writer/Tools routing remain independent. Configured does not mean
+successful collection or account entitlement. Shodan requires its account/key;
+WhatsMyName requires a versioned local dataset and selected sites. Contacts require
+active HTTP and an exact allowed host. Katana, Maigret, Mosint, and SpiderFoot
+collection is unavailable even if an executable is configured or verified.
 
-`/save-update addendum|revision|followup` writes accepted findings with source
-attribution. A new file/version is activated without rewriting the original;
-earlier citations remain resolvable. Already incorporated observations are not
-replayed on another save. Indexes and affected graph snapshots refresh.
+Opening Research never installs or scans. Managed install/update/remove first shows
+a plan and destination; Apply submits a visible cancellable job. Katana installation
+is pinned to 1.7.0 with official SHA-256 checks, platform/version/flag verification,
+and previous-installation retention on failure. Other automatic installers are
+unavailable. Removal accepts only an Argos-managed manifest/binary. No system Python,
+container runtime, or browser installation is automatic.
 
-`/correct <source-byte-offset> <replacement_or_suppress> <reason>` persists an
-extraction correction; underscores in a replacement represent spaces. The
-recorded original text must still match. `/undo-correction <id>` reverses it.
-`/merge <canonical-node-id> <other-node-ids>` records an explicit identity
-decision for current report entities; `/unmerge <decision-id>` reverses it.
-Original labels, source mentions, and history are retained through rebuilds.
+## Jobs, review, and optional reports
 
-Cockpit remains the default. Clusters show research coverage separately from
-missing co-occurrence. Path exposes hop provenance and bounded searches;
-`/corroborate` and `/weakest` focus corroboration work. Matrix retains adjacency
-and adds theme-by-report coverage with `c`; a cell opens its supporting passage.
-Ribbon retains accepted/rejected source extraction. The same cached inspector
-serves the views. Graph caps and display limits are visible. Co-occurrence is
-never promoted implicitly to ownership, verified identity, or confidence.
+API/executable work shares the existing bounded research queue, timeout, rate gate,
+output limits, request cache, redirect/public-address checks, and provider scope.
+`/cancel-jobs` cancels queued/running collection and managed tools; successful results
+from independent jobs survive failures. Queued cancellation is persisted. Interrupted
+jobs become partial on restart and are not automatically replayed. Explicit research
+may reuse completed cached results. Paid requests require a fresh explicit selection
+after restart or cache expiry.
 
-`/timeline` aligns provider observations and report statements as textual
-lanes. Event dates remain distinct from report publication and retrieval.
-Report statements without structured event dates remain undated, and snapshot
-build time is never event time. A graphical timeline and dedicated earlier/later
-comparison surface remain follow-up work.
+Raw attributed provider hits/artifacts and normalized observations are stored separately
+from analyst decisions. Persisting the same job result is idempotent; separate retrievals
+retain their source histories and are categorized as repeated/changed for review.
+Projection/index/source work runs on the existing bounded blocking workers; case projection and ingestion check cancellation cooperatively. Refreshes
+read the affected case rather than rebuilding every report graph; stale generations
+cannot replace a newly selected case. Report ingestion is version/pipeline keyed.
 
-## Migration and validation
+`/draft final|addendum|revision|followup <accepted observation IDs>` explicitly writes
+a new report from that selected reviewed evidence, local citation targets, attribution,
+event/retrieval dates, uncertainty, and pending review gaps. It never reassigns case
+observations to the report. Addendum/revision/follow-up here are separate case outputs;
+historical `/save-update addendum|revision|followup` retains its versioned report update
+behavior. `/source <observation-id>` opens the original artifact. `/cite <number>` or
+`/cite report-id@vN:Lline` opens current/historical report passages.
 
-SQLite migrations are additive: versioned report text, passages/FTS5, structured
-evidence, review decisions, and persistent research jobs. Existing reports are
-indexed from their saved files without new research. Missing files are reported
-as unavailable. Index rules and TNA pipeline versions invalidate derived data.
-Legacy research credentials move into owner-only `auth.json`; conflicts preserve
-both current and legacy secrets. Desk transcripts are retained across restart.
-Interrupted jobs become partial instead of being presented as still running.
+## Additive migration
 
-Automated tests use fixtures and local mocks. They cover old citation retention,
-exact observable retrieval, scope boundaries, correction/merge reversals,
-report-update deduplication, secret migration/redaction, process output bounds
-and timeout, restart recovery, rate gates, and normal/narrow TUI layouts. No
-broad scan, paid API lookup, or automatic tool installation is a routine test.
+The existing SQLite evidence tables remain the sole store. Entity memberships are
+namespaced by case/report so identical canonical identifiers can belong to multiple
+cases without overwriting membership. Original records are not deleted. Report text,
+versioned passages, transcript history, decisions, credentials, and old report snapshots
+remain readable. Indexing invalidates only the changed report and derived collection
+cache, not unrelated report graphs.
 
-Remaining work includes advanced provider-specific search templates, automatic
-validated downstream pivots, Enrich on Review, complete multi-report occurrence
-comparison, richer semantic conflict detection, graphical timeline comparison,
-account quota discovery, dataset refresh, and verified isolated CLI collection.
+Case ingestion uses existing report `case_id` values only. Explicitly included passages
+are authorized source references in the saved investigation scope; the report's metadata
+association remains unchanged. Unassigned reports remain accessible in the Desk/report
+reader and are never assigned by guesswork. The deterministic report extractor proposes
+mentions and same-passage co-occurrence as reviewable observations. It is one ingestion
+path; provider observations create case links without any report. Ingestion markers
+prevent unchanged report text from being re-extracted on each research result. Historical
+jobs' source bindings are recovered from their observation/artifact IDs for projection,
+without rewriting observation or decision history.
+
+## Validation and current limits
+
+Offline fixtures and local mocks cover reportless case restart, citation/scope isolation,
+review-to-network updates, identity candidates versus observed links, correction/merge
+reversals, additive report ingestion and historical citations, explicit drafting, queued
+cancellation and partial results, provider readiness/privacy, and narrow terminal views.
+The full workspace suite includes existing local mock HTTP tests; no routine live provider
+lookup, paid call, scan, or installation is required.
+
+Desk answers are deterministic attributed excerpts rather than model-synthesized prose.
+Timeline is textual; semantic conflict detection still depends on explicit provider flags.
+Advanced report-only Matrix coverage and Ribbon source extraction stay in the historical
+report reader. CLI collection, live account quota discovery, automatic dataset refresh,
+and automatic recursive pivots remain unavailable. Analysis exposes the supported
+conservative parser/review policy rather than implying arbitrary extraction presets work.
+
+
+All seven workspace views are separate clickable tabs whenever a case is open.
+The selected tab is highlighted and the tab bar wraps at narrower terminal widths.
+Number keys `1–7` select the same tabs; each retains its row and scroll position.
+Changing tabs reads cached evidence and never starts collection.
+
+## Clear or delete case data
+
+Press `D` in a case workspace or use `/case-data`. `/clear-case [case ID or title]`
+keeps an empty case; `/delete-case [case ID or title]` removes it. On the Cases &
+reports list, `x` prepares a delete plan. Preparation does not remove data. The
+review screen counts messages, case evidence/history, review decisions, research
+jobs/cache entries, and retained reports. `/confirm-case <exact ID>` applies the
+plan; `/cancel-case-data` or Esc in the workspace cancels it. Removal is irreversible.
+
+Active case jobs must finish or be cancelled first with `/cancel-jobs`. The apply
+worker rechecks the plan under an atomic transaction and refuses changed plans.
+It removes chat/tool history, case-only entities, observations, artifacts,
+relationships, reviews, investigation scope, correction/identity history, jobs/cache,
+and the derived case network. Report-backed raw records and their review history
+remain under their report; saved reports are detached from the case without changing
+files, versions, or citation targets. Other cases, shared sources, memories, provider
+configuration, and credentials are preserved. Durable reset markers reject old job
+results after clear and prevent deleted cases from being recreated by stale workers.
+New explicitly selected research can start in a cleared case. No provider request is
+started by these controls.
 
 ## Official contract references
 

@@ -17,6 +17,14 @@ The Providers app separates **accounts** from **models**:
   OpenRouter. Existing local configurations remain selectable.
 - **Sources**: existing OSINT source toggles and source-specific keys. Search
   service credentials never share an LLM key field.
+- **Research**: the existing research page, with Discovery, Infrastructure,
+  Identity & contacts, Exposure, and Analysis & output phase tabs (`1–5`).
+  Integration cards show input types, actual collection availability/readiness,
+  native/local/container mode, versions, credential references, bounds, scope,
+  privacy, cache/retries, and Test Configuration. Phase tabs are optional capability
+  groups. They do not run an investigation sequence. Opening the page never scans
+  or installs; managed installation/update/removal needs a reviewed plan and Apply.
+  See [case evidence and research](case-desk-research.md) for precise supported paths.
 
 OpenRouter API keys are masked. Enter edits a field; Ctrl+U clears its contents; paste is
 supported. Save stores only the displayed account. Verify checks the form without

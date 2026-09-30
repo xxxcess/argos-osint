@@ -1,275 +1,117 @@
-//! `argos` command line. The default is the full-screen terminal UI.
-//! `argos -p` runs one turn and prints it. `argos login` signs in Grok,
-//! OpenAI, OpenRouter, or a local OpenAI-compatible server.
+//! Command line access to Brain, providers, and hardware.
 
-use std::io::{self, Read, Write};
-use std::sync::{atomic::AtomicBool, Arc};
-
+use crate::tui::{self, App};
 use anyhow::{anyhow, Result};
-use argos_osint_core::agent::{self, TurnEvent, TurnInput};
-use argos_osint_core::gmail::GmailConfig;
+use argos_osint_core::brain::MemorySource;
 use argos_osint_core::hardware;
-use argos_osint_core::mcp::{self, take_frame};
 use argos_osint_core::paths;
 use argos_osint_core::provider::{self, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
 use clap::{Parser, Subcommand};
-use tokio::sync::mpsc::unbounded_channel;
-
-use crate::tui::{self, App};
+use std::io::{self, Write};
 
 #[derive(Parser)]
-#[command(
-    name = "argos",
-    version,
-    about = "Argos OSINT — terminal research desk"
-)]
+#[command(name = "argos", version, about = "Argos memory and provider shell")]
 struct Cli {
-    /// Run one turn and print the answer instead of opening the TUI.
-    #[arg(short = 'p', long)]
-    prompt: Option<String>,
-    /// Text model for this process. Saved when opening the TUI.
-    #[arg(short = 'm', long)]
-    model: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Sign in a text or voice provider from the terminal.
-    Login,
-    /// Forget text and voice credentials. Pass --gmail to forget the mailbox too.
-    Logout {
+    /// Save a sourced insight for recall by another chat app.
+    Remember {
         #[arg(long)]
-        gmail: bool,
+        app: String,
+        #[arg(long)]
+        conversation: String,
+        #[arg(long)]
+        message: Option<String>,
+        #[arg(long)]
+        reference: Option<String>,
+        #[arg(long, default_value = "fact")]
+        category: String,
+        text: String,
     },
+    /// Retrieve relevant saved insights as JSON, including their source metadata.
+    Recall {
+        query: String,
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+    },
+    /// List all saved memories as JSON.
+    Memories,
+    /// Sign in or configure a provider account.
+    Login,
+    /// Forget saved provider credentials.
+    Logout,
     /// Print the host profile.
     Hardware,
-    /// List markdown reports.
-    Reports,
-    /// List models for the active text provider. Grok starts with its built-in catalog.
+    /// List the active text model catalog.
     Models,
-    /// Speak MCP over stdio. Only `gmail` is implemented.
-    Mcp { service: String },
 }
 
 pub async fn dispatch() -> Result<()> {
-    let cli = Cli::parse();
-    if let Some(command) = cli.command {
-        return match command {
-            Command::Login => login().await,
-            Command::Logout { gmail } => logout(gmail),
-            Command::Hardware => print_hardware(),
-            Command::Reports => print_reports(),
-            Command::Models => print_models().await,
-            Command::Mcp { service } => mcp(service),
-        };
-    }
-    if let Some(prompt) = cli.prompt {
-        return headless(prompt, cli.model).await;
-    }
-    let mut app = App::boot()?;
-    if let Some(model) = cli.model {
-        app.set_writer_model(&model);
-    }
-    tui::run(app).await
-}
-
-async fn print_models() -> Result<()> {
-    let settings = SettingsFile::load().unwrap_or_default();
-    let auth = AuthFile::load().unwrap_or_default();
-    let secret = provider::active_text_secret(&auth, &settings.model);
-    println!("{}  {}", provider::effective_kind(&secret), secret.base_url);
-    if provider::effective_kind(&secret) == "grok" {
-        for model in provider::grok_models() {
-            let mark = if model.id == secret.model { "*" } else { " " };
-            println!("{mark} {:<12} {}", model.id, model.name);
+    match Cli::parse().command {
+        None => tui::run(App::boot()?).await,
+        Some(Command::Remember {
+            app,
+            conversation,
+            message,
+            reference,
+            category,
+            text,
+        }) => {
+            let store = open_store()?;
+            let memory = store.add_memory(
+                &text,
+                &category,
+                false,
+                MemorySource {
+                    app,
+                    conversation_id: conversation,
+                    message_id: message,
+                    reference,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&memory)?);
+            Ok(())
         }
-    }
-    match provider::list_models(&secret).await {
-        Ok(names) => {
-            if !names.is_empty() {
-                println!("endpoint:");
-                for name in names {
-                    let mark = if name == secret.model { "*" } else { " " };
-                    println!("{mark} {name}");
-                }
-            }
+        Some(Command::Recall { query, limit }) => {
+            let hits = open_store()?.recall(&query, limit)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &hits
+                        .iter()
+                        .map(|hit| serde_json::json!({"score":hit.score,"memory":hit.memory}))
+                        .collect::<Vec<_>>()
+                )?
+            );
+            Ok(())
         }
-        Err(err) => println!("endpoint list unavailable: {err}"),
+        Some(Command::Memories) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&open_store()?.list_memories()?)?
+            );
+            Ok(())
+        }
+        Some(Command::Login) => login().await,
+        Some(Command::Logout) => logout(),
+        Some(Command::Hardware) => {
+            let p = hardware::profile_cached(false);
+            println!("{}", p.one_line());
+            Ok(())
+        }
+        Some(Command::Models) => models().await,
     }
-    Ok(())
 }
 
-fn print_hardware() -> Result<()> {
-    let profile = hardware::profile_cached(false);
-    println!("{}", profile.one_line());
-    println!("backend: {}", profile.backend);
-    println!("logical cores: {}", profile.logical_cores);
-    if let Some(cores) = profile.gpu_cores {
-        println!("gpu cores: {cores}");
-    }
-    Ok(())
-}
-
-fn print_reports() -> Result<()> {
+fn open_store() -> Result<Store> {
     paths::ensure_home()?;
-    let store = Store::open(&paths::db_path())?;
-    let reports = store.list_reports()?;
-    if reports.is_empty() {
-        println!("No reports yet.");
-        return Ok(());
-    }
-    for report in reports {
-        println!("{}\t{}", report.created_at, report.path);
-    }
-    Ok(())
-}
-
-fn logout(gmail: bool) -> Result<()> {
-    let mut auth = AuthFile::load()?;
-    auth.text = None;
-    auth.voice = None;
-    auth.accounts.clear();
-    if gmail {
-        auth.gmail = None;
-    }
-    auth.save()?;
-    println!("Signed out text and voice providers.");
-    if gmail {
-        println!("Forgot the Gmail app password.");
-    }
-    Ok(())
-}
-
-async fn login() -> Result<()> {
-    println!("Argos provider login");
-    println!("Grok and OpenAI use subscription sign-in. OpenRouter keeps its own API account.");
-    println!(
-        "Credentials are stored in {} with owner-only permissions.",
-        paths::auth_path().display()
-    );
-    println!();
-    for preset in provider::presets() {
-        if preset.id == "grok" {
-            println!("  grok         Grok subscription (Grok Build CLI)");
-            continue;
-        }
-        if preset.id == "openai" {
-            println!("  openai       ChatGPT subscription (Codex CLI, Writer only)");
-            continue;
-        }
-        let auth = match preset.env_key {
-            Some(name) if preset.key_required => format!("key or {name}"),
-            Some(name) => format!("optional key or {name}"),
-            None => "optional key".into(),
-        };
-        println!("  {:<12} {}  ({auth})", preset.id, preset.base_url);
-    }
-    println!();
-    let modality = ask("Modality [text/voice]", "text")?;
-    let choice = ask("Provider [grok/openai/openrouter/local]", "grok")?;
-    if provider::normalize_kind(&choice) == "grok" {
-        if modality == "voice" {
-            return Err(anyhow!("Grok subscription setup is for Writer and Tools. Voice uses a separately configured transcription API."));
-        }
-        println!(
-            "{}",
-            argos_osint_core::grok_oauth::login(|line| println!("{line}")).await?
-        );
-        println!("Connected Grok subscription. Open Providers → Models to assign Writer or Tools. Saved account keys remain unchanged.");
-        return Ok(());
-    }
-    if matches!(
-        provider::normalize_kind(&choice).as_str(),
-        "openai" | "openai-chatgpt"
-    ) {
-        if modality == "voice" {
-            return Err(anyhow!(
-                "ChatGPT subscription is for the Writer. Voice needs a transcription API provider."
-            ));
-        }
-        println!(
-            "{}",
-            argos_osint_core::subscription::login(|line| println!("{line}")).await?
-        );
-        println!("Connected ChatGPT. Open Providers → Models to assign it to Writer; API account keys remain unchanged.");
-        return Ok(());
-    }
-    let Some(preset) = provider::preset(&choice) else {
-        return Err(anyhow!(
-            "unknown provider {choice}. Choose grok, openai, openrouter, or local."
-        ));
-    };
-    let base_url = ask("Base URL", preset.base_url)?;
-    let default_model = if modality == "voice" {
-        preset.voice_model
-    } else {
-        preset.text_model
-    };
-    let model = ask("Model", default_model)?;
-    let api_key = prompt_provider_key(preset)?;
-    let secret = ProviderSecret {
-        kind: preset.id.to_string(),
-        base_url,
-        model: model.clone(),
-        api_key,
-        stt_model: if modality == "voice" {
-            Some(model)
-        } else {
-            Some(preset.voice_model.to_string())
-        },
-        device: None,
-    };
-    let mut auth = AuthFile::load()?;
-    if modality == "voice" {
-        auth.voice = Some(secret);
-    } else {
-        auth.set_account(secret.clone());
-        auth.text = Some(secret);
-    }
-    auth.save()?;
-    println!("Saved the {modality} slot on {}.", preset.label);
-    Ok(())
-}
-
-fn prompt_provider_key(preset: &provider::ProviderPreset) -> Result<Option<String>> {
-    if let Some(name) = preset.env_key {
-        if std::env::var(name)
-            .ok()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-        {
-            let use_env = ask(&format!("Use {name} from the environment? [Y/n]"), "Y")?;
-            if !matches!(use_env.to_lowercase().as_str(), "n" | "no") {
-                println!("{name} will be read at request time and is not copied into auth.json.");
-                return Ok(None);
-            }
-        }
-    }
-    let prompt = if preset.key_required {
-        "API key: "
-    } else {
-        "API key (empty if this server does not need one): "
-    };
-    let key = rpassword::prompt_password(prompt)?;
-    let key = key.trim().to_string();
-    if key.is_empty() {
-        if preset.key_required {
-            return Err(anyhow!(
-                "{} needs an API key{}",
-                preset.label,
-                preset
-                    .env_key
-                    .map(|name| format!(" or {name}"))
-                    .unwrap_or_default()
-            ));
-        }
-        return Ok(None);
-    }
-    Ok(Some(key))
+    Store::open(&paths::db_path())
 }
 
 fn ask(label: &str, default: &str) -> Result<String> {
@@ -281,121 +123,81 @@ fn ask(label: &str, default: &str) -> Result<String> {
     io::stdout().flush()?;
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
-    let line = line.trim().to_string();
-    if line.is_empty() {
-        Ok(default.to_string())
+    let value = line.trim();
+    Ok(if value.is_empty() {
+        default.into()
     } else {
-        Ok(line)
-    }
+        value.into()
+    })
 }
 
-async fn headless(prompt: String, model: Option<String>) -> Result<()> {
-    paths::ensure_home()?;
-    let store = Store::open(&paths::db_path())?;
-    store.ensure_session("desk", "Desk", "desk")?;
-    let settings = SettingsFile::load().unwrap_or_default();
-    let auth = AuthFile::load().unwrap_or_default();
-    let profile = hardware::profile_cached(false);
-    let explicit = argos_osint_core::brain::insists_on_new_case(&prompt)
-        || prompt.trim_start().starts_with("/search ")
-        || prompt.trim_start().starts_with("investigate ");
-    let lookup = prompt.clone();
-    let db = paths::db_path();
-    let prior =
-        argos_osint_core::workers::spawn_blocking(move || -> Result<(String, Vec<String>)> {
-            let store = Store::open(&db)?;
-            store.sync_report_index()?;
-            let hits = store.retrieve_passages(
-                &lookup,
-                &argos_osint_core::evidence::EvidenceScope::Desk,
-                8,
-            )?;
-            Ok((
-                argos_osint_core::evidence::answer_material(&hits),
-                hits.iter().map(|h| h.citation()).collect::<Vec<_>>(),
-            ))
-        })
-        .await??;
-    let input = TurnInput {
-        session_id: "desk".into(),
-        user_text: prompt,
-        history: Vec::new(),
-        memories: store.list_memories()?,
-        view_name: "Desk".into(),
-        view_context: "Headless turn. No canvas is open.".into(),
-        hardware_line: profile.one_line(),
-        modality: settings.modality.clone(),
-        provider: Some({
-            let mut secret = provider::role_secret(&auth, &settings, true);
-            if let Some(model) = model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-                secret.model = model.into();
-            }
-            secret
-        }),
-        tool_provider: Some(provider::role_secret(&auth, &settings, false)),
-        plan: settings.source_plan(),
-        report_dir: crate::tui::report_dir(&settings),
-        case_id: None,
-        gmail: auth.gmail.as_ref().map(GmailConfig::from),
-        citation_ids: prior.1,
-        prior_reports: if explicit { String::new() } else { prior.0 },
-        evidence_only: !explicit,
-        from_memory: false,
+async fn login() -> Result<()> {
+    let kind = ask("Provider (grok/openai/openrouter/local)", "grok")?;
+    let kind = provider::normalize_kind(&kind);
+    if kind == "grok" {
+        println!(
+            "{}",
+            argos_osint_core::grok_oauth::login(|line| println!("{line}")).await?
+        );
+        return Ok(());
+    }
+    if matches!(kind.as_str(), "openai" | "openai-chatgpt") {
+        println!(
+            "{}",
+            argos_osint_core::subscription::login(|line| println!("{line}")).await?
+        );
+        return Ok(());
+    }
+    let preset = provider::preset(&kind).ok_or_else(|| anyhow!("unknown provider {kind}"))?;
+    let base_url = ask("Base URL", preset.base_url)?;
+    let model = ask("Model", preset.text_model)?;
+    let api_key =
+        rpassword::prompt_password("API key (empty for local server or environment variable): ")?;
+    let secret = ProviderSecret {
+        kind: kind.clone(),
+        base_url,
+        model: model.clone(),
+        api_key: if api_key.trim().is_empty() {
+            None
+        } else {
+            Some(api_key.trim().into())
+        },
+        stt_model: None,
+        device: None,
     };
-    let (tx, mut rx) = unbounded_channel();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let worker = tokio::spawn(async move {
-        agent::run_turn(input, tx, cancel).await;
-    });
-    let mut final_text = String::new();
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            TurnEvent::Delta(text) => {
-                print!("{text}");
-                let _ = io::stdout().flush();
-            }
-            TurnEvent::Note(text) | TurnEvent::Status(text) => eprintln!("{text}"),
-            TurnEvent::Report(meta) => {
-                eprintln!("report {}", meta.path);
-                let _ = store.add_report(&meta);
-            }
-            TurnEvent::Memory(memory) => {
-                let _ = store.add_memory(&memory.text);
-            }
-            TurnEvent::Done(text) => final_text = text,
-            TurnEvent::Failed(err) => return Err(anyhow!(err)),
-        }
-    }
-    if !final_text.is_empty() {
-        println!("\n{final_text}");
-    }
-    let _ = worker.await;
+    let mut auth = AuthFile::load()?;
+    auth.set_account(secret);
+    auth.save()?;
+    let mut settings = SettingsFile::load()?;
+    settings.writer_provider = kind;
+    settings.writer_model = model;
+    settings.save()?;
+    println!("Provider and writer model saved.");
     Ok(())
 }
 
-fn mcp(service: String) -> Result<()> {
-    if !service.eq_ignore_ascii_case("gmail") {
-        return Err(anyhow!("only the gmail MCP service is available"));
-    }
+fn logout() -> Result<()> {
+    let mut auth = AuthFile::load()?;
+    auth.accounts.clear();
+    auth.text = None;
+    auth.voice = None;
+    auth.save()?;
+    println!("Saved Argos provider credentials removed. Subscription CLI sessions remain managed by their own tools.");
+    Ok(())
+}
+
+async fn models() -> Result<()> {
     let auth = AuthFile::load()?;
-    let cfg = auth.gmail.as_ref().map(GmailConfig::from);
-    eprintln!("argos gmail mcp");
-    let mut incoming = String::new();
-    let mut stdin = io::stdin();
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = stdin.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        incoming.push_str(&String::from_utf8_lossy(&buf[..n]));
-        while let Some((message, used)) = take_frame(&incoming) {
-            incoming = incoming[used..].to_string();
-            if let Some(response) = mcp::handle_message(&message, cfg.as_ref()) {
-                println!("{response}");
-                let _ = io::stdout().flush();
+    let settings = SettingsFile::load()?;
+    let secret = provider::writer_secret(&auth, &settings);
+    println!("{} / {}", provider::effective_kind(&secret), secret.model);
+    match provider::list_models(&secret).await {
+        Ok(models) => {
+            for model in models {
+                println!("{model}");
             }
         }
+        Err(err) => eprintln!("catalog unavailable: {err}"),
     }
     Ok(())
 }

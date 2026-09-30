@@ -13,16 +13,12 @@ authors = ["the Argos OSINT authors"]
 rust-version = "1.86"
 
 [workspace.dependencies]
-libc = "0.2"
-sha2 = "0.10"
 anyhow = "1"
 chrono = { version = "0.4", features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 dirs = "5"
 futures-util = "0.3"
-imap = { version = "2.4", default-features = false, features = ["tls"] }
-native-tls = "0.2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28", "all-widgets", "layout-cache", "macros", "underline-color"] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
@@ -35,6 +31,3 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "fs", "sync", "net"] }
 toml = "0.8"
 url = "2"
-unicode-width = "0.2"
-urlencoding = "2"
-petgraph = "0.7"

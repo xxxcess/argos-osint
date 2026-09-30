@@ -1,4 +1,4 @@
-//! Provider and Gmail secrets. `auth.json` is owner-only on Unix (0600),
+//! Provider secrets. `auth.json` is owner-only on Unix (0600),
 //! same convention Grok uses for `~/.grok/auth.json`.
 
 use std::fs;
@@ -12,13 +12,9 @@ use crate::paths::{auth_path, ensure_home};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuthFile {
     #[serde(default)]
-    pub research: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
     pub text: Option<ProviderSecret>,
     #[serde(default)]
     pub voice: Option<ProviderSecret>,
-    #[serde(default)]
-    pub gmail: Option<GmailSecret>,
     /// Independent provider accounts. Legacy text/voice slots still round-trip.
     #[serde(default)]
     pub accounts: std::collections::BTreeMap<String, ProviderSecret>,
@@ -50,23 +46,15 @@ fn default_scope() -> String {
     "openid profile email".into()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GmailSecret {
-    pub email: String,
-    pub app_password: String,
-}
-
 impl AuthFile {
     pub fn redact(&self, text: &str) -> String {
         let mut result = text.to_string();
         for secret in self
-            .research
+            .accounts
             .values()
-            .map(String::as_str)
-            .chain(self.accounts.values().filter_map(|s| s.api_key.as_deref()))
+            .filter_map(|s| s.api_key.as_deref())
             .chain(self.text.iter().filter_map(|s| s.api_key.as_deref()))
             .chain(self.voice.iter().filter_map(|s| s.api_key.as_deref()))
-            .chain(self.gmail.iter().map(|s| s.app_password.as_str()))
         {
             if !secret.is_empty() {
                 result = result.replace(secret, "[redacted]");
@@ -104,7 +92,10 @@ impl AuthFile {
     }
 
     pub fn load() -> Result<Self> {
-        let path = auth_path();
+        Self::load_from(&auth_path())
+    }
+
+    fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -112,7 +103,12 @@ impl AuthFile {
         if raw.trim().is_empty() {
             return Ok(Self::default());
         }
-        Ok(serde_json::from_str(&raw)?)
+        let auth: Self = serde_json::from_str(&raw)?;
+        let legacy: serde_json::Value = serde_json::from_str(&raw)?;
+        if legacy.get("research").is_some() || legacy.get("gmail").is_some() {
+            auth.save_to(path)?;
+        }
+        Ok(auth)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -194,7 +190,9 @@ mod tests {
         );
         assert!(auth.account("openai").is_none());
         assert!(auth.account("openai-chatgpt").is_none());
-        assert_eq!(auth.gmail.as_ref().unwrap().app_password, "existing-mail");
+        assert!(!serde_json::to_string(&auth)
+            .unwrap()
+            .contains("existing-mail"));
 
         // A legacy CLI login may change text, but cannot discard its previous account.
         auth.text = auth.account("openrouter");
@@ -205,6 +203,18 @@ mod tests {
             restored.account("openrouter").unwrap().api_key.as_deref(),
             Some("router-existing")
         );
+    }
+
+    #[test]
+    fn loading_old_auth_removes_gmail_setup_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(&path, r#"{"gmail":{"email":"ada@gmail.com","app_password":"old-secret"},"accounts":{"openrouter":{"kind":"openrouter","base_url":"https://openrouter.ai/api/v1","model":"router-model","api_key":"router-key"}}}"#).unwrap();
+        let auth = AuthFile::load_from(&path).unwrap();
+        assert!(auth.account("openrouter").is_some());
+        let saved = std::fs::read_to_string(path).unwrap();
+        assert!(!saved.contains("gmail"));
+        assert!(!saved.contains("old-secret"));
     }
 
     #[test]

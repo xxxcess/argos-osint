@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Terminal UI for Argos OSINT"
+description = "Terminal shell for Argos"
 rust-version.workspace = true
 
 [[bin]]
@@ -14,18 +14,13 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 argos-osint-core = { path = "../argos-osint-core" }
-chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
-futures-util.workspace = true
 ratatui.workspace = true
 rpassword.workspace = true
 serde_json.workspace = true
-sysinfo.workspace = true
 tokio.workspace = true
-unicode-width.workspace = true
 url.workspace = true
-tui-nodes = "0.10"
 
 [dev-dependencies]
 tempfile.workspace = true

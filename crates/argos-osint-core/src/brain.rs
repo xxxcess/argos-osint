@@ -1,6 +1,4 @@
-//! User-centric recall. Keyword overlap plus a small identity boost, in the
-//! same role Odysseus uses for memory injection: relevant notes are selected
-//! before the model sees the turn and placed in the system prompt.
+//! User-centric recall for conversations in other Argos apps.
 
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +58,31 @@ pub fn parse_typed_memory(input: &str) -> (&'static str, String) {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemorySource {
+    /// App that contributed the insight.
+    pub app: String,
+    /// Conversation or context identifier within that app.
+    pub conversation_id: String,
+    /// Optional message that supports the insight.
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// Optional deep link or external reference.
+    #[serde(default)]
+    pub reference: Option<String>,
+}
+
+impl MemorySource {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.app.trim().is_empty(), "memory source app is required");
+        anyhow::ensure!(
+            !self.conversation_id.trim().is_empty(),
+            "memory source conversation_id is required"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Memory {
     pub id: String,
     pub text: String,
@@ -68,30 +91,11 @@ pub struct Memory {
     #[serde(default)]
     pub pinned: bool,
     pub created_at: String,
-    /// Report whose chat produced this fact, when it came from a report.
-    #[serde(default)]
-    pub report_id: Option<String>,
+    pub source: MemorySource,
 }
 
 fn default_category() -> String {
     "fact".into()
-}
-
-impl Memory {
-    pub fn fact(
-        id: impl Into<String>,
-        text: impl Into<String>,
-        created_at: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            text: text.into(),
-            category: "fact".into(),
-            pinned: false,
-            created_at: created_at.into(),
-            report_id: None,
-        }
-    }
 }
 
 /// One or two short sentences, capped so a report reply can be stored as a fact.
@@ -128,7 +132,27 @@ pub struct ScoredMemory {
 pub fn tokenize(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() > 1)
+        .filter(|w| {
+            w.len() > 1
+                && !matches!(
+                    *w,
+                    "the"
+                        | "and"
+                        | "for"
+                        | "with"
+                        | "what"
+                        | "who"
+                        | "where"
+                        | "when"
+                        | "how"
+                        | "are"
+                        | "was"
+                        | "were"
+                        | "this"
+                        | "that"
+                        | "about"
+                )
+        })
         .map(|w| w.to_string())
         .collect()
 }
@@ -177,6 +201,13 @@ fn query_kind(query: &str) -> &'static str {
         .any(|w| l.contains(w))
     {
         "task"
+    } else if ["project", "building", "working on"]
+        .iter()
+        .any(|w| l.contains(w))
+    {
+        "project"
+    } else if ["goal", "trying to"].iter().any(|w| l.contains(w)) {
+        "goal"
     } else {
         "fact"
     }
@@ -192,8 +223,14 @@ pub fn recall(memories: &[Memory], query: &str, top_k: usize) -> Vec<ScoredMemor
     let q_tokens = tokenize(query);
     let mut scored = Vec::new();
     for memory in memories {
-        let mut score = jaccard(&q_tokens, &tokenize(&memory.text));
-        if memory.category == kind {
+        let overlap = jaccard(&q_tokens, &tokenize(&memory.text));
+        let category_match = kind != "fact" && memory.category == kind;
+        let identity_match = kind == "identity" && looks_like_identity(&memory.text);
+        if overlap == 0.0 && !category_match && !identity_match {
+            continue;
+        }
+        let mut score = overlap;
+        if category_match {
             score += 0.25;
         }
         if memory.pinned {
@@ -234,58 +271,7 @@ pub fn recall(memories: &[Memory], query: &str, top_k: usize) -> Vec<ScoredMemor
     scored
 }
 
-/// Facts that came from a completed report and overlap the case-desk question.
-/// A pin or a category label does not count as a hit by itself.
-pub fn recall_report_facts(memories: &[Memory], query: &str, top_k: usize) -> Vec<ScoredMemory> {
-    let query = query.trim();
-    if query.is_empty() || top_k == 0 {
-        return Vec::new();
-    }
-    let q_tokens = tokenize(query);
-    let mut scored = Vec::new();
-    for memory in memories.iter().filter(|memory| memory.report_id.is_some()) {
-        let score = jaccard(&q_tokens, &tokenize(&memory.text));
-        if score >= 0.12 {
-            scored.push(ScoredMemory {
-                memory: memory.clone(),
-                score,
-            });
-        }
-    }
-    scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    scored.truncate(top_k);
-    scored
-}
-
-/// The user is asking for a fresh case even though facts may already answer it.
-pub fn insists_on_new_case(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    [
-        "new case",
-        "case worker",
-        "start a case",
-        "start research",
-        "new research",
-        "research again",
-        "search again",
-        "look it up",
-        "look this up",
-        "new investigation",
-        "ignore the memory",
-        "ignore memory",
-        "don't use the memory",
-        "do not use the memory",
-        "fresh search",
-        "fresh research",
-    ]
-    .iter()
-    .any(|phrase| lower.contains(phrase))
-}
-
+/// Format recalled insights with their origin for a downstream chat app.
 pub fn format_injection(hits: &[ScoredMemory]) -> String {
     if hits.is_empty() {
         return String::new();
@@ -293,10 +279,25 @@ pub fn format_injection(hits: &[ScoredMemory]) -> String {
     let mut out = String::from("USER MEMORY (recall for this turn):\n");
     for hit in hits {
         let pin = if hit.memory.pinned { " pinned" } else { "" };
+        let message = hit
+            .memory
+            .source
+            .message_id
+            .as_deref()
+            .unwrap_or("unknown message");
+        let reference = hit.memory.source.reference.as_deref().unwrap_or("");
         out.push_str(&format!(
-            "- [{}{pin}] {}\n",
+            "- [{}{pin}] {} (from {} / {} / {}{})\n",
             hit.memory.category,
-            hit.memory.text.trim()
+            hit.memory.text.trim(),
+            hit.memory.source.app,
+            hit.memory.source.conversation_id,
+            message,
+            if reference.is_empty() {
+                String::new()
+            } else {
+                format!(" / {reference}")
+            },
         ));
     }
     out
@@ -307,7 +308,19 @@ mod tests {
     use super::*;
 
     fn mem(id: &str, text: &str) -> Memory {
-        Memory::fact(id, text, "t")
+        Memory {
+            id: id.into(),
+            text: text.into(),
+            category: "fact".into(),
+            pinned: false,
+            created_at: "t".into(),
+            source: MemorySource {
+                app: "test".into(),
+                conversation_id: "test".into(),
+                message_id: None,
+                reference: None,
+            },
+        }
     }
 
     #[test]
@@ -332,7 +345,7 @@ mod tests {
     #[test]
     fn identity_query_prefers_name_memory() {
         let all = vec![
-            mem("1", "The harbor report is filed under northwind"),
+            mem("1", "The harbor document is filed under northwind"),
             mem("2", "My name is Sakie and I work the night desk"),
         ];
         let hits = recall(&all, "who am I", 3);
@@ -343,17 +356,11 @@ mod tests {
     #[test]
     fn overlap_ranks_and_empty_query_is_empty() {
         let all = vec![
-            mem("1", "Prefers markdown reports with source urls"),
+            mem("1", "Prefers markdown documents with source urls"),
             mem("2", "The kettle is in the galley"),
         ];
         assert!(recall(&all, "   ", 4).is_empty());
-        let mut fact = Memory::fact("m", "Harbor revenue rose (report: harbor budget)", "t");
-        fact.report_id = Some("rep".into());
-        let hits = recall_report_facts(&[fact], "what about harbor revenue", 3);
-        assert_eq!(hits.len(), 1);
-        assert!(insists_on_new_case("start a new case worker for harbor"));
-        assert!(!insists_on_new_case("what did we learn about harbor"));
-        let hits = recall(&all, "markdown source reports", 2);
+        let hits = recall(&all, "markdown source documents", 2);
         assert_eq!(hits[0].memory.id, "1");
     }
 }

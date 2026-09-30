@@ -8,8 +8,6 @@ pub const GREEN: Color = Color::Rgb(64, 210, 130);
 pub const TEXT: Color = Color::Rgb(214, 232, 236);
 pub const DIM: Color = Color::Rgb(120, 150, 162);
 pub const SELECT: Color = Color::Rgb(14, 92, 72);
-pub const WARN: Color = Color::Rgb(230, 186, 72);
-pub const RED: Color = Color::Rgb(220, 90, 90);
 
 pub fn panel(title: &str) -> Block<'static> {
     Block::default()

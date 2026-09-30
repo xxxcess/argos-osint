@@ -1,6 +1,6 @@
 //! Optional ChatGPT Writer via the user's authenticated Codex CLI.
 //! Argos never reads, copies, or refreshes Codex credentials. API billing is
-//! deliberately not a fallback for this mode. Research tools remain in Argos.
+//! deliberately not a fallback for this mode.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -149,10 +149,12 @@ pub async fn complete(
     mut on_delta: impl FnMut(&str),
 ) -> Result<Completion> {
     if !tools.is_empty() {
-        return Err(anyhow!("ChatGPT subscription is a Writer connection. Select an API provider for Tools in Providers → Models."));
+        return Err(anyhow!(
+            "ChatGPT subscription is a Writer connection and does not accept tool calls."
+        ));
     }
     check_login().await?;
-    // No repository, user instructions, MCP connections, or session history
+    // No repository, user instructions, or session history
     // are discovered by the subprocess. Its only evidence is this request.
     let work = tempfile::tempdir().context("create isolated Codex workspace")?;
     let mut child = command()

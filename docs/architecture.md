@@ -1,11 +1,21 @@
 # Architecture
 
-`argos-osint-core` contains Brain recall and persistence, provider connections, and hardware profiling. `argos-osint-bin` contains the CLI and terminal UI.
+`argos-osint-core` owns durable state, the shared OSINT registry/executor, provider routing, and Recon orchestration. `argos-osint-bin` owns the CLI and terminal UI. The launcher routes to Recon, Brain, OSINT, Providers, and System. `tui/ui.rs` renders controls and records matching hit regions; `tui/app.rs` manages focus and identified background events.
 
-The terminal retains a left app launcher, right canvas, and bottom composer. Brain is a top level app. Providers has Grok, OpenAI, OpenRouter, and Models tabs. System shows hardware and paths. The shared palette and rounded panels are in `tui/theme.rs`. The TUI enables terminal mouse capture; `tui/ui.rs` defines both rendering and hit areas, while `tui/app.rs` routes mouse and keyboard focus to fields, tabs, rows, and buttons.
+## Investigation flow
 
-Grok and ChatGPT sign-in run as background tasks and send progress and completion events to the TUI. OpenRouter verification checks a draft account without storing it; Save stores that account without changing the other providers. Writer routing is saved separately in `config.toml`.
+Each Recon turn stores a user message and a run with snapshots of both selected model roles. The Recon model receives current thread context, normalized entities, relevant historical Brain insights, and tool definitions. It returns a bounded structured plan; invalid plans receive one repair attempt. Dependencies are checked before dispatch. Ready calls execute concurrently through the same `osint::Executor` used by manual OSINT runs. Calls persist inputs, status, attempts, and bounded results. The Synthesis model receives evidence IDs and observations, then produces an answer whose citations are validated before storage. A separate extraction step derives atomic Brain claims from cited completed evidence. Failed extraction jobs can be retried with `recon retry-insights`.
 
-Brain's `MemorySource` requires an app and conversation ID and can carry a message ID and reference. `Store::add_memory` validates provenance, and `Store::recall` returns ranked memories with the same metadata. This API is the integration point for future chat apps. The `argos remember` and `argos recall` commands expose the same operations as JSON friendly CLI paths.
+The planner first tries a native `submit_recon_plan` function on Grok, OpenAI API, and OpenRouter connections, then uses validated structured JSON if unavailable. Subscription providers use structured JSON. Both routes become the same internal plan. Public tool observations are treated as data, never as instructions. Calls have per-host rate scheduling, a process concurrency cap, timeouts, bounded retries, bounded response bodies, caching, and an explicit redirect host policy. OSINT has no active scanning or shell execution. Manual calls use the same service and can be attached to threads with an explicit provenance link.
 
-The SQLite migration keeps ordinary memories, marks their unknown legacy origin, and removes old case, report, and research tables. New records use the `source_json` column.
+## Persistence
+
+`store.rs` migrates the existing Brain database additively, then applies `schema_recon.sql` for threads, messages, runs, calls, cache, settings, entities, claim insights, sources, relations, edits, extraction jobs, and application state. SQLite foreign keys and unique source identities protect provenance. Answers also store exact cited call IDs. The database migration uses a transaction and user version; reopening preserves new and unrelated tables. `ARGOS_HOME` changes the complete state root.
+
+At launch, runs still marked running become interrupted, with completed calls retained. Resume is explicit and skips completed calls. Deleting a thread rejects later run writes, removes its transcript and thread owned calls, and updates shared insight sources. The default deletion mode retains uniquely sourced insight text; `--with-insights` deletes unsupported extracted insights except user pinned or edited records. Shared insights retain surviving evidence. Manual Brain memories keep their existing source model and remain available through `remember` and `recall`.
+
+## Model and UI boundaries
+
+Provider accounts live in `auth.json`; Recon and Synthesis choices live independently in `config.toml`. The old Writer choice migrates into Synthesis. Sign-in saves credentials without assigning model roles. The TUI sends run events with thread IDs and reloads selected thread state from SQLite, so switching threads does not route one thread's result into another transcript.
+
+The 30 tool definitions in `osint.rs` are the catalog shown in OSINT and supplied to planning. Each definition carries validation, examples, source documentation, restrictions, and cache/rate policy. Adapters build fixed-host requests from validated values. Detailed raw responses are bounded and collapsed in the UI. Network fixture tests cover parser and validation behavior; live endpoints need separate optional smoke checks because quotas and uptime vary.

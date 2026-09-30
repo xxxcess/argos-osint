@@ -1,4 +1,4 @@
-//! Optional ChatGPT Writer via the user's authenticated Codex CLI.
+//! Optional ChatGPT completion via the user's authenticated Codex CLI.
 //! Argos never reads, copies, or refreshes Codex credentials. API billing is
 //! deliberately not a fallback for this mode.
 
@@ -63,6 +63,7 @@ pub async fn login(mut on_progress: impl FnMut(&str)) -> Result<String> {
     let mut stderr = BufReader::new(child.stderr.take().context("Codex stderr")?).lines();
     tokio::time::timeout(Duration::from_secs(300), async {
         let (mut out_done, mut err_done) = (false, false);
+        let ansi = regex::Regex::new(r"\x1b\[[0-9;]*m")?;
         while !out_done || !err_done {
             let (is_out, line) = tokio::select! {
                 line = stdout.next_line(), if !out_done => (true, line?),
@@ -70,7 +71,7 @@ pub async fn login(mut on_progress: impl FnMut(&str)) -> Result<String> {
             };
             match line {
                 Some(line) if !line.trim().is_empty() => {
-                    let clean = regex::Regex::new(r"\x1b\[[0-9;]*m")?.replace_all(&line, "");
+                    let clean = ansi.replace_all(&line, "");
                     on_progress(&clean.chars().take(300).collect::<String>());
                 }
                 None if is_out => out_done = true,
@@ -150,7 +151,7 @@ pub async fn complete(
 ) -> Result<Completion> {
     if !tools.is_empty() {
         return Err(anyhow!(
-            "ChatGPT subscription is a Writer connection and does not accept tool calls."
+            "ChatGPT subscription is a completion connection and does not accept tool calls."
         ));
     }
     check_login().await?;
@@ -164,7 +165,7 @@ pub async fn complete(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .context("start Codex Writer; update Codex CLI if an option is unsupported")?;
+        .context("start Codex completion; update Codex CLI if an option is unsupported")?;
     let input = serde_json::to_string(
         &messages
             .iter()
@@ -183,11 +184,11 @@ pub async fn complete(
         while let Some(line) = lines.next_line().await? {
             received += line.len();
             if received > 2 * 1024 * 1024 {
-                return Err(anyhow!("Codex Writer output exceeded its limit"));
+                return Err(anyhow!("Codex completion output exceeded its limit"));
             }
             let Ok(event) = serde_json::from_str::<Value>(&line) else { continue; };
             if matches!(event.get("type").and_then(Value::as_str), Some("turn.failed" | "error")) {
-                return Err(anyhow!("Codex Writer failed; check subscription availability and the selected model with Codex CLI"));
+                return Err(anyhow!("Codex completion failed; check subscription availability and the selected model with Codex CLI"));
             }
             if let Some(text) = answer_event(&event) {
                 // Codex JSONL currently emits complete message chunks.
@@ -200,10 +201,10 @@ pub async fn complete(
             }
         }
         if !child.wait().await?.success() || content.trim().is_empty() {
-            return Err(anyhow!("Codex Writer returned no successful answer; update Codex CLI or check ChatGPT sign-in"));
+            return Err(anyhow!("Codex completion returned no successful answer; update Codex CLI or check ChatGPT sign-in"));
         }
         Ok(Completion { content, tool_calls: Vec::new() })
-    }).await.context("Codex Writer timed out")?;
+    }).await.context("Codex completion timed out")?;
     result
 }
 
@@ -219,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_is_ephemeral_and_does_not_inherit_tools_or_configuration() {
+    fn completion_is_ephemeral_and_does_not_inherit_tools_or_configuration() {
         let args = exec_args("codex-default");
         for flag in [
             "--ephemeral",

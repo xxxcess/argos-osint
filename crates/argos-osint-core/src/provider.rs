@@ -285,6 +285,72 @@ pub fn writer_secret(auth: &crate::secrets::AuthFile, settings: &SettingsFile) -
     secret
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelAssignment {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RoleDefaults {
+    #[serde(default)]
+    pub recon: ModelAssignment,
+    #[serde(default)]
+    pub synthesis: ModelAssignment,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReconLimits {
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: u8,
+    #[serde(default = "default_max_calls")]
+    pub max_calls: u8,
+    #[serde(default = "default_turn_seconds")]
+    pub turn_seconds: u16,
+}
+fn default_max_rounds() -> u8 {
+    6
+}
+fn default_max_calls() -> u8 {
+    12
+}
+fn default_turn_seconds() -> u16 {
+    300
+}
+impl Default for ReconLimits {
+    fn default() -> Self {
+        Self {
+            max_rounds: default_max_rounds(),
+            max_calls: default_max_calls(),
+            turn_seconds: default_turn_seconds(),
+        }
+    }
+}
+
+pub fn role_secret(
+    auth: &crate::secrets::AuthFile,
+    settings: &SettingsFile,
+    role: &str,
+) -> Result<ProviderSecret> {
+    let assignment = match role {
+        "recon" => &settings.defaults.recon,
+        "synthesis" => &settings.defaults.synthesis,
+        _ => return Err(anyhow!("role must be recon or synthesis")),
+    };
+    let legacy = writer_secret(auth, settings);
+    let mut secret = if assignment.provider.is_empty() {
+        legacy
+    } else {
+        account_secret(auth, &assignment.provider)
+    };
+    if !assignment.model.is_empty() {
+        secret.model = assignment.model.clone();
+    }
+    Ok(secret)
+}
+
 /// Map login input onto a known provider id. Unknown text is returned
 /// trimmed so a saved custom kind still round-trips.
 pub fn normalize_kind(kind: &str) -> String {
@@ -329,8 +395,6 @@ pub fn detect_kind_from_url(url: &str) -> String {
         "grok".into()
     } else if host == "api.openai.com" || host.ends_with(".openai.com") {
         "openai".into()
-    } else if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
-        "local".into()
     } else {
         "local".into()
     }
@@ -875,38 +939,78 @@ pub struct SettingsFile {
     pub writer_provider: String,
     #[serde(default)]
     pub modality: String,
+    #[serde(default)]
+    pub defaults: RoleDefaults,
+    #[serde(default)]
+    pub osint_user_agent: String,
+    #[serde(default)]
+    pub recon_limits: ReconLimits,
 }
 
 impl SettingsFile {
     pub fn load() -> Result<Self> {
         let path = crate::paths::config_path();
+        Self::load_from(&path)
+    }
+
+    fn load_from(path: &std::path::Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let raw = std::fs::read_to_string(&path)?;
+        let raw = std::fs::read_to_string(path)?;
         if raw.trim().is_empty() {
             return Ok(Self::default());
         }
-        let settings: Self = toml::from_str(&raw)?;
+        let mut settings: Self = toml::from_str(&raw)?;
+        let legacy_provider = settings.writer_provider.clone();
+        let legacy_model = if settings.writer_model.is_empty() {
+            settings.model.clone()
+        } else {
+            settings.writer_model.clone()
+        };
+        let mut migrated = false;
+        for role in [
+            &mut settings.defaults.recon,
+            &mut settings.defaults.synthesis,
+        ] {
+            if role.provider.is_empty() && !legacy_provider.is_empty() {
+                role.provider = legacy_provider.clone();
+                migrated = true;
+            }
+            if role.model.is_empty() && !legacy_model.is_empty() {
+                role.model = legacy_model.clone();
+                migrated = true;
+            }
+        }
         let old_keys = toml::from_str::<toml::Value>(&raw)?
             .as_table()
             .is_some_and(|table| {
                 table.keys().any(|key| {
                     !matches!(
                         key.as_str(),
-                        "model" | "writer_model" | "writer_provider" | "modality"
+                        "model"
+                            | "writer_model"
+                            | "writer_provider"
+                            | "modality"
+                            | "defaults"
+                            | "osint_user_agent"
+                            | "recon_limits"
                     )
                 })
             });
-        if old_keys {
-            settings.save()?;
+        if old_keys || migrated {
+            settings.save_to(path)?;
         }
         Ok(settings)
     }
 
     pub fn save(&self) -> Result<()> {
         crate::paths::ensure_home()?;
-        crate::secrets::write_private(&crate::paths::config_path(), &toml::to_string_pretty(self)?)
+        self.save_to(&crate::paths::config_path())
+    }
+
+    fn save_to(&self, path: &std::path::Path) -> Result<()> {
+        crate::secrets::write_private(path, &toml::to_string_pretty(self)?)
     }
 }
 
@@ -923,5 +1027,21 @@ mod tests {
         assert!(saved.contains("grok-4.6"));
         assert!(!saved.contains("searx_url"));
         assert!(!saved.contains("report_dir"));
+    }
+
+    #[test]
+    fn role_defaults_migrate_once_and_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path,"writer_provider = 'openrouter'\nwriter_model = 'old-model'\nosint_user_agent = 'Argos test@example.com'\n[defaults.recon]\nprovider = 'local'\nmodel = 'local-model'\n").unwrap();
+        let settings = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(settings.defaults.recon.model, "local-model");
+        assert_eq!(settings.defaults.synthesis.model, "old-model");
+        assert_eq!(settings.osint_user_agent, "Argos test@example.com");
+        settings.save_to(&path).unwrap();
+        let reopened = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(reopened.defaults.recon, settings.defaults.recon);
+        assert_eq!(reopened.defaults.synthesis, settings.defaults.synthesis);
+        assert_eq!(reopened.osint_user_agent, settings.osint_user_agent);
     }
 }

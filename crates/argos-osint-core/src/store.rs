@@ -16,7 +16,7 @@ fn new_id() -> String {
 }
 
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl Store {
@@ -42,6 +42,13 @@ impl Store {
         self.conn
             .execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
+            let version: i64 = self
+                .conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))?;
+            anyhow::ensure!(
+                version <= 4,
+                "database schema version {version} is newer than this Argos build"
+            );
             let tables: Vec<String> = {
                 let mut stmt = self.conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
                 let rows = stmt
@@ -59,18 +66,10 @@ impl Store {
             } else {
                 Vec::new()
             };
-            if tables.is_empty() {
-                self.conn.execute_batch("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT NOT NULL, category TEXT NOT NULL, pinned INTEGER NOT NULL, created_at TEXT NOT NULL, source_json TEXT NOT NULL); CREATE INDEX memories_created ON memories(created_at DESC)")?;
-                return Ok(());
-            }
-            if tables.len() == 1 && old_memories && cols.iter().any(|v| v == "source_json") {
-                self.conn.execute_batch(
-                    "CREATE INDEX IF NOT EXISTS memories_created ON memories(created_at DESC)",
-                )?;
-                return Ok(());
-            }
-            self.conn.execute_batch("CREATE TABLE memories_new (id TEXT PRIMARY KEY, text TEXT NOT NULL, category TEXT NOT NULL, pinned INTEGER NOT NULL, created_at TEXT NOT NULL, source_json TEXT NOT NULL)")?;
-            if old_memories {
+            if !old_memories {
+                self.conn.execute_batch("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT NOT NULL, category TEXT NOT NULL, pinned INTEGER NOT NULL, created_at TEXT NOT NULL, source_json TEXT NOT NULL)")?;
+            } else if !cols.iter().any(|v| v == "source_json") {
+                self.conn.execute_batch("CREATE TABLE memories_new (id TEXT PRIMARY KEY, text TEXT NOT NULL, category TEXT NOT NULL, pinned INTEGER NOT NULL, created_at TEXT NOT NULL, source_json TEXT NOT NULL)")?;
                 let category = if cols.iter().any(|v| v == "category") {
                     "category"
                 } else {
@@ -92,24 +91,26 @@ impl Store {
                     ""
                 };
                 self.conn.execute_batch(&format!("INSERT INTO memories_new SELECT id,text,{category},{pinned},created_at,{source} FROM memories {filter}"))?;
+                self.conn.execute_batch(
+                    "DROP TABLE memories; ALTER TABLE memories_new RENAME TO memories",
+                )?;
             }
-            // The previous database mixed case and report state with memories.
-            // Only Brain survives the schema migration.
-            for name in tables {
-                let quoted = name.replace('"', "\"\"");
-                self.conn
-                    .execute_batch(&format!("DROP TABLE IF EXISTS \"{quoted}\""))?;
+            self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS memories_created ON memories(created_at DESC)",
+            )?;
+            if version < 4 {
+                self.conn.execute_batch(include_str!("schema_recon.sql"))?;
+                self.conn.pragma_update(None, "user_version", 4)?;
             }
-            self.conn.execute_batch("ALTER TABLE memories_new RENAME TO memories; CREATE INDEX memories_created ON memories(created_at DESC)")?;
             Ok(())
         })();
         match result {
             Ok(()) => {
-                self.conn.execute_batch("COMMIT")?;
+                self.conn.execute_batch("COMMIT; PRAGMA foreign_keys=ON")?;
                 Ok(())
             }
             Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
+                let _ = self.conn.execute_batch("ROLLBACK; PRAGMA foreign_keys=ON");
                 Err(err)
             }
         }
@@ -157,7 +158,7 @@ impl Store {
             source,
         };
         self.conn.execute(
-            "INSERT INTO memories VALUES (?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,?3,?4,?5,?6)",
             params![
                 memory.id,
                 memory.text,
@@ -183,17 +184,38 @@ impl Store {
     ) -> Result<bool> {
         let text = text.trim();
         anyhow::ensure!(!text.is_empty(), "memory text is empty");
-        Ok(self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE memories SET text=?1,category=?2,pinned=?3 WHERE id=?4",
             params![text, normalize_category(category), i64::from(pinned), id],
-        )? > 0)
+        )? > 0;
+        if changed {
+            self.conn.execute("INSERT OR IGNORE INTO insight_user_edits(memory_id) SELECT memory_id FROM insight_claims WHERE memory_id=?1",[id])?;
+        }
+        Ok(changed)
     }
 
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM memories WHERE id=?1", [id])?
-            > 0)
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<bool> {
+            self.conn.execute("DELETE FROM insight_sources WHERE fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
+            self.conn.execute("DELETE FROM insight_relations WHERE left_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1) OR right_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
+            self.conn
+                .execute("DELETE FROM insight_claims WHERE memory_id=?1", [id])?;
+            Ok(self
+                .conn
+                .execute("DELETE FROM memories WHERE id=?1", [id])?
+                > 0)
+        })();
+        match result {
+            Ok(deleted) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(deleted)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
     }
 
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
@@ -256,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_case_and_report_tables_are_removed() {
+    fn legacy_brain_is_preserved_without_dropping_unrelated_tables() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let conn = Connection::open(file.path()).unwrap();
         conn.execute_batch("CREATE TABLE memories(id TEXT PRIMARY KEY,text TEXT,created_at TEXT,category TEXT,pinned INTEGER,report_id TEXT); INSERT INTO memories VALUES ('a','keep','today','identity',1,NULL),('b','report','today','fact',0,'r1'); CREATE TABLE reports(id TEXT); CREATE TABLE sessions(id TEXT); CREATE VIRTUAL TABLE passage_fts USING fts5(body);").unwrap();
@@ -265,6 +287,15 @@ mod tests {
         assert_eq!(store.list_memories().unwrap().len(), 1);
         assert_eq!(store.list_memories().unwrap()[0].source.app, "argos-legacy");
         let count: i64 = store.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT IN ('memories') AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0)).unwrap();
-        assert_eq!(count, 0);
+        assert!(count > 0);
+        let reports: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='reports'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reports, 1);
     }
 }

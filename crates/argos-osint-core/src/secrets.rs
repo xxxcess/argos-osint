@@ -99,7 +99,7 @@ impl AuthFile {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         if raw.trim().is_empty() {
             return Ok(Self::default());
         }

@@ -8,8 +8,10 @@ use argos_osint_core::paths;
 use argos_osint_core::provider::{self, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
+use argos_osint_core::{osint, recon};
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
+use std::sync::{atomic::AtomicBool, Arc};
 
 #[derive(Parser)]
 #[command(name = "argos", version, about = "Argos memory and provider shell")]
@@ -42,6 +44,13 @@ enum Command {
     },
     /// List all saved memories as JSON.
     Memories,
+    /// List investigated claims with their evidence links.
+    Insights {
+        #[arg(long, default_value = "")]
+        entity: String,
+        #[arg(long, default_value = "")]
+        topic: String,
+    },
     /// Sign in or configure a provider account.
     Login,
     /// Forget saved provider credentials.
@@ -49,7 +58,111 @@ enum Command {
     /// Print the host profile.
     Hardware,
     /// List the active text model catalog.
-    Models,
+    Models {
+        #[arg(long, default_value = "synthesis")]
+        role: String,
+    },
+    Recon {
+        #[command(subcommand)]
+        command: ReconCommand,
+    },
+    Osint {
+        #[command(subcommand)]
+        command: OsintCommand,
+    },
+    Defaults {
+        #[command(subcommand)]
+        command: DefaultsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReconCommand {
+    List {
+        #[arg(long, default_value = "")]
+        search: String,
+    },
+    New {
+        #[arg(long, default_value = "New investigation")]
+        title: String,
+    },
+    Show {
+        thread_id: String,
+    },
+    Ask {
+        thread_id: String,
+        question: String,
+    },
+    AskNew {
+        question: String,
+        #[arg(long, default_value = "New investigation")]
+        title: String,
+    },
+    Rename {
+        thread_id: String,
+        title: String,
+    },
+    Delete {
+        thread_id: String,
+        #[arg(long)]
+        with_insights: bool,
+    },
+    Retry {
+        run_id: String,
+    },
+    Resume {
+        run_id: String,
+    },
+    RetryInsights {
+        answer_id: String,
+    },
+    Limits {
+        #[arg(long)]
+        max_rounds: Option<u8>,
+        #[arg(long)]
+        max_calls: Option<u8>,
+        #[arg(long)]
+        turn_seconds: Option<u16>,
+    },
+}
+
+#[derive(Subcommand)]
+enum OsintCommand {
+    List,
+    Describe {
+        tool_id: String,
+    },
+    Run {
+        tool_id: String,
+        #[arg(long)]
+        input: String,
+    },
+    History,
+    Attach {
+        call_id: String,
+        thread_id: String,
+    },
+    Enable {
+        tool_id: String,
+    },
+    Disable {
+        tool_id: String,
+    },
+    UserAgent {
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DefaultsCommand {
+    Show,
+    Set {
+        role: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        model: String,
+    },
 }
 
 pub async fn dispatch() -> Result<()> {
@@ -98,6 +211,9 @@ pub async fn dispatch() -> Result<()> {
             );
             Ok(())
         }
+        Some(Command::Insights { entity, topic }) => {
+            print_json(&open_store()?.search_insights(&entity, &topic)?)
+        }
         Some(Command::Login) => login().await,
         Some(Command::Logout) => logout(),
         Some(Command::Hardware) => {
@@ -105,7 +221,10 @@ pub async fn dispatch() -> Result<()> {
             println!("{}", p.one_line());
             Ok(())
         }
-        Some(Command::Models) => models().await,
+        Some(Command::Models { role }) => models(&role).await,
+        Some(Command::Recon { command }) => recon_command(command).await,
+        Some(Command::Osint { command }) => osint_command(command).await,
+        Some(Command::Defaults { command }) => defaults_command(command),
     }
 }
 
@@ -168,11 +287,7 @@ async fn login() -> Result<()> {
     let mut auth = AuthFile::load()?;
     auth.set_account(secret);
     auth.save()?;
-    let mut settings = SettingsFile::load()?;
-    settings.writer_provider = kind;
-    settings.writer_model = model;
-    settings.save()?;
-    println!("Provider and writer model saved.");
+    println!("Provider account saved. Set Recon and Synthesis models with `argos defaults set`.");
     Ok(())
 }
 
@@ -186,10 +301,10 @@ fn logout() -> Result<()> {
     Ok(())
 }
 
-async fn models() -> Result<()> {
+async fn models(role: &str) -> Result<()> {
     let auth = AuthFile::load()?;
     let settings = SettingsFile::load()?;
-    let secret = provider::writer_secret(&auth, &settings);
+    let secret = provider::role_secret(&auth, &settings, role)?;
     println!("{} / {}", provider::effective_kind(&secret), secret.model);
     match provider::list_models(&secret).await {
         Ok(models) => {
@@ -200,4 +315,202 @@ async fn models() -> Result<()> {
         Err(err) => eprintln!("catalog unavailable: {err}"),
     }
     Ok(())
+}
+
+fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn defaults_command(command: DefaultsCommand) -> Result<()> {
+    let mut settings = SettingsFile::load()?;
+    match command {
+        DefaultsCommand::Show => {
+            let auth = AuthFile::load()?;
+            let recon = provider::role_secret(&auth, &settings, "recon")?;
+            let synthesis = provider::role_secret(&auth, &settings, "synthesis")?;
+            print_json(
+                &serde_json::json!({"recon":{"provider":provider::effective_kind(&recon),"model":recon.model},"synthesis":{"provider":provider::effective_kind(&synthesis),"model":synthesis.model}}),
+            )
+        }
+        DefaultsCommand::Set {
+            role,
+            provider,
+            model,
+        } => {
+            anyhow::ensure!(!model.trim().is_empty(), "model is empty");
+            let kind = provider::normalize_kind(&provider);
+            anyhow::ensure!(
+                matches!(
+                    kind.as_str(),
+                    "grok" | "openai" | "openai-chatgpt" | "openrouter" | "local"
+                ),
+                "unknown provider"
+            );
+            let target = match role.as_str() {
+                "recon" => &mut settings.defaults.recon,
+                "synthesis" => &mut settings.defaults.synthesis,
+                _ => return Err(anyhow!("role must be recon or synthesis")),
+            };
+            target.provider = kind;
+            target.model = model.trim().into();
+            settings.save()?;
+            print_json(&settings.defaults)
+        }
+    }
+}
+
+async fn osint_command(command: OsintCommand) -> Result<()> {
+    match command {
+        OsintCommand::List => print_json(&osint::registry()),
+        OsintCommand::Describe { tool_id } => {
+            let tool = osint::definition(&tool_id).ok_or_else(|| anyhow!("unknown tool"))?;
+            print_json(
+                &serde_json::json!({"tool":tool,"input_schema":tool.schema(),"example_input":tool.example_input()}),
+            )
+        }
+        OsintCommand::History => print_json(&open_store()?.manual_calls()?),
+        OsintCommand::Attach { call_id, thread_id } => print_json(
+            &serde_json::json!({"attached":open_store()?.attach_call(&call_id,&thread_id)?}),
+        ),
+        OsintCommand::Enable { tool_id } => {
+            open_store()?.set_tool_enabled(&tool_id, true)?;
+            print_json(&serde_json::json!({"tool_id":tool_id,"enabled":true}))
+        }
+        OsintCommand::Disable { tool_id } => {
+            open_store()?.set_tool_enabled(&tool_id, false)?;
+            print_json(&serde_json::json!({"tool_id":tool_id,"enabled":false}))
+        }
+        OsintCommand::UserAgent { value } => {
+            anyhow::ensure!(
+                value.contains('@') || value.contains("http"),
+                "include an identifying contact email or URL"
+            );
+            let mut settings = SettingsFile::load()?;
+            settings.osint_user_agent = value;
+            settings.save()?;
+            print_json(&serde_json::json!({"saved":true}))
+        }
+        OsintCommand::Run { tool_id, input } => {
+            let value: serde_json::Value = serde_json::from_str(&input)?;
+            let service =
+                recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
+            let (call_id, result) = service.manual(&tool_id, value).await?;
+            print_json(&serde_json::json!({"call_id":call_id,"result":result}))
+        }
+    }
+}
+
+async fn recon_command(command: ReconCommand) -> Result<()> {
+    match command {
+        ReconCommand::List { search } => print_json(&open_store()?.list_threads(&search)?),
+        ReconCommand::New { title } => print_json(&open_store()?.new_thread(&title)?),
+        ReconCommand::Show { thread_id } => {
+            let store = open_store()?;
+            let thread = store
+                .get_thread(&thread_id)?
+                .ok_or_else(|| anyhow!("thread not found"))?;
+            let messages = store.list_messages(&thread_id)?;
+            print_json(&serde_json::json!({"thread":thread,"messages":messages}))
+        }
+        ReconCommand::Rename { thread_id, title } => print_json(
+            &serde_json::json!({"renamed":open_store()?.rename_thread(&thread_id,&title)?}),
+        ),
+        ReconCommand::Delete {
+            thread_id,
+            with_insights,
+        } => {
+            let mut store = open_store()?;
+            let retained = if with_insights {
+                store.deletion_consequences(&thread_id)?
+            } else {
+                Vec::new()
+            };
+            let deleted = store.delete_thread(&thread_id, with_insights)?;
+            print_json(
+                &serde_json::json!({"deleted":deleted,"pinned_or_edited_insights_retained_without_source":retained}),
+            )
+        }
+        ReconCommand::AskNew { question, title } => {
+            let thread = open_store()?.new_thread(&title)?;
+            ask_thread(&thread.id, &question).await
+        }
+        ReconCommand::Ask {
+            thread_id,
+            question,
+        } => ask_thread(&thread_id, &question).await,
+        ReconCommand::Retry { run_id } => {
+            let store = open_store()?;
+            let run = store
+                .get_run(&run_id)?
+                .ok_or_else(|| anyhow!("run not found"))?;
+            let question = store
+                .list_messages(&run.thread_id)?
+                .into_iter()
+                .find(|m| m.id == run.turn_id)
+                .ok_or_else(|| anyhow!("original turn unavailable"))?
+                .content;
+            drop(store);
+            ask_thread(&run.thread_id, &question).await
+        }
+        ReconCommand::Resume { run_id } => {
+            open_store()?.recover_runs()?;
+            let service =
+                recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
+            let run = service
+                .resume(&run_id, Arc::new(AtomicBool::new(false)), |stage| {
+                    eprintln!("{stage}")
+                })
+                .await?;
+            let store = open_store()?;
+            print_json(
+                &serde_json::json!({"run":run,"messages":store.list_messages(&run.thread_id)?,"calls":store.calls_for_run(&run.id)?}),
+            )
+        }
+        ReconCommand::RetryInsights { answer_id } => {
+            let service =
+                recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
+            service.retry_insights(&answer_id).await?;
+            print_json(&serde_json::json!({"answer_id":answer_id,"insight_job":"completed"}))
+        }
+        ReconCommand::Limits {
+            max_rounds,
+            max_calls,
+            turn_seconds,
+        } => {
+            let mut settings = SettingsFile::load()?;
+            if let Some(value) = max_rounds {
+                anyhow::ensure!((1..=8).contains(&value), "max-rounds must be 1..8");
+                settings.recon_limits.max_rounds = value;
+            }
+            if let Some(value) = max_calls {
+                anyhow::ensure!((1..=24).contains(&value), "max-calls must be 1..24");
+                settings.recon_limits.max_calls = value;
+            }
+            if let Some(value) = turn_seconds {
+                anyhow::ensure!((30..=900).contains(&value), "turn-seconds must be 30..900");
+                settings.recon_limits.turn_seconds = value;
+            }
+            if max_rounds.is_some() || max_calls.is_some() || turn_seconds.is_some() {
+                settings.save()?;
+            }
+            print_json(&settings.recon_limits)
+        }
+    }
+}
+
+async fn ask_thread(thread_id: &str, question: &str) -> Result<()> {
+    let service = recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
+    let run = service
+        .ask(
+            thread_id,
+            question,
+            Arc::new(AtomicBool::new(false)),
+            |stage| eprintln!("{stage}"),
+        )
+        .await?;
+    let store = open_store()?;
+    print_json(
+        &serde_json::json!({"run":run,"messages":store.list_messages(thread_id)?,"calls":store.calls_for_run(&run.id)?}),
+    )
 }

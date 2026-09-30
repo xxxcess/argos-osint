@@ -240,18 +240,15 @@ pub fn recall(memories: &[Memory], query: &str, top_k: usize) -> Vec<ScoredMemor
             && (memory.category == "identity" || looks_like_identity(&memory.text))
         {
             score = score.max(0.9);
-        } else if kind == "contact" && memory.text.to_lowercase().contains("email") {
-            score += 0.15;
-        } else if kind == "preference"
-            && ["prefer", "likes", "favorite"]
-                .iter()
-                .any(|w| memory.text.to_lowercase().contains(w))
-        {
-            score += 0.15;
-        } else if kind == "task"
-            && ["todo", "remind", "task"]
-                .iter()
-                .any(|w| memory.text.to_lowercase().contains(w))
+        } else if (kind == "contact" && memory.text.to_lowercase().contains("email"))
+            || (kind == "preference"
+                && ["prefer", "likes", "favorite"]
+                    .iter()
+                    .any(|w| memory.text.to_lowercase().contains(w)))
+            || (kind == "task"
+                && ["todo", "remind", "task"]
+                    .iter()
+                    .any(|w| memory.text.to_lowercase().contains(w)))
         {
             score += 0.15;
         }

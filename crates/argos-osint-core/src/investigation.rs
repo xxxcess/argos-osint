@@ -2,6 +2,8 @@
 use crate::{evidence::*, research::ResearchJob, store::Store};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+mod desk_graph;
+pub use desk_graph::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     if cancel.load(Ordering::Relaxed) {
@@ -26,6 +28,7 @@ pub struct CaseLink {
 }
 #[derive(Clone, Debug, Default)]
 pub struct CaseProjection {
+    pub gaps: Vec<Gap>,
     pub entities: Vec<Entity>,
     pub findings: Vec<Finding>,
     pub links: Vec<CaseLink>,
@@ -104,50 +107,27 @@ impl Store {
         case_id: &str,
         cancel: &AtomicBool,
     ) -> Result<CaseProjection> {
+        self.case_projection_with_research(case_id, cancel, &crate::research::defaults())
+    }
+    pub fn case_projection_with_research(
+        &self,
+        case_id: &str,
+        cancel: &AtomicBool,
+        configs: &std::collections::BTreeMap<String, crate::research::ResearchConfig>,
+    ) -> Result<CaseProjection> {
         let transaction = self.conn.unchecked_transaction()?;
         self.check_case_write(case_id, None)?;
         check_cancel(cancel)?;
         let scope = EvidenceScope::Case(case_id.into());
         self.ingest_case_reports_cancellable(case_id, cancel)?;
         check_cancel(cancel)?;
-        let findings = self.findings_scoped(&scope)?;
+        let mut findings = self.findings_scoped(&scope)?;
         let mut entities = self
             .records_scoped::<Entity>("entity", &scope)?
             .into_iter()
             .filter(|e| normalize_entity(&e.label, e.kind.clone()).is_ok())
             .collect::<Vec<_>>();
-        let mut accepted_counts = std::collections::HashMap::<String, usize>::new();
-        let mut seen = std::collections::HashSet::new();
-        for f in &findings {
-            let o = &f.observation;
-            let targets = o
-                .evidence
-                .iter()
-                .filter_map(|r| {
-                    r.passage_id
-                        .as_ref()
-                        .or(r.source_url.as_ref())
-                        .or(r.artifact_id.as_ref())
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if f.decision == Some(ReviewDecision::Accept)
-                && seen.insert((
-                    o.entity_id.clone(),
-                    o.provider.clone(),
-                    o.statement.clone(),
-                    targets,
-                ))
-            {
-                *accepted_counts.entry(o.entity_id.clone()).or_default() += 1;
-            }
-        }
-        entities.sort_by_key(|e| {
-            (
-                std::cmp::Reverse(accepted_counts.get(&e.id).copied().unwrap_or(0)),
-                e.label.clone(),
-            )
-        });
+        entities.sort_by_key(|e| e.id.clone());
         entities.dedup_by(|a, b| a.id == b.id);
         let mut links = Vec::new();
         let mut stmt = self.conn.prepare(
@@ -334,6 +314,11 @@ impl Store {
                     entity.aliases.dedup();
                 }
                 entities.retain(|e| !decision.entities.contains(&e.id) || &e.id == canonical);
+                for finding in &mut findings {
+                    if decision.entities.contains(&finding.observation.entity_id) {
+                        finding.observation.entity_id = canonical.clone();
+                    }
+                }
                 for link in &mut links {
                     if decision.entities.contains(&link.relationship.from) {
                         link.relationship.from = canonical.clone();
@@ -346,15 +331,12 @@ impl Store {
             }
         }
         let mut projection = CaseProjection {
+            gaps: vec![],
             entities,
             findings,
             links,
             timeline: self.timeline_scoped(&scope)?,
-            jobs: self
-                .jobs()?
-                .into_iter()
-                .filter(|j| j.input.case_id.as_deref() == Some(case_id))
-                .collect(),
+            jobs: self.jobs_for_case(case_id)?,
             snapshot: None,
             scope: self
                 .records::<InvestigationScope>("investigation_scope", None, Some(case_id))?
@@ -367,6 +349,8 @@ impl Store {
             .find(|c| c.id == case_id)
             .map(|c| c.title)
             .unwrap_or_else(|| "Case evidence".into());
+        projection.gaps = self.reconcile_gaps(case_id, &projection, configs)?;
+        projection.rank_leads();
         projection.snapshot = Some(projection.network_snapshot(&title));
         self.upsert_tna_graph(
             &format!("case:{case_id}"),
@@ -495,7 +479,9 @@ impl Store {
         let accepted = findings
             .iter()
             .filter(|f| {
-                selected.contains(&f.observation.id) && f.decision == Some(ReviewDecision::Accept)
+                selected.contains(&f.observation.id)
+                    && f.decision == Some(ReviewDecision::Accept)
+                    && !f.category.starts_with("Candidate")
             })
             .collect::<Vec<_>>();
         if accepted.is_empty()
@@ -534,6 +520,9 @@ impl Store {
             .take(30)
         {
             body.push_str(&format!("- Pending {}: {}\n", f.observation.id, f.category));
+        }
+        for gap in self.gaps(case_id, false)? {
+            body.push_str(&format!("- {}: {}\n", gap.kind.label(), gap.reason));
         }
         let report = crate::report::write_report(
             directory,

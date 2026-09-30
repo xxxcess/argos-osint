@@ -15,9 +15,10 @@ pub enum CaseView {
     Review,
     Jobs,
     Path,
+    Product,
 }
 impl CaseView {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Leads,
         Self::Focus,
         Self::Evidence,
@@ -25,21 +26,18 @@ impl CaseView {
         Self::Review,
         Self::Jobs,
         Self::Path,
+        Self::Product,
     ];
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|v| *v == self).unwrap_or(0)
     }
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Leads => "Leads",
-            Self::Focus => "Focus map",
-            Self::Evidence => "Evidence table",
-            Self::Timeline => "Timeline",
-            Self::Review => "Review",
-            Self::Jobs => "Jobs",
-            Self::Path => "Path",
-        }
-    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaseCenter {
+    #[default]
+    Workbench,
+    Graph,
+    Product,
 }
 #[derive(Clone, Debug, Default)]
 pub struct CaseWorkspace {
@@ -49,12 +47,28 @@ pub struct CaseWorkspace {
     pub snapshot: Option<TnaSnapshot>,
     pub lead_limit: usize,
     pub view: CaseView,
+    pub center: CaseCenter,
+    pub path_from: Option<String>,
+    pub path_to: Option<String>,
+    pub path_sel: usize,
+    pub hop_sel: usize,
+    pub plan_checked: Vec<String>,
+    pub plan_focus: bool,
+    pub inbox_focus: bool,
+    pub gap_focus: bool,
+    pub gaps_case_wide: bool,
+    pub gap_sel: usize,
+    pub product_checked: Vec<String>,
+    pub product_case_wide: bool,
+    pub global_jobs: bool,
+    pub view_links: [usize; 8],
     pub lead_id: Option<String>,
     pub row: usize,
     pub scroll: usize,
     pub link: usize,
     pub source: Option<String>,
     pub actions: Vec<String>,
+    pub disabled_actions: Vec<(String, String)>,
     pub action_sel: usize,
     pub expanded: Vec<String>,
     pub loading: bool,
@@ -62,15 +76,77 @@ pub struct CaseWorkspace {
     pub sort_by_date: bool,
     pub evidence_sort: usize,
     pub tab_hits: Vec<(CaseView, Rect)>,
-    pub view_positions: [(usize, usize); 7],
+    pub view_positions: [(usize, usize); 8],
 }
 impl CaseWorkspace {
     pub fn switch_view(&mut self, view: CaseView) {
         self.view_positions[self.view.index()] = (self.row, self.scroll);
+        self.view_links[self.view.index()] = self.link;
         self.view = view;
+        self.sort_by_date = view == CaseView::Timeline;
+        self.center = match view {
+            CaseView::Focus | CaseView::Path => CaseCenter::Graph,
+            CaseView::Product => CaseCenter::Product,
+            _ => CaseCenter::Workbench,
+        };
+        if self.center != CaseCenter::Graph {
+            self.gap_focus = false;
+        }
+        if self.center != CaseCenter::Workbench {
+            self.plan_focus = false;
+        }
+        self.link = self.view_links[view.index()];
         (self.row, self.scroll) = self.view_positions[view.index()];
         self.source = None;
-        self.actions.clear();
+    }
+    pub fn switch_center(&mut self, center: CaseCenter) {
+        self.switch_view(match center {
+            CaseCenter::Workbench => CaseView::Review,
+            CaseCenter::Graph => CaseView::Focus,
+            CaseCenter::Product => CaseView::Product,
+        });
+    }
+    pub fn visible_gaps(&self) -> Vec<&argos_osint_core::investigation::Gap> {
+        self.data
+            .gaps
+            .iter()
+            .filter(|g| {
+                g.open
+                    && (self.gaps_case_wide
+                        || self.lead_id.as_ref() == Some(&g.entity_id)
+                        || g.to
+                            .as_ref()
+                            .is_some_and(|id| Some(id) == self.lead_id.as_ref())
+                        || self.expanded.contains(&g.entity_id)
+                        || g.to.as_ref().is_some_and(|id| self.expanded.contains(id))
+                        || self.lead_id.is_none())
+            })
+            .collect()
+    }
+    pub fn product_findings(&self) -> Vec<&argos_osint_core::evidence::Finding> {
+        self.data
+            .findings
+            .iter()
+            .filter(|f| {
+                f.decision == Some(argos_osint_core::evidence::ReviewDecision::Accept)
+                    && !f.category.starts_with("Candidate")
+                    && (self.product_case_wide
+                        || Some(&f.observation.entity_id) == self.lead_id.as_ref())
+            })
+            .collect()
+    }
+    pub fn jobs(&self) -> Vec<&argos_osint_core::research::ResearchJob> {
+        self.data
+            .jobs
+            .iter()
+            .filter(|j| {
+                self.global_jobs
+                    || self
+                        .lead_id
+                        .as_ref()
+                        .is_none_or(|id| &j.input.entity_id == id)
+            })
+            .collect()
     }
     pub fn lead(&self) -> Option<&Entity> {
         self.data
@@ -84,6 +160,11 @@ impl CaseWorkspace {
             .findings
             .iter()
             .filter(|f| {
+                self.lead_id
+                    .as_ref()
+                    .is_none_or(|id| &f.observation.entity_id == id)
+            })
+            .filter(|f| {
                 self.filter.is_empty()
                     || format!(
                         "{} {} {} {} {} {:?}",
@@ -96,6 +177,10 @@ impl CaseWorkspace {
                     )
                     .to_lowercase()
                     .contains(&self.filter.to_lowercase())
+                    || self
+                        .filter
+                        .split('|')
+                        .any(|id| !id.is_empty() && f.observation.id == id)
             })
             .collect::<Vec<_>>();
         if self.sort_by_date {
@@ -120,6 +205,58 @@ impl CaseWorkspace {
     }
 }
 impl App {
+    pub(crate) fn sync_workbench_plan(&mut self) {
+        let Some(w) = self.investigation.as_mut() else {
+            return;
+        };
+        let label = w
+            .lead()
+            .map(|e| e.label.clone())
+            .unwrap_or_else(|| w.question.clone());
+        w.actions.clear();
+        w.disabled_actions.clear();
+        let mut configs = self.settings.research.iter().collect::<Vec<_>>();
+        configs.sort_by_key(|(name, _)| *name);
+        for (name, c) in configs {
+            if w.data
+                .scope
+                .as_ref()
+                .is_none_or(|s| !s.allowed_actions.contains(name))
+                || argos_osint_core::research::input_matches_action(name, &label).is_err()
+            {
+                continue;
+            }
+            let absent = w.data.gaps.iter().any(|g| {
+                g.kind == argos_osint_core::investigation::GapKind::CollectedAbsent
+                    && g.action.as_ref() == Some(name)
+                    && g.input == label
+            });
+            let reason = if !argos_osint_core::research::collection_available(name) {
+                Some("unavailable until contract verified".into())
+            } else if absent {
+                Some("collected_absent · not a real-world negative finding; history only".into())
+            } else if name == "shodan"
+                && self
+                    .auth
+                    .research
+                    .get(&c.secret_ref)
+                    .is_none_or(|s| s.is_empty())
+            {
+                Some("credential unavailable".into())
+            } else {
+                argos_osint_core::research::eligible_action(name, &label, c)
+                    .err()
+                    .map(|e| e.to_string())
+            };
+            if let Some(reason) = reason {
+                w.disabled_actions.push((name.clone(), reason));
+            } else {
+                w.actions.push(name.clone());
+            }
+        }
+        w.plan_checked.retain(|a| w.actions.contains(a));
+        w.action_sel = w.action_sel.min(w.actions.len().saturating_sub(1));
+    }
     pub(super) fn select_investigation_view(&mut self, view: CaseView) {
         if self.pending_case_data.is_some() {
             self.cancel_case_data_plan();
@@ -127,10 +264,13 @@ impl App {
         self.case_source_generation = self.case_source_generation.wrapping_add(1);
         if let Some(w) = self.investigation.as_mut() {
             w.switch_view(view);
+            w.plan_focus = false;
+            w.gap_focus = false;
+            w.inbox_focus = false;
             if view == CaseView::Path {
                 self.tna_layout = TnaLayout::Path;
-                if self.tna_from.is_none() {
-                    self.tna_from = w.lead_id.clone();
+                if w.path_from.is_none() {
+                    w.path_from = w.lead_id.clone();
                 }
             }
             self.focus = Focus::Graph;
@@ -272,7 +412,16 @@ impl App {
             .retain(|j| j.input.case_id.as_deref() != Some(&plan.case_id));
         self.recommendations.clear();
         self.reviewed_recommendations.clear();
+        self.desk_cases.remove(&plan.case_id);
+        self.desk_generations
+            .entry(plan.case_id.clone())
+            .and_modify(|g| *g = g.wrapping_add(1))
+            .or_insert(1);
+        self.desk_refreshing.remove(&plan.case_id);
         let _ = self.reload_lists();
+        if !plan.delete_case {
+            self.refresh_desk_case(&plan.case_id);
+        }
         if was_open {
             if self.investigation.is_some() {
                 self.close_investigation();
@@ -324,6 +473,8 @@ impl App {
             case_id: case.id,
             question: case.title,
             lead_limit: self.settings.analysis.lead_limit,
+            inbox_focus: true,
+            view: CaseView::Review,
             ..Default::default()
         });
         self.refresh_investigation();
@@ -339,11 +490,23 @@ impl App {
         self.case_generation = self.case_generation.wrapping_add(1);
         let generation = self.case_generation;
         let id = w.case_id.clone();
+        let mut configs = self.settings.research.clone();
+        if let Some(c) = configs.get_mut("shodan") {
+            if self
+                .auth
+                .research
+                .get(&c.secret_ref)
+                .is_none_or(|s| s.is_empty())
+            {
+                c.readiness = argos_osint_core::research::Readiness::MissingCredentials;
+            }
+        }
+
         if let Some(path) = self.tna_db_path.clone() {
             let tx = self.tx.clone();
             argos_osint_core::workers::spawn_blocking(move || {
                 let result = Store::open(&path)
-                    .and_then(|s| s.case_projection_cancellable(&id, &cancel))
+                    .and_then(|s| s.case_projection_with_research(&id, &cancel, &configs))
                     .map_err(|e| e.to_string());
                 let _ = tx.send(AppMsg::CaseReady {
                     case_id: id,
@@ -352,7 +515,10 @@ impl App {
                 });
             });
         } else {
-            let result = self.store.case_projection(&id).map_err(|e| e.to_string());
+            let result = self
+                .store
+                .case_projection_with_research(&id, &cancel, &configs)
+                .map_err(|e| e.to_string());
             self.on_msg(AppMsg::CaseReady {
                 case_id: id,
                 generation,
@@ -390,11 +556,11 @@ impl App {
                 .cloned()
         } else if w.view == CaseView::Path {
             self.tna_paths()
-                .get(self.tna_path_sel)
+                .get(w.path_sel)
                 .and_then(|p| {
                     p.nodes
                         .windows(2)
-                        .nth(self.tna_hop_sel)
+                        .nth(w.hop_sel)
                         .map(|pair| (pair[0].clone(), pair[1].clone()))
                 })
                 .and_then(|(from, to)| {
@@ -407,10 +573,17 @@ impl App {
                 .and_then(|l| l.relationship.evidence.first())
                 .cloned()
         } else if w.view == CaseView::Timeline {
-            w.data
-                .timeline
+            let mut chronological = w.clone();
+            chronological.sort_by_date = true;
+            chronological
+                .findings()
                 .get(w.row)
-                .and_then(|e| e.evidence.first())
+                .and_then(|f| f.observation.evidence.first())
+                .cloned()
+        } else if w.view == CaseView::Product {
+            w.product_findings()
+                .get(w.row)
+                .and_then(|f| f.observation.evidence.first())
                 .cloned()
         } else if w.view == CaseView::Evidence {
             w.evidence_rows()
@@ -465,14 +638,31 @@ impl App {
             if w.source.take().is_some() {
                 return false;
             }
-            if !w.actions.is_empty() {
-                w.actions.clear();
+            if w.view == CaseView::Path {
+                w.switch_view(CaseView::Focus);
+                return false;
+            }
+            if w.gap_focus {
+                w.gap_focus = false;
+                return false;
+            }
+            if w.plan_focus {
+                w.plan_focus = false;
+                return false;
+            }
+            if self.focus == Focus::TableDetail {
+                self.focus = Focus::Graph;
                 return false;
             }
             self.close_investigation();
             return false;
         }
         if self.focus == Focus::Prompt {
+            if key.code == KeyCode::Tab {
+                self.focus = Focus::Graph;
+                self.investigation.as_mut().unwrap().inbox_focus = true;
+                return false;
+            }
             return self.on_prompt_key(key);
         }
         if key.code == KeyCode::Char('/') {
@@ -488,13 +678,43 @@ impl App {
             return false;
         }
         if key.code == KeyCode::Tab {
-            self.focus = Focus::Prompt;
+            let w = self.investigation.as_mut().unwrap();
+            w.plan_focus = false;
+            if w.inbox_focus {
+                w.inbox_focus = false;
+            } else if self.focus != Focus::TableDetail {
+                self.focus = Focus::TableDetail;
+            } else {
+                self.focus = Focus::Prompt;
+            }
+            return false;
+        }
+        if key.code == KeyCode::BackTab {
+            self.investigation.as_mut().unwrap().inbox_focus = true;
+            self.focus = Focus::Graph;
             return false;
         }
         if let KeyCode::Char(c @ '1'..='7') = key.code {
-            self.select_investigation_view(CaseView::ALL[(c as u8 - b'1') as usize]);
+            if c == '1' {
+                self.close_investigation();
+            } else {
+                self.select_investigation_view(match c {
+                    '2' => CaseView::Review,
+                    '3' => CaseView::Focus,
+                    '4' => CaseView::Product,
+                    '5' => CaseView::Review,
+                    '6' => CaseView::Jobs,
+                    _ => CaseView::Path,
+                });
+            }
             return false;
         }
+        self.sync_workbench_plan();
+        if key.code == KeyCode::Char('o') {
+            self.selected_case_source();
+            return false;
+        }
+        let paths = self.tna_paths();
         let w = self.investigation.as_mut().unwrap();
         if w.source.is_some() {
             match key.code {
@@ -504,54 +724,181 @@ impl App {
             }
             return false;
         }
-        if !w.actions.is_empty() {
+        if key.code == KeyCode::Char('g') {
+            if w.gap_focus {
+                w.gap_focus = false;
+            } else {
+                w.switch_center(CaseCenter::Graph);
+                w.gap_focus = true;
+                w.gaps_case_wide = false;
+                w.gap_sel = 0;
+                w.inbox_focus = false;
+            }
+            return false;
+        }
+        if w.plan_focus {
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
-                    w.action_sel = (w.action_sel + 1) % w.actions.len()
+                    w.action_sel = (w.action_sel + 1).min(w.actions.len().saturating_sub(1))
                 }
                 KeyCode::Char('k') | KeyCode::Up => w.action_sel = w.action_sel.saturating_sub(1),
-                KeyCode::Enter => {
-                    let provider = w.actions[w.action_sel].clone();
-                    w.actions.clear();
-                    self.submit_enrichment(&provider);
+                KeyCode::Char(' ') => {
+                    if let Some(action) = w.actions.get(w.action_sel).cloned() {
+                        if w.plan_checked.contains(&action) {
+                            w.plan_checked.retain(|a| a != &action);
+                        } else {
+                            w.plan_checked.push(action);
+                        }
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char('e') => {
+                    let checked = std::mem::take(&mut w.plan_checked);
+                    w.plan_focus = false;
+                    for provider in checked {
+                        self.submit_enrichment(&provider);
+                    }
                 }
                 _ => {}
             }
             return false;
         }
+        if w.view == CaseView::Product && !w.inbox_focus {
+            match key.code {
+                KeyCode::Char(' ') => {
+                    if let Some(id) = w
+                        .product_findings()
+                        .get(w.row)
+                        .map(|f| f.observation.id.clone())
+                    {
+                        if w.product_checked.contains(&id) {
+                            w.product_checked.retain(|x| x != &id);
+                        } else {
+                            w.product_checked.push(id);
+                        }
+                    }
+                }
+                KeyCode::Char('c') => {
+                    w.product_case_wide = !w.product_case_wide;
+                    w.row = 0;
+                }
+                KeyCode::Enter => {
+                    self.prompt = format!("/draft final {}", w.product_checked.join(" "));
+                    self.cursor = self.prompt.chars().count();
+                    self.focus = Focus::Prompt;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    w.row = (w.row + 1).min(w.product_findings().len().saturating_sub(1))
+                }
+                KeyCode::Char('k') | KeyCode::Up => w.row = w.row.saturating_sub(1),
+                _ => {}
+            }
+            if !matches!(key.code, KeyCode::Char('g') | KeyCode::Char('e')) {
+                return false;
+            }
+        }
+        if w.gap_focus {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    w.gap_sel = (w.gap_sel + 1).min(w.visible_gaps().len().saturating_sub(1))
+                }
+                KeyCode::Char('k') | KeyCode::Up => w.gap_sel = w.gap_sel.saturating_sub(1),
+                KeyCode::Enter | KeyCode::Char('e') => {
+                    if let Some(gap) = w.visible_gaps().get(w.gap_sel).cloned().cloned() {
+                        if gap.kind == argos_osint_core::investigation::GapKind::Uncollected {
+                            w.lead_id = Some(gap.entity_id);
+                            w.switch_center(CaseCenter::Workbench);
+                            w.gap_focus = false;
+                            if let Some(action) = gap.action {
+                                w.plan_checked = vec![action.clone()];
+                                w.actions = vec![action];
+                                w.plan_focus = true;
+                            }
+                        } else if matches!(
+                            gap.kind,
+                            argos_osint_core::investigation::GapKind::Conflicting
+                                | argos_osint_core::investigation::GapKind::Candidate
+                        ) {
+                            w.lead_id = Some(gap.entity_id);
+                            w.filter = gap.observation_ids.join("|");
+                            w.switch_view(CaseView::Review);
+                            w.gap_focus = false;
+                            w.inbox_focus = false;
+                            w.row = 0;
+                        } else {
+                            let history = w
+                                .data
+                                .jobs
+                                .iter()
+                                .filter(|j| gap.job_ids.contains(&j.id))
+                                .map(|j| {
+                                    format!(
+                                        "{} · {} {:?}\nInput: {}\n{}\n{}",
+                                        j.id,
+                                        j.provider,
+                                        j.state,
+                                        j.input.label,
+                                        j.progress,
+                                        j.error.as_deref().unwrap_or("")
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            w.source = Some(format!(
+                                "{}\n{}\n{history}\nNot a real-world negative finding.",
+                                gap.kind.label(),
+                                gap.reason
+                            ));
+                        }
+                    }
+                }
+                KeyCode::Char('g') => w.gap_focus = false,
+                _ => {}
+            }
+            if !matches!(
+                key.code,
+                KeyCode::Char('x') | KeyCode::Char('z') | KeyCode::Left | KeyCode::Right
+            ) {
+                return false;
+            }
+        }
         match key.code {
-            KeyCode::Char('f') if w.view == CaseView::Path => {
-                self.tna_from = w.lead_id.clone();
-                self.tna_path_sel = 0;
-                self.tna_hop_sel = 0;
+            KeyCode::Char('f') if matches!(w.view, CaseView::Path | CaseView::Focus) => {
+                w.path_from = w.lead_id.clone();
+                if w.view == CaseView::Focus {
+                    w.switch_view(CaseView::Path);
+                }
+                w.path_sel = 0;
+                w.hop_sel = 0;
             }
-            KeyCode::Char('t') if w.view == CaseView::Path => {
-                self.tna_to = w.lead_id.clone();
-                self.tna_path_sel = 0;
-                self.tna_hop_sel = 0;
+            KeyCode::Char('t') if matches!(w.view, CaseView::Path | CaseView::Focus) => {
+                w.path_to = w.lead_id.clone();
+                if w.view == CaseView::Focus {
+                    w.switch_view(CaseView::Path);
+                }
+                w.path_sel = 0;
+                w.hop_sel = 0;
             }
-            KeyCode::Char('n') if w.view == CaseView::Path => {
-                self.tna_path_sel =
-                    (self.tna_path_sel + 1).min(self.tna_paths().len().saturating_sub(1));
-                self.tna_hop_sel = 0;
+            KeyCode::Char('n') if matches!(w.view, CaseView::Path | CaseView::Focus) => {
+                w.path_sel = (w.path_sel + 1).min(paths.len().saturating_sub(1));
+                w.hop_sel = 0;
             }
-            KeyCode::Char('N') if w.view == CaseView::Path => {
-                self.tna_path_sel = self.tna_path_sel.saturating_sub(1);
-                self.tna_hop_sel = 0;
+            KeyCode::Char('N') if matches!(w.view, CaseView::Path | CaseView::Focus) => {
+                w.path_sel = w.path_sel.saturating_sub(1);
+                w.hop_sel = 0;
             }
             KeyCode::Char(']') if w.view == CaseView::Path => {
-                self.tna_hop_sel = (self.tna_hop_sel + 1).min(
-                    self.tna_paths()
-                        .get(self.tna_path_sel)
+                w.hop_sel = (w.hop_sel + 1).min(
+                    paths
+                        .get(w.path_sel)
                         .map(|p| p.nodes.len().saturating_sub(2))
                         .unwrap_or(0),
                 );
             }
             KeyCode::Char('[') if w.view == CaseView::Path => {
-                self.tna_hop_sel = self.tna_hop_sel.saturating_sub(1)
+                w.hop_sel = w.hop_sel.saturating_sub(1)
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if matches!(w.view, CaseView::Leads | CaseView::Focus | CaseView::Path) {
+                if w.inbox_focus || w.view == CaseView::Leads {
                     if let Some(e) = w.data.entities.get(
                         (w.data
                             .entities
@@ -563,11 +910,18 @@ impl App {
                     ) {
                         w.lead_id = Some(e.id.clone());
                         w.link = 0;
+                        w.row = 0;
+                        w.plan_checked.clear();
+                        w.actions.clear();
                     }
                 } else {
+                    if matches!(w.view, CaseView::Focus | CaseView::Path) {
+                        w.link = (w.link + 1).min(w.links().len().saturating_sub(1));
+                        return false;
+                    }
                     let len = match w.view {
-                        CaseView::Timeline => w.data.timeline.len(),
-                        CaseView::Jobs => w.data.jobs.len(),
+                        CaseView::Timeline => w.findings().len(),
+                        CaseView::Jobs => w.jobs().len(),
                         CaseView::Evidence => w.evidence_rows().len(),
                         _ => w.findings().len(),
                     };
@@ -575,7 +929,7 @@ impl App {
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if matches!(w.view, CaseView::Leads | CaseView::Focus | CaseView::Path) {
+                if w.inbox_focus || w.view == CaseView::Leads {
                     if let Some(e) = w.data.entities.get(
                         w.data
                             .entities
@@ -586,8 +940,15 @@ impl App {
                     ) {
                         w.lead_id = Some(e.id.clone());
                         w.link = 0;
+                        w.row = 0;
+                        w.plan_checked.clear();
+                        w.actions.clear();
                     }
                 } else {
+                    if matches!(w.view, CaseView::Focus | CaseView::Path) {
+                        w.link = w.link.saturating_sub(1);
+                        return false;
+                    }
                     w.row = w.row.saturating_sub(1);
                 }
             }
@@ -607,41 +968,33 @@ impl App {
                 }
             }
             KeyCode::Char('s') => {
-                if w.view == CaseView::Evidence {
-                    w.evidence_sort = (w.evidence_sort + 1) % 7;
-                } else {
-                    w.sort_by_date = !w.sort_by_date;
+                match w.view {
+                    CaseView::Evidence => {
+                        w.switch_view(CaseView::Timeline);
+                    }
+                    CaseView::Timeline => {
+                        w.switch_view(CaseView::Review);
+                    }
+                    _ => {
+                        w.switch_view(CaseView::Evidence);
+                    }
                 }
                 w.row = 0;
             }
+            KeyCode::Char('J') => {
+                w.switch_view(CaseView::Jobs);
+                w.inbox_focus = false;
+                w.global_jobs = false;
+            }
+            KeyCode::Char('g') => {
+                w.gap_focus = true;
+                w.gap_sel = 0;
+                w.switch_center(CaseCenter::Graph);
+            }
             KeyCode::Char('e') => {
-                let label = w
-                    .lead()
-                    .map(|e| e.label.clone())
-                    .unwrap_or_else(|| w.question.clone());
-                let scope = w.data.scope.as_ref();
-                w.actions = self
-                    .settings
-                    .research
-                    .iter()
-                    .filter(|(name, c)| {
-                        scope.is_none_or(|s| s.allowed_actions.contains(name))
-                            && argos_osint_core::research::eligible_action(name, &label, c).is_ok()
-                            && (name.as_str() != "shodan"
-                                || self
-                                    .auth
-                                    .research
-                                    .get(&c.secret_ref)
-                                    .is_some_and(|s| !s.is_empty()))
-                    })
-                    .map(|(name, _)| name.clone())
-                    .collect();
-                w.action_sel = 0;
-                if w.actions.is_empty() {
-                    self.status =
-                        "No eligible actions; check investigation scope and Providers → Research"
-                            .into();
-                }
+                w.plan_focus = true;
+                w.inbox_focus = false;
+                w.switch_center(CaseCenter::Workbench);
             }
             KeyCode::Char('i') | KeyCode::Enter if w.view == CaseView::Leads => {
                 let mut detail = String::new();
@@ -704,42 +1057,69 @@ impl App {
                 w.scroll = 0;
             }
             KeyCode::Enter if w.view == CaseView::Jobs => {
-                if let Some(j) = w.data.jobs.get(w.row) {
+                if let Some(j) = w.jobs().get(w.row) {
                     w.filter = j.id.clone();
-                    w.view = CaseView::Review;
+                    w.switch_view(CaseView::Review);
                     w.row = 0;
                 }
             }
             KeyCode::Char('v') if w.view == CaseView::Focus => {
                 if let Some(l) = w.links().get(w.link) {
-                    w.filter = l.observations.first().cloned().unwrap_or_default();
-                    w.view = CaseView::Review;
+                    let ids = l.observations.join("|");
+                    let lead = w
+                        .data
+                        .findings
+                        .iter()
+                        .find(|f| l.observations.contains(&f.observation.id))
+                        .map(|f| f.observation.entity_id.clone());
+                    w.filter = ids;
+                    w.inbox_focus = false;
+                    if let Some(lead) = lead {
+                        w.lead_id = Some(lead);
+                    }
+                    w.switch_view(CaseView::Review);
                     w.row = 0;
                 }
             }
-            KeyCode::Char('p') if w.view == CaseView::Focus => {
-                if let Some(l) = w.links().get(w.link) {
-                    self.tna_from = Some(l.relationship.from.clone());
-                    self.tna_to = Some(l.relationship.to.clone());
-                    w.switch_view(CaseView::Path);
-                    self.tna_layout = TnaLayout::Path;
-                    self.tna_path_sel = 0;
-                    self.tna_hop_sel = 0;
+            KeyCode::Char('p') if matches!(w.view, CaseView::Focus | CaseView::Path) => {
+                if w.path_from.is_none() || w.path_to.is_none() {
+                    if let Some((from, to)) = w
+                        .links()
+                        .get(w.link)
+                        .map(|l| (l.relationship.from.clone(), l.relationship.to.clone()))
+                    {
+                        w.path_from = Some(from);
+                        w.path_to = Some(to);
+                    } else {
+                        w.path_from = w.lead_id.clone();
+                    }
                 }
+                w.switch_view(CaseView::Path);
+                self.tna_layout = TnaLayout::Path;
             }
             KeyCode::Char('z') => w.expanded.clear(),
             KeyCode::Enter | KeyCode::Char('o') => self.selected_case_source(),
             KeyCode::Char('a') | KeyCode::Char('r') | KeyCode::Char('d') | KeyCode::Char('t')
-                if w.view == CaseView::Review =>
+                if matches!(
+                    w.view,
+                    CaseView::Review | CaseView::Leads | CaseView::Evidence | CaseView::Timeline
+                ) =>
             {
-                if let Some(f) = w.findings().get(w.row) {
+                let selected = if w.view == CaseView::Evidence {
+                    w.evidence_rows()
+                        .get(w.row)
+                        .and_then(|r| r.observation_id.clone())
+                } else {
+                    w.findings().get(w.row).map(|f| f.observation.id.clone())
+                };
+                if let Some(id) = selected {
                     let decision = match key.code {
                         KeyCode::Char('a') => "accept",
                         KeyCode::Char('r') => "reject",
                         KeyCode::Char('d') => "defer",
                         _ => "retain",
                     };
-                    self.prompt = format!("/review {} {decision} ", f.observation.id);
+                    self.prompt = format!("/review {id} {decision} ");
                     self.cursor = self.prompt.chars().count();
                     self.focus = Focus::Prompt;
                     self.status = "Add a review reason and Enter".into();
@@ -836,7 +1216,7 @@ impl App {
             "desk",
             "assistant",
             &format!(
-                "Case saved: {}. /case {} opens Leads. Reports can be drafted after review.",
+                "Case saved: {}. /case {} opens Inbox + Workbench. Reports can be drafted after review.",
                 case.title, case.id
             ),
         );
@@ -860,7 +1240,7 @@ impl App {
                 self.submit_enrichment_with_plan(&format!("identity {label}"), plan.clone());
             }
         }
-        self.status = "Case saved · Leads · e choose enrichment · 2 Focus · 5 Review".into();
+        self.status = "Case saved · Inbox + Workbench · e plan · 3 Graph · 4 Product".into();
     }
 }
 
@@ -1082,8 +1462,9 @@ mod tests {
                 && !view.contains("Ribbon")
                 && !view.contains("Clusters")
         );
-        app.on_investigation_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-        assert_eq!(app.investigation.as_ref().unwrap().view, CaseView::Path);
+        app.select_investigation_view(CaseView::Review);
+        app.select_investigation_view(CaseView::Path);
+        assert_eq!(app.tna_paths().len(), 1);
         app.selected_case_source();
         assert!(app
             .investigation
@@ -1097,12 +1478,12 @@ mod tests {
     }
 
     #[test]
-    fn every_case_view_has_a_clickable_tab_and_keeps_its_position() {
+    fn three_case_centers_have_clickable_tabs_and_keep_positions() {
         let mut app = fixture();
         for width in [140, 80, 48] {
             render(&mut app, width, 40);
             let hits = app.investigation.as_ref().unwrap().tab_hits.clone();
-            assert_eq!(hits.len(), CaseView::ALL.len());
+            assert_eq!(hits.len(), 3);
             for (view, rect) in hits {
                 let header = app.case_tab_area;
                 assert!(rect.x > header.x && rect.right() < header.right());
@@ -1141,7 +1522,7 @@ mod tests {
         assert!(
             !title.contains("Case Desk") && !title.contains("different investigation question")
         );
-        assert_eq!(app.investigation.as_ref().unwrap().tab_hits.len(), 7);
+        assert_eq!(app.investigation.as_ref().unwrap().tab_hits.len(), 3);
         app.close_investigation();
         terminal
             .draw(|frame| super::super::super::ui::draw(frame, &mut app))
@@ -1210,6 +1591,7 @@ mod tests {
             CaseView::Review,
             CaseView::Jobs,
             CaseView::Path,
+            CaseView::Product,
         ] {
             app.investigation.as_mut().unwrap().view = view;
             for (width, height) in [(140, 42), (80, 24), (48, 18), (24, 10), (12, 5)] {
@@ -1221,15 +1603,194 @@ mod tests {
         assert!(
             text.contains("candidate")
                 && text.contains("Published address")
-                && text.contains("does not establish ownership"),
+                && (text.contains("does not establish") && text.contains("ownership")),
             "{text}"
         );
         assert!(!text.contains("Strategic"));
     }
     #[test]
+    fn desk_opens_highest_priority_review_and_product_prefills_only_selected_ids() {
+        let mut app = fixture();
+        let id = app.investigation.as_ref().unwrap().case_id.clone();
+        let other = app
+            .store
+            .create_case("Another case without a report")
+            .unwrap();
+        app.reload_lists().unwrap();
+        app.close_investigation();
+        app.focus = Focus::Canvas;
+        let mut terminal = Terminal::new(TestBackend::new(140, 36)).unwrap();
+        terminal
+            .draw(|f| super::super::super::ui::draw(f, &mut app))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(
+            text.contains("Next Work") && text.contains("Another case"),
+            "{text}"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.investigation.as_ref().unwrap().case_id, id);
+        assert_eq!(
+            app.investigation.as_ref().unwrap().findings()[0]
+                .observation
+                .id,
+            "o1"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.prompt, "/review o1 accept ");
+        assert_eq!(app.research_active, 0);
+        assert!(app.research_jobs.is_empty());
+        app.store
+            .review_finding("o1", ReviewDecision::Accept, "source verified")
+            .unwrap();
+        app.refresh_investigation();
+        app.select_investigation_view(CaseView::Product);
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.prompt, "/draft final o1");
+        assert!(app.store.list_reports().unwrap().is_empty());
+        assert!(app.cases.iter().any(|c| c.id == other.id));
+    }
+    #[test]
+    fn case_owned_path_and_link_selection_survive_centers_and_escape() {
+        let mut app = fixture();
+        app.store
+            .review_finding("o1", ReviewDecision::Accept, "source verified")
+            .unwrap();
+        app.refresh_investigation();
+        app.select_investigation_view(CaseView::Focus);
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        let from = app.investigation.as_ref().unwrap().path_from.clone();
+        let to = app.investigation.as_ref().unwrap().path_to.clone();
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.investigation.as_ref().unwrap().view, CaseView::Focus);
+        app.select_investigation_view(CaseView::Review);
+        app.select_investigation_view(CaseView::Focus);
+        let w = app.investigation.as_ref().unwrap();
+        assert_eq!(w.path_from, from);
+        assert_eq!(w.path_to, to);
+        assert_eq!(app.tna_paths().len(), 1);
+        assert!(app.tna_from.is_none() && app.tna_to.is_none());
+    }
+    #[test]
+    fn plan_starts_unchecked_and_hole_selection_checks_without_collecting() {
+        let mut app = fixture();
+        let case = app.investigation.as_ref().unwrap().case_id.clone();
+        let scope = InvestigationScope {
+            question: "harbor.example".into(),
+            allowed_actions: vec!["domain".into(), "katana".into()],
+            ..Default::default()
+        };
+        app.store
+            .put_record("scope", "investigation_scope", Some(&case), None, &scope)
+            .unwrap();
+        app.refresh_investigation();
+        app.sync_workbench_plan();
+        assert!(app.investigation.as_ref().unwrap().plan_checked.is_empty());
+        assert!(app
+            .investigation
+            .as_ref()
+            .unwrap()
+            .disabled_actions
+            .iter()
+            .any(|(name, _)| name == "katana"));
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let gap = app
+            .investigation
+            .as_ref()
+            .unwrap()
+            .visible_gaps()
+            .iter()
+            .position(|g| g.kind == argos_osint_core::investigation::GapKind::Uncollected)
+            .unwrap();
+        app.investigation.as_mut().unwrap().gap_sel = gap;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let w = app.investigation.as_ref().unwrap();
+        assert!(w.plan_focus);
+        assert_eq!(w.plan_checked, vec!["domain"]);
+        assert_eq!(app.research_active, 0);
+        assert!(app.research_jobs.is_empty());
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.investigation.as_ref().unwrap().plan_checked.is_empty());
+    }
+    #[test]
+    fn source_inspector_keeps_inbox_and_ctrl_c_leaves_jobs_running() {
+        let mut app = fixture();
+        app.selected_case_source();
+        let text = render(&mut app, 100, 30);
+        assert!(text.contains("Lead inbox") && text.contains("Original source"));
+        app.research_active = 1;
+        app.prompt.clear();
+        app.focus = Focus::Graph;
+        assert!(!app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(!app.quit);
+        assert_eq!(app.research_active, 1);
+    }
+    #[tokio::test]
+    async fn checked_plan_queues_separate_bounded_jobs_with_exact_lead_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("argos.db");
+        let store = Store::open(&path).unwrap();
+        let case = store.create_case("Harbor").unwrap();
+        let entity = normalize_entity("harbor.example", EntityType::Domain).unwrap();
+        store
+            .put_record(&entity.id, "entity", Some(&case.id), None, &entity)
+            .unwrap();
+        let scope = InvestigationScope {
+            question: entity.label.clone(),
+            allowed_actions: vec!["domain".into(), "search".into()],
+            ..Default::default()
+        };
+        store
+            .put_record("scope", "investigation_scope", Some(&case.id), None, &scope)
+            .unwrap();
+        let mut app = App::from_parts(store, SettingsFile::default(), AuthFile::default()).unwrap();
+        let mut inbox = app.take_inbox();
+        app.open_investigation(&case.id);
+        app.sync_workbench_plan();
+        let queue = argos_osint_core::research::ResearchQueue::new(path, 2);
+        // Cancel before execution so the real queue persists bounded job records without HTTP.
+        queue.cancel.store(true, Ordering::Relaxed);
+        app.research_queue = Some(queue);
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        {
+            let w = app.investigation.as_mut().unwrap();
+            w.plan_checked = vec!["domain".into(), "search".into()];
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(app.research_active, 2);
+        let mut completed = 0;
+        while completed < 2 {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(msg, AppMsg::ResearchJob(_)) {
+                completed += 1;
+            }
+            app.on_msg(msg);
+        }
+        let jobs = app.store.jobs_for_case(&case.id).unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().all(|j| j.input.entity_id == entity.id
+            && j.input.label == entity.label
+            && j.input.depth == 0));
+        assert_ne!(jobs[0].id, jobs[1].id);
+        assert_eq!(app.research_active, 0);
+        assert_eq!(app.investigation.as_ref().unwrap().view, CaseView::Review);
+    }
+    #[test]
     fn case_expand_shortcut_and_relationship_table_use_cached_supported_sources() {
         let mut app = fixture();
-        app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert_eq!(app.store.list_cases().unwrap().len(), 1);
         assert_eq!(app.investigation.as_ref().unwrap().expanded.len(), 1);
@@ -1327,6 +1888,7 @@ pub struct EvidenceTableRow {
     pub retrieved: String,
     pub statement: String,
     pub evidence: Vec<argos_osint_core::evidence::EvidenceRef>,
+    pub observation_id: Option<String>,
 }
 impl CaseWorkspace {
     pub fn evidence_rows(&self) -> Vec<EvidenceTableRow> {
@@ -1355,6 +1917,11 @@ impl CaseWorkspace {
             .data
             .findings
             .iter()
+            .filter(|f| {
+                self.lead_id
+                    .as_ref()
+                    .is_none_or(|id| &f.observation.entity_id == id)
+            })
             .map(|f| {
                 let o = &f.observation;
                 EvidenceTableRow {
@@ -1366,10 +1933,11 @@ impl CaseWorkspace {
                     retrieved: o.retrieved_at.clone(),
                     statement: format!("{} · {}", o.id, o.statement),
                     evidence: o.evidence.clone(),
+                    observation_id: Some(o.id.clone()),
                 }
             })
             .collect::<Vec<_>>();
-        rows.extend(self.data.links.iter().map(|l| {
+        rows.extend(self.links().into_iter().map(|l| {
             let r = &l.relationship;
             let o = self
                 .data
@@ -1394,6 +1962,7 @@ impl CaseWorkspace {
                 retrieved: o.map(|o| o.retrieved_at.clone()).unwrap_or_default(),
                 statement: r.uncertainty.clone(),
                 evidence: r.evidence.clone(),
+                observation_id: o.map(|o| o.id.clone()),
             }
         }));
         rows.retain(|r| {

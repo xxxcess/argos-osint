@@ -267,6 +267,16 @@ impl Store {
         self.conn.execute("INSERT INTO research_jobs VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET state=excluded.state,body=excluded.body,updated_at=excluded.updated_at",params![job.id,key,serde_json::to_string(&job.state)?,serde_json::to_string(job)?,chrono::Utc::now().to_rfc3339()])?;
         Ok(())
     }
+    pub fn jobs_for_case(&self, case_id: &str) -> Result<Vec<ResearchJob>> {
+        let mut stmt=self.conn.prepare("SELECT body FROM research_jobs WHERE json_extract(body,'$.input.case_id')=?1 ORDER BY updated_at DESC")?;
+        let bodies = stmt
+            .query_map([case_id], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        bodies
+            .into_iter()
+            .map(|b| Ok(serde_json::from_str(&b)?))
+            .collect()
+    }
     pub fn jobs(&self) -> Result<Vec<ResearchJob>> {
         let mut s = self
             .conn
@@ -645,7 +655,7 @@ impl ResearchQueue {
                     for (index,relationship) in relations.iter().enumerate(){store.put_record(&format!("{}:relationship:{index}",observation.id),"relationship",observation.case_id.as_deref(),observation.report_id.as_deref(),relationship)?;}
 
                 }
-            }transaction.commit()?;Ok::<(), anyhow::Error>(())
+            }store.record_job_gap(&job)?;transaction.commit()?;Ok::<(), anyhow::Error>(())
         }).await??;
         let _ = self.events.send(job_for_event);
         Ok(())
@@ -681,7 +691,7 @@ fn redact_value(value: &mut serde_json::Value, secret: Option<&str>) {
         _ => {}
     }
 }
-fn valid_input(provider: &str, label: &str) -> Result<()> {
+pub(crate) fn valid_input(provider: &str, label: &str) -> Result<()> {
     if label.is_empty()
         || label.len() > 512
         || label.starts_with('-')
@@ -1496,6 +1506,20 @@ pub fn collection_available(name: &str) -> bool {
     )
 }
 /// Same input/privacy checks used to present and submit a focused action.
+/// Input compatibility only: availability and saved scope are checked before submission.
+pub fn input_matches_action(name: &str, label: &str) -> Result<()> {
+    valid_input(name, label)?;
+    if matches!(name, "identity" | "leakcheck") {
+        let email = crate::search::TextQuery::extract(label).emails == vec![label.to_string()];
+        let handle = label
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
+        if !email && !handle {
+            bail!("Select an exact email or handle");
+        }
+    }
+    Ok(())
+}
 pub fn eligible_action(name: &str, label: &str, config: &ResearchConfig) -> Result<()> {
     if !config.enabled {
         bail!("Integration disabled");

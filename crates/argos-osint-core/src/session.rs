@@ -96,6 +96,18 @@ pub fn slash_commands() -> &'static [SlashCommand] {
             summary: "List or open a saved investigation without a report",
         },
         SlashCommand {
+            name: "work",
+            summary: "Open Workbench on a cached lead",
+        },
+        SlashCommand {
+            name: "graph",
+            summary: "Open the case Graph with typed holes",
+        },
+        SlashCommand {
+            name: "gaps",
+            summary: "List typed gaps for lead or case",
+        },
+        SlashCommand {
             name: "draft",
             summary: "Draft a report from selected accepted case observations",
         },

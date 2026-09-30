@@ -115,6 +115,12 @@ impl Store {
                 snapshot_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS case_gaps (
+                id TEXT PRIMARY KEY,
+                case_id TEXT NOT NULL,
+                body TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS case_gaps_case ON case_gaps(case_id);
             CREATE TABLE IF NOT EXISTS case_data_resets (
                 case_id TEXT PRIMARY KEY,
                 cleared_at TEXT NOT NULL,
@@ -200,7 +206,7 @@ impl Store {
         Ok(CaseDataPlan {
             case_id: id.into(), title, delete_case,
             messages: count("SELECT COUNT(*) FROM messages WHERE session_id=?1")?,
-            records: count("SELECT COUNT(*) FROM evidence_records WHERE case_id=?1 AND (report_id IS NULL OR kind IN ('case_ingestion','investigation_scope','entity_correction','identity_resolution'))")?,
+            records: count("SELECT COUNT(*) FROM evidence_records WHERE case_id=?1 AND (report_id IS NULL OR kind IN ('case_ingestion','investigation_scope','entity_correction','identity_resolution'))")? + count("SELECT COUNT(*) FROM case_gaps WHERE case_id=?1")?,
             decisions: count("SELECT COUNT(*) FROM finding_decisions WHERE observation_id IN (SELECT json_extract(body,'$.id') FROM evidence_records WHERE case_id=?1 AND kind='observation' AND report_id IS NULL)")?,
             jobs: count("SELECT COUNT(*) FROM research_jobs WHERE json_extract(body,'$.input.case_id')=?1")?,
             reports: count("SELECT COUNT(*) FROM reports WHERE case_id=?1")?,
@@ -228,6 +234,7 @@ impl Store {
             "DELETE FROM research_jobs WHERE json_extract(body,'$.input.case_id')=?1",
             [id],
         )?;
+        tx.execute("DELETE FROM case_gaps WHERE case_id=?1", [id])?;
         tx.execute("DELETE FROM messages WHERE session_id=?1", [id])?;
         tx.execute("DELETE FROM tool_calls WHERE session_id=?1", [id])?;
         tx.execute(

@@ -50,7 +50,8 @@ The bottom composer is the same idea as Grok Build. Enter sends. The message
 goes to the case desk, or to the case you selected with J/K, Enter, or
 `/use`. Esc closes an open widget first, then points the prompt back at the
 case desk. Esc does not cancel a running turn.
-Ctrl+C cancels a turn, clears a draft, or quits when the prompt is empty.
+Ctrl+C cancels a turn or clears a draft. Background jobs continue; `/cancel-jobs`
+cancels them. With no active turn, draft, or jobs, Ctrl+C quits.
 
 | Key | Action |
 | --- | --- |
@@ -82,22 +83,39 @@ include existing recommended passages (`e`), and allow sensitive (`s`) or active
 HTTP (`a`) actions if needed. Provider privacy and exact-host controls still apply.
 First actions start unchecked; Space selects sources and Enter saves the case and
 starts only selected actions. Enter with no actions creates a case without a report
-or initial network. Selecting saved cases opens Leads. Esc restores the Desk prompt,
+or initial network. Selecting saved cases opens Inbox + Workbench. Esc restores the Desk prompt,
 selection, and scroll position.
 
-A case has **1 Leads**, **2 Focus map**, **3 Evidence table**, **4 Timeline**,
-**5 Review**, **6 Jobs**, and **7 Path** as separate clickable tabs. The tab bar wraps
-on narrow screens; `1–7` selects tabs and each tab keeps its row/scroll position.
-`j/k` selects cached leads;
-`e` offers eligible provider actions and Enter submits one bounded job. Discovered
-identifiers become candidate leads without recursive collection. Focus shows one-hop
-links with typed basis, uncertainty, source targets, and review state. `←/→` selects
-a link, `x` expands one neighbor, `z` collapses, `o` opens its source, `v` opens its
-review, and `p` opens Path for that pair. Evidence and Timeline open the same source.
-Path also opens with `7`: `j/k` selects an entity, `f/t` pins endpoints, `n/N`
-selects a path, `[ / ]` selects a hop, and `o` opens its source. It uses accepted
-noncandidate links only and never starts research. No recovered path is not proof of
-a real-world gap.
+The Desk shows **Next Work**, a **Queue** including cases without reports, and typed
+**Open Questions**. Focus these lists with `w/q/g`, move with `j/k`, and press Enter
+to open the selected lead. `\` toggles the retrieval transcript; ordinary questions
+remain retrieval-only.
+
+The four modes are **1 Desk**, **2 Inbox + Workbench**, **3 Graph**, and **4 Product**.
+The persistent inbox ranks pending review and typed gaps before accepted link degree,
+showing a why-now reason and separate counts. Tab cycles inbox, center, inspector,
+and composer; narrow terminals stack the inbox above the center.
+
+Workbench keeps Plan, selected-lead jobs, Intake, and So What beside the inbox.
+`e` focuses Plan; Space checks actions; `e` or Enter queues only the checked set as
+separate bounded jobs. Checks start empty. `/investigate` remains a single explicit
+action. Selecting a lead never collects. Discovered identifiers become candidate
+leads without recursive collection. `a/r/d/t` prepares a review with a reason;
+`s` cycles intake presentations and `J` opens selected-lead jobs (`/jobs` is case-wide).
+
+Graph shows accepted edges, dashed candidates, and typed sockets: uncollected,
+collected-absent, conflicting, and candidate. `g` selects holes; Enter on an
+uncollected hole opens its checked plan without running it. Collected-absent opens
+history and is not a real-world negative finding. `←/→` selects a link, `x` expands
+one neighbor, `z` collapses, `o` opens source, and `v` opens review. `p` overlays Path;
+`f/t` pins endpoints, `n/N` selects a path, and `[ / ]` selects a hop. Pins survive
+center switches. Path uses accepted noncandidate links only and never researches.
+No recovered path is not proof of a real-world gap.
+
+Product lists eligible accepted observations; Space selects IDs, `c` toggles
+lead/case scope, and Enter prefills `/draft final <IDs>`. Pending gaps stay unresolved.
+`/work [lead]`, `/graph`, and `/gaps [lead|case]` expose the same cached surfaces.
+Migration aliases `5` Review, `6` Jobs, and `7` Path remain available.
 
 `D` opens case data controls. `/clear-case [id or title]` removes case investigation
 data while keeping the empty case; `/delete-case [id or title]` also removes the
@@ -165,13 +183,10 @@ The launcher is Case Desk, Providers, and System. Case Desk opens case investiga
 OSINT, under Providers, turns Facts, Web, News, Domain, Social, and Identity on or off for every run, sets a SearXNG URL, and can store Brave, Tavily, YouTube, and GitHub keys. Extra public sources whose URL contains `{query}` still work. Private addresses are refused.
 
 On the Case Desk, ask saved evidence or use **+** to review an investigation
-scope. **Tab** focuses Cases & reports; **Enter** opens a case or historical report.
-The case workspace starts on Leads. Focus map, Evidence table, and Timeline provide
-the main TNA views. **Path** is the only advanced case analysis tool: after reviewing
-findings, choose a pair in Focus and press `p` to inspect supported connections and
-each hop’s original source. Historical report workspaces
-retain their five layout shortcuts (`g/q/p/m/r`), citation reader, and extraction audit.
-Case evidence and typed relationships are the source of truth for investigation TNA.
+scope. Next Work opens the highest-priority lead; the case frame keeps an inbox
+beside Workbench, Graph, or Product. Historical report workspaces retain their five
+layout shortcuts (`g/q/p/m/r`), citation reader, and extraction audit.
+Case evidence and typed relationships remain the source of truth for investigation TNA.
 
 The agent loop supports independently selected Writer and Tools connections.
 Grok and OpenRouter use the OpenAI-compatible HTTP API. OpenAI subscription

@@ -140,29 +140,216 @@ fn draw_desk_and_reports(frame: &mut Frame, app: &mut App, area: Rect) {
         draw_network(frame, app, area);
         return;
     }
-    let rows = split_v(area, &[Constraint::Length(2), Constraint::Min(0)]);
-    let current = app
-        .research_jobs
-        .first()
-        .map(|j| format!("{} {:?}: {}", j.provider, j.state, j.progress))
-        .unwrap_or_else(|| "No background findings yet".into());
+    operations_desk(frame, app, area);
+}
+fn operations_desk(frame: &mut Frame, app: &mut App, area: Rect) {
+    let desk = app.desk_projection();
+    if app.cases.is_empty() || app.desk_transcript || desk.cards.is_empty() {
+        let rows = split_v(
+            area,
+            &[
+                Constraint::Length(2),
+                Constraint::Min(0),
+                Constraint::Length(if app.cases.is_empty() { 0 } else { 6 }),
+            ],
+        );
+        frame.render_widget(Paragraph::new("Ask saved evidence · + saves a case without a report.\n\\ transcript · ordinary questions remain retrieval only").style(theme::dim()),rows[0]);
+        app.canvas_area = rows[1];
+        if app.desk_transcript && area.width >= 80 {
+            let cols = split_h(
+                rows[1],
+                &[Constraint::Percentage(65), Constraint::Percentage(35)],
+            );
+            app.canvas_area = cols[0];
+            draw_canvas(frame, app, cols[0]);
+            draw_report_list(frame, app, cols[1]);
+        } else {
+            draw_canvas(frame, app, rows[1]);
+        }
+        if !app.cases.is_empty() {
+            desk_queue(frame, app, &desk, rows[2]);
+        }
+        return;
+    }
+    app.canvas_area = area;
+    app.report_area = Rect::default();
+    let rows = split_v(
+        area,
+        &[
+            Constraint::Length(9),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ],
+    );
+    let mut cards = Vec::new();
+    for (i, c) in desk.cards.iter().enumerate() {
+        let title = app
+            .cases
+            .iter()
+            .find(|case| case.id == c.case_id)
+            .map(|case| case.title.as_str())
+            .unwrap_or(&c.case_id);
+        let lead = c
+            .lead_id
+            .as_ref()
+            .and_then(|id| {
+                app.desk_cases
+                    .get(&c.case_id)?
+                    .entities
+                    .iter()
+                    .find(|e| &e.id == id)
+            })
+            .map(|e| e.label.as_str())
+            .unwrap_or("case question");
+        cards.push(
+            Line::from(format!(
+                "{} {} {} · {lead} · {title}",
+                if app.desk_pane == 0 && app.desk_row == i {
+                    "›"
+                } else {
+                    " "
+                },
+                i + 1,
+                match c.kind {
+                    argos_osint_core::investigation::NextWorkKind::Review => "REVIEW",
+                    argos_osint_core::investigation::NextWorkKind::Enrich => "ENRICH",
+                    argos_osint_core::investigation::NextWorkKind::Gap => "GAP",
+                    argos_osint_core::investigation::NextWorkKind::Product => "PRODUCT",
+                }
+            ))
+            .style(if app.desk_pane == 0 && app.desk_row == i {
+                theme::selected()
+            } else {
+                theme::text()
+            }),
+        );
+        cards.push(Line::from(format!("  {} · Enter opens work", c.reason)).style(theme::dim()));
+    }
     frame.render_widget(
-        Paragraph::new(format!(
-            "Scope {:?} · {} research/install jobs active · /jobs · /findings\n{}",
-            app.evidence_scope, app.research_active, current
-        ))
-        .style(theme::dim())
-        .wrap(Wrap { trim: false }),
+        Paragraph::new(cards)
+            .wrap(Wrap { trim: false })
+            .block(panel(if app.desk_refreshing.is_empty() {
+                " Next Work · w focus · j/k · Enter "
+            } else {
+                " Next Work · refreshing · w focus · Enter "
+            })),
         rows[0],
     );
-    let area = rows[1];
-    let cols = split_h(
-        area,
-        &[Constraint::Percentage(64), Constraint::Percentage(36)],
+    let lower = if area.width >= 80 {
+        split_h(
+            rows[1],
+            &[Constraint::Percentage(50), Constraint::Percentage(50)],
+        )
+    } else {
+        split_v(
+            rows[1],
+            &[Constraint::Percentage(50), Constraint::Percentage(50)],
+        )
+    };
+    desk_queue(frame, app, &desk, lower[0]);
+    let visible = lower[1].height.saturating_sub(2).max(1) as usize;
+    let mut questions = Vec::new();
+    for (i, g) in desk
+        .questions
+        .iter()
+        .enumerate()
+        .skip(if app.desk_pane == 2 {
+            app.desk_row.saturating_sub(visible.saturating_sub(1))
+        } else {
+            0
+        })
+        .take(visible)
+    {
+        questions.push(
+            Line::from(format!(
+                "{} {} · {} · {}",
+                if app.desk_pane == 2 && app.desk_row == i {
+                    "›"
+                } else {
+                    "○"
+                },
+                g.kind.label(),
+                g.input,
+                g.reason
+            ))
+            .style(if app.desk_pane == 2 && app.desk_row == i {
+                theme::selected()
+            } else {
+                theme::dim()
+            }),
+        );
+    }
+    if questions.is_empty() {
+        questions.push(Line::from(
+            "No named gaps · missing links alone are not gaps",
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(questions)
+            .wrap(Wrap { trim: false })
+            .block(panel(" Open Questions · g focus · Enter ")),
+        lower[1],
     );
-    app.canvas_area = cols[0];
-    draw_canvas(frame, app, cols[0]);
-    draw_report_list(frame, app, cols[1]);
+    frame.render_widget(
+        Paragraph::new("\\ transcript · Tab composer · + scope · Selecting a lead never collects.")
+            .style(theme::dim()),
+        rows[2],
+    );
+}
+fn desk_queue(
+    frame: &mut Frame,
+    app: &App,
+    desk: &argos_osint_core::investigation::DeskProjection,
+    area: Rect,
+) {
+    let mut lines = Vec::new();
+    for (i, row) in desk
+        .queue
+        .iter()
+        .enumerate()
+        .skip(if app.desk_pane == 1 {
+            app.desk_row.saturating_sub(3)
+        } else {
+            0
+        })
+        .take(area.height.saturating_sub(2) as usize)
+    {
+        let title = app
+            .cases
+            .iter()
+            .find(|c| c.id == row.case_id)
+            .map(|c| c.title.as_str())
+            .unwrap_or(&row.case_id);
+        lines.push(
+            Line::from(format!(
+                "{} {title} · {} review · {} jobs · {} gaps{}",
+                if app.desk_pane == 1 && app.desk_row == i {
+                    "›"
+                } else {
+                    " "
+                },
+                row.pending_review,
+                row.running_jobs,
+                row.gap_counts.iter().sum::<usize>(),
+                if row.draft_ready {
+                    " · draft ready"
+                } else {
+                    ""
+                }
+            ))
+            .style(if app.desk_pane == 1 && app.desk_row == i {
+                theme::selected()
+            } else {
+                theme::text()
+            }),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel(" Queue · q focus · cases without reports included ")),
+        area,
+    );
 }
 
 fn draw_brain(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1244,8 +1431,10 @@ fn prompt_line(app: &App) -> Line<'static> {
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     if app.investigation.is_some() && matches!(app.module, None | Some(ModuleId::Cases)) {
         frame.render_widget(
-            Paragraph::new("1–7 views · j/k select · o source · e enrich · / commands · Esc Desk")
-                .style(theme::dim()),
+            Paragraph::new(
+                "1 Desk · 2 Work · 3 Graph · 4 Product · e plan · / commands · Esc Desk",
+            )
+            .style(theme::dim()),
             area,
         );
         return;
@@ -1644,11 +1833,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, modal);
     let text = vec![
         Line::from("Argos OSINT").style(theme::accent()),
-        Line::from("Enter asks saved reviewed evidence and reports. + chooses investigation scope and first actions. /case lists saved cases; /case <id> opens Leads without a report."),
+        Line::from("Enter asks saved reviewed evidence and reports. + chooses investigation scope and first actions. /case lists saved cases; /case <id> opens Workbench without a report."),
         Line::from("Ctrl+P app search    Ctrl+M models    Tab cycle focus    Ctrl+C cancel or quit"),
         Line::from("/model lists Grok 4.6 and Grok 4.5. /model grok-4.5 switches. The default is grok-4.6."),
         Line::from("PgUp and PgDn scroll the case desk. End jumps to the latest. The wheel does the same over the chat."),
-        Line::from("Case: 1 Leads · 2 Focus · 3 Evidence · 4 Timeline · 5 Review · 6 Jobs · 7 Path. In Focus, p explores the selected pair after review. e chooses enrichment, o opens the source, Esc returns to Desk."),
+        Line::from("Modes: 1 Desk · 2 Inbox + Workbench · 3 Graph · 4 Product. Tab cycles inbox, center, inspector, composer. e focuses Plan; Space checks actions; e queues checked actions as separate jobs. g selects holes; p overlays Path; f/t pin endpoints. Product: Space selects accepted IDs; c lead/case; Enter prefills /draft. Desk: w Next Work, q Queue, g Open Questions; \\ toggles transcript. 5 Review, 6 Jobs, 7 Path remain aliases. o source; Esc returns."),
         Line::from("D opens case data controls. /clear-case keeps an empty case; /delete-case removes it. Review the plan, then /confirm-case <exact ID>. /cancel-case-data cancels. Saved reports remain accessible."),
         Line::from("System keeps the log, hardware, and settings. Configuration and task errors stay in that log."),
         Line::from("Providers separates Grok, OpenAI ChatGPT, and OpenRouter accounts. Models assigns Writer and Tools independently."),

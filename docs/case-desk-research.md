@@ -19,32 +19,64 @@ without a report, job, or graph. Search respects the selected Facts/Web/News/Soc
 sources; domain and identity first actions use exact seeds rather than a broad query.
 Source scope is saved with the case; later focused actions cannot bypass it.
 
-`/case` lists saved cases and `/case <id-or-title>` opens Leads. The Cases & reports
-list also opens cases, including cases without reports, across restarts. Esc returns
+`/case` lists saved cases and `/case <id-or-title>` opens Inbox + Workbench. The Desk Queue
+also opens cases, including cases without reports, across restarts. Esc returns
 to the preserved Desk prompt, highlight, scope, and scroll position.
 
-## Case workspace
+## Next-action Desk and case workspace
 
-| Key/view | Behavior |
+The Desk shows up to three **Next Work** cards, a case **Queue**, and typed **Open
+Questions**. Cases without reports are included. `w`, `q`, and `g` focus those
+lists; `j/k` moves and Enter opens the selected case and lead. `/scope case <id>` or
+report scopes restrict the queue to matching cases. `\` toggles the retrieval
+transcript in one key. When there is no next work, the transcript stays visible.
+Ordinary questions remain retrieval-only; selecting a lead never collects.
+`/dashboard` returns to this Desk with the saved prompt and scroll position.
+
+| Mode | Behavior |
 | --- | --- |
-| `1` Leads | Small ranked list, selected question, recent changes, pending review, evidence gaps, jobs. Rank is accepted evidence count, not a strategic score. |
-| `2` Focus map | Selected entity and immediate typed links. `j/k` selects entities; `←/→` selects a link; `x` expands one neighbor and `z` collapses. `v` opens its review; `p` opens Path for the pair. |
-| `3` Evidence table | Observation and relationship rows show entity/type, source, retrieval/event dates, and review state. `/filter <text/source/state>` filters and `s` cycles entity, relationship, source, event/retrieval date, and review-state sorts. |
-| `4` Timeline | Observation/provider and research lanes. Event date, publication, and retrieval stay separate; undated events stay undated. |
-| `5` Review | New/repeated/changed/conflicting/candidate identity findings. `a/r/d/t` prepares accept/reject/defer/retain, with an editable reason. |
-| `6` Jobs | Queued/running/partial/completed/failed/cancelled states, provider/input/progress/errors. Enter filters Review to the job's observations. |
-| `7` Path | The only advanced case tool. After review, select a pair in Focus and press `p`; explore up to four hops through accepted supported links. `j/k` selects entities, `f/t` pins endpoints, `n/N` chooses paths, `[ / ]` chooses hops, and `o` opens the original source. Candidate links are excluded; no recovered path is not a real-world negative finding. |
+| `1` Desk | Next Work, Queue, Open Questions, and collapsible retrieval transcript. |
+| `2` Inbox + Workbench | Persistent why-now lead list beside Plan, Intake, and So What. Pending/deferred review ranks first, followed by uncollected, conflicting, and candidate gaps. Accepted link degree is a tie-break; review/acceptance/degree counts remain separate. |
+| `3` Graph | Immediate relationships and typed holes for the selected lead and expanded neighbors. Solid accepted links, dashed candidates, gold uncollected sockets, dim collected-absent sockets, red conflicts. `←/→` selects a link; `x` expands one neighbor; `z` collapses; `v` opens its intake; `o` opens its source. Limit: 16 immediate relationships. |
+| `4` Product | Accepted observations for the selected lead; `c` switches to case-wide. Space selects IDs and Enter prefills `/draft final <IDs>` for editing/submission. Pending gaps remain visible and unresolved. Candidate identity observations are excluded. |
 
-`o` or Enter opens a selected source artifact or report passage. Focus, Evidence,
-and Timeline resolve the same source targets. Narrow terminals stack the inspector
-below the map rather than requiring a dense multi-column layout. Selection, expanded
-neighbors, filter, and source scroll remain stable across background refreshes.
+The inbox persists across centers. Tab cycles inbox, center, inspector, and
+composer; Shift+Tab focuses the inbox. `j/k` operates the focused list. Narrow
+terminals stack the inbox above the center; the header never wraps seven tabs.
+`5` Review, `6` Jobs, and `7` Path are migration aliases. `s` cycles Intake,
+Evidence, and chronological intake presentations. `/work [lead]`, `/graph`, and
+`/gaps [lead|case]` open the relevant cached surface.
 
-`e` offers eligible focused providers for the selected lead (or selected question
-when there are no entities). This is a cached menu. Selecting a lead never collects.
-Enter submits exactly one action. `/investigate <provider> [exact input]` provides
-the same explicit action; open a case or report first. Newly extracted identifiers
-are candidate leads with source mentions and do not trigger recursive enrichment.
+`e` focuses the selected lead's **Plan** (the case question is used when no lead
+exists). Checkboxes start empty. Space checks an eligible action; `e` or Enter
+queues the explicitly checked set as separate bounded jobs. Each remains independently
+cancellable with `/cancel-jobs`; there is no implicit run-all or recursive collection.
+Unready actions remain visible and disabled. Opening configuration never scans or
+installs. `/investigate <provider> [exact input]` retains its single-action form and
+stays on Workbench. Selected-lead jobs appear under Plan; `J` opens those jobs and
+Enter filters intake to that job. `/jobs` opens the case-wide job list.
+
+Graph `g` focuses holes. Enter or `e` on an uncollected hole opens Workbench with
+that action checked, without collecting. Collected-absent holes open job/source
+history and cannot silently replay the same action/input; they are **not a
+real-world negative finding**. Conflict and candidate holes open the relevant
+observations for review. Missing or uncollected evidence does not establish a
+real-world gap. No gap is inferred solely from a missing edge.
+
+`p` overlays Path on Graph, using the selected pair or existing `f/t` pins. `n/N`
+chooses a path; `[ / ]` chooses a hop; `o` opens its source. Path uses only accepted,
+noncandidate, source-supported links, up to four hops, and never starts research.
+Pins and map selection survive center switches; Esc closes Path to the same map.
+No recovered path is not proof of a real-world gap.
+
+Gaps use an additive case-owned SQLite table. Projections backfill eligible never-run
+actions, completed jobs with no extractable observations, existing candidate links,
+and already categorized conflicts. A successful job closes its uncollected gap;
+zero observations opens collected-absent. Partial/failed jobs never become absence
+findings. Closed records retain history; `/correct`, `/merge`, and `/unmerge` follow
+the case projection without rewriting original evidence. Gaps never start jobs.
+Case clearing/deletion removes gap records alongside investigation data while
+retaining detached reports and historical citations.
 
 `/review <id> accept|retain|reject|defer <reason>` validates scope and appends a decision.
 Acceptance enables source-backed observed links. Rejection/defer cannot promote a
@@ -151,10 +183,9 @@ and automatic recursive pivots remain unavailable. Analysis exposes the supporte
 conservative parser/review policy rather than implying arbitrary extraction presets work.
 
 
-All seven workspace views are separate clickable tabs whenever a case is open.
-The selected tab is highlighted and the tab bar wraps at narrower terminal widths.
-Number keys `1–7` select the same tabs; each retains its row and scroll position.
-Changing tabs reads cached evidence and never starts collection.
+The visible case header has Workbench, Graph, and Product centers, with Desk
+available through `1` or Esc. Each center retains navigation and selected links.
+Changing centers reads cached evidence and never starts collection.
 
 ## Clear or delete case data
 

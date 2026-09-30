@@ -9,7 +9,11 @@ pub(super) fn under_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
     let Some(w) = app.investigation.as_ref() else {
         return area;
     };
-    let active = w.view;
+    let active = match w.view {
+        CaseView::Focus | CaseView::Path => CaseView::Focus,
+        CaseView::Product => CaseView::Product,
+        _ => CaseView::Review,
+    };
     let groups = tab_groups(area.width.saturating_sub(2));
     let rows = split_v(
         area,
@@ -67,6 +71,7 @@ pub(super) fn under_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Rect {
 }
 
 pub(super) fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.sync_workbench_plan();
     app.report_area = Rect::default();
     app.report_line_index.clear();
     app.tna_tab_hits.clear();
@@ -75,82 +80,54 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     app.canvas_area = area;
     let rows = split_v(area, &[Constraint::Length(1), Constraint::Min(0)]);
     frame.render_widget(
-        Paragraph::new("D Case data · 1–7 select tab · e enrich · o source").style(theme::dim()),
+        Paragraph::new("1 Desk · Tab inbox/center/inspector/composer · e plan · g gaps · D data")
+            .style(theme::dim()),
         rows[0],
     );
     let w = app.investigation.as_ref().unwrap();
+    let regions = if rows[1].width >= 80 {
+        split_h(
+            rows[1],
+            &[Constraint::Percentage(28), Constraint::Percentage(72)],
+        )
+    } else {
+        split_v(rows[1], &[Constraint::Length(7), Constraint::Min(0)])
+    };
+    inbox(frame, w, regions[0]);
     if let Some(source) = &w.source {
         frame.render_widget(
             Paragraph::new(source.clone())
                 .scroll((w.scroll.min(u16::MAX as usize) as u16, 0))
                 .wrap(Wrap { trim: false })
-                .block(panel(" Original source · j/k scroll · Esc back ")),
-            rows[1],
-        );
-        return;
-    }
-    if !w.actions.is_empty() {
-        let items = w
-            .actions
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                Line::from(format!(
-                    "{} {} · {}",
-                    if i == w.action_sel { "›" } else { " " },
-                    name,
-                    argos_osint_core::research::capabilities(name)
-                ))
-                .style(if i == w.action_sel {
-                    theme::selected()
-                } else {
-                    theme::text()
-                })
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(
-            Paragraph::new(items)
-                .wrap(Wrap { trim: false })
                 .block(panel(
-                    " Enrich selection · chosen action only · Enter submit · Esc cancel ",
+                    " Original source / job history · j/k scroll · Esc back ",
                 )),
-            rows[1],
+            regions[1],
         );
         return;
     }
+
     match w.view {
-        CaseView::Leads => leads(frame, w, rows[1]),
-        CaseView::Focus => focus(frame, w, rows[1]),
-        CaseView::Evidence | CaseView::Review => evidence(frame, w, rows[1]),
-        CaseView::Timeline => timeline(frame, w, rows[1]),
-        CaseView::Jobs => jobs(frame, w, rows[1]),
-        CaseView::Path => case_path(frame, app, rows[1]),
+        CaseView::Focus => focus(frame, w, regions[1]),
+        CaseView::Path => {
+            let graph = split_v(
+                regions[1],
+                &[Constraint::Percentage(45), Constraint::Percentage(55)],
+            );
+            focus(frame, w, graph[0]);
+            case_path(frame, app, graph[1]);
+        }
+        CaseView::Product => product(frame, w, regions[1]),
+        _ => workbench(frame, w, regions[1]),
     }
 }
 
-fn tab_groups(width: u16) -> Vec<Vec<(CaseView, String)>> {
-    let mut groups = vec![Vec::new()];
-    let mut used = 0;
-    for (i, view) in CaseView::ALL.iter().enumerate() {
-        let title = if width < 55 {
-            ["Leads", "Focus", "Table", "Time", "Review", "Jobs", "Path"][i]
-        } else {
-            view.title()
-        };
-        let label = format!("{} {title}", i + 1);
-        let wanted = label.width() as u16 + 2;
-        let gap = if used > 0 { 3 } else { 0 };
-        if used > 0 && used + gap + wanted > width {
-            groups.push(Vec::new());
-            used = 0;
-        }
-        if used > 0 {
-            used += 3;
-        }
-        used += wanted;
-        groups.last_mut().unwrap().push((*view, label));
-    }
-    groups
+fn tab_groups(_width: u16) -> Vec<Vec<(CaseView, String)>> {
+    vec![vec![
+        (CaseView::Review, "2 Work".into()),
+        (CaseView::Focus, "3 Graph".into()),
+        (CaseView::Product, "4 Product".into()),
+    ]]
 }
 
 fn case_path(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -164,19 +141,19 @@ fn case_path(frame: &mut Frame, app: &mut App, area: Rect) {
             .style(theme::dim()),
         Line::from(format!(
             "From: {}",
-            app.tna_from
+            w.path_from
                 .as_deref()
                 .map(|id| name(w, id))
                 .unwrap_or_else(|| "select entity and press f".into())
         )),
         Line::from(format!(
             "To:   {}",
-            app.tna_to
+            w.path_to
                 .as_deref()
                 .map(|id| name(w, id))
                 .unwrap_or_else(|| "select entity and press t".into())
         )),
-        Line::from("j/k entity · f from · t to · n/N path · [/] hop · o source · 2 Focus")
+        Line::from("Inbox j/k · f from · t to · n/N path · [/] hop · o source · Esc map")
             .style(theme::dim()),
         Line::from(format!(
             "Selected entity: {}",
@@ -185,20 +162,20 @@ fn case_path(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(theme::accent()),
     ];
     if paths.is_empty() {
-        lines.push(Line::from(if app.tna_from.is_none() || app.tna_to.is_none() {"Choose two entities to explore their reviewed evidence."} else {"No supported path found within the search limits. This is not evidence of a real-world gap."}));
+        lines.push(Line::from(if w.path_from.is_none() || w.path_to.is_none() {"Choose two entities to explore their reviewed evidence."} else {"No supported path found within the search limits. This is not evidence of a real-world gap. No recovered path is not proof of a real-world gap."}));
     }
     for (i, path) in paths.iter().enumerate() {
         lines.push(
             Line::from(format!(
                 "{} {}",
-                if i == app.tna_path_sel { "›" } else { " " },
+                if i == w.path_sel { "›" } else { " " },
                 path.nodes
                     .iter()
                     .map(|id| name(w, id))
                     .collect::<Vec<_>>()
                     .join(" → ")
             ))
-            .style(if i == app.tna_path_sel {
+            .style(if i == w.path_sel {
                 theme::selected()
             } else {
                 theme::text()
@@ -206,8 +183,8 @@ fn case_path(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
     if let Some(pair) = paths
-        .get(app.tna_path_sel)
-        .and_then(|p| p.nodes.windows(2).nth(app.tna_hop_sel))
+        .get(w.path_sel)
+        .and_then(|p| p.nodes.windows(2).nth(w.hop_sel))
     {
         for link in w.data.links.iter().filter(|l| {
             !l.candidate
@@ -218,7 +195,7 @@ fn case_path(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.push(
                 Line::from(format!(
                     "\nHop {}: {} · {}",
-                    app.tna_hop_sel + 1,
+                    w.hop_sel + 1,
                     r.kind.label(),
                     r.basis.label()
                 ))
@@ -265,52 +242,40 @@ fn name(w: &CaseWorkspace, id: &str) -> String {
         .map(|e| e.label.clone())
         .unwrap_or_else(|| id.to_string())
 }
-fn leads(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
-    let cols = if area.width >= 80 {
-        split_h(
-            area,
-            &[Constraint::Percentage(45), Constraint::Percentage(55)],
-        )
-    } else {
-        split_v(
-            area,
-            &[Constraint::Percentage(50), Constraint::Percentage(50)],
-        )
-    };
+fn inbox(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
     let selected = w
         .data
         .entities
         .iter()
         .position(|e| Some(&e.id) == w.lead_id.as_ref())
         .unwrap_or(0);
-    let start = selected.saturating_sub(w.lead_limit.saturating_sub(1));
+    let visible = ((area.height.saturating_sub(2) / 3).max(1) as usize).min(w.lead_limit.max(1));
     let mut lines = Vec::new();
-    for e in w.data.entities.iter().skip(start).take(w.lead_limit.max(1)) {
-        let evidence = argos_osint_core::investigation::distinct_findings(
-            w.data
-                .findings
-                .iter()
-                .filter(|f| f.observation.entity_id == e.id),
-        );
-        let accepted =
-            argos_osint_core::investigation::distinct_findings(w.data.findings.iter().filter(
-                |f| f.observation.entity_id == e.id && f.decision == Some(ReviewDecision::Accept),
-            ));
-        let degree = w
+    for e in w
+        .data
+        .entities
+        .iter()
+        .skip(selected.saturating_sub(visible.saturating_sub(1)))
+        .take(visible)
+    {
+        let accepted = w
             .data
-            .links
+            .findings
             .iter()
-            .filter(|l| l.reviewed && (l.relationship.from == e.id || l.relationship.to == e.id))
+            .filter(|f| {
+                f.observation.entity_id == e.id && f.decision == Some(ReviewDecision::Accept)
+            })
             .count();
         lines.push(
             Line::from(format!(
-                "{} {}",
+                "{} {} · {:?}",
                 if Some(&e.id) == w.lead_id.as_ref() {
                     "›"
                 } else {
                     " "
                 },
-                e.label
+                e.label,
+                e.kind
             ))
             .style(if Some(&e.id) == w.lead_id.as_ref() {
                 theme::selected()
@@ -318,145 +283,224 @@ fn leads(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
                 theme::text()
             }),
         );
+        lines.push(Line::from(format!("why: {}", w.data.why_now(&e.id).1)).style(theme::dim()));
         lines.push(
             Line::from(format!(
-                "  {:?} · evidence {evidence} · accepted {accepted} · links {degree}",
-                e.kind
+                "review {} · accepted {accepted} · links {}",
+                w.data.pending_for(&e.id),
+                w.data.accepted_degree(&e.id)
             ))
             .style(theme::dim()),
         );
     }
     if lines.is_empty() {
-        lines.push(Line::from("No entity leads yet. /investigate search <focused question> collects only after selection."));
+        lines.push(Line::from("No leads yet · plan uses the case question"));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel(if w.inbox_focus {
+                " Lead inbox · j/k · focused "
+            } else {
+                " Lead inbox · Shift+Tab focus "
+            })),
+        area,
+    );
+}
+fn workbench(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
+    let rows = split_v(
+        area,
+        &[
+            Constraint::Length(
+                (w.actions.len() + w.disabled_actions.len() + 4).clamp(5, 10) as u16,
+            ),
+            Constraint::Min(4),
+            Constraint::Length(5),
+        ],
+    );
+    let mut plan = vec![Line::from(
+        "Space checks · e runs checked set as separate bounded jobs · no auto-check",
+    )
+    .style(theme::dim())];
+    for (i, action) in w
+        .actions
+        .iter()
+        .enumerate()
+        .skip(if w.plan_focus {
+            w.action_sel.saturating_sub(2)
+        } else {
+            0
+        })
+        .take(3)
+    {
+        plan.push(
+            Line::from(format!(
+                "{} [{}] {action} · ready · {}",
+                if w.plan_focus && i == w.action_sel {
+                    "›"
+                } else {
+                    " "
+                },
+                if w.plan_checked.contains(action) {
+                    "x"
+                } else {
+                    " "
+                },
+                argos_osint_core::research::capabilities(action)
+            ))
+            .style(if w.plan_focus && i == w.action_sel {
+                theme::selected()
+            } else {
+                theme::text()
+            }),
+        );
+    }
+    for (action, reason) in w.disabled_actions.iter().take(1) {
+        plan.push(Line::from(format!("[ ] {action} · {reason}")).style(theme::dim()));
+    }
+    for j in w
+        .data
+        .jobs
+        .iter()
+        .filter(|j| Some(&j.input.entity_id) == w.lead_id.as_ref() || w.lead_id.is_none())
+        .take(2)
+    {
+        plan.push(
+            Line::from(format!("{} {:?} · {}", j.provider, j.state, j.progress))
+                .style(theme::dim()),
+        );
+    }
+    if w.actions.is_empty() && w.disabled_actions.is_empty() {
+        plan.push(Line::from("No eligible in-scope actions"));
+    }
+    frame.render_widget(
+        Paragraph::new(plan)
+            .wrap(Wrap { trim: false })
+            .block(panel(" Plan · e focus · Selecting a lead never collects. ")),
+        rows[0],
+    );
+    match w.view {
+        CaseView::Jobs => jobs(frame, w, rows[1]),
+        CaseView::Evidence => evidence_table(frame, w, rows[1]),
+        CaseView::Timeline => timeline(frame, w, rows[1]),
+        _ => evidence(frame, w, rows[1]),
+    }
+    let mut summary = Vec::new();
+    if let Some(e) = w.lead() {
+        summary.push(Line::from(format!(
+            "{} · aliases {} · accepted links {} · candidate {}",
+            e.canonical,
+            e.aliases.join(", "),
+            w.data.accepted_degree(&e.id),
+            w.data
+                .links
+                .iter()
+                .filter(
+                    |l| l.candidate && (l.relationship.from == e.id || l.relationship.to == e.id)
+                )
+                .count()
+        )));
+    }
+    for f in w
+        .findings()
+        .iter()
+        .filter(|f| f.decision == Some(ReviewDecision::Accept))
+        .take(1)
+    {
+        summary.push(Line::from(f.observation.statement.clone()));
+    }
+    for g in w.visible_gaps().iter().take(1) {
+        summary.push(Line::from(format!("○ {} · g Graph holes", g.reason)).style(theme::dim()));
+    }
+    summary.push(
+        Line::from("Discovered identifiers become candidate leads without recursive collection.")
+            .style(theme::dim()),
+    );
+    frame.render_widget(
+        Paragraph::new(summary)
+            .wrap(Wrap { trim: false })
+            .block(panel(" So what ")),
+        rows[2],
+    );
+}
+fn product(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
+    let mut lines = vec![Line::from(format!(
+        "{} · c lead/case · Space select IDs · Enter prefills /draft final",
+        if w.product_case_wide {
+            "Case-wide"
+        } else {
+            "Selected lead"
+        }
+    ))
+    .style(theme::dim())];
+    for (i, f) in w
+        .product_findings()
+        .iter()
+        .enumerate()
+        .skip(w.row.saturating_sub(3))
+        .take(8)
+    {
+        let o = &f.observation;
+        lines.push(
+            Line::from(format!(
+                "{} [{}] {} · {}",
+                if i == w.row { "›" } else { " " },
+                if w.product_checked.contains(&o.id) {
+                    "x"
+                } else {
+                    " "
+                },
+                o.id,
+                o.statement
+            ))
+            .style(if i == w.row {
+                theme::selected()
+            } else {
+                theme::text()
+            }),
+        );
+    }
+    lines.push(Line::from("Pending gaps remain unresolved:").style(theme::accent()));
+    for g in w.data.gaps.iter().filter(|g| g.open).take(6) {
+        lines.push(Line::from(format!("○ {} · {}", g.kind.label(), g.reason)).style(theme::dim()));
     }
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(panel(
-                " Ranked leads · reviewed evidence first · j/k select · e enrich ",
+                " Product · accepted IDs only · choose final/addendum/revision/followup ",
             )),
-        cols[0],
-    );
-    let mut lines = vec![Line::from(format!(
-        "Pending review: {}",
-        w.data
-            .findings
-            .iter()
-            .filter(|f| f.decision.is_none() || f.decision == Some(ReviewDecision::Defer))
-            .count()
-    ))];
-    for f in w.data.findings.iter().rev().take(3) {
-        lines.push(Line::from(format!(
-            "{} · {}",
-            f.category, f.observation.statement
-        )));
-    }
-    lines.push(
-        Line::from(
-            "Unresolved: missing or uncollected evidence does not establish a real-world gap.",
-        )
-        .style(theme::dim()),
-    );
-    for j in w.data.jobs.iter().rev().take(2) {
-        lines.push(Line::from(format!(
-            "{} {:?} · {}",
-            j.provider, j.state, j.progress
-        )));
-    }
-    if let Some(e) = w.lead() {
-        lines.push(Line::from(format!(
-            "Selected: {} · {:?}\nAliases: {}",
-            e.canonical,
-            e.kind,
-            e.aliases.join(", ")
-        )));
-    }
-    lines.push(
-        Line::from("/draft final <accepted observation IDs> creates a report when chosen.")
-            .style(theme::dim()),
-    );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(panel(" Recent changes · review · gaps · jobs ")),
-        cols[1],
+        area,
     );
 }
+
 fn focus(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
-    let regions = if area.width >= 80 {
+    let regions = if area.width >= 60 {
         split_h(
             area,
-            &[
-                Constraint::Percentage(25),
-                Constraint::Percentage(40),
-                Constraint::Percentage(35),
-            ],
+            &[Constraint::Percentage(60), Constraint::Percentage(40)],
         )
-    } else if area.width >= 60 {
-        let rows = split_v(
-            area,
-            &[Constraint::Percentage(55), Constraint::Percentage(45)],
-        );
-        let top = split_h(
-            rows[0],
-            &[Constraint::Percentage(35), Constraint::Percentage(65)],
-        );
-        vec![top[0], top[1], rows[1]]
     } else {
         split_v(
             area,
-            &[
-                Constraint::Length(4),
-                Constraint::Percentage(40),
-                Constraint::Min(0),
-            ],
+            &[Constraint::Percentage(60), Constraint::Percentage(40)],
         )
     };
-    let index = w
-        .data
-        .entities
-        .iter()
-        .position(|e| Some(&e.id) == w.lead_id.as_ref())
-        .unwrap_or(0);
-    let visible = regions[0].height.saturating_sub(2).max(1) as usize;
-    let list = w
-        .data
-        .entities
-        .iter()
-        .skip(index.saturating_sub(visible.saturating_sub(1)))
-        .take(visible)
-        .map(|e| {
-            Line::from(format!(
-                "{} {}",
-                if Some(&e.id) == w.lead_id.as_ref() {
-                    "›"
-                } else {
-                    " "
-                },
-                e.label
-            ))
-            .style(if Some(&e.id) == w.lead_id.as_ref() {
-                theme::selected()
-            } else {
-                theme::text()
-            })
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(if list.is_empty() {
-            vec![Line::from("No leads yet")]
-        } else {
-            list
-        })
-        .block(panel(" Entities · j/k ")),
-        regions[0],
-    );
     let links = w.links();
     let mut lines = Vec::new();
-    for (i, l) in links.iter().enumerate().skip(
-        w.link
-            .saturating_sub((regions[1].height.saturating_sub(3) / 3).saturating_sub(1) as usize),
-    ) {
+    for (i, l) in
+        links
+            .iter()
+            .enumerate()
+            .skip(w.link.saturating_sub(
+                (regions[0].height.saturating_sub(5) / 3).saturating_sub(1) as usize,
+            ))
+            .take(if w.gap_focus {
+                0
+            } else {
+                (regions[0].height.saturating_sub(5) / 3).max(1) as usize
+            })
+    {
         let r = &l.relationship;
         let style = if l.candidate {
             Style::default().fg(theme::WARN)
@@ -465,9 +509,10 @@ fn focus(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
         };
         lines.push(
             Line::from(format!(
-                "{} {} → {}",
+                "{} {} {} {}",
                 if i == w.link { "›" } else { " " },
                 name(w, &r.from),
+                if l.candidate { "- - →" } else { "──→" },
                 name(w, &r.to)
             ))
             .style(style),
@@ -482,6 +527,52 @@ fn focus(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
             .style(style),
         );
     }
+    let hole_rows = (regions[0].height.saturating_sub(4) / 3).max(1) as usize;
+    for (i, gap) in w
+        .visible_gaps()
+        .iter()
+        .enumerate()
+        .skip(if w.gap_focus {
+            w.gap_sel.saturating_sub(hole_rows.saturating_sub(1))
+        } else {
+            0
+        })
+        .take(if w.gap_focus { hole_rows } else { 1 })
+    {
+        let style = match gap.kind {
+            argos_osint_core::investigation::GapKind::Conflicting => {
+                Style::default().fg(theme::RED)
+            }
+            argos_osint_core::investigation::GapKind::CollectedAbsent => theme::dim(),
+            _ => Style::default().fg(theme::WARN),
+        };
+        lines.push(
+            Line::from(format!(
+                "{} ○ {} · {}",
+                if w.gap_focus && i == w.gap_sel {
+                    "›"
+                } else {
+                    " "
+                },
+                name(w, &gap.entity_id),
+                gap.reason
+            ))
+            .style(if w.gap_focus && i == w.gap_sel {
+                theme::selected()
+            } else {
+                style
+            }),
+        );
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(
+            "No supported links. Enrich a selected lead, then review the observations.",
+        ));
+    }
+    lines.push(
+        Line::from("Missing or uncollected evidence does not establish a real-world gap.")
+            .style(theme::dim()),
+    );
     if lines.is_empty() {
         lines.push(Line::from(
             "No supported links. Enrich a selected lead, then review the observations.",
@@ -492,10 +583,21 @@ fn focus(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(panel(" Immediate relationships · limit 16 ")),
-        regions[1],
+        regions[0],
     );
     let mut detail = Vec::new();
-    if let Some(l) = links.get(w.link) {
+    if w.gap_focus {
+        if let Some(g) = w.visible_gaps().get(w.gap_sel) {
+            detail.push(Line::from(format!(
+                "{}\n{}\nJobs {}\nObservations {}",
+                g.kind.label(),
+                g.reason,
+                g.job_ids.join(", "),
+                g.observation_ids.join(", ")
+            )));
+        }
+    }
+    if let Some(l) = links.get(w.link).filter(|_| !w.gap_focus) {
         let r = &l.relationship;
         detail.push(Line::from(format!(
             "Selected: {} link",
@@ -518,6 +620,15 @@ fn focus(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
             ));
         }
         detail.push(Line::from(format!("Review: {}", l.observations.join(", "))));
+        for f in w
+            .data
+            .findings
+            .iter()
+            .filter(|f| l.observations.contains(&f.observation.id))
+            .take(2)
+        {
+            detail.push(Line::from(f.observation.statement.clone()));
+        }
     } else if let Some(e) = w.lead() {
         detail.push(Line::from(format!(
             "{}\n{:?}\nAliases: {}",
@@ -534,7 +645,7 @@ fn focus(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
         Paragraph::new(detail)
             .wrap(Wrap { trim: false })
             .block(panel(" Evidence inspector ")),
-        regions[2],
+        regions[1],
     );
 }
 fn evidence(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
@@ -585,69 +696,24 @@ fn evidence(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(panel(if w.view == CaseView::Review {
-                " Review · a accept · r reject · d defer · t retain · reason required · o source "
+                " Intake · a accept · r reject · d defer · t retain · reason required · o source "
             } else {
-                " Evidence table · j/k select · o source · 5 review "
+                " Intake · a/r/d/t with reason · o source "
             })),
         area,
     );
 }
 fn timeline(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
-    let mut lines = Vec::new();
-    let start = w.row.saturating_sub(1);
-    for (i, e) in w.data.timeline.iter().enumerate().skip(start).take(8) {
-        lines.push(
-            Line::from(format!(
-                "{} {}\nevent {} · published {} · retrieved {}\n{}",
-                if i == w.row { "›" } else { " " },
-                e.lane,
-                e.event_time.as_deref().unwrap_or("undated"),
-                e.published_at.as_deref().unwrap_or("unknown"),
-                if e.retrieved_at.is_empty() {
-                    "unknown"
-                } else {
-                    &e.retrieved_at
-                },
-                e.statement
-            ))
-            .style(if i == w.row {
-                theme::selected()
-            } else {
-                theme::text()
-            }),
-        );
-    }
-    for j in w.data.jobs.iter().rev().take(3) {
-        lines.push(
-            Line::from(format!(
-                "Research lane · {} {:?}\nStarted {} · finished {}",
-                j.provider,
-                j.state,
-                j.created_at,
-                j.finished_at.as_deref().unwrap_or("pending")
-            ))
-            .style(theme::dim()),
-        );
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(
-            "No dated activity. Undated evidence stays undated.",
-        ));
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(panel(
-                " Timeline lanes · j/k select observation · o same source ",
-            )),
-        area,
-    );
+    let mut chronological = w.clone();
+    chronological.sort_by_date = true;
+    chronological.view = CaseView::Review;
+    evidence(frame, &chronological, area);
 }
+
 fn jobs(frame: &mut Frame, w: &CaseWorkspace, area: Rect) {
     let mut lines = Vec::new();
     for (i, j) in w
-        .data
-        .jobs
+        .jobs()
         .iter()
         .enumerate()
         .skip(w.row.saturating_sub(1))

@@ -453,6 +453,12 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
                 if !plan.discovery_note.is_empty() {
                     lines.push(format!("Discovery: {}", plan.discovery_note));
                 }
+                if !plan.isolated_tools.is_empty() {
+                    lines.push("Tool isolation:".into());
+                    for tool in &plan.isolated_tools {
+                        lines.push(format!("   {tool}"));
+                    }
+                }
                 if plan.question_answered {
                     lines.push("Question answered. No further message.".into());
                 } else if !plan.additional_tools.is_empty() {

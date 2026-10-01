@@ -257,9 +257,77 @@ pub async fn run_turn(
     let enabled = enabled_tools(&service.db_path)?;
     let mut already = signatures(&results);
     let cached = HashSet::new();
-    let credits = credit_map(service)?;
     let costs = cost_map(&service.settings);
     let limits = &service.settings.recon_limits;
+    let missing = missing_keys(service);
+    let max_calls = usize::from(run.max_calls);
+    let turn_hunter_cap = if opening {
+        usize::from(limits.opening_hunter_calls)
+    } else {
+        4
+    };
+    let turn_sociavault_cap = if opening {
+        usize::from(limits.opening_sociavault_calls)
+    } else {
+        4
+    };
+    let mut hunter_cap = turn_hunter_cap;
+    let mut sociavault_cap = turn_sociavault_cap;
+    let mut executed_actions = Vec::new();
+    let mut isolation_skipped = Vec::new();
+    if opening {
+        // Tool isolation: the catalog tools that would otherwise only be listed as
+        // additional context run as plan steps with subject-derived inputs. It never
+        // calls Firecrawl.
+        progress("isolating tools");
+        let mut used: HashSet<String> = results
+            .iter()
+            .map(|(_, result)| result.tool_id.clone())
+            .collect();
+        used.extend(["firecrawl_search".to_string(), "firecrawl_scrape".to_string()]);
+        let suggestions = investigation::additional_tools(question, &used, &enabled);
+        let credits = credit_map(service)?;
+        let isolation = investigation::isolate_tools(
+            &suggestions,
+            &investigation::SelectionInput {
+                question,
+                strategy: &choice.kind,
+                opening,
+                entities: &entities,
+                gaps: &gaps,
+                enabled: &enabled,
+                already: &already,
+                cached: &cached,
+                hunter_cap,
+                sociavault_cap,
+                credits_left: &credits,
+                costs: &costs,
+                hits: &discovery_hits,
+            },
+            &missing,
+            ISOLATED_TOOLS,
+        );
+        let wave = run_wave(
+            service,
+            run,
+            &isolation.actions,
+            Wave {
+                plan: &mut plan,
+                already: &mut already,
+                executed: &mut executed_actions,
+                results: &mut results,
+                max_calls,
+            },
+            cancel,
+        )
+        .await?;
+        hunter_cap = hunter_cap.saturating_sub(count_tools(&wave.ran, |id| id.starts_with("hunter_")));
+        sociavault_cap =
+            sociavault_cap.saturating_sub(count_tools(&wave.ran, |id| id == "sociavault_profile"));
+        plan.isolated_tools = isolation_lines(&wave, &isolation.skipped);
+        isolation_skipped = isolation.skipped;
+    }
+    let credits = credit_map(service)?;
     let mut ranked = investigation::rank_actions(&investigation::SelectionInput {
         question,
         strategy: &choice.kind,
@@ -269,16 +337,8 @@ pub async fn run_turn(
         enabled: &enabled,
         already: &already,
         cached: &cached,
-        hunter_cap: if opening {
-            usize::from(limits.opening_hunter_calls)
-        } else {
-            4
-        },
-        sociavault_cap: if opening {
-            usize::from(limits.opening_sociavault_calls)
-        } else {
-            4
-        },
+        hunter_cap,
+        sociavault_cap,
         credits_left: &credits,
         costs: &costs,
         hits: &discovery_hits,
@@ -295,8 +355,6 @@ pub async fn run_turn(
         Err(_) => ranked.actions.clone(),
     };
     let mut deferred = ranked.deferred;
-    let mut executed_actions = Vec::new();
-    let max_calls = usize::from(run.max_calls);
     let remaining = max_calls.saturating_sub(plan.calls.len());
     if choice.kind == investigation::ADAPTIVE {
         let mut rounds = 0usize;
@@ -368,16 +426,8 @@ pub async fn run_turn(
                 enabled: &enabled,
                 already: &already,
                 cached: &cached,
-                hunter_cap: if opening {
-                    usize::from(limits.opening_hunter_calls)
-                } else {
-                    4
-                },
-                sociavault_cap: if opening {
-                    usize::from(limits.opening_sociavault_calls)
-                } else {
-                    4
-                },
+                hunter_cap,
+                sociavault_cap,
                 credits_left: &credits,
                 costs: &costs,
                 hits: &discovery_hits,
@@ -453,15 +503,78 @@ pub async fn run_turn(
         },
     };
     plan.question_answered = assessment.answered;
-    plan.additional_tools = if assessment.answered {
-        Vec::new()
-    } else {
-        assessment
-            .tools
+    plan.additional_tools = Vec::new();
+    if !assessment.answered {
+        // Suggested tools are executed, not only listed. Whatever still cannot run
+        // stays under Additional context with its reason.
+        let mut skipped = isolation_skipped;
+        let room = max_calls.saturating_sub(plan.calls.len());
+        if room > 0 && !assessment.tools.is_empty() {
+            progress("running suggested tools");
+            hunter_cap = turn_hunter_cap
+                .saturating_sub(count_tools(&executed_actions, |id| id.starts_with("hunter_")));
+            sociavault_cap = turn_sociavault_cap
+                .saturating_sub(count_tools(&executed_actions, |id| id == "sociavault_profile"));
+            let credits = credit_map(service)?;
+            let isolation = investigation::isolate_tools(
+                &assessment.tools,
+                &investigation::SelectionInput {
+                    question,
+                    strategy: &choice.kind,
+                    opening,
+                    entities: &entities,
+                    gaps: &gaps,
+                    enabled: &enabled,
+                    already: &already,
+                    cached: &cached,
+                    hunter_cap,
+                    sociavault_cap,
+                    credits_left: &credits,
+                    costs: &costs,
+                    hits: &discovery_hits,
+                },
+                &missing,
+                room.min(ISOLATED_TOOLS),
+            );
+            let wave = run_wave(
+                service,
+                run,
+                &isolation.actions,
+                Wave {
+                    plan: &mut plan,
+                    already: &mut already,
+                    executed: &mut executed_actions,
+                    results: &mut results,
+                    max_calls,
+                },
+                cancel,
+            )
+            .await?;
+            for action in &wave.blocked {
+                skipped.push(format!(
+                    "{} — not run: the call budget, credit budget, or a duplicate call stopped it.",
+                    action.tool_id
+                ));
+            }
+            skipped.extend(isolation.skipped);
+        }
+        let ran: HashSet<String> = results
             .iter()
-            .map(|tool| format!("{} — {}", tool.tool_id, tool.reason))
-            .collect()
-    };
+            .map(|(_, result)| result.tool_id.clone())
+            .collect();
+        for tool in &assessment.tools {
+            if ran.contains(&tool.tool_id) {
+                continue;
+            }
+            let prefix = format!("{} — ", tool.tool_id);
+            let line = skipped
+                .iter()
+                .find(|line| line.starts_with(&prefix))
+                .cloned()
+                .unwrap_or_else(|| format!("{} — {}", tool.tool_id, tool.reason));
+            plan.additional_tools.push(line);
+        }
+    }
     {
         let store = Store::open(&service.db_path)?;
         let mut seen_deferred = HashSet::new();
@@ -640,6 +753,100 @@ fn action_call(action: &investigation::ProposedAction, index: usize) -> PlanCall
         evidence_ids: action.evidence_ids.clone(),
         ..PlanCall::default()
     }
+}
+
+/// Tools chosen by the isolation step, and the most suggested tools run in one follow-up wave.
+const ISOLATED_TOOLS: usize = 3;
+
+struct Wave<'a> {
+    plan: &'a mut Plan,
+    already: &'a mut HashSet<String>,
+    executed: &'a mut Vec<investigation::ProposedAction>,
+    results: &'a mut Vec<(String, ToolResult)>,
+    max_calls: usize,
+}
+
+struct WaveOutcome {
+    ran: Vec<investigation::ProposedAction>,
+    blocked: Vec<investigation::ProposedAction>,
+}
+
+/// Runs proposed actions as plan steps through the budgeted executor, so credits,
+/// the call budget, disabled tools, and duplicate calls are handled as for any step.
+async fn run_wave(
+    service: &super::Service,
+    run: &Run,
+    actions: &[investigation::ProposedAction],
+    wave: Wave<'_>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<WaveOutcome> {
+    let room = wave.max_calls.saturating_sub(wave.plan.calls.len());
+    let (batch, over) = actions.split_at(actions.len().min(room));
+    let mut outcome = WaveOutcome {
+        ran: Vec::new(),
+        blocked: over.to_vec(),
+    };
+    if batch.is_empty() {
+        return Ok(outcome);
+    }
+    let calls = batch
+        .iter()
+        .enumerate()
+        .map(|(index, action)| PlanCall {
+            step_id: format!("isolate-{}", wave.plan.calls.len() + index),
+            ..action_call(action, wave.plan.calls.len() + index)
+        })
+        .collect::<Vec<_>>();
+    let executed = execute_budgeted(service, run, &calls, cancel).await?;
+    let ran: HashSet<String> = executed
+        .iter()
+        .map(|(_, result)| format!("{}:{}", result.tool_id, result.inputs))
+        .collect();
+    for (action, call) in batch.iter().zip(&calls) {
+        if ran.contains(&action.signature()) {
+            wave.plan.calls.push(call.clone());
+            wave.already.insert(action.signature());
+            wave.executed.push(action.clone());
+            outcome.ran.push(action.clone());
+        } else {
+            outcome.blocked.push(action.clone());
+        }
+    }
+    wave.results.extend(executed);
+    Ok(outcome)
+}
+
+fn count_tools(actions: &[investigation::ProposedAction], wanted: impl Fn(&str) -> bool) -> usize {
+    actions.iter().filter(|action| wanted(&action.tool_id)).count()
+}
+
+fn isolation_lines(wave: &WaveOutcome, skipped: &[String]) -> Vec<String> {
+    let mut lines: Vec<String> = wave
+        .ran
+        .iter()
+        .map(|action| format!("{} — ran with {}", action.tool_id, action.arguments))
+        .collect();
+    lines.extend(wave.blocked.iter().map(|action| {
+        format!(
+            "{} — not run: the call budget, credit budget, or a duplicate call stopped it.",
+            action.tool_id
+        )
+    }));
+    lines.extend(skipped.iter().cloned());
+    lines
+}
+
+fn missing_keys(service: &super::Service) -> HashSet<String> {
+    let keys = service.provider_keys();
+    [
+        ("firecrawl", keys.firecrawl),
+        ("hunter", keys.hunter),
+        ("sociavault", keys.sociavault),
+    ]
+    .into_iter()
+    .filter(|(_, key)| key.trim().is_empty())
+    .map(|(provider_name, _)| provider_name.to_string())
+    .collect()
 }
 
 fn signatures(results: &[(String, ToolResult)]) -> HashSet<String> {
@@ -979,4 +1186,52 @@ async fn model_json(
         _ = super::wait_cancel(cancel.clone()) => return Err(anyhow!("cancelled")),
     };
     super::parse_json(&response.content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn action(tool_id: &str, arguments: Value) -> investigation::ProposedAction {
+        investigation::ProposedAction {
+            id: String::new(),
+            tool_id: tool_id.into(),
+            arguments,
+            gap_id: "gap-profile".into(),
+            purpose: "Tool isolation".into(),
+            evidence_ids: vec!["question".into()],
+            expected: "profile".into(),
+            credit_cost: 0,
+            provider: String::new(),
+            cache_available: false,
+            scarce: false,
+            rank_reason: String::new(),
+            alternative_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn isolation_lines_show_what_ran_what_was_held_and_why() {
+        let wave = WaveOutcome {
+            ran: vec![action("stackexchange_users", json!({"name": "Donald Trump"}))],
+            blocked: vec![action("keybase_identity", json!({"username": "realDonaldTrump"}))],
+        };
+        let lines = isolation_lines(
+            &wave,
+            &["sociavault_profile — skipped: no SociaVault API key is configured.".into()],
+        );
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("stackexchange_users — ran with"));
+        assert!(lines[0].contains("Donald Trump"));
+        assert!(lines[1].starts_with("keybase_identity — not run"));
+        assert!(lines[2].contains("SociaVault API key"));
+        let step = PlanCall {
+            step_id: "isolate-2".into(),
+            ..action_call(&wave.ran[0], 2)
+        };
+        assert_eq!(step.tool_id, "stackexchange_users");
+        assert_eq!(step.arguments, json!({"name": "Donald Trump"}));
+        assert_eq!(step.reason, "Tool isolation");
+        assert_eq!(count_tools(&wave.ran, |id| id == "stackexchange_users"), 1);
+    }
 }

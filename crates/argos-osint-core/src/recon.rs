@@ -314,6 +314,9 @@ pub struct Plan {
     /// Tools Recon would use for missing context. Empty when the question is answered.
     #[serde(default)]
     pub additional_tools: Vec<String>,
+    /// Tool isolation on the opening turn: tools that ran, and tools skipped with a reason.
+    #[serde(default)]
+    pub isolated_tools: Vec<String>,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PlanCall {
@@ -1295,7 +1298,7 @@ pub fn question_subject(question: &str) -> String {
     if words.first().is_some_and(|word| auxiliary(word)) {
         words.remove(0);
     }
-    let subject = words.join(" ");
+    let subject = focus_phrase(&words.join(" "));
     subject
         .trim_matches(|ch: char| matches!(ch, '?' | '.' | '!' | '"' | '\'' | ','))
         .chars()
@@ -1304,6 +1307,61 @@ pub fn question_subject(question: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// Drops conversational lead-ins ("you tell me about") and trailing clauses
+/// ("and his social media activity", "'s accounts") so the subject is the
+/// person, organization, or identifier the question is about.
+fn focus_phrase(phrase: &str) -> String {
+    const LEAD_INS: &[&str] = &[
+        "can you tell me about ",
+        "could you tell me about ",
+        "you tell me about ",
+        "tell me about ",
+        "you tell me ",
+        "tell me ",
+        "do you know about ",
+        "you know about ",
+        "is known about ",
+        "known about ",
+        "is there on ",
+        "is there about ",
+        "information about ",
+        "information on ",
+        "info about ",
+        "info on ",
+        "me about ",
+        "about ",
+    ];
+    const TAILS: &[&str] = &[
+        " and his ",
+        " and her ",
+        " and their ",
+        " and its ",
+        "'s ",
+        "\u{2019}s ",
+    ];
+    let mut rest = phrase.trim();
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        match LEAD_INS.iter().find(|lead| lower.starts_with(*lead)) {
+            Some(lead) if rest.len() > lead.len() => rest = rest[lead.len()..].trim_start(),
+            _ => break,
+        }
+    }
+    let lower = rest.to_ascii_lowercase();
+    let cut = TAILS
+        .iter()
+        .filter_map(|tail| lower.find(tail))
+        .filter(|index| *index > 0)
+        .min()
+        .unwrap_or(rest.len());
+    let rest = rest[..cut].trim();
+    let rest = rest
+        .strip_suffix("'s")
+        .or_else(|| rest.strip_suffix("\u{2019}s"))
+        .unwrap_or(rest);
+    rest.trim().to_string()
 }
 
 fn interrogative(word: &str) -> bool {
@@ -2839,6 +2897,13 @@ mod tests {
         assert!(is_broad_question("How did Amazon start?"));
         assert!(!is_broad_question("certificates for example.org"));
         assert_eq!(question_subject("who is jeff bezos?"), "jeff bezos");
+        assert_eq!(
+            question_subject("what can you tell me about donald trump and his social media activity?"),
+            "donald trump"
+        );
+        assert_eq!(question_subject("Tell me about Jeff Bezos's companies"), "Jeff Bezos");
+        assert_eq!(question_subject("What is known about example.org?"), "example.org");
+        assert_eq!(question_subject("who owns example.com?"), "owns example.com");
         let elements = extract_grounding(&[
             "https://www.wikidata.org/wiki/Q312556".into(),
             "Jeff Bezos is an American businessman".into(),

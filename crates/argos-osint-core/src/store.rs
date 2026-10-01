@@ -46,7 +46,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 7,
+                version <= 8,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -142,6 +142,21 @@ impl Store {
                 self.conn
                     .execute_batch(include_str!("schema_investigation.sql"))?;
                 self.conn.pragma_update(None, "user_version", 7)?;
+            }
+            if version < 8 {
+                let run_columns: Vec<String> = {
+                    let mut stmt = self.conn.prepare("PRAGMA table_info(recon_runs)")?;
+                    let columns = stmt
+                        .query_map([], |row| row.get(1))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    columns
+                };
+                if !run_columns.iter().any(|name| name == "tool_picker_model") {
+                    self.conn.execute_batch(
+                        "ALTER TABLE recon_runs ADD COLUMN tool_picker_model TEXT NOT NULL DEFAULT ''",
+                    )?;
+                }
+                self.conn.pragma_update(None, "user_version", 8)?;
             }
             Ok(())
         })();
@@ -338,5 +353,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reports, 1);
+    }
+
+    #[test]
+    fn version_eight_adds_the_tool_picker_snapshot_column() {
+        let columns = |store: &Store| -> Vec<String> {
+            let mut stmt = store.conn.prepare("PRAGMA table_info(recon_runs)").unwrap();
+            stmt.query_map([], |row| row.get(1))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let fresh = Store::memory().unwrap();
+        assert!(columns(&fresh).iter().any(|name| name == "tool_picker_model"));
+        let version: i64 = fresh.conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, 8);
+        // A version-7 database without the column gains it, keeping existing runs.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let store = Store::open(file.path()).unwrap();
+        store.conn.execute_batch("INSERT INTO recon_threads(id,title,created_at,updated_at) VALUES ('t','T','now','now'); INSERT INTO recon_runs(id,thread_id,turn_id,state,stage,recon_model,synthesis_model,created_at,updated_at) VALUES ('r','t','m','completed','complete','grok / a','grok / b','now','now'); ALTER TABLE recon_runs DROP COLUMN tool_picker_model; PRAGMA user_version=7;").unwrap();
+        assert!(!columns(&store).iter().any(|name| name == "tool_picker_model"));
+        drop(store);
+        let reopened = Store::open(file.path()).unwrap();
+        assert!(columns(&reopened).iter().any(|name| name == "tool_picker_model"));
+        let snapshot: String = reopened.conn.query_row("SELECT tool_picker_model FROM recon_runs WHERE id='r'", [], |row| row.get(0)).unwrap();
+        assert_eq!(snapshot, "");
     }
 }

@@ -299,6 +299,72 @@ pub struct RoleDefaults {
     pub recon: ModelAssignment,
     #[serde(default)]
     pub synthesis: ModelAssignment,
+    /// Orders catalog tools for the Recon questions. Seeded to OpenRouter Jev.
+    #[serde(default)]
+    pub tool_picker: ModelAssignment,
+}
+
+/// Pinned default for the tool picker. The `~typesafe/jev-latest` alias is accepted
+/// when an operator sets it, but it is never stored as the default.
+pub const TOOL_PICKER_PROVIDER: &str = "openrouter";
+pub const TOOL_PICKER_MODEL: &str = "typesafe/jev-1.13";
+/// Picker models offered for OpenRouter even when `GET /models` omits them.
+pub const DECISIONS_MODELS: &[(&str, &str)] = &[(TOOL_PICKER_MODEL, "Jev 1.13 (decisions)")];
+
+/// Jev returns typed decisions, not completions.
+pub fn is_decisions_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model == TOOL_PICKER_MODEL || model == "~typesafe/jev-latest" || model.contains("/jev")
+}
+
+/// `decisions` for Jev models, `chat` for any other tool-picker model.
+pub fn picker_transport(model: &str) -> &'static str {
+    if is_decisions_model(model) {
+        "decisions"
+    } else {
+        "chat"
+    }
+}
+
+/// Canonical role name, or `None` for an unknown role.
+pub fn role_name(role: &str) -> Option<&'static str> {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "recon" => Some("recon"),
+        "synthesis" => Some("synthesis"),
+        "tool-picker" | "tool_picker" | "toolpicker" | "picker" => Some("tool_picker"),
+        _ => None,
+    }
+}
+
+impl RoleDefaults {
+    pub fn role(&self, role: &str) -> Option<&ModelAssignment> {
+        match role_name(role)? {
+            "recon" => Some(&self.recon),
+            "synthesis" => Some(&self.synthesis),
+            _ => Some(&self.tool_picker),
+        }
+    }
+
+    pub fn role_mut(&mut self, role: &str) -> Option<&mut ModelAssignment> {
+        match role_name(role)? {
+            "recon" => Some(&mut self.recon),
+            "synthesis" => Some(&mut self.synthesis),
+            _ => Some(&mut self.tool_picker),
+        }
+    }
+
+    /// Seeds the tool picker only when both of its fields are empty. Never touches
+    /// Recon or Synthesis.
+    pub fn seed_tool_picker(&mut self) -> bool {
+        if self.tool_picker.provider.trim().is_empty() && self.tool_picker.model.trim().is_empty() {
+            self.tool_picker = ModelAssignment {
+                provider: TOOL_PICKER_PROVIDER.into(),
+                model: TOOL_PICKER_MODEL.into(),
+            };
+            return true;
+        }
+        false
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -435,11 +501,10 @@ pub fn role_secret(
     settings: &SettingsFile,
     role: &str,
 ) -> Result<ProviderSecret> {
-    let assignment = match role {
-        "recon" => &settings.defaults.recon,
-        "synthesis" => &settings.defaults.synthesis,
-        _ => return Err(anyhow!("role must be recon or synthesis")),
-    };
+    let assignment = settings
+        .defaults
+        .role(role)
+        .ok_or_else(|| anyhow!("role must be recon, tool-picker, or synthesis"))?;
     let legacy = writer_secret(auth, settings);
     let mut secret = if assignment.provider.is_empty() {
         legacy
@@ -624,6 +689,85 @@ pub async fn complete(
         content: acc.content,
         tool_calls: acc.tool_calls,
     })
+}
+
+/// One Decisions answer. `choice` for choice questions, `score` for score questions,
+/// `noul` for yes/no questions. `probabilities` maps each option or level to its weight.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct DecisionAnswer {
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub choice: Option<String>,
+    #[serde(default)]
+    pub score: Option<f64>,
+    #[serde(default)]
+    pub noul: Option<f64>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub probabilities: std::collections::BTreeMap<String, f64>,
+}
+
+impl DecisionAnswer {
+    /// Probability of the chosen option, else the reported confidence.
+    pub fn choice_probability(&self) -> Option<f64> {
+        self.choice
+            .as_ref()
+            .and_then(|choice| self.probabilities.get(choice).copied())
+            .or(self.confidence)
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct DecisionsResponse {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub answers: std::collections::BTreeMap<String, DecisionAnswer>,
+    /// `usage.cost` in USD, when reported.
+    #[serde(default)]
+    pub cost: Option<f64>,
+}
+
+/// `https://openrouter.ai/api/v1` becomes `https://openrouter.ai/api/alpha/decisions`.
+pub fn decisions_url(base_url: &str) -> String {
+    let base = normalize_base(base_url);
+    let root = base.strip_suffix("/v1").unwrap_or(&base);
+    format!("{}/alpha/decisions", root.trim_end_matches('/'))
+}
+
+pub fn parse_decisions(text: &str) -> Result<DecisionsResponse> {
+    let value: Value = serde_json::from_str(text).context("decisions JSON")?;
+    let mut response: DecisionsResponse =
+        serde_json::from_value(value.clone()).context("decisions response")?;
+    response.cost = value.pointer("/usage/cost").and_then(Value::as_f64);
+    Ok(response)
+}
+
+/// Jev on OpenRouter: POST `{model, state, questions}` to the Decisions API. The caller
+/// races this against the turn cancel flag; the request has its own timeout.
+pub async fn decide(
+    secret: &ProviderSecret,
+    state: &Value,
+    questions: &Value,
+) -> Result<DecisionsResponse> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .context("http client")?;
+    let url = decisions_url(&secret.base_url);
+    let body = json!({"model": secret.model, "state": state, "questions": questions});
+    let req = authorize(client.post(&url).json(&body), secret).await?;
+    let resp = req.send().await.with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("provider {status}: {text}"));
+    }
+    parse_decisions(&text)
 }
 
 async fn complete_once(
@@ -1064,12 +1208,17 @@ impl SettingsFile {
     }
 
     fn load_from(path: &std::path::Path) -> Result<Self> {
+        let seeded = || {
+            let mut settings = Self::default();
+            settings.defaults.seed_tool_picker();
+            settings
+        };
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(seeded());
         }
         let raw = std::fs::read_to_string(path)?;
         if raw.trim().is_empty() {
-            return Ok(Self::default());
+            return Ok(seeded());
         }
         let mut settings: Self = toml::from_str(&raw)?;
         let legacy_provider = settings.writer_provider.clone();
@@ -1091,6 +1240,10 @@ impl SettingsFile {
                 role.model = legacy_model.clone();
                 migrated = true;
             }
+        }
+        // The tool picker is seeded on its own and never from the legacy writer.
+        if settings.defaults.seed_tool_picker() {
+            migrated = true;
         }
         let old_keys = toml::from_str::<toml::Value>(&raw)?
             .as_table()
@@ -1122,7 +1275,7 @@ impl SettingsFile {
         self.save_to(&crate::paths::config_path())
     }
 
-    fn save_to(&self, path: &std::path::Path) -> Result<()> {
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
         crate::secrets::write_private(path, &toml::to_string_pretty(self)?)
     }
 }
@@ -1156,5 +1309,110 @@ mod tests {
         assert_eq!(reopened.defaults.recon, settings.defaults.recon);
         assert_eq!(reopened.defaults.synthesis, settings.defaults.synthesis);
         assert_eq!(reopened.osint_user_agent, settings.osint_user_agent);
+    }
+
+    #[test]
+    fn empty_config_seeds_tool_picker_and_keeps_synthesis() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = SettingsFile::load_from(&dir.path().join("none.toml")).unwrap();
+        assert_eq!(missing.defaults.tool_picker.provider, TOOL_PICKER_PROVIDER);
+        assert_eq!(missing.defaults.tool_picker.model, TOOL_PICKER_MODEL);
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[defaults.synthesis]\nprovider = 'grok'\nmodel = 'grok-4.6'\n").unwrap();
+        let settings = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(settings.defaults.synthesis.model, "grok-4.6");
+        assert_eq!(settings.defaults.synthesis.provider, "grok");
+        assert_eq!(settings.defaults.tool_picker.model, TOOL_PICKER_MODEL);
+        assert!(settings.defaults.recon.model.is_empty());
+        // A saved picker assignment is never overwritten.
+        std::fs::write(&path, "[defaults.tool_picker]\nprovider = 'grok'\nmodel = 'grok-4.6'\n").unwrap();
+        let kept = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(kept.defaults.tool_picker.model, "grok-4.6");
+        assert_eq!(picker_transport(&kept.defaults.tool_picker.model), "chat");
+        assert_eq!(picker_transport(TOOL_PICKER_MODEL), "decisions");
+        assert_eq!(picker_transport("~typesafe/jev-latest"), "decisions");
+    }
+
+    #[test]
+    fn tool_picker_role_resolves_and_unknown_roles_error() {
+        let mut settings = SettingsFile::default();
+        settings.defaults.seed_tool_picker();
+        let auth = crate::secrets::AuthFile::default();
+        for role in ["tool-picker", "tool_picker"] {
+            let secret = role_secret(&auth, &settings, role).unwrap();
+            assert_eq!(secret.model, TOOL_PICKER_MODEL);
+            assert_eq!(effective_kind(&secret), "openrouter");
+        }
+        assert!(role_secret(&auth, &settings, "writer").is_err());
+        assert!(role_secret(&auth, &settings, "").is_err());
+    }
+
+    #[tokio::test]
+    async fn decisions_client_posts_to_alpha_decisions_and_parses_answers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let record = seen.clone();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 65536];
+            let mut request = String::new();
+            loop {
+                let n = socket.read(&mut buffer).await.unwrap();
+                request.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                let Some(end) = request.find("\r\n\r\n") else { continue };
+                let length = request[..end]
+                    .lines()
+                    .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length || n == 0 {
+                    break;
+                }
+            }
+            *record.lock().unwrap() = request;
+            let body = r#"{"answers":{"next_tool":{"type":"choice","choice":"firecrawl_search","confidence":0.7,"probabilities":{"firecrawl_search":0.82,"wikidata_entities":0.18}},"depth":{"type":"score","score":1.6,"confidence":0.9,"probabilities":{"0":0.1,"1":0.2,"2":0.7}}},"id":"gen-dec-1","model":"typesafe/jev-1.13-20260917","usage":{"cost":0.00002,"input_tokens":10,"output_tokens":2}}"#;
+            let reply = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        });
+        let secret = ProviderSecret {
+            kind: "openrouter".into(),
+            base_url: format!("http://127.0.0.1:{port}/api/v1"),
+            model: TOOL_PICKER_MODEL.into(),
+            api_key: Some("sk-or-test".into()),
+            stt_model: None,
+            device: None,
+        };
+        assert_eq!(decisions_url("https://openrouter.ai/api/v1"), "https://openrouter.ai/api/alpha/decisions");
+        let questions = json!({"next_tool": {"type": "choice", "instructions": "Pick", "criteria": {"firecrawl_search": "search", "wikidata_entities": "record"}}});
+        let response = decide(&secret, &json!({"q1": "Who?"}), &questions).await.unwrap();
+        let request = seen.lock().unwrap().clone();
+        assert!(request.starts_with("POST /api/alpha/decisions "), "{request}");
+        assert!(request.to_ascii_lowercase().contains("authorization: bearer sk-or-test"));
+        assert!(request.contains("X-Title") || request.to_ascii_lowercase().contains("x-title"));
+        assert!(request.contains("\"model\":\"typesafe/jev-1.13\""));
+        let pick = &response.answers["next_tool"];
+        assert_eq!(pick.choice.as_deref(), Some("firecrawl_search"));
+        assert_eq!(pick.choice_probability(), Some(0.82));
+        assert_eq!(response.answers["depth"].score, Some(1.6));
+        assert_eq!(response.cost, Some(0.00002));
+    }
+
+    /// Live Jev smoke. Runs only with `OPENROUTER_API_KEY` set: `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_decisions_smoke() {
+        let Ok(key) = std::env::var("OPENROUTER_API_KEY") else { return };
+        let secret = ProviderSecret {
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: TOOL_PICKER_MODEL.into(),
+            api_key: Some(key),
+            stt_model: None,
+            device: None,
+        };
+        let questions = json!({"next_tool": {"type": "choice", "instructions": "Which tool should run first to find the official website of Example Org?", "criteria": {"firecrawl_search": "Web search", "nvd_cve": "CVE record lookup"}}});
+        let response = decide(&secret, &json!({"question": "official website of Example Org"}), &questions).await.unwrap();
+        assert!(response.answers["next_tool"].choice.is_some());
     }
 }

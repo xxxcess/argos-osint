@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS recon_runs (
   id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES recon_threads(id) ON DELETE CASCADE,
   turn_id TEXT NOT NULL, state TEXT NOT NULL, stage TEXT NOT NULL,
   recon_model TEXT NOT NULL, synthesis_model TEXT NOT NULL,
+  tool_picker_model TEXT NOT NULL DEFAULT '',
   max_rounds INTEGER NOT NULL DEFAULT 6, max_calls INTEGER NOT NULL DEFAULT 12,
   turn_seconds INTEGER NOT NULL DEFAULT 300,
   plan_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL

@@ -11,7 +11,8 @@ use ratatui::Frame;
 use super::markdown::{self, Piece, Tone};
 
 use super::app::{
-    is_picker_field, App, ButtonId, ChoiceKind, FieldId, ModuleId, Overlay, ProviderPage, Target,
+    is_picker_field, App, ButtonId, ChoiceKind, DefaultsRole, FieldId, ModuleId, Overlay,
+    ProviderPage, Target,
 };
 use super::theme::{self, panel};
 use argos_osint_core::osint;
@@ -409,6 +410,17 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
         .as_deref()
         .and_then(|raw| serde_json::from_str::<Plan>(raw).ok());
     let title = match &plan {
+        Some(plan) if !plan.derived_questions.is_empty() => {
+            let transport = if plan.picker_transport.is_empty() {
+                "picking"
+            } else {
+                plan.picker_transport.as_str()
+            };
+            format!(
+                "Decision · tool picker ({transport}) · {}",
+                clip_chars(&plan.derived_questions[0].text, 64)
+            )
+        }
         Some(plan) => {
             let label = if plan.strategy.is_empty() {
                 "Recon decision"
@@ -435,6 +447,9 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
         String::new()
     } else {
         match plan {
+            Some(plan) if !plan.derived_questions.is_empty() => {
+                question_plan_lines(run, &plan).join("\n")
+            }
             Some(plan) => {
                 let mut lines = Vec::new();
                 if !plan.objective.is_empty() {
@@ -535,6 +550,107 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
         message_index: None,
         has_memory: false,
     }
+}
+
+/// Decision row for a question-driven turn: the three derived questions, the tool
+/// picker and its model snapshot, the ordered tools with dependencies and the questions
+/// they serve, the inputs bound for each step, and any fallback requests. Pick
+/// probabilities stay in `plan_json` (`recon show`); they are not rendered here.
+fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(if plan.questions_mode == "questions_fallback" {
+        "Questions (fallback set):".to_string()
+    } else {
+        "Questions:".to_string()
+    });
+    for question in &plan.derived_questions {
+        lines.push(format!("   {}: {}", question.id, question.text));
+    }
+    if !plan.questions_note.is_empty() {
+        lines.push(format!("   {}", plan.questions_note));
+    }
+    let model = if run.tool_picker_model.is_empty() {
+        plan.picker_model.as_str()
+    } else {
+        run.tool_picker_model.as_str()
+    };
+    let transport = if plan.picker_transport.is_empty() {
+        "fallback"
+    } else {
+        plan.picker_transport.as_str()
+    };
+    let mut picker = format!("Tool picker: {transport}");
+    if !model.is_empty() {
+        picker.push_str(&format!(" · {model}"));
+    }
+    if plan.planning_mode == "tool_picker_fallback" {
+        picker.push_str(" · deterministic order");
+    }
+    lines.push(picker);
+    if !plan.picker_note.is_empty() {
+        lines.push(format!("   {}", plan.picker_note));
+    }
+    if !plan.calls.is_empty() {
+        lines.push("Order:".into());
+    }
+    for call in &plan.calls {
+        let mut row = format!("{}. {}", call.step_id, call.tool_id);
+        if !call.reason.is_empty() {
+            row.push_str(&format!(" — {}", call.reason));
+        }
+        if !call.depends_on.is_empty() {
+            row.push_str(&format!(" · after {}", call.depends_on.join(", ")));
+        }
+        if call.pick_reason.starts_with("fallback:") {
+            row.push_str(" · fallback");
+        }
+        if !call.status.is_empty() {
+            row.push_str(&format!(" · {}", call.status));
+        }
+        if call.credit_cost > 0 {
+            row.push_str(&format!(" · {} credits", call.credit_cost));
+        }
+        lines.push(row);
+        for input in &call.filled {
+            lines.push(format!("   input {input}"));
+        }
+        for binding in plan.bindings.iter().filter(|b| b.step_id == call.step_id) {
+            let qualifier = if binding.qualifier.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", binding.qualifier)
+            };
+            lines.push(format!(
+                "   found {} {}{qualifier} · evidence {}",
+                binding.kind, binding.value, binding.evidence_id
+            ));
+        }
+    }
+    let explicit: Vec<_> = plan
+        .bindings
+        .iter()
+        .filter(|binding| binding.step_id.is_empty())
+        .map(|binding| format!("{} {}", binding.kind, binding.value))
+        .collect();
+    if !explicit.is_empty() {
+        lines.push(format!("From the question: {}", explicit.join("; ")));
+    }
+    if !plan.fallback_requests.is_empty() {
+        lines.push("Fallback requests:".into());
+        for request in &plan.fallback_requests {
+            lines.push(format!("   {request}"));
+        }
+    }
+    if !plan.deferred.is_empty() {
+        lines.push(format!("Deferred: {}", plan.deferred.join("; ")));
+    }
+    if !plan.unresolved_inputs.is_empty() {
+        lines.push(format!("Unresolved: {}", plan.unresolved_inputs.join(", ")));
+    }
+    if let Some(error) = &run.error {
+        lines.push(format!("Run error: {error}"));
+    }
+    lines
 }
 
 fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
@@ -1506,20 +1622,15 @@ pub fn focus_order(app: &App) -> Vec<Target> {
                     }
                 }
                 ProviderPage::Defaults => {
-                    order.push(Target::Button(ButtonId::ToggleDefaultRole));
-                    if app.defaults_synthesis {
-                        order.extend([
-                            Target::Field(FieldId::SynthesisProvider),
-                            Target::Field(FieldId::SynthesisModel),
-                            Target::Button(ButtonId::SaveSynthesis),
-                        ]);
-                    } else {
-                        order.extend([
-                            Target::Field(FieldId::ReconProvider),
-                            Target::Field(FieldId::ReconModel),
-                            Target::Button(ButtonId::SaveRecon),
-                        ]);
-                    }
+                    order.extend(
+                        DefaultsRole::ALL.map(|role| Target::Button(ButtonId::DefaultRole(role))),
+                    );
+                    let role = app.defaults_role;
+                    order.extend([
+                        Target::Field(role.provider_field()),
+                        Target::Field(role.model_field()),
+                        Target::Button(role.save_button()),
+                    ]);
                     order.push(Target::Button(ButtonId::RefreshModels));
                 }
             }
@@ -1796,29 +1907,23 @@ fn provider_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
         ProviderPage::Defaults => {
             let models = model_areas(rows[1]);
-            if contains(models[0], x, y) {
-                return Some(Target::Button(ButtonId::ToggleDefaultRole));
+            for (role, area) in DefaultsRole::ALL
+                .into_iter()
+                .zip(button_areas(models[0], DefaultsRole::ALL.len()))
+            {
+                if contains(area, x, y) {
+                    return Some(Target::Button(ButtonId::DefaultRole(role)));
+                }
             }
+            let role = app.defaults_role;
             if contains(models[1], x, y) {
-                return Some(Target::Field(if app.defaults_synthesis {
-                    FieldId::SynthesisProvider
-                } else {
-                    FieldId::ReconProvider
-                }));
+                return Some(Target::Field(role.provider_field()));
             }
             if contains(models[2], x, y) {
-                return Some(Target::Field(if app.defaults_synthesis {
-                    FieldId::SynthesisModel
-                } else {
-                    FieldId::ReconModel
-                }));
+                return Some(Target::Field(role.model_field()));
             }
             if contains(models[3], x, y) {
-                return Some(Target::Button(if app.defaults_synthesis {
-                    ButtonId::SaveSynthesis
-                } else {
-                    ButtonId::SaveRecon
-                }));
+                return Some(Target::Button(role.save_button()));
             }
             if contains(models[4], x, y) {
                 return Some(Target::Button(ButtonId::RefreshModels));
@@ -1878,6 +1983,8 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
         }
         FieldId::ReconProvider
         | FieldId::ReconModel
+        | FieldId::PickerProvider
+        | FieldId::PickerModel
         | FieldId::SynthesisProvider
         | FieldId::SynthesisModel
             if app.module == Some(ModuleId::Providers)
@@ -1885,7 +1992,9 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
         {
             let rows = model_areas(provider_areas(layout.body)[1]);
             Some(match field {
-                FieldId::ReconProvider | FieldId::SynthesisProvider => rows[1],
+                FieldId::ReconProvider | FieldId::PickerProvider | FieldId::SynthesisProvider => {
+                    rows[1]
+                }
                 _ => rows[2],
             })
         }
@@ -2692,32 +2801,21 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
         }
         ProviderPage::Defaults => {
             let models = model_areas(rows[1]);
-            draw_button(
-                frame,
-                app,
-                ButtonId::ToggleDefaultRole,
-                if app.defaults_synthesis {
-                    "Synthesis · switch to Recon"
+            for (role, area) in DefaultsRole::ALL
+                .into_iter()
+                .zip(button_areas(models[0], DefaultsRole::ALL.len()))
+            {
+                let label = if role == app.defaults_role {
+                    format!("● {}", role.label())
                 } else {
-                    "Recon · switch to Synthesis"
-                },
-                models[0],
-            );
-            let provider = if app.defaults_synthesis {
-                FieldId::SynthesisProvider
-            } else {
-                FieldId::ReconProvider
-            };
-            let model = if app.defaults_synthesis {
-                FieldId::SynthesisModel
-            } else {
-                FieldId::ReconModel
-            };
-            let save = if app.defaults_synthesis {
-                ButtonId::SaveSynthesis
-            } else {
-                ButtonId::SaveRecon
-            };
+                    role.label().to_string()
+                };
+                draw_button(frame, app, ButtonId::DefaultRole(role), &label, area);
+            }
+            let role = app.defaults_role;
+            let provider = role.provider_field();
+            let model = role.model_field();
+            let save = role.save_button();
             draw_field(frame, app, provider, " Provider ", models[1]);
             draw_field(frame, app, model, " Model ", models[2]);
             draw_button(frame, app, save, "Save default", models[3]);
@@ -2740,6 +2838,14 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
                     _ => "this account",
                 }
             };
+            let transport = if role == DefaultsRole::ToolPicker && !app.picker_model.is_empty() {
+                format!(
+                    " Transport: {}.",
+                    provider::picker_transport(&app.picker_model)
+                )
+            } else {
+                String::new()
+            };
             let note = if provider.is_empty() {
                 "Choose a connected account. Open Provider and Model, then Save default.".into()
             } else if app.model_catalog.is_empty() || app.catalog_for != provider {
@@ -2750,6 +2856,7 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
                     app.model_catalog.len()
                 )
             };
+            let note = format!("{note}{transport}");
             frame.render_widget(
                 Paragraph::new(note)
                     .style(theme::dim())
@@ -2914,13 +3021,11 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
 
 fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
     let area = popup_area(frame.area());
-    let title = match (kind, app.defaults_synthesis) {
-        (ChoiceKind::Provider, false) => " Recon provider ",
-        (ChoiceKind::Provider, true) => " Synthesis provider ",
-        (ChoiceKind::Model, false) => " Recon model ",
-        (ChoiceKind::Model, true) => " Synthesis model ",
+    let title = match kind {
+        ChoiceKind::Provider => format!(" {} provider ", app.defaults_role.label()),
+        ChoiceKind::Model => format!(" {} model ", app.defaults_role.label()),
     };
-    frame.render_widget(Paragraph::new("").block(panel(title)), area);
+    frame.render_widget(Paragraph::new("").block(panel(&title)), area);
     let inner = inset(area);
     let mut y = inner.y;
     let mut height = inner.height;
@@ -2989,4 +3094,97 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
         height: 1,
     };
     frame.render_widget(Paragraph::new(" close ").style(theme::accent()), close);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argos_osint_core::recon::{Binding, DerivedQuestion, PickRecord, PlanCall};
+
+    #[test]
+    fn decision_row_shows_questions_picker_order_bindings_and_fallbacks() {
+        let question = |id: &str, text: &str| DerivedQuestion {
+            id: id.into(),
+            text: text.into(),
+            ..Default::default()
+        };
+        let plan = Plan {
+            planning_mode: "tool_picker".into(),
+            derived_questions: vec![
+                question("q1", "Which accounts belong to Jane Roe?"),
+                question("q2", "Where does Jane Roe work?"),
+                question("q3", "What email does Jane Roe use?"),
+            ],
+            picker_transport: "decisions".into(),
+            picker_model: "typesafe/jev-1.13".into(),
+            picks: vec![PickRecord {
+                position: 1,
+                tool_id: "firecrawl_search".into(),
+                transport: "decisions".into(),
+                outcome: "accepted".into(),
+                confidence: Some(0.8731),
+                ..Default::default()
+            }],
+            calls: vec![
+                PlanCall {
+                    step_id: "s1".into(),
+                    tool_id: "firecrawl_search".into(),
+                    reason: "q1, q2".into(),
+                    status: "completed".into(),
+                    confidence: Some(0.8731),
+                    ..Default::default()
+                },
+                PlanCall {
+                    step_id: "s2".into(),
+                    tool_id: "sociavault_profile".into(),
+                    reason: "q1".into(),
+                    depends_on: vec!["s1".into()],
+                    filled: vec!["handle=janeroe (handle from call-s1)".into()],
+                    ..Default::default()
+                },
+            ],
+            bindings: vec![Binding {
+                kind: "handle".into(),
+                value: "janeroe".into(),
+                evidence_id: "call-s1".into(),
+                step_id: "s1".into(),
+                qualifier: "github".into(),
+            }],
+            fallback_requests: vec!["hunter_email_finder failed. Recon chose firecrawl_scrape as s3.".into()],
+            ..Default::default()
+        };
+        let run = recon::Run {
+            id: "run-1".into(),
+            thread_id: "t".into(),
+            turn_id: "turn".into(),
+            state: "completed".into(),
+            stage: String::new(),
+            recon_model: "grok / grok-4.6".into(),
+            synthesis_model: "grok / grok-4.6".into(),
+            tool_picker_model: "openrouter / typesafe/jev-1.13".into(),
+            max_rounds: 1,
+            max_calls: 8,
+            turn_seconds: 120,
+            plan_json: Some(serde_json::to_string(&plan).unwrap()),
+            error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let block = plan_block(&run, true);
+        assert!(block.title.contains("tool picker (decisions)"), "{}", block.title);
+        for needle in [
+            "q1: Which accounts belong to Jane Roe?",
+            "q2: Where does Jane Roe work?",
+            "q3: What email does Jane Roe use?",
+            "Tool picker: decisions · openrouter / typesafe/jev-1.13",
+            "s1. firecrawl_search — q1, q2 · completed",
+            "s2. sociavault_profile — q1 · after s1",
+            "input handle=janeroe (handle from call-s1)",
+            "found handle janeroe (github) · evidence call-s1",
+            "Fallback requests:",
+        ] {
+            assert!(block.body.contains(needle), "missing {needle:?} in\n{}", block.body);
+        }
+        assert!(!block.body.contains("0.87"), "probabilities stay out of the row");
+    }
 }

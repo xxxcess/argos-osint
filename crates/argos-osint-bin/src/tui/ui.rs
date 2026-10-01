@@ -453,6 +453,14 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
                 if !plan.discovery_note.is_empty() {
                     lines.push(format!("Discovery: {}", plan.discovery_note));
                 }
+                if !plan.accounts.is_empty() {
+                    lines.push(format!("Accounts found: {}", plan.accounts.join("; ")));
+                } else if !plan.accounts_note.is_empty() {
+                    lines.push("Accounts found: none".into());
+                }
+                if !plan.accounts_note.is_empty() {
+                    lines.push(format!("   {}", plan.accounts_note));
+                }
                 if !plan.isolated_tools.is_empty() {
                     lines.push("Tool isolation:".into());
                     for tool in &plan.isolated_tools {

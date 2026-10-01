@@ -943,6 +943,15 @@ pub struct SettingsFile {
     pub defaults: RoleDefaults,
     #[serde(default)]
     pub osint_user_agent: String,
+    /// Firecrawl API key. A non-empty value overrides `FIRECRAWL_API_KEY`.
+    #[serde(default)]
+    pub firecrawl_api_key: String,
+    /// Hunter API key. A non-empty value overrides `HUNTER_API_KEY`.
+    #[serde(default)]
+    pub hunter_api_key: String,
+    /// SociaVault API key. A non-empty value overrides `SOCIAVAULT_API_KEY`.
+    #[serde(default)]
+    pub sociavault_api_key: String,
     #[serde(default)]
     pub recon_limits: ReconLimits,
 }
@@ -994,6 +1003,9 @@ impl SettingsFile {
                             | "modality"
                             | "defaults"
                             | "osint_user_agent"
+                            | "firecrawl_api_key"
+                            | "hunter_api_key"
+                            | "sociavault_api_key"
                             | "recon_limits"
                     )
                 })

@@ -68,3 +68,9 @@ CREATE TABLE IF NOT EXISTS extraction_jobs (
   error TEXT, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS recon_message_memories (
+  message_id TEXT NOT NULL REFERENCES recon_messages(id) ON DELETE CASCADE,
+  memory_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  PRIMARY KEY(message_id, memory_id)
+);

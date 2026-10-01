@@ -44,6 +44,21 @@ pub fn auth_path() -> PathBuf {
         .join("auth.json")
 }
 
+/// True when a Grok subscription login is stored. An expired token still
+/// counts; the next model request refreshes it. An API-key entry does not.
+pub fn login_present() -> bool {
+    login_present_at(&auth_path())
+}
+
+fn login_present_at(path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&raw)
+        .ok()
+        .is_some_and(|value| pick_entry(&value).is_some())
+}
+
 /// Bearer token for the Grok provider. `None` when Grok has no login on this
 /// machine. Errors are for a login that exists but cannot be refreshed.
 pub async fn bearer() -> Result<Option<String>, String> {
@@ -368,8 +383,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("auth.json");
         assert_eq!(bearer_from_path(&path).await.unwrap(), None);
+        assert!(!login_present_at(&path));
         std::fs::write(&path, r#"{"api":{"auth_mode":"api_key","key":"xai-test"}}"#).unwrap();
         assert_eq!(bearer_from_path(&path).await.unwrap(), None);
+        assert!(!login_present_at(&path));
         std::fs::write(&path, r#"{
             "api":{"auth_mode":"api_key","key":"xai-test","expires_at":"2100-01-01T00:00:00Z"},
             "oauth":{"auth_mode":"oidc","key":"subscription-test","expires_at":"2099-01-01T00:00:00Z"}
@@ -378,7 +395,9 @@ mod tests {
             bearer_from_path(&path).await.unwrap().as_deref(),
             Some("subscription-test")
         );
+        assert!(login_present_at(&path));
         std::fs::write(&path, "invalid json").unwrap();
+        assert!(!login_present_at(&path));
         assert!(bearer_from_path(&path).await.is_err());
         assert!(bearer_from_path(home.path())
             .await

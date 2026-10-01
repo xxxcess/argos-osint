@@ -46,7 +46,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 5,
+                version <= 6,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -126,6 +126,17 @@ impl Store {
                     )?;
                 }
                 self.conn.pragma_update(None, "user_version", 5)?;
+            }
+            if version < 6 {
+                self.conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS recon_message_memories (
+                       message_id TEXT NOT NULL REFERENCES recon_messages(id) ON DELETE CASCADE,
+                       memory_id TEXT NOT NULL,
+                       ordinal INTEGER NOT NULL,
+                       PRIMARY KEY(message_id, memory_id)
+                     );",
+                )?;
+                self.conn.pragma_update(None, "user_version", 6)?;
             }
             Ok(())
         })();

@@ -8,6 +8,12 @@ pub const GREEN: Color = Color::Rgb(64, 210, 130);
 pub const TEXT: Color = Color::Rgb(214, 232, 236);
 pub const DIM: Color = Color::Rgb(120, 150, 162);
 pub const SELECT: Color = Color::Rgb(14, 92, 72);
+pub const WARN: Color = Color::Rgb(232, 176, 96);
+pub const RED: Color = Color::Rgb(232, 112, 104);
+/// Raised band behind a user prompt, the same role as Grok Build's `bg_light` prompt band.
+pub const USER_BAND: Color = Color::Rgb(12, 36, 44);
+/// Fenced code background, quieter than the user band.
+pub const CODE_BG: Color = Color::Rgb(10, 28, 36);
 
 pub fn panel(title: &str) -> Block<'static> {
     Block::default()
@@ -33,7 +39,7 @@ pub fn accent() -> Style {
 
 /// User turn, close to the Grok Build prompt block.
 pub fn user_message() -> Style {
-    Style::default().fg(TEXT).bg(Color::Rgb(12, 36, 44))
+    Style::default().fg(TEXT).bg(USER_BAND)
 }
 
 pub fn selected() -> Style {
@@ -41,4 +47,12 @@ pub fn selected() -> Style {
         .fg(GREEN)
         .bg(SELECT)
         .add_modifier(Modifier::BOLD)
+}
+
+pub fn warn() -> Style {
+    Style::default().fg(WARN).bg(BG)
+}
+
+pub fn error() -> Style {
+    Style::default().fg(RED).bg(BG)
 }

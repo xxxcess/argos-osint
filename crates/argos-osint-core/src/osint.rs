@@ -60,6 +60,12 @@ pub fn registry() -> &'static [ToolDefinition] {
         tool!("sans_ip_activity","SANS ISC IP activity","Exposure","Reported attack activity for an IP.",["ip"],"https://isc.sans.edu/api/","Reports are historical observations.",25,600),
         tool!("shodan_internetdb","Shodan InternetDB","Exposure","Observed ports, hostnames and vulnerability associations.",["ip"],"https://internetdb.shodan.io/","Free access is noncommercial; observations may be old.",20,600),
         tool!("urlscan_search","urlscan search","Exposure","Search existing website scan records.",["domain|query"],"https://urlscan.io/docs/api/","Search only; no scan submission; historical observations.",20,600),
+        tool!("firecrawl_search","Firecrawl search","Web","Web search through the Firecrawl search API. Use it to ground a broad question before narrower lookups, and to find social accounts before any SociaVault profile call.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/search","POST https://api.firecrawl.dev/v2/search with query and limit. Enter the API key on this tool, or set FIRECRAWL_API_KEY. Results are titles, links, and descriptions, not a full page scrape.",60,600),
+        tool!("hunter_domain_search","Hunter domain search","Enrichment","Email addresses, roles, and the email pattern Hunter has for a company domain or name.",["domain|company"],"https://hunter.io/api-documentation/v2#domain-search","GET https://api.hunter.io/v2/domain-search. Enter the API key on a Hunter tool, or set HUNTER_API_KEY. The key is sent as X-API-KEY and is not stored on the tool input. At most 10 addresses per call.",25,3600),
+        tool!("hunter_email_finder","Hunter email finder","Enrichment","Most likely professional email for a named person at a domain, company, or LinkedIn handle.",["domain|company|linkedin_handle","full_name|first_name|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-finder","GET https://api.hunter.io/v2/email-finder. Requires a domain, company, or LinkedIn handle, plus a full name or a first and last name unless the LinkedIn handle is enough. Same Hunter API key as the other Hunter tools.",25,3600),
+        tool!("hunter_email_verifier","Hunter email verifier","Enrichment","Deliverability status and score for one email address.",["email"],"https://hunter.io/api-documentation/v2#email-verifier","GET https://api.hunter.io/v2/email-verifier. The check can take about 20 seconds. Same Hunter API key as the other Hunter tools.",30,3600),
+        tool!("hunter_tech_lookup","Hunter tech lookup","Enrichment","Company profile and technology stack for a domain, from Hunter company enrichment.",["domain"],"https://hunter.io/api-documentation/v2#company-enrichment","GET https://api.hunter.io/v2/companies/find. Returns firmographics plus the tech and techCategories lists. Same Hunter API key as the other Hunter tools.",25,3600),
+        tool!("sociavault_profile","SociaVault profile","Social","Public profile stats, biography, and outbound social links for one handle. Use only after Firecrawl has searched for that entity's social accounts and the handle was extracted from those results.",["platform","handle"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/{platform}/profile (YouTube uses /youtube/channel; LinkedIn company pages use /linkedin/company). Platforms: twitter, instagram, tiktok, youtube, facebook, linkedin, threads, twitch. Enter the API key on this tool, or set SOCIAVAULT_API_KEY. The key is sent as X-API-Key and is not stored on the tool input. Profile routes only.",40,3600),
     ]).as_slice()
 }
 pub fn definition(id: &str) -> Option<&'static ToolDefinition> {
@@ -70,7 +76,9 @@ fn optional_keys(id: &str) -> &'static [&'static str] {
         "crtsh_certificates" | "commoncrawl_urls" => &["limit"],
         "mnemonic_passive_dns" => &["limit", "offset"],
         "wayback_availability" => &["timestamp"],
-        "arquivo_history" | "nominatim_geocode" => &["limit"],
+        "arquivo_history" | "nominatim_geocode" | "firecrawl_search" => &["limit"],
+        "hunter_domain_search" => &["limit"],
+        "hunter_email_finder" => &["last_name"],
         "github_repositories" | "gitlab_projects" => &["limit", "page"],
         "stackexchange_users" => &["site"],
         "overpass_places" => &["feature"],
@@ -132,6 +140,14 @@ impl ToolDefinition {
                 "ecosystem" => json!("Maven"),
                 "package_name" => json!("org.apache.logging.log4j:log4j-core"),
                 "version" => json!("2.14.1"),
+                "email" => json!("ada@example.org"),
+                "platform" => json!("twitter"),
+                "handle" => json!("example"),
+                "first_name" => json!("Ada"),
+                "last_name" => json!("Lovelace"),
+                "full_name" => json!("Ada Lovelace"),
+                "linkedin_handle" => json!("ada-lovelace"),
+                "company" => json!("Example Inc"),
                 _ => json!("example"),
             };
             values.insert(key.into(), value);
@@ -335,6 +351,366 @@ fn number_arg(v: &Value, key: &str, default: u64, max: u64) -> Result<String> {
     );
     Ok(n.to_string())
 }
+fn clip_text(value: &str) -> String {
+    let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 280 {
+        flat
+    } else {
+        let mut clipped: String = flat.chars().take(279).collect();
+        clipped.push('…');
+        clipped
+    }
+}
+fn email_address(value: &str) -> Result<String> {
+    let value = value.trim();
+    ensure!(
+        !value.chars().any(char::is_control) && value.len() <= 254,
+        "invalid email"
+    );
+    let (local, host) = value
+        .split_once('@')
+        .ok_or_else(|| anyhow!("invalid email"))?;
+    ensure!(
+        !local.is_empty()
+            && local.len() <= 64
+            && !local.starts_with('.')
+            && !local.ends_with('.')
+            && !local.contains("..")
+            && local
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')),
+        "invalid email"
+    );
+    Ok(format!(
+        "{}@{}",
+        local.to_ascii_lowercase(),
+        domain(&host.to_ascii_lowercase())?
+    ))
+}
+pub(crate) fn social_token(value: &str) -> Result<String> {
+    let value = value.trim().trim_start_matches('@');
+    ensure!(
+        (1..=80).contains(&value.len())
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+        "invalid social handle"
+    );
+    Ok(value.to_string())
+}
+fn linkedin_handle(value: &str) -> Result<String> {
+    let value = value.trim().trim_start_matches('@');
+    ensure!(
+        (1..=100).contains(&value.len())
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+        "invalid LinkedIn handle"
+    );
+    Ok(value.to_string())
+}
+fn https_on_host(raw: &str, hosts: &[&str]) -> Result<Url> {
+    let url = Url::parse(raw.trim())?;
+    let host = url.host_str().unwrap_or("");
+    ensure!(
+        url.scheme() == "https"
+            && hosts
+                .iter()
+                .any(|allowed| { host == *allowed || host.ends_with(&format!(".{allowed}")) }),
+        "unsupported profile URL"
+    );
+    Ok(url)
+}
+fn hunter_observations(id: &str, value: &Value) -> Value {
+    let data = value.get("data").unwrap_or(&Value::Null);
+    match id {
+        "hunter_domain_search" => {
+            let emails = data
+                .get("emails")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .take(10)
+                        .map(|row| {
+                            json!({
+                                "value": row.get("value"),
+                                "type": row.get("type"),
+                                "confidence": row.get("confidence"),
+                                "first_name": row.get("first_name"),
+                                "last_name": row.get("last_name"),
+                                "position": row.get("position"),
+                                "department": row.get("department"),
+                                "seniority": row.get("seniority"),
+                                "linkedin": row.get("linkedin"),
+                                "twitter": row.get("twitter"),
+                                "verification": row.pointer("/verification/status"),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            json!({
+                "domain": data.get("domain"),
+                "organization": data.get("organization"),
+                "pattern": data.get("pattern"),
+                "accept_all": data.get("accept_all"),
+                "webmail": data.get("webmail"),
+                "emails": emails,
+            })
+        }
+        "hunter_email_finder" => json!({
+            "email": data.get("email"),
+            "score": data.get("score"),
+            "first_name": data.get("first_name"),
+            "last_name": data.get("last_name"),
+            "position": data.get("position"),
+            "company": data.get("company"),
+            "domain": data.get("domain"),
+            "linkedin_url": data.get("linkedin_url"),
+            "twitter": data.get("twitter"),
+            "verification": data.get("verification"),
+            "accept_all": data.get("accept_all"),
+        }),
+        "hunter_email_verifier" => json!({
+            "email": data.get("email").or_else(|| value.pointer("/meta/params/email")),
+            "status": data.get("status"),
+            "result": data.get("result"),
+            "score": data.get("score"),
+            "regexp": data.get("regexp"),
+            "gibberish": data.get("gibberish"),
+            "disposable": data.get("disposable"),
+            "webmail": data.get("webmail"),
+            "mx_records": data.get("mx_records"),
+            "smtp_server": data.get("smtp_server"),
+            "smtp_check": data.get("smtp_check"),
+            "accept_all": data.get("accept_all"),
+            "block": data.get("block"),
+            "sources": data.get("sources").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+        }),
+        "hunter_tech_lookup" => {
+            let listed = |key: &str, limit: usize| {
+                data.get(key)
+                    .and_then(Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(Value::as_str)
+                            .filter(|item| !item.is_empty())
+                            .take(limit)
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            let handle = |key: &str| {
+                data.pointer(&format!("/{key}/handle"))
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            };
+            json!({
+                "name": data.get("name"),
+                "domain": data.get("domain"),
+                "description": data.get("description").and_then(Value::as_str).map(clip_text),
+                "location": data.get("location"),
+                "industry": data.pointer("/category/industry"),
+                "employees": data.pointer("/metrics/employees"),
+                "tech": listed("tech", 40),
+                "tech_categories": listed("techCategories", 20),
+                "emails": data.pointer("/site/emailAddresses").and_then(Value::as_array).map(|rows| {
+                    rows.iter().filter_map(Value::as_str).take(8).map(str::to_string).collect::<Vec<_>>()
+                }).unwrap_or_default(),
+                "social": {
+                    "linkedin": handle("linkedin"),
+                    "twitter": handle("twitter"),
+                    "facebook": handle("facebook"),
+                    "instagram": handle("instagram"),
+                }
+            })
+        }
+        _ => value.clone(),
+    }
+}
+fn push_profile_link(links: &mut Vec<String>, raw: &str) {
+    let Ok(url) = Url::parse(raw.trim()) else {
+        return;
+    };
+    let host = url.host_str().unwrap_or("");
+    let media = [
+        "cdninstagram",
+        "fbcdn",
+        "twimg",
+        "tiktokcdn",
+        "googleusercontent",
+        "ggpht",
+        "licdn.com",
+        "jtvnw.net",
+        "ytimg.com",
+    ]
+    .iter()
+    .any(|needle| host.contains(needle));
+    if media || (url.scheme() != "https" && url.scheme() != "http") {
+        return;
+    }
+    let text = url.to_string();
+    if text.chars().count() > 300
+        || links.iter().any(|existing| existing == &text)
+        || links.len() >= 8
+    {
+        return;
+    }
+    links.push(text);
+}
+fn sociavault_card(value: &Value) -> Value {
+    let mut name = String::new();
+    let mut handle = String::new();
+    let mut biography = String::new();
+    let mut stats = serde_json::Map::new();
+    let mut links = Vec::new();
+    fn walk(
+        value: &Value,
+        depth: usize,
+        name: &mut String,
+        handle: &mut String,
+        biography: &mut String,
+        stats: &mut serde_json::Map<String, Value>,
+        links: &mut Vec<String>,
+    ) {
+        if depth > 5 {
+            return;
+        }
+        let Some(object) = value.as_object() else {
+            if let Some(rows) = value.as_array() {
+                for row in rows.iter().take(6) {
+                    walk(row, depth + 1, name, handle, biography, stats, links);
+                }
+            }
+            return;
+        };
+        for (key, child) in object {
+            let lowered = key.to_ascii_lowercase().replace('-', "_");
+            if matches!(
+                lowered.as_str(),
+                "itemlist"
+                    | "item_list"
+                    | "posts"
+                    | "recentposts"
+                    | "recent_posts"
+                    | "activity"
+                    | "videos"
+                    | "allvideos"
+                    | "all_videos"
+                    | "recentbroadcasts"
+                    | "recent_broadcasts"
+                    | "similarprofiles"
+                    | "similar_profiles"
+                    | "similarstreamers"
+                    | "edge_owner_to_timeline_media"
+                    | "edge_felix_video_timeline"
+                    | "articles"
+                    | "recommendations"
+                    | "experience"
+                    | "education"
+                    | "publications"
+                    | "projects"
+            ) {
+                continue;
+            }
+            if biography.is_empty()
+                && matches!(
+                    lowered.as_str(),
+                    "biography"
+                        | "bio"
+                        | "description"
+                        | "about"
+                        | "pageintro"
+                        | "page_intro"
+                        | "signature"
+                )
+            {
+                if let Some(text) = child
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    *biography = clip_text(text);
+                }
+            }
+            if name.is_empty()
+                && depth <= 4
+                && matches!(
+                    lowered.as_str(),
+                    "full_name" | "fullname" | "nickname" | "display_name" | "displayname" | "name"
+                )
+            {
+                if let Some(text) = child
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty() && text.chars().count() <= 120)
+                {
+                    *name = text.to_string();
+                }
+            }
+            if handle.is_empty()
+                && depth <= 4
+                && matches!(
+                    lowered.as_str(),
+                    "username" | "handle" | "screen_name" | "screenname" | "uniqueid" | "unique_id"
+                )
+            {
+                if let Some(text) = child.as_str().map(str::trim).filter(|text| {
+                    !text.is_empty() && text.chars().count() <= 80 && !text.contains(' ')
+                }) {
+                    *handle = text.trim_start_matches('@').to_string();
+                }
+            }
+            let numeric = child.is_number()
+                || child.as_str().is_some_and(|text| {
+                    !text.is_empty() && text.chars().all(|c| c.is_ascii_digit())
+                });
+            if stats.len() < 12
+                && numeric
+                && (lowered.contains("follower")
+                    || lowered.contains("following")
+                    || lowered.contains("subscriber")
+                    || lowered.contains("friend")
+                    || lowered.contains("heart")
+                    || lowered.contains("video_count")
+                    || lowered.contains("videocount")
+                    || lowered.contains("statuses_count")
+                    || lowered.contains("media_count")
+                    || lowered.contains("view_count")
+                    || lowered.contains("viewcount")
+                    || lowered.contains("talking_about")
+                    || lowered.contains("talkingabout")
+                    || lowered == "connections"
+                    || lowered == "likes")
+            {
+                stats.insert(key.clone(), child.clone());
+            }
+            if let Some(text) = child.as_str() {
+                if text.starts_with("http://") || text.starts_with("https://") {
+                    push_profile_link(links, text);
+                }
+            }
+            walk(child, depth + 1, name, handle, biography, stats, links);
+        }
+    }
+    walk(
+        value,
+        0,
+        &mut name,
+        &mut handle,
+        &mut biography,
+        &mut stats,
+        &mut links,
+    );
+    json!({
+        "name": name,
+        "handle": handle,
+        "biography": biography,
+        "stats": stats,
+        "links": links,
+    })
+}
 fn parse_observations(
     id: &str,
     raw: &str,
@@ -377,6 +753,61 @@ fn parse_observations(
             ));
         }
     }
+    if id == "firecrawl_search" {
+        if v.get("success").and_then(Value::as_bool) == Some(false) {
+            let message = v
+                .get("error")
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "search failed".into());
+            return Err(anyhow!(
+                "Firecrawl search failed: {}",
+                message.chars().take(250).collect::<String>()
+            ));
+        }
+        let rows = v
+            .pointer("/data/web")
+            .and_then(Value::as_array)
+            .or_else(|| v.get("data").and_then(Value::as_array));
+        let truncated = rows.is_some_and(|rows| rows.len() > 8);
+        let results: Vec<Value> = rows
+            .into_iter()
+            .flatten()
+            .take(8)
+            .filter_map(|row| {
+                let url = row.get("url").and_then(Value::as_str).unwrap_or("");
+                if url.is_empty() {
+                    return None;
+                }
+                let snippet = row
+                    .get("description")
+                    .or_else(|| row.get("snippet"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                Some(json!({
+                    "title": clip_text(row.get("title").and_then(Value::as_str).unwrap_or("")),
+                    "url": url,
+                    "snippet": clip_text(snippet),
+                }))
+            })
+            .collect();
+        return Ok((json!({"results": results, "infoboxes": []}), truncated));
+    }
+    if id.starts_with("hunter_") {
+        return Ok((hunter_observations(id, &v), false));
+    }
+    if id == "sociavault_profile" {
+        if v.get("success").and_then(Value::as_bool) == Some(false) {
+            let message = v
+                .get("error")
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "profile lookup failed".into());
+            return Err(anyhow!(
+                "SociaVault profile failed: {}",
+                message.chars().take(250).collect::<String>()
+            ));
+        }
+        return Ok((sociavault_card(&v), false));
+    }
     if id == "crtsh_certificates" {
         let mut hosts = std::collections::BTreeSet::new();
         if let Some(rows) = v.as_array() {
@@ -408,12 +839,47 @@ fn no_results(id: &str, value: &Value) -> bool {
     if id == "nvd_cve" && value.get("totalResults").and_then(Value::as_u64) == Some(0) {
         return true;
     }
+    if id == "hunter_email_finder" {
+        return value
+            .get("email")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty();
+    }
+    if id == "hunter_domain_search" {
+        return value
+            .get("emails")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+            && value
+                .get("domain")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .is_empty();
+    }
+    if id == "sociavault_profile" {
+        return value
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+            && value
+                .get("handle")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .is_empty()
+            && value
+                .get("biography")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .is_empty();
+    }
     let pointer = match id {
         "github_repositories" | "stackexchange_users" => "/items",
         "grepapp_code_search" => "/hits/hits",
         "wikidata_entities" => "/search",
         "nvd_cve" => "/vulnerabilities",
-        "urlscan_search" => "/results",
+        "urlscan_search" | "firecrawl_search" => "/results",
         "mnemonic_passive_dns" => "/data",
         "osv_package" => "/vulns",
         _ => return false,
@@ -442,6 +908,109 @@ struct Request {
     body: Option<Value>,
     form: Option<Vec<(String, String)>>,
     ndjson: bool,
+}
+fn firecrawl_search_body(query: &str, limit: u64) -> Value {
+    json!({
+        "query": query,
+        "limit": limit,
+        "sources": ["web"]
+    })
+}
+fn profile_path_token(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        let url = Url::parse(raw)?;
+        let segment = url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .rfind(|segment| {
+                !segment.is_empty()
+                    && *segment != "channel"
+                    && *segment != "user"
+                    && *segment != "c"
+            })
+            .ok_or_else(|| anyhow!("profile URL has no handle"))?;
+        return social_token(segment);
+    }
+    social_token(raw)
+}
+fn sociavault_profile_request(v: &Value) -> Result<Request> {
+    let platform = str_arg(v, "platform")?.to_ascii_lowercase();
+    let platform = if platform == "x" {
+        "twitter"
+    } else {
+        platform.as_str()
+    };
+    let raw = str_arg(v, "handle")?;
+    let (path, query_name, query_value) = match platform {
+        "twitter" | "instagram" | "tiktok" | "threads" | "twitch" => (
+            format!("{platform}/profile"),
+            "handle",
+            profile_path_token(raw)?,
+        ),
+        "youtube" => {
+            if raw.starts_with("https://") || raw.starts_with("http://") {
+                let url = https_on_host(raw, &["youtube.com", "youtu.be"])?;
+                let segments: Vec<_> = url
+                    .path_segments()
+                    .into_iter()
+                    .flatten()
+                    .filter(|segment| !segment.is_empty())
+                    .collect();
+                if segments.first().copied() == Some("channel") {
+                    let id = social_token(segments.get(1).copied().unwrap_or(""))?;
+                    ("youtube/channel".into(), "channelId", id)
+                } else {
+                    ("youtube/channel".into(), "handle", profile_path_token(raw)?)
+                }
+            } else {
+                let token = social_token(raw)?;
+                let query_name = if token.starts_with("UC") && token.len() >= 20 {
+                    "channelId"
+                } else {
+                    "handle"
+                };
+                ("youtube/channel".into(), query_name, token)
+            }
+        }
+        "facebook" => {
+            let target = if raw.starts_with("https://") || raw.starts_with("http://") {
+                https_on_host(raw, &["facebook.com", "fb.com"])?.to_string()
+            } else {
+                format!("https://www.facebook.com/{}", social_token(raw)?)
+            };
+            ("facebook/profile".into(), "url", target)
+        }
+        "linkedin" => {
+            let (company, target) = if raw.starts_with("https://") || raw.starts_with("http://") {
+                let url = https_on_host(raw, &["linkedin.com"])?;
+                (url.path().contains("/company/"), url.to_string())
+            } else {
+                (
+                    false,
+                    format!("https://www.linkedin.com/in/{}", social_token(raw)?),
+                )
+            };
+            let path = if company {
+                "linkedin/company"
+            } else {
+                "linkedin/profile"
+            };
+            (path.into(), "url", target)
+        }
+        _ => return Err(anyhow!("unsupported SociaVault platform")),
+    };
+    let query = [(query_name, query_value.as_str())];
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    Ok(get(url(
+        "https://api.sociavault.com/v1/scrape",
+        &segments,
+        &query,
+    )?))
 }
 fn get(u: Url) -> Request {
     Request {
@@ -779,6 +1348,90 @@ fn request(id: &str, v: &Value) -> Result<Request> {
             let x = ip_arg()?;
             q("https://internetdb.shodan.io", &[&x], &[])
         }
+        "firecrawl_search" => {
+            let query = bounded(str_arg(v, "query")?)?;
+            let limit = number_arg(v, "limit", 3, 10)?;
+            Ok(Request {
+                url: Url::parse("https://api.firecrawl.dev/v2/search")?,
+                body: Some(firecrawl_search_body(&query, limit.parse().unwrap_or(3))),
+                form: None,
+                ndjson: false,
+            })
+        }
+        "hunter_domain_search" => {
+            let domain_value = str_arg(v, "domain").ok().map(domain).transpose()?;
+            let company_value = str_arg(v, "company").ok().map(bounded).transpose()?;
+            ensure!(
+                domain_value.is_some() || company_value.is_some(),
+                "provide domain or company"
+            );
+            let limit = number_arg(v, "limit", 10, 10)?;
+            let mut pairs = vec![("limit", limit.as_str())];
+            if let Some(domain_value) = domain_value.as_deref() {
+                pairs.push(("domain", domain_value));
+            } else if let Some(company_value) = company_value.as_deref() {
+                pairs.push(("company", company_value));
+            }
+            q("https://api.hunter.io/v2/domain-search", &[], &pairs)
+        }
+        "hunter_email_finder" => {
+            let domain_value = str_arg(v, "domain").ok().map(domain).transpose()?;
+            let company_value = str_arg(v, "company").ok().map(bounded).transpose()?;
+            let linkedin = str_arg(v, "linkedin_handle")
+                .ok()
+                .map(linkedin_handle)
+                .transpose()?;
+            ensure!(
+                domain_value.is_some() || company_value.is_some() || linkedin.is_some(),
+                "provide domain, company, or linkedin_handle"
+            );
+            let full_name = str_arg(v, "full_name").ok().map(bounded).transpose()?;
+            let first_name = str_arg(v, "first_name").ok().map(bounded).transpose()?;
+            let last_name = str_arg(v, "last_name").ok().map(bounded).transpose()?;
+            if linkedin.is_none() {
+                ensure!(
+                    full_name.is_some() || (first_name.is_some() && last_name.is_some()),
+                    "provide full_name or first_name and last_name"
+                );
+            }
+            let mut pairs = Vec::new();
+            if let Some(domain_value) = domain_value.as_deref() {
+                pairs.push(("domain", domain_value));
+            } else if let Some(company_value) = company_value.as_deref() {
+                pairs.push(("company", company_value));
+            }
+            if let Some(linkedin) = linkedin.as_deref() {
+                pairs.push(("linkedin_handle", linkedin));
+            }
+            if let Some(full_name) = full_name.as_deref() {
+                pairs.push(("full_name", full_name));
+            } else {
+                if let Some(first_name) = first_name.as_deref() {
+                    pairs.push(("first_name", first_name));
+                }
+                if let Some(last_name) = last_name.as_deref() {
+                    pairs.push(("last_name", last_name));
+                }
+            }
+            q("https://api.hunter.io/v2/email-finder", &[], &pairs)
+        }
+        "hunter_email_verifier" => {
+            let email = email_address(str_arg(v, "email")?)?;
+            q(
+                "https://api.hunter.io/v2/email-verifier",
+                &[],
+                &[("email", &email)],
+            )
+        }
+        "hunter_tech_lookup" => {
+            let d = domain_arg()?;
+            q(
+                "https://api.hunter.io/v2/companies/find",
+                &[],
+                &[("domain", &d)],
+            )
+        }
+        "sociavault_profile" => sociavault_profile_request(v),
         "urlscan_search" => {
             let x = if let Ok(d) = domain_arg() {
                 format!("domain:{d}")
@@ -818,6 +1471,56 @@ pub struct ToolResult {
 }
 type HostSchedule = Arc<Mutex<HashMap<String, std::time::Instant>>>;
 type SharedHttp = (reqwest::Client, Arc<Semaphore>, HostSchedule);
+#[derive(Clone, Debug, Default)]
+pub struct ProviderKeys {
+    pub firecrawl: String,
+    pub hunter: String,
+    pub sociavault: String,
+}
+fn provider_credential(
+    id: &str,
+    keys: &ProviderKeys,
+) -> Result<Option<(reqwest::header::HeaderName, String)>> {
+    let keyed = |raw: &str, missing: &str| -> Result<String> {
+        let key = raw.trim();
+        ensure!(
+            !key.is_empty() && key.len() <= 400 && !key.chars().any(char::is_control),
+            "{missing}"
+        );
+        Ok(key.to_string())
+    };
+    if id == "firecrawl_search" {
+        let key = keyed(
+            &keys.firecrawl,
+            "Enter the Firecrawl API key on the Firecrawl search tool, or set FIRECRAWL_API_KEY",
+        )?;
+        return Ok(Some((
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {key}"),
+        )));
+    }
+    if id.starts_with("hunter_") {
+        let key = keyed(
+            &keys.hunter,
+            "Enter the Hunter API key on a Hunter tool, or set HUNTER_API_KEY",
+        )?;
+        return Ok(Some((
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            key,
+        )));
+    }
+    if id == "sociavault_profile" {
+        let key = keyed(
+            &keys.sociavault,
+            "Enter the SociaVault API key on the SociaVault profile tool, or set SOCIAVAULT_API_KEY",
+        )?;
+        return Ok(Some((
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            key,
+        )));
+    }
+    Ok(None)
+}
 #[derive(Clone)]
 pub struct Executor {
     client: reqwest::Client,
@@ -893,8 +1596,18 @@ impl Executor {
     pub async fn run(
         &self,
         id: &str,
+        inputs: Value,
+        user_agent: Option<&str>,
+    ) -> Result<ToolResult> {
+        self.run_configured(id, inputs, user_agent, &ProviderKeys::default())
+            .await
+    }
+    pub async fn run_configured(
+        &self,
+        id: &str,
         mut inputs: Value,
         user_agent: Option<&str>,
+        keys: &ProviderKeys,
     ) -> Result<ToolResult> {
         let def = definition(id).ok_or_else(|| anyhow!("unknown tool {id}"))?;
         if ["nominatim_geocode", "sec_submissions"].contains(&id) {
@@ -963,11 +1676,17 @@ impl Executor {
                 .ok_or_else(|| anyhow!("Common Crawl index discovery returned no index"))?;
             inputs["index"] = json!(index);
         }
+        let credential = provider_credential(id, keys)?;
         let req = request(id, &inputs)?;
         let host = req.url.host_str().unwrap_or("").to_string();
         let _permit = self.global.acquire().await?;
         let interval = match id {
-            "nominatim_geocode" | "urlscan_search" => Duration::from_secs(1),
+            "nominatim_geocode" | "urlscan_search" | "firecrawl_search" => Duration::from_secs(1),
+            "hunter_domain_search"
+            | "hunter_email_finder"
+            | "hunter_email_verifier"
+            | "hunter_tech_lookup"
+            | "sociavault_profile" => Duration::from_secs(1),
             "hackertarget_hostsearch" | "overpass_places" => Duration::from_secs(2),
             "github_repositories" | "nvd_cve" => Duration::from_secs(6),
             _ => Duration::from_millis(250),
@@ -988,6 +1707,9 @@ impl Executor {
             builder = builder.timeout(Duration::from_secs(def.timeout_seconds));
             if let Some(ua) = user_agent {
                 builder = builder.header(reqwest::header::USER_AGENT, ua);
+            }
+            if let Some((name, value)) = &credential {
+                builder = builder.header(name, value);
             }
             let response =
                 tokio::time::timeout(Duration::from_secs(def.timeout_seconds), builder.send())
@@ -1100,6 +1822,18 @@ impl Executor {
                     return Ok(result);
                 }
             }
+            if id == "sociavault_profile" {
+                if let Some(object) = result.observations.as_object_mut() {
+                    object.insert(
+                        "platform".into(),
+                        inputs.get("platform").cloned().unwrap_or(Value::Null),
+                    );
+                    object.insert(
+                        "queried_handle".into(),
+                        inputs.get("handle").cloned().unwrap_or(Value::Null),
+                    );
+                }
+            }
             if no_results(id, &result.observations) {
                 result.status = "no_results".into();
             }
@@ -1112,16 +1846,16 @@ mod tests {
     use super::*;
     #[test]
     fn registry_and_validation() {
-        assert_eq!(registry().len(), 30);
+        assert_eq!(registry().len(), 36);
         let ids: std::collections::HashSet<_> = registry().iter().map(|t| t.id).collect();
-        assert_eq!(ids.len(), 30);
+        assert_eq!(ids.len(), 36);
         assert_eq!(
             registry()
                 .iter()
                 .map(|t| t.category)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            10
+            13
         );
         for t in registry() {
             assert!(!t.description.is_empty());
@@ -1131,6 +1865,82 @@ mod tests {
         }
         assert!(request("overpass_places", &json!({"latitude":95,"longitude":0})).is_err());
         assert!(request("shodan_internetdb", &json!({"ip":"127.0.0.1"})).is_ok());
+        let search = request("firecrawl_search", &json!({"query":"who is example"})).unwrap();
+        assert_eq!(search.url.as_str(), "https://api.firecrawl.dev/v2/search");
+        assert_eq!(
+            search.body,
+            Some(json!({"query":"who is example","limit":3,"sources":["web"]}))
+        );
+        assert!(request(
+            "hunter_domain_search",
+            &json!({"domain":"example.org","limit":25})
+        )
+        .is_err());
+        let domain_search =
+            request("hunter_domain_search", &json!({"domain":"Example.ORG"})).unwrap();
+        assert_eq!(
+            domain_search.url.as_str(),
+            "https://api.hunter.io/v2/domain-search?limit=10&domain=example.org"
+        );
+        assert!(request(
+            "hunter_email_finder",
+            &json!({"domain":"example.org","first_name":"Ada"})
+        )
+        .is_err());
+        let finder = request(
+            "hunter_email_finder",
+            &json!({"domain":"example.org","full_name":"Ada Lovelace"}),
+        )
+        .unwrap();
+        assert!(finder
+            .url
+            .as_str()
+            .starts_with("https://api.hunter.io/v2/email-finder?"));
+        assert!(!finder.url.as_str().contains("api_key"));
+        let verifier =
+            request("hunter_email_verifier", &json!({"email":"Ada@Example.ORG"})).unwrap();
+        assert_eq!(
+            verifier.url.as_str(),
+            "https://api.hunter.io/v2/email-verifier?email=ada%40example.org"
+        );
+        let tech = request("hunter_tech_lookup", &json!({"domain":"hunter.io"})).unwrap();
+        assert_eq!(
+            tech.url.as_str(),
+            "https://api.hunter.io/v2/companies/find?domain=hunter.io"
+        );
+        let profile = request(
+            "sociavault_profile",
+            &json!({"platform":"x","handle":"https://x.com/ExampleUser"}),
+        )
+        .unwrap();
+        assert_eq!(
+            profile.url.as_str(),
+            "https://api.sociavault.com/v1/scrape/twitter/profile?handle=ExampleUser"
+        );
+        let linkedin = request(
+            "sociavault_profile",
+            &json!({"platform":"linkedin","handle":"https://www.linkedin.com/company/hunterio"}),
+        )
+        .unwrap();
+        assert_eq!(
+            linkedin.url.as_str(),
+            "https://api.sociavault.com/v1/scrape/linkedin/company?url=https%3A%2F%2Fwww.linkedin.com%2Fcompany%2Fhunterio"
+        );
+        let channel = request(
+            "sociavault_profile",
+            &json!({"platform":"youtube","handle":"UCxxxxxxxxxxxxxxxxxxxxxx"}),
+        )
+        .unwrap();
+        assert_eq!(
+            channel.url.as_str(),
+            "https://api.sociavault.com/v1/scrape/youtube/channel?channelId=UCxxxxxxxxxxxxxxxxxxxxxx"
+        );
+        assert!(request(
+            "sociavault_profile",
+            &json!({"platform":"reddit","handle":"example"})
+        )
+        .is_err());
+        assert!(provider_credential("hunter_domain_search", &ProviderKeys::default()).is_err());
     }
     #[test]
     fn parse_fixtures() {
@@ -1168,5 +1978,58 @@ mod tests {
         assert!(parse_observations("commoncrawl_urls", "not-json", "text/plain", true).is_err());
         assert!(parse_observations("nvd_cve", "<html>error</html>", "text/html", false).is_err());
         assert!(parse_observations("nvd_cve", "oops", "application/json", false).is_err());
+        let (web, truncated) = parse_observations(
+            "firecrawl_search",
+            r#"{"success":true,"data":{"web":[{"title":"Jeff Bezos","description":"American businessman","url":"https://en.wikipedia.org/wiki/Jeff_Bezos"},{"title":"Wikidata","description":"Q312556","url":"https://www.wikidata.org/wiki/Q312556"}]}}"#,
+            "application/json",
+            false,
+        )
+        .unwrap();
+        assert!(!truncated);
+        assert_eq!(web["results"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            web["results"][0]["url"],
+            "https://en.wikipedia.org/wiki/Jeff_Bezos"
+        );
+        assert!(web["results"][1]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("Q312556"));
+        assert!(parse_observations(
+            "firecrawl_search",
+            r#"{"success":false,"error":"unauthorized"}"#,
+            "application/json",
+            false
+        )
+        .is_err());
+        let (company, _) = parse_observations(
+            "hunter_tech_lookup",
+            r#"{"data":{"name":"Hunter","domain":"hunter.io","description":"Email data","location":"Wilmington, Delaware","category":{"industry":"Internet"},"metrics":{"employees":"11-50"},"tech":["ruby","hsts"],"techCategories":["security"],"site":{"emailAddresses":["support@hunter.io"]},"linkedin":{"handle":"company/hunterio"},"twitter":{"handle":null}}}"#,
+            "application/json",
+            false,
+        )
+        .unwrap();
+        assert_eq!(company["tech"][0], "ruby");
+        assert_eq!(company["social"]["linkedin"], "company/hunterio");
+        assert_eq!(company["emails"][0], "support@hunter.io");
+        let (profile_card, _) = parse_observations(
+            "sociavault_profile",
+            r#"{"success":true,"data":{"user":{"uniqueId":"example","nickname":"Example","signature":"Builder. https://example.org"},"stats":{"followerCount":10,"followingCount":2},"bio_links":{"0":{"url":"https://www.youtube.com/@example"}}}}"#,
+            "application/json",
+            false,
+        )
+        .unwrap();
+        assert_eq!(profile_card["handle"], "example");
+        assert_eq!(profile_card["name"], "Example");
+        assert!(profile_card["biography"]
+            .as_str()
+            .unwrap()
+            .contains("Builder"));
+        assert_eq!(profile_card["stats"]["followerCount"], 10);
+        assert!(profile_card["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|link| link.as_str().unwrap().contains("youtube.com")));
     }
 }

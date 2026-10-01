@@ -1,6 +1,6 @@
 # Argos OSINT
 
-Argos is a terminal investigation workspace. Its launcher contains **Recon**, **Brain**, **OSINT**, **Providers**, and **System**, in that order. Recon starts by default and restores the last selected surviving thread.
+Argos is a terminal investigation workspace. It opens on **Home**. **Recon** and **Brain** are the two applications. **OSINT**, **Providers**, and **System** are system apps: they configure gathering, accounts, and host state. Only Recon has a chat. The last surviving Recon thread is restored when Recon opens.
 
 ## Run and navigate
 
@@ -8,11 +8,21 @@ Argos is a terminal investigation workspace. Its launcher contains **Recon**, **
 cargo run -p argos-osint-bin
 ```
 
-F1–F5 open the five apps. Tab and Shift+Tab move focus; Enter activates a focused control. Ctrl+N starts a Recon thread. Alt+Left and Alt+Right navigate recently opened threads. PageUp and PageDown scroll the Recon transcript. Shift+Enter adds a line in the composer; Enter sends. Esc closes a detail panel or returns focus without cancelling a run. Ctrl+C quits. Mouse selection, buttons, tabs, and scrolling are supported. On narrow terminals, panels are stacked.
+From Home, ↑↓ select and Enter opens. `1` opens Recon, `2` Brain, `3` OSINT, `4` Providers, and `5` System. Esc or the Home control leaves an app. `?` opens the shortcut card for the current screen.
 
-Recon keeps threads, drafts, messages, run stages, plans, tool calls, and evidence across restarts. Its transcript shows cited answers and tool activity. Use the explicit Cancel action to stop a run; interrupted runs can be resumed. The composer accepts `:rename <title>`, `:delete`, and `:delete-with-insights` for the selected thread.
+Recon opens on a full-screen list of recent investigations. ↑↓ moves through that list and Enter opens the selected investigation as its own full-screen transcript. Esc from the transcript returns to the list; Esc from the list returns Home. In the transcript, Tab moves between the log and the prompt. Enter sends; Shift+Enter adds a line. While the transcript is focused, ↑↓ select a message, decision, or tool, and ←→ fold a decision or tool log. Enter toggles the selected fold. `f` opens the full text. Ctrl+U and Ctrl+D scroll the focused pane, and the mouse wheel scrolls the pane under the pointer. Ctrl+N starts an investigation and opens its transcript. In the transcript, when the cursor is not in a text field, Alt+Left and Alt+Right move through recently opened investigations. A click counts on release, so dragging across Home does not launch an app. Ctrl+C cancels a running turn, or clears a draft first. Press Ctrl+C or Ctrl+Q again within a second to quit when nothing else is pending.
 
-OSINT lists 30 HTTP lookup tools in ten categories. Choose a tool to see its input schema, example, documentation, access restrictions, result, and source. Manual runs remain in history and can be attached to a Recon thread without another request. `:prev` and `:next` navigate saved manual results. A standalone result does not create a Brain insight; Recon extracts insights from cited evidence after synthesis. Some public services require an identifying User-Agent and impose quotas or licensing limits. Set one before SEC or Nominatim lookups:
+The transcript follows the Grok Build chat. Your question sits on a raised band with a prompt arrow. The answer is rendered Markdown: headings, lists, bold, code, quotes, and links. Decisions and lookups stay on collapsed disclosure rows. A `◉ brain` mark on an answer opens the memories that were in its prompt. A new investigation stays untitled until the Recon model names it from the first question. `:rename` replaces that title.
+
+Brain, OSINT, Providers, and System use fields and buttons only. OSINT keeps previous and next controls for saved manual runs. System shows hardware, paths, and a scrollable event log of run stages and failures.
+
+Recon keeps threads, drafts, messages, run stages, plans, tool calls, evidence, and the memories supplied to each synthesis answer. Use Cancel to stop a run; interrupted runs can be resumed. The composer accepts `:rename <title>`, `:delete`, and `:delete-with-insights` for the selected thread.
+
+The first answer in a thread is a broad reconnaissance pass. Recon selects three to five of the best suited tools, reports the names, domains, roles, and locations the evidence actually supports, and asks which narrower scope to pursue next: people, domains, emails, social accounts, infrastructure, or filings. Later turns go deeper on that scope and may use the configured call budget plus follow-up rounds. A broad question (`who`, `what`, `where`, `when`, `how`, or `why`, followed by `is`, `did`, `are`, and the same kind of verb) still checks Brain first. When those memories are missing or thin, Recon searches the web with Firecrawl before planning. Enter the key on the Firecrawl search tool in OSINT, or export `FIRECRAWL_API_KEY`. The call is `POST https://api.firecrawl.dev/v2/search` with `query` and `limit`.
+
+Hunter domain search, email finder, email verifier, and company tech lookup share one key. Enter it on any Hunter tool, or export `HUNTER_API_KEY`. A saved key overrides the environment variable. SociaVault profile lookups use the same pattern (`SOCIAVAULT_API_KEY` on the SociaVault profile tool). On a later turn, handles and company domains found in Firecrawl results are looked up and logged in the transcript: SociaVault profiles the handles, and Hunter domain search plus tech lookup run for company domains. Social-network hosts such as `x.com` stay on the profile lookup. The opening turn still does not start that narrower work.
+
+OSINT lists 36 HTTP lookup tools in thirteen categories, including Firecrawl search, Hunter enrichment, and SociaVault profiles. Choose a tool to see its input schema, example, documentation, access restrictions, result, and source. Manual runs remain in history and can be attached to a Recon thread without another request. Prev and Next move through saved manual results. A standalone result does not create a Brain insight; Recon extracts insights from cited evidence after synthesis. Some public services require an identifying User-Agent and impose quotas or licensing limits. Set one before SEC or Nominatim lookups:
 
 ```sh
 cargo run -p argos-osint-bin -- osint user-agent 'Argos contact@example.com'

@@ -4,7 +4,7 @@ use anyhow::Result;
 use argos_osint_core::brain::{Memory, MemorySource, ScoredMemory};
 use argos_osint_core::hardware::{self, HardwareProfile};
 use argos_osint_core::paths;
-use argos_osint_core::provider::{self, SettingsFile};
+use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
 use argos_osint_core::{osint, recon};
@@ -15,14 +15,15 @@ use crossterm::event::{
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::io::Stdout;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,12 +54,52 @@ impl ModuleId {
     pub fn blurb(self) -> &'static str {
         match self {
             Self::Recon => "Investigate with evidence",
-            Self::Brain => "Recall insights from conversations",
-            Self::Osint => "Public lookup tools",
-            Self::Providers => "Accounts and Defaults",
-            Self::System => "Hardware and settings",
+            Self::Brain => "Recall and manage insights",
+            Self::Osint => "Configure public lookup tools",
+            Self::Providers => "Accounts and model defaults",
+            Self::System => "Hardware, paths, and event log",
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Scrolls {
+    pub chat: u16,
+    pub threads: u16,
+    pub memories: u16,
+    pub tools: u16,
+    pub detail: u16,
+    pub log: u16,
+    pub popup: u16,
+    pub recall: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceKind {
+    Provider,
+    Model,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChoiceItem {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Overlay {
+    None,
+    Help,
+    Memories { message_id: String },
+    Block { title: String, body: String },
+    Choice(ChoiceKind),
+}
+
+#[derive(Clone, Debug)]
+pub struct LogLine {
+    pub at: String,
+    pub level: String,
+    pub text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +130,9 @@ pub enum FieldId {
     ReconSearch,
     OsintSearch,
     OsintInput,
+    FirecrawlKey,
+    HunterKey,
+    SociaVaultKey,
     ReconProvider,
     ReconModel,
     SynthesisProvider,
@@ -120,6 +164,13 @@ pub enum ButtonId {
     OsintCancel,
     OsintToggle,
     OsintRaw,
+    OsintPrev,
+    OsintNext,
+    SaveFirecrawlKey,
+    SaveHunterKey,
+    SaveSociaVaultKey,
+    OpenSource,
+    ClearLog,
     GrokSignIn,
     GrokCheck,
     OpenAISignIn,
@@ -133,12 +184,19 @@ pub enum ButtonId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     App(usize),
+    Home,
     ProviderTab(ProviderPage),
     Memory(usize),
     Thread(usize),
     Tool(usize),
     Field(FieldId),
     Button(ButtonId),
+    Transcript,
+    ChatHeader(usize),
+    ChatBody(usize),
+    BrainMark(usize),
+    Choice(usize),
+    CloseOverlay,
 }
 
 #[derive(Debug)]
@@ -168,7 +226,12 @@ enum WorkEvent {
     },
     CatalogDone {
         synthesis: bool,
-        outcome: Result<Vec<String>, String>,
+        provider: String,
+        outcome: Result<Vec<ListedModel>, String>,
+    },
+    Access {
+        grok: bool,
+        openai: bool,
     },
     InsightDone {
         thread_id: String,
@@ -188,6 +251,9 @@ pub struct App {
     pub recon_search: String,
     pub osint_search: String,
     pub osint_input: String,
+    pub firecrawl_key: String,
+    pub hunter_key: String,
+    pub sociavault_key: String,
     osint_inputs: HashMap<String, String>,
     pub selected_thread: Option<String>,
     pub threads: Vec<recon::Thread>,
@@ -202,7 +268,21 @@ pub struct App {
     pub manual_runs: Vec<recon::Call>,
     pub manual_run_pos: usize,
     pub recon_stage: String,
-    pub recon_scroll: u16,
+    /// False on the investigation list. True when a transcript fills the screen.
+    pub recon_chat: bool,
+    pub scrolls: Scrolls,
+    pub expanded: HashSet<String>,
+    pub chat_sel: usize,
+    pub chat_follow: bool,
+    pub overlay: Overlay,
+    pub log: Vec<LogLine>,
+    pub runs: Vec<recon::Run>,
+    pub answer_memories: HashMap<String, Vec<Memory>>,
+    quit_arm: Option<Instant>,
+    esc_arm: Option<Instant>,
+    press: Option<(u16, u16, Option<Target>)>,
+    draft_dirty: bool,
+    pub frame: RefCell<super::ui::FrameCache>,
     pub thread_history: Vec<String>,
     pub history_pos: usize,
     running: HashMap<String, Arc<AtomicBool>>,
@@ -212,7 +292,15 @@ pub struct App {
     pub synthesis_provider: String,
     pub synthesis_model: String,
     pub defaults_synthesis: bool,
-    pub model_catalog: Vec<String>,
+    pub model_catalog: Vec<ListedModel>,
+    pub catalog_for: String,
+    pub choice_items: Vec<ChoiceItem>,
+    pub choice_sel: usize,
+    pub choice_note: String,
+    pub grok_signed_in: bool,
+    pub openai_signed_in: bool,
+    access_probe: bool,
+    access_checked: bool,
     pub router_key: String,
     pub router_endpoint: String,
     pub router_advanced: bool,
@@ -269,7 +357,7 @@ impl App {
             .and_then(|id| store.get_thread(id).ok().flatten())
             .map(|t| t.draft)
             .unwrap_or_default();
-        let recon_scroll = selected_thread
+        let chat_scroll = selected_thread
             .as_ref()
             .and_then(|id| store.get_thread(id).ok().flatten())
             .map(|t| t.scroll.clamp(0, i64::from(u16::MAX)) as u16)
@@ -296,8 +384,8 @@ impl App {
         let router = provider::account_secret(&auth, "openrouter");
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
-        Ok(Self {
-            module: Some(ModuleId::Recon),
+        let mut app = Self {
+            module: None,
             launcher_sel: 0,
             provider_page: ProviderPage::Grok,
             input: draft,
@@ -312,6 +400,9 @@ impl App {
                 .map(|t| t.example_input().to_string())
                 .unwrap_or_else(|| "{}".into()),
             osint_inputs: HashMap::new(),
+            firecrawl_key: settings.firecrawl_api_key.clone(),
+            hunter_key: settings.hunter_api_key.clone(),
+            sociavault_key: settings.sociavault_api_key.clone(),
             selected_thread,
             threads,
             thread_states,
@@ -325,7 +416,23 @@ impl App {
             manual_runs,
             manual_run_pos,
             recon_stage: "ready".into(),
-            recon_scroll,
+            recon_chat: false,
+            scrolls: Scrolls {
+                chat: chat_scroll,
+                ..Scrolls::default()
+            },
+            expanded: HashSet::new(),
+            chat_sel: 0,
+            chat_follow: chat_scroll == 0,
+            overlay: Overlay::None,
+            log: Vec::new(),
+            runs: Vec::new(),
+            answer_memories: HashMap::new(),
+            quit_arm: None,
+            esc_arm: None,
+            press: None,
+            draft_dirty: false,
+            frame: RefCell::new(super::ui::FrameCache::default()),
             thread_history: Vec::new(),
             history_pos: 0,
             running: HashMap::new(),
@@ -336,6 +443,14 @@ impl App {
             synthesis_model: synthesis_default.model,
             defaults_synthesis: false,
             model_catalog: Vec::new(),
+            catalog_for: String::new(),
+            choice_items: Vec::new(),
+            choice_sel: 0,
+            choice_note: String::new(),
+            grok_signed_in: argos_osint_core::grok_oauth::login_present(),
+            openai_signed_in: false,
+            access_probe: false,
+            access_checked: false,
             router_key: router.api_key.unwrap_or_default(),
             router_endpoint: router.base_url,
             router_advanced: false,
@@ -362,18 +477,69 @@ impl App {
             provider_rx,
             work_tx,
             work_rx,
-        })
+        };
+        app.push_log("info", "Argos ready");
+        if app.selected_thread.is_some() {
+            let _ = app.refresh_selected();
+        }
+        Ok(app)
+    }
+
+    pub fn error_count(&self) -> usize {
+        self.log.iter().filter(|line| line.level == "error").count()
+    }
+
+    pub fn running_thread(&self, id: &str) -> bool {
+        self.running.contains_key(id)
+    }
+
+    pub fn insight_summary(&self, memory_id: &str) -> Option<String> {
+        let insight = self.store.insight_for_memory(memory_id).ok().flatten()?;
+        let mut lines = vec![format!(
+            "{} · {} → {} · {} · {:.0}%",
+            insight.entity,
+            insight.predicate,
+            insight.object_value,
+            insight.classification,
+            insight.confidence * 100.0
+        )];
+        lines.push(format!(
+            "{} evidence link{}",
+            insight.sources.len(),
+            if insight.sources.len() == 1 { "" } else { "s" }
+        ));
+        if !insight.related.is_empty() {
+            lines.push(format!("Related: {}", insight.related.join(", ")));
+        }
+        Some(lines.join("\n"))
+    }
+
+    fn push_log(&mut self, level: &str, text: impl Into<String>) {
+        self.log.push(LogLine {
+            at: log_stamp(),
+            level: level.into(),
+            text: text.into(),
+        });
+        if self.log.len() > 400 {
+            let extra = self.log.len() - 400;
+            self.log.drain(0..extra);
+        }
+    }
+
+    fn go_home(&mut self) {
+        self.flush_draft();
+        self.overlay = Overlay::None;
+        self.module = None;
+        self.set_focus(Target::App(self.launcher_sel));
+        self.status = "Home".into();
     }
 
     fn select(&mut self, index: usize) {
-        if self.module == Some(ModuleId::Recon) {
-            if let Some(id) = &self.selected_thread {
-                let _ = self.store.save_draft(id, &self.input, 0);
-            }
-        }
+        self.flush_draft();
         self.launcher_sel = index;
         self.module = Some(ModuleId::ALL[index]);
         if self.module == Some(ModuleId::Recon) {
+            self.recon_chat = false;
             self.input = self
                 .selected_thread
                 .as_ref()
@@ -386,7 +552,8 @@ impl App {
         self.hits.clear();
         self.status = format!("{} open", ModuleId::ALL[index].title());
         self.set_focus(match self.module {
-            Some(ModuleId::Recon) => Target::Field(FieldId::Composer),
+            Some(ModuleId::Recon) if self.threads.is_empty() => Target::Field(FieldId::ReconSearch),
+            Some(ModuleId::Recon) => Target::Thread(self.thread_sel),
             Some(ModuleId::Brain) => Target::Field(FieldId::BrainApp),
             Some(ModuleId::Osint) => Target::Field(FieldId::OsintSearch),
             Some(ModuleId::Providers) => Target::ProviderTab(self.provider_page),
@@ -403,6 +570,9 @@ impl App {
             FieldId::ReconSearch => &self.recon_search,
             FieldId::OsintSearch => &self.osint_search,
             FieldId::OsintInput => &self.osint_input,
+            FieldId::FirecrawlKey => &self.firecrawl_key,
+            FieldId::HunterKey => &self.hunter_key,
+            FieldId::SociaVaultKey => &self.sociavault_key,
             FieldId::ReconProvider => &self.recon_provider,
             FieldId::ReconModel => &self.recon_model,
             FieldId::SynthesisProvider => &self.synthesis_provider,
@@ -422,6 +592,9 @@ impl App {
             FieldId::ReconSearch => &mut self.recon_search,
             FieldId::OsintSearch => &mut self.osint_search,
             FieldId::OsintInput => &mut self.osint_input,
+            FieldId::FirecrawlKey => &mut self.firecrawl_key,
+            FieldId::HunterKey => &mut self.hunter_key,
+            FieldId::SociaVaultKey => &mut self.sociavault_key,
             FieldId::ReconProvider => &mut self.recon_provider,
             FieldId::ReconModel => &mut self.recon_model,
             FieldId::SynthesisProvider => &mut self.synthesis_provider,
@@ -433,6 +606,11 @@ impl App {
     }
 
     fn set_focus(&mut self, target: Target) {
+        if self.focus == Target::Field(FieldId::Composer)
+            && target != Target::Field(FieldId::Composer)
+        {
+            self.flush_draft();
+        }
         self.focus = target;
         self.cursor = match target {
             Target::Field(field) => self.field(field).chars().count(),
@@ -508,11 +686,20 @@ impl App {
         self.open_thread_with_history(id, true)
     }
 
+    fn enter_investigation(&mut self, id: &str) -> Result<()> {
+        self.open_thread(id)?;
+        self.recon_chat = true;
+        self.module = Some(ModuleId::Recon);
+        self.set_focus(Target::Field(FieldId::Composer));
+        Ok(())
+    }
+
     fn open_thread_with_history(&mut self, id: &str, record: bool) -> Result<()> {
         if self.module == Some(ModuleId::Recon) {
             if let Some(previous) = &self.selected_thread {
                 self.store
-                    .save_draft(previous, &self.input, i64::from(self.recon_scroll))?;
+                    .save_draft(previous, &self.input, i64::from(self.scrolls.chat))?;
+                self.draft_dirty = false;
             }
         }
         let thread = self
@@ -524,7 +711,9 @@ impl App {
         self.messages = self.store.list_messages(id)?;
         self.refresh_selected()?;
         self.input = thread.draft;
-        self.recon_scroll = thread.scroll.clamp(0, i64::from(u16::MAX)) as u16;
+        self.scrolls.chat = thread.scroll.clamp(0, i64::from(u16::MAX)) as u16;
+        self.chat_follow = self.scrolls.chat == 0;
+        self.chat_sel = usize::MAX;
         self.recon_stage = "ready".into();
         self.refresh_threads()?;
         if record && self.thread_history.last().map(String::as_str) != Some(id) {
@@ -538,7 +727,7 @@ impl App {
 
     fn new_thread(&mut self) -> Result<()> {
         let thread = self.store.new_thread("New investigation")?;
-        self.open_thread(&thread.id)?;
+        self.enter_investigation(&thread.id)?;
         self.input.clear();
         self.set_focus(Target::Field(FieldId::Composer));
         Ok(())
@@ -559,7 +748,8 @@ impl App {
         );
         self.input.clear();
         self.store
-            .save_draft(&tid, "", i64::from(self.recon_scroll))?;
+            .save_draft(&tid, "", i64::from(self.scrolls.chat))?;
+        self.chat_follow = true;
         let service =
             recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
         let tx = self.work_tx.clone();
@@ -651,6 +841,30 @@ impl App {
         Ok(())
     }
 
+    fn remember_firecrawl_key(&mut self) -> Result<String> {
+        let key = self.firecrawl_key.trim().to_string();
+        anyhow::ensure!(!key.is_empty(), "Enter a Firecrawl API key");
+        self.settings.firecrawl_api_key = key;
+        self.settings.save()?;
+        Ok("Firecrawl API key saved".into())
+    }
+
+    fn remember_hunter_key(&mut self) -> Result<String> {
+        let key = self.hunter_key.trim().to_string();
+        anyhow::ensure!(!key.is_empty(), "Enter a Hunter API key");
+        self.settings.hunter_api_key = key;
+        self.settings.save()?;
+        Ok("Hunter API key saved".into())
+    }
+
+    fn remember_sociavault_key(&mut self) -> Result<String> {
+        let key = self.sociavault_key.trim().to_string();
+        anyhow::ensure!(!key.is_empty(), "Enter a SociaVault API key");
+        self.settings.sociavault_api_key = key;
+        self.settings.save()?;
+        Ok("SociaVault API key saved".into())
+    }
+
     fn run_osint(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.osint_cancel.is_none(),
@@ -661,6 +875,13 @@ impl App {
             .ok_or_else(|| anyhow::anyhow!("No tool selected"))?;
         let input: Value = serde_json::from_str(&self.osint_input)?;
         osint::validate(tool.id, &input)?;
+        if tool.id == "firecrawl_search" {
+            self.remember_firecrawl_key()?;
+        } else if tool.id.starts_with("hunter_") {
+            self.remember_hunter_key()?;
+        } else if tool.id == "sociavault_profile" {
+            self.remember_sociavault_key()?;
+        }
         let service =
             recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
         let tx = self.work_tx.clone();
@@ -681,13 +902,19 @@ impl App {
     fn on_work_event(&mut self, event: WorkEvent) {
         match event {
             WorkEvent::ReconStage { thread_id, stage } => {
+                self.push_log("info", format!("Recon {stage}"));
                 if self.selected_thread.as_deref() == Some(&thread_id) {
                     self.recon_stage = stage;
                     let _ = self.refresh_selected();
+                    let _ = self.refresh_threads();
                 }
             }
             WorkEvent::ReconDone { thread_id, outcome } => {
                 self.running.remove(&thread_id);
+                match &outcome {
+                    Ok(()) => self.push_log("info", "Recon turn complete"),
+                    Err(err) => self.push_log("error", format!("Recon failed: {err}")),
+                }
                 if self.selected_thread.as_deref() == Some(&thread_id) {
                     self.recon_stage = outcome
                         .as_ref()
@@ -705,31 +932,61 @@ impl App {
                 match outcome {
                     Ok(value) => {
                         self.status = format!("{}: {}", value.1.tool_id, value.1.status);
+                        if value.1.status == "failed" {
+                            self.push_log(
+                                "error",
+                                format!(
+                                    "{} failed: {}",
+                                    value.1.tool_id,
+                                    value.1.error.as_deref().unwrap_or("unknown error")
+                                ),
+                            );
+                        } else {
+                            self.push_log(
+                                "info",
+                                format!("{} {}", value.1.tool_id, value.1.status),
+                            );
+                        }
                         self.osint_result = Some(value);
                         if let Ok(runs) = self.store.manual_calls() {
                             self.manual_runs = runs;
                             self.manual_run_pos = self.manual_runs.len().saturating_sub(1);
                         }
                     }
-                    Err(err) => self.status = err,
+                    Err(err) => {
+                        self.push_log("error", format!("OSINT failed: {err}"));
+                        self.status = err;
+                    }
                 }
             }
-            WorkEvent::CatalogDone { synthesis, outcome } => {
-                if self.defaults_synthesis == synthesis {
-                    match outcome {
-                        Ok(models) => {
-                            self.status = format!("{} models available", models.len());
-                            self.model_catalog = models;
-                        }
-                        Err(err) => self.status = err,
-                    }
+            WorkEvent::CatalogDone {
+                synthesis,
+                provider,
+                outcome,
+            } => self.finish_catalog(synthesis, provider, outcome),
+            WorkEvent::Access { grok, openai } => {
+                if grok {
+                    self.grok_signed_in = true;
+                }
+                if openai {
+                    self.openai_signed_in = true;
+                }
+                self.access_probe = false;
+                self.access_checked = true;
+                if matches!(self.overlay, Overlay::Choice(ChoiceKind::Provider)) {
+                    self.rebuild_provider_choices();
                 }
             }
             WorkEvent::InsightDone { thread_id, outcome } => {
                 if self.selected_thread.as_deref() == Some(&thread_id) {
-                    self.status = outcome
-                        .map(|_| "Insights saved".into())
-                        .unwrap_or_else(|e| format!("Insight retry failed: {e}"));
+                    self.status = match outcome {
+                        Ok(()) => "Insights saved".into(),
+                        Err(err) => {
+                            let text = format!("Insight retry failed: {err}");
+                            self.push_log("error", text.clone());
+                            text
+                        }
+                    };
                     if let Ok(memories) = self.store.list_memories() {
                         self.memories = memories;
                     }
@@ -738,21 +995,277 @@ impl App {
         }
     }
 
-    fn refresh_catalog(&mut self) {
-        let synthesis = self.defaults_synthesis;
-        let kind = if synthesis {
+    pub fn role_provider(&self) -> String {
+        let raw = if self.defaults_synthesis {
             &self.synthesis_provider
         } else {
             &self.recon_provider
         };
-        let secret = provider::account_secret(&self.auth, kind);
+        match provider::normalize_kind(raw).as_str() {
+            "openai" => "openai-chatgpt".into(),
+            "grok-subscription" => "grok".into(),
+            other => other.to_string(),
+        }
+    }
+
+    fn role_model(&self) -> String {
+        if self.defaults_synthesis {
+            self.synthesis_model.clone()
+        } else {
+            self.recon_model.clone()
+        }
+    }
+
+    fn set_role_provider(&mut self, id: &str) {
+        if self.defaults_synthesis {
+            self.synthesis_provider = id.to_string();
+        } else {
+            self.recon_provider = id.to_string();
+        }
+    }
+
+    fn set_role_model(&mut self, id: &str) {
+        if self.defaults_synthesis {
+            self.synthesis_model = id.to_string();
+        } else {
+            self.recon_model = id.to_string();
+        }
+    }
+
+    pub fn field_display(&self, field: FieldId) -> String {
+        match field {
+            FieldId::ReconProvider | FieldId::SynthesisProvider => {
+                let kind = self.field(field);
+                if kind.is_empty() {
+                    String::new()
+                } else {
+                    provider_label(kind).to_string()
+                }
+            }
+            _ => self.field(field).to_string(),
+        }
+    }
+
+    fn refresh_catalog(&mut self) {
+        let synthesis = self.defaults_synthesis;
+        let provider = self.role_provider();
+        if provider.is_empty() {
+            self.status = "Choose a provider first".into();
+            return;
+        }
+        if provider == "openai-chatgpt" {
+            self.finish_catalog(synthesis, provider, Ok(codex_models()));
+            return;
+        }
+        self.status = "Loading models this account can call".into();
+        if matches!(self.overlay, Overlay::Choice(ChoiceKind::Model)) {
+            self.choice_note = "Loading models this account can call…".into();
+        }
+        let secret = provider::account_secret(&self.auth, &provider);
         let tx = self.work_tx.clone();
-        self.status = "Loading models".into();
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
         tokio::spawn(async move {
-            let outcome = provider::list_models(&secret)
+            let outcome = provider::verified_catalog(&secret)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send(WorkEvent::CatalogDone { synthesis, outcome });
+            let _ = tx.send(WorkEvent::CatalogDone {
+                synthesis,
+                provider,
+                outcome,
+            });
+        });
+    }
+
+    fn finish_catalog(
+        &mut self,
+        synthesis: bool,
+        provider: String,
+        outcome: Result<Vec<ListedModel>, String>,
+    ) {
+        if self.defaults_synthesis != synthesis || self.role_provider() != provider {
+            return;
+        }
+        match outcome {
+            Ok(models) => {
+                let count = models.len();
+                self.model_catalog = models;
+                self.catalog_for = provider;
+                self.status = format!("{count} models this account can call");
+                if matches!(self.overlay, Overlay::Choice(ChoiceKind::Model)) {
+                    self.choice_note = if count == 0 {
+                        "This account returned no models.".into()
+                    } else {
+                        "Models this account can call.".into()
+                    };
+                    self.rebuild_model_choices();
+                }
+            }
+            Err(err) => {
+                self.push_log("error", format!("Model catalog failed: {err}"));
+                self.status = err.clone();
+                if matches!(self.overlay, Overlay::Choice(ChoiceKind::Model)) {
+                    self.choice_note = err;
+                    if self.catalog_for != self.role_provider() {
+                        self.choice_items.clear();
+                        self.choice_sel = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_default_picker(&mut self, field: FieldId) {
+        let synthesis = matches!(field, FieldId::SynthesisProvider | FieldId::SynthesisModel);
+        if synthesis != self.defaults_synthesis {
+            return;
+        }
+        if matches!(field, FieldId::ReconProvider | FieldId::SynthesisProvider) {
+            self.open_provider_picker();
+        } else {
+            self.open_model_picker();
+        }
+    }
+
+    fn open_provider_picker(&mut self) {
+        self.scrolls.popup = 0;
+        self.overlay = Overlay::Choice(ChoiceKind::Provider);
+        self.choice_note = "Connected accounts. Sign in on the other tabs to add one.".into();
+        self.rebuild_provider_choices();
+        self.probe_access();
+    }
+
+    fn open_model_picker(&mut self) {
+        let provider = self.role_provider();
+        if provider.is_empty() {
+            self.status = "Choose a provider first".into();
+            return;
+        }
+        self.scrolls.popup = 0;
+        self.overlay = Overlay::Choice(ChoiceKind::Model);
+        if provider == "openai-chatgpt" {
+            self.finish_catalog(self.defaults_synthesis, provider, Ok(codex_models()));
+            self.choice_note = "ChatGPT subscription exposes the Codex default.".into();
+            self.status = "ChatGPT subscription uses the Codex default".into();
+            return;
+        }
+        if self.catalog_for != provider {
+            self.model_catalog.clear();
+            self.choice_items.clear();
+            self.choice_sel = 0;
+            self.choice_note = "Loading models this account can call…".into();
+        } else {
+            self.choice_note = "Models this account can call.".into();
+            self.rebuild_model_choices();
+        }
+        self.refresh_catalog();
+    }
+
+    fn rebuild_provider_choices(&mut self) {
+        let mut items = Vec::new();
+        if self.grok_signed_in {
+            items.push(ChoiceItem {
+                id: "grok".into(),
+                label: "Grok · subscription models".into(),
+            });
+        }
+        if self.openai_signed_in {
+            items.push(ChoiceItem {
+                id: "openai-chatgpt".into(),
+                label: "OpenAI · ChatGPT subscription".into(),
+            });
+        }
+        if openrouter_ready(&self.auth) {
+            items.push(ChoiceItem {
+                id: "openrouter".into(),
+                label: "OpenRouter · models this key can call".into(),
+            });
+        }
+        items.push(ChoiceItem {
+            id: "local".into(),
+            label: "Local · models on this machine".into(),
+        });
+        let current = self.role_provider();
+        self.set_choices(items, &current);
+    }
+
+    fn rebuild_model_choices(&mut self) {
+        let current = self.role_model();
+        let items = self
+            .model_catalog
+            .iter()
+            .map(|model| ChoiceItem {
+                id: model.id.clone(),
+                label: model_label(model),
+            })
+            .collect();
+        self.set_choices(items, &current);
+    }
+
+    fn set_choices(&mut self, items: Vec<ChoiceItem>, current: &str) {
+        let sel = items
+            .iter()
+            .position(|item| item.id == current)
+            .unwrap_or(0);
+        self.choice_items = items;
+        self.choice_sel = if self.choice_items.is_empty() {
+            0
+        } else {
+            sel.min(self.choice_items.len() - 1)
+        };
+        let room = super::ui::choice_list_room(self).max(1);
+        super::ui::reveal_index(&mut self.scrolls.popup, self.choice_sel, room);
+    }
+
+    pub fn move_choice(&mut self, delta: i32) {
+        if self.choice_items.is_empty() {
+            return;
+        }
+        let last = self.choice_items.len() as i32 - 1;
+        self.choice_sel = (self.choice_sel as i32 + delta).clamp(0, last) as usize;
+        let room = super::ui::choice_list_room(self).max(1);
+        super::ui::reveal_index(&mut self.scrolls.popup, self.choice_sel, room);
+    }
+
+    fn apply_choice(&mut self, index: usize) {
+        let Some(item) = self.choice_items.get(index).cloned() else {
+            return;
+        };
+        match self.overlay {
+            Overlay::Choice(ChoiceKind::Provider) => {
+                let changed = self.role_provider() != item.id;
+                self.set_role_provider(&item.id);
+                if changed {
+                    self.set_role_model("");
+                    self.model_catalog.clear();
+                    self.catalog_for.clear();
+                }
+                self.status = format!("Provider {}", provider_label(&item.id));
+            }
+            Overlay::Choice(ChoiceKind::Model) => {
+                self.set_role_model(&item.id);
+                self.status = format!("Model {}", item.id);
+            }
+            _ => return,
+        }
+        self.overlay = Overlay::None;
+        self.scrolls.popup = 0;
+    }
+
+    fn probe_access(&mut self) {
+        if self.access_checked || self.access_probe {
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        self.access_probe = true;
+        let tx = self.work_tx.clone();
+        tokio::spawn(async move {
+            let grok = argos_osint_core::grok_oauth::check_login().await.is_ok();
+            let openai = argos_osint_core::subscription::check_login().await.is_ok();
+            let _ = tx.send(WorkEvent::Access { grok, openai });
         });
     }
 
@@ -760,6 +1273,8 @@ impl App {
         if let Some(tid) = &self.selected_thread {
             self.messages = self.store.list_messages(tid)?;
             self.calls = self.store.all_calls_for_thread(tid)?;
+            self.runs = self.store.runs_for_thread(tid)?;
+            self.answer_memories = self.store.answer_memories(tid)?;
         }
         Ok(())
     }
@@ -834,6 +1349,7 @@ impl App {
                     self.selected_thread = None;
                     self.messages.clear();
                     self.input.clear();
+                    self.recon_chat = false;
                     self.refresh_threads()?;
                     if let Some(next) = self.threads.first().map(|t| t.id.clone()) {
                         self.open_thread(&next)?;
@@ -894,6 +1410,19 @@ impl App {
                 }
                 .into())
             }
+            ButtonId::OsintPrev => self.shift_manual(false),
+            ButtonId::OsintNext => self.shift_manual(true),
+            ButtonId::SaveFirecrawlKey => self.remember_firecrawl_key(),
+            ButtonId::SaveHunterKey => self.remember_hunter_key(),
+            ButtonId::SaveSociaVaultKey => self.remember_sociavault_key(),
+            ButtonId::OpenSource => self
+                .open_insight_source()
+                .map(|_| "Source thread opened".into()),
+            ButtonId::ClearLog => {
+                self.log.clear();
+                self.push_log("info", "Event log cleared");
+                Ok("Event log cleared".into())
+            }
             ButtonId::OsintAttach => {
                 let Some((call_id, _)) = &self.osint_result else {
                     self.status = "No result selected".into();
@@ -916,9 +1445,7 @@ impl App {
                 let title = format!("Investigate {}", result.tool_id);
                 self.store.new_thread(&title).and_then(|thread| {
                     self.store.attach_call(&call_id, &thread.id)?;
-                    self.open_thread(&thread.id)?;
-                    self.module = Some(ModuleId::Recon);
-                    self.set_focus(Target::Field(FieldId::Composer));
+                    self.enter_investigation(&thread.id)?;
                     Ok("Recon started from result".into())
                 })
             }
@@ -968,6 +1495,7 @@ impl App {
             ButtonId::ToggleDefaultRole => {
                 self.defaults_synthesis = !self.defaults_synthesis;
                 self.model_catalog.clear();
+                self.catalog_for.clear();
                 Ok(format!(
                     "{} default",
                     if self.defaults_synthesis {
@@ -1016,7 +1544,45 @@ impl App {
                 Ok("Hardware refreshed".into())
             }
         };
-        self.status = result.unwrap_or_else(|err| err.to_string());
+        self.report(result);
+    }
+
+    fn report(&mut self, result: Result<String>) {
+        self.status = match result {
+            Ok(message) => message,
+            Err(err) => {
+                let text = err.to_string();
+                self.push_log("error", text.clone());
+                text
+            }
+        };
+    }
+
+    fn shift_manual(&mut self, forward: bool) -> Result<String> {
+        let tool = osint::registry()
+            .get(self.tool_sel)
+            .ok_or_else(|| anyhow::anyhow!("No tool selected"))?;
+        let positions: Vec<_> = self
+            .manual_runs
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.tool_id == tool.id && call.result.is_some())
+            .map(|(index, _)| index)
+            .collect();
+        anyhow::ensure!(!positions.is_empty(), "No previous runs for this tool");
+        let current = positions
+            .iter()
+            .position(|pos| *pos == self.manual_run_pos)
+            .unwrap_or(positions.len() - 1);
+        let next = if forward {
+            (current + 1).min(positions.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        self.manual_run_pos = positions[next];
+        let call = &self.manual_runs[self.manual_run_pos];
+        self.osint_result = call.result.clone().map(|result| (call.id.clone(), result));
+        Ok(format!("Manual result {} of {}", next + 1, positions.len()))
     }
 
     fn router_draft(&self) -> Result<ProviderSecret> {
@@ -1165,11 +1731,36 @@ impl App {
                 }
                 self.provider_pending = None;
                 let message = result.unwrap_or_else(|err| err);
+                let lower = message.to_ascii_lowercase();
                 match page {
-                    ProviderPage::Grok => self.grok_status = message.clone(),
-                    ProviderPage::OpenAI => self.openai_status = message.clone(),
+                    ProviderPage::Grok => {
+                        self.grok_status = message.clone();
+                        if lower.contains("ready")
+                            || lower.contains("connected")
+                            || lower.contains("signed in")
+                        {
+                            self.grok_signed_in = true;
+                        } else if lower.contains("sign-in required") {
+                            self.grok_signed_in = false;
+                        }
+                    }
+                    ProviderPage::OpenAI => {
+                        self.openai_status = message.clone();
+                        if lower.contains("signed in") {
+                            self.openai_signed_in = true;
+                        } else if lower.contains("sign-in required") {
+                            self.openai_signed_in = false;
+                        }
+                    }
                     ProviderPage::OpenRouter => self.router_status = message.clone(),
                     ProviderPage::Defaults => {}
+                }
+                if message.to_ascii_lowercase().contains("fail")
+                    || message.to_ascii_lowercase().contains("error")
+                {
+                    self.push_log("error", message.clone());
+                } else {
+                    self.push_log("info", message.clone());
                 }
                 self.status = message;
             }
@@ -1179,6 +1770,7 @@ impl App {
     fn activate_target(&mut self, target: Target) {
         match target {
             Target::App(index) => self.select(index),
+            Target::Home => self.go_home(),
             Target::ProviderTab(page) => {
                 self.provider_page = page;
                 self.set_focus(target);
@@ -1194,17 +1786,42 @@ impl App {
             Target::Thread(index) => {
                 if let Some(id) = self.threads.get(index).map(|t| t.id.clone()) {
                     self.status = self
-                        .open_thread(&id)
-                        .map(|_| "Thread opened".into())
+                        .enter_investigation(&id)
+                        .map(|_| "Investigation opened".into())
                         .unwrap_or_else(|e| e.to_string());
-                    self.set_focus(Target::Thread(index));
                 }
             }
             Target::Tool(index) => self.select_tool(index),
+            Target::Field(field) if is_picker_field(field) => {
+                self.set_focus(target);
+                self.open_default_picker(field);
+            }
             Target::Field(_) => self.set_focus(target),
             Target::Button(button) => {
                 self.set_focus(target);
                 self.activate_button(button);
+            }
+            Target::Transcript => self.set_focus(Target::Transcript),
+            Target::ChatHeader(index) => {
+                self.chat_sel = index;
+                self.chat_follow = false;
+                self.set_focus(Target::Transcript);
+                super::ui::toggle_chat(self);
+            }
+            Target::ChatBody(index) => {
+                self.chat_sel = index;
+                self.chat_follow = false;
+                self.set_focus(Target::Transcript);
+            }
+            Target::BrainMark(index) => {
+                self.chat_sel = index;
+                self.set_focus(Target::Transcript);
+                super::ui::open_memory(self, index);
+            }
+            Target::Choice(index) => self.apply_choice(index),
+            Target::CloseOverlay => {
+                self.overlay = Overlay::None;
+                self.scrolls.popup = 0;
             }
         }
     }
@@ -1213,6 +1830,9 @@ impl App {
         let Target::Field(field) = self.focus else {
             return;
         };
+        if is_picker_field(field) {
+            return;
+        }
         let cursor = self.cursor;
         let value = self.field_mut(field);
         let byte = value
@@ -1228,6 +1848,9 @@ impl App {
         let Target::Field(field) = self.focus else {
             return;
         };
+        if is_picker_field(field) {
+            return;
+        }
         if self.cursor == 0 {
             return;
         }
@@ -1251,6 +1874,9 @@ impl App {
         let Target::Field(field) = self.focus else {
             return;
         };
+        if is_picker_field(field) {
+            return;
+        }
         let cursor = self.cursor;
         let value = self.field_mut(field);
         let start = value
@@ -1267,63 +1893,15 @@ impl App {
     }
 
     fn submit(&mut self) {
-        let input = std::mem::take(&mut self.input);
-        let input = input.trim();
+        if self.module != Some(ModuleId::Recon) {
+            return;
+        }
+        let input = self.input.trim().to_string();
         if input.is_empty() {
             return;
         }
-        let result = match self.module {
-            Some(ModuleId::Recon) => {
-                self.input = input.into();
-                self.recon_command(input)
-            }
-            Some(ModuleId::Brain) => self.brain_command(input),
-            Some(ModuleId::Osint) => self.osint_command(input),
-            Some(ModuleId::Providers) => self.provider_command(input),
-            Some(ModuleId::System) if input == "refresh" => {
-                self.hardware = hardware::profile_cached(true);
-                Ok("Hardware refreshed".into())
-            }
-            _ => Err(anyhow::anyhow!(
-                "Open Brain or Providers to use the composer"
-            )),
-        };
-        self.status = match result {
-            Ok(message) => message,
-            Err(err) => format!("{err}"),
-        };
-    }
-
-    fn osint_command(&mut self, input: &str) -> Result<String> {
-        if matches!(input, ":prev" | ":next") {
-            let tool = osint::registry()
-                .get(self.tool_sel)
-                .ok_or_else(|| anyhow::anyhow!("No tool selected"))?;
-            let positions: Vec<_> = self
-                .manual_runs
-                .iter()
-                .enumerate()
-                .filter(|(_, call)| call.tool_id == tool.id && call.result.is_some())
-                .map(|(i, _)| i)
-                .collect();
-            anyhow::ensure!(!positions.is_empty(), "No previous runs for this tool");
-            let current = positions
-                .iter()
-                .position(|p| *p == self.manual_run_pos)
-                .unwrap_or(positions.len() - 1);
-            let next = if input == ":prev" {
-                current.saturating_sub(1)
-            } else {
-                (current + 1).min(positions.len() - 1)
-            };
-            self.manual_run_pos = positions[next];
-            let call = &self.manual_runs[self.manual_run_pos];
-            self.osint_result = call.result.clone().map(|r| (call.id.clone(), r));
-            Ok(format!("Manual result {} of {}", next + 1, positions.len()))
-        } else {
-            self.run_osint()?;
-            Ok("Tool started".into())
-        }
+        let result = self.recon_command(&input);
+        self.report(result);
     }
 
     fn recon_command(&mut self, input: &str) -> Result<String> {
@@ -1354,6 +1932,7 @@ impl App {
             self.store.delete_thread(&id, with_insights)?;
             self.selected_thread = None;
             self.messages.clear();
+            self.recon_chat = false;
             self.refresh_threads()?;
             if let Some(next) = self.threads.first().map(|t| t.id.clone()) {
                 self.open_thread(&next)?;
@@ -1374,64 +1953,6 @@ impl App {
         Ok("Recon started".into())
     }
 
-    fn brain_command(&mut self, input: &str) -> Result<String> {
-        if input == "source" {
-            self.open_insight_source()?;
-            return Ok("Source thread opened".into());
-        }
-        if let Some(query) = input.strip_prefix("recall ") {
-            self.hits = self.store.recall(query, 8)?;
-            return Ok(format!("{} relevant memories", self.hits.len()));
-        }
-        if let Some(rest) = input.strip_prefix("add ") {
-            let (source, text) = rest
-                .split_once('|')
-                .ok_or_else(|| anyhow::anyhow!("Use: add <app> <conversation-id> | <insight>"))?;
-            let mut parts = source.split_whitespace();
-            let app = parts.next().unwrap_or_default();
-            let conversation_id = parts.next().unwrap_or_default();
-            anyhow::ensure!(
-                parts.next().is_none(),
-                "Use one app and one conversation ID"
-            );
-            let (category, text) = argos_osint_core::brain::parse_typed_memory(text);
-            self.store.add_memory(
-                &text,
-                category,
-                false,
-                MemorySource {
-                    app: app.into(),
-                    conversation_id: conversation_id.into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )?;
-            self.memories = self.store.list_memories()?;
-            return Ok("Insight saved with source".into());
-        }
-        if input == "pin" {
-            let memory = self
-                .memories
-                .get(self.memory_sel)
-                .ok_or_else(|| anyhow::anyhow!("No memory selected"))?;
-            self.store
-                .update_memory(&memory.id, &memory.text, &memory.category, !memory.pinned)?;
-            self.memories = self.store.list_memories()?;
-            return Ok("Memory pin updated".into());
-        }
-        if input == "delete" {
-            let memory = self
-                .memories
-                .get(self.memory_sel)
-                .ok_or_else(|| anyhow::anyhow!("No memory selected"))?;
-            self.store.delete_memory(&memory.id)?;
-            self.memories = self.store.list_memories()?;
-            self.memory_sel = self.memory_sel.min(self.memories.len().saturating_sub(1));
-            return Ok("Memory deleted".into());
-        }
-        Err(anyhow::anyhow!("Use add, recall, pin, or delete"))
-    }
-
     fn open_insight_source(&mut self) -> Result<()> {
         let insight = self
             .selected_insight
@@ -1444,84 +1965,108 @@ impl App {
             .find(|id| self.store.get_thread(id).ok().flatten().is_some())
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("No surviving source thread"))?;
-        self.open_thread(&id)?;
-        self.module = Some(ModuleId::Recon);
-        self.set_focus(Target::Field(FieldId::Composer));
+        self.enter_investigation(&id)?;
         Ok(())
     }
 
-    fn provider_command(&mut self, input: &str) -> Result<String> {
-        if let Some(rest) = input.strip_prefix("recon ") {
-            let mut parts = rest.split_whitespace();
-            let provider = parts
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("Use: recon <provider> <model>"))?;
-            let model = parts
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("Use: recon <provider> <model>"))?;
-            anyhow::ensure!(parts.next().is_none(), "Use one provider and one model ID");
-            let kind = provider::normalize_kind(provider);
-            let kind = if kind == "openai" {
-                "openai-chatgpt".into()
-            } else {
-                kind
-            };
-            anyhow::ensure!(
-                matches!(
-                    kind.as_str(),
-                    "grok" | "openai-chatgpt" | "openrouter" | "local"
-                ),
-                "Choose Grok, OpenAI, OpenRouter, or local"
-            );
-            self.settings.defaults.recon.provider = kind;
-            self.settings.defaults.recon.model = model.into();
-            self.settings.save()?;
-            self.recon_provider = self.settings.defaults.recon.provider.clone();
-            self.recon_model = self.settings.defaults.recon.model.clone();
-            return Ok(format!(
-                "Recon: {} / {}",
-                self.settings.defaults.recon.provider, model
-            ));
-        }
-        Err(anyhow::anyhow!(
-            "Use Defaults controls to set Recon and Synthesis models"
-        ))
-    }
-
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            return false;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+            return self.on_interrupt();
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n') {
-            self.status = self
-                .new_thread()
-                .map(|_| "New investigation".into())
-                .unwrap_or_else(|e| e.to_string());
-            self.module = Some(ModuleId::Recon);
+        if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
+            return self.arm_quit();
+        }
+        if let Overlay::Choice(_) = self.overlay {
+            if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('d')) {
+                let room = super::ui::choice_list_room(self).max(1) as i32;
+                self.move_choice(if key.code == KeyCode::Char('d') {
+                    room
+                } else {
+                    -room
+                });
+                return true;
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.activate_target(Target::CloseOverlay),
+                KeyCode::Up | KeyCode::Char('k') => self.move_choice(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.move_choice(1),
+                KeyCode::Enter => self.apply_choice(self.choice_sel),
+                _ => {}
+            }
             return true;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == KeyCode::Char('o')
-            && self.module == Some(ModuleId::Brain)
-        {
-            self.status = self
+        if self.overlay != Overlay::None {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.activate_target(Target::CloseOverlay),
+                KeyCode::Up => {
+                    self.scrolls.popup = self.scrolls.popup.saturating_sub(1);
+                }
+                KeyCode::Down => self.scrolls.popup = self.scrolls.popup.saturating_add(1),
+                _ => {}
+            }
+            if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('d')) {
+                super::ui::page(
+                    self,
+                    if key.code == KeyCode::Char('d') {
+                        1
+                    } else {
+                        -1
+                    },
+                );
+            }
+            return true;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('d')) {
+            let down = key.code == KeyCode::Char('d');
+            if self.field_focused() {
+                if !down {
+                    if let Target::Field(field) = self.focus {
+                        if !is_picker_field(field) {
+                            self.field_mut(field).clear();
+                            self.cursor = 0;
+                            self.persist_draft();
+                        }
+                    }
+                }
+            } else {
+                super::ui::page(self, if down { 1 } else { -1 });
+            }
+            return true;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('\u{1c}')) {
+            self.go_home();
+            return true;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N')) {
+            let created = self.new_thread().map(|_| "New investigation".into());
+            self.report(created);
+            self.module = Some(ModuleId::Recon);
+            self.launcher_sel = 0;
+            return true;
+        }
+        if ctrl && key.code == KeyCode::Char('o') && self.module == Some(ModuleId::Brain) {
+            let opened = self
                 .open_insight_source()
-                .map(|_| "Source thread opened".into())
-                .unwrap_or_else(|e| e.to_string());
+                .map(|_| "Source thread opened".into());
+            self.report(opened);
             return true;
         }
         if key.modifiers.contains(KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Left | KeyCode::Right)
         {
-            let next = if key.code == KeyCode::Left {
-                self.history_pos.saturating_sub(1)
-            } else {
-                (self.history_pos + 1).min(self.thread_history.len().saturating_sub(1))
-            };
-            if let Some(id) = self.thread_history.get(next).cloned() {
-                self.history_pos = next;
-                let _ = self.open_thread_with_history(&id, false);
-                self.module = Some(ModuleId::Recon);
+            if self.field_focused() {
+                self.move_word(if key.code == KeyCode::Left { -1 } else { 1 });
+            } else if self.module == Some(ModuleId::Recon) {
+                let next = if key.code == KeyCode::Left {
+                    self.history_pos.saturating_sub(1)
+                } else {
+                    (self.history_pos + 1).min(self.thread_history.len().saturating_sub(1))
+                };
+                if let Some(id) = self.thread_history.get(next).cloned() {
+                    self.history_pos = next;
+                    let _ = self.open_thread_with_history(&id, false);
+                }
             }
             return true;
         }
@@ -1530,105 +2075,368 @@ impl App {
             && self.focus == Target::Field(FieldId::Composer)
         {
             self.edit_char('\n');
+            self.persist_draft();
             return true;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a') {
+        if ctrl && key.code == KeyCode::Char('a') {
             if let Target::Field(field) = self.focus {
-                self.field_mut(field).clear();
-                self.cursor = 0;
+                if !is_picker_field(field) {
+                    self.field_mut(field).clear();
+                    self.cursor = 0;
+                }
             }
+            return true;
+        }
+        if matches!(key.code, KeyCode::Char('?')) && !self.field_focused() {
+            self.overlay = if self.overlay == Overlay::Help {
+                Overlay::None
+            } else {
+                Overlay::Help
+            };
+            self.scrolls.popup = 0;
             return true;
         }
         match key.code {
-            KeyCode::Esc => {
-                self.set_focus(Target::Field(FieldId::Composer));
-            }
-            KeyCode::Enter => match self.focus {
-                Target::Field(FieldId::Composer) => self.submit(),
-                Target::Field(_) => self.focus_next(false),
-                target => self.activate_target(target),
-            },
+            KeyCode::Esc => self.on_esc(),
+            KeyCode::Enter => self.on_enter(),
             KeyCode::Backspace => self.edit_backspace(),
             KeyCode::Delete => self.edit_delete(),
-            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Right => {
+            KeyCode::Left if self.field_focused() => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Right if self.field_focused() => {
                 if let Target::Field(field) = self.focus {
                     self.cursor = (self.cursor + 1).min(self.field(field).chars().count());
                 }
             }
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => {
+            KeyCode::Left | KeyCode::Char('h') if self.transcript_focused() => {
+                super::ui::fold_chat(self, false);
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.transcript_focused() => {
+                super::ui::fold_chat(self, true);
+            }
+            KeyCode::Char('e') if self.transcript_focused() => super::ui::toggle_chat(self),
+            KeyCode::Char('f') if self.transcript_focused() => {
+                super::ui::open_block(self, self.chat_sel);
+            }
+            KeyCode::Char(' ') if self.transcript_focused() => {
+                self.set_focus(Target::Field(FieldId::Composer));
+            }
+            KeyCode::Home if self.field_focused() => self.cursor = 0,
+            KeyCode::End if self.field_focused() => {
                 if let Target::Field(field) = self.focus {
                     self.cursor = self.field(field).chars().count();
                 }
             }
-            KeyCode::Char(c) => self.edit_char(c),
-            KeyCode::Up if self.module == Some(ModuleId::Recon) => {
-                self.thread_sel = self.thread_sel.saturating_sub(1);
-                self.set_focus(Target::Thread(self.thread_sel));
+            KeyCode::Home if self.transcript_focused() => super::ui::move_chat(self, -10_000),
+            KeyCode::End if self.transcript_focused() => {
+                self.chat_follow = true;
+                super::ui::normalize(self);
             }
-            KeyCode::Down if self.module == Some(ModuleId::Recon) => {
-                self.thread_sel = (self.thread_sel + 1).min(self.threads.len().saturating_sub(1));
-                self.set_focus(Target::Thread(self.thread_sel));
+            KeyCode::Char(c) if self.field_focused() => self.edit_char(c),
+            KeyCode::Char(c)
+                if self.module.is_none()
+                    && key.modifiers.is_empty()
+                    && matches!(c, '1' | '2' | '3' | '4' | '5') =>
+            {
+                self.select((c as u8 - b'1') as usize);
             }
-            KeyCode::Up if self.module == Some(ModuleId::Osint) => {
-                let ids = self.filtered_tool_ids();
-                let pos = ids.iter().position(|id| *id == self.tool_sel).unwrap_or(0);
-                let next = *ids.get(pos.saturating_sub(1)).unwrap_or(&self.tool_sel);
-                self.select_tool(next);
+            KeyCode::Char(c) if self.module.is_none() && matches!(c, 'j' | 'k') => {
+                self.move_vertical(if c == 'j' { 1 } else { -1 });
             }
-            KeyCode::Down if self.module == Some(ModuleId::Osint) => {
-                let ids = self.filtered_tool_ids();
-                let pos = ids.iter().position(|id| *id == self.tool_sel).unwrap_or(0);
-                let next = *ids
-                    .get((pos + 1).min(ids.len().saturating_sub(1)))
-                    .unwrap_or(&self.tool_sel);
-                self.select_tool(next);
+            KeyCode::Char(c)
+                if !self.field_focused()
+                    && self.module != Some(ModuleId::Recon)
+                    && matches!(c, 'j' | 'k') =>
+            {
+                self.move_vertical(if c == 'j' { 1 } else { -1 });
             }
-            KeyCode::Up if self.module == Some(ModuleId::Brain) => {
-                self.memory_sel = self.memory_sel.saturating_sub(1);
-                self.set_focus(Target::Memory(self.memory_sel));
+            KeyCode::Char(c)
+                if self.module == Some(ModuleId::Recon)
+                    && !self.field_focused()
+                    && !c.is_control() =>
+            {
+                self.set_focus(if self.recon_chat {
+                    Target::Field(FieldId::Composer)
+                } else {
+                    Target::Field(FieldId::ReconSearch)
+                });
+                self.edit_char(c);
             }
-            KeyCode::Down if self.module == Some(ModuleId::Brain) => {
-                self.memory_sel = (self.memory_sel + 1).min(self.memories.len().saturating_sub(1));
-                self.set_focus(Target::Memory(self.memory_sel));
-            }
-            KeyCode::PageUp if self.module == Some(ModuleId::Recon) => {
-                self.recon_scroll = self.recon_scroll.saturating_sub(8);
-            }
-            KeyCode::PageDown if self.module == Some(ModuleId::Recon) => {
-                self.recon_scroll = self.recon_scroll.saturating_add(8);
-            }
-            KeyCode::Up => self.launcher_sel = self.launcher_sel.saturating_sub(1),
-            KeyCode::Down => {
-                self.launcher_sel = (self.launcher_sel + 1).min(ModuleId::ALL.len() - 1)
-            }
+            KeyCode::Up => self.move_vertical(-1),
+            KeyCode::Down => self.move_vertical(1),
             KeyCode::Tab => self.focus_next(key.modifiers.contains(KeyModifiers::SHIFT)),
-            KeyCode::F(n) if (1..=ModuleId::ALL.len() as u8).contains(&n) => {
-                self.select(n as usize - 1)
-            }
             _ => {}
         }
-        if self.module == Some(ModuleId::Recon) && self.focus == Target::Field(FieldId::ReconSearch)
+        if matches!(key.code, KeyCode::Char(_))
+            && self.module == Some(ModuleId::Recon)
+            && self.focus == Target::Field(FieldId::ReconSearch)
         {
             let _ = self.refresh_threads();
         }
-        if self.module == Some(ModuleId::Osint) && self.focus == Target::Field(FieldId::OsintSearch)
+        if matches!(key.code, KeyCode::Char(_))
+            && self.module == Some(ModuleId::Osint)
+            && self.focus == Target::Field(FieldId::OsintSearch)
         {
-            if let Some(id) = self.filtered_tool_ids().first() {
-                let next = *id;
-                self.select_tool(next);
+            if let Some(id) = self.filtered_tool_ids().first().copied() {
+                self.select_tool(id);
                 self.set_focus(Target::Field(FieldId::OsintSearch));
             }
         }
-        if self.module == Some(ModuleId::Recon) && self.focus == Target::Field(FieldId::Composer) {
-            if let Some(id) = &self.selected_thread {
-                let _ = self
-                    .store
-                    .save_draft(id, &self.input, i64::from(self.recon_scroll));
+        self.persist_draft();
+        super::ui::normalize(self);
+        true
+    }
+
+    fn on_interrupt(&mut self) -> bool {
+        if self.overlay != Overlay::None {
+            self.activate_target(Target::CloseOverlay);
+            return true;
+        }
+        if let Target::Field(field) = self.focus {
+            if !self.field(field).is_empty() {
+                self.field_mut(field).clear();
+                self.cursor = 0;
+                self.status = "Cleared".into();
+                self.persist_draft();
+                return true;
             }
         }
+        if self.module == Some(ModuleId::Recon) {
+            if let Some(id) = self.selected_thread.clone() {
+                if let Some(cancel) = self.running.get(&id) {
+                    cancel.store(true, Ordering::Relaxed);
+                    self.status = "Cancellation requested".into();
+                    self.push_log("info", "Recon cancellation requested");
+                    return true;
+                }
+            }
+        }
+        self.arm_quit()
+    }
+
+    fn arm_quit(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .quit_arm
+            .is_some_and(|armed| now.duration_since(armed) < Duration::from_secs(1))
+        {
+            return false;
+        }
+        self.quit_arm = Some(now);
+        self.status = "Press Ctrl+C or Ctrl+Q again to quit".into();
         true
+    }
+
+    fn on_esc(&mut self) {
+        if self.focus == Target::Field(FieldId::Composer) && !self.input.trim().is_empty() {
+            let now = Instant::now();
+            if self
+                .esc_arm
+                .is_some_and(|armed| now.duration_since(armed) < Duration::from_millis(800))
+            {
+                self.input.clear();
+                self.cursor = 0;
+                self.esc_arm = None;
+                self.status = "Draft cleared".into();
+                self.persist_draft();
+            } else {
+                self.esc_arm = Some(now);
+                self.status = "Press Esc again to clear the draft".into();
+            }
+            return;
+        }
+        if self.module == Some(ModuleId::Recon) && self.recon_chat {
+            self.recon_chat = false;
+            self.set_focus(if self.threads.is_empty() {
+                Target::Field(FieldId::ReconSearch)
+            } else {
+                Target::Thread(self.thread_sel)
+            });
+            self.status = "Investigations".into();
+            return;
+        }
+        if self.module.is_some() {
+            self.go_home();
+        }
+    }
+
+    fn on_enter(&mut self) {
+        match self.focus {
+            Target::Field(FieldId::Composer) => self.submit(),
+            Target::Field(field) if is_picker_field(field) => self.open_default_picker(field),
+            Target::Field(_) => self.focus_next(false),
+            Target::Transcript => self.enter_chat(),
+            target => self.activate_target(target),
+        }
+    }
+
+    fn enter_chat(&mut self) {
+        let blocks = super::ui::chat_blocks(self);
+        let Some(block) = blocks.get(self.chat_sel) else {
+            return;
+        };
+        if block.collapsible {
+            super::ui::toggle_chat(self);
+        } else if block.has_memory {
+            super::ui::open_memory(self, self.chat_sel);
+        } else {
+            super::ui::open_block(self, self.chat_sel);
+        }
+    }
+
+    fn field_focused(&self) -> bool {
+        matches!(self.focus, Target::Field(_))
+    }
+
+    fn transcript_focused(&self) -> bool {
+        matches!(
+            self.focus,
+            Target::Transcript | Target::ChatHeader(_) | Target::ChatBody(_)
+        )
+    }
+
+    fn move_vertical(&mut self, delta: i32) {
+        match self.focus {
+            Target::Field(FieldId::Composer) => self.move_composer_line(delta),
+            Target::Field(FieldId::ReconSearch) | Target::Thread(_) => self.move_thread(delta),
+            Target::Field(_) => {}
+            Target::Transcript | Target::ChatHeader(_) | Target::ChatBody(_) => {
+                super::ui::move_chat(self, delta);
+            }
+            Target::Memory(_) => self.move_memory(delta),
+            Target::Tool(_) => self.move_tool(delta),
+            _ => match self.module {
+                None => self.move_home(delta),
+                Some(ModuleId::Brain) => self.move_memory(delta),
+                Some(ModuleId::Osint) => self.move_tool(delta),
+                Some(ModuleId::System) => {
+                    self.scrolls.log = add_scroll(self.scrolls.log, delta);
+                }
+                Some(ModuleId::Recon) if self.recon_chat => super::ui::move_chat(self, delta),
+                Some(ModuleId::Recon) => self.move_thread(delta),
+                Some(ModuleId::Providers) => {
+                    self.scrolls.detail = add_scroll(self.scrolls.detail, delta * 3);
+                }
+            },
+        }
+    }
+
+    fn move_home(&mut self, delta: i32) {
+        let next = (self.launcher_sel as i32 + delta).clamp(0, ModuleId::ALL.len() as i32 - 1);
+        self.launcher_sel = next as usize;
+        self.set_focus(Target::App(self.launcher_sel));
+    }
+
+    fn move_thread(&mut self, delta: i32) {
+        if self.threads.is_empty() {
+            return;
+        }
+        let next =
+            (self.thread_sel as i32 + delta).clamp(0, self.threads.len() as i32 - 1) as usize;
+        self.thread_sel = next;
+        let room = super::ui::thread_room_for(self);
+        super::ui::reveal_index(&mut self.scrolls.threads, next, room);
+        self.set_focus(Target::Thread(next));
+    }
+
+    fn move_memory(&mut self, delta: i32) {
+        if self.memories.is_empty() {
+            return;
+        }
+        let next =
+            (self.memory_sel as i32 + delta).clamp(0, self.memories.len() as i32 - 1) as usize;
+        self.memory_sel = next;
+        self.selected_insight = self
+            .memories
+            .get(next)
+            .and_then(|memory| self.store.insight_for_memory(&memory.id).ok().flatten());
+        let room = super::ui::memory_room_for(self);
+        super::ui::reveal_index(&mut self.scrolls.memories, next, room);
+        self.set_focus(Target::Memory(next));
+    }
+
+    fn move_tool(&mut self, delta: i32) {
+        let ids = self.filtered_tool_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let pos = ids.iter().position(|id| *id == self.tool_sel).unwrap_or(0) as i32;
+        let next = (pos + delta).clamp(0, ids.len() as i32 - 1) as usize;
+        self.select_tool(ids[next]);
+        let room = super::ui::tool_room_for(self);
+        super::ui::reveal_index(&mut self.scrolls.tools, next, room);
+    }
+
+    fn move_composer_line(&mut self, delta: i32) {
+        let value = self.input.clone();
+        if !value.contains('\n') {
+            return;
+        }
+        let chars: Vec<char> = value.chars().collect();
+        let cursor = self.cursor.min(chars.len());
+        let mut lines = vec![0usize];
+        for (index, ch) in chars.iter().enumerate() {
+            if *ch == '\n' {
+                lines.push(index + 1);
+            }
+        }
+        let current = lines
+            .iter()
+            .rposition(|start| *start <= cursor)
+            .unwrap_or(0);
+        let col = cursor - lines[current];
+        let next = current as i32 + delta;
+        if next < 0 || next as usize >= lines.len() {
+            return;
+        }
+        let start = lines[next as usize];
+        let end = if next as usize + 1 < lines.len() {
+            lines[next as usize + 1] - 1
+        } else {
+            chars.len()
+        };
+        self.cursor = start + col.min(end.saturating_sub(start));
+    }
+
+    fn move_word(&mut self, delta: i32) {
+        let Target::Field(field) = self.focus else {
+            return;
+        };
+        let chars: Vec<char> = self.field(field).chars().collect();
+        let mut cursor = self.cursor.min(chars.len());
+        if delta < 0 {
+            while cursor > 0 && chars[cursor - 1].is_whitespace() {
+                cursor -= 1;
+            }
+            while cursor > 0 && !chars[cursor - 1].is_whitespace() {
+                cursor -= 1;
+            }
+        } else {
+            while cursor < chars.len() && !chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+        }
+        self.cursor = cursor;
+    }
+
+    fn persist_draft(&mut self) {
+        if self.module == Some(ModuleId::Recon) && self.focus == Target::Field(FieldId::Composer) {
+            self.draft_dirty = true;
+        }
+    }
+
+    fn flush_draft(&mut self) {
+        if !self.draft_dirty {
+            return;
+        }
+        self.draft_dirty = false;
+        if let Some(id) = &self.selected_thread {
+            let _ = self
+                .store
+                .save_draft(id, &self.input, i64::from(self.scrolls.chat));
+        }
     }
 
     fn focus_next(&mut self, reverse: bool) {
@@ -1651,34 +2459,93 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(target) = super::ui::hit_test(self, mouse.column, mouse.row) {
-                    self.activate_target(target);
-                    if let Target::Field(field) = target {
-                        self.cursor = super::ui::cursor_at(self, field, mouse.column);
+                let target = super::ui::hit_test(self, mouse.column, mouse.row);
+                self.press = Some((mouse.column, mouse.row, target));
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some((x, y, target)) = self.press.as_mut() {
+                    if mouse.column.abs_diff(*x) > 1 || mouse.row.abs_diff(*y) > 1 {
+                        *target = None;
                     }
                 }
             }
-            MouseEventKind::ScrollDown if self.module == Some(ModuleId::Brain) => {
-                self.memory_sel = (self.memory_sel + 1).min(self.memories.len().saturating_sub(1));
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some((x, y, target)) = self.press.take() else {
+                    return;
+                };
+                if mouse.column.abs_diff(x) > 1 || mouse.row.abs_diff(y) > 1 {
+                    return;
+                }
+                if let Some(target) = target {
+                    self.activate_target(target);
+                    if let Target::Field(field) = self.focus {
+                        self.cursor = super::ui::cursor_at(self, field, x);
+                    }
+                }
             }
-            MouseEventKind::ScrollUp if self.module == Some(ModuleId::Brain) => {
-                self.memory_sel = self.memory_sel.saturating_sub(1);
-            }
-            MouseEventKind::ScrollDown if self.module == Some(ModuleId::Recon) => {
-                self.thread_sel = (self.thread_sel + 1).min(self.threads.len().saturating_sub(1));
-            }
-            MouseEventKind::ScrollUp if self.module == Some(ModuleId::Recon) => {
-                self.thread_sel = self.thread_sel.saturating_sub(1);
-            }
-            MouseEventKind::ScrollDown if self.module == Some(ModuleId::Osint) => {
-                self.tool_sel = (self.tool_sel + 1).min(osint::registry().len().saturating_sub(1));
-            }
-            MouseEventKind::ScrollUp if self.module == Some(ModuleId::Osint) => {
-                self.tool_sel = self.tool_sel.saturating_sub(1);
-            }
+            MouseEventKind::ScrollDown => super::ui::scroll_at(self, mouse.column, mouse.row, 1),
+            MouseEventKind::ScrollUp => super::ui::scroll_at(self, mouse.column, mouse.row, -1),
             _ => {}
         }
     }
+}
+
+pub fn is_picker_field(field: FieldId) -> bool {
+    matches!(
+        field,
+        FieldId::ReconProvider
+            | FieldId::ReconModel
+            | FieldId::SynthesisProvider
+            | FieldId::SynthesisModel
+    )
+}
+
+fn provider_label(kind: &str) -> &'static str {
+    match provider::normalize_kind(kind).as_str() {
+        "grok" | "grok-subscription" => "Grok",
+        "openai" | "openai-chatgpt" => "OpenAI",
+        "openrouter" => "OpenRouter",
+        "local" => "Local",
+        _ => "Provider",
+    }
+}
+
+fn model_label(model: &ListedModel) -> String {
+    let name = model.name.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case(&model.id) {
+        model.id.clone()
+    } else {
+        format!("{name} · {}", model.id)
+    }
+}
+
+fn codex_models() -> Vec<ListedModel> {
+    vec![ListedModel {
+        id: "codex-default".into(),
+        name: "Codex default".into(),
+        free: false,
+    }]
+}
+
+fn openrouter_ready(auth: &AuthFile) -> bool {
+    provider::resolved_key(&provider::account_secret(auth, "openrouter")).is_some()
+}
+
+fn add_scroll(value: u16, delta: i32) -> u16 {
+    (i32::from(value) + delta).clamp(0, i32::from(u16::MAX)) as u16
+}
+
+fn log_stamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!(
+        "{:02}:{:02}:{:02}Z",
+        (secs / 3600) % 24,
+        (secs / 60) % 60,
+        secs % 60
+    )
 }
 
 pub async fn run(mut app: App) -> Result<()> {
@@ -1707,32 +2574,73 @@ pub async fn run(mut app: App) -> Result<()> {
     )?;
     let mut terminal: Terminal<ratatui::backend::CrosstermBackend<Stdout>> =
         Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
+    let mut dirty = true;
     loop {
-        while let Ok(message) = app.provider_rx.try_recv() {
-            app.on_provider_event(message);
+        if pump(&mut app) {
+            dirty = true;
         }
-        while let Ok(message) = app.work_rx.try_recv() {
-            app.on_work_event(message);
+        if dirty {
+            super::ui::normalize(&mut app);
+            terminal.draw(|frame| {
+                app.screen = frame.area();
+                super::ui::draw(frame, &app)
+            })?;
+            dirty = false;
         }
-        terminal.draw(|frame| {
-            app.screen = frame.area();
-            super::ui::draw(frame, &app)
-        })?;
-        let next = if event::poll(Duration::from_millis(150))? {
-            Some(event::read()?)
-        } else {
-            None
-        };
-        match next {
-            Some(Event::Key(key)) if key.kind == KeyEventKind::Press && !app.handle_key(key) => {
-                break
+        let busy =
+            !app.running.is_empty() || app.osint_cancel.is_some() || app.provider_pending.is_some();
+        let wait = Duration::from_millis(if busy { 80 } else { 400 });
+        if !event::poll(wait)? {
+            if app.draft_dirty {
+                app.flush_draft();
             }
-            Some(Event::Key(_)) => {}
-            Some(Event::Mouse(mouse)) => app.handle_mouse(mouse),
-            _ => {}
+            continue;
+        }
+        loop {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if !app.handle_key(key) {
+                        app.flush_draft();
+                        return Ok(());
+                    }
+                    dirty = true;
+                }
+                Event::Mouse(mouse) => {
+                    app.handle_mouse(mouse);
+                    dirty |= mouse_dirties(mouse.kind);
+                }
+                Event::Resize(_, _) => dirty = true,
+                _ => {}
+            }
+            if !event::poll(Duration::ZERO)? {
+                break;
+            }
         }
     }
-    Ok(())
+}
+
+fn pump(app: &mut App) -> bool {
+    let mut dirty = false;
+    while let Ok(message) = app.provider_rx.try_recv() {
+        app.on_provider_event(message);
+        dirty = true;
+    }
+    while let Ok(message) = app.work_rx.try_recv() {
+        app.on_work_event(message);
+        dirty = true;
+    }
+    dirty
+}
+
+fn mouse_dirties(kind: MouseEventKind) -> bool {
+    matches!(
+        kind,
+        MouseEventKind::Up(MouseButton::Left)
+            | MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+    )
 }
 
 #[cfg(test)]
@@ -1755,6 +2663,9 @@ mod tests {
             osint_search: String::new(),
             osint_input: osint::registry()[0].example_input().to_string(),
             osint_inputs: HashMap::new(),
+            firecrawl_key: String::new(),
+            hunter_key: String::new(),
+            sociavault_key: String::new(),
             selected_thread: None,
             threads: Vec::new(),
             thread_states: HashMap::new(),
@@ -1768,7 +2679,20 @@ mod tests {
             manual_runs: Vec::new(),
             manual_run_pos: 0,
             recon_stage: "ready".into(),
-            recon_scroll: 0,
+            recon_chat: false,
+            scrolls: Scrolls::default(),
+            expanded: HashSet::new(),
+            chat_sel: 0,
+            chat_follow: true,
+            overlay: Overlay::None,
+            log: Vec::new(),
+            runs: Vec::new(),
+            answer_memories: HashMap::new(),
+            quit_arm: None,
+            esc_arm: None,
+            press: None,
+            draft_dirty: false,
+            frame: RefCell::new(super::super::ui::FrameCache::default()),
             thread_history: Vec::new(),
             history_pos: 0,
             running: HashMap::new(),
@@ -1779,6 +2703,14 @@ mod tests {
             synthesis_model: String::new(),
             defaults_synthesis: false,
             model_catalog: Vec::new(),
+            catalog_for: String::new(),
+            choice_items: Vec::new(),
+            choice_sel: 0,
+            choice_note: String::new(),
+            grok_signed_in: false,
+            openai_signed_in: false,
+            access_probe: false,
+            access_checked: false,
             router_key: String::new(),
             router_endpoint: "https://openrouter.ai/api/v1".into(),
             router_advanced: false,
@@ -1813,11 +2745,16 @@ mod tests {
             .flat_map(|y| (0..app.screen.width).map(move |x| (x, y)))
             .find(|(x, y)| super::super::ui::hit_test(app, *x, *y) == Some(target))
             .expect("visible click target");
-        app.handle_mouse(MouseEvent {
+        let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: position.0,
             row: position.1,
             modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(down);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..down
         });
     }
 
@@ -1948,6 +2885,129 @@ mod tests {
     }
 
     #[test]
+    fn defaults_pick_provider_and_model_from_account_access() {
+        let mut app = app();
+        app.grok_signed_in = true;
+        app.openai_signed_in = true;
+        let mut router = provider::account_secret(&app.auth, "openrouter");
+        router.api_key = Some("router-key".into());
+        app.auth.set_account(router);
+        click(&mut app, Target::App(3));
+        click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
+        click(&mut app, Target::Field(FieldId::ReconProvider));
+        assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)));
+        let ids: Vec<_> = app
+            .choice_items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(ids, ["grok", "openai-chatgpt", "openrouter", "local"]);
+        let openrouter = ids.iter().position(|id| *id == "openrouter").unwrap();
+        click(&mut app, Target::Choice(openrouter));
+        assert_eq!(app.recon_provider, "openrouter");
+        assert!(app.recon_model.is_empty());
+        assert!(app.model_catalog.is_empty());
+        assert!(matches!(app.overlay, Overlay::None));
+
+        click(&mut app, Target::Field(FieldId::ReconProvider));
+        type_text(&mut app, "nope");
+        assert_eq!(app.recon_provider, "openrouter");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        type_text(&mut app, "still-nope");
+        assert_eq!(app.recon_provider, "openrouter");
+
+        app.model_catalog = vec![ListedModel {
+            id: "grok-4.6".into(),
+            name: "Grok 4.6".into(),
+            free: false,
+        }];
+        app.catalog_for = "grok".into();
+        app.on_work_event(WorkEvent::CatalogDone {
+            synthesis: false,
+            provider: "openrouter".into(),
+            outcome: Ok(vec![
+                ListedModel {
+                    id: "alpha".into(),
+                    name: "Alpha".into(),
+                    free: false,
+                },
+                ListedModel {
+                    id: "beta".into(),
+                    name: "Beta".into(),
+                    free: true,
+                },
+            ]),
+        });
+        assert_eq!(app.catalog_for, "openrouter");
+        click(&mut app, Target::Field(FieldId::ReconModel));
+        assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Model)));
+        let models: Vec<_> = app
+            .choice_items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(models, ["alpha", "beta"]);
+        click(&mut app, Target::Choice(1));
+        assert_eq!(app.recon_model, "beta");
+        assert!(matches!(app.overlay, Overlay::None));
+
+        click(&mut app, Target::Button(ButtonId::ToggleDefaultRole));
+        click(&mut app, Target::Field(FieldId::SynthesisProvider));
+        assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)));
+        assert_eq!(app.choice_items[0].id, "grok");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.synthesis_provider, "grok");
+        assert!(app.synthesis_model.is_empty());
+        assert_eq!(app.recon_provider, "openrouter");
+        assert_eq!(app.recon_model, "beta");
+
+        click(&mut app, Target::Field(FieldId::SynthesisProvider));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.synthesis_provider, "openai-chatgpt");
+        click(&mut app, Target::Field(FieldId::SynthesisModel));
+        assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Model)));
+        assert_eq!(
+            app.choice_items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["codex-default"]
+        );
+        click(&mut app, Target::Choice(0));
+        assert_eq!(app.synthesis_model, "codex-default");
+        app.on_work_event(WorkEvent::CatalogDone {
+            synthesis: true,
+            provider: "grok".into(),
+            outcome: Ok(vec![ListedModel {
+                id: "not-allowed".into(),
+                name: "Not allowed".into(),
+                free: false,
+            }]),
+        });
+        assert_eq!(app.catalog_for, "openai-chatgpt");
+        assert_eq!(app.model_catalog[0].id, "codex-default");
+        assert_eq!(app.recon_model, "beta");
+
+        app.grok_signed_in = false;
+        app.openai_signed_in = false;
+        app.auth = AuthFile::default();
+        click(&mut app, Target::Field(FieldId::SynthesisProvider));
+        let available: Vec<_> = app
+            .choice_items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        assert!(available.contains(&"local"));
+        assert!(!available.contains(&"grok"));
+        assert!(!available.contains(&"openai-chatgpt"));
+        assert_eq!(
+            available.contains(&"openrouter"),
+            openrouter_ready(&app.auth)
+        );
+    }
+
+    #[test]
     fn recon_and_osint_controls_are_clickable_at_80x24() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 80, 24);
@@ -1956,8 +3016,21 @@ mod tests {
         app.select(0);
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
+            Target::Field(FieldId::ReconSearch),
             Target::Button(ButtonId::NewThread),
             Target::Button(ButtonId::DeleteThread),
+        ] {
+            assert!(
+                (0..24)
+                    .flat_map(|y| (0..80).map(move |x| (x, y)))
+                    .any(|(x, y)| super::super::ui::hit_test(&app, x, y) == Some(target)),
+                "dashboard is missing {target:?}"
+            );
+        }
+        assert!(!hit(&app, Target::Button(ButtonId::Send)));
+        app.recon_chat = true;
+        terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
+        for target in [
             Target::Button(ButtonId::CancelRun),
             Target::Button(ButtonId::ResumeRun),
             Target::Button(ButtonId::RetryInsights),
@@ -1967,9 +3040,10 @@ mod tests {
                 (0..24)
                     .flat_map(|y| (0..80).map(move |x| (x, y)))
                     .any(|(x, y)| super::super::ui::hit_test(&app, x, y) == Some(target)),
-                "missing {target:?}"
+                "chat is missing {target:?}"
             );
         }
+        assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
         app.select(2);
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
@@ -1987,5 +3061,262 @@ mod tests {
                 "missing {target:?}"
             );
         }
+    }
+
+    #[test]
+    fn home_offers_recon_and_brain_and_only_recon_has_chat() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 80, 24);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        for target in [Target::App(0), Target::App(1), Target::App(4)] {
+            assert!(hit(&app, target), "home is missing {target:?}");
+        }
+        assert!(!hit(&app, Target::Field(FieldId::Composer)));
+        app.select(1);
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        assert!(!hit(&app, Target::Field(FieldId::Composer)));
+        assert!(!super::super::ui::focus_order(&app).contains(&Target::Field(FieldId::Composer)));
+        app.select(0);
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        assert!(hit(&app, Target::Field(FieldId::ReconSearch)));
+        assert!(hit(&app, Target::Button(ButtonId::NewThread)));
+        assert!(!hit(&app, Target::Field(FieldId::Composer)));
+        app.recon_chat = true;
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        assert!(hit(&app, Target::Field(FieldId::Composer)));
+        assert!(hit(&app, Target::Button(ButtonId::Send)));
+        assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
+    }
+
+    #[test]
+    fn recon_chat_folds_decisions_and_opens_synthesis_memory() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 100, 36);
+        let thread = app.store.new_thread("example.org").unwrap();
+        let user = app
+            .store
+            .add_message(&thread.id, "user", "What is known about example.org?", None)
+            .unwrap();
+        let run = app
+            .store
+            .new_run(&thread.id, &user.id, "grok / recon", "grok / synthesis")
+            .unwrap();
+        let tool = osint::registry()[0].id;
+        let plan = recon::Plan {
+            objective: "Resolve example.org".into(),
+            calls: vec![recon::PlanCall {
+                step_id: "a".into(),
+                tool_id: tool.into(),
+                arguments: serde_json::json!({"domain": "example.org"}),
+                depends_on: Vec::new(),
+                reason: "Need the current public record".into(),
+            }],
+            unresolved_inputs: Vec::new(),
+            stop_condition: "A current observation is in hand".into(),
+            planning_mode: "json".into(),
+        };
+        app.store
+            .set_run(&run.id, "running", "synthesizing", Some(&plan), None)
+            .unwrap();
+        app.store
+            .queue_call(
+                tool,
+                &serde_json::json!({"domain": "example.org"}),
+                "recon",
+                Some(&run.id),
+                Some(&thread.id),
+                Some(&user.id),
+            )
+            .unwrap();
+        let memory = app
+            .store
+            .add_memory(
+                "example.org previously resolved to a mail host",
+                "investigation",
+                true,
+                MemorySource {
+                    app: "recon".into(),
+                    conversation_id: thread.id.clone(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        app.store
+            .add_answer(
+                &thread.id,
+                &run.id,
+                "The saved memory still names a mail host.",
+                &[],
+                std::slice::from_ref(&memory.id),
+            )
+            .unwrap();
+        app.selected_thread = Some(thread.id);
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.refresh_selected().unwrap();
+        app.chat_follow = false;
+        app.scrolls.chat = 0;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let drawn = screen_text(&terminal);
+        assert!(
+            drawn.contains('❯'),
+            "user prompt should keep the prompt arrow"
+        );
+        assert!(
+            !drawn.contains("You ·"),
+            "user turns should not use a You header"
+        );
+        assert!(
+            !drawn.contains("Synthesis ·"),
+            "answers should not use a Synthesis header"
+        );
+        let brain = (0..36)
+            .flat_map(|y| (0..100).map(move |x| (x, y)))
+            .find(|(x, y)| {
+                matches!(
+                    super::super::ui::hit_test(&app, *x, *y),
+                    Some(Target::BrainMark(_))
+                )
+            });
+        let (x, y) = brain.expect("synthesis answer should show a brain mark");
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(down);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..down
+        });
+        assert!(matches!(app.overlay, Overlay::Memories { .. }));
+        app.overlay = Overlay::None;
+        let tool_block = super::super::ui::chat_blocks(&app)
+            .iter()
+            .position(|block| block.key.starts_with("tool:"))
+            .expect("tool log");
+        app.chat_follow = false;
+        app.chat_sel = tool_block;
+        app.set_focus(Target::Transcript);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let key = super::super::ui::chat_blocks(&app)[tool_block].key.clone();
+        assert!(app.expanded.contains(&key));
+    }
+
+    #[test]
+    fn system_log_records_errors_and_scrolls() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 80, 24);
+        for index in 0..40 {
+            app.push_log("error", format!("lookup failed {index}"));
+        }
+        app.select(4);
+        assert_eq!(app.error_count(), 40);
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(app.scrolls.log > 0);
+    }
+
+    #[test]
+    fn pointer_and_chords_do_not_switch_apps_on_their_own() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 80, 24);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let (x, y) = (0..24)
+            .flat_map(|row| (0..80).map(move |column| (column, row)))
+            .find(|(column, row)| {
+                super::super::ui::hit_test(&app, *column, *row) == Some(Target::App(0))
+            })
+            .expect("recon row");
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.module.is_none());
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: x,
+            row: y.saturating_add(4),
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: x,
+            row: y.saturating_add(4),
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.module.is_none());
+        app.select(1);
+        app.set_focus(Target::Field(FieldId::BrainInsight));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Brain));
+    }
+
+    #[test]
+    fn firecrawl_key_field_is_on_the_osint_tool() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 100, 36);
+        app.select(2);
+        app.tool_sel = osint::registry()
+            .iter()
+            .position(|tool| tool.id == "firecrawl_search")
+            .unwrap();
+        assert!(hit(&app, Target::Field(FieldId::FirecrawlKey)));
+        assert!(hit(&app, Target::Button(ButtonId::SaveFirecrawlKey)));
+        app.tool_sel = osint::registry()
+            .iter()
+            .position(|tool| tool.id == "hunter_domain_search")
+            .unwrap();
+        assert!(hit(&app, Target::Field(FieldId::HunterKey)));
+        assert!(hit(&app, Target::Button(ButtonId::SaveHunterKey)));
+        assert!(!hit(&app, Target::Field(FieldId::FirecrawlKey)));
+        app.tool_sel = osint::registry()
+            .iter()
+            .position(|tool| tool.id == "sociavault_profile")
+            .unwrap();
+        assert!(hit(&app, Target::Field(FieldId::SociaVaultKey)));
+        assert!(hit(&app, Target::Button(ButtonId::SaveSociaVaultKey)));
+        app.tool_sel = 0;
+        assert!(!hit(&app, Target::Field(FieldId::FirecrawlKey)));
+        assert!(!hit(&app, Target::Field(FieldId::HunterKey)));
+        assert!(!hit(&app, Target::Field(FieldId::SociaVaultKey)));
+    }
+
+    fn screen_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn hit(app: &App, target: Target) -> bool {
+        (0..app.screen.height)
+            .flat_map(|y| (0..app.screen.width).map(move |x| (x, y)))
+            .any(|(x, y)| super::super::ui::hit_test(app, x, y) == Some(target))
     }
 }

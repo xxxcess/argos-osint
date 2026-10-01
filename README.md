@@ -8,7 +8,7 @@ Argos is a terminal investigation workspace. Its launcher contains **Recon**, **
 cargo run -p argos-osint-bin
 ```
 
-F1–F5 open the five apps. Tab and Shift+Tab move focus; Enter activates a focused control. Ctrl+N starts a Recon thread. Alt+Left and Alt+Right navigate recently opened threads. Shift+Enter adds a line in the composer; Enter sends. Esc closes a detail panel or returns focus without cancelling a run. Ctrl+C quits. Mouse selection, buttons, tabs, and scrolling are supported. On narrow terminals, panels are stacked.
+F1–F5 open the five apps. Tab and Shift+Tab move focus; Enter activates a focused control. Ctrl+N starts a Recon thread. Alt+Left and Alt+Right navigate recently opened threads. PageUp and PageDown scroll the Recon transcript. Shift+Enter adds a line in the composer; Enter sends. Esc closes a detail panel or returns focus without cancelling a run. Ctrl+C quits. Mouse selection, buttons, tabs, and scrolling are supported. On narrow terminals, panels are stacked.
 
 Recon keeps threads, drafts, messages, run stages, plans, tool calls, and evidence across restarts. Its transcript shows cited answers and tool activity. Use the explicit Cancel action to stop a run; interrupted runs can be resumed. The composer accepts `:rename <title>`, `:delete`, and `:delete-with-insights` for the selected thread.
 

@@ -1593,6 +1593,12 @@ impl App {
                 self.memory_sel = (self.memory_sel + 1).min(self.memories.len().saturating_sub(1));
                 self.set_focus(Target::Memory(self.memory_sel));
             }
+            KeyCode::PageUp if self.module == Some(ModuleId::Recon) => {
+                self.recon_scroll = self.recon_scroll.saturating_sub(8);
+            }
+            KeyCode::PageDown if self.module == Some(ModuleId::Recon) => {
+                self.recon_scroll = self.recon_scroll.saturating_add(8);
+            }
             KeyCode::Up => self.launcher_sel = self.launcher_sel.saturating_sub(1),
             KeyCode::Down => {
                 self.launcher_sel = (self.launcher_sel + 1).min(ModuleId::ALL.len() - 1)

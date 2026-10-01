@@ -777,6 +777,7 @@ fn draw_recon(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(content)
             .style(theme::text())
             .block(panel(&format!(" Recon · {} ", app.recon_stage)))
+            .scroll((app.recon_scroll, 0))
             .wrap(Wrap { trim: true }),
         transcript,
     );

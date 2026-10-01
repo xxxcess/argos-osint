@@ -112,10 +112,19 @@ pub struct Run {
     pub stage: String,
     pub recon_model: String,
     pub synthesis_model: String,
+    pub max_rounds: u8,
+    pub max_calls: u8,
+    pub turn_seconds: u16,
     pub plan_json: Option<String>,
     pub error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct RunLimits {
+    pub max_rounds: u8,
+    pub max_calls: u8,
+    pub turn_seconds: u16,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Call {
@@ -357,7 +366,39 @@ impl Store {
         recon_model: &str,
         synthesis_model: &str,
     ) -> Result<Run> {
+        self.new_run_with_limits(
+            tid,
+            turn_id,
+            recon_model,
+            synthesis_model,
+            RunLimits {
+                max_rounds: 6,
+                max_calls: 12,
+                turn_seconds: 300,
+            },
+        )
+    }
+    pub fn new_run_with_limits(
+        &self,
+        tid: &str,
+        turn_id: &str,
+        recon_model: &str,
+        synthesis_model: &str,
+        limits: RunLimits,
+    ) -> Result<Run> {
         ensure!(self.get_thread(tid)?.is_some(), "thread not found");
+        ensure!(
+            (1..=8).contains(&limits.max_rounds),
+            "max_rounds must be 1..8"
+        );
+        ensure!(
+            (1..=24).contains(&limits.max_calls),
+            "max_calls must be 1..24"
+        );
+        ensure!(
+            (30..=900).contains(&limits.turn_seconds),
+            "turn_seconds must be 30..900"
+        );
         let time = now();
         let run = Run {
             id: id("run"),
@@ -367,16 +408,19 @@ impl Store {
             stage: "extracting entities".into(),
             recon_model: recon_model.into(),
             synthesis_model: synthesis_model.into(),
+            max_rounds: limits.max_rounds,
+            max_calls: limits.max_calls,
+            turn_seconds: limits.turn_seconds,
             plan_json: None,
             error: None,
             created_at: time.clone(),
             updated_at: time,
         };
-        self.conn.execute("INSERT INTO recon_runs(id,thread_id,turn_id,state,stage,recon_model,synthesis_model,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![run.id,run.thread_id,run.turn_id,run.state,run.stage,run.recon_model,run.synthesis_model,run.created_at,run.updated_at])?;
+        self.conn.execute("INSERT INTO recon_runs(id,thread_id,turn_id,state,stage,recon_model,synthesis_model,max_rounds,max_calls,turn_seconds,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![run.id,run.thread_id,run.turn_id,run.state,run.stage,run.recon_model,run.synthesis_model,run.max_rounds,run.max_calls,run.turn_seconds,run.created_at,run.updated_at])?;
         Ok(run)
     }
     pub fn get_run(&self, rid: &str) -> Result<Option<Run>> {
-        Ok(self.conn.query_row("SELECT id,thread_id,turn_id,state,stage,recon_model,synthesis_model,plan_json,error,created_at,updated_at FROM recon_runs WHERE id=?1",[rid],|r|Ok(Run{id:r.get(0)?,thread_id:r.get(1)?,turn_id:r.get(2)?,state:r.get(3)?,stage:r.get(4)?,recon_model:r.get(5)?,synthesis_model:r.get(6)?,plan_json:r.get(7)?,error:r.get(8)?,created_at:r.get(9)?,updated_at:r.get(10)?})).optional()?)
+        Ok(self.conn.query_row("SELECT id,thread_id,turn_id,state,stage,recon_model,synthesis_model,max_rounds,max_calls,turn_seconds,plan_json,error,created_at,updated_at FROM recon_runs WHERE id=?1",[rid],|r|Ok(Run{id:r.get(0)?,thread_id:r.get(1)?,turn_id:r.get(2)?,state:r.get(3)?,stage:r.get(4)?,recon_model:r.get(5)?,synthesis_model:r.get(6)?,max_rounds:r.get(7)?,max_calls:r.get(8)?,turn_seconds:r.get(9)?,plan_json:r.get(10)?,error:r.get(11)?,created_at:r.get(12)?,updated_at:r.get(13)?})).optional()?)
     }
     pub fn latest_resumable_run(&self, tid: &str) -> Result<Option<Run>> {
         let id:Option<String>=self.conn.query_row("SELECT id FROM recon_runs WHERE thread_id=?1 AND state IN ('interrupted','failed') ORDER BY updated_at DESC LIMIT 1",[tid],|r|r.get(0)).optional()?;
@@ -929,16 +973,22 @@ impl Service {
         let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "synthesis")?;
         let store = Store::open(&self.db_path)?;
         let turn = store.add_message(tid, "user", question, None)?;
-        let run = store.new_run(
+        let max_rounds = self.settings.recon_limits.max_rounds.clamp(1, 8);
+        let max_calls = self.settings.recon_limits.max_calls.clamp(1, 24);
+        let turn_seconds = self.settings.recon_limits.turn_seconds.clamp(30, 900);
+        let run = store.new_run_with_limits(
             tid,
             &turn.id,
             &format!("{} / {}", recon_secret.kind, recon_secret.model),
             &format!("{} / {}", synthesis_secret.kind, synthesis_secret.model),
+            RunLimits {
+                max_rounds,
+                max_calls,
+                turn_seconds,
+            },
         )?;
         drop(store);
-        let deadline = std::time::Duration::from_secs(u64::from(
-            self.settings.recon_limits.turn_seconds.clamp(30, 900),
-        ));
+        let deadline = std::time::Duration::from_secs(u64::from(run.turn_seconds));
         let outcome = tokio::time::timeout(
             deadline,
             self.ask_inner(
@@ -1070,7 +1120,7 @@ impl Service {
             }
             let recalled = store.recon_recall(&store.thread_entities(&run.thread_id)?)?;
             drop(store);
-            let max_calls = usize::from(self.settings.recon_limits.max_calls.clamp(1, 24));
+            let max_calls = usize::from(run.max_calls);
             self.finish_answer(
                 AnswerContext {
                     run: &run,
@@ -1224,8 +1274,8 @@ impl Service {
             .filter_map(|call| call.result.map(|result| (call.id, result)))
             .collect();
         drop(store);
-        let max_calls = usize::from(self.settings.recon_limits.max_calls.clamp(1, 24));
-        let max_rounds = usize::from(self.settings.recon_limits.max_rounds.clamp(1, 8));
+        let max_calls = usize::from(run.max_calls);
+        let max_rounds = usize::from(run.max_rounds);
         let manifest: Vec<_> = osint::registry()
             .iter()
             .map(|t| json!({"id":t.id,"description":t.description,"input_schema":t.schema(),"restrictions":t.restrictions}))

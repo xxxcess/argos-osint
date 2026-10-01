@@ -46,7 +46,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 4,
+                version <= 5,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -101,6 +101,31 @@ impl Store {
             if version < 4 {
                 self.conn.execute_batch(include_str!("schema_recon.sql"))?;
                 self.conn.pragma_update(None, "user_version", 4)?;
+            }
+            if version < 5 {
+                let recon_schema_present: bool = self.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='recon_runs')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if !recon_schema_present {
+                    self.conn.execute_batch(include_str!("schema_recon.sql"))?;
+                }
+                let run_columns: Vec<String> = {
+                    let mut stmt = self.conn.prepare("PRAGMA table_info(recon_runs)")?;
+                    let columns = stmt
+                        .query_map([], |row| row.get(1))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    columns
+                };
+                if !run_columns.iter().any(|name| name == "max_rounds") {
+                    self.conn.execute_batch(
+                        "ALTER TABLE recon_runs ADD COLUMN max_rounds INTEGER NOT NULL DEFAULT 6;
+                         ALTER TABLE recon_runs ADD COLUMN max_calls INTEGER NOT NULL DEFAULT 12;
+                         ALTER TABLE recon_runs ADD COLUMN turn_seconds INTEGER NOT NULL DEFAULT 300;",
+                    )?;
+                }
+                self.conn.pragma_update(None, "user_version", 5)?;
             }
             Ok(())
         })();

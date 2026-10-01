@@ -137,6 +137,572 @@ pub fn additional_tools(
     tools
 }
 
+/// The tool-isolation step: catalog tools picked for the question, turned into
+/// runnable lookups, plus the ones that cannot run and why. It never calls Firecrawl.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Isolation {
+    pub actions: Vec<ProposedAction>,
+    pub skipped: Vec<String>,
+}
+
+/// Turns tool suggestions into executable lookups whose inputs come from the focus
+/// subject (its name, evidenced handle, or own domain), never from a source domain.
+/// `missing_keys` names providers without a configured API key.
+pub fn isolate_tools(
+    suggestions: &[ToolSuggestion],
+    input: &SelectionInput<'_>,
+    missing_keys: &HashSet<String>,
+    limit: usize,
+) -> Isolation {
+    let mut isolation = Isolation::default();
+    let mut hunter = 0usize;
+    let mut social = 0usize;
+    let mut seen = HashSet::new();
+    for suggestion in suggestions {
+        if seen.len() >= limit && !seen.contains(suggestion.tool_id.as_str()) {
+            break;
+        }
+        let Some(tool) = osint::definition(&suggestion.tool_id) else {
+            continue;
+        };
+        if seen.contains(tool.id) {
+            continue;
+        }
+        let skip = |reason: String| format!("{} — skipped: {reason}", tool.id);
+        if tool.id.starts_with("firecrawl_") {
+            isolation.skipped.push(skip(
+                "Firecrawl is reserved for the two opening searches and grounded follow-ups.".into(),
+            ));
+            continue;
+        }
+        if !input.enabled.contains(tool.id) {
+            isolation
+                .skipped
+                .push(skip(format!("{} is disabled in OSINT.", tool.name)));
+            continue;
+        }
+        let cost = osint::endpoint_cost(tool.id);
+        if let Some(cost) = cost {
+            if missing_keys.contains(cost.provider) {
+                isolation.skipped.push(skip(format!(
+                    "no {} API key is configured. Enter it on the {} tool in OSINT or set {}_API_KEY.",
+                    provider_label(cost.provider),
+                    tool.name,
+                    cost.provider.to_ascii_uppercase()
+                )));
+                continue;
+            }
+        }
+        if tool.id.starts_with("hunter_") && hunter >= input.hunter_cap {
+            isolation
+                .skipped
+                .push(skip(format!("the Hunter allowance for this turn is {}.", input.hunter_cap)));
+            continue;
+        }
+        if tool.id == "sociavault_profile" && social >= input.sociavault_cap {
+            isolation.skipped.push(skip(format!(
+                "the SociaVault allowance for this turn is {}.",
+                input.sociavault_cap
+            )));
+            continue;
+        }
+        // SociaVault runs once per evidenced account of the subject, up to the allowance.
+        let candidates: Vec<ProposedAction> = if tool.id == "sociavault_profile" {
+            sociavault_actions(input, &suggestion.reason)
+        } else {
+            propose(tool.id, input)
+                .or_else(|| subject_action(tool, input, &suggestion.reason))
+                .into_iter()
+                .collect()
+        };
+        if candidates.is_empty() {
+            isolation.skipped.push(skip(format!(
+                "no input for {} can be derived from the subject ({}).",
+                tool.name,
+                tool.inputs.join(", ")
+            )));
+            continue;
+        }
+        seen.insert(tool.id);
+        let mut spent = 0u32;
+        for mut action in candidates {
+            if input.already.contains(&action.signature()) {
+                continue;
+            }
+            let label = format!("{} {}", tool.id, action.arguments);
+            if tool.id == "sociavault_profile" && social >= input.sociavault_cap {
+                isolation.skipped.push(format!(
+                    "{label} — skipped: the SociaVault allowance for this turn is {}.",
+                    input.sociavault_cap
+                ));
+                continue;
+            }
+            action.cache_available = input.cached.contains(&action.signature());
+            if action.cache_available {
+                action.credit_cost = 0;
+            }
+            if let Some(left) = input.credits_left.get(&action.provider) {
+                if action.spends() && spent + action.credit_cost > *left {
+                    isolation.skipped.push(format!(
+                        "{label} — skipped: the {} credit budget is too low.",
+                        provider_label(&action.provider)
+                    ));
+                    continue;
+                }
+            }
+            if action.spends() {
+                spent += action.credit_cost;
+            }
+            if tool.id.starts_with("hunter_") {
+                hunter += 1;
+            }
+            if tool.id == "sociavault_profile" {
+                social += 1;
+            }
+            action.rank_reason = format!(
+                "Chosen by tool isolation. {} {}",
+                suggestion.reason, action.rank_reason
+            )
+            .trim()
+            .to_string();
+            action.id = format!("isolate-{}", isolation.actions.len());
+            isolation.actions.push(action);
+        }
+    }
+    isolation
+}
+
+/// The focus subject entity: the selected, unambiguous entity named like the subject.
+fn subject_entity<'a>(input: &SelectionInput<'a>) -> Option<&'a SelectedEntity> {
+    let subject = subject_of(input.question);
+    input.entities.iter().find(|entity| {
+        entity.selected && !entity.ambiguous && matches_subject(&subject, &entity.canonical_name)
+    })
+}
+
+/// One SociaVault profile lookup per SociaVault-supported account on the subject.
+fn sociavault_actions(input: &SelectionInput<'_>, reason: &str) -> Vec<ProposedAction> {
+    let Some(entity) = subject_entity(input) else {
+        return Vec::new();
+    };
+    let Some(primary) = input
+        .gaps
+        .iter()
+        .find(|gap| gap.kind == "profile")
+        .or_else(|| input.gaps.first())
+    else {
+        return Vec::new();
+    };
+    let mut actions = Vec::new();
+    for platform in SOCIAVAULT_ORDER {
+        for account in entity.identifiers.iter().filter(|identifier| identifier.kind == *platform) {
+            let Some(action) = grounded(
+                "sociavault_profile",
+                json!({"platform": account.kind, "handle": account.value}),
+                primary,
+                &format!(
+                    "Tool isolation: SociaVault profile for the {} account {} of {}. {reason}",
+                    account.kind, account.value, entity.canonical_name
+                ),
+                entity.evidence_ids.clone(),
+                "Public profile fields. A matching handle does not prove ownership.",
+                "The platform and handle were extracted from discovery results about the subject.",
+            ) else {
+                continue;
+            };
+            if osint::validate(&action.tool_id, &action.arguments).is_ok() {
+                actions.push(price(action, input));
+            }
+        }
+    }
+    actions
+}
+
+/// SociaVault platforms in the order their profiles are looked up.
+const SOCIAVAULT_ORDER: &[&str] = &[
+    "twitter", "instagram", "facebook", "youtube", "tiktok", "threads", "linkedin", "twitch",
+];
+
+/// Platforms whose handle works as a plain username on another service.
+const USERNAME_ORDER: &[&str] = &[
+    "twitter", "truthsocial", "instagram", "github", "keybase", "tiktok", "threads", "youtube",
+    "twitch",
+];
+
+fn provider_label(provider: &str) -> &str {
+    match provider {
+        "firecrawl" => "Firecrawl",
+        "hunter" => "Hunter",
+        "sociavault" => "SociaVault",
+        other => other,
+    }
+}
+
+/// Builds tool arguments from the focus subject. Returns none when a required input
+/// would have to be guessed (for example a social handle no evidence supports).
+fn subject_action(
+    tool: &osint::ToolDefinition,
+    input: &SelectionInput<'_>,
+    reason: &str,
+) -> Option<ProposedAction> {
+    let subject = subject_of(input.question);
+    let focus = subject_entity(input);
+    let name = focus
+        .map(|entity| entity.canonical_name.clone())
+        .unwrap_or_else(|| display_name(&subject));
+    if name.trim().is_empty() {
+        return None;
+    }
+    let person = focus
+        .map(|entity| entity.entity_type == "person")
+        .unwrap_or_else(|| subject_type(input.question, &subject, input.hits) == "person");
+    let handle = focus.and_then(|entity| {
+        entity
+            .identifiers
+            .iter()
+            .find(|identifier| platform_kind(&identifier.kind))
+    });
+    // A username for account directories: that service's own handle first, then the
+    // subject's best-evidenced handle elsewhere.
+    let own_platform = match tool.id {
+        "keybase_identity" => "keybase",
+        "wikipedia_users" => "wikipedia",
+        "github_repositories" => "github",
+        _ => "",
+    };
+    let username = focus.and_then(|entity| {
+        std::iter::once(own_platform)
+            .chain(USERNAME_ORDER.iter().copied())
+            .filter(|platform| !platform.is_empty())
+            .find_map(|platform| {
+                entity
+                    .identifiers
+                    .iter()
+                    .find(|identifier| identifier.kind == platform)
+            })
+    });
+    let domain = focus
+        .and_then(|entity| identifier(entity, "domain").map(str::to_string))
+        .or_else(|| explicit_kind(input.question, "domain"));
+    let mut arguments = serde_json::Map::new();
+    for group in tool.inputs {
+        let value = group.split('|').find_map(|key| {
+            let value = match key {
+                "name" | "query" => Some(name.clone()),
+                "full_name" if person => Some(name.clone()),
+                "company" | "company_name" if !person => Some(name.clone()),
+                "username" => username.map(|identifier| identifier.value.clone()),
+                "handle" => handle.map(|identifier| identifier.value.clone()),
+                "platform" => handle.map(|identifier| identifier.kind.clone()),
+                "linkedin_handle" => handle
+                    .filter(|identifier| identifier.kind == "linkedin")
+                    .map(|identifier| identifier.value.clone()),
+                "domain" | "domain_or_url" | "domain_or_ip" => domain.clone(),
+                "ip" | "url" | "cve" => explicit_kind(input.question, key),
+                "cve_id" => explicit_kind(input.question, "cve"),
+                "email" => emails_in(input.question).into_iter().next(),
+                "bitcoin_address" => bitcoin_in(input.question),
+                _ => None,
+            }?;
+            Some((key, value))
+        });
+        let (key, value) = value?;
+        arguments.insert(key.into(), Value::String(value));
+    }
+    let primary = input
+        .gaps
+        .iter()
+        .find(|gap| gap.kind == gap_kind(input.question))
+        .or_else(|| input.gaps.first())?;
+    let evidence = focus
+        .map(|entity| entity.evidence_ids.clone())
+        .filter(|ids| !ids.is_empty())
+        .unwrap_or_else(|| vec!["question".into()]);
+    let action = grounded(
+        tool.id,
+        Value::Object(arguments),
+        primary,
+        &format!("Tool isolation: {} for {name}. {reason}", tool.name),
+        evidence,
+        &format!(
+            "{} for {name}. Matches are candidates until another source corroborates them.",
+            tool.description.trim_end_matches('.')
+        ),
+        "Inputs come from the focus subject, not from search-result publishers.",
+    )?;
+    osint::validate(&action.tool_id, &action.arguments).ok()?;
+    Some(price(action, input))
+}
+
+/// One online account of the subject, with where it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Account {
+    pub platform: String,
+    pub handle: String,
+    pub evidence_id: String,
+    /// `model`, `pattern`, or both.
+    pub sources: Vec<String>,
+}
+
+/// Platforms whose accounts Recon extracts and attaches to the subject.
+pub const ACCOUNT_PLATFORMS: &[&str] = &[
+    "twitter", "truthsocial", "instagram", "facebook", "youtube", "tiktok", "threads", "linkedin",
+    "twitch", "github", "keybase", "wikipedia",
+];
+
+/// Sites that host accounts. Their domains are never organizations in a result set.
+fn account_platform_host(host: &str) -> bool {
+    const HOSTS: &[&str] = &[
+        "x.com", "twitter.com", "truthsocial.com", "instagram.com", "facebook.com", "fb.com",
+        "youtube.com", "youtu.be", "tiktok.com", "threads.net", "linkedin.com", "twitch.tv",
+        "github.com", "gitlab.com", "keybase.io", "reddit.com", "medium.com", "substack.com",
+        "rumble.com", "gettr.com", "parler.com", "bsky.app", "mastodon.social", "linktr.ee",
+    ];
+    HOSTS
+        .iter()
+        .any(|known| host == *known || host.ends_with(&format!(".{known}")))
+}
+
+/// Deterministic extraction: profile URLs (x.com/<h>, twitter.com/<h>, truthsocial.com/@<h>,
+/// instagram.com/<h>, facebook.com/<h>, github.com/<h>, keybase.io/<h>, youtube.com/@<h>, …)
+/// in result links and text. Keeps only accounts that belong to the subject.
+pub fn fallback_accounts(question: &str, hits: &[SearchHit]) -> Vec<Account> {
+    let subject = subject_of(question);
+    let mut accounts = Vec::new();
+    for hit in hits {
+        let titled = names_subject(&subject, &hit.title);
+        for handle in super::extract_social_handles(std::slice::from_ref(&hit.url)) {
+            if titled || names_subject(&subject, &handle.handle) {
+                push_account(&mut accounts, &handle.platform, &handle.handle, &hit.evidence_id, "pattern");
+            }
+        }
+        for handle in super::extract_social_handles(&[hit.title.clone(), hit.snippet.clone()]) {
+            if names_subject(&subject, &handle.handle) {
+                push_account(&mut accounts, &handle.platform, &handle.handle, &hit.evidence_id, "pattern");
+            }
+        }
+    }
+    accounts
+}
+
+/// Accounts the Recon model extracted. Each must use a known platform, be a valid handle,
+/// appear in the results, and belong to the subject (its handle or its result names it).
+pub fn accounts_from_model(value: &Value, question: &str, hits: &[SearchHit]) -> Vec<Account> {
+    let subject = subject_of(question);
+    let mut accounts = Vec::new();
+    let Some(rows) = value.get("accounts").and_then(Value::as_array) else {
+        return accounts;
+    };
+    for row in rows.iter().take(24) {
+        let platform = row
+            .get("platform")
+            .and_then(Value::as_str)
+            .map(normalize_platform)
+            .unwrap_or_default();
+        let raw = row.get("handle").and_then(Value::as_str).unwrap_or("").trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let (platform, handle) = if raw.contains('/') {
+            match super::extract_social_handles(&[raw.to_string()]).into_iter().next() {
+                Some(found) => (found.platform, found.handle),
+                None => continue,
+            }
+        } else {
+            let Ok(token) = osint::social_token(raw) else {
+                continue;
+            };
+            let handle = match platform.as_str() {
+                "facebook" => format!("https://www.facebook.com/{token}"),
+                "linkedin" => format!("https://www.linkedin.com/in/{token}"),
+                _ => token,
+            };
+            (platform, handle)
+        };
+        if !ACCOUNT_PLATFORMS.contains(&platform.as_str()) {
+            continue;
+        }
+        let needle = handle
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(&handle)
+            .to_ascii_lowercase();
+        let Some(source) = hits.iter().find(|hit| {
+            appears_as_token(&format!("{} {} {}", hit.url, hit.title, hit.snippet), &needle)
+        }) else {
+            continue;
+        };
+        // A handle that does not carry the subject's name needs its own profile page
+        // titled with the subject; a mention inside an article about the subject is not enough.
+        let profile = hits.iter().any(|hit| {
+            appears_as_token(&hit.url, &needle) && names_subject(&subject, &hit.title)
+        });
+        if names_subject(&subject, &handle) || profile {
+            push_account(&mut accounts, &platform, &handle, &source.evidence_id, "model");
+        }
+    }
+    accounts
+}
+
+/// The handle appears whole in the text, not inside a longer handle or word.
+fn appears_as_token(text: &str, needle: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    let part = |ch: Option<char>| ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    !needle.is_empty()
+        && text.match_indices(needle).any(|(index, _)| {
+            !part(text[..index].chars().next_back()) && !part(text[index + needle.len()..].chars().next())
+        })
+}
+
+/// Tools the Recon model picked to answer the question, limited to enabled, non-Firecrawl tools.
+pub fn model_tool_picks(value: &Value, enabled: &HashSet<String>) -> Vec<ToolSuggestion> {
+    let mut tools: Vec<ToolSuggestion> = Vec::new();
+    for row in value.get("tools").and_then(Value::as_array).into_iter().flatten().take(12) {
+        let Some(id) = row.get("tool_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(tool) = osint::definition(id) else {
+            continue;
+        };
+        if tool.id.starts_with("firecrawl_")
+            || !enabled.contains(tool.id)
+            || tools.iter().any(|item| item.tool_id == tool.id)
+        {
+            continue;
+        }
+        let reason = row
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(clip_query)
+            .unwrap_or_else(|| format!("The Recon model picked {} for this question.", tool.name));
+        tools.push(ToolSuggestion {
+            tool_id: tool.id.into(),
+            reason,
+        });
+    }
+    tools
+}
+
+fn normalize_platform(value: &str) -> String {
+    let compact: String = value
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+    match compact.as_str() {
+        "x" | "xcom" | "twitter" | "xtwitter" | "twitterx" => "twitter".into(),
+        "truth" | "truthsocial" => "truthsocial".into(),
+        "ig" | "insta" | "instagram" => "instagram".into(),
+        "fb" | "facebook" => "facebook".into(),
+        "yt" | "youtube" => "youtube".into(),
+        other => other.into(),
+    }
+}
+
+fn push_account(accounts: &mut Vec<Account>, platform: &str, handle: &str, evidence: &str, source: &str) {
+    if let Some(existing) = accounts.iter_mut().find(|account| {
+        account.platform == platform && account.handle.eq_ignore_ascii_case(handle)
+    }) {
+        if !existing.sources.iter().any(|item| item == source) {
+            existing.sources.push(source.into());
+        }
+        return;
+    }
+    accounts.push(Account {
+        platform: platform.into(),
+        handle: handle.into(),
+        evidence_id: evidence.into(),
+        sources: vec![source.into()],
+    });
+}
+
+/// Model accounts first, then pattern accounts, deduplicated by platform and handle.
+pub fn merge_accounts(model: &[Account], pattern: &[Account]) -> Vec<Account> {
+    let mut merged = Vec::new();
+    for account in model.iter().chain(pattern) {
+        for source in &account.sources {
+            push_account(&mut merged, &account.platform, &account.handle, &account.evidence_id, source);
+        }
+    }
+    merged.truncate(16);
+    merged
+}
+
+/// Attaches the accounts to the subject entity as handles, creating the subject entity
+/// when the results named only its accounts. Account platforms never become entities.
+pub fn attach_accounts(
+    question: &str,
+    hits: &[SearchHit],
+    entities: &mut Vec<SelectedEntity>,
+    accounts: &[Account],
+) {
+    if accounts.is_empty() {
+        return;
+    }
+    let focus = Focus::new(question, hits);
+    let index = match entities.iter().position(|entity| {
+        entity.canonical_name.eq_ignore_ascii_case(&focus.name)
+            || content_tokens(&entity.canonical_name) == content_tokens(&focus.subject)
+    }) {
+        Some(index) => index,
+        None => {
+            entities.insert(
+                0,
+                SelectedEntity {
+                    canonical_name: focus.name.clone(),
+                    entity_type: focus.entity_type.into(),
+                    identifiers: Vec::new(),
+                    evidence_ids: Vec::new(),
+                    relationships: Vec::new(),
+                    unresolved: vec!["needs a second independent source".into()],
+                    certainty: "medium".into(),
+                    why: "Online accounts in the discovery results belong to the subject.".into(),
+                    ambiguous: false,
+                    selected: true,
+                },
+            );
+            let mut chosen = 0;
+            for entity in entities.iter_mut() {
+                if entity.selected {
+                    chosen += 1;
+                    entity.selected = chosen <= 3;
+                }
+            }
+            0
+        }
+    };
+    let entity = &mut entities[index];
+    if entity.ambiguous {
+        return;
+    }
+    for account in accounts {
+        if !entity.identifiers.iter().any(|identifier| {
+            identifier.kind == account.platform && identifier.value.eq_ignore_ascii_case(&account.handle)
+        }) {
+            entity.identifiers.push(EntityIdentifier {
+                kind: account.platform.clone(),
+                value: account.handle.clone(),
+            });
+        }
+        if !entity.evidence_ids.contains(&account.evidence_id) {
+            entity.evidence_ids.push(account.evidence_id.clone());
+        }
+    }
+}
+
+/// `twitter @realDonaldTrump (model, pattern)`, for the decision block.
+pub fn account_line(account: &Account) -> String {
+    let handle = if account.handle.contains('/') {
+        account.handle.clone()
+    } else {
+        format!("@{}", account.handle)
+    };
+    format!("{} {handle} ({})", account.platform, account.sources.join(", "))
+}
+
 pub fn assessment_from_model(value: &Value, fallback: &[ToolSuggestion]) -> Option<AnswerAssessment> {
     let answered = value.get("answered")?.as_bool()?;
     if answered {
@@ -254,6 +820,22 @@ pub struct DiscoveryQuery {
 pub fn complementary_queries(question: &str, strategy: &str) -> [DiscoveryQuery; 2] {
     let subject = subject_of(question);
     let identity = clip_query(&format!("{subject} official name identifiers"));
+    if accounts_flow(question, strategy) {
+        return [
+            DiscoveryQuery {
+                role: "identity".into(),
+                query: identity,
+                angle: "Establish the subject and its authoritative identifiers.".into(),
+            },
+            DiscoveryQuery {
+                role: ACCOUNTS.into(),
+                query: clip_query(&format!(
+                    "{subject} official social media accounts profiles handles"
+                )),
+                angle: "Find the subject's associated online accounts: X/Twitter, Truth Social, Instagram, Facebook, YouTube, GitHub, Keybase.".into(),
+            },
+        ];
+    }
     let mut investigative = clip_query(&investigative_angle(question, &subject, strategy));
     if !distinct_queries(&identity, &investigative) {
         investigative = clip_query(&format!(
@@ -273,6 +855,91 @@ pub fn complementary_queries(question: &str, strategy: &str) -> [DiscoveryQuery;
                 .into(),
         },
     ]
+}
+
+/// Query role for the associated-accounts search.
+pub const ACCOUNTS: &str = "accounts";
+
+/// Discovery for a person or organization searches for associated online accounts
+/// second and extracts their handles. Topics, events, places, products, and technical
+/// identifiers keep the investigative-question search.
+pub fn accounts_flow(question: &str, strategy: &str) -> bool {
+    strategy == DISCOVERY && matches!(target_kind(question), "person" | "organization")
+}
+
+/// Whether a query looks for online accounts rather than restating the question.
+pub fn accounts_query(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    ["account", "profile", "handle", "social", "twitter", "instagram", "official site"]
+        .iter()
+        .any(|word| query.contains(word))
+}
+
+/// What the question targets, from the question alone: `person`, `organization`, or
+/// `other` (topic, event, place, product, or a technical identifier).
+pub fn target_kind(question: &str) -> &'static str {
+    if super::explicit_entities(question)
+        .iter()
+        .any(|(kind, _)| matches!(kind.as_str(), "domain" | "url" | "ip" | "cve"))
+        || !emails_in(question).is_empty()
+        || bitcoin_in(question).is_some()
+    {
+        return "other";
+    }
+    let subject = subject_of(question);
+    let words: Vec<String> = subject
+        .split_whitespace()
+        .map(|word| word.trim_matches(|ch: char| !ch.is_alphanumeric()).to_ascii_lowercase())
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words.is_empty() {
+        return "other";
+    }
+    const OTHER_WORDS: &[&str] = &[
+        "war", "election", "elections", "crisis", "attack", "shooting", "hurricane",
+        "earthquake", "storm", "wildfire", "protest", "protests", "pandemic", "outbreak",
+        "scandal", "trial", "summit", "olympics", "conference", "act", "bill", "policy", "law",
+        "regulation", "price", "prices", "market", "inflation", "economy", "climate", "history",
+        "vulnerability", "exploit", "malware", "ransomware", "breach", "leak", "incident",
+        "release", "version", "update", "game", "movie", "film", "album", "book", "song",
+        "product", "phone", "city", "country", "river", "mountain", "island", "street",
+        "county", "province", "region", "tariff", "tariffs", "start", "started", "begin",
+    ];
+    if words.iter().any(|word| OTHER_WORDS.contains(&word.as_str())) {
+        return "other";
+    }
+    if words.iter().any(|word| ORG_WORDS.contains(&word.as_str())) {
+        return "organization";
+    }
+    let asked = format!(
+        " {} ",
+        question
+            .to_ascii_lowercase()
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+            .collect::<String>()
+    );
+    let cue = |cues: &[&str]| cues.iter().any(|cue| asked.contains(cue));
+    if cue(&[" company ", " organization ", " organisation ", " firm ", " brand ", " its "]) {
+        return "organization";
+    }
+    if cue(&[" his ", " her ", " him ", " he ", " she ", " himself ", " herself "]) {
+        return "person";
+    }
+    let who = asked.trim_start().starts_with("who ");
+    let capitalized = subject
+        .split_whitespace()
+        .all(|word| word.chars().next().is_some_and(char::is_uppercase));
+    let alphabetic = subject
+        .split_whitespace()
+        .all(|word| word.chars().all(|ch| ch.is_alphabetic() || matches!(ch, '.' | '-' | '\'')));
+    if alphabetic && (2..=4).contains(&words.len()) && (who || capitalized) {
+        return "person";
+    }
+    if alphabetic && words.len() == 1 && (who || capitalized) {
+        return "organization";
+    }
+    "other"
 }
 
 pub fn distinct_queries(left: &str, right: &str) -> bool {
@@ -459,57 +1126,6 @@ pub struct SelectedEntity {
     pub selected: bool,
 }
 
-pub fn select_entities(question: &str, hits: &[SearchHit]) -> Vec<SelectedEntity> {
-    let subject = subject_of(question);
-    let mut groups: Vec<Candidate> = Vec::new();
-    for hit in hits {
-        absorb_hit(&mut groups, &subject, hit);
-    }
-    let mut entities: Vec<SelectedEntity> = groups
-        .into_iter()
-        .filter_map(|candidate| candidate.finish(&subject))
-        .collect();
-    let person_names: Vec<String> = entities
-        .iter()
-        .filter(|entity| entity.entity_type == "person" && entity.selected)
-        .map(|entity| entity.canonical_name.to_ascii_lowercase())
-        .collect();
-    if person_names.len() > 1
-        && person_names
-            .iter()
-            .all(|name| matches_subject(&subject, name))
-    {
-        for entity in &mut entities {
-            if entity.entity_type == "person" {
-                entity.ambiguous = true;
-                entity.certainty = "low".into();
-                if !entity
-                    .unresolved
-                    .iter()
-                    .any(|item| item == "ambiguous identity")
-                {
-                    entity
-                        .unresolved
-                        .push("ambiguous identity; not used as a lookup input".into());
-                }
-            }
-        }
-    }
-    entities.sort_by_key(rank_key);
-    let mut chosen = 0;
-    for entity in &mut entities {
-        let keep = entity.selected
-            && entity.certainty != "low"
-            && !entity.ambiguous
-            && chosen < 3;
-        entity.selected = keep;
-        if keep {
-            chosen += 1;
-        }
-    }
-    entities
-}
-
 fn rank_key(entity: &SelectedEntity) -> (u8, usize, String) {
     let certainty = match entity.certainty.as_str() {
         "high" => 0,
@@ -584,7 +1200,298 @@ impl Candidate {
     }
 }
 
-fn absorb_hit(groups: &mut Vec<Candidate>, subject: &str, hit: &SearchHit) {
+pub fn select_entities(question: &str, hits: &[SearchHit]) -> Vec<SelectedEntity> {
+    let focus = Focus::new(question, hits);
+    let subject = focus.subject.clone();
+    let mut groups: Vec<Candidate> = Vec::new();
+    for hit in hits {
+        absorb_hit(&mut groups, &focus, hit);
+    }
+    let mut entities: Vec<SelectedEntity> = groups
+        .into_iter()
+        .filter_map(|candidate| candidate.finish(&subject))
+        .collect();
+    let person_names: Vec<String> = entities
+        .iter()
+        .filter(|entity| entity.entity_type == "person" && entity.selected)
+        .filter(|entity| names_subject(&subject, &entity.canonical_name))
+        .map(|entity| entity.canonical_name.to_ascii_lowercase())
+        .collect();
+    if person_names.len() > 1 {
+        for entity in &mut entities {
+            if entity.entity_type == "person" && names_subject(&subject, &entity.canonical_name) {
+                entity.ambiguous = true;
+                entity.certainty = "low".into();
+                if !entity
+                    .unresolved
+                    .iter()
+                    .any(|item| item == "ambiguous identity")
+                {
+                    entity
+                        .unresolved
+                        .push("ambiguous identity; not used as a lookup input".into());
+                }
+            }
+        }
+    }
+    entities.sort_by_key(|entity| {
+        let (certainty, sources, name) = rank_key(entity);
+        (u8::from(!entity.canonical_name.eq_ignore_ascii_case(&focus.name)), certainty, sources, name)
+    });
+    let mut chosen = 0;
+    for entity in &mut entities {
+        let keep = entity.selected
+            && entity.certainty != "low"
+            && !entity.ambiguous
+            && chosen < 3;
+        entity.selected = keep;
+        if keep {
+            chosen += 1;
+        }
+    }
+    entities
+}
+
+/// The subject the user asked about: how it is matched, displayed, and typed.
+/// Search-result publishers never become this subject or its identifiers.
+struct Focus {
+    subject: String,
+    name: String,
+    entity_type: &'static str,
+    explicit_domain: Option<String>,
+}
+
+impl Focus {
+    fn new(question: &str, hits: &[SearchHit]) -> Self {
+        let subject = subject_of(question);
+        Self {
+            name: display_name(&subject),
+            entity_type: subject_type(question, &subject, hits),
+            explicit_domain: explicit_kind(question, "domain"),
+            subject,
+        }
+    }
+
+    /// Whether this host is the subject's own site rather than a page about it.
+    fn owns(&self, host: &str) -> bool {
+        if let Some(domain) = &self.explicit_domain {
+            return host == domain || host.ends_with(&format!(".{domain}"));
+        }
+        let tokens = content_tokens(&self.subject);
+        if tokens.is_empty() {
+            return false;
+        }
+        let labels: Vec<&str> = host.split('.').collect();
+        let site: String = labels[..labels.len().saturating_sub(1)]
+            .concat()
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect();
+        tokens.iter().all(|token| site.contains(token.as_str()))
+    }
+
+    /// The canonical subject name and type when `name` refers to the subject itself.
+    fn canonical(&self, name: &str, fallback_type: &'static str) -> (String, &'static str) {
+        let tokens = content_tokens(name);
+        if !tokens.is_empty() && tokens == content_tokens(&self.subject) {
+            (self.name.clone(), self.entity_type)
+        } else {
+            (name.trim().to_string(), fallback_type)
+        }
+    }
+}
+
+/// Title-cases an all-lowercase subject such as `donald trump`; domains and typed casing stay.
+fn display_name(subject: &str) -> String {
+    if subject.chars().any(|ch| ch.is_uppercase())
+        || subject.split_whitespace().any(|word| word.contains('.') && !word.ends_with('.'))
+    {
+        return subject.to_string();
+    }
+    subject
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Words that make a subject an organization.
+const ORG_WORDS: &[&str] = &[
+    "inc", "corp", "corporation", "llc", "ltd", "limited", "company", "group", "holdings",
+    "university", "college", "school", "foundation", "institute", "association", "agency",
+    "bank", "party", "department", "ministry", "council", "committee", "technologies", "labs",
+    "media", "gmbh", "plc", "trust", "fund", "partners", "club", "network", "news", "times",
+    "systems", "solutions", "studios", "records", "airlines", "motors",
+];
+
+/// Person or organization, from the question, the subject's shape, and how sources describe it.
+fn subject_type(question: &str, subject: &str, hits: &[SearchHit]) -> &'static str {
+    if super::explicit_entities(subject)
+        .iter()
+        .any(|(kind, _)| matches!(kind.as_str(), "domain" | "url" | "ip"))
+    {
+        return "organization";
+    }
+    let words: Vec<String> = subject
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                .to_ascii_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words.iter().any(|word| ORG_WORDS.contains(&word.as_str())) {
+        return "organization";
+    }
+    let spaced = |text: &str| {
+        format!(
+            " {} ",
+            text.to_ascii_lowercase()
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+                .collect::<String>()
+        )
+    };
+    let asked = spaced(question);
+    let has = |text: &str, cues: &[&str]| cues.iter().filter(|cue| text.contains(*cue)).count();
+    if has(&asked, &[" his ", " her ", " him ", " he ", " she ", " himself ", " herself "]) > 0 {
+        return "person";
+    }
+    if has(&asked, &[" its ", " company ", " organization ", " firm ", " brand "]) > 0 {
+        return "organization";
+    }
+    let mut person = 0;
+    let mut organization = 0;
+    for hit in hits {
+        if !names_subject(subject, &hit.title) && !names_subject(subject, &hit.snippet) {
+            continue;
+        }
+        let text = spaced(&hit.snippet);
+        person += has(
+            &text,
+            &[
+                " born ", " politician ", " businessman ", " businesswoman ", " actor ",
+                " actress ", " singer ", " musician ", " author ", " journalist ", " he ",
+                " she ", " his ", " her ",
+            ],
+        );
+        organization += has(
+            &text,
+            &[
+                " company ", " corporation ", " headquartered ", " subsidiary ", " nonprofit ",
+                " organization ", " its ",
+            ],
+        );
+    }
+    if person != organization {
+        return if person > organization { "person" } else { "organization" };
+    }
+    let name_shaped = (2..=4).contains(&words.len())
+        && subject
+            .split_whitespace()
+            .all(|word| word.chars().all(|ch| ch.is_alphabetic() || matches!(ch, '.' | '-' | '\'')));
+    if name_shaped {
+        "person"
+    } else {
+        "organization"
+    }
+}
+
+/// News and reference publishers whose pages are citations, never entities.
+fn publisher_host(host: &str) -> bool {
+    const OUTLETS: &[&str] = &[
+        "apnews", "reuters", "cnn", "foxnews", "nbcnews", "cbsnews", "abcnews", "npr", "pbs",
+        "politico", "axios", "thehill", "rollcall", "usatoday", "wsj", "washingtonpost",
+        "nytimes", "bbc", "theguardian", "bloomberg", "forbes", "newsweek", "time", "latimes",
+        "cnbc", "msnbc", "aljazeera", "theatlantic", "vox", "huffpost", "businessinsider",
+        "yahoo", "msn", "britannica", "factcheck", "snopes", "politifact", "ballotpedia",
+        "c-span", "cspan", "vanityfair", "newyorker", "slate", "salon", "independent",
+        "telegraph", "economist", "ft", "nypost", "dailymail", "mediaite", "semafor",
+    ];
+    const NEWS_WORDS: &[&str] = &[
+        "times", "post", "tribune", "herald", "gazette", "journal", "daily", "press",
+        "chronicle", "reporter", "magazine", "radio", "broadcast", "courier", "observer",
+    ];
+    let labels: Vec<&str> = host.split('.').collect();
+    let mut index = labels.len().saturating_sub(2);
+    if labels.len() >= 3 && matches!(labels[index], "co" | "com" | "org" | "net" | "ac" | "gov") {
+        index -= 1;
+    }
+    let site = labels.get(index).copied().unwrap_or(host);
+    // US broadcast call signs such as kark.com or wfaa.com are local news stations.
+    let call_sign = site.starts_with(['k', 'w'])
+        && (site.len() == 4 || (site.len() == 6 && site.ends_with("tv")))
+        && site.chars().all(|ch| ch.is_ascii_lowercase());
+    OUTLETS.contains(&site)
+        || call_sign
+        || site.contains("news")
+        || NEWS_WORDS
+            .iter()
+            .any(|word| site.ends_with(word) || (site.starts_with(word) && *word != "post"))
+}
+
+/// A shallow page whose title names the site itself, such as a homepage or about page.
+/// Deeper article pages describe a subject; their site is the publisher.
+fn site_page(host: &str, hit: &SearchHit) -> bool {
+    let Ok(url) = url::Url::parse(&hit.url) else {
+        return false;
+    };
+    let depth = url
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).count())
+        .unwrap_or(0);
+    if depth > 1 {
+        return false;
+    }
+    let label = domain_label(host);
+    let title: String = hit
+        .title
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    !label.is_empty()
+        && (title.contains(&label)
+            || content_tokens(&hit.title)
+                .iter()
+                .any(|token| token.len() >= 4 && label.contains(token.as_str())))
+}
+
+/// Every content token of the subject appears in the value.
+fn names_subject(subject: &str, value: &str) -> bool {
+    let subject_tokens = content_tokens(subject);
+    if subject_tokens.is_empty() {
+        return false;
+    }
+    let value_tokens = content_tokens(value);
+    if subject_tokens.is_subset(&value_tokens) {
+        return true;
+    }
+    let compact: String = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    subject_tokens.iter().all(|token| compact.contains(token.as_str()))
+}
+
+/// Capitalized two-to-four word names such as `Eric Trump`, not headlines.
+fn looks_like_name(value: &str) -> bool {
+    let words: Vec<&str> = value.split_whitespace().collect();
+    (2..=4).contains(&words.len())
+        && words.iter().all(|word| {
+            word.chars().next().is_some_and(char::is_uppercase)
+                && word.chars().all(|ch| ch.is_alphabetic() || matches!(ch, '.' | '-'))
+        })
+}
+
+fn absorb_hit(groups: &mut Vec<Candidate>, focus: &Focus, hit: &SearchHit) {
     let Ok(url) = url::Url::parse(&hit.url) else {
         return;
     };
@@ -593,6 +1500,7 @@ fn absorb_hit(groups: &mut Vec<Candidate>, subject: &str, hit: &SearchHit) {
         .unwrap_or("")
         .trim_start_matches("www.")
         .to_ascii_lowercase();
+    let subject = focus.subject.as_str();
     if let Some(handle) = super::extract_social_handles(std::slice::from_ref(&hit.url))
         .into_iter()
         .next()
@@ -601,7 +1509,12 @@ fn absorb_hit(groups: &mut Vec<Candidate>, subject: &str, hit: &SearchHit) {
         if !matches_subject(subject, &name) && !matches_subject(subject, &handle.handle) {
             return;
         }
-        let candidate = upsert(groups, &name, "person");
+        let (name, entity_type) = if names_subject(subject, &handle.handle) {
+            (focus.name.clone(), focus.entity_type)
+        } else {
+            focus.canonical(&name, "person")
+        };
+        let candidate = upsert(groups, &name, entity_type);
         push_id(
             candidate,
             EntityIdentifier {
@@ -619,18 +1532,39 @@ fn absorb_hit(groups: &mut Vec<Candidate>, subject: &str, hit: &SearchHit) {
         ));
         return;
     }
-    if super::enrichable_domain(&host) {
-        let title = title_name(&hit.title);
-        let name = title
-            .filter(|title| matches_subject(subject, title) || matches_subject(subject, &host))
-            .unwrap_or_else(|| domain_label(&host));
-        let mentioned = matches_subject(subject, &name)
-            || matches_subject(subject, &host)
-            || matches_subject(subject, &hit.title)
-            || matches_subject(subject, &hit.snippet);
-        if !mentioned {
-            return;
-        }
+    if !host.is_empty() && focus.owns(&host) {
+        let name = if focus.explicit_domain.is_some() {
+            title_name(&hit.title)
+                .filter(|title| matches_subject(subject, title))
+                .unwrap_or_else(|| domain_label(&host))
+        } else {
+            focus.name.clone()
+        };
+        let candidate = upsert(groups, &name, focus.entity_type);
+        push_id(
+            candidate,
+            EntityIdentifier {
+                kind: "domain".into(),
+                value: host.clone(),
+            },
+        );
+        note_hit(candidate, hit, true, true);
+        candidate.why.push(format!(
+            "The domain {host} is the subject's own site, so it is an identifier of this entity."
+        ));
+        candidate
+            .relationships
+            .push(format!("{host} is a site for {}", candidate.name));
+        return;
+    }
+    let mentioned = matches_subject(subject, &hit.title) || matches_subject(subject, &hit.snippet);
+    let own_page = super::enrichable_domain(&host)
+        && !publisher_host(&host)
+        && !account_platform_host(&host)
+        && site_page(&host, hit);
+    if own_page && mentioned {
+        // A related organization's homepage or about page that mentions the subject.
+        let name = domain_label(&host);
         let candidate = upsert(groups, &name, "organization");
         push_id(
             candidate,
@@ -641,19 +1575,40 @@ fn absorb_hit(groups: &mut Vec<Candidate>, subject: &str, hit: &SearchHit) {
         );
         note_hit(candidate, hit, true, true);
         candidate.why.push(format!(
-            "The domain {host} is treated as an identifier of this entity, not of the publisher."
+            "{host} describes its own organization and mentions the subject."
         ));
         candidate
             .relationships
             .push(format!("{host} is a site for {}", candidate.name));
+    }
+    if names_subject(subject, &hit.title) || names_subject(subject, &hit.snippet) {
+        let candidate = upsert(groups, &focus.name, focus.entity_type);
+        note_hit(candidate, hit, true, false);
+        let why = if host.is_empty() {
+            "The subject is named by a source page.".to_string()
+        } else {
+            format!("The subject is named by a source page. The publisher {host} is a citation, not an entity or identifier.")
+        };
+        if !candidate.why.contains(&why) {
+            candidate.why.push(why);
+        }
+        return;
+    }
+    if own_page {
         return;
     }
     if let Some(name) = title_name(&hit.title) {
-        if matches_subject(subject, &name) {
+        let publisher = domain_label(&host);
+        let compact: String = name
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if matches_subject(subject, &name) && looks_like_name(&name) && compact != publisher {
             let candidate = upsert(groups, &name, "person");
             note_hit(candidate, hit, true, false);
             candidate.why.push(
-                "The subject is named by a source page. The publisher domain is not an identifier."
+                "A related person is named by a source page. The publisher domain is not an identifier."
                     .into(),
             );
         }
@@ -2396,4 +3351,321 @@ mod tests {
             let _ = free;
         }
     }
+
+    const TRUMP: &str = "what can you tell me about donald trump and his social media activity?";
+
+    fn trump_hits() -> Vec<SearchHit> {
+        dedupe_hits(vec![
+            hit("e1", "Trump posts dozens of times overnight on Truth Social | AP News", "https://apnews.com/article/trump-truth-social-posts-overnight-0a1b2c", "President Donald Trump posted dozens of times on his social media platform overnight.", "investigative"),
+            hit("e1", "Trump's social media activity draws scrutiny", "https://www.kark.com/news/politics/trump-social-media-activity/", "Donald Trump's posts on Truth Social and X drew new scrutiny this week.", "investigative"),
+            hit("e2", "Donald Trump - Roll Call Factba.se", "https://rollcall.com/factbase/trump/topic/social-media/", "Every Donald Trump social media post, speech, and interview.", "identity"),
+            hit("e2", "Donald J. Trump (@realDonaldTrump) / X", "https://x.com/realDonaldTrump", "45th and 47th President of the United States.", "identity"),
+            hit("e2", "Donald Trump - Wikipedia", "https://en.wikipedia.org/wiki/Donald_Trump", "Donald John Trump is an American politician and businessman.", "identity"),
+            hit("e1", "AP News: Breaking News, Latest News and Videos", "https://apnews.com/", "Latest on Donald Trump and the White House.", "investigative"),
+        ])
+    }
+
+    #[test]
+    fn trump_question_extracts_the_subject_not_the_source_publishers() {
+        let entities = select_entities(TRUMP, &trump_hits());
+        for publisher in ["apnews", "kark", "rollcall", "ap news", "roll call"] {
+            assert!(
+                entities.iter().all(|entity| !entity.canonical_name.eq_ignore_ascii_case(publisher)),
+                "{publisher} became an entity: {entities:?}"
+            );
+        }
+        assert!(entities.iter().all(|entity| entity.identifiers.iter().all(|identifier| {
+            !matches!(identifier.value.as_str(), "apnews.com" | "kark.com" | "rollcall.com" | "wikipedia.org" | "en.wikipedia.org")
+        })));
+        let selected: Vec<_> = entities.iter().filter(|entity| entity.selected).collect();
+        let trump = selected.first().expect("the subject is selected");
+        assert_eq!(trump.canonical_name, "Donald Trump");
+        assert_eq!(trump.entity_type, "person");
+        assert_eq!(trump.certainty, "high");
+        assert!(trump.identifiers.iter().all(|identifier| identifier.kind != "domain"));
+        assert!(trump.identifiers.iter().any(|identifier| {
+            identifier.kind == "twitter" && identifier.value.eq_ignore_ascii_case("realDonaldTrump")
+        }));
+        assert!(!trump.unresolved.iter().any(|item| item.contains("company domain")));
+        assert_eq!(
+            entities
+                .iter()
+                .filter(|entity| entity.canonical_name.to_ascii_lowercase().contains("trump"))
+                .count(),
+            1,
+            "subject variants merge into one entity: {entities:?}"
+        );
+    }
+
+    #[test]
+    fn subject_type_follows_the_question_and_the_name() {
+        assert_eq!(subject_type(TRUMP, "donald trump", &[]), "person");
+        assert_eq!(subject_type("who is jeff bezos?", "jeff bezos", &[]), "person");
+        assert_eq!(subject_type("who is Amazon?", "Amazon", &[]), "organization");
+        assert_eq!(subject_type("what is Acme Holdings Inc?", "Acme Holdings Inc", &[]), "organization");
+        assert_eq!(subject_type("certificates for example.org", "certificates for example.org", &[]), "organization");
+        assert!(publisher_host("apnews.com"));
+        assert!(publisher_host("kark.com"));
+        assert!(publisher_host("rollcall.com"));
+        assert!(publisher_host("bbc.co.uk"));
+        assert!(!publisher_host("amazon.com"));
+    }
+
+    fn trump_input<'a>(
+        entities: &'a [SelectedEntity],
+        gaps: &'a [Gap],
+        enabled: &'a HashSet<String>,
+        empty: &'a HashSet<String>,
+        credits: &'a HashMap<String, u32>,
+        costs: &'a HashMap<String, u32>,
+        hits: &'a [SearchHit],
+    ) -> SelectionInput<'a> {
+        input(TRUMP, DISCOVERY, true, entities, gaps, enabled, empty, empty, credits, costs, hits)
+    }
+
+    #[test]
+    fn tool_isolation_runs_the_suggested_tools_with_subject_inputs_and_no_firecrawl() {
+        let hits = trump_hits();
+        let entities = select_entities(TRUMP, &hits);
+        let gaps = gaps_for(TRUMP, DISCOVERY, &entities, None);
+        let enabled = enabled_all();
+        let empty = HashSet::new();
+        let credits = HashMap::from([
+            ("firecrawl".into(), 20),
+            ("hunter".into(), 5),
+            ("sociavault".into(), 5),
+        ]);
+        let costs = HashMap::new();
+        let used: HashSet<String> = ["firecrawl_search".to_string(), "firecrawl_scrape".to_string()].into();
+        let suggestions = additional_tools(TRUMP, &used, &enabled);
+        let ids: Vec<_> = suggestions.iter().map(|tool| tool.tool_id.as_str()).collect();
+        assert_eq!(ids, ["sociavault_profile", "keybase_identity", "stackexchange_users"]);
+        let selection = trump_input(&entities, &gaps, &enabled, &empty, &credits, &costs, &hits);
+        let isolation = isolate_tools(&suggestions, &selection, &HashSet::new(), 3);
+        let ran: Vec<_> = isolation.actions.iter().map(|action| action.tool_id.as_str()).collect();
+        assert_eq!(ran, ids, "skipped: {:?}", isolation.skipped);
+        let social = &isolation.actions[0];
+        assert_eq!(social.arguments["platform"], "twitter");
+        assert!(social.arguments["handle"].as_str().unwrap().eq_ignore_ascii_case("realDonaldTrump"));
+        assert_eq!(isolation.actions[2].arguments, json!({"name": "Donald Trump"}));
+        for action in &isolation.actions {
+            assert!(!action.tool_id.starts_with("firecrawl_"));
+            let text = action.arguments.to_string();
+            assert!(!text.contains("apnews") && !text.contains("kark") && !text.contains("rollcall"));
+            assert!(osint::validate(&action.tool_id, &action.arguments).is_ok());
+            assert!(!action.purpose.is_empty() && !action.evidence_ids.is_empty());
+        }
+        assert_eq!(isolation.actions[0].credit_cost, 1);
+        assert!(isolation.actions[0].spends());
+    }
+
+    #[test]
+    fn tool_isolation_skips_with_a_reason_when_a_tool_cannot_run() {
+        let hits = trump_hits();
+        let entities = select_entities(TRUMP, &hits);
+        let gaps = gaps_for(TRUMP, DISCOVERY, &entities, None);
+        let enabled = enabled_all();
+        let empty = HashSet::new();
+        let credits = HashMap::from([("sociavault".into(), 5), ("firecrawl".into(), 20)]);
+        let costs = HashMap::new();
+        let mut suggestions = vec![ToolSuggestion {
+            tool_id: "firecrawl_search".into(),
+            reason: "Search again.".into(),
+        }];
+        suggestions.extend(additional_tools(TRUMP, &HashSet::new(), &enabled).into_iter().filter(|tool| tool.tool_id != "firecrawl_search"));
+        suggestions.push(ToolSuggestion {
+            tool_id: "overpass_places".into(),
+            reason: "Places near the subject.".into(),
+        });
+        let selection = trump_input(&entities, &gaps, &enabled, &empty, &credits, &costs, &hits);
+        let missing: HashSet<String> = ["sociavault".to_string()].into();
+        let isolation = isolate_tools(&suggestions, &selection, &missing, 5);
+        assert!(isolation.actions.iter().all(|action| {
+            action.tool_id != "firecrawl_search" && action.tool_id != "sociavault_profile" && action.tool_id != "overpass_places"
+        }));
+        assert!(isolation.skipped.iter().any(|line| line.starts_with("firecrawl_search — skipped")));
+        assert!(isolation.skipped.iter().any(|line| {
+            line.starts_with("sociavault_profile — skipped") && line.contains("SOCIAVAULT_API_KEY")
+        }));
+        assert!(isolation.skipped.iter().any(|line| line.starts_with("overpass_places — skipped: no input")));
+        let mut capped = trump_input(&entities, &gaps, &enabled, &empty, &credits, &costs, &hits);
+        capped.sociavault_cap = 0;
+        let isolation = isolate_tools(&suggestions, &capped, &HashSet::new(), 5);
+        assert!(isolation.actions.iter().all(|action| action.tool_id != "sociavault_profile"));
+        assert!(isolation.skipped.iter().any(|line| line.contains("SociaVault allowance")));
+        let lonely: Vec<SelectedEntity> = Vec::new();
+        let gaps = gaps_for(TRUMP, DISCOVERY, &lonely, None);
+        let bare = trump_input(&lonely, &gaps, &enabled, &empty, &credits, &costs, &[]);
+        let isolation = isolate_tools(&suggestions, &bare, &HashSet::new(), 5);
+        assert!(isolation.actions.iter().any(|action| {
+            action.tool_id == "stackexchange_users" && action.arguments == json!({"name": "Donald Trump"})
+        }));
+        assert!(isolation.skipped.iter().any(|line| line.starts_with("sociavault_profile — skipped: no input")));
+    }
+
+
+    fn account_hits() -> Vec<SearchHit> {
+        let mut hits = trump_hits();
+        hits.extend(dedupe_hits(vec![
+            hit("e3", "Donald J. Trump (@realDonaldTrump) - Truth Social", "https://truthsocial.com/@realDonaldTrump", "Truth Social profile.", ACCOUNTS),
+            hit("e3", "Donald J. Trump (@realdonaldtrump) • Instagram photos and videos", "https://www.instagram.com/realdonaldtrump/", "Instagram profile.", ACCOUNTS),
+            hit("e3", "Truth Social", "https://truthsocial.com/", "Truth Social is the platform Donald Trump posts on.", ACCOUNTS),
+            hit("e3", "AP reporter on X", "https://x.com/apreporter", "Covers Donald Trump at the White House.", ACCOUNTS),
+            hit("e3", "Trump campaign ads on GitHub", "https://apnews.com/article/x", "Profiles: https://github.com/someoneelse and https://keybase.io/realdonaldtrump", ACCOUNTS),
+        ]));
+        hits
+    }
+
+    #[test]
+    fn person_and_organization_discovery_searches_for_accounts_second() {
+        for question in [TRUMP, "who is jeff bezos?", "who is Amazon?", "tell me about Acme Holdings Inc"] {
+            assert!(accounts_flow(question, DISCOVERY), "{question}");
+            let queries = complementary_queries(question, DISCOVERY);
+            assert_eq!(queries[0].role, "identity");
+            assert_eq!(queries[1].role, ACCOUNTS, "{question}");
+            assert!(queries[1].query.contains("official social media accounts profiles handles"));
+            assert!(accounts_query(&queries[1].query));
+            assert!(distinct_queries(&queries[0].query, &queries[1].query));
+        }
+        assert_eq!(
+            complementary_queries(TRUMP, DISCOVERY)[1].query,
+            "donald trump official social media accounts profiles handles"
+        );
+        assert_eq!(target_kind(TRUMP), "person");
+        assert_eq!(target_kind("who is Amazon?"), "organization");
+    }
+
+    #[test]
+    fn other_subjects_keep_the_investigative_question_and_skip_accounts() {
+        for question in [
+            "what is the ukraine war?",
+            "How did Amazon start?",
+            "what is inflation?",
+            "certificates for example.org",
+            "what happened in the 2024 election?",
+        ] {
+            assert_eq!(target_kind(question), "other", "{question}");
+            assert!(!accounts_flow(question, DISCOVERY), "{question}");
+            let queries = complementary_queries(question, DISCOVERY);
+            assert_eq!(queries[1].role, "investigative", "{question}");
+            assert!(!queries[1].query.contains("official social media accounts"));
+        }
+        let history = complementary_queries("How did Amazon start?", DISCOVERY);
+        assert!(history[1].query.contains("history") || history[1].query.contains("timeline"));
+        assert!(!accounts_flow(TRUMP, HYPOTHESIS));
+        assert!(!accounts_flow(TRUMP, ADAPTIVE));
+        assert_eq!(complementary_queries(TRUMP, ADAPTIVE)[1].role, "investigative");
+    }
+
+    #[test]
+    fn fallback_extractor_keeps_only_the_subject_accounts() {
+        let accounts = fallback_accounts(TRUMP, &account_hits());
+        let has = |platform: &str, handle: &str| {
+            accounts.iter().any(|account| account.platform == platform && account.handle.eq_ignore_ascii_case(handle))
+        };
+        assert!(has("twitter", "realDonaldTrump"), "{accounts:?}");
+        assert!(has("truthsocial", "realDonaldTrump"), "{accounts:?}");
+        assert!(has("instagram", "realdonaldtrump"));
+        assert!(has("keybase", "realdonaldtrump"));
+        assert!(!has("twitter", "apreporter"));
+        assert!(!has("github", "someoneelse"));
+        assert!(accounts.iter().all(|account| account.sources == ["pattern"]));
+    }
+
+    #[test]
+    fn model_accounts_are_grounded_owned_and_merged_with_the_fallback() {
+        let hits = account_hits();
+        let value = json!({
+            "accounts": [
+                {"platform": "X", "handle": "@realDonaldTrump", "evidence_id": "e2"},
+                {"platform": "Truth Social", "handle": "https://truthsocial.com/@realDonaldTrump"},
+                {"platform": "twitter", "handle": "trumpfakeaccount"},
+                {"platform": "twitter", "handle": "apreporter"},
+                {"platform": "myspace", "handle": "realDonaldTrump"},
+                {"platform": "facebook", "handle": "DonaldTrump"}
+            ],
+            "tools": [
+                {"tool_id": "firecrawl_search", "reason": "search again"},
+                {"tool_id": "keybase_identity", "reason": "Check proofs for the handle."},
+                {"tool_id": "not_a_tool", "reason": "x"}
+            ]
+        });
+        let model = accounts_from_model(&value, TRUMP, &hits);
+        assert_eq!(model.len(), 2, "{model:?}");
+        assert!(model.iter().all(|account| account.handle.eq_ignore_ascii_case("realDonaldTrump")));
+        let tools = model_tool_picks(&value, &enabled_all());
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_id, "keybase_identity");
+        let merged = merge_accounts(&model, &fallback_accounts(TRUMP, &hits));
+        let twitter = merged
+            .iter()
+            .find(|account| account.platform == "twitter")
+            .unwrap();
+        assert_eq!(twitter.sources, ["model", "pattern"]);
+        assert_eq!(
+            merged.iter().filter(|account| account.platform == "twitter").count(),
+            1
+        );
+        assert_eq!(account_line(twitter), "twitter @realDonaldTrump (model, pattern)");
+    }
+
+    #[test]
+    fn account_platforms_attach_to_the_subject_and_are_never_entities() {
+        let hits = account_hits();
+        let mut entities = select_entities(TRUMP, &hits);
+        let accounts = merge_accounts(&[], &fallback_accounts(TRUMP, &hits));
+        attach_accounts(TRUMP, &hits, &mut entities, &accounts);
+        for name in ["truthsocial", "truth social", "instagram", "x", "github", "keybase", "apnews"] {
+            assert!(entities.iter().all(|entity| !entity.canonical_name.eq_ignore_ascii_case(name)), "{name}: {entities:?}");
+        }
+        assert!(entities.iter().all(|entity| entity.identifiers.iter().all(|identifier| {
+            !matches!(identifier.value.as_str(), "truthsocial.com" | "x.com" | "instagram.com" | "github.com")
+        })));
+        let trump = entities.iter().find(|entity| entity.canonical_name == "Donald Trump").unwrap();
+        assert_eq!(trump.entity_type, "person");
+        for platform in ["twitter", "truthsocial", "instagram", "keybase"] {
+            assert!(trump.identifiers.iter().any(|identifier| identifier.kind == platform), "{platform}");
+        }
+        assert!(trump.identifiers.iter().all(|identifier| identifier.kind != "domain"));
+    }
+
+    #[test]
+    fn extracted_handles_feed_sociavault_keybase_and_wikipedia() {
+        let hits = account_hits();
+        let mut entities = select_entities(TRUMP, &hits);
+        attach_accounts(TRUMP, &hits, &mut entities, &fallback_accounts(TRUMP, &hits));
+        let gaps = gaps_for(TRUMP, DISCOVERY, &entities, None);
+        let enabled = enabled_all();
+        let empty = HashSet::new();
+        let credits = HashMap::from([("sociavault".into(), 10), ("firecrawl".into(), 20)]);
+        let costs = HashMap::new();
+        let suggestions: Vec<ToolSuggestion> = ["sociavault_profile", "keybase_identity", "wikipedia_users", "stackexchange_users"]
+            .iter()
+            .map(|id| ToolSuggestion { tool_id: (*id).into(), reason: "Suggested.".into() })
+            .collect();
+        let mut selection = trump_input(&entities, &gaps, &enabled, &empty, &credits, &costs, &hits);
+        selection.sociavault_cap = 2;
+        let isolation = isolate_tools(&suggestions, &selection, &HashSet::new(), 4);
+        let social: Vec<_> = isolation
+            .actions
+            .iter()
+            .filter(|action| action.tool_id == "sociavault_profile")
+            .map(|action| action.arguments.clone())
+            .collect();
+        assert_eq!(social.len(), 2, "{:?}", isolation);
+        assert_eq!(social[0]["platform"], "twitter");
+        assert!(social[0]["handle"].as_str().unwrap().eq_ignore_ascii_case("realDonaldTrump"));
+        assert_eq!(social[1]["platform"], "instagram");
+        let args = |id: &str| isolation.actions.iter().find(|action| action.tool_id == id).map(|action| action.arguments.clone());
+        assert_eq!(args("keybase_identity"), Some(json!({"username": "realdonaldtrump"})));
+        assert_eq!(args("wikipedia_users").unwrap()["username"].as_str().unwrap().to_ascii_lowercase(), "realdonaldtrump");
+        assert_eq!(args("stackexchange_users"), Some(json!({"name": "Donald Trump"})));
+        selection.sociavault_cap = 1;
+        let capped = isolate_tools(&suggestions, &selection, &HashSet::new(), 4);
+        assert_eq!(capped.actions.iter().filter(|action| action.tool_id == "sociavault_profile").count(), 1);
+        assert!(capped.skipped.iter().any(|line| {
+            line.starts_with("sociavault_profile") && line.contains("instagram") && line.contains("allowance")
+        }), "{:?}", capped.skipped);
+    }
+
 }

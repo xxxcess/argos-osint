@@ -60,16 +60,60 @@ pub fn registry() -> &'static [ToolDefinition] {
         tool!("sans_ip_activity","SANS ISC IP activity","Exposure","Reported attack activity for an IP.",["ip"],"https://isc.sans.edu/api/","Reports are historical observations.",25,600),
         tool!("shodan_internetdb","Shodan InternetDB","Exposure","Observed ports, hostnames and vulnerability associations.",["ip"],"https://internetdb.shodan.io/","Free access is noncommercial; observations may be old.",20,600),
         tool!("urlscan_search","urlscan search","Exposure","Search existing website scan records.",["domain|query"],"https://urlscan.io/docs/api/","Search only; no scan submission; historical observations.",20,600),
-        tool!("firecrawl_search","Firecrawl search","Web","Web search through the Firecrawl search API. Use it to ground a broad question before narrower lookups, and to find social accounts before any SociaVault profile call.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/search","POST https://api.firecrawl.dev/v2/search with query and limit. Enter the API key on this tool, or set FIRECRAWL_API_KEY. Results are titles, links, and descriptions, not a full page scrape.",60,600),
+        tool!("firecrawl_search","Firecrawl search","Web","Web search for titles, links, and descriptions. A new investigation runs two complementary searches before enrichment. Later searches are targeted follow-ups.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/search","POST https://api.firecrawl.dev/v2/search with query and limit. Enter the API key on this tool, or set FIRECRAWL_API_KEY. Results are snippets, not page content. Automatic investigation does not paginate.",60,600),
+        tool!("firecrawl_scrape","Firecrawl page","Web","Retrieve one public page as markdown when a search snippet is not enough to support a consequential claim.",["url"],"https://docs.firecrawl.dev/api-reference/endpoint/scrape","POST https://api.firecrawl.dev/v2/scrape for a single URL already found in evidence. One page per call. No crawl, pagination, or link expansion. Same Firecrawl API key as search.",60,86400),
         tool!("hunter_domain_search","Hunter domain search","Enrichment","Email addresses, roles, and the email pattern Hunter has for a company domain or name.",["domain|company"],"https://hunter.io/api-documentation/v2#domain-search","GET https://api.hunter.io/v2/domain-search. Enter the API key on a Hunter tool, or set HUNTER_API_KEY. The key is sent as X-API-KEY and is not stored on the tool input. At most 10 addresses per call.",25,3600),
         tool!("hunter_email_finder","Hunter email finder","Enrichment","Most likely professional email for a named person at a domain, company, or LinkedIn handle.",["domain|company|linkedin_handle","full_name|first_name|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-finder","GET https://api.hunter.io/v2/email-finder. Requires a domain, company, or LinkedIn handle, plus a full name or a first and last name unless the LinkedIn handle is enough. Same Hunter API key as the other Hunter tools.",25,3600),
         tool!("hunter_email_verifier","Hunter email verifier","Enrichment","Deliverability status and score for one email address.",["email"],"https://hunter.io/api-documentation/v2#email-verifier","GET https://api.hunter.io/v2/email-verifier. The check can take about 20 seconds. Same Hunter API key as the other Hunter tools.",30,3600),
         tool!("hunter_tech_lookup","Hunter tech lookup","Enrichment","Company profile and technology stack for a domain, from Hunter company enrichment.",["domain"],"https://hunter.io/api-documentation/v2#company-enrichment","GET https://api.hunter.io/v2/companies/find. Returns firmographics plus the tech and techCategories lists. Same Hunter API key as the other Hunter tools.",25,3600),
-        tool!("sociavault_profile","SociaVault profile","Social","Public profile stats, biography, and outbound social links for one handle. Use only after Firecrawl has searched for that entity's social accounts and the handle was extracted from those results.",["platform","handle"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/{platform}/profile (YouTube uses /youtube/channel; LinkedIn company pages use /linkedin/company). Platforms: twitter, instagram, tiktok, youtube, facebook, linkedin, threads, twitch. Enter the API key on this tool, or set SOCIAVAULT_API_KEY. The key is sent as X-API-Key and is not stored on the tool input. Profile routes only.",40,3600),
+        tool!("sociavault_profile","SociaVault profile","Social","Public profile stats, biography, and outbound links for one evidence-supported handle. Profile routes only; no follower expansion.",["platform","handle"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/{platform}/profile (YouTube uses /youtube/channel; LinkedIn company pages use /linkedin/company). Platforms: twitter, instagram, tiktok, youtube, facebook, linkedin, threads, twitch. Enter the API key on this tool, or set SOCIAVAULT_API_KEY. The key is sent as X-API-Key and is not stored on the tool input. Use only a platform and handle that Firecrawl evidence already supports.",40,3600),
     ]).as_slice()
 }
 pub fn definition(id: &str) -> Option<&'static ToolDefinition> {
     registry().iter().find(|t| t.id == id)
+}
+
+/// Estimated provider credits for one call. Free registry tools return none.
+/// Allowances and overrides live with the investigation budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndpointCost {
+    pub provider: &'static str,
+    pub credits: u32,
+}
+
+pub fn endpoint_cost(id: &str) -> Option<EndpointCost> {
+    let cost = |provider, credits| EndpointCost { provider, credits };
+    match id {
+        "firecrawl_search" => Some(cost("firecrawl", 2)),
+        "firecrawl_scrape" => Some(cost("firecrawl", 1)),
+        "hunter_domain_search" | "hunter_email_finder" | "hunter_email_verifier"
+        | "hunter_tech_lookup" => Some(cost("hunter", 1)),
+        "sociavault_profile" => Some(cost("sociavault", 1)),
+        _ => None,
+    }
+}
+
+pub fn scarce_provider(id: &str) -> bool {
+    endpoint_cost(id).is_some()
+}
+
+/// Credits a provider reported on the raw response, when the payload includes them.
+pub fn reported_credits(raw: &str) -> Option<u32> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    for pointer in [
+        "/creditsUsed",
+        "/credits_used",
+        "/data/creditsUsed",
+        "/data/credits_used",
+        "/meta/credits_used",
+    ] {
+        if let Some(credits) = value.pointer(pointer).and_then(Value::as_u64) {
+            if credits <= u64::from(u32::MAX) {
+                return Some(credits as u32);
+            }
+        }
+    }
+    None
 }
 fn optional_keys(id: &str) -> &'static [&'static str] {
     match id {
@@ -350,6 +394,15 @@ fn number_arg(v: &Value, key: &str, default: u64, max: u64) -> Result<String> {
         "{key} exceeds the supported bound"
     );
     Ok(n.to_string())
+}
+fn clip_page(value: &str) -> String {
+    if value.chars().count() <= 4000 {
+        value.to_string()
+    } else {
+        let mut clipped: String = value.chars().take(3999).collect();
+        clipped.push('…');
+        clipped
+    }
 }
 fn clip_text(value: &str) -> String {
     let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -790,7 +843,48 @@ fn parse_observations(
                 }))
             })
             .collect();
-        return Ok((json!({"results": results, "infoboxes": []}), truncated));
+        return Ok((
+            json!({"results": results, "infoboxes": [], "evidence_form": "snippet"}),
+            truncated,
+        ));
+    }
+    if id == "firecrawl_scrape" {
+        if v.get("success").and_then(Value::as_bool) == Some(false) {
+            let message = v
+                .get("error")
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "page retrieval failed".into());
+            return Err(anyhow!(
+                "Firecrawl page retrieval failed: {}",
+                message.chars().take(250).collect::<String>()
+            ));
+        }
+        let data = v.get("data").unwrap_or(&v);
+        let markdown = data
+            .get("markdown")
+            .or_else(|| data.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let title = data
+            .pointer("/metadata/title")
+            .or_else(|| data.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let page_url = data
+            .pointer("/metadata/sourceURL")
+            .or_else(|| data.get("url"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let clipped = clip_page(markdown);
+        return Ok((
+            json!({
+                "title": clip_text(title),
+                "url": page_url,
+                "markdown": clipped,
+                "evidence_form": "page",
+            }),
+            markdown.chars().count() > clipped.chars().count(),
+        ));
     }
     if id.starts_with("hunter_") {
         return Ok((hunter_observations(id, &v), false));
@@ -838,6 +932,14 @@ fn no_results(id: &str, value: &Value) -> bool {
     }
     if id == "nvd_cve" && value.get("totalResults").and_then(Value::as_u64) == Some(0) {
         return true;
+    }
+    if id == "firecrawl_scrape" {
+        return value
+            .get("markdown")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .is_empty();
     }
     if id == "hunter_email_finder" {
         return value
@@ -1358,6 +1460,19 @@ fn request(id: &str, v: &Value) -> Result<Request> {
                 ndjson: false,
             })
         }
+        "firecrawl_scrape" => {
+            let page = url_arg(str_arg(v, "url")?)?;
+            Ok(Request {
+                url: Url::parse("https://api.firecrawl.dev/v2/scrape")?,
+                body: Some(json!({
+                    "url": page,
+                    "formats": ["markdown"],
+                    "onlyMainContent": true,
+                })),
+                form: None,
+                ndjson: false,
+            })
+        }
         "hunter_domain_search" => {
             let domain_value = str_arg(v, "domain").ok().map(domain).transpose()?;
             let company_value = str_arg(v, "company").ok().map(bounded).transpose()?;
@@ -1468,6 +1583,12 @@ pub struct ToolResult {
     pub error: Option<String>,
     pub cached: bool,
     pub truncated: bool,
+    /// Credits reserved for this call. Zero when the result was reused from cache.
+    #[serde(default)]
+    pub credits_charged: u32,
+    /// Provider-reported usage when the response included it.
+    #[serde(default)]
+    pub credits_reported: Option<u32>,
 }
 type HostSchedule = Arc<Mutex<HashMap<String, std::time::Instant>>>;
 type SharedHttp = (reqwest::Client, Arc<Semaphore>, HostSchedule);
@@ -1489,10 +1610,10 @@ fn provider_credential(
         );
         Ok(key.to_string())
     };
-    if id == "firecrawl_search" {
+    if id == "firecrawl_search" || id == "firecrawl_scrape" {
         let key = keyed(
             &keys.firecrawl,
-            "Enter the Firecrawl API key on the Firecrawl search tool, or set FIRECRAWL_API_KEY",
+            "Enter the Firecrawl API key on a Firecrawl tool, or set FIRECRAWL_API_KEY",
         )?;
         return Ok(Some((
             reqwest::header::AUTHORIZATION,
@@ -1656,6 +1777,8 @@ impl Executor {
                     error: None,
                     cached: false,
                     truncated: matches.len() == 30,
+                    credits_charged: 0,
+                    credits_reported: None,
                 });
             }
             let cik = matches[0]
@@ -1681,7 +1804,9 @@ impl Executor {
         let host = req.url.host_str().unwrap_or("").to_string();
         let _permit = self.global.acquire().await?;
         let interval = match id {
-            "nominatim_geocode" | "urlscan_search" | "firecrawl_search" => Duration::from_secs(1),
+            "nominatim_geocode" | "urlscan_search" | "firecrawl_search" | "firecrawl_scrape" => {
+                Duration::from_secs(1)
+            }
             "hunter_domain_search"
             | "hunter_email_finder"
             | "hunter_email_verifier"
@@ -1777,6 +1902,7 @@ impl Executor {
                 bytes.extend_from_slice(&chunk);
             }
             let raw = String::from_utf8_lossy(&bytes).to_string();
+            let credits_reported = reported_credits(&raw);
             let mut result = ToolResult {
                 tool_id: id.into(),
                 inputs: inputs.clone(),
@@ -1788,6 +1914,8 @@ impl Executor {
                 error: None,
                 cached: false,
                 truncated,
+                credits_charged: 0,
+                credits_reported,
             };
             if status.as_u16() == 404 {
                 result.status = "no_results".into();
@@ -1846,9 +1974,9 @@ mod tests {
     use super::*;
     #[test]
     fn registry_and_validation() {
-        assert_eq!(registry().len(), 36);
+        assert_eq!(registry().len(), 37);
         let ids: std::collections::HashSet<_> = registry().iter().map(|t| t.id).collect();
-        assert_eq!(ids.len(), 36);
+        assert_eq!(ids.len(), 37);
         assert_eq!(
             registry()
                 .iter()
@@ -1870,6 +1998,19 @@ mod tests {
         assert_eq!(
             search.body,
             Some(json!({"query":"who is example","limit":3,"sources":["web"]}))
+        );
+        let page = request("firecrawl_scrape", &json!({"url":"https://example.org/about"})).unwrap();
+        assert_eq!(page.url.as_str(), "https://api.firecrawl.dev/v2/scrape");
+        assert_eq!(page.body.as_ref().unwrap()["formats"][0], "markdown");
+        assert!(request("firecrawl_scrape", &json!({"url":"http://127.0.0.1/secret"})).is_err());
+        assert_eq!(endpoint_cost("firecrawl_search").unwrap().credits, 2);
+        assert_eq!(endpoint_cost("firecrawl_scrape").unwrap().provider, "firecrawl");
+        assert_eq!(endpoint_cost("hunter_email_verifier").unwrap().provider, "hunter");
+        assert_eq!(endpoint_cost("sociavault_profile").unwrap().credits, 1);
+        assert!(endpoint_cost("wikidata_entities").is_none());
+        assert_eq!(
+            reported_credits(r#"{"success":true,"creditsUsed":2,"data":{}}"#),
+            Some(2)
         );
         assert!(request(
             "hunter_domain_search",

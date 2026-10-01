@@ -46,7 +46,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 6,
+                version <= 7,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -137,6 +137,11 @@ impl Store {
                      );",
                 )?;
                 self.conn.pragma_update(None, "user_version", 6)?;
+            }
+            if version < 7 {
+                self.conn
+                    .execute_batch(include_str!("schema_investigation.sql"))?;
+                self.conn.pragma_update(None, "user_version", 7)?;
             }
             Ok(())
         })();

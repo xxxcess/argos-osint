@@ -309,6 +309,41 @@ pub struct ReconLimits {
     pub max_calls: u8,
     #[serde(default = "default_turn_seconds")]
     pub turn_seconds: u16,
+    /// Recurring Firecrawl credits available to automatic investigation.
+    #[serde(default = "default_firecrawl_credits")]
+    pub firecrawl_credits: u32,
+    /// Recurring Hunter credits available to automatic investigation.
+    #[serde(default = "default_hunter_credits")]
+    pub hunter_credits: u32,
+    /// Recurring SociaVault credits available to automatic investigation.
+    #[serde(default = "default_sociavault_credits")]
+    pub sociavault_credits: u32,
+    /// Non-renewing Firecrawl trial credits. Spent before the recurring allowance.
+    #[serde(default)]
+    pub firecrawl_trial_credits: u32,
+    /// Non-renewing Hunter trial credits. Spent before the recurring allowance.
+    #[serde(default)]
+    pub hunter_trial_credits: u32,
+    /// Non-renewing SociaVault trial credits. Spent before the recurring allowance.
+    #[serde(default)]
+    pub sociavault_trial_credits: u32,
+    /// Maximum Hunter calls on the opening turn. Zero disables opening enrichment.
+    #[serde(default = "default_opening_cap")]
+    pub opening_hunter_calls: u8,
+    /// Maximum SociaVault calls on the opening turn.
+    #[serde(default = "default_opening_cap")]
+    pub opening_sociavault_calls: u8,
+    /// `monthly` restores the recurring allowance. `never` keeps a fixed pool.
+    #[serde(default = "default_credit_reset")]
+    pub credit_reset: String,
+    #[serde(default = "default_search_cost")]
+    pub firecrawl_search_cost: u32,
+    #[serde(default = "default_one_cost")]
+    pub firecrawl_scrape_cost: u32,
+    #[serde(default = "default_one_cost")]
+    pub hunter_call_cost: u32,
+    #[serde(default = "default_one_cost")]
+    pub sociavault_call_cost: u32,
 }
 fn default_max_rounds() -> u8 {
     6
@@ -319,12 +354,78 @@ fn default_max_calls() -> u8 {
 fn default_turn_seconds() -> u16 {
     300
 }
+fn default_firecrawl_credits() -> u32 {
+    200
+}
+fn default_hunter_credits() -> u32 {
+    50
+}
+fn default_sociavault_credits() -> u32 {
+    50
+}
+fn default_opening_cap() -> u8 {
+    1
+}
+fn default_credit_reset() -> String {
+    "monthly".into()
+}
+fn default_search_cost() -> u32 {
+    2
+}
+fn default_one_cost() -> u32 {
+    1
+}
 impl Default for ReconLimits {
     fn default() -> Self {
         Self {
             max_rounds: default_max_rounds(),
             max_calls: default_max_calls(),
             turn_seconds: default_turn_seconds(),
+            firecrawl_credits: default_firecrawl_credits(),
+            hunter_credits: default_hunter_credits(),
+            sociavault_credits: default_sociavault_credits(),
+            firecrawl_trial_credits: 0,
+            hunter_trial_credits: 0,
+            sociavault_trial_credits: 0,
+            opening_hunter_calls: default_opening_cap(),
+            opening_sociavault_calls: default_opening_cap(),
+            credit_reset: default_credit_reset(),
+            firecrawl_search_cost: default_search_cost(),
+            firecrawl_scrape_cost: default_one_cost(),
+            hunter_call_cost: default_one_cost(),
+            sociavault_call_cost: default_one_cost(),
+        }
+    }
+}
+
+impl ReconLimits {
+    pub fn allowance(&self, provider: &str) -> u32 {
+        match provider {
+            "firecrawl" => self.firecrawl_credits,
+            "hunter" => self.hunter_credits,
+            "sociavault" => self.sociavault_credits,
+            _ => 0,
+        }
+    }
+
+    pub fn trial_grant(&self, provider: &str) -> u32 {
+        match provider {
+            "firecrawl" => self.firecrawl_trial_credits,
+            "hunter" => self.hunter_trial_credits,
+            "sociavault" => self.sociavault_trial_credits,
+            _ => 0,
+        }
+    }
+
+    pub fn configured_cost(&self, tool_id: &str) -> Option<(&'static str, u32)> {
+        let priced = |provider: &'static str, credits: u32| Some((provider, credits));
+        match tool_id {
+            "firecrawl_search" => priced("firecrawl", self.firecrawl_search_cost),
+            "firecrawl_scrape" => priced("firecrawl", self.firecrawl_scrape_cost),
+            "hunter_domain_search" | "hunter_email_finder" | "hunter_email_verifier"
+            | "hunter_tech_lookup" => priced("hunter", self.hunter_call_cost),
+            "sociavault_profile" => priced("sociavault", self.sociavault_call_cost),
+            _ => None,
         }
     }
 }

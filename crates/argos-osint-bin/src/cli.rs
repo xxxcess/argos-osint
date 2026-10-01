@@ -123,6 +123,33 @@ enum ReconCommand {
         max_calls: Option<u8>,
         #[arg(long)]
         turn_seconds: Option<u16>,
+        #[arg(long)]
+        firecrawl_credits: Option<u32>,
+        #[arg(long)]
+        hunter_credits: Option<u32>,
+        #[arg(long)]
+        sociavault_credits: Option<u32>,
+        #[arg(long)]
+        firecrawl_trial: Option<u32>,
+        #[arg(long)]
+        hunter_trial: Option<u32>,
+        #[arg(long)]
+        sociavault_trial: Option<u32>,
+        #[arg(long)]
+        opening_hunter: Option<u8>,
+        #[arg(long)]
+        opening_sociavault: Option<u8>,
+        /// monthly restores the recurring allowance; never keeps a fixed pool.
+        #[arg(long)]
+        credit_reset: Option<String>,
+        #[arg(long)]
+        firecrawl_search_cost: Option<u32>,
+        #[arg(long)]
+        firecrawl_scrape_cost: Option<u32>,
+        #[arg(long)]
+        hunter_call_cost: Option<u32>,
+        #[arg(long)]
+        sociavault_call_cost: Option<u32>,
     },
 }
 
@@ -477,21 +504,115 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             max_rounds,
             max_calls,
             turn_seconds,
+            firecrawl_credits,
+            hunter_credits,
+            sociavault_credits,
+            firecrawl_trial,
+            hunter_trial,
+            sociavault_trial,
+            opening_hunter,
+            opening_sociavault,
+            credit_reset,
+            firecrawl_search_cost,
+            firecrawl_scrape_cost,
+            hunter_call_cost,
+            sociavault_call_cost,
         } => {
             let mut settings = SettingsFile::load()?;
+            let mut changed = false;
             if let Some(value) = max_rounds {
                 anyhow::ensure!((1..=8).contains(&value), "max-rounds must be 1..8");
                 settings.recon_limits.max_rounds = value;
+                changed = true;
             }
             if let Some(value) = max_calls {
                 anyhow::ensure!((1..=24).contains(&value), "max-calls must be 1..24");
                 settings.recon_limits.max_calls = value;
+                changed = true;
             }
             if let Some(value) = turn_seconds {
                 anyhow::ensure!((30..=900).contains(&value), "turn-seconds must be 30..900");
                 settings.recon_limits.turn_seconds = value;
+                changed = true;
             }
-            if max_rounds.is_some() || max_calls.is_some() || turn_seconds.is_some() {
+            let assign = |slot: &mut u32, value: Option<u32>, changed: &mut bool| {
+                if let Some(value) = value {
+                    *slot = value;
+                    *changed = true;
+                }
+            };
+            assign(
+                &mut settings.recon_limits.firecrawl_credits,
+                firecrawl_credits,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.hunter_credits,
+                hunter_credits,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.sociavault_credits,
+                sociavault_credits,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.firecrawl_trial_credits,
+                firecrawl_trial,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.hunter_trial_credits,
+                hunter_trial,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.sociavault_trial_credits,
+                sociavault_trial,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.firecrawl_search_cost,
+                firecrawl_search_cost,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.firecrawl_scrape_cost,
+                firecrawl_scrape_cost,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.hunter_call_cost,
+                hunter_call_cost,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.sociavault_call_cost,
+                sociavault_call_cost,
+                &mut changed,
+            );
+            if let Some(value) = opening_hunter {
+                anyhow::ensure!((0..=4).contains(&value), "opening-hunter must be 0..4");
+                settings.recon_limits.opening_hunter_calls = value;
+                changed = true;
+            }
+            if let Some(value) = opening_sociavault {
+                anyhow::ensure!(
+                    (0..=4).contains(&value),
+                    "opening-sociavault must be 0..4"
+                );
+                settings.recon_limits.opening_sociavault_calls = value;
+                changed = true;
+            }
+            if let Some(value) = credit_reset {
+                anyhow::ensure!(
+                    matches!(value.as_str(), "monthly" | "never"),
+                    "credit-reset must be monthly or never"
+                );
+                settings.recon_limits.credit_reset = value;
+                changed = true;
+            }
+            if changed {
                 settings.save()?;
             }
             print_json(&settings.recon_limits)

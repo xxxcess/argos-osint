@@ -3120,10 +3120,12 @@ mod tests {
                 arguments: serde_json::json!({"domain": "example.org"}),
                 depends_on: Vec::new(),
                 reason: "Need the current public record".into(),
+                ..recon::PlanCall::default()
             }],
             unresolved_inputs: Vec::new(),
             stop_condition: "A current observation is in hand".into(),
             planning_mode: "json".into(),
+            ..recon::Plan::default()
         };
         app.store
             .set_run(&run.id, "running", "synthesizing", Some(&plan), None)

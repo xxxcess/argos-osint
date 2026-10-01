@@ -410,12 +410,24 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
         .and_then(|raw| serde_json::from_str::<Plan>(raw).ok());
     let title = match &plan {
         Some(plan) => {
-            let objective = if plan.objective.is_empty() {
+            let label = if plan.strategy.is_empty() {
                 "Recon decision"
             } else {
-                plan.objective.as_str()
+                strategy_label(&plan.strategy)
             };
-            format!("Decision · {} lookups · {objective}", plan.calls.len())
+            let rationale = clip_chars(
+                if plan.strategy_rationale.is_empty() {
+                    if plan.objective.is_empty() {
+                        "Recon decision"
+                    } else {
+                        plan.objective.as_str()
+                    }
+                } else {
+                    plan.strategy_rationale.as_str()
+                },
+                72,
+            );
+            format!("Decision · {label} · {rationale}")
         }
         None => "Decision · waiting for a plan".into(),
     };
@@ -428,26 +440,64 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
                 if !plan.objective.is_empty() {
                     lines.push(format!("Objective: {}", plan.objective));
                 }
-                if !plan.planning_mode.is_empty() {
-                    lines.push(format!("Mode: {}", plan.planning_mode));
+                if !plan.strategy.is_empty() {
+                    lines.push(format!(
+                        "Strategy: {} — {}",
+                        strategy_label(&plan.strategy),
+                        plan.strategy_rationale
+                    ));
+                }
+                if !plan.strategy_change.is_empty() {
+                    lines.push(format!("Change: {}", plan.strategy_change));
+                }
+                if !plan.discovery_note.is_empty() {
+                    lines.push(format!("Discovery: {}", plan.discovery_note));
+                }
+                if plan.question_answered {
+                    lines.push("Question answered. No further message.".into());
+                } else if !plan.additional_tools.is_empty() {
+                    lines.push("Additional context:".into());
+                    for tool in &plan.additional_tools {
+                        lines.push(format!("   {tool}"));
+                    }
+                }
+                for hypothesis in &plan.hypotheses {
+                    lines.push(format!(
+                        "Hypothesis: {} ({})",
+                        hypothesis.question, hypothesis.status
+                    ));
+                    for line in &hypothesis.lines {
+                        lines.push(format!("   {line}"));
+                    }
+                }
+                for entity in &plan.selected_entities {
+                    lines.push(format!(
+                        "Entity: {} ({}, {}) {}",
+                        entity.name, entity.entity_type, entity.certainty, entity.identifiers
+                    ));
                 }
                 if !plan.stop_condition.is_empty() {
                     lines.push(format!("Stop when: {}", plan.stop_condition));
                 }
                 for (index, call) in plan.calls.iter().enumerate() {
-                    lines.push(format!(
-                        "{}. {} — {}",
-                        index + 1,
-                        call.tool_id,
-                        if call.reason.is_empty() {
-                            call.step_id.as_str()
-                        } else {
-                            call.reason.as_str()
-                        }
-                    ));
+                    let mut detail = if call.reason.is_empty() {
+                        call.step_id.clone()
+                    } else {
+                        call.reason.clone()
+                    };
+                    if call.credit_cost > 0 {
+                        detail.push_str(&format!(" · {} credits", call.credit_cost));
+                    }
+                    lines.push(format!("{}. {} — {detail}", index + 1, call.tool_id));
+                    if !call.expected.is_empty() {
+                        lines.push(format!("   expected: {}", call.expected));
+                    }
                     if !call.depends_on.is_empty() {
                         lines.push(format!("   depends on {}", call.depends_on.join(", ")));
                     }
+                }
+                if !plan.deferred.is_empty() {
+                    lines.push(format!("Deferred: {}", plan.deferred.join("; ")));
                 }
                 if !plan.unresolved_inputs.is_empty() {
                     lines.push(format!("Unresolved: {}", plan.unresolved_inputs.join(", ")));
@@ -478,10 +528,15 @@ fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
         .map(|tool| tool.name)
         .unwrap_or(call.tool_id.as_str());
     let key = format!("tool:{}", call.id);
+    let cache = call
+        .result
+        .as_ref()
+        .map(|result| if result.cached { " · cache" } else { "" })
+        .unwrap_or("");
     if !app.expanded.contains(&key) {
         return ChatBlock {
             key,
-            title: format!("{name} · {}", call.status),
+            title: format!("{name} · {}{cache}", call.status),
             body: String::new(),
             collapsible: true,
             message_index: None,
@@ -500,6 +555,22 @@ fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
         lines.insert(0, format!("Reason: {reason}"));
     }
     if let Some(result) = &call.result {
+        lines.push(format!(
+            "Cache: {}",
+            if result.cached {
+                "reused a fresh cached result"
+            } else {
+                "live lookup"
+            }
+        ));
+        if result.credits_charged > 0 || result.credits_reported.is_some() {
+            lines.push(format!(
+                "Credits: {}",
+                result
+                    .credits_reported
+                    .unwrap_or(result.credits_charged)
+            ));
+        }
         if !result.source_url.is_empty() {
             lines.push(format!("Source: {}", result.source_url));
         }
@@ -519,6 +590,15 @@ fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
         collapsible: true,
         message_index: None,
         has_memory: false,
+    }
+}
+
+fn strategy_label(kind: &str) -> &'static str {
+    match kind {
+        "hypothesis" => "Question and hypothesis testing",
+        "adaptive" => "Adaptive expansion by information value",
+        "discovery" => "Discovery and selective enrichment",
+        _ => "Discovery and selective enrichment",
     }
 }
 

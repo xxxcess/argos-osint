@@ -51,26 +51,53 @@ const LEGAL_WORDS: &[&str] = &[
     "legal issues", "legal case", "legal cases", "indicted", "indictment",
 ];
 
+/// Prompt words that ask for top headlines rather than an article search.
+const HEADLINE_WORDS: &[&str] = &["headline", "headlines", "top stories", "front page"];
+/// Prompt words that ask about a judge (CourtListener judge search).
+const JUDGE_WORDS: &[&str] = &["judge", "judges", "justice", "justices", "magistrate"];
+
+/// Whether the prompt uses one of `words` outside its subject's own name. Words inside a
+/// prompt or thread subject ("Fox News", "Judge Judy", "the Daily Journal") are exempt,
+/// by the same entity exemption [`names_tool_except`] uses for provider names.
+fn asks(question: &str, thread: &[String], words: &[&str]) -> bool {
+    let entities: Vec<String> = subject_entities(question, thread);
+    words.iter().any(|word| outside_entities(word, question, &entities, Span::Whole))
+}
+
 /// Context kinds (`news`, `legal`) the prompt asks about, by the deterministic keyword
-/// rule. A plain "who is X?" yields neither, which saves the providers' daily quotas.
+/// rule. A plain "who is X?" yields neither, which saves the providers' daily quotas, and
+/// a keyword inside the subject's name ("who owns Fox News?") does not count.
 pub fn context_targets(question: &str) -> Vec<&'static str> {
-    let lower = question.to_ascii_lowercase().replace('\u{2019}', "'");
-    let padded = format!(" {} ", lower.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '\'' { ch } else { ' ' }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "));
-    let hit = |words: &[&str]| words.iter().any(|word| padded.contains(&format!(" {word} ")));
+    context_targets_in(question, &[])
+}
+
+/// [`context_targets`] where words of the thread's subject are exempt as well.
+pub fn context_targets_in(question: &str, thread: &[String]) -> Vec<&'static str> {
     let mut kinds = Vec::new();
-    if hit(NEWS_WORDS) {
+    if asks(question, thread, NEWS_WORDS) {
         kinds.push(super::tool_io::NEWS_KIND);
     }
-    if hit(LEGAL_WORDS) {
+    if asks(question, thread, LEGAL_WORDS) {
         kinds.push(super::tool_io::LEGAL_KIND);
     }
     kinds
 }
 
+/// The prompt asks for headlines outside the subject's name (`entities` are the turn's
+/// directive entities).
+pub fn asks_for_headlines(question: &str, entities: &[String]) -> bool {
+    asks(question, entities, HEADLINE_WORDS)
+}
+
+/// The prompt asks about a judge outside the subject's name ("who is Judge Judy?" does not).
+pub fn asks_about_judge(question: &str, entities: &[String]) -> bool {
+    asks(question, entities, JUDGE_WORDS)
+}
+
 /// Context targets follow the keyword rule: added to d1 when the prompt asks for them,
 /// removed where it does not.
-fn apply_context_targets(directives: &mut [Directive], question: &str) {
-    let wanted = context_targets(question);
+fn apply_context_targets(directives: &mut [Directive], question: &str, thread: &[String]) {
+    let wanted = context_targets_in(question, thread);
     for item in directives.iter_mut() {
         item.targets.retain(|kind| !super::tool_io::CONTEXT_KINDS.contains(&kind.as_str()) || wanted.contains(&kind.as_str()));
     }
@@ -115,18 +142,63 @@ pub fn names_tool(text: &str) -> Option<String> {
     names_tool_except(text, &[])
 }
 
-/// `term` is part of a prompt entity: its words occur, in order, among the entity's
-/// words ("hunter" in "Hunter Biden", "github" in "GitHub"). Dotted or underscored terms
-/// (`hunter.io`, tool ids) must occur in the entity as written.
-fn in_entity(term: &str, entities: &[String]) -> bool {
-    let term_words = words_of(term);
-    entities.iter().any(|entity| {
-        if term.contains('.') || term.contains('_') {
-            return entity.to_ascii_lowercase().contains(term);
+/// How a word of the checked text belongs to a prompt entity.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Span {
+    /// Any run of an entity's words ("hunter" from "Hunter Biden", wherever it occurs):
+    /// tool and provider names (#28).
+    Part,
+    /// A whole entity spelled out in the text, or a text that is itself part of an entity:
+    /// news and legal keywords (#29), so "latest news about Fox News" still asks for news.
+    Whole,
+}
+
+/// For each word of `words` (as [`words_of`] splits text), whether it belongs to one of
+/// `entities`. The one exemption shared by the tool-name check and the context keyword rule.
+fn entity_mask(words: &[String], entities: &[String], span: Span) -> Vec<bool> {
+    let mut mask = vec![false; words.len()];
+    for entity in entities {
+        let name = words_of(entity);
+        if name.is_empty() || words.is_empty() {
+            continue;
         }
-        let words = words_of(entity);
-        !term_words.is_empty() && words.windows(term_words.len()).any(|window| window == term_words.as_slice())
-    })
+        if span == Span::Whole && name.windows(words.len()).any(|window| window == words) {
+            mask.iter_mut().for_each(|owned| *owned = true);
+            continue;
+        }
+        for start in 0..words.len() {
+            let lengths: Vec<usize> = match span {
+                Span::Whole => vec![name.len()],
+                Span::Part => (1..=name.len()).rev().collect(),
+            };
+            for len in lengths {
+                let Some(run) = words.get(start..start + len) else { continue };
+                if name.windows(len).any(|window| window == run) {
+                    mask[start..start + len].iter_mut().for_each(|owned| *owned = true);
+                    break;
+                }
+            }
+        }
+    }
+    mask
+}
+
+/// Whether `term` occurs in `text` as whole words, at least once with none of its words
+/// belonging to `entities` (see [`entity_mask`]).
+fn outside_entities(term: &str, text: &str, entities: &[String], span: Span) -> bool {
+    let words = words_of(&text.replace('\u{2019}', "'"));
+    let term_words = words_of(term);
+    if term_words.is_empty() || term_words.len() > words.len() {
+        return false;
+    }
+    let mask = entity_mask(&words, entities, span);
+    (0..=words.len() - term_words.len()).any(|start| words[start..start + term_words.len()] == term_words[..] && !mask[start..start + term_words.len()].iter().any(|owned| *owned))
+}
+
+/// A dotted or underscored term (`hunter.io`, tool ids) occurs in a prompt entity as
+/// written. Plain words go through [`outside_entities`].
+fn in_entity(term: &str, entities: &[String]) -> bool {
+    entities.iter().any(|entity| entity.to_ascii_lowercase().contains(term))
 }
 
 /// [`names_tool`], ignoring any tool or provider word that belongs to one of `entities`
@@ -139,12 +211,113 @@ pub fn names_tool_except(text: &str, entities: &[String]) -> Option<String> {
     if let Some(id) = ids.into_iter().find(|id| lower.contains(id) && !in_entity(id, entities)) {
         return Some(id.to_string());
     }
-    let words = format!(" {} ", words_of(text).join(" "));
     PROVIDER_TERMS
         .iter()
-        .filter(|term| if term.contains('.') { lower.contains(*term) } else { words.contains(&format!(" {term} ")) })
-        .find(|term| !in_entity(term, entities))
+        .find(|term| if term.contains('.') { lower.contains(*term) && !in_entity(term, entities) } else { outside_entities(term, text, entities, Span::Part) })
         .map(|term| term.to_string())
+}
+
+/// Words that end a subject name inside a prompt clause ("elon musk been sued").
+const NAME_BREAKS: &[&str] = &[
+    "been", "being", "is", "are", "was", "were", "has", "have", "had", "in", "on", "and", "or",
+    "lately", "recently", "today", "any", "for", "this", "these", "that", "did", "does", "do",
+];
+/// Words after which a prompt names its subject ("news about X", "the head of X").
+const NAME_MARKERS: &[&str] = &["about", "with", "against", "involving", "around", "regarding", "of", "on", "for", "re"];
+/// Second words of an identity prompt ("who owns Fox News?"), whose whole subject is a name.
+const IDENTITY_VERBS: &[&str] = &[
+    "is", "was", "owns", "runs", "founded", "leads", "manages", "operates", "controls", "created",
+    "built", "made", "started", "s",
+];
+
+/// A word that only frames a news or legal request, never a name on its own.
+fn framing_word(word: &str) -> bool {
+    let word = word.to_ascii_lowercase();
+    let in_list = |list: &[&str]| list.iter().any(|item| !item.contains(' ') && *item == word);
+    in_list(NEWS_WORDS) || in_list(LEGAL_WORDS) || in_list(CONTEXT_FILLER) || in_list(HEADLINE_WORDS) || in_list(JUDGE_WORDS)
+        || PRONOUNS.contains(&word.as_str())
+        || QUESTION_WORDS.contains(&word.as_str())
+        || matches!(word.as_str(), "the" | "a" | "an" | "top" | "new" | "week" | "stories" | "s")
+}
+
+/// Runs of two or more capitalized words ("Elon Musk", "Fox News", "Judge Judy"). A
+/// sentence-initial framing word is dropped while two words remain ("Latest Fox News").
+fn name_runs(question: &str) -> Vec<String> {
+    let bare = |word: &str| word.split(['\'', '\u{2019}']).next().unwrap_or("").trim_matches(|ch: char| !ch.is_alphanumeric()).to_string();
+    let words: Vec<&str> = question.split_whitespace().collect();
+    let capital = |word: &str| {
+        let token = bare(word);
+        let lower = token.to_ascii_lowercase();
+        token.chars().next().is_some_and(char::is_uppercase) && !QUESTION_WORDS.contains(&lower.as_str()) && !PRONOUNS.contains(&lower.as_str())
+    };
+    let mut runs = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        if !capital(words[index]) {
+            index += 1;
+            continue;
+        }
+        let mut end = index;
+        while end + 1 < words.len() && capital(words[end + 1]) && !words[end].ends_with([',', '?', '.', ';', '!', ':']) {
+            end += 1;
+        }
+        let mut start = index;
+        while start == 0 && end > start + 1 && framing_word(&bare(words[start])) {
+            start += 1;
+        }
+        if end > start {
+            let run: Vec<String> = words[start..=end].iter().map(|word| word.trim_end_matches(|ch: char| !ch.is_alphanumeric()).trim_end_matches("'s").trim_end_matches("\u{2019}s").to_string()).collect();
+            runs.push(run.join(" "));
+        }
+        index = end + 1;
+    }
+    runs
+}
+
+/// The subject name in the prompt's subject phrase: the words after the last marker
+/// ("news about elon musk"), cut at a clause word or possessive ("elon musk been sued",
+/// "elon musk's lawsuits"). Outside an identity prompt, trailing lowercase framing words
+/// are dropped ("elon musk lawsuits"). None when only framing words remain ("the latest news").
+fn phrase_name(question: &str) -> Option<String> {
+    let tokens: Vec<String> = subject_phrase(question)
+        .split_whitespace()
+        .map(|word| word.trim_matches(|ch: char| !(ch.is_alphanumeric() || ch == '\'' || ch == '\u{2019}' || ch == '.' || ch == '-' || ch == '&')).to_string())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let lower = |word: &str| word.to_ascii_lowercase();
+    let start = tokens.iter().rposition(|word| NAME_MARKERS.contains(&lower(word).as_str())).map_or(0, |at| at + 1);
+    let mut name: Vec<String> = Vec::new();
+    for token in &tokens[start..] {
+        if NAME_BREAKS.contains(&lower(token).as_str()) {
+            if name.is_empty() {
+                continue;
+            }
+            break;
+        }
+        let owner = token.strip_suffix("'s").or_else(|| token.strip_suffix("\u{2019}s"));
+        name.push(owner.unwrap_or(token).to_string());
+        if owner.is_some() {
+            break;
+        }
+    }
+    let first: Vec<String> = words_of(&question.replace(['\'', '\u{2019}'], " "));
+    let identity = first.first().is_some_and(|word| matches!(word.as_str(), "who" | "what" | "which"))
+        && first.get(1).is_some_and(|word| IDENTITY_VERBS.contains(&word.as_str()));
+    if !identity {
+        while name.last().is_some_and(|word| framing_word(word) && !word.chars().next().is_some_and(char::is_uppercase)) {
+            name.pop();
+        }
+    }
+    (!name.is_empty() && !name.iter().all(|word| framing_word(word))).then(|| name.join(" "))
+}
+
+/// The prompt's subject names, plus the thread's subject: the words a news or legal
+/// keyword may not be taken from.
+fn subject_entities(question: &str, thread: &[String]) -> Vec<String> {
+    let mut names = name_runs(question);
+    names.extend(phrase_name(question));
+    names.extend(thread.iter().cloned());
+    names
 }
 
 /// The prompt names an entity of its own: an identifier, an email, or a run of two
@@ -243,6 +416,10 @@ const CONTEXT_FILLER: &[&str] = &[
 /// ("Elon Musk"), else the words after about/with/against/involving, else the subject
 /// phrase, with the context words around it removed.
 fn context_entity(question: &str) -> Option<String> {
+    // A subject name with a framing word in it ("Judge Judy", "Fox News") stays whole.
+    if let Some(name) = name_runs(question).into_iter().find(|name| words_of(name).iter().any(|word| framing_word(word)) && !words_of(name).iter().all(|word| framing_word(word))) {
+        return Some(name);
+    }
     let bare = |word: &str| word.split(['\'', '\u{2019}']).next().unwrap_or("").trim_matches(|ch: char| !ch.is_alphanumeric()).to_string();
     let words: Vec<&str> = question.split_whitespace().collect();
     let capital = |word: &str| {
@@ -350,7 +527,7 @@ pub fn fallback_directives(question: &str, thread: &[String]) -> Vec<Directive> 
             "at least one affiliated organization or contact domain is accepted",
         ),
     ];
-    apply_context_targets(&mut list, question);
+    apply_context_targets(&mut list, question, thread);
     list
 }
 
@@ -455,7 +632,7 @@ pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Res
             directives[0].targets.push(kind);
         }
     }
-    apply_context_targets(&mut directives, question);
+    apply_context_targets(&mut directives, question, thread);
     // A directive left with no target after the rule keeps d1's identity kinds.
     for item in directives.iter_mut().filter(|item| item.targets.is_empty()) {
         item.targets = vec!["person_name".into(), "org_name".into(), "url".into()];

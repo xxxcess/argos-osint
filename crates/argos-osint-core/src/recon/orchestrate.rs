@@ -4052,6 +4052,71 @@ mod tests {
         assert!(!ran.iter().any(|(_, tool, _)| tool == "courtlistener_judge_search"), "judge search only when the prompt asks about a judge");
     }
 
+    fn has_context_target(directives: &[crate::recon::Directive]) -> bool {
+        directives.iter().flat_map(|item| &item.targets).any(|kind| investigation::CONTEXT_KINDS.contains(&kind.as_str()))
+    }
+
+    /// A news, legal, headline, or judge word inside the subject's own name is not a
+    /// request: "who owns Fox News?", "who is Judge Judy?", and "what is the Daily
+    /// Journal?" run no News or Legal tool.
+    #[tokio::test]
+    async fn a_keyword_inside_the_subjects_name_runs_no_news_or_legal_tool() {
+        let keys = context_keys("news-key", "court-key");
+        for question in ["who owns Fox News?", "who is Judge Judy?", "what is the Daily Journal?"] {
+            assert!(investigation::context_targets(question).is_empty(), "{question}");
+            let (plan, ran, _) = context_turn(question, &keys, generic).await;
+            assert!(!has_context_target(&plan.directives), "{question}: {:?}", plan.directives);
+            assert!(!ran.iter().any(|(_, tool, _)| is_context(tool)), "{question}: {ran:?}");
+            assert!(!plan.calls.iter().any(|call| is_context(&call.tool_id)), "{question}");
+        }
+        // Lowercase, other subject verbs, and the thread's subject are exempt the same way.
+        for question in ["who owns fox news?", "who is judge judy?", "what is the daily journal?", "who runs the Court Records Bureau?", "who founded News Corp?", "what is The Headline Times?", "who is Justice Smith?"] {
+            assert!(investigation::context_targets(question).is_empty(), "{question}");
+        }
+        assert!(!has_context_target(&investigation::fallback_directives("what about Fox News?", &["Fox News".to_string()])));
+        // Judge and headline picks follow the same rule.
+        let judy = vec!["Judge Judy".to_string()];
+        assert!(!investigation::directives::asks_about_judge("has Judge Judy been sued?", &judy));
+        assert!(!investigation::directives::asks_for_headlines("who owns The Headline Times?", &[]));
+    }
+
+    /// The same words outside the subject's name still ask: "latest news about Fox News"
+    /// runs NewsAPI for "Fox News", and "has Judge Judy been sued?" runs CourtListener
+    /// for "Judge Judy" (legal via "sued", no judge search).
+    #[tokio::test]
+    async fn a_keyword_outside_the_subjects_name_still_runs_news_or_legal() {
+        let keys = context_keys("news-key", "court-key");
+        let (plan, ran, _) = context_turn("latest news about Fox News", &keys, generic).await;
+        assert!(plan.directives[0].targets.contains(&"news".to_string()), "{:?}", plan.directives);
+        let news: Vec<&(String, String, Value)> = ran.iter().filter(|(_, tool, _)| tool == "newsapi_search").collect();
+        assert_eq!(news.len(), 1, "{ran:?}");
+        assert_eq!(news[0].2, json!({"query": "Fox News"}));
+
+        let (plan, ran, _) = context_turn("has Judge Judy been sued?", &keys, generic).await;
+        assert!(plan.directives[0].targets.contains(&"legal".to_string()), "{:?}", plan.directives);
+        let legal: Vec<&(String, String, Value)> = ran.iter().filter(|(_, tool, _)| matches!(tool.as_str(), "courtlistener_case_search" | "courtlistener_docket_search")).collect();
+        assert!(!legal.is_empty(), "{ran:?}");
+        assert!(legal.iter().all(|(_, _, args)| args == &json!({"query": "Judge Judy"})), "{legal:?}");
+        assert!(!ran.iter().any(|(_, tool, _)| tool == "courtlistener_judge_search"), "\"Judge\" is part of the name: {ran:?}");
+        assert!(!ran.iter().any(|(_, tool, _)| tool.starts_with("newsapi_")), "{ran:?}");
+
+        for (question, want) in [
+            ("latest news about Fox News", vec!["news"]),
+            ("Fox News headlines about Elon Musk", vec!["news"]),
+            ("has Judge Judy been sued?", vec!["legal"]),
+            ("has judge judy been sued?", vec!["legal"]),
+            ("is Fox News being sued?", vec!["legal"]),
+            ("what are the latest headlines?", vec!["news"]),
+            ("elon musk lawsuits", vec!["legal"]),
+            ("what is elon musk's latest lawsuit?", vec!["news", "legal"]),
+        ] {
+            assert_eq!(investigation::context_targets(question), want, "{question}");
+        }
+        assert!(has_context_target(&investigation::fallback_directives("any news on him?", &["Fox News".to_string()])), "a thread subject exempts only its own words");
+        assert!(investigation::directives::asks_about_judge("which judge ruled on Elon Musk's pay?", &["Elon Musk".to_string()]));
+        assert!(investigation::directives::asks_for_headlines("Fox News headlines about Elon Musk", &["Elon Musk".to_string()]));
+    }
+
     /// AC6: at most 2 NewsAPI and 3 CourtListener calls a turn; a CourtListener 429
     /// skips the rest of its steps with the stated reason.
     #[tokio::test]

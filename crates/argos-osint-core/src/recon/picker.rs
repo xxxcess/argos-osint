@@ -503,7 +503,7 @@ pub struct OrderContext<'a> {
 /// case and docket search (judge search first when the prompt asks about a judge) for
 /// `legal`. Only candidates, in that order.
 pub fn context_tools(directives: &[Directive], candidates: &[String], question: &str) -> Vec<String> {
-    let lower = question.to_ascii_lowercase();
+    let entities: Vec<String> = directives.iter().flat_map(|item| item.entities.iter().cloned()).collect();
     let mut wanted: Vec<&str> = Vec::new();
     for kind in investigation::CONTEXT_KINDS {
         if !directives.iter().any(|item| item.targets.iter().any(|target| target == kind)) {
@@ -511,11 +511,11 @@ pub fn context_tools(directives: &[Directive], candidates: &[String], question: 
         }
         if *kind == investigation::NEWS_KIND {
             wanted.push("newsapi_search");
-            if lower.contains("headline") {
+            if investigation::directives::asks_for_headlines(question, &entities) {
                 wanted.push("newsapi_headlines");
             }
         } else {
-            if lower.contains("judge") {
+            if investigation::directives::asks_about_judge(question, &entities) {
                 wanted.push("courtlistener_judge_search");
             }
             wanted.extend(["courtlistener_case_search", "courtlistener_docket_search"]);

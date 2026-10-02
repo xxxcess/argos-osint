@@ -7,7 +7,7 @@
 
 use serde_json::{json, Value};
 
-use super::super::Binding;
+use super::super::{Binding, Directive};
 use super::{
     clip_query, emails_in, names_subject, normalize_platform,
     select_entities, social_or_publisher, subject_of, SearchHit, ACCOUNTS,
@@ -535,7 +535,22 @@ fn coordinate_parts(value: &str) -> Option<(f64, f64)> {
 struct Chosen {
     args: Vec<(&'static str, Value)>,
     filled: Vec<String>,
+    /// Grounding source per argument, in `args` order.
+    sources: Vec<String>,
 }
+
+/// Grounding source of a binding: the prompt, a directive that named it, or the call
+/// whose observation yielded it.
+fn ground(binding: &Binding) -> String {
+    match binding.evidence_id.as_str() {
+        "question" => PROMPT_SOURCE.to_string(),
+        id if id.starts_with('d') && id.len() == 2 => format!("{id} directive"),
+        id => format!("binding {id}"),
+    }
+}
+
+/// Fixed tool defaults and named platforms.
+pub const FIXED_SOURCE: &str = "fixed";
 
 fn source(binding: &Binding) -> String {
     let via = if binding.source_tool.is_empty() { String::new() } else { format!(" via {}", binding.source_tool) };
@@ -553,6 +568,17 @@ struct Ctx<'a> {
     subject: &'a str,
     hint: &'a str,
     question: &'a str,
+    directive: Option<&'a Directive>,
+}
+
+impl Ctx<'_> {
+    /// Source label for a value named in the directive goal or the prompt.
+    fn named_source(&self, named_in_hint: bool) -> String {
+        match (named_in_hint, self.directive) {
+            (true, Some(directive)) => format!("{} directive", directive.id),
+            _ => PROMPT_SOURCE.to_string(),
+        }
+    }
 }
 
 /// The platform a SociaVault query tool searches: the first one the question or hint
@@ -564,6 +590,26 @@ fn query_platform(tool: &str, ctx: &Ctx, binding: &Binding) -> &'static str {
     let own = served.iter().copied().find(|known| binding.kind == "handle" && *known == binding.qualifier);
     let reddit = served.contains(&"reddit") && (subreddit_in(ctx.hint).is_some() || subreddit_in(ctx.question).is_some());
     reddit.then_some("reddit").or(named).or(own).unwrap_or(if tool == "sociavault_search_users" { "instagram" } else { "twitter" })
+}
+
+/// `query_platform` and where the platform came from: the directive goal, the prompt, the
+/// handle's own platform, or the tool default.
+fn query_platform_sourced(tool: &str, ctx: &Ctx, binding: &Binding) -> (&'static str, String) {
+    let platform = query_platform(tool, ctx, binding);
+    let served_in = |text: &str| {
+        let texts = [(String::new(), text.to_string())];
+        question_platforms(&texts).iter().any(|(named, _)| named == platform) || platform == "reddit" && subreddit_in(text).is_some()
+    };
+    let source = if served_in(ctx.hint) {
+        ctx.named_source(true)
+    } else if served_in(ctx.question) {
+        PROMPT_SOURCE.to_string()
+    } else if binding.kind == "handle" && binding.qualifier == platform {
+        ground(binding)
+    } else {
+        FIXED_SOURCE.to_string()
+    };
+    (platform, source)
 }
 
 /// `r/<name>` named in the question or hint.
@@ -582,6 +628,7 @@ fn choose(fill: &Fill, bindings: &[Binding], ctx: &Ctx) -> Option<Chosen> {
     let plain = |input: &'static str, binding: &Binding, value: Value| Chosen {
         filled: vec![format!("{input}={} ({})", value.as_str().map(String::from).unwrap_or_else(|| value.to_string()), source(binding))],
         args: vec![(input, value)],
+        sources: vec![ground(binding)],
     };
     match fill.how {
         How::Plain => {
@@ -608,14 +655,16 @@ fn choose(fill: &Fill, bindings: &[Binding], ctx: &Ctx) -> Option<Chosen> {
                     format!("platform={} ({})", binding.qualifier, source(binding)),
                     format!("{input}={} ({})", binding.value, source(binding)),
                 ],
+                sources: vec![ground(binding), ground(binding)],
             })
         }
         How::PlatformQuery(tool) => {
             let binding = candidates(bindings, fill.kind).into_iter().find(|binding| !binding.inferred)?;
-            let platform = query_platform(tool, ctx, binding);
+            let (platform, platform_source) = query_platform_sourced(tool, ctx, binding);
             Some(Chosen {
                 args: vec![("platform", json!(platform)), (fill.input, json!(binding.value))],
-                filled: vec![format!("platform={platform} (named or default)"), format!("{}={} ({})", fill.input, binding.value, source(binding))],
+                filled: vec![format!("platform={platform} ({platform_source})"), format!("{}={} ({})", fill.input, binding.value, source(binding))],
+                sources: vec![platform_source, ground(binding)],
             })
         }
         How::PlatformHandle(platform) => {
@@ -628,14 +677,27 @@ fn choose(fill: &Fill, bindings: &[Binding], ctx: &Ctx) -> Option<Chosen> {
             urls.dedup_by(|a, b| a.value == b.value);
             urls.truncate(crate::osint::BATCH_SCRAPE_DEFAULT_URLS);
             let first = *urls.first()?;
+            let mut evidence: Vec<String> = Vec::new();
+            for binding in &urls {
+                let label = ground(binding);
+                if !evidence.contains(&label) {
+                    evidence.push(label);
+                }
+            }
             Some(Chosen {
                 args: vec![(fill.input, json!(urls.iter().map(|binding| binding.value.clone()).collect::<Vec<_>>()))],
                 filled: vec![format!("{}={} URL(s) ({})", fill.input, urls.len(), source(first))],
+                sources: vec![evidence.join(", ")],
             })
         }
         How::Subreddit => {
-            let name = subreddit_in(ctx.hint).or_else(|| subreddit_in(ctx.question))?;
-            Some(Chosen { filled: vec![format!("{}=r/{name} (named in the question)", fill.input)], args: vec![(fill.input, json!(name))] })
+            let in_hint = subreddit_in(ctx.hint);
+            let name = in_hint.clone().or_else(|| subreddit_in(ctx.question))?;
+            Some(Chosen {
+                filled: vec![format!("{}=r/{name} (named in the question)", fill.input)],
+                args: vec![(fill.input, json!(name))],
+                sources: vec![ctx.named_source(in_hint.is_some())],
+            })
         }
         How::CompanyEmail | How::WebmailEmail => {
             let webmail = fill.how == How::WebmailEmail;
@@ -655,6 +717,7 @@ fn choose(fill: &Fill, bindings: &[Binding], ctx: &Ctx) -> Option<Chosen> {
             Some(Chosen {
                 args: vec![("ecosystem", json!(ecosystem)), ("package_name", json!(name)), ("version", json!(version))],
                 filled: vec![format!("package={} ({})", binding.value, source(binding))],
+                sources: vec![ground(binding); 3],
             })
         }
         How::PackageName => {
@@ -670,13 +733,26 @@ fn choose(fill: &Fill, bindings: &[Binding], ctx: &Ctx) -> Option<Chosen> {
             Some(Chosen {
                 args: vec![("latitude", json!(lat)), ("longitude", json!(lon))],
                 filled: vec![format!("coordinates={} ({})", binding.value, source(binding))],
+                sources: vec![ground(binding); 2],
             })
         }
-        How::SearchQuery => {
-            let hint = clip_query(hint);
-            let query = if hint.is_empty() { subject.to_string() } else { hint };
-            (!query.is_empty()).then(|| Chosen { args: vec![(fill.input, json!(query))], filled: Vec::new() })
-        }
+        How::SearchQuery => match ctx.directive {
+            // The directive's entity plus its fixed qualifier, never question text.
+            Some(directive) => {
+                let grounded = super::directive_query(directive, true)?;
+                Some(Chosen {
+                    filled: vec![format!("{}={} ({})", fill.input, grounded.query, grounded.source)],
+                    args: vec![(fill.input, json!(grounded.query))],
+                    sources: vec![grounded.source],
+                })
+            }
+            // Reachability checks only (`unmet_kinds`): a search input is always fillable.
+            None => {
+                let hint = clip_query(hint);
+                let query = if hint.is_empty() { subject.to_string() } else { hint };
+                (!query.is_empty()).then(|| Chosen { args: vec![(fill.input, json!(query))], filled: Vec::new(), sources: vec![PROMPT_SOURCE.into()] })
+            }
+        },
     }
 }
 
@@ -717,49 +793,129 @@ fn slot_label(slot: &Slot) -> String {
     common.join(", ")
 }
 
-/// Arguments for one step from accepted bindings. Returns the arguments, the fills as
-/// `input=value (kind from evidence)`, and the inputs still missing. Reads `TOOLS` only;
-/// never passes a social or news host where a domain is expected.
-pub fn bind_arguments(
-    tool_id: &str,
-    bindings: &[Binding],
-    question: &str,
-    query_hint: &str,
-) -> (Value, Vec<String>, Vec<String>) {
+/// One step's bound arguments: the arguments, the fills as `input=value (source)` for the
+/// decision row, the inputs still missing, and the grounding of every argument as
+/// `(input, value, source)`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Bound {
+    pub args: Value,
+    pub filled: Vec<String>,
+    pub missing: Vec<String>,
+    pub grounding: Vec<(String, Value, String)>,
+}
+
+/// The binding kind the directive's first entity can fill directly: `person_name` for a
+/// person, `org_name` for an organization, or none (a topic or identifier).
+pub fn entity_kind(question: &str, entity: &str) -> &'static str {
+    let kind = super::target_kind(question);
+    let words: Vec<String> = entity.split_whitespace().map(|word| word.trim_matches(|ch: char| !ch.is_alphanumeric()).to_ascii_lowercase()).collect();
+    if kind == "organization" || words.iter().any(|word| super::ORG_WORDS.contains(&word.as_str())) {
+        "org_name"
+    } else if plausible_person_name(entity) && (kind == "person" || super::refers_back(question)) {
+        "person_name"
+    } else {
+        ""
+    }
+}
+
+/// Subject first: a slot whose input can take the directive's entity directly (a person
+/// or organization name, or a search query) gets the entity, unless the slot leads with
+/// an identifier (handle, domain, package, …) a binding already fills. Later bindings only
+/// fill what the entity cannot.
+fn entity_choice(slot: &Slot, eligible: &[Binding], ctx: &Ctx, tool: &str) -> Option<Chosen> {
+    let directive = ctx.directive?;
+    let entity = directive.entities.first()?;
+    let lead = slot.fills.first()?;
+    let name_like = |fill: &Fill| matches!(fill.kind, "person_name" | "org_name" | QUERY_KIND);
+    if !name_like(lead) && choose(lead, eligible, ctx).is_some() {
+        return None;
+    }
+    let kind = entity_kind(ctx.question, entity);
+    let label = format!("{} entity", directive.id);
+    for fill in slot.fills.iter().filter(|fill| name_like(fill)) {
+        match fill.how {
+            How::SearchQuery => return choose(fill, eligible, ctx),
+            How::PlatformQuery(query_tool) => {
+                // Platform searches send the entity alone.
+                let grounded = super::directive_query(directive, false)?;
+                let anchor = Binding { kind: String::new(), ..Binding::default() };
+                let (platform, platform_source) = query_platform_sourced(query_tool, ctx, &anchor);
+                return Some(Chosen {
+                    args: vec![("platform", json!(platform)), (fill.input, json!(grounded.query))],
+                    filled: vec![format!("platform={platform} ({platform_source})"), format!("{}={} ({})", fill.input, grounded.query, grounded.source)],
+                    sources: vec![platform_source, grounded.source],
+                });
+            }
+            How::Plain if !kind.is_empty() && fill.kind == kind => {
+                let _ = tool;
+                return Some(Chosen {
+                    filled: vec![format!("{}={entity} ({label})", fill.input)],
+                    args: vec![(fill.input, json!(entity))],
+                    sources: vec![label],
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Arguments for one step from the directive it serves and accepted bindings. Reads
+/// `TOOLS` only; never passes a social or news host where a domain is expected. Without a
+/// directive, the fixed directive for the question that the tool serves is used.
+pub fn bind_step(tool_id: &str, bindings: &[Binding], question: &str, directive: Option<&Directive>) -> Bound {
+    let mut bound = Bound::default();
     let mut args = serde_json::Map::new();
-    let mut filled = Vec::new();
-    let mut missing = Vec::new();
     let Some(row) = tool_row(tool_id) else {
-        return (Value::Object(args), filled, vec![format!("{tool_id} inputs have no binding kind")]);
+        bound.args = Value::Object(args);
+        bound.missing.push(format!("{tool_id} inputs have no binding kind"));
+        return bound;
+    };
+    let fixed;
+    let directive = match directive {
+        Some(directive) => Some(directive),
+        None => {
+            fixed = super::fallback_directives(question, &[]);
+            let evidence = evidence_kinds(row.tool);
+            fixed.iter().find(|item| item.targets.iter().any(|kind| evidence.contains(&kind.as_str()))).or_else(|| fixed.first())
+        }
     };
     let subject = subject_of(question);
     let eligible: Vec<Binding> = bindings.iter().filter(|binding| binding_allowed(row.tool, binding)).cloned().collect();
-    let ctx = Ctx { subject: &subject, hint: query_hint, question };
-    for slot in row.slots {
-        match slot.fills.iter().find_map(|fill| choose(fill, &eligible, &ctx)) {
-            Some(chosen) => {
-                for (input, value) in chosen.args {
-                    args.insert(input.into(), value);
-                }
-                filled.extend(chosen.filled);
+    let hint = directive.map(|item| item.goal.clone()).unwrap_or_default();
+    let ctx = Ctx { subject: &subject, hint: &hint, question, directive };
+    let mut sources: Vec<(String, String)> = Vec::new();
+    let take = |chosen: Chosen, args: &mut serde_json::Map<String, Value>, overwrite: bool, sources: &mut Vec<(String, String)>, filled: &mut Vec<String>| {
+        for (index, (input, value)) in chosen.args.into_iter().enumerate() {
+            if !overwrite && args.contains_key(input) {
+                continue;
             }
-            None => missing.push(slot_label(slot)),
+            args.insert(input.into(), value);
+            sources.retain(|(known, _)| known != input);
+            sources.push((input.to_string(), chosen.sources.get(index).cloned().unwrap_or_default()));
+        }
+        filled.extend(chosen.filled);
+    };
+    for slot in row.slots {
+        match entity_choice(slot, &eligible, &ctx, row.tool).or_else(|| slot.fills.iter().find_map(|fill| choose(fill, &eligible, &ctx))) {
+            Some(chosen) => take(chosen, &mut args, true, &mut sources, &mut bound.filled),
+            None => bound.missing.push(slot_label(slot)),
         }
     }
     for fill in row.optional {
         if let Some(chosen) = choose(fill, &eligible, &ctx) {
-            for (input, value) in chosen.args {
-                args.entry(input.to_string()).or_insert(value);
-            }
-            filled.extend(chosen.filled);
+            take(chosen, &mut args, false, &mut sources, &mut bound.filled);
         }
     }
     for (input, value) in row.extras {
-        args.entry(input.to_string()).or_insert(json!(value));
+        if !args.contains_key(*input) {
+            args.insert(input.to_string(), json!(value));
+            sources.push((input.to_string(), FIXED_SOURCE.into()));
+        }
     }
-    if crate::osint::SOCIAVAULT_TOOLS.contains(&row.tool) && missing.is_empty() {
+    if crate::osint::SOCIAVAULT_TOOLS.contains(&row.tool) && bound.missing.is_empty() {
         let platform = args.get("platform").and_then(Value::as_str).unwrap_or("").to_string();
-        let mut text = format!("{query_hint} {question}");
+        let mut text = format!("{hint} {question}");
         if args.contains_key("subreddit") {
             text.push_str(" r/");
         }
@@ -769,12 +925,36 @@ pub fn bind_arguments(
             // Only an endpoint whose inputs the bound arguments carry.
             let fits = route.is_some_and(|route| route.input.keys().iter().any(|key| args.contains_key(*key) || (*key == "user_id" && has_user_id)));
             if fits {
-                filled.push(format!("endpoint={endpoint} (named in the question)"));
+                let in_hint = crate::osint::sociavault_endpoint_hint(row.tool, &platform, &hint) == Some(endpoint);
+                bound.filled.push(format!("endpoint={endpoint} (named in the question)"));
                 args.insert("endpoint".into(), json!(endpoint));
+                sources.push(("endpoint".into(), ctx.named_source(in_hint)));
             }
         }
     }
-    (Value::Object(args), filled, missing)
+    bound.grounding = sources
+        .into_iter()
+        .filter_map(|(input, source)| args.get(&input).map(|value| (input, value.clone(), source)))
+        .collect();
+    bound.args = Value::Object(args);
+    bound
+}
+
+/// Kinds a tool reports evidence about: what it produces, or for a tool that produces no
+/// bindings (a verifier, a balance lookup), the kinds it takes.
+pub fn evidence_kinds(tool_id: &str) -> Vec<&'static str> {
+    let produced = output_kinds(tool_id);
+    if produced.is_empty() {
+        input_kinds(tool_id)
+    } else {
+        produced
+    }
+}
+
+/// `bind_step` as `(arguments, fills, missing)`.
+pub fn bind_arguments(tool_id: &str, bindings: &[Binding], question: &str, directive: Option<&Directive>) -> (Value, Vec<String>, Vec<String>) {
+    let bound = bind_step(tool_id, bindings, question, directive);
+    (bound.args, bound.filled, bound.missing)
 }
 
 /// Kinds of each slot the bindings cannot fill yet.
@@ -783,7 +963,7 @@ pub fn unmet_kinds(tool_id: &str, bindings: &[Binding]) -> Vec<Vec<&'static str>
         return Vec::new();
     };
     let eligible: Vec<Binding> = bindings.iter().filter(|binding| binding_allowed(row.tool, binding)).cloned().collect();
-    let ctx = Ctx { subject: "", hint: "-", question: "" };
+    let ctx = Ctx { subject: "", hint: "-", question: "", directive: None };
     row.slots
         .iter()
         .filter(|slot| !slot.fills.iter().any(|fill| choose(fill, &eligible, &ctx).is_some()))
@@ -1586,12 +1766,12 @@ mod tests {
         let mut bindings = question_bindings(question);
         bindings.push(domain.clone());
         for hunter in ["hunter_domain_search", "hunter_company_enrichment", "hunter_email_count"] {
-            let (args, _, _) = bind_arguments(hunter, &bindings, question, "");
+            let (args, _, _) = bind_arguments(hunter, &bindings, question, None);
             assert!(args.get("domain").is_none(), "{hunter} took a crt.sh-only domain: {args}");
         }
-        assert!(bind_arguments("firecrawl_map", &bindings, question, "").2.len() == 1, "map waits too");
+        assert!(bind_arguments("firecrawl_map", &bindings, question, None).2.len() == 1, "map waits too");
         // Gap-fillers still use it.
-        assert_eq!(bind_arguments("urlscan_search", &bindings, question, "").0["domain"], "acmerobotics.com");
+        assert_eq!(bind_arguments("urlscan_search", &bindings, question, None).0["domain"], "acmerobotics.com");
         // A Firecrawl observation containing the same value makes it eligible.
         let search = json!({"results": [{"title": "Acme Robotics | Home", "url": "https://acmerobotics.com/", "snippet": "Acme Robotics builds robots."}]});
         let primary = rule_bindings(question, "call-s2", "firecrawl_search", &search);
@@ -1599,24 +1779,24 @@ mod tests {
         assert_eq!(seen.source_tool, "firecrawl_search");
         bindings.retain(|binding| binding.value != "acmerobotics.com");
         bindings.push(Binding { source_tool: seen.source_tool.clone(), evidence_id: seen.evidence_id.clone(), ..domain });
-        let (args, filled, missing) = bind_arguments("hunter_domain_search", &bindings, question, "");
+        let (args, filled, missing) = bind_arguments("hunter_domain_search", &bindings, question, None);
         assert!(missing.is_empty(), "{missing:?}");
         assert_eq!(args["domain"], "acmerobotics.com");
         assert!(filled.iter().any(|fill| fill.contains("via firecrawl_search")), "{filled:?}");
         // A domain named in the prompt binds directly.
         let prompt = question_bindings("Who runs acmerobotics.com?");
-        assert_eq!(bind_arguments("hunter_company_enrichment", &prompt, "Who runs acmerobotics.com?", "").0["domain"], "acmerobotics.com");
+        assert_eq!(bind_arguments("hunter_company_enrichment", &prompt, "Who runs acmerobotics.com?", None).0["domain"], "acmerobotics.com");
     }
 
     #[test]
     fn hunter_routes_emails_and_domain_finder_matches() {
         let question = "Who is jane@acmerobotics.com and jane.example@gmail.com?";
         let known = question_bindings(question);
-        assert_eq!(bind_arguments("hunter_combined_enrichment", &known, question, "").0["email"], "jane@acmerobotics.com");
-        assert_eq!(bind_arguments("hunter_person_enrichment", &known, question, "").0["email"], "jane.example@gmail.com");
+        assert_eq!(bind_arguments("hunter_combined_enrichment", &known, question, None).0["email"], "jane@acmerobotics.com");
+        assert_eq!(bind_arguments("hunter_person_enrichment", &known, question, None).0["email"], "jane.example@gmail.com");
         // Webmail domains never become company domains.
         let webmail = vec![Binding { kind: "domain".into(), value: "gmail.com".into(), evidence_id: "question".into(), ..Binding::default() }];
-        assert!(!bind_arguments("hunter_domain_search", &webmail, question, "").2.is_empty());
+        assert!(!bind_arguments("hunter_domain_search", &webmail, question, None).2.is_empty());
         // Domain finder: perfect matches are exact, others inferred.
         let observed = |perfect: bool| json!({"companies": [{"domain": "acmerobotics.com", "company_name": "Acme Robotics"}], "perfect_match": perfect});
         let exact = rule_bindings("Who runs Acme Robotics?", "call-s1", "hunter_domain_finder", &observed(true));
@@ -1624,7 +1804,7 @@ mod tests {
         let guess = rule_bindings("Who runs Acme Robotics?", "call-s1", "hunter_domain_finder", &observed(false));
         assert!(guess.iter().filter(|binding| binding.kind == "domain").all(|binding| binding.inferred), "{guess:?}");
         let org = "What does Acme Robotics Inc do?";
-        let company = bind_arguments("hunter_domain_finder", &question_bindings(org), org, "").0;
+        let company = bind_arguments("hunter_domain_finder", &question_bindings(org), org, None).0;
         assert!(company["company"].as_str().is_some_and(|name| name.contains("Acme Robotics")), "{company}");
     }
 
@@ -1632,18 +1812,18 @@ mod tests {
     fn sociavault_query_tools_take_the_named_platform_and_mark_found_handles_unverified() {
         let question = "Who is Jane Example on TikTok?";
         let known = question_bindings(question);
-        let (args, _, missing) = bind_arguments("sociavault_search_users", &known, question, "");
+        let (args, _, missing) = bind_arguments("sociavault_search_users", &known, question, None);
         assert!(missing.is_empty(), "{missing:?} from {known:?}");
         assert_eq!(args["platform"], "tiktok", "the named platform");
         assert!(args["query"].as_str().is_some_and(|query| query.contains("Jane Example")), "{args}");
         assert!(osint::validate("sociavault_search_users", &args).is_ok());
         // No platform named: the tool's default.
         let plain = question_bindings("Who is Jane Example?");
-        assert_eq!(bind_arguments("sociavault_search", &plain, "Who is Jane Example?", "").0["platform"], "twitter");
+        assert_eq!(bind_arguments("sociavault_search", &plain, "Who is Jane Example?", None).0["platform"], "twitter");
         // r/<name> selects the Reddit subreddit route.
         let reddit = "What does r/rust say about Jane Example?";
         let name = vec![Binding { kind: "person_name".into(), value: "Jane Example".into(), evidence_id: "question".into(), ..Binding::default() }];
-        let (args, _, _) = bind_arguments("sociavault_search", &name, reddit, "");
+        let (args, _, _) = bind_arguments("sociavault_search", &name, reddit, None);
         assert_eq!((args["platform"].as_str(), args["subreddit"].as_str(), args["endpoint"].as_str()), (Some("reddit"), Some("rust"), Some("subreddit")), "{args}");
         assert!(osint::validate("sociavault_search", &args).is_ok());
         // Handles a search lists are leads, not the subject's confirmed accounts.
@@ -1651,7 +1831,7 @@ mod tests {
         assert!(found.iter().filter(|binding| binding.kind == "handle").all(|binding| binding.unverified), "{found:?}");
         // A profile's platform id feeds user-content routes that need it.
         let id = vec![Binding { kind: PLATFORM_ID_KIND.into(), value: "44196397".into(), qualifier: "twitter".into(), evidence_id: "call-s2".into(), source_tool: "sociavault_profile".into(), ..Binding::default() }];
-        let (args, _, missing) = bind_arguments("sociavault_user_content", &id, "Show Jane Example's tweets", "");
+        let (args, _, missing) = bind_arguments("sociavault_user_content", &id, "Show Jane Example's tweets", None);
         assert!(missing.is_empty());
         assert_eq!(args, json!({"platform": "twitter", "user_id": "44196397"}));
         let profile = rule_bindings("Who is Jane Example?", "call-s2", "sociavault_profile", &json!({"platform": "twitter", "handle": "janeexample", "platform_id": "44196397"}));
@@ -1664,7 +1844,7 @@ mod tests {
             .iter()
             .map(|url| Binding { kind: URL_KIND.into(), value: url.to_string(), evidence_id: "call-s1".into(), source_tool: "firecrawl_map".into(), ..Binding::default() })
             .collect();
-        let (args, _, missing) = bind_arguments("firecrawl_batch_scrape", &urls, "Who runs Acme Robotics?", "");
+        let (args, _, missing) = bind_arguments("firecrawl_batch_scrape", &urls, "Who runs Acme Robotics?", None);
         assert!(missing.is_empty());
         let picked: Vec<&str> = args["urls"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
         assert_eq!(picked.len(), osint::BATCH_SCRAPE_DEFAULT_URLS);
@@ -1681,7 +1861,7 @@ mod tests {
     /// Prompt -> known bindings -> the first tool's arguments.
     fn first_args(question: &str, tool: &str) -> Value {
         let known = question_bindings(question);
-        let (args, _, missing) = bind_arguments(tool, &known, question, "");
+        let (args, _, missing) = bind_arguments(tool, &known, question, None);
         assert!(missing.is_empty(), "{tool} for {question:?}: missing {missing:?} from {known:?}");
         osint::validate(tool, &args).unwrap_or_else(|err| panic!("{tool} {args}: {err}"));
         args
@@ -1691,7 +1871,7 @@ mod tests {
     fn next_args(question: &str, producer: &str, observation: Value, next: &str) -> Value {
         let mut bindings = question_bindings(question);
         bindings.extend(rule_bindings(question, "call-s1", producer, &observation));
-        let (args, _, missing) = bind_arguments(next, &bindings, question, "");
+        let (args, _, missing) = bind_arguments(next, &bindings, question, None);
         assert!(missing.is_empty(), "{next} after {producer}: missing {missing:?} from {bindings:?}");
         osint::validate(next, &args).unwrap_or_else(|err| panic!("{next} {args}: {err}"));
         args

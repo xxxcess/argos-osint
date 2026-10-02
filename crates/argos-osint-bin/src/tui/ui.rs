@@ -411,7 +411,7 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
         .as_deref()
         .and_then(|raw| serde_json::from_str::<Plan>(raw).ok());
     let title = match &plan {
-        Some(plan) if !plan.derived_questions.is_empty() => {
+        Some(plan) if !plan.directives.is_empty() => {
             let transport = if plan.picker_transport.is_empty() {
                 "picking"
             } else {
@@ -419,7 +419,7 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
             };
             format!(
                 "Decision · tool picker ({transport}) · {}",
-                clip_chars(&plan.derived_questions[0].text, 64)
+                clip_chars(&plan.directives[0].goal, 64)
             )
         }
         Some(plan) => {
@@ -448,7 +448,7 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
         String::new()
     } else {
         match plan {
-            Some(plan) if !plan.derived_questions.is_empty() => {
+            Some(plan) if !plan.directives.is_empty() => {
                 question_plan_lines(run, &plan).join("\n")
             }
             Some(plan) => {
@@ -559,16 +559,23 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
 /// probabilities stay in `plan_json` (`recon show`); they are not rendered here.
 fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(if plan.questions_mode == "questions_fallback" {
-        "Questions (fallback set):".to_string()
+    lines.push(if matches!(plan.directives_mode.as_str(), "directives_fallback" | "questions_fallback") {
+        "Directives (fallback set):".to_string()
     } else {
-        "Questions:".to_string()
+        "Directives:".to_string()
     });
-    for question in &plan.derived_questions {
-        lines.push(format!("   {}: {}", question.id, question.text));
+    for directive in &plan.directives {
+        let mut row = format!("   {}: {}", directive.id, directive.goal);
+        if !directive.entities.is_empty() {
+            row.push_str(&format!(" · entities {}", directive.entities.join(", ")));
+        }
+        if !directive.targets.is_empty() {
+            row.push_str(&format!(" · targets {}", directive.targets.join(", ")));
+        }
+        lines.push(row);
     }
-    if !plan.questions_note.is_empty() {
-        lines.push(format!("   {}", plan.questions_note));
+    if !plan.directives_note.is_empty() {
+        lines.push(format!("   {}", plan.directives_note));
     }
     let model = if run.tool_picker_model.is_empty() {
         plan.picker_model.as_str()
@@ -3114,22 +3121,25 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use argos_osint_core::recon::{Binding, DerivedQuestion, PickRecord, PlanCall};
+    use argos_osint_core::recon::{Binding, Directive, PickRecord, PlanCall};
 
     #[test]
-    fn decision_row_shows_questions_picker_order_bindings_and_fallbacks() {
-        let question = |id: &str, text: &str| DerivedQuestion {
+    fn decision_row_shows_directives_picker_order_bindings_and_fallbacks() {
+        let directive = |id: &str, goal: &str, targets: &[&str]| Directive {
             id: id.into(),
-            text: text.into(),
+            goal: goal.into(),
+            entities: vec!["Jane Roe".into()],
+            targets: targets.iter().map(|kind| kind.to_string()).collect(),
             ..Default::default()
         };
         let plan = Plan {
             planning_mode: "tool_picker".into(),
-            derived_questions: vec![
-                question("q1", "Which accounts belong to Jane Roe?"),
-                question("q2", "Where does Jane Roe work?"),
-                question("q3", "What email does Jane Roe use?"),
+            directives: vec![
+                directive("d1", "Establish the subject's identity and public roles", &["person_name", "org_name", "url"]),
+                directive("d2", "Find the subject's official online accounts and websites", &["handle", "domain", "url"]),
+                directive("d3", "Find organizations affiliated with the subject and their contact domains", &["org_name", "domain", "email"]),
             ],
+            directives_mode: "directives_fallback".into(),
             picker_transport: "decisions".into(),
             picker_model: "typesafe/jev-1.13".into(),
             picks: vec![PickRecord {
@@ -3144,15 +3154,16 @@ mod tests {
                 PlanCall {
                     step_id: "s1".into(),
                     tool_id: "firecrawl_search".into(),
-                    reason: "q1, q2".into(),
+                    reason: "d1, d2".into(),
                     status: "completed".into(),
+                    filled: vec!["query=Jane Roe (d1 entity)".into()],
                     confidence: Some(0.8731),
                     ..Default::default()
                 },
                 PlanCall {
                     step_id: "s2".into(),
                     tool_id: "sociavault_profile".into(),
-                    reason: "q1".into(),
+                    reason: "d2".into(),
                     depends_on: vec!["s1".into()],
                     filled: vec!["handle=janeroe (handle from call-s1)".into()],
                     ..Default::default()
@@ -3179,7 +3190,7 @@ mod tests {
             }, Binding {
                 kind: "handle".into(),
                 value: "janeroe".into(),
-                evidence_id: "q1".into(),
+                evidence_id: "d2".into(),
                 step_id: String::new(),
                 qualifier: "twitter".into(),
                 inferred: false,
@@ -3210,17 +3221,19 @@ mod tests {
         let block = plan_block(&run, true);
         assert!(block.title.contains("tool picker (decisions)"), "{}", block.title);
         for needle in [
-            "q1: Which accounts belong to Jane Roe?",
-            "q2: Where does Jane Roe work?",
-            "q3: What email does Jane Roe use?",
+            "Directives (fallback set):",
+            "d1: Establish the subject's identity and public roles · entities Jane Roe · targets person_name, org_name, url",
+            "d2: Find the subject's official online accounts and websites · entities Jane Roe · targets handle, domain, url",
+            "d3: Find organizations affiliated with the subject and their contact domains",
             "Tool picker: decisions · openrouter / typesafe/jev-1.13",
-            "s1. firecrawl_search — q1, q2 · completed",
-            "s2. sociavault_profile — q1 · after s1",
+            "s1. firecrawl_search — d1, d2 · completed",
+            "input query=Jane Roe (d1 entity)",
+            "s2. sociavault_profile — d2 · after s1",
             "input handle=janeroe (handle from call-s1)",
             "found handle janeroe (github) · evidence call-s1",
             "found handle janeroe (facebook) · evidence call-s1 · inferred",
             "Binding extraction:",
-            "From the question: handle janeroe (twitter) · named in q1, unverified",
+            "From the question: handle janeroe (twitter) · named in d2, unverified",
             "s1 firecrawl_search: rules found 1; Recon model added 0",
             "Fallback requests:",
         ] {

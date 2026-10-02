@@ -3038,8 +3038,13 @@ fn bitcoin_in(text: &str) -> Option<String> {
 // binding, fallback questions, rule binders, and the deterministic picker.
 // ---------------------------------------------------------------------------
 
-use super::{Binding, DerivedQuestion};
+use super::{Binding, Directive};
 
+pub(crate) mod directives;
+pub use directives::{
+    directive_entities, directive_for_target, directive_query, fallback_directives,
+    grounded_query, parse_directives, refers_back, relevance_gate, GroundedQuery, QUALIFIERS,
+};
 mod tool_io;
 pub use tool_io::{
     accept_bindings, bind_arguments, catalog_inputs, consumers_of, dependencies, dependency,
@@ -3048,6 +3053,7 @@ pub use tool_io::{
     unmet_needs, vet_model_bindings, BINDING_KINDS, COORDINATES_KIND, URL_KIND,
 };
 pub use tool_io::{allowed_producer, binding_allowed, restricted_sources, GATES};
+pub use tool_io::{bind_step, evidence_kinds};
 use tool_io::coordinates_in_text;
 
 pub(crate) fn social_or_publisher(domain: &str) -> bool {
@@ -3162,11 +3168,11 @@ pub fn question_bindings(question: &str) -> Vec<Binding> {
 /// handle and platform bindings with the question id as evidence, marked `unverified`.
 /// The handle must occur verbatim in that question, must name the subject (a derived
 /// question is model text), and is skipped when the user's own question already gave it.
-pub fn derived_question_handles(question: &str, questions: &[DerivedQuestion], known: &[Binding]) -> Vec<Binding> {
+pub fn derived_question_handles(question: &str, questions: &[Directive], known: &[Binding]) -> Vec<Binding> {
     let subject = subject_of(question);
     let mut found: Vec<Binding> = Vec::new();
     for item in questions {
-        let text = item.text.as_str();
+        let text = item.goal.as_str();
         let mut pairs: Vec<(String, String)> = super::extract_social_handles(&[text.to_string()])
             .into_iter()
             .map(|handle| (handle.handle, handle.platform))
@@ -3199,131 +3205,24 @@ pub fn derived_question_handles(question: &str, questions: &[DerivedQuestion], k
     found
 }
 
-/// The query of the one accounts search a starved handle step may add. A person's search
-/// names the platforms the questions ask about ("Elon Musk official X Twitter Instagram
-/// account") so profile pages outrank Q&A and aggregator pages; others ask for the
-/// official website and accounts.
-pub fn accounts_search_query(question: &str, questions: &[DerivedQuestion], bindings: &[Binding]) -> String {
-    let subject = display_name(&subject_of(question));
-    let person = target_kind(question) == "person" || bindings.iter().any(|binding| binding.kind == "person_name");
-    if !person {
-        return format!("{subject} official website social media accounts");
-    }
-    let mut texts: Vec<(String, String)> = questions.iter().map(|item| (item.id.clone(), item.text.clone())).collect();
-    texts.push(("question".into(), question.to_string()));
-    let mut labels: Vec<&str> = Vec::new();
-    for (platform, _) in question_platforms(&texts) {
-        let label = match platform.as_str() {
-            "twitter" => "X Twitter",
-            "instagram" => "Instagram",
-            "facebook" => "Facebook",
-            "tiktok" => "TikTok",
-            "youtube" => "YouTube",
-            "linkedin" => "LinkedIn",
-            "threads" => "Threads",
-            "twitch" => "Twitch",
-            _ => continue,
-        };
-        if !labels.contains(&label) {
-            labels.push(label);
-        }
-    }
-    if labels.is_empty() {
-        labels = vec!["X Twitter", "Instagram"];
-    }
-    format!("{subject} official {} account", labels.join(" "))
-}
-
-/// Three fixed questions when the Recon model is unavailable or its reply fails:
-/// identity, associated accounts or domains, and a corroborating public record.
-pub fn fallback_questions(question: &str) -> Vec<DerivedQuestion> {
-    let subject = display_name(&subject_of(question));
-    let kind = target_kind(question);
-    let named = if kind == "person" { "person_name" } else { "org_name" };
-    let identity = DerivedQuestion {
-        id: "q1".into(),
-        text: format!("Who or what is {subject}, and which authoritative identifiers describe it?"),
-        serves: "Establishes the subject before any enrichment.".into(),
-        needs: Vec::new(),
-        evidence: vec![named.into(), "domain".into()],
-    };
-    let second = if matches!(kind, "person" | "organization") {
-        DerivedQuestion {
-            id: "q2".into(),
-            text: format!("Which online accounts and handles belong to {subject}?"),
-            serves: "Finds handles that profile tools can enrich.".into(),
-            needs: vec![named.into()],
-            evidence: vec!["handle".into(), "platform".into()],
-        }
+/// The one accounts search a starved handle step may add: the entity of the directive
+/// that targets handles plus the fixed `official account` qualifier (`Elon Musk official
+/// account`), with its grounding label. `None` without a directive entity.
+pub fn accounts_search_query(question: &str, directives: &[Directive]) -> Option<(String, GroundedQuery)> {
+    let fallback;
+    let directives = if directives.is_empty() {
+        fallback = fallback_directives(question, &[]);
+        fallback.as_slice()
     } else {
-        DerivedQuestion {
-            id: "q2".into(),
-            text: format!("Which domains, hosts, or addresses are associated with {subject}?"),
-            serves: "Finds infrastructure identifiers that lookup tools accept.".into(),
-            needs: Vec::new(),
-            evidence: vec!["domain".into(), "ip".into()],
-        }
+        directives
     };
-    let record: (&str, Vec<&str>) = match gap_kind(question) {
-        "contacts" | "deliverability" => ("Which public record confirms a contact address for", vec!["email"]),
-        "infrastructure" | "registration" => ("Which registration or network record corroborates", vec!["domain", "ip"]),
-        "vulnerability" => ("Which published advisory record describes", vec!["cve"]),
-        "bitcoin" => ("Which public ledger record shows activity for", vec!["wallet"]),
-        "place" => ("Which public geographic record locates", vec!["address"]),
-        "code" => ("Which public code repository corroborates", vec!["handle", "org_name"]),
-        _ => ("Which independent public record corroborates what is known about", vec![named, "domain"]),
-    };
-    let third = DerivedQuestion {
-        id: "q3".into(),
-        text: format!("{} {subject}?", record.0),
-        serves: "Corroborates the answer with an independent record.".into(),
-        needs: Vec::new(),
-        evidence: record.1.into_iter().map(String::from).collect(),
-    };
-    vec![identity, second, third]
-}
-
-/// Validates a Recon reply: exactly three questions with ids q1–q3, non-empty text,
-/// closed-vocabulary needs and evidence, and evidence that some enabled tool accepts.
-pub fn parse_questions(value: &Value, enabled: &HashSet<String>) -> Result<Vec<DerivedQuestion>, String> {
-    let list = value
-        .get("questions")
-        .and_then(Value::as_array)
-        .ok_or("the reply has no questions array")?;
-    if list.len() != 3 {
-        return Err(format!("expected exactly 3 questions, got {}", list.len()));
-    }
-    let mut questions = Vec::new();
-    for (index, item) in list.iter().enumerate() {
-        let question: DerivedQuestion = serde_json::from_value(item.clone())
-            .map_err(|err| format!("question {} is malformed: {err}", index + 1))?;
-        let expected = format!("q{}", index + 1);
-        if question.id != expected {
-            return Err(format!("question {} must have id {expected}", index + 1));
-        }
-        let text = question.text.trim();
-        if text.is_empty() || text.chars().count() > 300 {
-            return Err(format!("{expected} text must be 1 to 300 characters"));
-        }
-        for kind in question.needs.iter().chain(&question.evidence) {
-            if !BINDING_KINDS.contains(&kind.as_str()) {
-                return Err(format!("{expected} uses {kind}, which is not in the binding vocabulary"));
-            }
-        }
-        let answerable = question.evidence.iter().any(|kind| {
-            enabled
-                .iter()
-                .any(|tool| pickable(tool) && input_kinds(tool).contains(&kind.as_str()))
-        });
-        if !answerable {
-            return Err(format!("{expected} evidence matches no enabled tool input"));
-        }
-        questions.push(DerivedQuestion {
-            text: text.into(),
-            ..question
-        });
-    }
-    Ok(questions)
+    let directive = directive_for_target(directives, "handle").or_else(|| directives.first())?;
+    let entity = directive.entities.first()?;
+    let qualifier = QUALIFIERS.iter().find(|(kind, _)| *kind == "handle").map(|(_, value)| *value).unwrap_or("");
+    let query = format!("{entity} {qualifier}");
+    grounded_query(&query, &directive.entities, &[]).then(|| {
+        (directive.id.clone(), GroundedQuery { query, source: format!("{} entity + qualifier", directive.id) })
+    })
 }
 
 /// Default picking ladders when the picker model is unavailable, by what the question
@@ -3360,7 +3259,7 @@ fn ladder(question: &str, bindings: &[Binding]) -> Vec<&'static str> {
 /// the default ladder, keeping only candidates not already picked. Unkeyed tools go last.
 pub fn fallback_order(
     question: &str,
-    questions: &[DerivedQuestion],
+    questions: &[Directive],
     bindings: &[Binding],
     candidates: &[String],
     unkeyed: &HashSet<String>,
@@ -3394,8 +3293,8 @@ pub fn fallback_order(
     for item in questions {
         gaps.push(Gap {
             id: item.id.clone(),
-            question: item.text.clone(),
-            kind: gap_kind(&item.text).into(),
+            question: item.goal.clone(),
+            kind: gap_kind(&item.goal).into(),
         });
     }
     let enabled: HashSet<String> = candidates.iter().cloned().collect();
@@ -4252,24 +4151,27 @@ mod tests {
     #[test]
     fn binder_maps_kinds_to_inputs_and_never_hands_hunter_a_social_host() {
         let social = vec![binding("domain", "x.com", "call-1")];
-        let (_, _, missing) = bind_arguments("hunter_domain_search", &social, "who is jane?", "");
+        let (_, _, missing) = bind_arguments("hunter_domain_search", &social, "who is jane example?", None);
         assert_eq!(missing, vec!["domain or company".to_string()]);
         // Hunter takes only prompt or primary-provider bindings (D1).
         let primary = |kind: &str, value: &str, evidence: &str| Binding { source_tool: "firecrawl_search".into(), ..binding(kind, value, evidence) };
         let mixed = vec![primary("domain", "nytimes.com", "call-1"), primary("domain", "example.org", "call-2")];
-        let (args, filled, missing) = bind_arguments("hunter_domain_search", &mixed, "who is jane?", "");
+        let (args, filled, missing) = bind_arguments("hunter_domain_search", &mixed, "who is jane?", None);
         assert!(missing.is_empty());
         assert_eq!(args, json!({"domain": "example.org"}));
         assert_eq!(filled, vec!["domain=example.org (domain from call-2 via firecrawl_search)".to_string()]);
         let handle = Binding { qualifier: "twitter".into(), ..binding("handle", "janeexample", "call-3") };
-        let (args, _, missing) = bind_arguments("sociavault_profile", std::slice::from_ref(&handle), "who is jane?", "");
+        let (args, _, missing) = bind_arguments("sociavault_profile", std::slice::from_ref(&handle), "who is jane?", None);
         assert!(missing.is_empty());
         assert_eq!(args, json!({"platform": "twitter", "handle": "janeexample"}));
         assert!(osint::validate("sociavault_profile", &args).is_ok());
-        let (args, _, _) = bind_arguments("keybase_identity", &[handle], "who is jane?", "");
+        let (args, _, _) = bind_arguments("keybase_identity", &[handle], "who is jane?", None);
         assert_eq!(args, json!({"username": "janeexample"}));
-        let (args, _, _) = bind_arguments("firecrawl_search", &[], "who is jane example?", "Which accounts belong to Jane Example?");
-        assert_eq!(args["query"], json!("Which accounts belong to Jane Example?"));
+        // A search query is the directive entity plus its fixed qualifier, never question text.
+        let directives = fallback_directives("who is jane example?", &[]);
+        let (args, filled, _) = bind_arguments("firecrawl_search", &[], "who is jane example?", Some(&directives[1]));
+        assert_eq!(args["query"], json!("Jane Example official account"));
+        assert_eq!(filled, vec!["query=Jane Example official account (d2 entity + qualifier)".to_string()]);
         assert_eq!(unmet_needs("sociavault_profile", &[]), vec!["handle or platform_id".to_string()]);
         assert!(unmet_needs("crtsh_certificates", &mixed).is_empty());
     }
@@ -4299,7 +4201,7 @@ mod tests {
         assert_eq!(kept[0], "hunter_email_verifier");
         let deps = depends_on(&order, at("sociavault_profile"), &[], &HashMap::new(), &HashMap::new());
         assert!(deps.contains(&at("firecrawl_search")));
-        assert_eq!(fallback_questions("who is jane example?").len(), 3);
+        assert_eq!(fallback_directives("who is jane example?", &[]).len(), 3);
         // Geocoder coordinates make Overpass reachable.
         assert!(pickable("overpass_places"));
         assert!(dependencies().iter().all(|row| osint::definition(row.tool).is_some()));

@@ -1162,7 +1162,9 @@ pub fn accept_bindings(candidates: Vec<Binding>, observation: &str) -> Vec<Bindi
         if !occurs {
             continue;
         }
-        if binding.kind == "handle" && !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')) {
+        // LinkedIn handles carry their page type (`company/acme`, `in/jane`).
+        let linkedin_path = binding.qualifier == "linkedin" && (value.starts_with("company/") || value.starts_with("in/")) && value.matches('/').count() == 1;
+        if binding.kind == "handle" && !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-') || (linkedin_path && ch == '/')) {
             continue;
         }
         if binding.kind == "person_name" && !plausible_person_name(&value) {
@@ -1714,6 +1716,25 @@ mod tests {
             {"title": "Acme Robotics Inc - About", "url": "https://acmerobotics.com/about", "snippet": "Founded in 2001."},
         ]});
         assert_eq!(next_args(question, "firecrawl_search", search, "hunter_domain_search")["domain"], json!("acmerobotics.com"));
+    }
+
+    /// Acceptance 3: a domain prompt runs Hunter first, and its social handles feed
+    /// SociaVault in the same turn.
+    #[test]
+    fn domain_prompt_feeds_hunter_then_sociavault() {
+        let question = "Who runs acmerobotics.com?";
+        assert_eq!(first_args(question, "hunter_company_enrichment"), json!({"domain": "acmerobotics.com"}));
+        assert_eq!(first_args(question, "hunter_email_count"), json!({"domain": "acmerobotics.com"}));
+        let card = json!({"name": "Acme Robotics", "domain": "acmerobotics.com", "social": {"twitter": {"handle": "acmerobotics"}, "linkedin": {"handle": "company/acme-robotics"}}});
+        let profile = next_args(question, "hunter_company_enrichment", card.clone(), "sociavault_profile");
+        assert!(
+            profile == json!({"platform": "twitter", "handle": "acmerobotics"}) || profile == json!({"platform": "linkedin", "handle": "company/acme-robotics"}),
+            "{profile}"
+        );
+        let bindings = rule_bindings(question, "call-s1", "hunter_company_enrichment", &card);
+        let linkedin = bindings.iter().find(|binding| binding.qualifier == "linkedin").expect("LinkedIn company handle");
+        let args = json!({"platform": "linkedin", "handle": linkedin.value});
+        assert_eq!(osint::select_route("sociavault_profile", &args).unwrap().endpoint, "company");
     }
 
     #[test]

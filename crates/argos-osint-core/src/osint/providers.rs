@@ -239,7 +239,7 @@ pub fn select_route(tool: &str, v: &Value) -> Result<&'static SociaVaultRoute> {
         });
     }
     let present = |key: &str| str_arg(v, key).is_ok();
-    if platform == "linkedin" && str_arg(v, "handle").is_ok_and(|handle| handle.contains("/company/")) {
+    if platform == "linkedin" && str_arg(v, "handle").is_ok_and(|handle| handle.contains("/company/") || handle.starts_with("company/")) {
         if let Some(route) = routes.iter().find(|route| route.endpoint == "company") {
             return Ok(route);
         }
@@ -296,10 +296,16 @@ fn linkedin_url(raw: &str, company: bool) -> Result<String> {
             if company { "LinkedIn company" } else { "LinkedIn profile" }
         );
         Ok(parsed.to_string())
-    } else if company {
-        Ok(format!("https://www.linkedin.com/company/{}", linkedin_handle(raw)?))
     } else {
-        Ok(format!("https://www.linkedin.com/in/{}", linkedin_handle(raw)?))
+        // Hunter reports LinkedIn handles with their page type: `company/acme`, `in/jane`.
+        let (kind, bare) = match (raw.strip_prefix("company/"), raw.strip_prefix("in/")) {
+            (Some(rest), _) => (Some(true), rest),
+            (_, Some(rest)) => (Some(false), rest),
+            _ => (None, raw),
+        };
+        ensure!(kind.is_none_or(|is_company| is_company == company), "{} handle required", if company { "LinkedIn company" } else { "LinkedIn profile" });
+        let segment = if company { "company" } else { "in" };
+        Ok(format!("https://www.linkedin.com/{segment}/{}", linkedin_handle(bare)?))
     }
 }
 
@@ -1033,6 +1039,10 @@ mod tests {
         // Without an endpoint, a LinkedIn company URL selects the company route.
         let company = request("sociavault_profile", &json!({"platform": "linkedin", "handle": "https://www.linkedin.com/company/acme-robotics/"})).unwrap();
         assert_eq!(company.url.path(), "/v1/scrape/linkedin/company");
+        let hunter_style = request("sociavault_profile", &json!({"platform": "linkedin", "handle": "company/acme-robotics"})).unwrap();
+        assert_eq!(hunter_style.url.path(), "/v1/scrape/linkedin/company");
+        assert_eq!(query(&hunter_style), vec![("url".to_string(), "https://www.linkedin.com/company/acme-robotics".to_string())]);
+        assert!(request("sociavault_profile", &json!({"platform": "linkedin", "endpoint": "profile", "handle": "company/acme-robotics"})).is_err());
         // Platform aliases normalize; a platform the tool does not serve is rejected.
         assert_eq!(request("sociavault_profile", &json!({"platform": "X", "handle": "@example"})).unwrap().url.path(), "/v1/scrape/twitter/profile");
         assert!(request("sociavault_profile", &json!({"platform": "reddit", "handle": "example"})).is_err());

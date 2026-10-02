@@ -12,12 +12,10 @@ pub const MUTED: Color = Color::Rgb(78, 104, 116);
 pub const SELECT: Color = Color::Rgb(14, 92, 72);
 pub const WARN: Color = Color::Rgb(232, 176, 96);
 pub const RED: Color = Color::Rgb(232, 112, 104);
-pub const VIOLET: Color = Color::Rgb(176, 140, 232);
 /// Raised band behind a user prompt, the same role as Grok Build's `bg_light` prompt band.
 pub const USER_BAND: Color = Color::Rgb(12, 36, 44);
 /// Fenced code background, quieter than the user band.
 pub const CODE_BG: Color = Color::Rgb(10, 28, 36);
-pub const TOOL: Color = Color::Rgb(96, 176, 214);
 
 pub fn panel(title: &str) -> Block<'static> {
     Block::default()
@@ -27,6 +25,22 @@ pub fn panel(title: &str) -> Block<'static> {
         .title(title.to_string())
         .title_style(Style::default().fg(ACCENT))
         .style(Style::default().bg(BG).fg(TEXT))
+}
+
+/// Solid raised card. Background is part of the style so a popup covers the view under it.
+pub fn card(title: &str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(ACCENT).bg(SURFACE))
+        .title(title.to_string())
+        .title_style(
+            Style::default()
+                .fg(ACCENT)
+                .bg(SURFACE)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(SURFACE).fg(TEXT))
 }
 
 pub fn text() -> Style {
@@ -65,28 +79,14 @@ pub fn error() -> Style {
     Style::default().fg(RED).bg(BG)
 }
 
-pub fn surface() -> Style {
+pub fn card_text() -> Style {
     Style::default().fg(TEXT).bg(SURFACE)
 }
 
-pub fn directive_color(id: &str) -> Color {
-    match id {
-        "d1" => WARN,
-        "d2" => ACCENT,
-        "d3" => VIOLET,
-        _ => DIM,
-    }
+pub fn card_dim() -> Style {
+    Style::default().fg(DIM).bg(SURFACE)
 }
 
-pub fn node_color(kind: &str) -> Color {
-    match kind {
-        "investigation" => ACCENT,
-        "directive" => WARN,
-        "entity" => TEXT,
-        "topic" => VIOLET,
-        "finding" => GREEN,
-        "evidence" => TOOL,
-        "source" => DIM,
-        _ => TEXT,
-    }
+pub fn card_accent() -> Style {
+    Style::default().fg(ACCENT).bg(SURFACE)
 }

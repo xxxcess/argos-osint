@@ -281,10 +281,8 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
         let Some(call) = call_for(&calls, &source.call_id) else {
             continue;
         };
-        for directive in &directives {
-            if serves_directive(call, &directive.id) {
-                answered.insert(directive.id.clone());
-            }
+        for directive_id in ordered_serves(call, &directives) {
+            answered.insert(directive_id);
         }
     }
     for directive in &directives {
@@ -310,13 +308,7 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
     for source in &cited {
         let call = call_for(&calls, &source.call_id);
         let served = call
-            .map(|call| {
-                directives
-                    .iter()
-                    .filter(|directive| serves_directive(call, &directive.id))
-                    .map(|directive| directive.id.clone())
-                    .collect::<Vec<_>>()
-            })
+            .map(|call| ordered_serves(call, &directives))
             .unwrap_or_default();
         let source_label = source
             .source_url
@@ -497,6 +489,7 @@ pub fn recon_path(graph: &MemoryGraph) -> ReconPath {
         .iter()
         .find(|node| node.kind == GraphNodeKind::Finding)
         .map(|node| node.label.clone());
+    let chosen = choose_directive(graph);
     let mut bands = Vec::new();
     for directive in graph
         .nodes
@@ -508,6 +501,9 @@ pub fn recon_path(graph: &MemoryGraph) -> ReconPath {
             .strip_prefix("directive:")
             .unwrap_or(directive.label.as_str())
             .to_string();
+        if chosen.as_deref() != Some(directive_id.as_str()) {
+            continue;
+        }
         let subjects = graph
             .edges
             .iter()
@@ -541,11 +537,249 @@ pub fn recon_path(graph: &MemoryGraph) -> ReconPath {
     }
 }
 
-fn serves_directive(call: &PlanCall, directive_id: &str) -> bool {
-    directive_ids(&call.reason)
+/// Plain-text recon path used as the synthesis prompt for a saved graph summary.
+pub fn graph_brief(graph: &MemoryGraph) -> String {
+    if graph.is_empty() {
+        return String::new();
+    }
+    let path = recon_path(graph);
+    let chosen = path.bands.first().map(|band| band.directive_id.as_str());
+    let mut lines = vec![format!("Investigation: {}", path.investigation)];
+    if let Some(finding) = graph
+        .nodes
         .iter()
-        .any(|id| id == directive_id)
+        .find(|node| node.kind == GraphNodeKind::Finding)
+    {
+        lines.push(format!(
+            "Conclusion: {}",
+            finding.detail.replace('\n', " | ")
+        ));
+    }
+    for node in graph.nodes.iter().filter(|node| keep_node(node, chosen)) {
+        lines.push(format!("{}: {}", node.kind.label(), node.label));
+        let detail = node.detail.replace('\n', " | ");
+        if !detail.is_empty() && detail != node.label {
+            lines.push(format!("  {detail}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push("Recon path".into());
+    for band in &path.bands {
+        let goal = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == GraphNodeKind::Directive && node.label == band.directive_id)
+            .and_then(|node| node.detail.lines().next())
+            .filter(|line| !line.is_empty())
+            .unwrap_or(band.directive_label.as_str());
+        lines.push(format!("Directive {}: {goal}", band.directive_id));
+        if !band.subjects.is_empty() {
+            lines.push(format!("  investigates {}", band.subjects.join(", ")));
+        }
+        if band.evidence.is_empty() {
+            lines.push("  evidence: none".into());
+        } else {
+            for item in &band.evidence {
+                lines.push(format!("  evidence: {}", item.replace('\n', " ")));
+            }
+        }
+        match &band.finding {
+            Some(finding) => lines.push(format!("  finding: {finding}")),
+            None => lines.push("  finding: none".into()),
+        }
+    }
+    for edge in &graph.edges {
+        let from_node = graph.node(&edge.from);
+        let to_node = graph.node(&edge.to);
+        if from_node.is_some_and(|node| !keep_node(node, chosen))
+            || to_node.is_some_and(|node| !keep_node(node, chosen))
+        {
+            continue;
+        }
+        let from = from_node
+            .map(|node| node.label.as_str())
+            .unwrap_or(edge.from.as_str());
+        let to = to_node
+            .map(|node| node.label.as_str())
+            .unwrap_or(edge.to.as_str());
+        lines.push(format!("{from} {} {to}", edge.kind.verb()));
+    }
+    lines.join("\n")
 }
+
+fn ordered_serves(call: &PlanCall, directives: &[Directive]) -> Vec<String> {
+    let known: HashSet<&str> = directives.iter().map(|directive| directive.id.as_str()).collect();
+    directive_ids(&call.reason)
+        .into_iter()
+        .filter(|id| known.contains(id.as_str()))
+        .collect()
+}
+
+/// The one directive this insight rests on. Cited evidence counts first: a call that
+/// serves only one directive outweighs a call shared across several. The insight's
+/// entity, topic, and finding, then the question, break the remaining ties.
+fn choose_directive(graph: &MemoryGraph) -> Option<String> {
+    let directives: Vec<&GraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == GraphNodeKind::Directive)
+        .collect();
+    if directives.is_empty() {
+        return None;
+    }
+    let evidence: Vec<&GraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == GraphNodeKind::Evidence)
+        .collect();
+    let tagged: HashSet<&str> = evidence
+        .iter()
+        .flat_map(|node| node.tags.iter().map(String::as_str))
+        .collect();
+    let claim = claim_tokens(graph);
+    let question = tokens(
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == GraphNodeKind::Investigation)
+            .map(|node| node.label.as_str())
+            .unwrap_or(""),
+    );
+    let mut best_id = None;
+    let mut best_score = i32::MIN;
+    for directive in &directives {
+        let id = directive
+            .id
+            .strip_prefix("directive:")
+            .unwrap_or(directive.label.as_str());
+        if !tagged.is_empty() && !tagged.contains(id) {
+            continue;
+        }
+        let mut score = 0;
+        for item in &evidence {
+            if item.tags.first().map(String::as_str) == Some(id) {
+                score += if item.tags.len() == 1 { 8 } else { 3 };
+            } else if item.tags.iter().any(|tag| tag == id) {
+                score += 1;
+            }
+        }
+        let directive_tokens = directive_tokens(graph, directive);
+        for token in &claim {
+            if directive_tokens.contains(token) {
+                score += 3;
+            }
+        }
+        for token in &question {
+            if directive_tokens.contains(token) && !claim.contains(token) {
+                score += 2;
+            }
+        }
+        if graph
+            .edges
+            .iter()
+            .any(|edge| edge.kind == GraphEdgeKind::Answers && edge.to == directive.id)
+        {
+            score += 1;
+        }
+        if score > best_score {
+            best_score = score;
+            best_id = Some(id.to_string());
+        }
+    }
+    best_id.or_else(|| {
+        directives.first().map(|directive| {
+            directive
+                .id
+                .strip_prefix("directive:")
+                .unwrap_or(directive.label.as_str())
+                .to_string()
+        })
+    })
+}
+
+fn keep_node(node: &GraphNode, chosen: Option<&str>) -> bool {
+    let Some(chosen) = chosen else {
+        return true;
+    };
+    match node.kind {
+        GraphNodeKind::Directive => {
+            node.id == format!("directive:{chosen}") || node.label == chosen
+        }
+        GraphNodeKind::Evidence => node.tags.is_empty() || node.tags.iter().any(|tag| tag == chosen),
+        _ => true,
+    }
+}
+
+fn claim_tokens(graph: &MemoryGraph) -> HashSet<String> {
+    let Some(finding) = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == GraphNodeKind::Finding)
+    else {
+        return HashSet::new();
+    };
+    let mut text = finding.label.clone();
+    for edge in &graph.edges {
+        if edge.kind == GraphEdgeKind::Concerns && edge.from == finding.id {
+            if let Some(node) = graph.node(&edge.to) {
+                text.push(' ');
+                text.push_str(&node.label);
+            }
+        }
+    }
+    tokens(&text)
+}
+
+fn directive_tokens(graph: &MemoryGraph, directive: &GraphNode) -> HashSet<String> {
+    let mut text = directive.detail.clone();
+    for edge in &graph.edges {
+        if edge.kind != GraphEdgeKind::Investigates || edge.from != directive.id {
+            continue;
+        }
+        let Some(node) = graph.node(&edge.to) else {
+            continue;
+        };
+        if node.kind == GraphNodeKind::Entity {
+            text.push(' ');
+            text.push_str(&node.label);
+        }
+    }
+    tokens(&text)
+}
+
+fn tokens(text: &str) -> HashSet<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 4 && !STOP.contains(&token.to_ascii_lowercase().as_str()))
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+const STOP: &[&str] = &[
+    "about",
+    "been",
+    "collect",
+    "find",
+    "found",
+    "from",
+    "have",
+    "identify",
+    "into",
+    "investigation",
+    "locate",
+    "official",
+    "public",
+    "recent",
+    "that",
+    "their",
+    "this",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "your",
+];
 
 fn directive_ids(reason: &str) -> Vec<String> {
     let mut ids = Vec::new();
@@ -683,11 +917,10 @@ mod tests {
             1
         );
         let path = recon_path(&graph);
-        assert_eq!(path.bands.len(), 3);
+        assert_eq!(path.bands.len(), 1);
+        assert_eq!(path.bands[0].directive_id, "d1");
         assert!(path.bands[0].finding.is_some());
-        assert!(path.bands[1].finding.is_none());
-        assert!(path.bands[2].finding.is_none());
-        assert!(path.bands[2].evidence.is_empty());
+        assert!(!path.bands[0].evidence.is_empty());
         let links = force_links(&graph);
         let entity = graph
             .nodes
@@ -708,6 +941,33 @@ mod tests {
             link.directive == "d1" && (link.from == finding.id || link.to == finding.id)
         }));
         assert!(!links.iter().any(|link| link.directive == "d3"));
+        let brief = graph_brief(&graph);
+        assert!(brief.contains("who is Elon Musk?"));
+        assert!(brief.contains("Establish identity and public roles"));
+        assert!(!brief.contains("Find official accounts"));
+        assert!(!brief.contains("Find affiliated orgs"));
+        assert!(brief.contains("Recon path"));
+    }
+
+    #[test]
+    fn path_keeps_the_directive_the_insight_rests_on_when_one_call_serves_several() {
+        let (mut insight, mut plan) = sample();
+        insight.topic = "accounts".into();
+        insight.predicate = "owns".into();
+        insight.object_value = "x.com".into();
+        plan.calls[0].reason = "d1, d2, d3".into();
+        let graph = build_memory_graph(&insight, &[plan]);
+        let path = recon_path(&graph);
+        assert_eq!(path.bands.len(), 1);
+        assert_eq!(path.bands[0].directive_id, "d2");
+        assert_eq!(
+            path.bands[0].finding.as_deref(),
+            Some("owns → x.com")
+        );
+        assert!(path.bands[0]
+            .subjects
+            .iter()
+            .any(|subject| subject == "Elon Musk"));
     }
 
     #[test]

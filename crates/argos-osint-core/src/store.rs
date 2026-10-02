@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::brain::{normalize_category, recall, Memory, MemorySource, ScoredMemory};
 
@@ -13,6 +13,13 @@ static IDS: AtomicU64 = AtomicU64::new(1);
 fn new_id() -> String {
     let n = IDS.fetch_add(1, Ordering::Relaxed);
     format!("mem-{}-{n}", chrono::Utc::now().timestamp_millis())
+}
+
+/// A saved explanation of one memory, keyed by the directive it was written from.
+pub struct GraphSummary {
+    pub summary: String,
+    /// Directive id. Empty for a summary written before the path was narrowed.
+    pub focus: String,
 }
 
 pub struct Store {
@@ -46,7 +53,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 8,
+                version <= 10,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -158,6 +165,33 @@ impl Store {
                 }
                 self.conn.pragma_update(None, "user_version", 8)?;
             }
+            if version < 9 {
+                self.conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS memory_graph_summaries (
+                       memory_id TEXT PRIMARY KEY,
+                       summary TEXT NOT NULL,
+                       created_at TEXT NOT NULL
+                     );",
+                )?;
+                self.conn.pragma_update(None, "user_version", 9)?;
+            }
+            if version < 10 {
+                let summary_columns: Vec<String> = {
+                    let mut stmt = self
+                        .conn
+                        .prepare("PRAGMA table_info(memory_graph_summaries)")?;
+                    let columns = stmt
+                        .query_map([], |row| row.get(1))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    columns
+                };
+                if !summary_columns.iter().any(|name| name == "focus") {
+                    self.conn.execute_batch(
+                        "ALTER TABLE memory_graph_summaries ADD COLUMN focus TEXT NOT NULL DEFAULT ''",
+                    )?;
+                }
+                self.conn.pragma_update(None, "user_version", 10)?;
+            }
             Ok(())
         })();
         match result {
@@ -250,6 +284,44 @@ impl Store {
         Ok(changed)
     }
 
+    pub fn graph_summary(&self, memory_id: &str) -> Result<Option<GraphSummary>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT summary, focus FROM memory_graph_summaries WHERE memory_id=?1",
+                [memory_id],
+                |row| {
+                    Ok(GraphSummary {
+                        summary: row.get(0)?,
+                        focus: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Stores the synthesis explanation for one memory's recon path.
+    /// `focus` is the directive id the summary was written from.
+    /// Returns false when that memory is already gone.
+    pub fn save_graph_summary(&self, memory_id: &str, summary: &str, focus: &str) -> Result<bool> {
+        let summary = summary.trim();
+        anyhow::ensure!(!summary.is_empty(), "graph summary is empty");
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE id=?1",
+            [memory_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "INSERT INTO memory_graph_summaries(memory_id,summary,created_at,focus) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(memory_id) DO UPDATE SET summary=excluded.summary, created_at=excluded.created_at, focus=excluded.focus",
+            params![memory_id, summary, chrono::Utc::now().to_rfc3339(), focus],
+        )?;
+        Ok(true)
+    }
+
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<bool> {
@@ -257,6 +329,10 @@ impl Store {
             self.conn.execute("DELETE FROM insight_relations WHERE left_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1) OR right_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
             self.conn
                 .execute("DELETE FROM insight_claims WHERE memory_id=?1", [id])?;
+            self.conn.execute(
+                "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
+                [id],
+            )?;
             Ok(self
                 .conn
                 .execute("DELETE FROM memories WHERE id=?1", [id])?
@@ -334,6 +410,35 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_memory_removes_its_graph_summary() {
+        let store = Store::memory().unwrap();
+        let memory = store
+            .add_memory(
+                "Atlas launch",
+                "project",
+                false,
+                MemorySource {
+                    app: "chat".into(),
+                    conversation_id: "thread-9".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        assert!(store
+            .save_graph_summary(&memory.id, "The recon path ends at the launch window.", "d1")
+            .unwrap());
+        assert!(store
+            .graph_summary(&memory.id)
+            .unwrap()
+            .unwrap()
+            .summary
+            .contains("launch"));
+        assert!(store.delete_memory(&memory.id).unwrap());
+        assert!(store.graph_summary(&memory.id).unwrap().is_none());
+    }
+
+    #[test]
     fn legacy_brain_is_preserved_without_dropping_unrelated_tables() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let conn = Connection::open(file.path()).unwrap();
@@ -372,7 +477,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 10);
         // A version-7 database without the column gains it, keeping existing runs.
         let file = tempfile::NamedTempFile::new().unwrap();
         let store = Store::open(file.path()).unwrap();

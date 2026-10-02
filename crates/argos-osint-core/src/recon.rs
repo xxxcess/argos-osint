@@ -2,7 +2,8 @@
 pub(crate) mod budget;
 mod graph;
 pub use graph::{
-    force_links, recon_path, ForceLink, GraphNode, GraphNodeKind, MemoryGraph, PathBand, ReconPath,
+    force_links, graph_brief, recon_path, ForceLink, GraphNode, GraphNodeKind, MemoryGraph,
+    PathBand, ReconPath,
 };
 pub(crate) mod investigation;
 mod orchestrate;
@@ -1347,9 +1348,19 @@ impl Store {
         tx.execute("UPDATE recon_runs SET state='deleted',stage='deleted' WHERE thread_id=?1 AND state='running'",[tid])?;
         tx.execute("UPDATE osint_calls SET status='cancelled' WHERE thread_id=?1 AND status IN ('queued','running')",[tid])?;
         if insights {
+            let doomed = investigation_memory_ids(&tx, tid)?;
             tx.execute("DELETE FROM insight_sources WHERE thread_id=?1", [tid])?;
-            tx.execute("DELETE FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources) AND memory_id IN (SELECT id FROM memories WHERE pinned=0) AND memory_id NOT IN (SELECT memory_id FROM insight_user_edits)",[])?;
-            tx.execute("DELETE FROM memories WHERE id NOT IN (SELECT memory_id FROM insight_claims) AND source_json LIKE ?1 AND pinned=0 AND id NOT IN (SELECT memory_id FROM insight_user_edits)",[format!("%{tid}%")])?;
+            tx.execute("DELETE FROM insight_relations WHERE left_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources)) OR right_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources))",[])?;
+            tx.execute("DELETE FROM insight_user_edits WHERE memory_id IN (SELECT memory_id FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources))",[])?;
+            tx.execute("DELETE FROM memory_graph_summaries WHERE memory_id IN (SELECT memory_id FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources))",[])?;
+            tx.execute("DELETE FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources)",[])?;
+            for id in doomed {
+                tx.execute(
+                    "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
+                    [id.as_str()],
+                )?;
+                tx.execute("DELETE FROM memories WHERE id=?1 AND id NOT IN (SELECT memory_id FROM insight_claims)",[id.as_str()])?;
+            }
         } else {
             tx.execute("UPDATE insight_sources SET deleted_origin=1,thread_id=NULL,run_id=NULL,answer_id='deleted-origin' WHERE thread_id=?1",[tid])?;
         }
@@ -1470,12 +1481,37 @@ impl Store {
             .collect()
     }
     pub fn deletion_consequences(&self, tid: &str) -> Result<Vec<String>> {
-        let mut stmt=self.conn.prepare("SELECT DISTINCT c.memory_id FROM insight_sources s JOIN insight_claims c ON c.fingerprint=s.fingerprint JOIN memories m ON m.id=c.memory_id WHERE s.thread_id=?1 AND (m.pinned=1 OR EXISTS (SELECT 1 FROM insight_user_edits e WHERE e.memory_id=m.id)) AND NOT EXISTS (SELECT 1 FROM insight_sources other WHERE other.fingerprint=s.fingerprint AND other.thread_id<>?1)")?;
-        let rows = stmt
-            .query_map([tid], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        investigation_memory_ids(&self.conn, tid)
     }
+}
+
+/// Memories this investigation owns: its extracted insights, and memories filed
+/// against the thread, unless another investigation still sources the claim.
+fn investigation_memory_ids(conn: &rusqlite::Connection, tid: &str) -> Result<Vec<String>> {
+    let source_like = format!("%\"conversation_id\":\"{tid}\"%");
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT m.id FROM memories m
+         WHERE (
+           m.id IN (
+             SELECT c.memory_id FROM insight_claims c
+             JOIN insight_sources s ON s.fingerprint = c.fingerprint
+             WHERE s.thread_id = ?1
+           )
+           OR m.source_json LIKE ?2
+         )
+         AND m.id NOT IN (
+           SELECT c.memory_id FROM insight_claims c
+           JOIN insight_sources s ON s.fingerprint = c.fingerprint
+           WHERE s.thread_id IS NOT NULL AND s.thread_id <> ?1
+         )",
+    )?;
+    let rows = stmt
+        .query_map(params![tid, source_like], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+impl Store {
     pub fn recon_recall(&self, entities: &[(String, String)]) -> Result<Vec<RecallInsight>> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
@@ -3070,6 +3106,9 @@ impl Service {
         }
         let mut answer = streamed.text.trim().to_string();
         ensure!(!answer.is_empty(), "empty synthesis answer");
+        // The text already on screen. Repair is not streamed, so a failed repair must
+        // not throw this away and fail the turn.
+        let watched = answer.clone();
         if let Err(error) = validate_citations(&answer, results) {
             progress(TurnEvent::AnswerNote("fixing citations…".into()));
             let allowance = {
@@ -3121,7 +3160,13 @@ impl Service {
             }
             answer = repaired.text.trim().into();
         }
-        let (answer, dropped) = settle_citations(&answer, results)?;
+        let (answer, dropped) = match settle_citations(&answer, results) {
+            Ok(settled) => settled,
+            Err(_) => {
+                self.keep_partial(run, plan, results, &watched, UNCITED)?;
+                return Ok(None);
+            }
+        };
         if !dropped.is_empty() {
             let mut logged = plan.clone();
             logged.binding_notes.push(format!(
@@ -3504,12 +3549,18 @@ fn cut_short_answer(streamed: &str, results: &[(String, ToolResult)], reason: &s
     out
 }
 
+/// Citation repair could not attach a real evidence id. The streamed answer is stored
+/// anyway; this is not a timeout.
+const UNCITED: &str = "missing evidence citations";
+
 fn cut_footer(reason: &str) -> String {
     if reason == budget::STREAM_LOST {
         format!(
             "{} ({reason}). The text received so far was kept.",
             budget::CUT_SHORT
         )
+    } else if reason == UNCITED {
+        "The answer was kept, but it did not cite gathered evidence. Re-run the turn if you need cited claims.".into()
     } else {
         format!("{} ({reason}). {}", budget::CUT_SHORT, budget::CUT_NOTE)
     }
@@ -3974,6 +4025,54 @@ mod tests {
         assert_eq!(relation, 1);
         s.delete_thread(&a.id, true).unwrap();
         assert_eq!(s.list_memories().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deleting_an_investigation_removes_its_brain_memories_and_graph_summary() {
+        let mut store = Store::memory().unwrap();
+        let thread = store.new_thread("Owned").unwrap();
+        let other = store.new_thread("Other").unwrap();
+        let owned = store
+            .add_memory(
+                "only this investigation",
+                "investigation",
+                true,
+                crate::brain::MemorySource {
+                    app: "recon".into(),
+                    conversation_id: thread.id.clone(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        store
+            .save_graph_summary(&owned.id, "The path established the claim.", "d1")
+            .unwrap();
+        let kept = store
+            .add_memory(
+                "filed elsewhere",
+                "fact",
+                false,
+                crate::brain::MemorySource {
+                    app: "recon".into(),
+                    conversation_id: other.id.clone(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        let removed = store.deletion_consequences(&thread.id).unwrap();
+        assert_eq!(removed, vec![owned.id.clone()]);
+        store.delete_thread(&thread.id, true).unwrap();
+        let ids: Vec<_> = store
+            .list_memories()
+            .unwrap()
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect();
+        assert!(!ids.contains(&owned.id));
+        assert!(ids.contains(&kept.id));
+        assert!(store.graph_summary(&owned.id).unwrap().is_none());
     }
     #[test]
     fn answer_evidence_survives_reopen_and_deleted_thread_rejects_late_calls() {

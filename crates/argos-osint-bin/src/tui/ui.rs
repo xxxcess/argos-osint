@@ -5,23 +5,24 @@ use std::collections::HashSet;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::markdown::{self, Piece, Tone};
 
 use super::app::{
-    is_picker_field, App, BrainListMode, BrainPage, ButtonId, ChoiceKind, DefaultsRole, FieldId,
-    GraphView, ModuleId, Overlay, ProviderPage, Target,
+    is_picker_field, App, BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId, ModuleId,
+    Overlay, ProviderPage, Target,
 };
-use super::theme::{self, panel};
+use super::theme;
 use argos_osint_core::osint;
 use argos_osint_core::provider;
 use argos_osint_core::recon::{self, Plan};
 
 const TAB_H: u16 = 1;
+const PAGE_TAB_H: u16 = 3;
 const FIELD_H: u16 = 2;
-const ACTION_H: u16 = 1;
+const ACTION_H: u16 = 3;
 
 fn split_vertical(area: Rect, constraints: impl IntoIterator<Item = Constraint>) -> Vec<Rect> {
     Layout::default()
@@ -83,7 +84,7 @@ fn header_tabs(area: Rect) -> Vec<(Option<ModuleId>, Rect)> {
     let mut x = area.x;
     let mut out = Vec::new();
     for (index, label) in labels.iter().enumerate() {
-        let width = (label.len() as u16 + 2).min(area.width.saturating_sub(x - area.x));
+        let width = (label.len() as u16 + 4).min(area.width.saturating_sub(x - area.x));
         if width < 2 {
             break;
         }
@@ -131,11 +132,6 @@ fn composer_parts(area: Rect) -> (Rect, Rect) {
     let send = 8.min(area.width / 5);
     let parts = split_horizontal(area, [Constraint::Min(8), Constraint::Length(send.max(6))]);
     (parts[0], parts[1])
-}
-
-fn brain_pages(area: Rect) -> (Rect, Rect) {
-    let rows = split_vertical(area, [Constraint::Length(TAB_H), Constraint::Min(0)]);
-    (rows[0], rows[1])
 }
 
 struct BrainList {
@@ -189,7 +185,32 @@ fn brain_form(area: Rect) -> BrainForm {
 }
 
 fn provider_areas(area: Rect) -> Vec<Rect> {
-    split_vertical(area, [Constraint::Length(TAB_H), Constraint::Min(4)])
+    split_vertical(area, [Constraint::Length(PAGE_TAB_H), Constraint::Min(4)])
+}
+
+struct BrainPath {
+    back: Rect,
+    body: Rect,
+}
+
+fn brain_path(area: Rect) -> BrainPath {
+    let rows = split_vertical(area, [Constraint::Length(ACTION_H), Constraint::Min(0)]);
+    let back = split_horizontal(rows[0], [Constraint::Length(16), Constraint::Min(0)]);
+    BrainPath {
+        back: back[0],
+        body: rows[1],
+    }
+}
+
+fn list_room(height: u16) -> usize {
+    height.saturating_sub(2) as usize
+}
+
+fn in_pane(rect: Rect, x: u16, y: u16) -> bool {
+    x > rect.x
+        && x + 1 < rect.x.saturating_add(rect.width)
+        && y > rect.y
+        && y + 1 < rect.y.saturating_add(rect.height)
 }
 
 fn model_areas(area: Rect) -> Vec<Rect> {
@@ -429,6 +450,9 @@ pub fn chat_blocks(app: &App) -> Vec<ChatBlock> {
 fn build_blocks(app: &App) -> Vec<ChatBlock> {
     let mut blocks = Vec::new();
     let mut used = HashSet::new();
+    // One live answer per open thread. It is appended after every tool row so a plan-log
+    // refresh or a late call cannot push the text the user is reading off the bottom.
+    let mut live: Option<ChatBlock> = None;
     for (index, message) in app.messages.iter().enumerate() {
         if message.role == "user" {
             blocks.push(ChatBlock {
@@ -470,8 +494,10 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                         message_index: None,
                         has_memory: false,
                     });
+                }
+                if !answered {
                     if let Some((title, body)) = app.live_bubble(&run.thread_id) {
-                        blocks.push(ChatBlock {
+                        live = Some(ChatBlock {
                             key: format!("stream:{}", run.id),
                             title,
                             body,
@@ -502,6 +528,9 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
         if used.insert(call_index) {
             blocks.push(tool_block(app, call));
         }
+    }
+    if let Some(block) = live {
+        blocks.push(block);
     }
     blocks
 }
@@ -897,10 +926,16 @@ fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
         .as_ref()
         .map(|result| if result.cached { " · cache" } else { "" })
         .unwrap_or("");
+    let brief = input_brief(&call.inputs);
+    let inputs = if brief.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", clip_chars(&brief, 72))
+    };
     if !app.expanded.contains(&key) {
         return ChatBlock {
             key,
-            title: format!("{name} · {}{cache}", call.status),
+            title: format!("{name} · {}{cache}{inputs}", call.status),
             body: String::new(),
             collapsible: true,
             message_index: None,
@@ -914,17 +949,67 @@ fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
     if let Some(reason) = plan_reason(app, call) {
         lines.insert(0, format!("Reason: {reason}"));
     }
+    lines.extend(input_lines(&call.inputs));
     if let Some(summary) = result_summary(call) {
         lines.push(format!("Result: {summary}"));
     }
     lines.push("Full result is in the System event log.".into());
     ChatBlock {
         key,
-        title: format!("{name} · {}", call.status),
+        title: format!("{name} · {}{inputs}", call.status),
         body: lines.join("\n"),
         collapsible: true,
         message_index: None,
         has_memory: false,
+    }
+}
+
+fn input_brief(inputs: &serde_json::Value) -> String {
+    let serde_json::Value::Object(map) = inputs else {
+        return String::new();
+    };
+    map.iter()
+        .filter_map(|(key, value)| {
+            let shown = match value {
+                serde_json::Value::String(text) if !text.is_empty() => text.clone(),
+                serde_json::Value::Number(number) => number.to_string(),
+                serde_json::Value::Bool(flag) => flag.to_string(),
+                _ => return None,
+            };
+            Some(format!("{key}={shown}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn input_lines(inputs: &serde_json::Value) -> Vec<String> {
+    let serde_json::Value::Object(map) = inputs else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for (key, value) in map {
+        let shown = match value {
+            serde_json::Value::String(text) if !text.is_empty() => text.clone(),
+            serde_json::Value::Number(number) => number.to_string(),
+            serde_json::Value::Bool(flag) => flag.to_string(),
+            serde_json::Value::Array(items) if !items.is_empty() => items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => continue,
+        };
+        if shown.is_empty() {
+            continue;
+        }
+        lines.push(format!("  {key}: {shown}"));
+    }
+    if lines.is_empty() {
+        Vec::new()
+    } else {
+        let mut out = vec!["Input:".into()];
+        out.extend(lines);
+        out
     }
 }
 
@@ -1334,16 +1419,7 @@ fn transcript_rect(app: &App) -> Rect {
     if app.module != Some(ModuleId::Recon) || !app.recon_chat {
         return Rect::default();
     }
-    pad(chat_areas(body).0)
-}
-
-fn pad(area: Rect) -> Rect {
-    Rect {
-        x: area.x.saturating_add(1),
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
-    }
+    inset(chat_areas(body).0)
 }
 
 fn chat_view(app: &App) -> (Rect, u16, Vec<ChatRow>) {
@@ -1421,6 +1497,7 @@ fn chat_spots(app: &App) -> Vec<Spot> {
 }
 
 pub fn normalize(app: &mut App) {
+    app.prune_log();
     let count = chat_blocks(app).len();
     if count == 0 {
         app.chat_sel = 0;
@@ -1552,6 +1629,8 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         }
         Region::Detail => nudge(&mut app.scrolls.detail, delta * 3, 10_000),
         Region::Recall => nudge(&mut app.scrolls.recall, delta * 3, 10_000),
+        Region::Path => nudge(&mut app.scrolls.path, delta, 10_000),
+        Region::Summary => nudge(&mut app.scrolls.summary, delta * 3, 10_000),
         Region::Log => {
             let max = log_max(app);
             nudge(&mut app.scrolls.log, delta * 3, max);
@@ -1583,19 +1662,18 @@ pub fn page(app: &mut App, direction: i32) {
             scroll_chat(app, direction * room);
         }
         Some(ModuleId::Brain)
-            if app.brain_page == BrainPage::Memories
-                && app.brain_list_mode == BrainListMode::List
+            if app.brain_list_mode == BrainListMode::List
                 && matches!(app.focus, Target::Memory(_)) =>
         {
             let room = (memory_room(app) / 2).max(1) as i32;
             let max = memory_max(app);
             nudge_list(&mut app.scrolls.memories, direction * room, max);
         }
-        Some(ModuleId::Brain)
-            if app.brain_page == BrainPage::Memories
-                && app.brain_list_mode == BrainListMode::List =>
-        {
+        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::List => {
             nudge(&mut app.scrolls.recall, direction * 6, 10_000);
+        }
+        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => {
+            nudge(&mut app.scrolls.summary, direction * 4, 10_000);
         }
         Some(ModuleId::Brain) => {}
         Some(ModuleId::Osint) if matches!(app.focus, Target::Tool(_)) => {
@@ -1644,6 +1722,8 @@ enum Region {
     Detail,
     Recall,
     Log,
+    Path,
+    Summary,
     None,
 }
 
@@ -1666,12 +1746,24 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
                 Region::None
             }
         }
-        Some(ModuleId::Brain)
-            if app.brain_page == BrainPage::Memories
-                && app.brain_list_mode == BrainListMode::List =>
-        {
-            let (_, rest) = brain_pages(body);
-            let layout = brain_list(rest);
+        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => {
+            let layout = brain_path(body);
+            if contains(layout.body, x, y) {
+                let rows = split_vertical(
+                    layout.body,
+                    [Constraint::Percentage(55), Constraint::Percentage(45)],
+                );
+                if contains(rows[0], x, y) {
+                    Region::Path
+                } else {
+                    Region::Summary
+                }
+            } else {
+                Region::None
+            }
+        }
+        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::List => {
+            let layout = brain_list(body);
             if contains(layout.list, x, y) {
                 Region::Memories
             } else if contains(layout.recall, x, y) {
@@ -1717,25 +1809,23 @@ fn thread_room(app: &App) -> usize {
     if app.recon_chat {
         return 1;
     }
-    dashboard_areas(chrome(app.screen, app).body)
-        .1
-        .height
-        .saturating_sub(1) as usize
+    list_room(dashboard_areas(chrome(app.screen, app).body).1.height).max(1)
 }
 
 fn memory_room(app: &App) -> usize {
-    if app.brain_page != BrainPage::Memories || app.brain_list_mode != BrainListMode::List {
+    if app.brain_list_mode != BrainListMode::List {
         return 1;
     }
-    let (_, rest) = brain_pages(chrome(app.screen, app).body);
-    brain_list(rest).list.height.saturating_sub(1) as usize / 2
+    (list_room(brain_list(chrome(app.screen, app).body).list.height) / 2).max(1)
 }
 
 fn tool_room(app: &App) -> usize {
-    osint_areas(chrome(app.screen, app).body, api_key_slot(app).is_some())
-        .list
-        .height
-        .saturating_sub(1) as usize
+    list_room(
+        osint_areas(chrome(app.screen, app).body, api_key_slot(app).is_some())
+            .list
+            .height,
+    )
+    .max(1)
 }
 
 fn thread_max(app: &App) -> u16 {
@@ -1753,10 +1843,7 @@ fn tool_max(app: &App) -> u16 {
 }
 
 fn log_max(app: &App) -> u16 {
-    let room = system_areas(chrome(app.screen, app).body)
-        .2
-        .height
-        .saturating_sub(1);
+    let room = list_room(system_areas(chrome(app.screen, app).body).2.height) as u16;
     log_line_count(app).saturating_sub(room as usize) as u16
 }
 
@@ -1887,15 +1974,11 @@ pub fn focus_order(app: &App) -> Vec<Target> {
         Some(ModuleId::Brain) => {
             let mut order = vec![Target::Home];
             order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            order.extend(BrainPage::ALL.map(Target::BrainTab));
-            match (app.brain_page, app.brain_list_mode) {
-                (BrainPage::Graph, _) => {
-                    order.extend(GraphView::ALL.map(Target::GraphView));
-                    if !super::graph::selectable(&app.brain_graph, app.graph_view).is_empty() {
-                        order.push(Target::GraphNode(app.graph_node));
-                    }
+            match app.brain_list_mode {
+                BrainListMode::Graph => {
+                    order.push(Target::Button(ButtonId::BrainBack));
                 }
-                (_, BrainListMode::Create) => {
+                BrainListMode::Create => {
                     order.extend(
                         [
                             FieldId::BrainApp,
@@ -2150,7 +2233,7 @@ fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     if contains(search, x, y) {
         return Some(Target::Field(FieldId::ReconSearch));
     }
-    if contains(list, x, y) && y > list.y && y < list.y + list.height {
+    if in_pane(list, x, y) {
         let index = app.scrolls.threads as usize + (y - list.y - 1) as usize;
         if index < app.threads.len() {
             return Some(Target::Thread(index));
@@ -2168,19 +2251,15 @@ fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
 }
 
 fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
-    let (tabs, rest) = brain_pages(body);
-    if contains(tabs, x, y) {
-        let areas = button_areas(tabs, BrainPage::ALL.len());
-        return areas
-            .into_iter()
-            .zip(BrainPage::ALL)
-            .find_map(|(rect, page)| contains(rect, x, y).then_some(Target::BrainTab(page)));
-    }
-    if app.brain_page == BrainPage::Graph {
-        return super::graph::hit(app, rest, x, y);
+    if app.brain_list_mode == BrainListMode::Graph {
+        let layout = brain_path(body);
+        if contains(layout.back, x, y) {
+            return Some(Target::Button(ButtonId::BrainBack));
+        }
+        return None;
     }
     if app.brain_list_mode == BrainListMode::Create {
-        let form = brain_form(rest);
+        let form = brain_form(body);
         if contains(form.app, x, y) {
             return Some(Target::Field(FieldId::BrainApp));
         }
@@ -2200,7 +2279,7 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
         return None;
     }
-    let layout = brain_list(rest);
+    let layout = brain_list(body);
     if contains(layout.query, x, y) {
         return Some(Target::Field(FieldId::BrainQuery));
     }
@@ -2218,7 +2297,7 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             .position(|rect| contains(*rect, x, y))
             .map(|index| Target::Button(ids[index]));
     }
-    if contains(layout.list, x, y) && y > layout.list.y && y < layout.list.y + layout.list.height {
+    if in_pane(layout.list, x, y) {
         let index = app.scrolls.memories as usize + (y - layout.list.y - 1) as usize / 2;
         if index < app.memories.len() {
             return Some(Target::Memory(index));
@@ -2247,7 +2326,7 @@ fn osint_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             });
         }
     }
-    if contains(list, x, y) && y > list.y && y < list.y + list.height {
+    if in_pane(list, x, y) {
         let tools = visible_tools(app);
         let index = app.scrolls.tools as usize + (y - list.y - 1) as usize;
         if let Some((id, _)) = tools.get(index) {
@@ -2351,7 +2430,7 @@ fn provider_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
 }
 
 fn system_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
-    let (_, actions, _) = system_areas(body);
+    let (_, actions, log) = system_areas(body);
     if contains(actions, x, y) {
         let areas = button_areas(actions, 2);
         return Some(Target::Button(if contains(areas[0], x, y) {
@@ -2360,7 +2439,30 @@ fn system_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             ButtonId::ClearLog
         }));
     }
-    let _ = app;
+    log_index_at(app, log, x, y).map(Target::LogLine)
+}
+
+/// The event-log entry under a click. The fold arrow is the first cell of the entry's
+/// header row; a click anywhere on that entry folds it.
+fn log_index_at(app: &App, log: Rect, x: u16, y: u16) -> Option<usize> {
+    let inner = inset(log);
+    if app.log.is_empty() || !contains(inner, x, y) {
+        return None;
+    }
+    let row = (y - inner.y) as usize + app.scrolls.log as usize;
+    let mut cursor = 0usize;
+    for (index, entry) in app.log.iter().enumerate() {
+        let extra = if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
+            entry.detail.lines().count()
+        } else {
+            0
+        };
+        let height = 1 + extra;
+        if row < cursor + height {
+            return Some(index);
+        }
+        cursor += height;
+    }
     None
 }
 
@@ -2390,19 +2492,15 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
         }
         FieldId::BrainQuery
             if app.module == Some(ModuleId::Brain)
-                && app.brain_page == BrainPage::Memories
                 && app.brain_list_mode == BrainListMode::List =>
         {
-            let (_, rest) = brain_pages(layout.body);
-            Some(brain_list(rest).query)
+            Some(brain_list(layout.body).query)
         }
         FieldId::BrainApp | FieldId::BrainConversation | FieldId::BrainInsight
             if app.module == Some(ModuleId::Brain)
-                && app.brain_page == BrainPage::Memories
                 && app.brain_list_mode == BrainListMode::Create =>
         {
-            let (_, rest) = brain_pages(layout.body);
-            let form = brain_form(rest);
+            let form = brain_form(layout.body);
             match field {
                 FieldId::BrainConversation => Some(form.conversation),
                 FieldId::BrainInsight => Some(form.insight),
@@ -2622,18 +2720,33 @@ fn value_area_or_composer(area: Rect, field: FieldId) -> Rect {
 }
 
 fn draw_button(frame: &mut Frame, app: &App, button: ButtonId, label: &str, area: Rect) {
-    if area.width == 0 || area.height == 0 {
+    if area.width < 2 || area.height < 2 {
         return;
     }
     let selected = app.focus == Target::Button(button);
+    let border = if selected {
+        theme::accent()
+    } else {
+        Style::default().fg(theme::BORDER).bg(theme::BG)
+    };
     frame.render_widget(
-        Paragraph::new(format!(" {label} "))
+        Paragraph::new(label)
             .alignment(Alignment::Center)
             .style(if selected {
                 theme::selected()
             } else {
                 theme::dim()
-            }),
+            })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border)
+                    .style(if selected {
+                        theme::selected()
+                    } else {
+                        theme::dim()
+                    }),
+            ),
         area,
     );
 }
@@ -2659,14 +2772,26 @@ fn draw_tabs<T: Copy>(
         frame.render_widget(
             Paragraph::new(label)
                 .alignment(Alignment::Center)
-                .style(style),
+                .style(style)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(if active || focused {
+                            theme::accent()
+                        } else {
+                            Style::default().fg(theme::BORDER).bg(theme::BG)
+                        })
+                        .style(style),
+                ),
             rect,
         );
     }
 }
 
-fn pane(title: &str) -> ratatui::widgets::Block<'static> {
-    ratatui::widgets::Block::default()
+fn pane(title: &str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
         .title(title.to_string())
         .title_style(theme::dim())
         .style(theme::text())
@@ -2726,7 +2851,7 @@ fn draw_header(frame: &mut Frame, app: &App, layout: &Chrome) {
         } else {
             theme::dim()
         };
-        spans.push(Span::styled(format!(" {label} "), style));
+        spans.push(Span::styled(format!("│ {label} │"), style));
     }
     let detail = header_detail(app);
     let room = layout.header.width.saturating_sub(used.saturating_add(1)) as usize;
@@ -2759,9 +2884,10 @@ fn header_detail(app: &App) -> String {
                 .unwrap_or("New investigation");
             title.to_string()
         }
-        Some(ModuleId::Brain) => match app.brain_page {
-            BrainPage::Memories => "memories".into(),
-            BrainPage::Graph => format!("graph · {}", app.graph_view.title().to_ascii_lowercase()),
+        Some(ModuleId::Brain) => match app.brain_list_mode {
+            BrainListMode::List => "memories".into(),
+            BrainListMode::Create => "new memory".into(),
+            BrainListMode::Graph => "recon path".into(),
         },
         Some(ModuleId::Osint) => "lookup tools".into(),
         Some(ModuleId::Providers) => app.provider_page.title().to_string(),
@@ -2797,8 +2923,8 @@ fn footer_line(app: &App) -> Paragraph<'static> {
                 "↑↓ open · Ctrl+N new · Ctrl+K · Esc home"
             }
             (Some(ModuleId::Recon), _) => "Tab next · Enter · Ctrl+K · Esc list",
-            (Some(ModuleId::Brain), _) if app.brain_page == BrainPage::Graph => {
-                "1–3 views · h/l node · Ctrl+K · Esc home"
+            (Some(ModuleId::Brain), _) if app.brain_list_mode == BrainListMode::Graph => {
+                "↑↓ summary · Esc memories · Ctrl+K"
             }
             (Some(ModuleId::System), _) => "↑↓ log · Enter fold · Ctrl+K · Esc home",
             _ => "Tab next · Enter · Ctrl+K commands · Esc home",
@@ -2874,10 +3000,10 @@ fn draw_slash_hint(frame: &mut Frame, app: &App, body: Rect) {
     let area = Rect {
         x: body.x,
         y: body.y + body.height.saturating_sub(height),
-        width: body.width.min(48).max(24),
+        width: body.width.clamp(24, 48),
         height,
     };
-    let mut lines = vec![Line::from(Span::styled(" commands", theme::dim()))];
+    let mut lines = vec![Line::from(Span::styled(" commands", theme::card_dim()))];
     for (index, (name, help)) in matches.iter().enumerate() {
         let selected = index == 0;
         lines.push(Line::from(Span::styled(
@@ -2885,14 +3011,15 @@ fn draw_slash_hint(frame: &mut Frame, app: &App, body: Rect) {
             if selected {
                 theme::selected()
             } else {
-                theme::text()
+                theme::card_text()
             },
         )));
     }
+    cover(frame, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .style(theme::surface())
-            .block(panel("")),
+            .style(theme::card_text())
+            .block(theme::card("")),
         area,
     );
 }
@@ -2945,13 +3072,7 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             theme::dim()
         };
-        let prefix = if selected {
-            "▸ "
-        } else if target.is_some() {
-            "  "
-        } else {
-            "  "
-        };
+        let prefix = if selected { "▸ " } else { "  " };
         lines.push(Line::from(Span::styled(format!("{prefix}{label}"), style)));
     }
     frame.render_widget(
@@ -2973,7 +3094,7 @@ fn draw_recon(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_recon_dashboard(frame: &mut Frame, app: &App, area: Rect) {
     let (search, list, actions) = dashboard_areas(area);
     draw_field(frame, app, FieldId::ReconSearch, " Find ", search);
-    let room = list.height.saturating_sub(1) as usize;
+    let room = list_room(list.height);
     let width = list.width.saturating_sub(1) as usize;
     let items = app
         .threads
@@ -3022,6 +3143,7 @@ fn draw_recon_dashboard(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_recon_chat(frame: &mut Frame, app: &App, area: Rect) {
     let (transcript, run_actions) = chat_areas(area);
+    frame.render_widget(pane(" transcript "), transcript);
     draw_transcript(frame, app, transcript);
     let run_buttons = button_areas(run_actions, 3);
     draw_button(frame, app, ButtonId::CancelRun, "Cancel", run_buttons[0]);
@@ -3112,18 +3234,7 @@ fn face_background(style: Style, face: RowFace) -> Style {
 }
 
 fn tone_style(tone: Tone) -> Style {
-    match tone {
-        Tone::Body => theme::text(),
-        Tone::Dim => theme::dim(),
-        Tone::Accent | Tone::Heading => theme::accent().add_modifier(Modifier::BOLD),
-        Tone::Bold => theme::text().add_modifier(Modifier::BOLD),
-        Tone::Italic => theme::text().add_modifier(Modifier::ITALIC),
-        Tone::Strike => theme::dim().add_modifier(Modifier::CROSSED_OUT),
-        Tone::Code => theme::accent().add_modifier(Modifier::BOLD),
-        Tone::Link => theme::accent().add_modifier(Modifier::UNDERLINED),
-        Tone::Warn => theme::warn(),
-        Tone::Error => theme::error(),
-    }
+    super::markdown::style(tone)
 }
 
 fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
@@ -3139,7 +3250,7 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
     let items = tools
         .into_iter()
         .skip(app.scrolls.tools as usize)
-        .take(list.height.saturating_sub(1) as usize)
+        .take(list_room(list.height))
         .map(|(index, tool)| {
             let enabled = app.tool_enabled.get(index).copied().unwrap_or(true);
             ListItem::new(format!(
@@ -3242,25 +3353,14 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
-    let (tabs, rest) = brain_pages(area);
-    draw_tabs(
-        frame,
-        tabs,
-        BrainPage::ALL.into_iter().map(|page| {
-            (
-                page,
-                page.title().to_string(),
-                app.brain_page == page,
-                app.focus == Target::BrainTab(page),
-            )
-        }),
-    );
-    if app.brain_page == BrainPage::Graph {
-        super::graph::draw(frame, app, rest);
+    if app.brain_list_mode == BrainListMode::Graph {
+        let layout = brain_path(area);
+        draw_button(frame, app, ButtonId::BrainBack, "Back", layout.back);
+        super::graph::draw(frame, app, layout.body);
         return;
     }
     if app.brain_list_mode == BrainListMode::Create {
-        let form = brain_form(rest);
+        let form = brain_form(area);
         draw_field(frame, app, FieldId::BrainApp, " Source app ", form.app);
         draw_field(
             frame,
@@ -3275,7 +3375,7 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
         draw_button(frame, app, ButtonId::BrainBack, "Back", actions[1]);
         return;
     }
-    let layout = brain_list(rest);
+    let layout = brain_list(area);
     let actions = button_areas(layout.actions, 5);
     draw_button(frame, app, ButtonId::CreateMemory, "Create", actions[0]);
     draw_button(frame, app, ButtonId::Recall, "Recall", actions[1]);
@@ -3283,7 +3383,7 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     draw_button(frame, app, ButtonId::Delete, "Delete", actions[3]);
     draw_button(frame, app, ButtonId::OpenSource, "Source", actions[4]);
     draw_field(frame, app, FieldId::BrainQuery, " Recall ", layout.query);
-    let room = layout.list.height.saturating_sub(1) as usize / 2;
+    let room = list_room(layout.list.height) / 2;
     let items = app
         .memories
         .iter()
@@ -3531,7 +3631,8 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn log_rows(app: &App) -> Vec<Line<'static>> {
+fn log_rows(app: &App, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
     let mut rows = Vec::new();
     for (index, entry) in app.log.iter().enumerate() {
         let style = if index == app.log_sel {
@@ -3551,12 +3652,18 @@ fn log_rows(app: &App) -> Vec<Line<'static>> {
             "▸ ".into()
         };
         rows.push(Line::from(Span::styled(
-            format!("{marker}{} {} {}", entry.at, entry.level, entry.text),
+            fit(
+                &format!("{marker}{} {} {}", entry.at, entry.level, entry.text),
+                width,
+            ),
             style,
         )));
         if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
             for line in entry.detail.lines() {
-                rows.push(Line::from(Span::styled(format!("  {line}"), theme::text())));
+                rows.push(Line::from(Span::styled(
+                    fit(&format!("  {line}"), width),
+                    theme::text(),
+                )));
             }
         }
     }
@@ -3595,13 +3702,12 @@ fn draw_system(frame: &mut Frame, app: &App, area: Rect) {
             theme::dim(),
         ))]
     } else {
-        log_rows(app)
+        log_rows(app, inset(log).width as usize)
     };
     frame.render_widget(
         Paragraph::new(lines)
             .block(pane(" event log "))
-            .scroll((app.scrolls.log, 0))
-            .wrap(Wrap { trim: false }),
+            .scroll((app.scrolls.log, 0)),
         log,
     );
 }
@@ -3672,11 +3778,21 @@ fn help_text(app: &App) -> &'static str {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Recon · 2 Brain · 3 OSINT · 4 Providers · 5 System\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
-        Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors, run stages, and tool results\n↑↓ select a line · Enter folds a tool result\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",
-        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Create replaces the list with the form\nSave stores the memory and returns to the list. Back or Esc leaves the form\nGraph draws the selected memory\n1 force · 2 directive · 3 path\n↑↓ or h/j/k/l move the selected node\nEsc returns home from the list · ? opens this card",
+        Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors, run stages, and tool results for 24 hours\n↑↓ select a line · Enter or click the arrow folds a tool result\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",
+        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Enter opens that memory's recon path\nThe path sits above a summary of the whole graph\nThe first visit asks Synthesis to write the summary and saves it\nBack or Esc returns to the previous view\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
         Some(ModuleId::Providers) => "Providers\n\nEach account tab stores that provider only\nDefaults sets Recon and Synthesis separately\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
         _ => "Controls\n\nTab moves between fields and buttons\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }
+}
+
+fn cover(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let fill = " ".repeat(area.width as usize);
+    let lines = vec![Line::from(Span::styled(fill, theme::card_text())); area.height as usize];
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_overlay(frame: &mut Frame, app: &App) {
@@ -3689,6 +3805,7 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         return;
     }
     let area = popup_area(frame.area());
+    cover(frame, area);
     let title = match &app.overlay {
         Overlay::Help => " Shortcuts ",
         Overlay::Memories { .. } => " Memory ",
@@ -3697,8 +3814,8 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(popup_text(app))
-            .style(theme::text())
-            .block(panel(title))
+            .style(theme::card_text())
+            .block(theme::card(title))
             .scroll((app.scrolls.popup, 0))
             .wrap(Wrap { trim: false }),
         area,
@@ -3709,12 +3826,13 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         width: 8.min(area.width),
         height: 1,
     };
-    frame.render_widget(Paragraph::new(" close ").style(theme::accent()), close);
+    frame.render_widget(Paragraph::new(" close ").style(theme::card_accent()), close);
 }
 
 fn draw_palette(frame: &mut Frame, app: &App) {
     let area = popup_area(frame.area());
-    frame.render_widget(Paragraph::new("").block(panel(" commands ")), area);
+    cover(frame, area);
+    frame.render_widget(Paragraph::new("").block(theme::card(" commands ")), area);
     let inner = inset(area);
     if inner.height == 0 {
         return;
@@ -3744,7 +3862,7 @@ fn draw_palette(frame: &mut Frame, app: &App) {
                 if selected {
                     theme::selected()
                 } else {
-                    theme::text()
+                    theme::card_text()
                 },
             ),
             Rect {
@@ -3759,11 +3877,12 @@ fn draw_palette(frame: &mut Frame, app: &App) {
 
 fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
     let area = popup_area(frame.area());
+    cover(frame, area);
     let title = match kind {
         ChoiceKind::Provider => format!(" {} provider ", app.defaults_role.label()),
         ChoiceKind::Model => format!(" {} model ", app.defaults_role.label()),
     };
-    frame.render_widget(Paragraph::new("").block(panel(&title)), area);
+    frame.render_widget(Paragraph::new("").block(theme::card(&title)), area);
     let inner = inset(area);
     let mut y = inner.y;
     let mut height = inner.height;
@@ -3773,7 +3892,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
                 &app.choice_note.replace('\n', " "),
                 inner.width as usize,
             ))
-            .style(theme::dim()),
+            .style(theme::card_dim()),
             Rect {
                 x: inner.x,
                 y,
@@ -3791,7 +3910,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
             "No connected account yet. Local is always listed."
         };
         frame.render_widget(
-            Paragraph::new(empty).style(theme::dim()),
+            Paragraph::new(empty).style(theme::card_dim()),
             Rect {
                 x: inner.x,
                 y,
@@ -3815,7 +3934,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
             Paragraph::new(text).style(if selected {
                 theme::selected()
             } else {
-                theme::text()
+                theme::card_text()
             }),
             Rect {
                 x: inner.x,
@@ -3831,7 +3950,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
         width: 8.min(area.width),
         height: 1,
     };
-    frame.render_widget(Paragraph::new(" close ").style(theme::accent()), close);
+    frame.render_widget(Paragraph::new(" close ").style(theme::card_accent()), close);
 }
 
 #[cfg(test)]

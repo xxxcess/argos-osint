@@ -522,15 +522,13 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             with_insights,
         } => {
             let mut store = open_store()?;
-            let retained = if with_insights {
+            let removed = if with_insights {
                 store.deletion_consequences(&thread_id)?
             } else {
                 Vec::new()
             };
             let deleted = store.delete_thread(&thread_id, with_insights)?;
-            print_json(
-                &serde_json::json!({"deleted":deleted,"pinned_or_edited_insights_retained_without_source":retained}),
-            )
+            print_json(&serde_json::json!({"deleted":deleted,"memories_removed":removed}))
         }
         ReconCommand::AskNew { question, title } => {
             let thread = open_store()?.new_thread(&title)?;

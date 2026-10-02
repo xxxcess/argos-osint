@@ -1,7 +1,11 @@
-//! Terminal Markdown for the Recon transcript.
+//! Terminal Markdown for the Recon transcript and Brain graph summary.
 //!
 //! Pretty mode hides the source markers, matching Grok Build's agent messages:
 //! headings, emphasis, inline code, links, lists, quotes, and fenced code.
+
+use ratatui::style::{Modifier, Style};
+
+use super::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -29,6 +33,21 @@ pub struct Piece {
 pub struct MdLine {
     pub pieces: Vec<Piece>,
     pub code: bool,
+}
+
+pub fn style(tone: Tone) -> Style {
+    match tone {
+        Tone::Body => theme::text(),
+        Tone::Dim => theme::dim(),
+        Tone::Accent | Tone::Heading => theme::accent().add_modifier(Modifier::BOLD),
+        Tone::Bold => theme::text().add_modifier(Modifier::BOLD),
+        Tone::Italic => theme::text().add_modifier(Modifier::ITALIC),
+        Tone::Strike => theme::dim().add_modifier(Modifier::CROSSED_OUT),
+        Tone::Code => theme::accent().add_modifier(Modifier::BOLD),
+        Tone::Link => theme::accent().add_modifier(Modifier::UNDERLINED),
+        Tone::Warn => theme::warn(),
+        Tone::Error => theme::error(),
+    }
 }
 
 pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {

@@ -60,6 +60,12 @@ CREATE TABLE IF NOT EXISTS insight_sources (
   PRIMARY KEY(fingerprint, answer_id, call_id)
 );
 CREATE TABLE IF NOT EXISTS insight_user_edits (memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS memory_graph_summaries (
+  memory_id TEXT PRIMARY KEY,
+  summary TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  focus TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS insight_relations (
   left_fingerprint TEXT NOT NULL, right_fingerprint TEXT NOT NULL,
   relation TEXT NOT NULL, PRIMARY KEY(left_fingerprint,right_fingerprint,relation)

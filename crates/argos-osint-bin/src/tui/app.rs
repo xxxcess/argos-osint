@@ -72,6 +72,8 @@ pub struct Scrolls {
     pub log: u16,
     pub popup: u16,
     pub recall: u16,
+    pub path: u16,
+    pub summary: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +107,8 @@ pub struct PaletteItem {
 #[derive(Clone, Debug)]
 pub struct LogLine {
     pub id: u64,
+    /// Unix seconds. Lines older than 24 hours are dropped.
+    pub created: u64,
     pub at: String,
     pub level: String,
     pub text: String,
@@ -132,41 +136,10 @@ impl ProviderPage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BrainPage {
-    Memories,
-    Graph,
-}
-impl BrainPage {
-    pub const ALL: [Self; 2] = [Self::Memories, Self::Graph];
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Memories => "Memories",
-            Self::Graph => "Graph",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrainListMode {
     List,
     Create,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GraphView {
-    Force,
-    Directive,
-    Path,
-}
-impl GraphView {
-    pub const ALL: [Self; 3] = [Self::Force, Self::Directive, Self::Path];
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Force => "Force",
-            Self::Directive => "Directive",
-            Self::Path => "Path",
-        }
-    }
+    Graph,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -309,9 +282,6 @@ pub enum Target {
     App(usize),
     Home,
     ProviderTab(ProviderPage),
-    BrainTab(BrainPage),
-    GraphView(GraphView),
-    GraphNode(usize),
     Memory(usize),
     Thread(usize),
     Tool(usize),
@@ -321,6 +291,8 @@ pub enum Target {
     ChatHeader(usize),
     ChatBody(usize),
     BrainMark(usize),
+    /// One System event-log row. Clicking it folds the entry when it has a detail.
+    LogLine(usize),
     Choice(usize),
     CloseOverlay,
 }
@@ -374,6 +346,10 @@ enum WorkEvent {
     Deadline {
         thread_id: String,
         label: String,
+    },
+    GraphSummary {
+        memory_id: String,
+        outcome: std::result::Result<String, String>,
     },
 }
 
@@ -480,12 +456,11 @@ pub struct App {
     pub memories: Vec<Memory>,
     pub selected_insight: Option<recon::InsightView>,
     pub memory_sel: usize,
-    pub brain_page: BrainPage,
     pub brain_list_mode: BrainListMode,
-    pub graph_view: GraphView,
     pub brain_graph: recon::MemoryGraph,
     brain_graph_for: Option<String>,
-    pub graph_node: usize,
+    pub graph_summary: String,
+    graph_summary_pending: Option<String>,
     pub hits: Vec<ScoredMemory>,
     pub auth: AuthFile,
     pub settings: SettingsFile,
@@ -652,12 +627,11 @@ impl App {
             memories,
             selected_insight: None,
             memory_sel: 0,
-            brain_page: BrainPage::Memories,
             brain_list_mode: BrainListMode::List,
-            graph_view: GraphView::Force,
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
-            graph_node: 0,
+            graph_summary: String::new(),
+            graph_summary_pending: None,
             hits: Vec::new(),
             auth,
             settings,
@@ -711,10 +685,12 @@ impl App {
     }
 
     fn push_log_detail(&mut self, level: &str, text: impl Into<String>, detail: impl Into<String>) {
+        self.prune_log();
         let at_end = self.log.is_empty() || self.log_sel + 1 >= self.log.len();
         self.log_seq = self.log_seq.saturating_add(1);
         self.log.push(LogLine {
             id: self.log_seq,
+            created: unix_now(),
             at: log_stamp(),
             level: level.into(),
             text: text.into(),
@@ -726,9 +702,23 @@ impl App {
                 self.log_open.remove(&line.id);
             }
         }
-        if at_end {
+        if at_end || self.log_sel >= self.log.len() {
             self.log_sel = self.log.len().saturating_sub(1);
-        } else if self.log_sel >= self.log.len() {
+        }
+    }
+
+    /// Drops event-log lines older than 24 hours.
+    pub(crate) fn prune_log(&mut self) {
+        let now = unix_now();
+        let before = self.log.len();
+        self.log
+            .retain(|line| now.saturating_sub(line.created) < LOG_TTL_SECS);
+        if self.log.len() == before {
+            return;
+        }
+        let live: HashSet<u64> = self.log.iter().map(|line| line.id).collect();
+        self.log_open.retain(|id| live.contains(id));
+        if self.log_sel >= self.log.len() {
             self.log_sel = self.log.len().saturating_sub(1);
         }
     }
@@ -760,9 +750,7 @@ impl App {
             ("clear-log", "Clear event log"),
         ];
         items.retain(|(id, label)| {
-            query.is_empty()
-                || id.contains(&query)
-                || label.to_ascii_lowercase().contains(&query)
+            query.is_empty() || id.contains(&query) || label.to_ascii_lowercase().contains(&query)
         });
         items
             .into_iter()
@@ -821,7 +809,10 @@ impl App {
     }
 
     fn run_slash(&mut self, input: &str) -> Result<String> {
-        let mut parts = input.trim().trim_start_matches('/').splitn(2, char::is_whitespace);
+        let mut parts = input
+            .trim()
+            .trim_start_matches('/')
+            .splitn(2, char::is_whitespace);
         let name = parts.next().unwrap_or("").to_ascii_lowercase();
         match name.as_str() {
             "help" | "?" => {
@@ -1107,6 +1098,7 @@ impl App {
         self.input.clear();
         self.store
             .save_draft(&tid, "", i64::from(self.scrolls.chat))?;
+        self.live_answers.remove(&tid);
         self.chat_follow = true;
         let service =
             recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
@@ -1149,6 +1141,7 @@ impl App {
             recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
         let tx = self.work_tx.clone();
         let cancel = Arc::new(AtomicBool::new(false));
+        self.live_answers.remove(&tid);
         self.running.insert(tid.clone(), cancel.clone());
         tokio::spawn(async move {
             let progress_tx = tx.clone();
@@ -1311,7 +1304,24 @@ impl App {
             }
             WorkEvent::ReconDone { thread_id, outcome } => {
                 self.running.remove(&thread_id);
-                self.live_answers.remove(&thread_id);
+                // A saved answer replaces the bubble. A failed turn that never stored one
+                // keeps the text that was already streaming, instead of blanking it when
+                // the recon log picks up the run error.
+                let retain = outcome.is_err()
+                    && self
+                        .live_answers
+                        .get(&thread_id)
+                        .is_some_and(|live| !live.text.trim().is_empty());
+                if retain {
+                    if let Some(live) = self.live_answers.get_mut(&thread_id) {
+                        live.shown.clone_from(&live.text);
+                        if live.note.is_empty() {
+                            live.note = "Recon · stopped".into();
+                        }
+                    }
+                } else {
+                    self.live_answers.remove(&thread_id);
+                }
                 self.deadlines.remove(&thread_id);
                 self.recon_stages.remove(&thread_id);
                 match &outcome {
@@ -1401,6 +1411,34 @@ impl App {
                     }
                 }
                 true
+            }
+            WorkEvent::GraphSummary { memory_id, outcome } => {
+                if self.graph_summary_pending.as_deref() == Some(memory_id.as_str()) {
+                    self.graph_summary_pending = None;
+                }
+                let viewing = self.brain_list_mode == BrainListMode::Graph
+                    && self
+                        .memories
+                        .get(self.memory_sel)
+                        .is_some_and(|memory| memory.id == memory_id);
+                match outcome {
+                    Ok(text) => {
+                        if viewing {
+                            self.graph_summary = text;
+                            self.status = "Graph summary saved".into();
+                        }
+                    }
+                    Err(err) => {
+                        self.push_log("error", format!("Graph summary failed: {err}"));
+                        if viewing {
+                            self.graph_summary = format!(
+                                "Graph summary failed: {err}\n\nLeave and open this memory again to retry."
+                            );
+                            self.status = "Graph summary failed".into();
+                        }
+                    }
+                }
+                viewing
             }
         }
     }
@@ -1766,21 +1804,122 @@ impl App {
             return;
         }
         self.brain_graph_for = id.clone();
-        self.graph_node = 0;
+        self.scrolls.path = 0;
         self.brain_graph = match &id {
             Some(id) => self.store.graph_for_memory(id).unwrap_or_default(),
             None => recon::MemoryGraph::default(),
         };
     }
 
-    fn move_graph_node(&mut self, delta: i32) {
-        let count = super::graph::selectable(&self.brain_graph, self.graph_view).len();
-        if count == 0 {
+    fn reload_memories(&mut self) {
+        let shown = self.brain_graph_for.clone();
+        if let Ok(memories) = self.store.list_memories() {
+            self.memories = memories;
+        }
+        if self.memories.is_empty() {
+            self.memory_sel = 0;
+        } else if self.memory_sel >= self.memories.len() {
+            self.memory_sel = self.memories.len() - 1;
+        }
+        let still = shown
+            .as_ref()
+            .is_some_and(|id| self.memories.iter().any(|memory| &memory.id == id));
+        if self.brain_list_mode == BrainListMode::Graph && !still {
+            self.brain_list_mode = BrainListMode::List;
+            self.graph_summary.clear();
+            self.graph_summary_pending = None;
+        }
+        self.brain_graph_for = None;
+        self.sync_graph();
+    }
+
+    fn leave_brain_detail(&mut self) {
+        self.brain_list_mode = BrainListMode::List;
+        self.set_focus(if self.memories.is_empty() {
+            Target::Button(ButtonId::CreateMemory)
+        } else {
+            Target::Memory(self.memory_sel)
+        });
+        self.status = "Memories".into();
+    }
+
+    fn open_memory_graph(&mut self) {
+        let Some(memory) = self.memories.get(self.memory_sel).cloned() else {
+            self.status = "No memory selected".into();
+            return;
+        };
+        self.brain_list_mode = BrainListMode::Graph;
+        self.scrolls.path = 0;
+        self.scrolls.summary = 0;
+        self.brain_graph_for = None;
+        self.sync_graph();
+        self.set_focus(Target::Button(ButtonId::BrainBack));
+        self.load_or_request_summary(&memory);
+    }
+
+    fn load_or_request_summary(&mut self, memory: &Memory) {
+        let focus = recon::recon_path(&self.brain_graph)
+            .bands
+            .first()
+            .map(|band| band.directive_id.clone())
+            .unwrap_or_default();
+        match self.store.graph_summary(&memory.id) {
+            Ok(Some(saved)) if saved.focus == focus || focus.is_empty() => {
+                self.graph_summary = saved.summary;
+                self.status = "Recon path".into();
+                return;
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(err) => {
+                self.graph_summary = format!("Graph summary unavailable: {err}");
+                self.status = "Graph summary unavailable".into();
+                return;
+            }
+        }
+        if self.brain_graph.is_empty() {
+            self.graph_summary = "This memory has no investigation graph.".into();
+            self.status = "Recon path".into();
             return;
         }
-        let next = (self.graph_node as i32 + delta).clamp(0, count as i32 - 1) as usize;
-        self.graph_node = next;
-        self.set_focus(Target::GraphNode(next));
+        if self.graph_summary_pending.as_deref() == Some(memory.id.as_str()) {
+            self.graph_summary = "Writing graph summary…".into();
+            self.status = self.graph_summary.clone();
+            return;
+        }
+        let secret = match provider::role_secret(&self.auth, &self.settings, "synthesis") {
+            Ok(secret) => secret,
+            Err(err) => {
+                self.graph_summary = format!("Graph summary unavailable: {err}");
+                self.status = "Graph summary unavailable".into();
+                return;
+            }
+        };
+        let prompt = format!(
+            "Memory:\n{}\n\n{}",
+            memory.text,
+            recon::graph_brief(&self.brain_graph)
+        );
+        self.graph_summary_pending = Some(memory.id.clone());
+        self.graph_summary = "Writing graph summary…".into();
+        self.status = self.graph_summary.clone();
+        let memory_id = memory.id.clone();
+        let tx = self.work_tx.clone();
+        let db = paths::db_path();
+        tokio::spawn(async move {
+            let outcome = write_graph_summary(&secret, &prompt)
+                .await
+                .and_then(|text| {
+                    let store = Store::open(&db)?;
+                    if !store.save_graph_summary(&memory_id, &text, &focus)? {
+                        anyhow::bail!("memory was deleted before the summary was saved");
+                    }
+                    Ok(text)
+                });
+            let _ = tx.send(WorkEvent::GraphSummary {
+                memory_id,
+                outcome: outcome.map_err(|err| err.to_string()),
+            });
+        });
     }
 
     fn activate_button(&mut self, button: ButtonId) {
@@ -1790,7 +1929,6 @@ impl App {
                 return;
             }
             ButtonId::CreateMemory => {
-                self.brain_page = BrainPage::Memories;
                 self.brain_list_mode = BrainListMode::Create;
                 self.set_focus(Target::Field(FieldId::BrainApp));
                 self.cursor = self.brain_app.chars().count();
@@ -1798,9 +1936,7 @@ impl App {
                 return;
             }
             ButtonId::BrainBack => {
-                self.brain_list_mode = BrainListMode::List;
-                self.set_focus(Target::Button(ButtonId::CreateMemory));
-                self.status = "Memories".into();
+                self.leave_brain_detail();
                 return;
             }
             ButtonId::Add => self.save_insight(),
@@ -1826,17 +1962,10 @@ impl App {
                     self.status = "No memory selected".into();
                     return;
                 };
-                self.store
-                    .delete_memory(&memory.id)
-                    .and_then(|_| self.store.list_memories())
-                    .map(|memories| {
-                        self.memories = memories;
-                        self.memory_sel =
-                            self.memory_sel.min(self.memories.len().saturating_sub(1));
-                        self.brain_graph_for = None;
-                        self.sync_graph();
-                        "Memory deleted".into()
-                    })
+                self.store.delete_memory(&memory.id).map(|_| {
+                    self.reload_memories();
+                    "Memory deleted".into()
+                })
             }
             ButtonId::NewThread => self.new_thread().map(|_| "New investigation".into()),
             ButtonId::DeleteThread => {
@@ -1847,7 +1976,9 @@ impl App {
                 self.running
                     .remove(&id)
                     .inspect(|cancel| cancel.store(true, Ordering::Relaxed));
-                self.store.delete_thread(&id, false).and_then(|_| {
+                self.store.deletion_consequences(&id).and_then(|removed| {
+                    let removed = removed.len();
+                    self.store.delete_thread(&id, true)?;
                     self.selected_thread = None;
                     self.messages.clear();
                     self.input.clear();
@@ -1856,7 +1987,10 @@ impl App {
                     if let Some(next) = self.threads.first().map(|t| t.id.clone()) {
                         self.open_thread(&next)?;
                     }
-                    Ok("Conversation deleted; contributed insights retained".into())
+                    self.reload_memories();
+                    Ok(format!(
+                        "Investigation deleted; {removed} brain memories removed"
+                    ))
                 })
             }
             ButtonId::CancelRun => {
@@ -2297,36 +2431,6 @@ impl App {
                 self.provider_page = page;
                 self.set_focus(target);
             }
-            Target::BrainTab(page) => {
-                self.brain_page = page;
-                if page == BrainPage::Graph {
-                    self.sync_graph();
-                    let count = super::graph::selectable(&self.brain_graph, self.graph_view).len();
-                    if count == 0 {
-                        self.set_focus(Target::BrainTab(BrainPage::Graph));
-                    } else {
-                        self.graph_node = self.graph_node.min(count - 1);
-                        self.set_focus(Target::GraphNode(self.graph_node));
-                    }
-                } else {
-                    self.set_focus(target);
-                }
-            }
-            Target::GraphView(view) => {
-                self.graph_view = view;
-                self.graph_node = 0;
-                self.set_focus(
-                    if super::graph::selectable(&self.brain_graph, view).is_empty() {
-                        Target::GraphView(view)
-                    } else {
-                        Target::GraphNode(0)
-                    },
-                );
-            }
-            Target::GraphNode(index) => {
-                self.graph_node = index;
-                self.set_focus(target);
-            }
             Target::Memory(index) => {
                 self.memory_sel = index;
                 self.selected_insight = self
@@ -2370,6 +2474,14 @@ impl App {
                 self.chat_sel = index;
                 self.set_focus(Target::Transcript);
                 super::ui::open_memory(self, index);
+            }
+            Target::LogLine(index) => {
+                if self.log.is_empty() {
+                    return;
+                }
+                self.log_sel = index.min(self.log.len() - 1);
+                self.log_browsing = true;
+                self.toggle_log();
             }
             Target::Choice(index) if self.overlay == Overlay::Palette => {
                 if let Some(id) = self.palette_items().get(index).map(|item| item.id.clone()) {
@@ -2485,13 +2597,8 @@ impl App {
             self.running
                 .remove(&id)
                 .inspect(|c| c.store(true, Ordering::Relaxed));
-            let with_insights = input.ends_with("insights");
-            let retained = if with_insights {
-                self.store.deletion_consequences(&id)?.len()
-            } else {
-                0
-            };
-            self.store.delete_thread(&id, with_insights)?;
+            let removed = self.store.deletion_consequences(&id)?.len();
+            self.store.delete_thread(&id, true)?;
             self.selected_thread = None;
             self.messages.clear();
             self.recon_chat = false;
@@ -2499,8 +2606,11 @@ impl App {
             if let Some(next) = self.threads.first().map(|t| t.id.clone()) {
                 self.open_thread(&next)?;
             }
+            self.reload_memories();
             self.input.clear();
-            return Ok(format!("Thread deleted; {retained} pinned or edited insights retained without their deleted source"));
+            return Ok(format!(
+                "Investigation deleted; {removed} brain memories removed"
+            ));
         }
         if input == ":cancel" {
             if let Some(id) = &self.selected_thread {
@@ -2546,7 +2656,9 @@ impl App {
         if self.overlay == Overlay::Palette {
             match key.code {
                 KeyCode::Esc => self.activate_target(Target::CloseOverlay),
-                KeyCode::Up | KeyCode::Char('k') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Up | KeyCode::Char('k')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
                     self.palette_sel = self.palette_sel.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -2694,32 +2806,6 @@ impl App {
             KeyCode::Enter => self.on_enter(),
             KeyCode::Backspace => self.edit_backspace(),
             KeyCode::Delete => self.edit_delete(),
-            KeyCode::Char(c)
-                if self.module == Some(ModuleId::Brain)
-                    && self.brain_page == BrainPage::Graph
-                    && !self.field_focused()
-                    && matches!(c, '1' | '2' | '3') =>
-            {
-                self.activate_target(Target::GraphView(match c {
-                    '1' => GraphView::Force,
-                    '2' => GraphView::Directive,
-                    _ => GraphView::Path,
-                }));
-            }
-            KeyCode::Left | KeyCode::Char('h')
-                if self.module == Some(ModuleId::Brain)
-                    && self.brain_page == BrainPage::Graph
-                    && !self.field_focused() =>
-            {
-                self.move_graph_node(-1);
-            }
-            KeyCode::Right | KeyCode::Char('l')
-                if self.module == Some(ModuleId::Brain)
-                    && self.brain_page == BrainPage::Graph
-                    && !self.field_focused() =>
-            {
-                self.move_graph_node(1);
-            }
             KeyCode::Left if self.field_focused() => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Right if self.field_focused() => {
                 if let Target::Field(field) = self.focus {
@@ -2863,10 +2949,8 @@ impl App {
             }
             return;
         }
-        if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Create {
-            self.brain_list_mode = BrainListMode::List;
-            self.set_focus(Target::Button(ButtonId::CreateMemory));
-            self.status = "Memories".into();
+        if self.module == Some(ModuleId::Brain) && self.brain_list_mode != BrainListMode::List {
+            self.leave_brain_detail();
             return;
         }
         if self.module == Some(ModuleId::Recon) && self.recon_chat {
@@ -2908,6 +2992,7 @@ impl App {
             Target::Field(field) if is_picker_field(field) => self.open_default_picker(field),
             Target::Field(_) => self.focus_next(false),
             Target::Transcript => self.enter_chat(),
+            Target::Memory(_) => self.open_memory_graph(),
             target => self.activate_target(target),
         }
     }
@@ -2946,12 +3031,11 @@ impl App {
                 super::ui::move_chat(self, delta);
             }
             Target::Memory(_) => self.move_memory(delta),
-            Target::GraphNode(_) => self.move_graph_node(delta),
             Target::Tool(_) => self.move_tool(delta),
             _ => match self.module {
                 None => self.move_home(delta),
-                Some(ModuleId::Brain) if self.brain_page == BrainPage::Graph => {
-                    self.move_graph_node(delta);
+                Some(ModuleId::Brain) if self.brain_list_mode == BrainListMode::Graph => {
+                    self.scrolls.summary = add_scroll(self.scrolls.summary, delta);
                 }
                 Some(ModuleId::Brain) if self.brain_list_mode == BrainListMode::Create => {}
                 Some(ModuleId::Brain) => self.move_memory(delta),
@@ -3216,10 +3300,7 @@ fn add_scroll(value: u16, delta: i32) -> u16 {
 }
 
 fn log_stamp() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+    let secs = unix_now();
     format!(
         "{:02}:{:02}:{:02}Z",
         (secs / 3600) % 24,
@@ -3227,6 +3308,15 @@ fn log_stamp() -> String {
         secs % 60
     )
 }
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+const LOG_TTL_SECS: u64 = 24 * 60 * 60;
 
 pub async fn run(mut app: App) -> Result<()> {
     use crossterm::{
@@ -3297,6 +3387,30 @@ pub async fn run(mut app: App) -> Result<()> {
             }
         }
     }
+}
+
+async fn write_graph_summary(secret: &ProviderSecret, prompt: &str) -> Result<String> {
+    let messages = [
+        provider::ChatMessage {
+            role: "system".into(),
+            content: "You explain the conclusion of one investigation insight. The recon path already keeps only the directive this insight rests on, with the subjects and evidence that contributed to it. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how that directive and the contributing evidence support the relation. Use only the graph and the memory. Do not mention directives that are absent from the recon path. Do not invent sources or outcomes. No bullet list.".into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+        provider::ChatMessage {
+            role: "user".into(),
+            content: prompt.into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+    ];
+    let completion = provider::complete(secret, &messages, &[], |_| {}).await?;
+    let text = completion.content.trim().to_string();
+    anyhow::ensure!(
+        !text.is_empty(),
+        "synthesis returned an empty graph summary"
+    );
+    Ok(text)
 }
 
 fn work_event(thread_id: &str, event: recon::TurnEvent) -> WorkEvent {
@@ -3455,12 +3569,11 @@ mod tests {
             memories: Vec::new(),
             selected_insight: None,
             memory_sel: 0,
-            brain_page: BrainPage::Memories,
             brain_list_mode: BrainListMode::List,
-            graph_view: GraphView::Force,
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
-            graph_node: 0,
+            graph_summary: String::new(),
+            graph_summary_pending: None,
             hits: Vec::new(),
             auth: AuthFile::default(),
             settings: SettingsFile::default(),
@@ -3534,10 +3647,13 @@ mod tests {
         assert!(!listed
             .iter()
             .any(|target| matches!(target, Target::Field(FieldId::BrainInsight))));
-        click(&mut app, Target::BrainTab(BrainPage::Graph));
-        assert_eq!(app.brain_page, BrainPage::Graph);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.brain_list_mode, BrainListMode::Graph);
         assert!(app.brain_graph.is_empty());
-        click(&mut app, Target::BrainTab(BrainPage::Memories));
+        assert!(app.graph_summary.contains("no investigation graph"));
+        assert!(app.graph_summary_pending.is_none());
+        click(&mut app, Target::Button(ButtonId::BrainBack));
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
         click(&mut app, Target::Field(FieldId::BrainQuery));
         type_text(&mut app, "Atlas");
         click(&mut app, Target::Button(ButtonId::Recall));
@@ -4127,7 +4243,14 @@ mod tests {
             .body;
         assert!(body.contains("System event log"));
         assert!(body.contains("cache"));
+        assert!(body.contains("query: Jane Roe"));
         assert!(!body.contains("Jane Roe role"));
+        let title = super::super::ui::chat_blocks(&app)
+            .into_iter()
+            .find(|block| block.key == "tool:call-s1")
+            .expect("tool row")
+            .title;
+        assert!(title.contains("query=Jane Roe"), "{title}");
         app.select(4);
         let index = app
             .log
@@ -4141,6 +4264,23 @@ mod tests {
         assert!(app.log_open.contains(&id));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!app.log_open.contains(&id));
+    }
+
+    #[test]
+    fn event_log_entries_expire_after_a_day_and_a_click_folds_the_arrow() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 100, 40);
+        app.push_log_detail("info", "old lookup", "detail line");
+        app.log[0].created = unix_now().saturating_sub(LOG_TTL_SECS + 60);
+        app.push_log_detail("info", "fresh lookup", "fresh detail");
+        app.prune_log();
+        assert_eq!(app.log.len(), 1);
+        assert!(app.log[0].text.contains("fresh"));
+        app.select(4);
+        click(&mut app, Target::LogLine(0));
+        assert!(app.log_open.contains(&app.log[0].id));
+        click(&mut app, Target::LogLine(0));
+        assert!(!app.log_open.contains(&app.log[0].id));
     }
 
     #[test]
@@ -4468,6 +4608,150 @@ mod tests {
         assert!(blocks
             .iter()
             .any(|block| block.body == "Repaired answer [call-1]."));
+    }
+
+    #[test]
+    fn a_log_or_late_tool_row_does_not_drop_the_live_answer() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.screen = Rect::new(0, 0, 100, 40);
+        app.selected_thread = Some("t-open".into());
+        app.running
+            .insert("t-open".into(), Arc::new(AtomicBool::new(false)));
+        app.messages = vec![recon::Message {
+            id: "m1".into(),
+            thread_id: "t-open".into(),
+            sequence: 1,
+            role: "user".into(),
+            content: "who?".into(),
+            run_id: None,
+            created_at: String::new(),
+        }];
+        app.runs = vec![recon::Run {
+            id: "run-1".into(),
+            thread_id: "t-open".into(),
+            turn_id: "m1".into(),
+            state: "running".into(),
+            stage: "synthesizing".into(),
+            recon_model: String::new(),
+            synthesis_model: String::new(),
+            tool_picker_model: String::new(),
+            max_rounds: 1,
+            max_calls: 4,
+            turn_seconds: 300,
+            plan_json: Some(
+                r#"{"directives":[{"id":"d1","goal":"Establish identity","entities":[],"targets":[]}]}"#
+                    .into(),
+            ),
+            error: Some("answer is missing evidence citations".into()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }];
+        app.expanded.insert("plan:run-1".into());
+        app.calls.push(recon::Call {
+            id: "call-matched".into(),
+            tool_id: "firecrawl_search".into(),
+            run_id: Some("run-1".into()),
+            thread_id: Some("t-open".into()),
+            turn_id: Some("m1".into()),
+            origin: "recon".into(),
+            inputs: serde_json::json!({"query": "Shivon Zilis"}),
+            status: "completed".into(),
+            attempts: 1,
+            result: None,
+            started_at: String::new(),
+            completed_at: None,
+        });
+        app.calls.push(recon::Call {
+            id: "call-late".into(),
+            tool_id: "sociavault_google_search".into(),
+            run_id: None,
+            thread_id: Some("t-open".into()),
+            turn_id: None,
+            origin: "recon".into(),
+            inputs: serde_json::json!({"query": "Shivon Zilis official account"}),
+            status: "completed".into(),
+            attempts: 1,
+            result: None,
+            started_at: String::new(),
+            completed_at: None,
+        });
+        app.recon_stages
+            .insert("t-open".into(), "synthesizing".into());
+        app.on_work_event(WorkEvent::AnswerDelta {
+            thread_id: "t-open".into(),
+            text: "Shivon Zilis is a Neuralink executive.".into(),
+        });
+        let blocks = super::super::ui::chat_blocks(&app);
+        let stream = blocks.last().unwrap();
+        assert_eq!(stream.key, "stream:run-1");
+        assert_eq!(stream.body, "Shivon Zilis is a Neuralink executive.");
+        assert!(blocks.iter().any(|block| block.key == "tool:call-late"));
+        assert!(blocks
+            .iter()
+            .any(|block| block.body.contains("Run error: answer is missing evidence citations")));
+    }
+
+    #[test]
+    fn a_failed_turn_keeps_the_streamed_answer_on_screen() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.screen = Rect::new(0, 0, 100, 40);
+        app.selected_thread = Some("t-open".into());
+        app.running
+            .insert("t-open".into(), Arc::new(AtomicBool::new(false)));
+        let messages = vec![recon::Message {
+            id: "m1".into(),
+            thread_id: "t-open".into(),
+            sequence: 1,
+            role: "user".into(),
+            content: "who?".into(),
+            run_id: None,
+            created_at: String::new(),
+        }];
+        let runs = vec![recon::Run {
+            id: "run-1".into(),
+            thread_id: "t-open".into(),
+            turn_id: "m1".into(),
+            state: "failed".into(),
+            stage: "failed".into(),
+            recon_model: String::new(),
+            synthesis_model: String::new(),
+            tool_picker_model: String::new(),
+            max_rounds: 1,
+            max_calls: 4,
+            turn_seconds: 300,
+            plan_json: None,
+            error: Some("answer is missing evidence citations".into()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }];
+        app.messages = messages.clone();
+        app.runs = runs.clone();
+        app.on_work_event(WorkEvent::AnswerDelta {
+            thread_id: "t-open".into(),
+            text: "Shivon Zilis is a Neuralink executive.".into(),
+        });
+        app.on_work_event(WorkEvent::ReconDone {
+            thread_id: "t-open".into(),
+            outcome: Err("answer is missing evidence citations".into()),
+        });
+        assert_eq!(
+            app.live_answers["t-open"].text,
+            "Shivon Zilis is a Neuralink executive."
+        );
+        assert!(!app.running_thread("t-open"));
+        app.messages = messages;
+        app.runs = runs;
+        let blocks = super::super::ui::chat_blocks(&app);
+        let stream = blocks
+            .iter()
+            .find(|block| block.key == "stream:run-1")
+            .unwrap();
+        assert_eq!(stream.body, "Shivon Zilis is a Neuralink executive.");
+        assert_eq!(stream.title, "Recon · stopped");
     }
 
     fn hit(app: &App, target: Target) -> bool {

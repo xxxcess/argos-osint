@@ -48,7 +48,7 @@ pub async fn execute_budgeted(
             serde_json::to_string(&call.arguments)?
         );
         let cached = store.cache_get(&cache_key)?.is_some();
-        if let Some((provider_name, cost)) = limits.configured_cost(&call.tool_id) {
+        if let Some((provider_name, cost)) = limits.configured_cost_for(&call.tool_id, &call.arguments) {
             if !cached && cost > 0 {
                 match store.reserve_credits(provider_name, cost, limits)? {
                     Some(hold) => {
@@ -415,20 +415,21 @@ struct TurnModels<'a> {
     gate: &'a ModelGate,
     catalog: &'a [picker::CatalogEntry],
     unkeyed: &'a HashSet<String>,
-    /// First turn of the thread: the SociaVault allowance is `opening_sociavault_calls`.
+    /// First turn of the thread: the SociaVault budget is `sociavault_turn_credits_opening`.
     opening: bool,
 }
 
-/// SociaVault calls this turn: `opening_sociavault_calls` on a thread's first turn and
-/// four later (the per-turn cap PR #24 used), never more than the credits cover.
-fn per_platform_allowance(service: &super::Service, opening: bool) -> usize {
+/// SociaVault calls this turn: the per-turn credit budget (`sociavault_turn_credits_opening`
+/// on a thread's first turn, `sociavault_turn_credits_later` after; spec defaults D4, to
+/// confirm), never more than the remaining credits cover. Every SociaVault route in the
+/// catalog costs one call's price.
+fn sociavault_turn_calls(service: &super::Service, opening: bool) -> usize {
     let limits = &service.settings.recon_limits;
-    let cap = if opening { usize::from(limits.opening_sociavault_calls) } else { 4 };
     let cost = limits.sociavault_call_cost.max(1);
     let credits = Store::open(&service.db_path)
         .and_then(|store| store.credits_available("sociavault", limits))
         .unwrap_or(0);
-    cap.min((credits / cost) as usize)
+    (limits.sociavault_turn_credits(opening).min(credits) / cost) as usize
 }
 
 async fn execute_ordered(
@@ -449,7 +450,8 @@ async fn execute_ordered(
         recon_secret: models.recon_secret,
         gate: models.gate,
         cancel,
-        per_platform_allowance: per_platform_allowance(service, models.opening),
+        sociavault_calls: sociavault_turn_calls(service, models.opening),
+        google_min_results: service.settings.recon_limits.google_fallback_min_results as usize,
     };
     let db = service.db_path.clone();
     let run_id = run.id.clone();
@@ -500,8 +502,116 @@ pub(crate) struct StepEnv<'a> {
     pub recon_secret: &'a ProviderSecret,
     pub gate: &'a ModelGate,
     pub cancel: &'a Arc<AtomicBool>,
-    /// Calls a per-platform tool (SociaVault) may make this turn.
-    pub per_platform_allowance: usize,
+    /// SociaVault calls the turn's credit budget covers, across every SociaVault tool.
+    pub sociavault_calls: usize,
+    /// Firecrawl search results below which the search counts as weak and the SociaVault
+    /// Google search fallback is offered (spec default D3, to confirm).
+    pub google_min_results: usize,
+}
+
+/// SociaVault calls dispatched (or bound and about to run) this turn.
+fn sociavault_dispatched(plan: &Plan) -> usize {
+    plan.calls.iter().filter(|call| call.tool_id.starts_with("sociavault_") && !call.call_id.is_empty()).count()
+}
+
+/// Why a Firecrawl search result counts as weak (decision D3): it failed, returned fewer
+/// than `min` results, or returned only social or publisher pages. `None`: strong enough.
+pub(crate) fn firecrawl_weak(status: &str, observations: &Value, min: usize) -> Option<String> {
+    if !usable(status) {
+        return Some(format!("Firecrawl search {}", status.replace('_', " ")));
+    }
+    let urls: Vec<&str> = observations
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().filter_map(|row| row.get("url").and_then(Value::as_str)).collect())
+        .unwrap_or_default();
+    if urls.len() < min {
+        return Some(format!("Firecrawl search returned {} result(s), fewer than {min}", urls.len()));
+    }
+    let substantive = urls.iter().any(|raw| {
+        url::Url::parse(raw)
+            .ok()
+            .and_then(|url| url.host_str().map(|host| host.trim_start_matches("www.").to_string()))
+            .is_some_and(|host| !investigation::social_or_publisher(&host))
+    });
+    (!substantive).then(|| "every Firecrawl search result was a social or publisher page".to_string())
+}
+
+/// After a weak Firecrawl search, inserts one bound SociaVault Google search with the same
+/// query as the next step. Never in the opening set; once per query; within the
+/// SociaVault turn budget.
+fn google_fallback(plan: &mut Plan, env: &StepEnv<'_>, index: usize, reason: &str) {
+    const GOOGLE: &str = "sociavault_google_search";
+    let step = plan.calls[index].clone();
+    let query = step.arguments.get("query").and_then(Value::as_str).unwrap_or("").to_string();
+    if query.is_empty() || !env.catalog.iter().any(|entry| entry.id == GOOGLE) || env.unkeyed.contains(GOOGLE) {
+        return;
+    }
+    if plan.calls.iter().any(|call| call.tool_id == GOOGLE && call.arguments.get("query").and_then(Value::as_str) == Some(query.as_str())) {
+        return;
+    }
+    // Planned SociaVault steps keep their share of the turn budget.
+    let planned_sociavault = plan.calls[index + 1..].iter().filter(|call| call.tool_id.starts_with("sociavault_") && call.status == "pending").count();
+    if sociavault_dispatched(plan) + planned_sociavault >= env.sociavault_calls {
+        plan.binding_notes.push(format!(
+            "{} {}: {reason}; SociaVault Google search not added: the SociaVault budget this turn ({} call(s)) is held by planned steps",
+            step.step_id, step.tool_id, env.sociavault_calls
+        ));
+        return;
+    }
+    let step_id = format!("s{}", next_step_number(plan));
+    plan.fallback_requests.push(format!("{} {}: {reason}. Recon added SociaVault Google search as {step_id}.", step.step_id, step.tool_id));
+    let call = PlanCall {
+        step_id: step_id.clone(),
+        tool_id: GOOGLE.into(),
+        arguments: json!({"query": query}),
+        filled: vec![format!("query={query} (same query as {})", step.step_id)],
+        bound: true,
+        depends_on: vec![step.step_id.clone()],
+        reason: step.reason.clone(),
+        expected: investigation::output_kinds(GOOGLE).join(", "),
+        credit_cost: service_cost(GOOGLE),
+        status: "pending".into(),
+        pick_reason: format!("fallback: SociaVault Google search — {reason}"),
+        ..PlanCall::default()
+    };
+    plan.calls.insert(index + 1, call);
+}
+
+/// Whether any Firecrawl search this turn was weak, so Google search may be a fallback pick.
+fn firecrawl_was_weak(plan: &Plan) -> bool {
+    plan.calls.iter().any(|call| call.tool_id == "firecrawl_search" && matches!(call.status.as_str(), "failed" | "rate_limited" | "timeout" | "deferred" | "no_results"))
+        || plan.calls.iter().any(|call| call.tool_id == "sociavault_google_search")
+}
+
+/// A Hunter email count for the same domain or company that found no addresses.
+fn zero_email_count(results: &[(String, ToolResult)], arguments: &Value) -> Option<String> {
+    let key = |value: &Value| {
+        ["domain", "company"]
+            .iter()
+            .find_map(|name| value.get(*name).and_then(Value::as_str).map(|text| text.trim().to_ascii_lowercase()))
+    };
+    let wanted = key(arguments)?;
+    results
+        .iter()
+        .filter(|(_, result)| result.tool_id == "hunter_email_count" && usable(&result.status))
+        .find(|(_, result)| key(&result.inputs).as_deref() == Some(wanted.as_str()) && result.observations.get("total").and_then(Value::as_u64) == Some(0))
+        .map(|(id, _)| format!("{id} counted 0 addresses for {wanted} (none public, or privacy-suppressed)"))
+}
+
+/// A Hunter 451 (the person asked not to be processed): drop that email and every
+/// binding drawn from a step whose arguments carried it.
+fn forget_claimed_email(plan: &mut Plan, email: &str) {
+    let tainted: HashSet<String> = plan
+        .calls
+        .iter()
+        .filter(|call| !call.call_id.is_empty() && call.arguments.to_string().to_ascii_lowercase().contains(&email.to_ascii_lowercase()))
+        .map(|call| call.call_id.clone())
+        .collect();
+    let before = plan.bindings.len();
+    let claimed = |binding: &super::Binding| binding.kind == "email" && binding.value.eq_ignore_ascii_case(email);
+    plan.bindings.retain(|binding| !(claimed(binding) || tainted.contains(&binding.evidence_id)));
+    plan.binding_notes.push(format!("Hunter returned 451 for a claimed address; {} binding(s) about it were removed", before - plan.bindings.len()));
 }
 
 const DONE_STATES: &[&str] = &["completed", "no_results", "failed", "rate_limited", "deferred", "skipped", "cancelled", "timeout"];
@@ -581,10 +691,24 @@ where
             if step.arguments != arguments {
                 plan.calls[index].filled = filled
                     .into_iter()
-                    .filter(|fill| !fill.ends_with("from question)"))
+                    .filter(|fill| !fill.ends_with("from question)") || investigation::restricted_sources(&step.tool_id).is_some())
                     .collect();
             }
             plan.calls[index].arguments = arguments;
+        }
+        if step.tool_id.starts_with("sociavault_") && sociavault_dispatched(plan) >= env.sociavault_calls {
+            plan.calls[index].status = "deferred".into();
+            plan.deferred.push(format!("{} — the SociaVault budget this turn is {} call(s)", step.tool_id, env.sociavault_calls));
+            index += 1;
+            continue;
+        }
+        if step.tool_id == "hunter_domain_search" {
+            if let Some(note) = zero_email_count(&results, &plan.calls[index].arguments) {
+                plan.calls[index].status = "skipped".into();
+                plan.binding_notes.push(format!("{} {}: skipped: {note}", step.step_id, step.tool_id));
+                index += 1;
+                continue;
+            }
         }
         let label = format!("running {}", step.tool_id);
         progress(&label);
@@ -607,6 +731,9 @@ where
                     step.tool_id,
                     err.to_string().chars().take(160).collect::<String>()
                 ));
+                if step.tool_id == "firecrawl_search" {
+                    google_fallback(plan, env, index, "Firecrawl search failed to dispatch");
+                }
                 after_step(plan, env, picker, index, false, &mut fallback_for, progress).await?;
                 persist(plan, "running tools")?;
                 index += 1;
@@ -622,6 +749,9 @@ where
                     .iter()
                     .filter(|call| matches!(call.status.as_str(), "pending" | "completed" | "no_results" | "failed" | ""))
                     .count();
+                if step.tool_id == "firecrawl_search" {
+                    google_fallback(plan, env, index, "Firecrawl search could not run");
+                }
                 if executable < picker::MIN_PICKS {
                     let purpose = format!("{} could not run ({reason}); pick a replacement so at least three tools run", step.tool_id);
                     request_fallback(plan, env, picker, index, &purpose, &[], progress).await?;
@@ -642,9 +772,21 @@ where
                     let accepted = extract_bindings(plan, env, index, &call_id, &result.observations).await?;
                     for mut binding in accepted {
                         binding.step_id = step.step_id.clone();
-                        if !plan.bindings.iter().any(|known| {
+                        let same = |known: &super::Binding| {
                             known.kind == binding.kind && known.value.eq_ignore_ascii_case(&binding.value) && known.qualifier == binding.qualifier && !known.unverified
-                        }) {
+                        };
+                        // A gap-filler value becomes a Hunter input once a primary provider
+                        // observes it too: the binding takes the primary source.
+                        if let Some(known) = plan.bindings.iter_mut().find(|known| same(known)) {
+                            if !investigation::binding_allowed("hunter_domain_search", known) && investigation::binding_allowed("hunter_domain_search", &binding) {
+                                known.source_tool = binding.source_tool.clone();
+                                known.evidence_id = binding.evidence_id.clone();
+                                known.step_id = binding.step_id.clone();
+                                known.inferred = known.inferred && binding.inferred;
+                            }
+                            continue;
+                        }
+                        {
                             // An observed value supersedes the same value named in a question.
                             plan.bindings.retain(|known| {
                                 !(known.unverified && known.kind == binding.kind && known.value.eq_ignore_ascii_case(&binding.value) && known.qualifier == binding.qualifier)
@@ -653,7 +795,26 @@ where
                         }
                     }
                 }
+                if result.observations.get("claimed_email").and_then(Value::as_bool) == Some(true) {
+                    if let Some(email) = step.arguments.get("email").and_then(Value::as_str) {
+                        forget_claimed_email(plan, email);
+                    }
+                }
+                let weak = (step.tool_id == "firecrawl_search")
+                    .then(|| {
+                        firecrawl_weak(&result.status, &result.observations, env.google_min_results).or_else(|| {
+                            // Strong results that still left a later step without an input.
+                            plan.calls[index + 1..]
+                                .iter()
+                                .find(|later| later.status == "pending" && !later.bound && later.depends_on.contains(&step.step_id) && !investigation::bind_arguments(&later.tool_id, &plan.bindings, env.question, "").2.is_empty())
+                                .map(|later| format!("{} still lacks an input after Firecrawl search", later.tool_id))
+                        })
+                    })
+                    .flatten();
                 results.push((call_id, result));
+                if let Some(reason) = weak {
+                    google_fallback(plan, env, index, &reason);
+                }
                 after_step(plan, env, picker, index, ok, &mut fallback_for, progress).await?;
             }
         }
@@ -804,17 +965,19 @@ fn expand_per_platform(plan: &mut Plan, index: usize, env: &StepEnv<'_>, dispatc
     let mut texts: Vec<(String, String)> = plan.derived_questions.iter().map(|item| (item.id.clone(), item.text.clone())).collect();
     texts.push(("question".into(), env.question.to_string()));
     let platforms = investigation::question_platforms(&texts);
-    let (targets, unresolved) = investigation::per_platform_targets(&platforms, &plan.bindings, env.question);
+    let (targets, unresolved) = investigation::per_platform_targets(&step.tool_id, &platforms, &plan.bindings, env.question);
     if targets.is_empty() {
         return;
     }
     let budget = env.max_calls.saturating_sub(dispatched);
-    let take = env.per_platform_allowance.min(budget);
-    let reason = if env.per_platform_allowance <= budget {
-        format!("the {} allowance this turn is {}", step.tool_id, env.per_platform_allowance)
+    let sociavault_left = env.sociavault_calls.saturating_sub(sociavault_dispatched(plan));
+    let take = sociavault_left.min(budget);
+    let reason = if sociavault_left <= budget {
+        format!("the SociaVault budget this turn is {} call(s)", env.sociavault_calls)
     } else {
         "the call budget was reached".to_string()
     };
+    let hint_text: String = texts.iter().map(|(_, text)| text.as_str()).collect::<Vec<_>>().join(" ");
     let mut calls = Vec::new();
     for (position, (platform, binding, qid)) in targets.iter().enumerate() {
         let letter = (b'a' + position as u8) as char;
@@ -826,10 +989,16 @@ fn expand_per_platform(plan: &mut Plan, index: usize, env: &StepEnv<'_>, dispatc
         } else {
             format!("handle from {}", binding.evidence_id)
         };
+        let mut arguments = json!({"platform": platform, "handle": binding.value});
+        let mut filled = vec![format!("platform={platform} ({source})"), format!("handle={} ({source})", binding.value)];
+        if let Some(endpoint) = crate::osint::sociavault_endpoint_hint(&step.tool_id, platform, &hint_text) {
+            arguments["endpoint"] = json!(endpoint);
+            filled.push(format!("endpoint={endpoint} (named in the question)"));
+        }
         let mut call = PlanCall {
             step_id,
-            arguments: json!({"platform": platform, "handle": binding.value}),
-            filled: vec![format!("platform={platform} ({source})"), format!("handle={} ({source})", binding.value)],
+            arguments,
+            filled,
             reason: if qid.is_empty() || qid == "question" { step.reason.clone() } else { qid.clone() },
             bound: true,
             ..step.clone()
@@ -889,17 +1058,19 @@ async fn request_fallback(
         && !plan.calls.iter().any(|call| call.tool_id == "firecrawl_search" && call.bound);
     let runnable = |id: &str| investigation::bind_arguments(id, &plan.bindings, env.question, "-").2.is_empty();
     let yields = |id: &str| need_kinds.is_empty() || investigation::output_kinds(id).iter().any(|kind| need_kinds.contains(kind));
+    // SociaVault Google search is offered only after a weak Firecrawl search (D3).
+    let google_ok = |id: &str| id != "sociavault_google_search" || firecrawl_was_weak(plan);
     let mut candidates: Vec<String> = env
         .catalog
         .iter()
         .map(|entry| entry.id.clone())
-        .filter(|id| !planned.contains(id.as_str()) && runnable(id) && yields(id))
+        .filter(|id| !planned.contains(id.as_str()) && runnable(id) && yields(id) && google_ok(id))
         .collect();
     if accounts_search && !candidates.iter().any(|id| id == "firecrawl_search") {
         candidates.insert(0, "firecrawl_search".into());
     }
     if candidates.is_empty() && need_kinds.is_empty() {
-        candidates = env.catalog.iter().map(|entry| entry.id.clone()).filter(|id| !planned.contains(id.as_str())).collect();
+        candidates = env.catalog.iter().map(|entry| entry.id.clone()).filter(|id| !planned.contains(id.as_str()) && google_ok(id)).collect();
     }
     let picked: Vec<String> = plan
         .calls
@@ -2313,7 +2484,8 @@ mod tests {
     #[tokio::test]
     async fn low_confidence_picks_fall_back_to_the_deterministic_order() {
         let (base, _) = scripted(vec![
-            choice("nvd_cve", 0.2),
+            // Opening picks are primary providers only (#27), so the first is SociaVault.
+            choice("sociavault_search", 0.2),
             choice("gleif_entities", 0.3),
             choice("census_geocode", 0.1),
             choice("done", 0.4),
@@ -2432,7 +2604,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 4 };
+        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls: 4, google_min_results: 3 };
         let mut session = picker::Picker::new(&secret, &cancel);
         let ran = std::sync::Mutex::new(Vec::new());
         let runner = |call: PlanCall| {
@@ -2503,7 +2675,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 4 };
+        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls: 4, google_min_results: 3 };
         let picker_secret = none.clone();
         let mut session = picker::Picker::new(&picker_secret, &cancel);
         let ran = std::sync::Mutex::new(Vec::new());
@@ -2536,7 +2708,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 4 };
+        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls: 4, google_min_results: 3 };
         let mut session = picker::Picker::new(&none, &cancel);
         let flag = cancel.clone();
         let runner = |call: PlanCall| {
@@ -2648,7 +2820,7 @@ mod tests {
         plan.bindings = investigation::question_bindings(TRUMP);
         let unkeyed = HashSet::new();
         let gate = ModelGate::default();
-        let env = StepEnv { question: TRUMP, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &recon, gate: &gate, cancel: &cancel, per_platform_allowance: 2 };
+        let env = StepEnv { question: TRUMP, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &recon, gate: &gate, cancel: &cancel, sociavault_calls: 2, google_min_results: 3 };
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let mut session = picker::Picker::new(&none, &cancel);
         let ran = std::sync::Mutex::new(Vec::new());
@@ -2670,7 +2842,7 @@ mod tests {
         let facebook = plan.calls.iter().find(|call| call.arguments["platform"] == "facebook").expect("facebook step kept");
         assert_eq!(facebook.status, "deferred");
         assert!(facebook.filled.iter().any(|fill| fill.contains("inferred for facebook")), "{:?}", facebook.filled);
-        assert!(plan.deferred.iter().any(|line| line.contains("sociavault_profile facebook") && line.contains("allowance")), "{:?}", plan.deferred);
+        assert!(plan.deferred.iter().any(|line| line.contains("sociavault_profile facebook") && line.contains("SociaVault budget")), "{:?}", plan.deferred);
         assert!(plan.bindings.iter().any(|binding| binding.qualifier == "facebook" && binding.inferred));
         assert!(plan.bindings.iter().any(|binding| binding.qualifier == "truthsocial" && binding.value == "realDonaldTrump" && !binding.inferred));
         assert!(!plan.bindings.iter().any(|binding| binding.kind == "person_name" && binding.value.contains("scraper")));
@@ -2695,7 +2867,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question: TRUMP, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 1 };
+        let env = StepEnv { question: TRUMP, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls: 1, google_min_results: 3 };
         let mut session = picker::Picker::new(&secret, &cancel);
         let ran = std::sync::Mutex::new(Vec::new());
         let runner = |call: PlanCall| {
@@ -2811,7 +2983,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question: ELON, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 1 };
+        let env = StepEnv { question: ELON, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls: 1, google_min_results: 3 };
         let mut session = picker::Picker::new(&secret, &cancel);
         let ran = std::sync::Mutex::new(Vec::new());
         let runner = |call: PlanCall| {
@@ -2851,7 +3023,7 @@ mod tests {
         assert_eq!(
             plan.unresolved_inputs,
             vec![
-                "s3 sociavault_profile: no binding for platform, handle".to_string(),
+                "s3 sociavault_profile: no binding for platform, handle or user_id".to_string(),
                 "s4 keybase_identity: no binding for username or domain".to_string(),
                 "s6 firecrawl_scrape: no binding for url".to_string(),
                 "s7 wikipedia_users: no binding for username".to_string(),
@@ -2882,7 +3054,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question: ELON, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 1 };
+        let env = StepEnv { question: ELON, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls: 1, google_min_results: 3 };
         let mut session = picker::Picker::new(&none, &cancel);
         let ran = std::sync::Mutex::new(Vec::new());
         let runner = |call: PlanCall| {
@@ -2916,7 +3088,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 1 };
+        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls: 1, google_min_results: 3 };
         let mut session = picker::Picker::new(&none, &cancel);
         let runner = |call: PlanCall| async move {
             if call.step_id == "s1" {
@@ -2956,5 +3128,183 @@ mod tests {
         let results = execute_budgeted(&service, &run, &[call], &cancel).await.expect("no 'plan made no progress'");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1.status, "failed");
+    }
+
+    // -- #27: primary providers ---------------------------------------------------
+
+    const ACME: &str = "Who runs Acme Robotics?";
+
+    fn bound(step_id: &str, tool_id: &str, arguments: Value) -> PlanCall {
+        PlanCall { arguments, bound: true, ..step(step_id, tool_id, &[]) }
+    }
+
+    /// Runs `plan` with a scripted observer and no models. Returns (step, tool, arguments).
+    async fn run_primary<F>(plan: &mut Plan, question: &str, sociavault_calls: usize, observe: F) -> Vec<(String, String, Value)>
+    where
+        F: Fn(&PlanCall) -> (&'static str, Value) + Sync,
+    {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
+        let unkeyed = HashSet::new();
+        let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
+        let gate = ModelGate::default();
+        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls, google_min_results: crate::provider::GOOGLE_FALLBACK_MIN_RESULTS as usize };
+        let mut session = picker::Picker::new(&none, &cancel);
+        let ran = std::sync::Mutex::new(Vec::new());
+        let runner = |call: PlanCall| {
+            ran.lock().unwrap().push((call.step_id.clone(), call.tool_id.clone(), call.arguments.clone()));
+            let (status, observation) = observe(&call);
+            let mut outcome = result(&call.tool_id, status, observation);
+            outcome.inputs = call.arguments.clone();
+            let id = format!("call-{}", call.step_id);
+            async move { Ok(StepOutcome::Ran(id, Box::new(outcome))) }
+        };
+        let mut progress = |_: &str| {};
+        let mut persist = |_: &Plan, _: &str| Ok(());
+        execute_steps(plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
+        let ran = ran.lock().unwrap().clone();
+        ran
+    }
+
+    fn acme_results(urls: &[&str]) -> Value {
+        json!({"results": urls.iter().map(|url| json!({"title": "Acme Robotics", "url": url, "snippet": "Acme Robotics builds industrial robots."})).collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn google_search_is_never_an_opening_candidate_and_openings_are_primary() {
+        let catalog: Vec<String> = picker::eligible_catalog(&all_tools(), &HashSet::new()).into_iter().map(|entry| entry.id).collect();
+        assert!(catalog.contains(&"sociavault_google_search".to_string()), "it stays in the catalog for the fallback");
+        let bindings = investigation::question_bindings(ACME);
+        let opening = picker::offered_candidates(&catalog, &[], &bindings, ACME);
+        assert!(opening.contains(&"firecrawl_search".to_string()));
+        assert!(opening.iter().all(|id| crate::osint::primary_provider(id).is_some()), "{opening:?}");
+        assert!(!opening.contains(&"sociavault_google_search".to_string()));
+        assert!(opening.contains(&"sociavault_search".to_string()), "a named subject opens SociaVault search");
+        // After a primary pick, gap-fillers join; Google search still does not.
+        let later = picker::offered_candidates(&catalog, &["firecrawl_search".to_string()], &bindings, ACME);
+        assert!(later.contains(&"wikidata_entities".to_string()) && !later.contains(&"sociavault_google_search".to_string()));
+        // An IP prompt opens gap-fillers at once.
+        let ip = investigation::question_bindings("Who is behind 8.8.8.8?");
+        assert!(picker::offered_candidates(&catalog, &[], &ip, "Who is behind 8.8.8.8?").contains(&"shodan_internetdb".to_string()));
+        assert_eq!(picker::MAX_PICKS, 10, "spec default D4, to confirm");
+    }
+
+    #[tokio::test]
+    async fn a_weak_firecrawl_search_adds_one_google_search_with_the_same_query() {
+        let cases: [(&str, Value, Option<&str>); 4] = [
+            ("failed", json!({}), Some("Firecrawl search failed")),
+            ("completed", acme_results(&["https://acmerobotics.com/"]), Some("returned 1 result(s), fewer than 3")),
+            ("completed", acme_results(&["https://x.com/acme", "https://www.linkedin.com/company/acme", "https://www.nytimes.com/acme"]), Some("social or publisher")),
+            ("completed", acme_results(&["https://acmerobotics.com/", "https://acmerobotics.com/about", "https://robots.example.org/acme"]), None),
+        ];
+        for (status, observation, weak) in cases {
+            let mut plan = Plan { calls: vec![bound("s1", "firecrawl_search", json!({"query": "Acme Robotics", "limit": 5}))], ..Plan::default() };
+            let ran = run_primary(&mut plan, ACME, 3, |call| if call.tool_id == "firecrawl_search" { (status, observation.clone()) } else { ("completed", json!({"results": {}})) }).await;
+            let google: Vec<&PlanCall> = plan.calls.iter().filter(|call| call.tool_id == "sociavault_google_search").collect();
+            match weak {
+                Some(reason) => {
+                    assert_eq!(google.len(), 1, "{status} {observation}: {:?}", plan.calls);
+                    assert_eq!(google[0].arguments, json!({"query": "Acme Robotics"}));
+                    assert!(google[0].pick_reason.starts_with("fallback: SociaVault Google search — ") && google[0].pick_reason.contains(reason), "{}", google[0].pick_reason);
+                    assert_eq!(ran.last().unwrap().1, "sociavault_google_search");
+                }
+                None => assert!(google.is_empty(), "three substantive results are not weak: {:?}", plan.calls),
+            }
+        }
+        // Without SociaVault budget the fallback is noted, not run.
+        let mut plan = Plan { calls: vec![bound("s1", "firecrawl_search", json!({"query": "Acme Robotics"}))], ..Plan::default() };
+        let ran = run_primary(&mut plan, ACME, 0, |_| ("failed", json!({}))).await;
+        assert_eq!(ran.len(), 1);
+        assert!(plan.binding_notes.iter().any(|note| note.contains("Google search not added")), "{:?}", plan.binding_notes);
+    }
+
+    #[tokio::test]
+    async fn the_sociavault_turn_budget_defers_calls_past_it() {
+        let limits = crate::provider::ReconLimits::default();
+        assert_eq!((limits.sociavault_turn_credits(true), limits.sociavault_turn_credits(false), limits.google_fallback_min_results), (3, 8, 3), "spec defaults D3/D4, to confirm");
+        let mut plan = Plan {
+            calls: vec![
+                bound("s1", "sociavault_search", json!({"platform": "twitter", "query": "Jane Example"})),
+                bound("s2", "sociavault_search_users", json!({"platform": "instagram", "query": "Jane Example"})),
+                bound("s3", "sociavault_profile", json!({"platform": "twitter", "handle": "janeexample"})),
+            ],
+            ..Plan::default()
+        };
+        let ran = run_primary(&mut plan, "Who is Jane Example?", 2, |_| ("completed", json!({"accounts": [], "links": [], "texts": []}))).await;
+        assert_eq!(ran.iter().map(|(id, _, _)| id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
+        assert_eq!(plan.calls[2].status, "deferred");
+        assert!(plan.deferred.iter().any(|line| line.starts_with("sociavault_profile") && line.contains("SociaVault budget this turn is 2")), "{:?}", plan.deferred);
+    }
+
+    #[tokio::test]
+    async fn a_zero_email_count_skips_the_paid_domain_search() {
+        let mut plan = Plan {
+            calls: vec![
+                bound("s1", "hunter_email_count", json!({"domain": "acmerobotics.com"})),
+                bound("s2", "hunter_domain_search", json!({"domain": "acmerobotics.com"})),
+            ],
+            ..Plan::default()
+        };
+        let ran = run_primary(&mut plan, ACME, 3, |_| ("completed", json!({"total": 0, "personal_emails": 0, "generic_emails": 0}))).await;
+        assert_eq!(ran.len(), 1, "{ran:?}");
+        assert_eq!(plan.calls[1].status, "skipped");
+        assert!(plan.binding_notes.iter().any(|note| note.starts_with("s2 hunter_domain_search: skipped") && note.contains("privacy-suppressed")), "{:?}", plan.binding_notes);
+        // A non-zero count lets it run.
+        let mut plan = Plan {
+            calls: vec![bound("s1", "hunter_email_count", json!({"domain": "acmerobotics.com"})), bound("s2", "hunter_domain_search", json!({"domain": "acmerobotics.com"}))],
+            ..Plan::default()
+        };
+        let ran = run_primary(&mut plan, ACME, 3, |call| if call.tool_id == "hunter_email_count" { ("completed", json!({"total": 4})) } else { ("completed", json!({"emails": []})) }).await;
+        assert_eq!(ran.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_claimed_email_removes_its_bindings() {
+        let mut plan = Plan {
+            calls: vec![bound("s1", "hunter_email_verifier", json!({"email": "jane@acmerobotics.com"}))],
+            bindings: vec![
+                super::super::Binding { kind: "email".into(), value: "jane@acmerobotics.com".into(), evidence_id: "question".into(), ..Default::default() },
+                super::super::Binding { kind: "domain".into(), value: "acmerobotics.com".into(), evidence_id: "question".into(), ..Default::default() },
+            ],
+            ..Plan::default()
+        };
+        run_primary(&mut plan, ACME, 3, |_| ("no_results", json!({"claimed_email": true, "note": "claimed"}))).await;
+        assert!(!plan.bindings.iter().any(|binding| binding.kind == "email"), "{:?}", plan.bindings);
+        assert!(plan.bindings.iter().any(|binding| binding.kind == "domain"), "unrelated bindings stay");
+        assert!(plan.binding_notes.iter().any(|note| note.contains("451")), "{:?}", plan.binding_notes);
+    }
+
+    #[tokio::test]
+    async fn a_gap_filler_domain_feeds_hunter_once_firecrawl_observes_it() {
+        let crtsh = super::super::Binding {
+            kind: "domain".into(),
+            value: "acmerobotics.com".into(),
+            evidence_id: "call-s0".into(),
+            source_tool: "crtsh_certificates".into(),
+            ..Default::default()
+        };
+        // Alone, the crt.sh domain never reaches Hunter.
+        let mut plan = Plan { calls: vec![step("s1", "hunter_company_enrichment", &[])], bindings: vec![crtsh.clone()], ..Plan::default() };
+        let ran = run_primary(&mut plan, ACME, 3, |_| ("completed", json!({}))).await;
+        assert!(ran.is_empty(), "{ran:?}");
+        assert_eq!(plan.calls[0].status, "skipped");
+        // After a Firecrawl search also returns it, the binding takes the primary source.
+        let mut plan = Plan {
+            calls: vec![bound("s1", "firecrawl_search", json!({"query": "Acme Robotics", "limit": 5})), step("s2", "hunter_company_enrichment", &["s1"])],
+            bindings: vec![crtsh],
+            ..Plan::default()
+        };
+        let ran = run_primary(&mut plan, ACME, 3, |call| {
+            if call.tool_id == "firecrawl_search" {
+                ("completed", acme_results(&["https://acmerobotics.com/", "https://acmerobotics.com/about", "https://acmerobotics.com/team"]))
+            } else {
+                ("completed", json!({"name": "Acme Robotics", "domain": "acmerobotics.com"}))
+            }
+        })
+        .await;
+        assert_eq!(ran.get(1).map(|(_, tool, args)| (tool.as_str(), args.clone())), Some(("hunter_company_enrichment", json!({"domain": "acmerobotics.com"}))), "{ran:?}");
+        assert!(plan.calls[1].filled.iter().any(|fill| fill.contains("via firecrawl_search")), "{:?}", plan.calls[1].filled);
+        let merged = plan.bindings.iter().find(|binding| binding.kind == "domain" && binding.value == "acmerobotics.com").unwrap();
+        assert_eq!(merged.source_tool, "firecrawl_search");
     }
 }

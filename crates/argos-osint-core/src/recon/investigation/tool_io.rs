@@ -16,7 +16,70 @@ use super::{
 /// Closed binding vocabulary shared by questions, the picker, and the binder.
 pub const BINDING_KINDS: &[&str] = &[
     "domain", "ip", "email", "handle", "platform", "person_name", "org_name", "cve", "package",
-    "address", "wallet",
+    "address", "wallet", "platform_id",
+];
+
+/// A numeric account id (Twitter `rest_id`, Instagram user id, YouTube `channelId`) from a
+/// SociaVault profile call. Its qualifier is the platform.
+pub const PLATFORM_ID_KIND: &str = "platform_id";
+
+/// Kinds deliberately produced only by tools, never by the prompt, with the reason.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const TOOL_ONLY: &[(&str, &str)] = &[(
+    PLATFORM_ID_KIND,
+    "numeric account ids come from a SociaVault profile call, so user-content routes run after it",
+)];
+
+/// Source of a binding read from the user's prompt.
+pub const PROMPT_SOURCE: &str = "prompt";
+
+/// Producers whose observations may feed a consumer's inputs, as tool-id prefixes. Hunter
+/// takes inputs only from the prompt and the primary providers (decision D1); Firecrawl
+/// map and crawl run only on a domain from the prompt, Firecrawl, or Hunter. `None`: any
+/// producer.
+pub fn restricted_sources(consumer: &str) -> Option<&'static [&'static str]> {
+    let consumer = crate::osint::canonical_tool_id(consumer);
+    if consumer.starts_with("hunter_") {
+        Some(&["firecrawl_", "sociavault_", "hunter_"])
+    } else if matches!(consumer, "firecrawl_map" | "firecrawl_crawl") {
+        Some(&["firecrawl_", "hunter_"])
+    } else {
+        None
+    }
+}
+
+/// Whether `producer`'s observation may feed `consumer`.
+pub fn allowed_producer(consumer: &str, producer: &str) -> bool {
+    producer == PROMPT_SOURCE || restricted_sources(consumer).is_none_or(|prefixes| prefixes.iter().any(|prefix| producer.starts_with(prefix)))
+}
+
+/// Where a binding came from: its tool, `prompt` for the user's question, or empty for
+/// an older binding with no recorded tool (never eligible for a restricted consumer).
+pub fn binding_source(binding: &Binding) -> &str {
+    if !binding.source_tool.is_empty() {
+        &binding.source_tool
+    } else if binding.evidence_id == "question" {
+        PROMPT_SOURCE
+    } else {
+        ""
+    }
+}
+
+/// A binding may fill `consumer`'s input only when its evidence is the prompt or an
+/// allowed producer's observation. A gap-filler value becomes eligible once a primary
+/// observation also contains it (the merge then records the primary source).
+pub fn binding_allowed(consumer: &str, binding: &Binding) -> bool {
+    let source = binding_source(binding);
+    restricted_sources(consumer).is_none() || (!source.is_empty() && allowed_producer(consumer, source))
+}
+
+/// Ordering gates: the first tool runs before the second when both are planned. Email
+/// count gates the paid domain search; email insight routes an address to the right
+/// enrichment. Neither yields a binding, so they are not producers.
+pub const GATES: &[(&str, &str)] = &[
+    ("hunter_email_count", "hunter_domain_search"),
+    ("hunter_email_insight", "hunter_person_enrichment"),
+    ("hunter_email_insight", "hunter_combined_enrichment"),
 ];
 
 /// Page URLs are an internal binding: `firecrawl_scrape`, `wayback_availability`, and
@@ -28,11 +91,6 @@ pub const COORDINATES_KIND: &str = "coordinates";
 
 /// A search query, always available: the derived question's text or the subject.
 pub const QUERY_KIND: &str = "query";
-
-/// Platforms SociaVault profile routes accept.
-pub const SOCIAVAULT_PLATFORMS: &[&str] = &[
-    "twitter", "instagram", "tiktok", "youtube", "facebook", "linkedin", "threads", "twitch",
-];
 
 /// Kinds the prompt extractor (`question_bindings`) can produce from the user's text.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -50,6 +108,12 @@ pub fn known_kind(kind: &str) -> bool {
     BINDING_KINDS.contains(&kind) || kind == URL_KIND || kind == COORDINATES_KIND
 }
 
+/// The SociaVault tools whose observation lists accounts found by search: those handles
+/// stay `unverified` until a profile call or a Firecrawl page links them to the subject.
+fn search_handles(tool_id: &str) -> bool {
+    tool_row(tool_id).is_some_and(|row| row.unverified_handles)
+}
+
 /// How a binding becomes tool arguments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum How {
@@ -57,8 +121,24 @@ pub enum How {
     Plain,
     /// A domain becomes `https://<domain>`.
     DomainAsUrl,
-    /// A handle on a SociaVault platform fills `platform` (its qualifier) and `handle`.
-    SocialPair,
+    /// A handle on a platform the SociaVault tool serves fills `platform` (its qualifier)
+    /// and `handle`.
+    SocialPair(&'static str),
+    /// A platform id on a platform the SociaVault tool serves fills `platform` and `user_id`.
+    PlatformIdPair(&'static str),
+    /// A name or handle fills `query`, and `platform` is the first platform the question
+    /// names that the SociaVault tool serves, else the tool's default platform.
+    PlatformQuery(&'static str),
+    /// A handle bound on exactly this platform (no fallback to other platforms).
+    PlatformHandle(&'static str),
+    /// Up to `BATCH_SCRAPE_DEFAULT_URLS` page URLs, contact and about pages first.
+    UrlList,
+    /// `r/<name>` named in the question text.
+    Subreddit,
+    /// An email address on a company (non-webmail) domain.
+    CompanyEmail,
+    /// An email address on a webmail domain.
+    WebmailEmail,
     /// A handle, preferring one on this platform, else the subject's best-supported handle.
     Username(&'static str),
     /// `ecosystem:name@version` fills `ecosystem`, `package_name`, and `version`.
@@ -100,8 +180,12 @@ pub struct ToolIo {
     /// The observation describes the account the tool was given (a profile lookup), so
     /// the accounts it links belong to the subject.
     pub profile_of_input: bool,
-    /// One call per platform with a handle (SociaVault), within the turn allowance.
+    /// One call per platform with a handle (SociaVault), within the turn budget.
     pub per_platform: bool,
+    /// Optional inputs the binder fills when a binding exists (never required).
+    pub optional: &'static [Fill],
+    /// Handles this tool finds are search results: `unverified` until confirmed.
+    pub unverified_handles: bool,
 }
 
 const fn fill(kind: &'static str, input: &'static str) -> Fill {
@@ -123,6 +207,8 @@ const fn row(tool: &'static str, slots: &'static [Slot], produces: &'static [&'s
         account_platform: "",
         profile_of_input: false,
         per_platform: false,
+        optional: &[],
+        unverified_handles: false,
     }
 }
 
@@ -146,6 +232,36 @@ const PAGE_PRODUCES: &[&str] = &[
 ];
 const IP_SEEDS: &[&str] = &["mnemonic_passive_dns", "hackertarget_hostsearch"];
 const HANDLE_SEEDS: &[&str] = &["firecrawl_search", "sociavault_profile"];
+/// Producers of a domain the subject owns, for Hunter and Firecrawl map and crawl.
+const DOMAIN_SEEDS: &[&str] = &["firecrawl_search", "hunter_domain_finder"];
+/// Producers of an email for the Hunter email tools.
+const EMAIL_SEEDS: &[&str] = &["firecrawl_search", "hunter_domain_search"];
+const SOCIAL_SEARCH_QUERY: &[Fill] = &[
+    fill_how("person_name", "query", How::PlatformQuery("sociavault_search")),
+    fill_how("org_name", "query", How::PlatformQuery("sociavault_search")),
+    fill_how("handle", "query", How::PlatformQuery("sociavault_search")),
+];
+const SOCIAL_USER_QUERY: &[Fill] = &[
+    fill_how("person_name", "query", How::PlatformQuery("sociavault_search_users")),
+    fill_how("org_name", "query", How::PlatformQuery("sociavault_search_users")),
+    fill_how("handle", "query", How::PlatformQuery("sociavault_search_users")),
+];
+const HUNTER_PERSON_KEYS: &[(&str, &str)] = &[
+    ("full_name", "person_name"),
+    ("employer", "org_name"),
+    ("employer_domain", "domain"),
+    ("handle", "handle"),
+];
+const HUNTER_COMBINED_KEYS: &[(&str, &str)] = &[
+    ("full_name", "person_name"),
+    ("employer", "org_name"),
+    ("employer_domain", "domain"),
+    ("handle", "handle"),
+    ("name", "org_name"),
+    ("legal_name", "org_name"),
+    ("domain", "domain"),
+    ("address", "address"),
+];
 
 /// The tool input table. Coverage is asserted against `osint::registry()` in tests.
 pub const TOOLS: &[ToolIo] = &[
@@ -191,10 +307,31 @@ pub const TOOLS: &[ToolIo] = &[
     row("urlscan_search", &[DOMAIN], &["domain", "ip", "url"]),
     ToolIo { extras: &[("limit", 5)], ..row("firecrawl_search", &[Slot { fills: &[fill_how(QUERY_KIND, "query", How::SearchQuery)] }], SEARCH_PRODUCES) },
     ToolIo { after: &["firecrawl_search"], ..row("firecrawl_scrape", &[Slot { fills: &[fill(URL_KIND, "url")] }], PAGE_PRODUCES) },
+    ToolIo { after: DOMAIN_SEEDS, ..row("firecrawl_map", &[DOMAIN], &["url"]) },
+    ToolIo { after: &["firecrawl_map", "firecrawl_search"], ..row("firecrawl_batch_scrape", &[Slot { fills: &[fill_how(URL_KIND, "urls", How::UrlList)] }], PAGE_PRODUCES) },
+    ToolIo { after: DOMAIN_SEEDS, ..row("firecrawl_crawl", &[DOMAIN], PAGE_PRODUCES) },
     ToolIo {
-        after: &["firecrawl_search", "crtsh_certificates"],
+        after: &["firecrawl_map", "firecrawl_search"],
+        keys: &[("org_name", "org_name"), ("legal_name", "org_name"), ("domain", "domain"), ("address", "address"), ("name", "person_name")],
+        profile_of_input: true,
+        ..row("firecrawl_extract", &[Slot { fills: &[fill(URL_KIND, "url")] }], &["org_name", "person_name", "domain", "email", "handle", "address", "url"])
+    },
+    ToolIo {
+        after: &["firecrawl_search"],
+        keys: &[("domain", "domain"), ("company_name", "org_name")],
+        ..row("hunter_domain_finder", &[Slot { fills: &[fill("org_name", "company")] }], &["domain", "org_name"])
+    },
+    ToolIo { after: DOMAIN_SEEDS, ..row("hunter_email_count", &[Slot { fills: &[fill("domain", "domain"), fill("org_name", "company")] }], &[]) },
+    ToolIo {
+        after: DOMAIN_SEEDS,
         keys: &[("organization", "org_name")],
         ..row("hunter_domain_search", &[Slot { fills: &[fill("domain", "domain"), fill("org_name", "company")] }], &["email", "person_name", "domain", "org_name"])
+    },
+    ToolIo {
+        after: DOMAIN_SEEDS,
+        keys: &[("name", "org_name"), ("legal_name", "org_name"), ("handle", "handle"), ("domain", "domain"), ("parent_domain", "domain"), ("address", "address")],
+        profile_of_input: true,
+        ..row("hunter_company_enrichment", &[DOMAIN], &["org_name", "domain", "handle", "email", "address"])
     },
     ToolIo {
         after: &["firecrawl_search", "hunter_domain_search"],
@@ -205,20 +342,55 @@ pub const TOOLS: &[ToolIo] = &[
         )
     },
     ToolIo { after: &["hunter_email_finder", "hunter_domain_search"], ..row("hunter_email_verifier", &[Slot { fills: &[fill("email", "email")] }], &[]) },
+    ToolIo { after: EMAIL_SEEDS, ..row("hunter_email_insight", &[Slot { fills: &[fill("email", "email")] }], &[]) },
     ToolIo {
-        after: &["firecrawl_search", "crtsh_certificates"],
-        keys: &[("name", "org_name"), ("handle", "handle")],
-        ..row("hunter_tech_lookup", &[DOMAIN], &["org_name", "domain", "handle"])
+        after: EMAIL_SEEDS,
+        keys: HUNTER_PERSON_KEYS,
+        profile_of_input: true,
+        ..row(
+            "hunter_person_enrichment",
+            &[Slot { fills: &[fill_how("email", "email", How::WebmailEmail), fill_how("handle", "linkedin_handle", How::PlatformHandle("linkedin"))] }],
+            &["person_name", "org_name", "domain", "handle"],
+        )
     },
     ToolIo {
-        after: &["firecrawl_search"],
+        after: EMAIL_SEEDS,
+        keys: HUNTER_COMBINED_KEYS,
+        profile_of_input: true,
+        ..row("hunter_combined_enrichment", &[Slot { fills: &[fill_how("email", "email", How::CompanyEmail)] }], &["person_name", "org_name", "domain", "handle", "address", "email"])
+    },
+    ToolIo {
+        after: &["firecrawl_search", "hunter_company_enrichment", "sociavault_search_users"],
+        keys: &[("platform_id", PLATFORM_ID_KIND)],
         profile_of_input: true,
         per_platform: true,
-        ..row("sociavault_profile", &[Slot { fills: &[fill_how("handle", "handle", How::SocialPair)] }], &["handle", "url", "domain", "email"])
+        ..row(
+            "sociavault_profile",
+            &[Slot { fills: &[fill_how("handle", "handle", How::SocialPair("sociavault_profile")), fill_how(PLATFORM_ID_KIND, "user_id", How::PlatformIdPair("sociavault_profile"))] }],
+            &["handle", "url", "domain", "email", PLATFORM_ID_KIND],
+        )
     },
+    ToolIo {
+        optional: &[fill_how(QUERY_KIND, "subreddit", How::Subreddit)],
+        unverified_handles: true,
+        ..row("sociavault_search", &[Slot { fills: SOCIAL_SEARCH_QUERY }], &["handle", "url"])
+    },
+    ToolIo { unverified_handles: true, ..row("sociavault_search_users", &[Slot { fills: SOCIAL_USER_QUERY }], &["handle"]) },
+    ToolIo {
+        after: &["sociavault_profile"],
+        per_platform: true,
+        ..row(
+            "sociavault_user_content",
+            &[Slot { fills: &[fill_how("handle", "handle", How::SocialPair("sociavault_user_content")), fill_how(PLATFORM_ID_KIND, "user_id", How::PlatformIdPair("sociavault_user_content"))] }],
+            &["handle", "url", "domain", "email"],
+        )
+    },
+    // No declared producer: Recon inserts it bound, after a weak Firecrawl search (D3).
+    row("sociavault_google_search", &[Slot { fills: &[fill_how(QUERY_KIND, "query", How::SearchQuery)] }], &["domain", "url", "handle", "person_name", "org_name", "email"]),
 ];
 
 pub fn tool_row(tool_id: &str) -> Option<&'static ToolIo> {
+    let tool_id = crate::osint::canonical_tool_id(tool_id);
     TOOLS.iter().find(|row| row.tool == tool_id)
 }
 
@@ -234,7 +406,9 @@ pub fn input_kinds(tool_id: &str) -> Vec<&'static str> {
         for fill in slot.fills {
             let extra: &[&'static str] = match fill.kind {
                 QUERY_KIND => &["person_name", "org_name", "domain", "handle", "email", "address", "cve", "ip", "wallet", "package"],
-                kind if fill.how == How::SocialPair => if kind == "handle" { &["platform", "handle"] } else { &[] },
+                kind if matches!(fill.how, How::SocialPair(_) | How::PlatformIdPair(_)) => {
+                    if kind == "handle" { &["platform", "handle"] } else { &["platform", PLATFORM_ID_KIND] }
+                }
                 _ => std::slice::from_ref(&fill.kind),
             };
             for kind in extra {
@@ -278,6 +452,7 @@ pub fn extractor(kind: &str) -> &'static str {
         "person_name" | "org_name" => "entity selection on search hits and keyed name fields",
         "address" => "keyed address fields",
         "coordinates" => "lat/lon fields",
+        PLATFORM_ID_KIND => "keyed `platform_id` on a SociaVault profile card (Twitter rest_id, Instagram user id, YouTube channelId)",
         QUERY_KIND => "always available",
         _ => "",
     }
@@ -308,7 +483,7 @@ pub fn plausible_person_name(value: &str) -> bool {
 
 fn usable(binding: &Binding) -> bool {
     match binding.kind.as_str() {
-        "domain" => !social_or_publisher(&binding.value),
+        "domain" => !social_or_publisher(&binding.value) && !crate::osint::webmail_host(&binding.value),
         "person_name" => plausible_person_name(&binding.value),
         _ => true,
     }
@@ -363,16 +538,47 @@ struct Chosen {
 }
 
 fn source(binding: &Binding) -> String {
+    let via = if binding.source_tool.is_empty() { String::new() } else { format!(" via {}", binding.source_tool) };
     if binding.inferred {
-        format!("{} inferred for {} from {}", binding.kind, binding.qualifier, binding.evidence_id)
+        format!("{} inferred for {} from {}{via}", binding.kind, binding.qualifier, binding.evidence_id)
     } else if binding.unverified {
-        format!("{} named in {}, unverified", binding.kind, binding.evidence_id)
+        format!("{} named in {}, unverified{via}", binding.kind, binding.evidence_id)
     } else {
-        format!("{} from {}", binding.kind, binding.evidence_id)
+        format!("{} from {}{via}", binding.kind, binding.evidence_id)
     }
 }
 
-fn choose(fill: &Fill, bindings: &[Binding], subject: &str, hint: &str) -> Option<Chosen> {
+/// What `choose` reads besides the bindings.
+struct Ctx<'a> {
+    subject: &'a str,
+    hint: &'a str,
+    question: &'a str,
+}
+
+/// The platform a SociaVault query tool searches: the first one the question or hint
+/// names that the tool serves, else the handle's own platform, else the tool's default.
+fn query_platform(tool: &str, ctx: &Ctx, binding: &Binding) -> &'static str {
+    let served = crate::osint::sociavault_platforms(tool);
+    let texts = [(String::new(), format!("{} {}", ctx.hint, ctx.question))];
+    let named = question_platforms(&texts).into_iter().find_map(|(platform, _)| served.iter().copied().find(|known| *known == platform));
+    let own = served.iter().copied().find(|known| binding.kind == "handle" && *known == binding.qualifier);
+    let reddit = served.contains(&"reddit") && (subreddit_in(ctx.hint).is_some() || subreddit_in(ctx.question).is_some());
+    reddit.then_some("reddit").or(named).or(own).unwrap_or(if tool == "sociavault_search_users" { "instagram" } else { "twitter" })
+}
+
+/// `r/<name>` named in the question or hint.
+fn subreddit_in(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let at = lower.find("r/")?;
+    if at > 0 && lower.as_bytes()[at - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let name: String = lower[at + 2..].chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
+    (2..=21).contains(&name.len()).then_some(name)
+}
+
+fn choose(fill: &Fill, bindings: &[Binding], ctx: &Ctx) -> Option<Chosen> {
+    let (subject, hint) = (ctx.subject, ctx.hint);
     let plain = |input: &'static str, binding: &Binding, value: Value| Chosen {
         filled: vec![format!("{input}={} ({})", value.as_str().map(String::from).unwrap_or_else(|| value.to_string()), source(binding))],
         args: vec![(input, value)],
@@ -390,17 +596,53 @@ fn choose(fill: &Fill, bindings: &[Binding], subject: &str, hint: &str) -> Optio
             let binding = candidates(bindings, "domain").into_iter().next()?;
             Some(plain(fill.input, binding, json!(format!("https://{}", binding.value))))
         }
-        How::SocialPair => {
-            let binding = candidates(bindings, "handle")
+        How::SocialPair(tool) | How::PlatformIdPair(tool) => {
+            let served = crate::osint::sociavault_account_platforms(tool);
+            let binding = candidates(bindings, fill.kind)
                 .into_iter()
-                .find(|binding| SOCIAVAULT_PLATFORMS.contains(&binding.qualifier.as_str()))?;
+                .find(|binding| served.contains(&binding.qualifier.as_str()))?;
+            let input = if fill.kind == "handle" { "handle" } else { "user_id" };
             Some(Chosen {
-                args: vec![("platform", json!(binding.qualifier)), ("handle", json!(binding.value))],
+                args: vec![("platform", json!(binding.qualifier)), (input, json!(binding.value))],
                 filled: vec![
                     format!("platform={} ({})", binding.qualifier, source(binding)),
-                    format!("handle={} ({})", binding.value, source(binding)),
+                    format!("{input}={} ({})", binding.value, source(binding)),
                 ],
             })
+        }
+        How::PlatformQuery(tool) => {
+            let binding = candidates(bindings, fill.kind).into_iter().find(|binding| !binding.inferred)?;
+            let platform = query_platform(tool, ctx, binding);
+            Some(Chosen {
+                args: vec![("platform", json!(platform)), (fill.input, json!(binding.value))],
+                filled: vec![format!("platform={platform} (named or default)"), format!("{}={} ({})", fill.input, binding.value, source(binding))],
+            })
+        }
+        How::PlatformHandle(platform) => {
+            let binding = platform_handle(bindings, platform)?;
+            Some(plain(fill.input, binding, json!(binding.value)))
+        }
+        How::UrlList => {
+            let mut urls: Vec<&Binding> = candidates(bindings, URL_KIND);
+            urls.sort_by_key(|binding| (binding.inferred, binding.unverified, crate::osint::map_rank(&binding.value)));
+            urls.dedup_by(|a, b| a.value == b.value);
+            urls.truncate(crate::osint::BATCH_SCRAPE_DEFAULT_URLS);
+            let first = *urls.first()?;
+            Some(Chosen {
+                args: vec![(fill.input, json!(urls.iter().map(|binding| binding.value.clone()).collect::<Vec<_>>()))],
+                filled: vec![format!("{}={} URL(s) ({})", fill.input, urls.len(), source(first))],
+            })
+        }
+        How::Subreddit => {
+            let name = subreddit_in(ctx.hint).or_else(|| subreddit_in(ctx.question))?;
+            Some(Chosen { filled: vec![format!("{}=r/{name} (named in the question)", fill.input)], args: vec![(fill.input, json!(name))] })
+        }
+        How::CompanyEmail | How::WebmailEmail => {
+            let webmail = fill.how == How::WebmailEmail;
+            let binding = candidates(bindings, "email").into_iter().find(|binding| {
+                binding.value.rsplit_once('@').is_some_and(|(_, host)| crate::osint::webmail_host(&host.to_ascii_lowercase()) == webmail)
+            })?;
+            Some(plain(fill.input, binding, json!(binding.value)))
         }
         How::Username(platform) => {
             let binding = platform_handle(bindings, platform).or_else(|| best_handle(bindings, subject))?;
@@ -438,23 +680,41 @@ fn choose(fill: &Fill, bindings: &[Binding], subject: &str, hint: &str) -> Optio
     }
 }
 
+/// Tool inputs one fill writes, for labels.
+fn fill_names(fill: &Fill) -> &[&'static str] {
+    match fill.how {
+        How::SocialPair(_) => &["platform", "handle"],
+        How::PlatformIdPair(_) => &["platform", "user_id"],
+        How::PlatformQuery(_) => &["platform", "query"],
+        How::PackageParts => &["ecosystem", "package_name", "version"],
+        How::Coordinates => &["latitude", "longitude"],
+        _ => std::slice::from_ref(&fill.input),
+    }
+}
+
 fn slot_label(slot: &Slot) -> String {
-    let mut inputs: Vec<&str> = Vec::new();
+    let names = fill_names;
+    if slot.fills.len() == 1 {
+        return names(&slot.fills[0]).join(", ");
+    }
+    // Inputs every alternative writes (`platform`), then the alternatives: "platform,
+    // handle or user_id"; "domain or company".
+    let mut common: Vec<&str> = Vec::new();
+    let mut rest: Vec<&str> = Vec::new();
     for fill in slot.fills {
-        let names: &[&str] = match fill.how {
-            How::SocialPair => &["platform", "handle"],
-            How::PackageParts => &["ecosystem", "package_name", "version"],
-            How::Coordinates => &["latitude", "longitude"],
-            _ => std::slice::from_ref(&fill.input),
-        };
-        for name in names {
-            if !inputs.contains(name) {
-                inputs.push(name);
+        for name in names(fill) {
+            let everywhere = slot.fills.iter().all(|other| names(other).contains(name));
+            let list = if everywhere { &mut common } else { &mut rest };
+            if !list.contains(name) {
+                list.push(name);
             }
         }
     }
-    let joiner = if slot.fills.len() == 1 { ", " } else { " or " };
-    inputs.join(joiner)
+    let alternatives = rest.join(" or ");
+    if !alternatives.is_empty() {
+        common.push(&alternatives);
+    }
+    common.join(", ")
 }
 
 /// Arguments for one step from accepted bindings. Returns the arguments, the fills as
@@ -473,8 +733,10 @@ pub fn bind_arguments(
         return (Value::Object(args), filled, vec![format!("{tool_id} inputs have no binding kind")]);
     };
     let subject = subject_of(question);
+    let eligible: Vec<Binding> = bindings.iter().filter(|binding| binding_allowed(row.tool, binding)).cloned().collect();
+    let ctx = Ctx { subject: &subject, hint: query_hint, question };
     for slot in row.slots {
-        match slot.fills.iter().find_map(|fill| choose(fill, bindings, &subject, query_hint)) {
+        match slot.fills.iter().find_map(|fill| choose(fill, &eligible, &ctx)) {
             Some(chosen) => {
                 for (input, value) in chosen.args {
                     args.insert(input.into(), value);
@@ -484,8 +746,33 @@ pub fn bind_arguments(
             None => missing.push(slot_label(slot)),
         }
     }
+    for fill in row.optional {
+        if let Some(chosen) = choose(fill, &eligible, &ctx) {
+            for (input, value) in chosen.args {
+                args.entry(input.to_string()).or_insert(value);
+            }
+            filled.extend(chosen.filled);
+        }
+    }
     for (input, value) in row.extras {
         args.entry(input.to_string()).or_insert(json!(value));
+    }
+    if crate::osint::SOCIAVAULT_TOOLS.contains(&row.tool) && missing.is_empty() {
+        let platform = args.get("platform").and_then(Value::as_str).unwrap_or("").to_string();
+        let mut text = format!("{query_hint} {question}");
+        if args.contains_key("subreddit") {
+            text.push_str(" r/");
+        }
+        let has_user_id = args.contains_key("user_id");
+        if let Some(endpoint) = crate::osint::sociavault_endpoint_hint(row.tool, &platform, &text) {
+            let route = crate::osint::sociavault_routes(row.tool).find(|route| route.platform == platform && route.endpoint == endpoint);
+            // Only an endpoint whose inputs the bound arguments carry.
+            let fits = route.is_some_and(|route| route.input.keys().iter().any(|key| args.contains_key(*key) || (*key == "user_id" && has_user_id)));
+            if fits {
+                filled.push(format!("endpoint={endpoint} (named in the question)"));
+                args.insert("endpoint".into(), json!(endpoint));
+            }
+        }
     }
     (Value::Object(args), filled, missing)
 }
@@ -495,9 +782,11 @@ pub fn unmet_kinds(tool_id: &str, bindings: &[Binding]) -> Vec<Vec<&'static str>
     let Some(row) = tool_row(tool_id) else {
         return Vec::new();
     };
+    let eligible: Vec<Binding> = bindings.iter().filter(|binding| binding_allowed(row.tool, binding)).cloned().collect();
+    let ctx = Ctx { subject: "", hint: "-", question: "" };
     row.slots
         .iter()
-        .filter(|slot| !slot.fills.iter().any(|fill| choose(fill, bindings, "", "-").is_some()))
+        .filter(|slot| !slot.fills.iter().any(|fill| choose(fill, &eligible, &ctx).is_some()))
         .map(|slot| {
             let mut kinds: Vec<&'static str> = Vec::new();
             for fill in slot.fills {
@@ -784,7 +1073,7 @@ fn keyed(row: &ToolIo, value: &Value, parent: &str, out: &mut Vec<(&'static str,
             }
             for (key, item) in map {
                 if let Some((_, kind)) = row.keys.iter().find(|(name, _)| name == key) {
-                    let qualifier = if *kind == "handle" {
+                    let qualifier = if *kind == "handle" || *kind == PLATFORM_ID_KIND {
                         sibling_platform
                             .clone()
                             .or_else(|| parent_platform.clone())
@@ -913,6 +1202,8 @@ pub fn rule_bindings(question: &str, evidence_id: &str, tool_id: &str, observati
             value: value.into(),
             evidence_id: evidence_id.into(),
             qualifier: qualifier.into(),
+            source_tool: row.tool.into(),
+            unverified: kind == "handle" && row.unverified_handles,
             ..Binding::default()
         });
     };
@@ -997,12 +1288,26 @@ pub fn rule_bindings(question: &str, evidence_id: &str, tool_id: &str, observati
                     push("address", value, "");
                 }
             }
+            PLATFORM_ID_KIND => {
+                for (_, value, qualifier) in keyed_values.iter().filter(|(item, _, _)| *item == PLATFORM_ID_KIND) {
+                    if !qualifier.is_empty() {
+                        push(PLATFORM_ID_KIND, value, qualifier);
+                    }
+                }
+            }
             COORDINATES_KIND => {
                 let mut found = Vec::new();
                 coordinates_in(observations, &mut found);
                 found.iter().take(3).for_each(|value| push(COORDINATES_KIND, value, ""));
             }
             _ => {}
+        }
+    }
+    // A domain finder match is a guess unless Hunter called it a perfect match.
+    if row.tool == "hunter_domain_finder" && observations.get("perfect_match").and_then(Value::as_bool) != Some(true) {
+        for binding in candidates.iter_mut().filter(|binding| binding.kind == "domain") {
+            binding.inferred = true;
+            binding.qualifier = "company".into();
         }
     }
     let mut per_kind: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -1029,8 +1334,13 @@ pub fn vet_model_bindings(
     let subject = subject_of(question);
     let hits = hits_in(evidence_id, observations);
     let profile = tool_row(tool_id).is_some_and(|row| row.profile_of_input);
+    let source_tool = tool_row(tool_id).map(|row| row.tool).unwrap_or("");
     let mut out = Vec::new();
     for mut binding in candidates {
+        binding.source_tool = source_tool.into();
+        if binding.kind == "handle" && search_handles(tool_id) {
+            binding.unverified = true;
+        }
         if binding.kind == "handle" {
             let raw = binding.value.trim().to_string();
             if raw.contains('/') {
@@ -1066,6 +1376,7 @@ pub fn question_platforms(texts: &[(String, String)]) -> Vec<(String, String)> {
             ("twitter", "twitter"), (" x ", "twitter"), ("x.com", "twitter"), ("(x)", "twitter"), ("x/twitter", "twitter"),
             ("instagram", "instagram"), ("facebook", "facebook"), ("tiktok", "tiktok"), ("youtube", "youtube"),
             ("linkedin", "linkedin"), ("threads", "threads"), ("twitch", "twitch"),
+            ("pinterest", "pinterest"), ("reddit", "reddit"),
         ] {
             if let Some(at) = lower.find(hint) {
                 hits.push((at, platform));
@@ -1085,22 +1396,25 @@ pub fn question_platforms(texts: &[(String, String)]) -> Vec<(String, String)> {
 /// platform without its own handle borrows the subject's best-supported handle, marked
 /// `inferred`. Without question platforms, every subject handle on a supported platform.
 pub fn per_platform_targets(
+    tool_id: &str,
     platforms: &[(String, String)],
     bindings: &[Binding],
     question: &str,
 ) -> (Vec<(String, Binding, String)>, Vec<String>) {
     let subject = subject_of(question);
+    let served = crate::osint::sociavault_account_platforms(tool_id);
+    let platforms: Vec<(String, String)> = platforms.iter().filter(|(platform, _)| served.contains(&platform.as_str())).cloned().collect();
     let mut targets = Vec::new();
     let mut unresolved = Vec::new();
     if platforms.is_empty() {
-        for binding in bindings.iter().filter(|binding| binding.kind == "handle" && !binding.inferred && SOCIAVAULT_PLATFORMS.contains(&binding.qualifier.as_str())) {
+        for binding in bindings.iter().filter(|binding| binding.kind == "handle" && !binding.inferred && served.contains(&binding.qualifier.as_str())) {
             if !targets.iter().any(|(platform, _, _): &(String, Binding, String)| *platform == binding.qualifier) {
                 targets.push((binding.qualifier.clone(), binding.clone(), String::new()));
             }
         }
         return (targets, unresolved);
     }
-    for (platform, qid) in platforms {
+    for (platform, qid) in &platforms {
         let exact = platform_handle(bindings, platform);
         match exact {
             Some(binding) => targets.push((platform.clone(), binding.clone(), qid.clone())),
@@ -1141,7 +1455,9 @@ mod tests {
     /// Tool inputs a fill writes.
     fn writes(fill: &Fill) -> Vec<&'static str> {
         match fill.how {
-            How::SocialPair => vec!["platform", "handle"],
+            How::SocialPair(_) => vec!["platform", "handle"],
+            How::PlatformIdPair(_) => vec!["platform", "user_id"],
+            How::PlatformQuery(_) => vec!["platform", fill.input],
             How::PackageParts => vec!["ecosystem", "package_name", "version"],
             How::Coordinates => vec!["latitude", "longitude"],
             _ => vec![fill.input],
@@ -1179,13 +1495,19 @@ mod tests {
                         tool.id,
                         fill.kind
                     );
-                    assert!(fill.kind == QUERY_KIND || PROMPT_KINDS.contains(&fill.kind), "{}: the prompt never yields {}", tool.id, fill.kind);
+                    let tool_only = TOOL_ONLY.iter().any(|(kind, why)| *kind == fill.kind && !why.is_empty());
+                    assert!(fill.kind == QUERY_KIND || PROMPT_KINDS.contains(&fill.kind) || tool_only, "{}: the prompt never yields {}", tool.id, fill.kind);
                     // (c) a rule extractor exists for the kind.
                     assert!(!extractor(fill.kind).is_empty(), "{}: no extractor for {}", tool.id, fill.kind);
                     for input in writes(fill) {
                         let schema = tool.schema();
                         assert!(schema["properties"].get(input).is_some(), "{}: {input} is not a tool input", tool.id);
                     }
+                }
+            }
+            for fill in row.optional {
+                for input in writes(fill) {
+                    assert!(tool.schema()["properties"].get(input).is_some(), "{}: optional {input} is not a tool input", tool.id);
                 }
             }
             for kind in row.produces {
@@ -1203,6 +1525,155 @@ mod tests {
         for kind in BINDING_KINDS.iter().filter(|kind| **kind != "platform") {
             assert!(PROMPT_KINDS.contains(kind) || !producers_of(kind).is_empty(), "{kind} has no producer");
         }
+    }
+
+    /// Every SociaVault route in the matrix is reachable: the tool's fills write
+    /// `platform` and at least one of the route's inputs, and each such fill's kind has a
+    /// producer (a tool, the prompt, or the always-available query). Every Firecrawl and
+    /// Hunter tool has a row, and Hunter inputs come only from primary providers or the
+    /// prompt (D1).
+    #[test]
+    fn every_primary_provider_route_maps_its_inputs_to_producers() {
+        let has_producer = |kind: &str| kind == QUERY_KIND || PROMPT_KINDS.contains(&kind) || !producers_of(kind).is_empty();
+        for route in osint::SOCIAVAULT_ROUTES {
+            let row = tool_row(route.tool).unwrap_or_else(|| panic!("{} has no row", route.tool));
+            let fills: Vec<&Fill> = row.slots.iter().flat_map(|slot| slot.fills.iter()).chain(row.optional.iter()).collect();
+            let name = format!("{} {}:{}", route.tool, route.platform, route.endpoint);
+            if route.tool != "sociavault_google_search" {
+                assert!(fills.iter().any(|fill| writes(fill).contains(&"platform")), "{name}: platform is never written");
+            }
+            let feeding: Vec<&&Fill> = fills.iter().filter(|fill| writes(fill).iter().any(|input| route.input.keys().contains(input))).collect();
+            assert!(!feeding.is_empty(), "{name}: no fill writes {:?}", route.input.keys());
+            assert!(feeding.iter().any(|fill| has_producer(fill.kind)), "{name}: no producer for {:?}", route.input.keys());
+            // The account platforms a pair fill accepts include this route's platform.
+            if route.input.keys().contains(&"handle") || route.input.keys().contains(&"user_id") {
+                assert!(osint::sociavault_account_platforms(route.tool).contains(&route.platform), "{name}");
+            }
+        }
+        for tool in osint::registry().iter().filter(|tool| tool.id.starts_with("firecrawl_") || tool.id.starts_with("hunter_")) {
+            let row = tool_row(tool.id).unwrap_or_else(|| panic!("{} has no row", tool.id));
+            assert!(pickable(tool.id), "{}", tool.id);
+            if !tool.id.starts_with("hunter_") {
+                continue;
+            }
+            for producer in row.after {
+                assert!(osint::primary_provider(producer).is_some(), "{}: declared producer {producer} is a gap-filler", tool.id);
+            }
+            for fill in row.slots.iter().flat_map(|slot| slot.fills.iter()) {
+                let primary: Vec<&str> = producers_of(fill.kind).into_iter().filter(|producer| allowed_producer(tool.id, producer)).collect();
+                assert!(PROMPT_KINDS.contains(&fill.kind) || !primary.is_empty(), "{}: {} has no primary producer", tool.id, fill.kind);
+                assert!(primary.iter().all(|producer| osint::primary_provider(producer).is_some()), "{}: {primary:?}", tool.id);
+                for gap_filler in producers_of(fill.kind).into_iter().filter(|producer| osint::primary_provider(producer).is_none()) {
+                    assert!(!allowed_producer(tool.id, gap_filler), "{}: gap-filler {gap_filler} may feed {}", tool.id, fill.kind);
+                }
+            }
+        }
+        assert!(allowed_producer("hunter_domain_search", PROMPT_SOURCE));
+        assert!(!allowed_producer("firecrawl_map", "crtsh_certificates"));
+        assert!(allowed_producer("urlscan_search", "crtsh_certificates"), "gap-fillers stay unrestricted");
+    }
+
+    /// D1: a domain only crt.sh found is never a Hunter input; once a Firecrawl result
+    /// also contains it (the binding takes the primary source), it binds.
+    #[test]
+    fn a_gap_filler_only_domain_waits_for_a_primary_observation_before_hunter() {
+        let question = "Who runs Acme Robotics?";
+        let crtsh = rule_bindings(question, "call-s1", "crtsh_certificates", &json!({"names": ["acmerobotics.com", "www.acmerobotics.com"]}));
+        let domain = crtsh.iter().find(|binding| binding.kind == "domain").expect("crt.sh yields the domain").clone();
+        assert_eq!(domain.source_tool, "crtsh_certificates");
+        let mut bindings = question_bindings(question);
+        bindings.push(domain.clone());
+        for hunter in ["hunter_domain_search", "hunter_company_enrichment", "hunter_email_count"] {
+            let (args, _, _) = bind_arguments(hunter, &bindings, question, "");
+            assert!(args.get("domain").is_none(), "{hunter} took a crt.sh-only domain: {args}");
+        }
+        assert!(bind_arguments("firecrawl_map", &bindings, question, "").2.len() == 1, "map waits too");
+        // Gap-fillers still use it.
+        assert_eq!(bind_arguments("urlscan_search", &bindings, question, "").0["domain"], "acmerobotics.com");
+        // A Firecrawl observation containing the same value makes it eligible.
+        let search = json!({"results": [{"title": "Acme Robotics | Home", "url": "https://acmerobotics.com/", "snippet": "Acme Robotics builds robots."}]});
+        let primary = rule_bindings(question, "call-s2", "firecrawl_search", &search);
+        let seen = primary.iter().find(|binding| binding.kind == "domain" && binding.value == "acmerobotics.com").expect("Firecrawl yields it");
+        assert_eq!(seen.source_tool, "firecrawl_search");
+        bindings.retain(|binding| binding.value != "acmerobotics.com");
+        bindings.push(Binding { source_tool: seen.source_tool.clone(), evidence_id: seen.evidence_id.clone(), ..domain });
+        let (args, filled, missing) = bind_arguments("hunter_domain_search", &bindings, question, "");
+        assert!(missing.is_empty(), "{missing:?}");
+        assert_eq!(args["domain"], "acmerobotics.com");
+        assert!(filled.iter().any(|fill| fill.contains("via firecrawl_search")), "{filled:?}");
+        // A domain named in the prompt binds directly.
+        let prompt = question_bindings("Who runs acmerobotics.com?");
+        assert_eq!(bind_arguments("hunter_company_enrichment", &prompt, "Who runs acmerobotics.com?", "").0["domain"], "acmerobotics.com");
+    }
+
+    #[test]
+    fn hunter_routes_emails_and_domain_finder_matches() {
+        let question = "Who is jane@acmerobotics.com and jane.example@gmail.com?";
+        let known = question_bindings(question);
+        assert_eq!(bind_arguments("hunter_combined_enrichment", &known, question, "").0["email"], "jane@acmerobotics.com");
+        assert_eq!(bind_arguments("hunter_person_enrichment", &known, question, "").0["email"], "jane.example@gmail.com");
+        // Webmail domains never become company domains.
+        let webmail = vec![Binding { kind: "domain".into(), value: "gmail.com".into(), evidence_id: "question".into(), ..Binding::default() }];
+        assert!(!bind_arguments("hunter_domain_search", &webmail, question, "").2.is_empty());
+        // Domain finder: perfect matches are exact, others inferred.
+        let observed = |perfect: bool| json!({"companies": [{"domain": "acmerobotics.com", "company_name": "Acme Robotics"}], "perfect_match": perfect});
+        let exact = rule_bindings("Who runs Acme Robotics?", "call-s1", "hunter_domain_finder", &observed(true));
+        assert!(exact.iter().any(|binding| binding.kind == "domain" && !binding.inferred && binding.source_tool == "hunter_domain_finder"));
+        let guess = rule_bindings("Who runs Acme Robotics?", "call-s1", "hunter_domain_finder", &observed(false));
+        assert!(guess.iter().filter(|binding| binding.kind == "domain").all(|binding| binding.inferred), "{guess:?}");
+        let org = "What does Acme Robotics Inc do?";
+        let company = bind_arguments("hunter_domain_finder", &question_bindings(org), org, "").0;
+        assert!(company["company"].as_str().is_some_and(|name| name.contains("Acme Robotics")), "{company}");
+    }
+
+    #[test]
+    fn sociavault_query_tools_take_the_named_platform_and_mark_found_handles_unverified() {
+        let question = "Who is Jane Example on TikTok?";
+        let known = question_bindings(question);
+        let (args, _, missing) = bind_arguments("sociavault_search_users", &known, question, "");
+        assert!(missing.is_empty(), "{missing:?} from {known:?}");
+        assert_eq!(args["platform"], "tiktok", "the named platform");
+        assert!(args["query"].as_str().is_some_and(|query| query.contains("Jane Example")), "{args}");
+        assert!(osint::validate("sociavault_search_users", &args).is_ok());
+        // No platform named: the tool's default.
+        let plain = question_bindings("Who is Jane Example?");
+        assert_eq!(bind_arguments("sociavault_search", &plain, "Who is Jane Example?", "").0["platform"], "twitter");
+        // r/<name> selects the Reddit subreddit route.
+        let reddit = "What does r/rust say about Jane Example?";
+        let name = vec![Binding { kind: "person_name".into(), value: "Jane Example".into(), evidence_id: "question".into(), ..Binding::default() }];
+        let (args, _, _) = bind_arguments("sociavault_search", &name, reddit, "");
+        assert_eq!((args["platform"].as_str(), args["subreddit"].as_str(), args["endpoint"].as_str()), (Some("reddit"), Some("rust"), Some("subreddit")), "{args}");
+        assert!(osint::validate("sociavault_search", &args).is_ok());
+        // Handles a search lists are leads, not the subject's confirmed accounts.
+        let found = rule_bindings("Who is Jane Example?", "call-s1", "sociavault_search_users", &json!({"accounts": [{"platform": "tiktok", "handle": "janeexample", "url": "https://www.tiktok.com/@janeexample"}]}));
+        assert!(found.iter().filter(|binding| binding.kind == "handle").all(|binding| binding.unverified), "{found:?}");
+        // A profile's platform id feeds user-content routes that need it.
+        let id = vec![Binding { kind: PLATFORM_ID_KIND.into(), value: "44196397".into(), qualifier: "twitter".into(), evidence_id: "call-s2".into(), source_tool: "sociavault_profile".into(), ..Binding::default() }];
+        let (args, _, missing) = bind_arguments("sociavault_user_content", &id, "Show Jane Example's tweets", "");
+        assert!(missing.is_empty());
+        assert_eq!(args, json!({"platform": "twitter", "user_id": "44196397"}));
+        let profile = rule_bindings("Who is Jane Example?", "call-s2", "sociavault_profile", &json!({"platform": "twitter", "handle": "janeexample", "platform_id": "44196397"}));
+        assert!(profile.iter().any(|binding| binding.kind == PLATFORM_ID_KIND && binding.qualifier == "twitter" && binding.value == "44196397"), "{profile:?}");
+    }
+
+    #[test]
+    fn batch_scrape_takes_ranked_urls_and_gates_order_before_hunter() {
+        let urls: Vec<Binding> = ["https://acmerobotics.com/blog/a", "https://acmerobotics.com/contact", "https://acmerobotics.com/about", "https://acmerobotics.com/blog/b", "https://acmerobotics.com/blog/c", "https://acmerobotics.com/blog/d"]
+            .iter()
+            .map(|url| Binding { kind: URL_KIND.into(), value: url.to_string(), evidence_id: "call-s1".into(), source_tool: "firecrawl_map".into(), ..Binding::default() })
+            .collect();
+        let (args, _, missing) = bind_arguments("firecrawl_batch_scrape", &urls, "Who runs Acme Robotics?", "");
+        assert!(missing.is_empty());
+        let picked: Vec<&str> = args["urls"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert_eq!(picked.len(), osint::BATCH_SCRAPE_DEFAULT_URLS);
+        assert_eq!(&picked[..2], ["https://acmerobotics.com/contact", "https://acmerobotics.com/about"]);
+        let order = super::super::dependency_order(&["hunter_domain_search".to_string(), "hunter_email_count".to_string()], &question_bindings("Who runs acmerobotics.com?"), &std::collections::HashMap::new());
+        assert_eq!(order, ["hunter_email_count", "hunter_domain_search"], "email count gates the paid domain search");
+        let deps = super::super::depends_on(&order, 1, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new());
+        assert!(deps.contains(&0));
+        // A gap-filler is never a declared or implied producer for Hunter.
+        let mixed = ["crtsh_certificates".to_string(), "hunter_company_enrichment".to_string()];
+        assert!(super::super::depends_on(&mixed, 1, &[], &std::collections::HashMap::new(), &std::collections::HashMap::new()).is_empty());
     }
 
     /// Prompt -> known bindings -> the first tool's arguments.

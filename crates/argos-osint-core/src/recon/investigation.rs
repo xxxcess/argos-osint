@@ -458,7 +458,7 @@ pub struct Account {
 /// Platforms whose accounts Recon extracts and attaches to the subject.
 pub const ACCOUNT_PLATFORMS: &[&str] = &[
     "twitter", "truthsocial", "instagram", "facebook", "youtube", "tiktok", "threads", "linkedin",
-    "twitch", "github", "keybase", "wikipedia",
+    "twitch", "github", "keybase", "wikipedia", "pinterest",
 ];
 
 /// Sites that host accounts. Their domains are never organizations in a result set.
@@ -466,7 +466,7 @@ fn account_platform_host(host: &str) -> bool {
     const HOSTS: &[&str] = &[
         "x.com", "twitter.com", "truthsocial.com", "instagram.com", "facebook.com", "fb.com",
         "youtube.com", "youtu.be", "tiktok.com", "threads.net", "linkedin.com", "twitch.tv",
-        "github.com", "gitlab.com", "keybase.io", "reddit.com", "medium.com", "substack.com",
+        "github.com", "gitlab.com", "keybase.io", "reddit.com", "pinterest.com", "medium.com", "substack.com",
         "rumble.com", "gettr.com", "parler.com", "bsky.app", "mastodon.social", "linktr.ee",
     ];
     HOSTS
@@ -2559,7 +2559,7 @@ fn propose(tool_id: &str, input: &SelectionInput<'_>) -> Option<ProposedAction> 
                 "Deliverability was requested for an address in the question.",
             )
         }
-        "hunter_tech_lookup" if kind == "technology" => {
+        "hunter_company_enrichment" if kind == "technology" => {
             let entity = entity?;
             let domain = domain?;
             grounded(
@@ -3047,9 +3047,10 @@ pub use tool_io::{
     pickable, plausible_person_name, question_platforms, rule_bindings, tool_row, unmet_kinds,
     unmet_needs, vet_model_bindings, BINDING_KINDS, COORDINATES_KIND, URL_KIND,
 };
+pub use tool_io::{allowed_producer, binding_allowed, restricted_sources, GATES};
 use tool_io::coordinates_in_text;
 
-fn social_or_publisher(domain: &str) -> bool {
+pub(crate) fn social_or_publisher(domain: &str) -> bool {
     let host = domain.trim_start_matches("www.").to_ascii_lowercase();
     account_platform_host(&host) || publisher_host(&host)
 }
@@ -3063,13 +3064,6 @@ fn first_domain(bindings: &[Binding]) -> Option<&Binding> {
         .iter()
         .find(|binding| binding.kind == "domain" && !social_or_publisher(&binding.value))
 }
-
-/// Webmail hosts: an address there says nothing about the owner's organization.
-const FREE_MAIL: &[&str] = &[
-    "gmail.com", "googlemail.com", "yahoo.com", "outlook.com", "hotmail.com", "live.com",
-    "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "mail.com",
-    "yandex.com", "zoho.com",
-];
 
 /// Bindings already known from the user's question: every kind in `PROMPT_KINDS`.
 pub fn question_bindings(question: &str) -> Vec<Binding> {
@@ -3115,7 +3109,7 @@ pub fn question_bindings(question: &str) -> Vec<Binding> {
     for email in &emails {
         add(&mut found, "email", email.clone(), "");
         if let Some((_, host)) = email.rsplit_once('@') {
-            if !FREE_MAIL.contains(&host) {
+            if !crate::osint::webmail_host(host) {
                 add(&mut found, "domain", host.to_string(), "");
             }
         }
@@ -3347,9 +3341,17 @@ fn ladder(question: &str, bindings: &[Binding]) -> Vec<&'static str> {
         }
     }
     match target_kind(question) {
-        "person" => order.extend(["firecrawl_search", "wikidata_entities", "sociavault_profile", "keybase_identity", "stackexchange_users", "github_repositories", "firecrawl_scrape"]),
-        "organization" => order.extend(["firecrawl_search", "wikidata_entities", "hunter_domain_search", "sociavault_profile", "gleif_entities", "sec_submissions", "crtsh_certificates", "firecrawl_scrape"]),
-        _ => order.extend(["firecrawl_search", "wikidata_entities", "firecrawl_scrape", "github_repositories"]),
+        // Primary providers first (Firecrawl, SociaVault, Hunter), then gap-fillers.
+        "person" => order.extend([
+            "firecrawl_search", "sociavault_profile", "sociavault_search_users", "sociavault_user_content", "firecrawl_scrape",
+            "hunter_person_enrichment", "wikidata_entities", "keybase_identity", "stackexchange_users", "github_repositories",
+        ]),
+        "organization" => order.extend([
+            "firecrawl_search", "hunter_domain_finder", "hunter_company_enrichment", "firecrawl_map", "firecrawl_batch_scrape",
+            "hunter_email_count", "hunter_domain_search", "sociavault_profile", "wikidata_entities", "gleif_entities",
+            "sec_submissions", "crtsh_certificates", "firecrawl_scrape",
+        ]),
+        _ => order.extend(["firecrawl_search", "sociavault_search", "firecrawl_scrape", "wikidata_entities", "github_repositories"]),
     }
     order
 }
@@ -3449,9 +3451,9 @@ pub fn dependency_order(
                 if !unmet.contains(group) {
                     continue;
                 }
-                let earlier = order[..index]
-                    .iter()
-                    .any(|other| row.producers.contains(&other.as_str()) || group.iter().any(|kind| produces(other, kind)));
+                let earlier = order[..index].iter().any(|other| {
+                    allowed_producer(&tool, other) && (row.producers.contains(&other.as_str()) || group.iter().any(|kind| produces(other, kind)))
+                });
                 if earlier {
                     continue;
                 }
@@ -3467,11 +3469,30 @@ pub fn dependency_order(
                 }
             }
         }
+        // Gates: email count before domain search, email insight before enrichment.
+        if !moved {
+            for (first, second) in GATES {
+                let at_first = order.iter().position(|id| canonical(id) == *first);
+                let at_second = order.iter().position(|id| canonical(id) == *second);
+                if let (Some(at_first), Some(at_second)) = (at_first, at_second) {
+                    if at_first > at_second {
+                        let gate = order.remove(at_first);
+                        order.insert(at_second, gate);
+                        moved = true;
+                        break;
+                    }
+                }
+            }
+        }
         if !moved {
             break;
         }
     }
     order
+}
+
+fn canonical(id: &str) -> &str {
+    crate::osint::canonical_tool_id(id)
 }
 
 /// Earlier steps whose output a step needs: declared producers and output kinds for
@@ -3497,11 +3518,13 @@ pub fn depends_on(
     let mut deps = Vec::new();
     for (earlier, other) in order[..index].iter().enumerate() {
         let declared = !wanted.is_empty() && producers.contains(&other.as_str());
-        let yields = wanted.iter().any(|kind| {
-            output_kinds(other).contains(&kind.as_str())
-                || chat_produces.get(other).is_some_and(|kinds| kinds.contains(kind))
-        });
-        if declared || yields {
+        let yields = allowed_producer(tool, other)
+            && wanted.iter().any(|kind| {
+                output_kinds(other).contains(&kind.as_str())
+                    || chat_produces.get(other).is_some_and(|kinds| kinds.contains(kind))
+            });
+        let gated = GATES.iter().any(|(first, second)| *first == canonical(other) && *second == canonical(tool));
+        if declared || yields || gated {
             deps.push(earlier);
         }
     }
@@ -3764,7 +3787,7 @@ mod tests {
         assert!(contact_actions
             .actions
             .iter()
-            .all(|action| action.tool_id != "hunter_tech_lookup"));
+            .all(|action| action.tool_id != "hunter_company_enrichment"));
         let tech = gaps_for(
             "what technology stack does Amazon use?",
             ADAPTIVE,
@@ -3787,7 +3810,7 @@ mod tests {
         assert!(tech_actions
             .actions
             .iter()
-            .any(|action| action.tool_id == "hunter_tech_lookup"));
+            .any(|action| action.tool_id == "hunter_company_enrichment"));
         assert!(tech_actions
             .actions
             .iter()
@@ -3966,12 +3989,22 @@ mod tests {
         input(TRUMP, DISCOVERY, true, entities, gaps, enabled, empty, empty, credits, costs, hits)
     }
 
+    /// The legacy isolation path ranks by description; the SociaVault search, content,
+    /// and Google tools added in #27 are picker-driven, so these tests leave them out.
+    fn legacy_enabled() -> HashSet<String> {
+        let mut enabled = enabled_all();
+        for id in ["sociavault_search", "sociavault_search_users", "sociavault_user_content", "sociavault_google_search"] {
+            enabled.remove(id);
+        }
+        enabled
+    }
+
     #[test]
     fn tool_isolation_runs_the_suggested_tools_with_subject_inputs_and_no_firecrawl() {
         let hits = trump_hits();
         let entities = select_entities(TRUMP, &hits);
         let gaps = gaps_for(TRUMP, DISCOVERY, &entities, None);
-        let enabled = enabled_all();
+        let enabled = legacy_enabled();
         let empty = HashSet::new();
         let credits = HashMap::from([
             ("firecrawl".into(), 20),
@@ -4007,7 +4040,7 @@ mod tests {
         let hits = trump_hits();
         let entities = select_entities(TRUMP, &hits);
         let gaps = gaps_for(TRUMP, DISCOVERY, &entities, None);
-        let enabled = enabled_all();
+        let enabled = legacy_enabled();
         let empty = HashSet::new();
         let credits = HashMap::from([("sociavault".into(), 5), ("firecrawl".into(), 20)]);
         let costs = HashMap::new();
@@ -4221,11 +4254,13 @@ mod tests {
         let social = vec![binding("domain", "x.com", "call-1")];
         let (_, _, missing) = bind_arguments("hunter_domain_search", &social, "who is jane?", "");
         assert_eq!(missing, vec!["domain or company".to_string()]);
-        let mixed = vec![binding("domain", "nytimes.com", "call-1"), binding("domain", "example.org", "call-2")];
+        // Hunter takes only prompt or primary-provider bindings (D1).
+        let primary = |kind: &str, value: &str, evidence: &str| Binding { source_tool: "firecrawl_search".into(), ..binding(kind, value, evidence) };
+        let mixed = vec![primary("domain", "nytimes.com", "call-1"), primary("domain", "example.org", "call-2")];
         let (args, filled, missing) = bind_arguments("hunter_domain_search", &mixed, "who is jane?", "");
         assert!(missing.is_empty());
         assert_eq!(args, json!({"domain": "example.org"}));
-        assert_eq!(filled, vec!["domain=example.org (domain from call-2)".to_string()]);
+        assert_eq!(filled, vec!["domain=example.org (domain from call-2 via firecrawl_search)".to_string()]);
         let handle = Binding { qualifier: "twitter".into(), ..binding("handle", "janeexample", "call-3") };
         let (args, _, missing) = bind_arguments("sociavault_profile", std::slice::from_ref(&handle), "who is jane?", "");
         assert!(missing.is_empty());
@@ -4235,7 +4270,7 @@ mod tests {
         assert_eq!(args, json!({"username": "janeexample"}));
         let (args, _, _) = bind_arguments("firecrawl_search", &[], "who is jane example?", "Which accounts belong to Jane Example?");
         assert_eq!(args["query"], json!("Which accounts belong to Jane Example?"));
-        assert_eq!(unmet_needs("sociavault_profile", &[]), vec!["handle".to_string()]);
+        assert_eq!(unmet_needs("sociavault_profile", &[]), vec!["handle or platform_id".to_string()]);
         assert!(unmet_needs("crtsh_certificates", &mixed).is_empty());
     }
 

@@ -1,5 +1,5 @@
 //! Persistent investigations and evidence-grounded model orchestration.
-mod investigation;
+pub(crate) mod investigation;
 mod orchestrate;
 mod picker;
 
@@ -400,6 +400,10 @@ pub struct Binding {
     /// observed in tool evidence. Usable as a tool input; never stated as a finding.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unverified: bool,
+    /// Catalog tool whose observation yielded the value; empty for the user's question
+    /// and derived-question handles. Hunter inputs require a primary-provider source.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_tool: String,
 }
 
 /// One tool-picker request and its outcome.
@@ -1253,7 +1257,7 @@ impl Store {
                 |r| r.get::<_, i64>(0),
             )
             .optional()?
-            .unwrap_or(1)
+            .unwrap_or(i64::from(osint::default_enabled(id)))
             != 0)
     }
     pub fn set_tool_enabled(&self, id: &str, enabled: bool) -> Result<()> {
@@ -1911,6 +1915,15 @@ fn social_from_url(url: &url::Url) -> Option<SocialHandle> {
             platform: "twitch".into(),
             handle: token(first)?,
         },
+        "pinterest.com"
+            if !reserved_social_segment(first)
+                && !matches!(first, "pin" | "ideas" | "today" | "business" | "categories") =>
+        {
+            SocialHandle {
+                platform: "pinterest".into(),
+                handle: token(first)?,
+            }
+        }
         "truthsocial.com" if url.path().starts_with("/@") => SocialHandle {
             platform: "truthsocial".into(),
             handle: token(first)?,

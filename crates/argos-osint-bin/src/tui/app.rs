@@ -955,11 +955,11 @@ impl App {
             .ok_or_else(|| anyhow::anyhow!("No tool selected"))?;
         let input: Value = serde_json::from_str(&self.osint_input)?;
         osint::validate(tool.id, &input)?;
-        if tool.id == "firecrawl_search" {
+        if tool.id.starts_with("firecrawl_") {
             self.remember_firecrawl_key()?;
         } else if tool.id.starts_with("hunter_") {
             self.remember_hunter_key()?;
-        } else if tool.id == "sociavault_profile" {
+        } else if tool.id.starts_with("sociavault_") {
             self.remember_sociavault_key()?;
         }
         let service =
@@ -3476,6 +3476,11 @@ mod tests {
             .unwrap();
         assert!(hit(&app, Target::Field(FieldId::SociaVaultKey)));
         assert!(hit(&app, Target::Button(ButtonId::SaveSociaVaultKey)));
+        // Every tool of a provider shares its key row.
+        for (id, field) in [("firecrawl_map", FieldId::FirecrawlKey), ("sociavault_google_search", FieldId::SociaVaultKey), ("hunter_company_enrichment", FieldId::HunterKey)] {
+            app.tool_sel = osint::registry().iter().position(|tool| tool.id == id).unwrap();
+            assert!(hit(&app, Target::Field(field)), "{id}");
+        }
         app.tool_sel = 0;
         assert!(!hit(&app, Target::Field(FieldId::FirecrawlKey)));
         assert!(!hit(&app, Target::Field(FieldId::HunterKey)));

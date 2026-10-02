@@ -182,12 +182,13 @@ struct ApiKeySlot {
     button: ButtonId,
 }
 
-/// Key row for the selected keyed tool. Hunter tools share one key.
+/// Key row for the selected keyed tool. Firecrawl, SociaVault, and Hunter tools each
+/// share one key per provider.
 fn api_key_slot(app: &App) -> Option<ApiKeySlot> {
     let id = osint::registry().get(app.tool_sel)?.id;
-    let (field, button) = if id == "firecrawl_search" {
+    let (field, button) = if id.starts_with("firecrawl_") {
         (FieldId::FirecrawlKey, ButtonId::SaveFirecrawlKey)
-    } else if id == "sociavault_profile" {
+    } else if id.starts_with("sociavault_") {
         (FieldId::SociaVaultKey, ButtonId::SaveSociaVaultKey)
     } else if id.starts_with("hunter_") {
         (FieldId::HunterKey, ButtonId::SaveHunterKey)
@@ -3165,6 +3166,7 @@ mod tests {
                 qualifier: "github".into(),
                 inferred: false,
                 unverified: false,
+                source_tool: String::new(),
             }, Binding {
                 kind: "handle".into(),
                 value: "janeroe".into(),
@@ -3173,6 +3175,7 @@ mod tests {
                 qualifier: "facebook".into(),
                 inferred: true,
                 unverified: false,
+                source_tool: String::new(),
             }, Binding {
                 kind: "handle".into(),
                 value: "janeroe".into(),
@@ -3181,6 +3184,7 @@ mod tests {
                 qualifier: "twitter".into(),
                 inferred: false,
                 unverified: true,
+                source_tool: String::new(),
             }],
             binding_notes: vec!["s1 firecrawl_search: rules found 1; Recon model added 0".into()],
             fallback_requests: vec!["hunter_email_finder failed. Recon chose firecrawl_scrape as s3.".into()],

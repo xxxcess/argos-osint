@@ -363,6 +363,7 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
             if let Some(run) = app.runs.iter().find(|run| run.turn_id == message.id) {
                 blocks.push(plan_block(
                     run,
+                    &app.calls,
                     app.expanded.contains(&format!("plan:{}", run.id)),
                 ));
                 for (call_index, call) in app.calls.iter().enumerate() {
@@ -426,7 +427,7 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
     blocks
 }
 
-fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
+fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock {
     let plan = run
         .plan_json
         .as_deref()
@@ -439,20 +440,20 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
                 plan.picker_transport.as_str()
             };
             format!(
-                "Decision · tool picker ({transport}) · {}",
+                "Recon log · tool picker ({transport}) · {}",
                 clip_chars(&plan.directives[0].goal, 64)
             )
         }
         Some(plan) => {
             let label = if plan.strategy.is_empty() {
-                "Recon decision"
+                "Recon log"
             } else {
                 strategy_label(&plan.strategy)
             };
             let rationale = clip_chars(
                 if plan.strategy_rationale.is_empty() {
                     if plan.objective.is_empty() {
-                        "Recon decision"
+                        "Recon log"
                     } else {
                         plan.objective.as_str()
                     }
@@ -461,16 +462,16 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
                 },
                 72,
             );
-            format!("Decision · {label} · {rationale}")
+            format!("Recon log · {label} · {rationale}")
         }
-        None => "Decision · waiting for a plan".into(),
+        None => "Recon log · waiting for a plan".into(),
     };
     let body = if !open {
         String::new()
     } else {
         match plan {
             Some(plan) if !plan.directives.is_empty() => {
-                question_plan_lines(run, &plan).join("\n")
+                question_plan_lines(run, &plan, calls).join("\n")
             }
             Some(plan) => {
                 let mut lines = Vec::new();
@@ -578,7 +579,7 @@ fn plan_block(run: &recon::Run, open: bool) -> ChatBlock {
 /// picker and its model snapshot, the ordered tools with dependencies and the questions
 /// they serve, the inputs bound for each step, and any fallback requests. Pick
 /// probabilities stay in `plan_json` (`recon show`); they are not rendered here.
-fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
+fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(if matches!(plan.directives_mode.as_str(), "directives_fallback" | "questions_fallback") {
         "Directives (fallback set):".to_string()
@@ -643,6 +644,11 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
             row.push_str(&format!(" · {} credits", call.credit_cost));
         }
         lines.push(row);
+        if let Some(found) = matching_call(calls, call) {
+            if let Some(summary) = result_summary(found) {
+                lines.push(format!("   result {summary}"));
+            }
+        }
         for input in &call.filled {
             lines.push(format!("   input {input}"));
         }
@@ -699,6 +705,91 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
     lines
 }
 
+fn matching_call<'a>(calls: &'a [recon::Call], step: &recon::PlanCall) -> Option<&'a recon::Call> {
+    if !step.call_id.is_empty() {
+        if let Some(found) = calls.iter().find(|call| call.id == step.call_id) {
+            return Some(found);
+        }
+    }
+    calls.iter().find(|call| call.tool_id == step.tool_id && call.inputs == step.arguments)
+}
+
+fn result_count(observations: &serde_json::Value) -> Option<usize> {
+    for key in ["results", "articles"] {
+        if let Some(rows) = observations.get(key).and_then(serde_json::Value::as_array) {
+            return Some(rows.len());
+        }
+    }
+    None
+}
+
+/// Status, cache or live, result count, truncation, and a short error.
+fn result_summary(call: &recon::Call) -> Option<String> {
+    let result = call.result.as_ref()?;
+    let mut parts = vec![result.status.clone()];
+    parts.push(if result.cached { "cache".into() } else { "live".into() });
+    if let Some(count) = result_count(&result.observations) {
+        parts.push(format!(
+            "{count} result{}",
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+    if result.truncated {
+        parts.push("truncated".into());
+    }
+    if let Some(error) = result.error.as_deref().filter(|text| !text.is_empty()) {
+        parts.push(clip_chars(error, 80));
+    }
+    Some(parts.join(" · "))
+}
+
+pub struct ToolLog {
+    pub level: &'static str,
+    pub summary: String,
+    pub detail: String,
+}
+
+/// One-line summary and the clipped result body for the System event log.
+pub fn tool_result_log(call: &recon::Call) -> Option<ToolLog> {
+    let result = call.result.as_ref()?;
+    let name = osint::definition(&call.tool_id)
+        .map(|tool| tool.name)
+        .unwrap_or(call.tool_id.as_str());
+    let summary = result_summary(call).unwrap_or_else(|| result.status.clone());
+    let level = match result.status.as_str() {
+        "failed" => "error",
+        "timeout" | "rate_limited" => "warn",
+        _ => "info",
+    };
+    let mut detail = vec![
+        format!("Call {}", call.id),
+        format!("Status: {} · attempts {}", call.status, call.attempts),
+        format!("Result: {summary}"),
+        format!(
+            "Input: {}",
+            serde_json::to_string(&call.inputs).unwrap_or_else(|_| "{}".into())
+        ),
+    ];
+    if !result.source_url.is_empty() {
+        detail.push(format!("Source: {}", result.source_url));
+    }
+    if !result.retrieved_at.is_empty() {
+        detail.push(format!("Retrieved: {}", result.retrieved_at));
+    }
+    if let Some(error) = result.error.as_deref().filter(|text| !text.is_empty()) {
+        detail.push(format!("Error: {error}"));
+    }
+    let observations = serde_json::to_string_pretty(&result.observations).unwrap_or_default();
+    if !observations.is_empty() && observations != "null" {
+        detail.push(clip_chars(&observations, 4_000));
+    }
+    Some(ToolLog {
+        level,
+        summary: format!("{name} {summary}"),
+        detail: detail.join("\n"),
+    })
+}
+
 fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
     let name = osint::definition(&call.tool_id)
         .map(|tool| tool.name)
@@ -722,43 +813,14 @@ fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
     let mut lines = vec![
         format!("Call {}", call.id),
         format!("Status: {} · attempts {}", call.status, call.attempts),
-        format!(
-            "Input: {}",
-            serde_json::to_string(&call.inputs).unwrap_or_else(|_| "{}".into())
-        ),
     ];
     if let Some(reason) = plan_reason(app, call) {
         lines.insert(0, format!("Reason: {reason}"));
     }
-    if let Some(result) = &call.result {
-        lines.push(format!(
-            "Cache: {}",
-            if result.cached {
-                "reused a fresh cached result"
-            } else {
-                "live lookup"
-            }
-        ));
-        if result.credits_charged > 0 || result.credits_reported.is_some() {
-            lines.push(format!(
-                "Credits: {}",
-                result
-                    .credits_reported
-                    .unwrap_or(result.credits_charged)
-            ));
-        }
-        if !result.source_url.is_empty() {
-            lines.push(format!("Source: {}", result.source_url));
-        }
-        lines.push(format!("Retrieved: {}", result.retrieved_at));
-        if let Some(error) = &result.error {
-            lines.push(format!("Error: {error}"));
-        }
-        let observations = serde_json::to_string_pretty(&result.observations).unwrap_or_default();
-        if !observations.is_empty() && observations != "null" {
-            lines.push(clip_chars(&observations, 1600));
-        }
+    if let Some(summary) = result_summary(call) {
+        lines.push(format!("Result: {summary}"));
     }
+    lines.push("Full result is in the System event log.".into());
     ChatBlock {
         key,
         title: format!("{name} · {}", call.status),
@@ -1423,8 +1485,7 @@ pub fn page(app: &mut App, direction: i32) {
             let room = inset(system_areas(chrome(app.screen, app).body).2)
                 .height
                 .max(1) as i32;
-            let max = log_max(app);
-            nudge(&mut app.scrolls.log, direction * room, max);
+            move_system_log(app, direction * room);
         }
         None => {}
     }
@@ -1562,7 +1623,65 @@ fn tool_max(app: &App) -> u16 {
 
 fn log_max(app: &App) -> u16 {
     let room = inset(system_areas(chrome(app.screen, app).body).2).height;
-    app.log.len().saturating_sub(room as usize) as u16
+    log_line_count(app).saturating_sub(room as usize) as u16
+}
+
+fn log_line_count(app: &App) -> usize {
+    app.log
+        .iter()
+        .map(|entry| {
+            let extra = if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
+                entry.detail.lines().count()
+            } else {
+                0
+            };
+            1 + extra
+        })
+        .sum()
+}
+
+fn log_entry_start(app: &App, index: usize) -> usize {
+    app.log
+        .iter()
+        .take(index)
+        .map(|entry| {
+            let extra = if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
+                entry.detail.lines().count()
+            } else {
+                0
+            };
+            1 + extra
+        })
+        .sum()
+}
+
+pub fn move_system_log(app: &mut App, delta: i32) {
+    if app.log.is_empty() {
+        return;
+    }
+    app.log_browsing = true;
+    let last = app.log.len() as i32 - 1;
+    app.log_sel = (app.log_sel as i32 + delta).clamp(0, last) as usize;
+    reveal_log(app);
+}
+
+pub fn reveal_log(app: &mut App) {
+    if app.log.is_empty() {
+        app.scrolls.log = 0;
+        return;
+    }
+    if app.log_sel >= app.log.len() {
+        app.log_sel = app.log.len() - 1;
+    }
+    let room = inset(system_areas(chrome(app.screen, app).body).2)
+        .height
+        .max(1) as usize;
+    let start = log_entry_start(app, app.log_sel);
+    reveal_index(&mut app.scrolls.log, start, room);
+    let max = log_max(app);
+    if app.scrolls.log > max {
+        app.scrolls.log = max;
+    }
 }
 
 fn popup_max(app: &App) -> u16 {
@@ -2963,6 +3082,38 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn log_rows(app: &App) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    for (index, entry) in app.log.iter().enumerate() {
+        let style = if index == app.log_sel {
+            theme::selected()
+        } else {
+            match entry.level.as_str() {
+                "error" => theme::error(),
+                "warn" => theme::warn(),
+                _ => theme::dim(),
+            }
+        };
+        let marker = if entry.detail.is_empty() {
+            String::new()
+        } else if app.log_open.contains(&entry.id) {
+            "▾ ".into()
+        } else {
+            "▸ ".into()
+        };
+        rows.push(Line::from(Span::styled(
+            format!("{marker}{} {} {}", entry.at, entry.level, entry.text),
+            style,
+        )));
+        if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
+            for line in entry.detail.lines() {
+                rows.push(Line::from(Span::styled(format!("  {line}"), theme::text())));
+            }
+        }
+    }
+    rows
+}
+
 fn draw_system(frame: &mut Frame, app: &App, area: Rect) {
     let (hardware, actions, log) = system_areas(area);
     let body = format!(
@@ -2995,20 +3146,7 @@ fn draw_system(frame: &mut Frame, app: &App, area: Rect) {
             theme::dim(),
         ))]
     } else {
-        app.log
-            .iter()
-            .map(|line| {
-                let style = match line.level.as_str() {
-                    "error" => theme::error(),
-                    "warn" => theme::warn(),
-                    _ => theme::dim(),
-                };
-                Line::from(Span::styled(
-                    format!("{} {} {}", line.at, line.level, line.text),
-                    style,
-                ))
-            })
-            .collect()
+        log_rows(app)
     };
     frame.render_widget(
         Paragraph::new(lines)
@@ -3078,8 +3216,8 @@ fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Recon · 2 Brain · 3 OSINT · 4 Providers · 5 System\n? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
-        Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line\nTab moves between the transcript and the prompt\n↑↓ select a message, decision, or tool\n←→ or h/l fold the selected decision or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nCtrl+U/Ctrl+D scroll · the wheel scrolls the pane under the pointer\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
-        Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors and run stages from every app\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",
+        Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nCtrl+U/Ctrl+D scroll · the wheel scrolls the pane under the pointer\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
+        Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors, run stages, and tool results\n↑↓ select a line · Enter folds a tool result\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",
         Some(ModuleId::Providers) => "Providers\n\nEach account tab stores that provider only\nDefaults sets Recon and Synthesis separately\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
         _ => "Controls\n\nTab moves between fields and buttons\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }
@@ -3194,7 +3332,8 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use argos_osint_core::recon::{Binding, Directive, PickRecord, PlanCall};
+    use argos_osint_core::osint::ToolResult;
+    use argos_osint_core::recon::{Binding, Call, Directive, PickRecord, PlanCall};
 
     #[test]
     fn decision_row_shows_directives_picker_order_bindings_and_fallbacks() {
@@ -3229,6 +3368,7 @@ mod tests {
                     tool_id: "firecrawl_search".into(),
                     reason: "d1, d2".into(),
                     status: "completed".into(),
+                    call_id: "call-s1".into(),
                     filled: vec!["query=Jane Roe (d1 entity)".into()],
                     confidence: Some(0.8731),
                     ..Default::default()
@@ -3291,8 +3431,35 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         };
-        let block = plan_block(&run, true);
-        assert!(block.title.contains("tool picker (decisions)"), "{}", block.title);
+        let calls = vec![Call {
+            id: "call-s1".into(),
+            tool_id: "firecrawl_search".into(),
+            run_id: Some("run-1".into()),
+            thread_id: None,
+            turn_id: None,
+            origin: "recon".into(),
+            inputs: serde_json::json!({"query": "Jane Roe"}),
+            status: "completed".into(),
+            attempts: 1,
+            result: Some(ToolResult {
+                tool_id: "firecrawl_search".into(),
+                inputs: serde_json::json!({"query": "Jane Roe"}),
+                status: "completed".into(),
+                source_url: "https://example.test/jane".into(),
+                retrieved_at: "2026-10-02T00:00:00Z".into(),
+                observations: serde_json::json!({"results": [{"title": "Jane Roe role"}, {"title": "Jane Roe site"}]}),
+                raw: String::new(),
+                error: None,
+                cached: false,
+                truncated: false,
+                credits_charged: 0,
+                credits_reported: None,
+            }),
+            started_at: String::new(),
+            completed_at: Some("2026-10-02T00:00:00Z".into()),
+        }];
+        let block = plan_block(&run, &calls, true);
+        assert!(block.title.starts_with("Recon log · tool picker (decisions)"), "{}", block.title);
         for needle in [
             "Directives (fallback set):",
             "d1: Establish the subject's identity and public roles · entities Jane Roe · targets person_name, org_name, url",
@@ -3300,6 +3467,7 @@ mod tests {
             "d3: Find organizations affiliated with the subject and their contact domains",
             "Tool picker: decisions · openrouter / typesafe/jev-1.13",
             "s1. firecrawl_search — d1, d2 · completed",
+            "result completed · live · 2 results",
             "input query=Jane Roe (d1 entity)",
             "s2. sociavault_profile — d2 · after s1",
             "input handle=janeroe (handle from call-s1)",
@@ -3313,5 +3481,10 @@ mod tests {
             assert!(block.body.contains(needle), "missing {needle:?} in\n{}", block.body);
         }
         assert!(!block.body.contains("0.87"), "probabilities stay out of the row");
+        assert!(!block.body.contains("Jane Roe role"), "raw observations stay out of the decision row");
+        let logged = tool_result_log(&calls[0]).unwrap();
+        assert_eq!(logged.summary, "Firecrawl search completed · live · 2 results");
+        assert!(logged.detail.contains("Jane Roe role"));
+        assert!(logged.detail.contains("https://example.test/jane"));
     }
 }

@@ -97,9 +97,12 @@ pub enum Overlay {
 
 #[derive(Clone, Debug)]
 pub struct LogLine {
+    pub id: u64,
     pub at: String,
     pub level: String,
     pub text: String,
+    /// Full tool result. Empty lines stay a single row.
+    pub detail: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,6 +380,11 @@ pub struct App {
     pub chat_follow: bool,
     pub overlay: Overlay,
     pub log: Vec<LogLine>,
+    pub log_sel: usize,
+    pub log_open: HashSet<u64>,
+    pub log_browsing: bool,
+    log_seq: u64,
+    logged_calls: HashSet<String>,
     pub runs: Vec<recon::Run>,
     pub answer_memories: HashMap<String, Vec<Memory>>,
     quit_arm: Option<Instant>,
@@ -536,6 +544,11 @@ impl App {
             chat_follow: chat_scroll == 0,
             overlay: Overlay::None,
             log: Vec::new(),
+            log_sel: 0,
+            log_open: HashSet::new(),
+            log_browsing: false,
+            log_seq: 0,
+            logged_calls: HashSet::new(),
             runs: Vec::new(),
             answer_memories: HashMap::new(),
             quit_arm: None,
@@ -628,14 +641,29 @@ impl App {
     }
 
     fn push_log(&mut self, level: &str, text: impl Into<String>) {
+        self.push_log_detail(level, text, "");
+    }
+
+    fn push_log_detail(&mut self, level: &str, text: impl Into<String>, detail: impl Into<String>) {
+        let at_end = self.log.is_empty() || self.log_sel + 1 >= self.log.len();
+        self.log_seq = self.log_seq.saturating_add(1);
         self.log.push(LogLine {
+            id: self.log_seq,
             at: log_stamp(),
             level: level.into(),
             text: text.into(),
+            detail: detail.into(),
         });
         if self.log.len() > 400 {
             let extra = self.log.len() - 400;
-            self.log.drain(0..extra);
+            for line in self.log.drain(0..extra) {
+                self.log_open.remove(&line.id);
+            }
+        }
+        if at_end {
+            self.log_sel = self.log.len().saturating_sub(1);
+        } else if self.log_sel >= self.log.len() {
+            self.log_sel = self.log.len().saturating_sub(1);
         }
     }
 
@@ -732,6 +760,7 @@ impl App {
         {
             self.flush_draft();
         }
+        self.log_browsing = false;
         self.focus = target;
         self.cursor = match target {
             Target::Field(field) => self.field(field).chars().count(),
@@ -1470,8 +1499,25 @@ impl App {
             self.calls = self.store.all_calls_for_thread(tid)?;
             self.runs = self.store.runs_for_thread(tid)?;
             self.answer_memories = self.store.answer_memories(tid)?;
+            self.note_finished_calls();
         }
         Ok(())
+    }
+
+    /// Appends one collapsible System log entry the first time a call has a result.
+    fn note_finished_calls(&mut self) {
+        let pending: Vec<recon::Call> = self
+            .calls
+            .iter()
+            .filter(|call| call.result.is_some() && !self.logged_calls.contains(&call.id))
+            .cloned()
+            .collect();
+        for call in pending {
+            self.logged_calls.insert(call.id.clone());
+            if let Some(entry) = super::ui::tool_result_log(&call) {
+                self.push_log_detail(entry.level, entry.summary, entry.detail);
+            }
+        }
     }
 
     fn save_insight(&mut self) -> Result<String> {
@@ -1617,6 +1663,8 @@ impl App {
                 .map(|_| "Source thread opened".into()),
             ButtonId::ClearLog => {
                 self.log.clear();
+                self.log_open.clear();
+                self.log_sel = 0;
                 self.push_log("info", "Event log cleared");
                 Ok("Event log cleared".into())
             }
@@ -2466,7 +2514,25 @@ impl App {
         }
     }
 
+    fn toggle_log(&mut self) {
+        let Some(line) = self.log.get(self.log_sel) else {
+            return;
+        };
+        if line.detail.is_empty() {
+            return;
+        }
+        let id = line.id;
+        if !self.log_open.insert(id) {
+            self.log_open.remove(&id);
+        }
+        super::ui::reveal_log(self);
+    }
+
     fn on_enter(&mut self) {
+        if self.module == Some(ModuleId::System) && self.log_browsing {
+            self.toggle_log();
+            return;
+        }
         match self.focus {
             Target::Field(FieldId::Composer) => self.submit(),
             Target::Field(field) if is_picker_field(field) => self.open_default_picker(field),
@@ -2516,7 +2582,7 @@ impl App {
                 Some(ModuleId::Brain) => self.move_memory(delta),
                 Some(ModuleId::Osint) => self.move_tool(delta),
                 Some(ModuleId::System) => {
-                    self.scrolls.log = add_scroll(self.scrolls.log, delta);
+                    super::ui::move_system_log(self, delta);
                 }
                 Some(ModuleId::Recon) if self.recon_chat => super::ui::move_chat(self, delta),
                 Some(ModuleId::Recon) => self.move_thread(delta),
@@ -2959,6 +3025,11 @@ mod tests {
             chat_follow: true,
             overlay: Overlay::None,
             log: Vec::new(),
+            log_sel: 0,
+            log_open: HashSet::new(),
+            log_browsing: false,
+            log_seq: 0,
+            logged_calls: HashSet::new(),
             runs: Vec::new(),
             answer_memories: HashMap::new(),
             quit_arm: None,
@@ -3584,6 +3655,66 @@ mod tests {
         assert_eq!(app.error_count(), 40);
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(app.scrolls.log > 0);
+    }
+
+    #[test]
+    fn a_finished_tool_call_is_logged_once_and_the_transcript_keeps_a_summary() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 100, 40);
+        app.calls.push(recon::Call {
+            id: "call-s1".into(),
+            tool_id: "firecrawl_search".into(),
+            run_id: None,
+            thread_id: None,
+            turn_id: None,
+            origin: "recon".into(),
+            inputs: serde_json::json!({"query": "Jane Roe"}),
+            status: "completed".into(),
+            attempts: 1,
+            result: Some(osint::ToolResult {
+                tool_id: "firecrawl_search".into(),
+                inputs: serde_json::json!({"query": "Jane Roe"}),
+                status: "completed".into(),
+                source_url: "https://example.test/jane".into(),
+                retrieved_at: String::new(),
+                observations: serde_json::json!({"results": [{"title": "Jane Roe role"}, {"title": "Jane Roe site"}]}),
+                raw: String::new(),
+                error: None,
+                cached: true,
+                truncated: false,
+                credits_charged: 0,
+                credits_reported: None,
+            }),
+            started_at: String::new(),
+            completed_at: Some(String::new()),
+        });
+        app.note_finished_calls();
+        app.note_finished_calls();
+        let logged: Vec<_> = app.log.iter().filter(|line| !line.detail.is_empty()).collect();
+        assert_eq!(logged.len(), 1);
+        assert!(logged[0].text.contains("cache"));
+        assert!(logged[0].text.contains("2 results"));
+        assert!(logged[0].detail.contains("Jane Roe role"));
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.expanded.insert("tool:call-s1".into());
+        let body = super::super::ui::chat_blocks(&app)
+            .into_iter()
+            .find(|block| block.key == "tool:call-s1")
+            .expect("tool row")
+            .body;
+        assert!(body.contains("System event log"));
+        assert!(body.contains("cache"));
+        assert!(!body.contains("Jane Roe role"));
+        app.select(4);
+        let index = app.log.iter().position(|line| !line.detail.is_empty()).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.log_sel = index;
+        let id = app.log[index].id;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.log_open.contains(&id));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.log_open.contains(&id));
     }
 
     #[test]

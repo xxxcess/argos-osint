@@ -556,11 +556,31 @@ pub fn goal_error_for(goal: &str, entities: &[String]) -> Option<String> {
     names_tool_except(goal, entities).map(|term| format!("the goal names a tool or provider ({term})"))
 }
 
+/// Whether `entity` occurs in `text`, compared without case.
+fn span_in(text: &str, entity: &str) -> bool {
+    let entity = entity.trim();
+    !text.is_empty() && !entity.is_empty() && text.to_ascii_lowercase().contains(&entity.to_ascii_lowercase())
+}
+
+/// A copied pronoun ("these", "his") is not a subject the investigation can search.
+fn pronoun_only(entity: &str) -> bool {
+    let tokens = words_of(entity);
+    tokens.is_empty() || tokens.iter().all(|word| PRONOUNS.contains(&word.as_str()))
+}
+
 /// Validates a Recon reply: exactly three directives `d1`–`d3`, tool-free imperative goals
 /// of at most 15 words, entities that are verbatim prompt spans (or the thread subject on
 /// a follow-up), and targets from the binding vocabulary. A Recon-written `query` that
 /// breaks the grounded-query rules is dropped (the deterministic query is used).
+#[cfg(test)]
 pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Result<Vec<Directive>, String> {
+    parse_directives_with(value, question, thread, "")
+}
+
+/// [`parse_directives`] where a follow-up may also name a verbatim span of the previous
+/// turn's synthesis. On a pronoun follow-up those names are kept; a reply that names none
+/// falls back to the thread subject.
+pub fn parse_directives_with(value: &Value, question: &str, thread: &[String], prior: &str) -> Result<Vec<Directive>, String> {
     let list = value
         .get("directives")
         .and_then(Value::as_array)
@@ -588,7 +608,8 @@ pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Res
             }
             let verbatim = lower_question.contains(&entity.to_ascii_lowercase());
             let thread_subject = thread.iter().any(|known| known.eq_ignore_ascii_case(entity));
-            if !verbatim && !thread_subject {
+            let from_prior = span_in(prior, entity);
+            if !verbatim && !thread_subject && !from_prior {
                 return Err(format!("{expected}: entity \"{entity}\" is not in the user's prompt"));
             }
             if names_tool_except(entity, &prompt_entities).is_some() {
@@ -606,8 +627,15 @@ pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Res
             return Err(format!("{expected}: {error}"));
         }
         parsed.goal = parsed.goal.trim().to_string();
-        // A pronoun follow-up keeps the thread subject even when Recon copied the pronoun.
-        if entities.is_empty() || refers_back(question) && !thread.is_empty() {
+        // A pronoun follow-up keeps names taken from the previous synthesis or the thread
+        // subject. A reply that only copied the pronoun falls back to the thread subject.
+        if refers_back(question) && !thread.is_empty() {
+            entities.retain(|entity| {
+                !pronoun_only(entity)
+                    && (thread.iter().any(|known| known.eq_ignore_ascii_case(entity)) || span_in(prior, entity))
+            });
+        }
+        if entities.is_empty() {
             entities = fallback_entities.clone();
         }
         parsed.entities = entities;

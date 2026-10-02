@@ -7,9 +7,10 @@ use crate::osint::{self, COURTLISTENER_SPACING, LEGAL_TOOLS};
 /// Seconds added for each Recon or tool-picker model round that actually runs.
 pub const RECON_ROUND_SECONDS: u64 = 45;
 /// Synthesis starts with this many seconds, then one more per 1,000 characters.
-pub const SYNTHESIS_BASE_SECONDS: u64 = 45;
-/// Synthesis allowance never exceeds this, before the repair extension.
-pub const SYNTHESIS_CAP_SECONDS: u64 = 300;
+pub const SYNTHESIS_BASE_SECONDS: u64 = 300;
+/// Room left for Recon and tools when the turn ceiling is too small to hold the
+/// full synthesis minimum and still run a call.
+const PHASE_WINDOW_SECONDS: u64 = 120;
 /// Streaming synthesis ends when this long passes with no new text.
 pub const SYNTHESIS_IDLE_SECONDS: u64 = 60;
 /// Executor concurrency (`Semaphore::new(4)`). Tool wall time divides by this.
@@ -21,6 +22,8 @@ pub const SYNTHESIS_DEADLINE: &str = "synthesis deadline reached";
 pub const SYNTHESIS_IDLE: &str = "synthesis idle timeout";
 pub const CUT_SHORT: &str = "Synthesis was cut short";
 pub const CUT_NOTE: &str = "Synthesis ran out of time; re-run or raise max_turn_seconds.";
+/// The provider closed the stream after some answer text had already arrived.
+pub const STREAM_LOST: &str = "provider stream ended";
 
 /// One scheduled call. A cache hit contributes nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,12 +66,18 @@ pub fn tool_allowance_seconds(calls: &[ScheduledCall]) -> u64 {
     concurrent + spacing + polling
 }
 
-/// 45s plus 1s per 1,000 characters, capped at 300s. A repair pass adds half of that again.
+/// 300s plus 1s per 1,000 characters, capped by `ceiling`. A repair pass adds half of
+/// that again, still not past the ceiling.
 pub fn synthesis_allowance_seconds(chars: usize, repair: bool) -> u64 {
-    let base = SYNTHESIS_BASE_SECONDS.saturating_add((chars as u64) / 1_000);
-    let capped = base.min(SYNTHESIS_CAP_SECONDS);
+    synthesis_allowance_capped(chars, repair, u64::from(crate::provider::MAX_MAX_TURN_SECONDS))
+}
+
+pub fn synthesis_allowance_capped(chars: usize, repair: bool, ceiling: u64) -> u64 {
+    let ceiling = ceiling.max(1);
+    let grown = SYNTHESIS_BASE_SECONDS.saturating_add((chars as u64) / 1_000);
+    let capped = grown.min(ceiling);
     if repair {
-        capped.saturating_add(capped / 2)
+        capped.saturating_add(capped / 2).min(ceiling)
     } else {
         capped
     }
@@ -207,13 +216,26 @@ impl TurnClock {
         if let Some(seconds) = self.synthesis_override {
             return seconds;
         }
+        let ceiling = self.ceiling.as_secs();
         if self.repair {
-            return synthesis_allowance_seconds(self.evidence_chars, true);
+            return synthesis_allowance_capped(self.evidence_chars, true, ceiling);
         }
         if self.synthesis_started.is_none() && self.evidence_chars == 0 {
-            return SYNTHESIS_BASE_SECONDS;
+            return SYNTHESIS_BASE_SECONDS.min(ceiling);
         }
-        synthesis_allowance_seconds(self.evidence_chars, false)
+        synthesis_allowance_capped(self.evidence_chars, false, ceiling)
+    }
+
+    /// Synthesis time held back from Recon and tools. A tight ceiling keeps a window
+    /// so those phases can still run.
+    fn synthesis_hold(&self) -> u64 {
+        let wanted = self.synthesis_seconds();
+        let ceiling = self.ceiling.as_secs();
+        if ceiling.saturating_sub(wanted) < PHASE_WINDOW_SECONDS {
+            ceiling.saturating_sub(PHASE_WINDOW_SECONDS)
+        } else {
+            wanted
+        }
     }
 
     pub fn deadline(&self) -> Duration {
@@ -255,7 +277,7 @@ impl TurnClock {
     pub fn recon_remaining(&self) -> Duration {
         self.deadline()
             .saturating_sub(self.started.elapsed())
-            .saturating_sub(Duration::from_secs(self.synthesis_seconds()))
+            .saturating_sub(Duration::from_secs(self.synthesis_hold()))
     }
 
     /// Synthesis allowance still unused, and never past the hard ceiling.
@@ -276,15 +298,16 @@ impl TurnClock {
             return false;
         };
         let allowance = Duration::from_secs(self.tool_seconds());
+        let reserve = self.synthesis_hold();
         let sum = self
             .recon_seconds()
             .saturating_add(self.tool_seconds())
-            .saturating_add(self.synthesis_seconds());
+            .saturating_add(reserve);
         let slack = self.deadline().as_secs().saturating_sub(sum);
         if started.elapsed() >= allowance + Duration::from_secs(slack) {
             return true;
         }
-        self.started.elapsed() + Duration::from_secs(self.synthesis_seconds()) >= self.ceiling
+        self.started.elapsed() + Duration::from_secs(reserve) >= self.ceiling
     }
 
     fn queue(&mut self) {
@@ -333,12 +356,29 @@ mod tests {
     }
 
     #[test]
-    fn bigger_evidence_means_more_synthesis_time_until_the_cap() {
-        assert_eq!(synthesis_allowance_seconds(0, false), 45);
-        assert_eq!(synthesis_allowance_seconds(2_500, false), 47);
-        assert_eq!(synthesis_allowance_seconds(1_000_000, false), 300);
-        assert_eq!(synthesis_allowance_seconds(0, true), 45 + 22);
-        assert_eq!(synthesis_allowance_seconds(1_000_000, true), 300 + 150);
+    fn bigger_evidence_means_more_synthesis_time_until_the_ceiling() {
+        assert_eq!(synthesis_allowance_capped(0, false, 900), 300);
+        assert_eq!(synthesis_allowance_capped(2_500, false, 900), 302);
+        assert_eq!(synthesis_allowance_capped(1_000_000, false, 900), 900);
+        assert_eq!(synthesis_allowance_capped(0, true, 900), 450);
+        assert_eq!(synthesis_allowance_seconds(0, false), 300);
+        assert_eq!(synthesis_allowance_seconds(1_000_000, false), 1_300);
+    }
+
+    #[test]
+    fn a_round_keeps_its_time_and_a_tight_ceiling_still_runs_tools() {
+        let mut clock = TurnClock::new(300, 900);
+        assert_eq!(clock.synthesis_seconds(), 300);
+        clock.note_round();
+        let remaining = clock.recon_remaining().as_secs();
+        assert!((44..=45).contains(&remaining), "a round keeps about 45s, got {remaining}");
+        clock.raise_calls(vec![live("crtsh_certificates")]);
+        clock.begin_tools();
+        assert!(!clock.tools_blocked());
+        let mut tight = TurnClock::new(300, 300);
+        tight.raise_calls(vec![live("crtsh_certificates")]);
+        tight.begin_tools();
+        assert!(!tight.tools_blocked(), "a 300s ceiling still leaves a tool window");
     }
 
     #[test]

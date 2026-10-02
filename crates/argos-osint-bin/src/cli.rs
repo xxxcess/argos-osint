@@ -604,7 +604,7 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                 changed = true;
             }
             if let Some(value) = turn_seconds {
-                anyhow::ensure!((30..=900).contains(&value), "turn-seconds must be 30..900");
+                anyhow::ensure!((300..=900).contains(&value), "turn-seconds must be 300..900");
                 settings.recon_limits.turn_seconds = value;
                 changed = true;
             }

@@ -2860,8 +2860,10 @@ use super::{Binding, Directive};
 pub(crate) mod directives;
 pub use directives::{
     context_gate, directive_entities, directive_for_target, directive_query,
-    fallback_directives, grounded_query, parse_directives, refers_back, relevance_gate, GroundedQuery, QUALIFIERS,
+    fallback_directives, grounded_query, parse_directives_with, refers_back, relevance_gate, GroundedQuery, QUALIFIERS,
 };
+#[cfg(test)]
+pub use directives::parse_directives;
 mod tool_io;
 pub use tool_io::{
     accept_bindings, bind_arguments, catalog_inputs, consumers_of, dependencies, dependency,

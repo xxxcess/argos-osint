@@ -70,13 +70,6 @@ pub struct ToolSuggestion {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct AnswerAssessment {
-    pub answered: bool,
-    pub tools: Vec<ToolSuggestion>,
-}
-
 /// Tools that could supply context the current results do not. At least three when the registry allows it.
 #[allow(dead_code)]
 pub fn additional_tools(
@@ -477,6 +470,7 @@ fn account_platform_host(host: &str) -> bool {
 /// Deterministic extraction: profile URLs (x.com/<h>, twitter.com/<h>, truthsocial.com/@<h>,
 /// instagram.com/<h>, facebook.com/<h>, github.com/<h>, keybase.io/<h>, youtube.com/@<h>, …)
 /// in result links and text. Keeps only accounts that belong to the subject.
+#[allow(dead_code)]
 pub fn fallback_accounts(question: &str, hits: &[SearchHit]) -> Vec<Account> {
     let subject = subject_of(question);
     let mut accounts = Vec::new();
@@ -496,110 +490,6 @@ pub fn fallback_accounts(question: &str, hits: &[SearchHit]) -> Vec<Account> {
     accounts
 }
 
-/// Accounts the Recon model extracted. Each must use a known platform, be a valid handle,
-/// appear in the results, and belong to the subject (its handle or its result names it).
-#[allow(dead_code)]
-pub fn accounts_from_model(value: &Value, question: &str, hits: &[SearchHit]) -> Vec<Account> {
-    let subject = subject_of(question);
-    let mut accounts = Vec::new();
-    let Some(rows) = value.get("accounts").and_then(Value::as_array) else {
-        return accounts;
-    };
-    for row in rows.iter().take(24) {
-        let platform = row
-            .get("platform")
-            .and_then(Value::as_str)
-            .map(normalize_platform)
-            .unwrap_or_default();
-        let raw = row.get("handle").and_then(Value::as_str).unwrap_or("").trim();
-        if raw.is_empty() {
-            continue;
-        }
-        let (platform, handle) = if raw.contains('/') {
-            match super::extract_social_handles(&[raw.to_string()]).into_iter().next() {
-                Some(found) => (found.platform, found.handle),
-                None => continue,
-            }
-        } else {
-            let Ok(token) = osint::social_token(raw) else {
-                continue;
-            };
-            let handle = match platform.as_str() {
-                "facebook" => format!("https://www.facebook.com/{token}"),
-                "linkedin" => format!("https://www.linkedin.com/in/{token}"),
-                _ => token,
-            };
-            (platform, handle)
-        };
-        if !ACCOUNT_PLATFORMS.contains(&platform.as_str()) {
-            continue;
-        }
-        let needle = handle
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(&handle)
-            .to_ascii_lowercase();
-        let Some(source) = hits.iter().find(|hit| {
-            appears_as_token(&format!("{} {} {}", hit.url, hit.title, hit.snippet), &needle)
-        }) else {
-            continue;
-        };
-        // A handle that does not carry the subject's name needs its own profile page
-        // titled with the subject; a mention inside an article about the subject is not enough.
-        let profile = hits.iter().any(|hit| {
-            appears_as_token(&hit.url, &needle) && names_subject(&subject, &hit.title)
-        });
-        if names_subject(&subject, &handle) || profile {
-            push_account(&mut accounts, &platform, &handle, &source.evidence_id, "model");
-        }
-    }
-    accounts
-}
-
-/// The handle appears whole in the text, not inside a longer handle or word.
-#[allow(dead_code)]
-fn appears_as_token(text: &str, needle: &str) -> bool {
-    let text = text.to_ascii_lowercase();
-    let part = |ch: Option<char>| ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-    !needle.is_empty()
-        && text.match_indices(needle).any(|(index, _)| {
-            !part(text[..index].chars().next_back()) && !part(text[index + needle.len()..].chars().next())
-        })
-}
-
-/// Tools the Recon model picked to answer the question, limited to enabled, non-Firecrawl tools.
-#[allow(dead_code)]
-pub fn model_tool_picks(value: &Value, enabled: &HashSet<String>) -> Vec<ToolSuggestion> {
-    let mut tools: Vec<ToolSuggestion> = Vec::new();
-    for row in value.get("tools").and_then(Value::as_array).into_iter().flatten().take(12) {
-        let Some(id) = row.get("tool_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(tool) = osint::definition(id) else {
-            continue;
-        };
-        if tool.id.starts_with("firecrawl_")
-            || !enabled.contains(tool.id)
-            || tools.iter().any(|item| item.tool_id == tool.id)
-        {
-            continue;
-        }
-        let reason = row
-            .get("reason")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|reason| !reason.is_empty())
-            .map(clip_query)
-            .unwrap_or_else(|| format!("The Recon model picked {} for this question.", tool.name));
-        tools.push(ToolSuggestion {
-            tool_id: tool.id.into(),
-            reason,
-        });
-    }
-    tools
-}
-
 #[allow(dead_code)]
 fn normalize_platform(value: &str) -> String {
     let compact: String = value
@@ -617,6 +507,7 @@ fn normalize_platform(value: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn push_account(accounts: &mut Vec<Account>, platform: &str, handle: &str, evidence: &str, source: &str) {
     if let Some(existing) = accounts.iter_mut().find(|account| {
         account.platform == platform && account.handle.eq_ignore_ascii_case(handle)
@@ -632,19 +523,6 @@ fn push_account(accounts: &mut Vec<Account>, platform: &str, handle: &str, evide
         evidence_id: evidence.into(),
         sources: vec![source.into()],
     });
-}
-
-/// Model accounts first, then pattern accounts, deduplicated by platform and handle.
-#[allow(dead_code)]
-pub fn merge_accounts(model: &[Account], pattern: &[Account]) -> Vec<Account> {
-    let mut merged = Vec::new();
-    for account in model.iter().chain(pattern) {
-        for source in &account.sources {
-            push_account(&mut merged, &account.platform, &account.handle, &account.evidence_id, source);
-        }
-    }
-    merged.truncate(16);
-    merged
 }
 
 /// Attaches the accounts to the subject entity as handles, creating the subject entity
@@ -708,67 +586,6 @@ pub fn attach_accounts(
             entity.evidence_ids.push(account.evidence_id.clone());
         }
     }
-}
-
-/// `twitter @realDonaldTrump (model, pattern)`, for the decision block.
-#[allow(dead_code)]
-pub fn account_line(account: &Account) -> String {
-    let handle = if account.handle.contains('/') {
-        account.handle.clone()
-    } else {
-        format!("@{}", account.handle)
-    };
-    format!("{} {handle} ({})", account.platform, account.sources.join(", "))
-}
-
-#[allow(dead_code)]
-pub fn assessment_from_model(value: &Value, fallback: &[ToolSuggestion]) -> Option<AnswerAssessment> {
-    let answered = value.get("answered")?.as_bool()?;
-    if answered {
-        return Some(AnswerAssessment {
-            answered: true,
-            tools: Vec::new(),
-        });
-    }
-    let mut tools: Vec<ToolSuggestion> = Vec::new();
-    if let Some(rows) = value.get("tools").and_then(Value::as_array) {
-        for row in rows {
-            let Some(id) = row.get("tool_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if osint::definition(id).is_none() || tools.iter().any(|tool| tool.tool_id == id) {
-                continue;
-            }
-            let reason = row
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if reason.is_empty() {
-                continue;
-            }
-            tools.push(ToolSuggestion {
-                tool_id: id.into(),
-                reason: reason.into(),
-            });
-        }
-    }
-    for suggestion in fallback {
-        if tools.len() >= 3 {
-            break;
-        }
-        if tools.iter().any(|tool| tool.tool_id == suggestion.tool_id) {
-            continue;
-        }
-        tools.push(suggestion.clone());
-    }
-    if tools.len() < 3 {
-        return None;
-    }
-    Some(AnswerAssessment {
-        answered: false,
-        tools,
-    })
 }
 
 #[allow(dead_code)]
@@ -3485,7 +3302,7 @@ mod tests {
     }
 
     #[test]
-    fn unanswered_questions_name_three_more_tools_and_answered_ones_name_none() {
+    fn additional_tools_name_three_more_unused_tools() {
         let enabled = enabled_all();
         let mut used = HashSet::new();
         used.insert("firecrawl_search".into());
@@ -3493,18 +3310,6 @@ mod tests {
         assert!(tools.len() >= 3);
         assert!(tools.iter().all(|tool| tool.tool_id != "firecrawl_search"));
         assert!(tools.iter().any(|tool| tool.tool_id == "crtsh_certificates"));
-        let fallback = tools.clone();
-        let answered = assessment_from_model(&json!({"answered": true, "tools": [{"tool_id": "crtsh_certificates", "reason": "ignored"}]}), &fallback).unwrap();
-        assert!(answered.answered);
-        assert!(answered.tools.is_empty());
-        let partial = assessment_from_model(
-            &json!({"answered": false, "tools": [{"tool_id": "wikidata_entities", "reason": "Confirm the named organization."}]}),
-            &fallback,
-        )
-        .unwrap();
-        assert!(!partial.answered);
-        assert!(partial.tools.len() >= 3);
-        assert_eq!(partial.tools[0].tool_id, "wikidata_entities");
     }
 
     #[test]
@@ -4048,47 +3853,10 @@ mod tests {
     }
 
     #[test]
-    fn model_accounts_are_grounded_owned_and_merged_with_the_fallback() {
-        let hits = account_hits();
-        let value = json!({
-            "accounts": [
-                {"platform": "X", "handle": "@realDonaldTrump", "evidence_id": "e2"},
-                {"platform": "Truth Social", "handle": "https://truthsocial.com/@realDonaldTrump"},
-                {"platform": "twitter", "handle": "trumpfakeaccount"},
-                {"platform": "twitter", "handle": "apreporter"},
-                {"platform": "myspace", "handle": "realDonaldTrump"},
-                {"platform": "facebook", "handle": "DonaldTrump"}
-            ],
-            "tools": [
-                {"tool_id": "firecrawl_search", "reason": "search again"},
-                {"tool_id": "keybase_identity", "reason": "Check proofs for the handle."},
-                {"tool_id": "not_a_tool", "reason": "x"}
-            ]
-        });
-        let model = accounts_from_model(&value, TRUMP, &hits);
-        assert_eq!(model.len(), 2, "{model:?}");
-        assert!(model.iter().all(|account| account.handle.eq_ignore_ascii_case("realDonaldTrump")));
-        let tools = model_tool_picks(&value, &enabled_all());
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].tool_id, "keybase_identity");
-        let merged = merge_accounts(&model, &fallback_accounts(TRUMP, &hits));
-        let twitter = merged
-            .iter()
-            .find(|account| account.platform == "twitter")
-            .unwrap();
-        assert_eq!(twitter.sources, ["model", "pattern"]);
-        assert_eq!(
-            merged.iter().filter(|account| account.platform == "twitter").count(),
-            1
-        );
-        assert_eq!(account_line(twitter), "twitter @realDonaldTrump (model, pattern)");
-    }
-
-    #[test]
     fn account_platforms_attach_to_the_subject_and_are_never_entities() {
         let hits = account_hits();
         let mut entities = select_entities(TRUMP, &hits);
-        let accounts = merge_accounts(&[], &fallback_accounts(TRUMP, &hits));
+        let accounts = fallback_accounts(TRUMP, &hits);
         attach_accounts(TRUMP, &hits, &mut entities, &accounts);
         for name in ["truthsocial", "truth social", "instagram", "x", "github", "keybase", "apnews"] {
             assert!(entities.iter().all(|entity| !entity.canonical_name.eq_ignore_ascii_case(name)), "{name}: {entities:?}");

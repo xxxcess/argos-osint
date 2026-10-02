@@ -63,21 +63,42 @@ fn words_of(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The catalog tool id or provider name `text` uses, if any.
+/// The catalog tool id or provider name `text` uses, if any (tests; the checks pass the
+/// prompt's entities to [`names_tool_except`]).
+#[cfg(test)]
 pub fn names_tool(text: &str) -> Option<String> {
-    let lower = text.to_ascii_lowercase();
-    for tool in crate::osint::registry() {
-        if lower.contains(tool.id) {
-            return Some(tool.id.to_string());
+    names_tool_except(text, &[])
+}
+
+/// `term` is part of a prompt entity: its words occur, in order, among the entity's
+/// words ("hunter" in "Hunter Biden", "github" in "GitHub"). Dotted or underscored terms
+/// (`hunter.io`, tool ids) must occur in the entity as written.
+fn in_entity(term: &str, entities: &[String]) -> bool {
+    let term_words = words_of(term);
+    entities.iter().any(|entity| {
+        if term.contains('.') || term.contains('_') {
+            return entity.to_ascii_lowercase().contains(term);
         }
-    }
-    if lower.contains("hunter_tech_lookup") {
-        return Some("hunter_tech_lookup".into());
+        let words = words_of(entity);
+        !term_words.is_empty() && words.windows(term_words.len()).any(|window| window == term_words.as_slice())
+    })
+}
+
+/// [`names_tool`], ignoring any tool or provider word that belongs to one of `entities`
+/// (the prompt's own entities), so "who is Hunter Biden?" or "who runs GitHub?" can
+/// still name their subject. A tool word outside those entities still counts.
+pub fn names_tool_except(text: &str, entities: &[String]) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let mut ids: Vec<&str> = crate::osint::registry().iter().map(|tool| tool.id).collect();
+    ids.push("hunter_tech_lookup");
+    if let Some(id) = ids.into_iter().find(|id| lower.contains(id) && !in_entity(id, entities)) {
+        return Some(id.to_string());
     }
     let words = format!(" {} ", words_of(text).join(" "));
     PROVIDER_TERMS
         .iter()
-        .find(|term| if term.contains('.') { lower.contains(*term) } else { words.contains(&format!(" {term} ")) })
+        .filter(|term| if term.contains('.') { lower.contains(*term) } else { words.contains(&format!(" {term} ")) })
+        .find(|term| !in_entity(term, entities))
         .map(|term| term.to_string())
 }
 
@@ -215,8 +236,16 @@ pub fn fallback_directives(question: &str, thread: &[String]) -> Vec<Directive> 
     ]
 }
 
-/// Why a goal is not a valid directive goal, if it is not.
+/// Why a goal is not a valid directive goal, if it is not (tests; parsing uses
+/// [`goal_error_for`]).
+#[cfg(test)]
 pub fn goal_error(goal: &str) -> Option<String> {
+    goal_error_for(goal, &[])
+}
+
+/// [`goal_error`] where tool or provider words inside `entities` (the prompt's own
+/// entities) do not count as naming a tool.
+pub fn goal_error_for(goal: &str, entities: &[String]) -> Option<String> {
     let goal = goal.trim();
     let words: Vec<&str> = goal.split_whitespace().collect();
     if words.is_empty() {
@@ -229,7 +258,7 @@ pub fn goal_error(goal: &str) -> Option<String> {
     if goal.ends_with('?') || QUESTION_WORDS.contains(&first.as_str()) {
         return Some("the goal must be an imperative, not a question".into());
     }
-    names_tool(goal).map(|term| format!("the goal names a tool or provider ({term})"))
+    names_tool_except(goal, entities).map(|term| format!("the goal names a tool or provider ({term})"))
 }
 
 /// Validates a Recon reply: exactly three directives `d1`–`d3`, tool-free imperative goals
@@ -246,6 +275,9 @@ pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Res
     }
     let lower_question = question.to_ascii_lowercase();
     let fallback_entities = directive_entities(question, thread);
+    // The prompt's own entities (and the thread subject): tool or provider words inside
+    // them ("Hunter Biden", "GitHub", "Google") do not make a directive name a tool.
+    let prompt_entities: Vec<String> = fallback_entities.iter().chain(thread).cloned().collect();
     let mut directives = Vec::new();
     for (index, item) in list.iter().enumerate() {
         let mut parsed: Directive = serde_json::from_value(item.clone()).map_err(|err| format!("directive {} is malformed: {err}", index + 1))?;
@@ -253,10 +285,6 @@ pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Res
         if parsed.id != expected {
             return Err(format!("directive {} must have id {expected}", index + 1));
         }
-        if let Some(error) = goal_error(&parsed.goal) {
-            return Err(format!("{expected}: {error}"));
-        }
-        parsed.goal = parsed.goal.trim().to_string();
         let mut entities: Vec<String> = Vec::new();
         for entity in &parsed.entities {
             let entity = entity.trim();
@@ -268,7 +296,7 @@ pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Res
             if !verbatim && !thread_subject {
                 return Err(format!("{expected}: entity \"{entity}\" is not in the user's prompt"));
             }
-            if names_tool(entity).is_some() {
+            if names_tool_except(entity, &prompt_entities).is_some() {
                 return Err(format!("{expected}: entity \"{entity}\" names a tool or provider"));
             }
             let shown = display_name(entity);
@@ -276,6 +304,13 @@ pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Res
                 entities.push(shown);
             }
         }
+        // Tool or provider words that belong to a prompt entity ("Hunter Biden") are not
+        // tool names in the goal either.
+        let exempt: Vec<String> = prompt_entities.iter().chain(&entities).cloned().collect();
+        if let Some(error) = goal_error_for(&parsed.goal, &exempt) {
+            return Err(format!("{expected}: {error}"));
+        }
+        parsed.goal = parsed.goal.trim().to_string();
         // A pronoun follow-up keeps the thread subject even when Recon copied the pronoun.
         if entities.is_empty() || refers_back(question) && !thread.is_empty() {
             entities = fallback_entities.clone();
@@ -322,7 +357,8 @@ pub fn grounded_query(query: &str, entities: &[String], values: &[String]) -> bo
     if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS || query.split_whitespace().count() > MAX_QUERY_WORDS || query.contains('?') {
         return false;
     }
-    if names_tool(query).is_some_and(|term| !entities.iter().chain(values).any(|known| known.to_ascii_lowercase().contains(&term))) {
+    let known: Vec<String> = entities.iter().chain(values).cloned().collect();
+    if names_tool_except(query, &known).is_some() {
         return false;
     }
     let mut rest = format!(" {} ", query.to_ascii_lowercase());

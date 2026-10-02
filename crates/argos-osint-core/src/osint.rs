@@ -37,6 +37,9 @@ pub struct ToolDefinition {
     pub timeout_seconds: u64,
     pub cache_seconds: u64,
 }
+/// Cache lifetime for every Firecrawl, SociaVault, and Hunter tool: one week. Their calls
+/// spend paid credits, so a completed result is reused for 604800 s.
+pub const PRIMARY_PROVIDER_CACHE_SECONDS: u64 = 604_800;
 macro_rules! tool { ($id:expr,$name:expr,$category:expr,$description:expr,[$($input:expr),*],$doc:expr,$restriction:expr,$timeout:expr,$cache:expr) => { ToolDefinition {id:$id,name:$name,category:$category,description:$description,inputs:&[$($input),*],documentation:$doc,restrictions:$restriction,timeout_seconds:$timeout,cache_seconds:$cache} }; }
 pub fn registry() -> &'static [ToolDefinition] {
     static TOOLS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
@@ -71,28 +74,28 @@ pub fn registry() -> &'static [ToolDefinition] {
         tool!("sans_ip_activity","SANS ISC IP activity","Exposure","Reported attack activity for an IP.",["ip"],"https://isc.sans.edu/api/","Reports are historical observations.",25,600),
         tool!("shodan_internetdb","Shodan InternetDB","Exposure","Observed ports, hostnames and vulnerability associations.",["ip"],"https://internetdb.shodan.io/","Free access is noncommercial; observations may be old.",20,600),
         tool!("urlscan_search","urlscan search","Exposure","Search existing website scan records.",["domain|query"],"https://urlscan.io/docs/api/","Search only; no scan submission; historical observations.",20,600),
-        tool!("firecrawl_search","Firecrawl search","Web","Web search for titles, links, and descriptions. A new investigation runs two complementary searches before enrichment. Later searches are targeted follow-ups.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/search","POST https://api.firecrawl.dev/v2/search with query and limit (at most 10). Optional sources (web, news), categories (github, research), tbs time filter, and location. Enter the API key on this tool, or set FIRECRAWL_API_KEY. Results are snippets, not page content. Automatic investigation does not paginate. 2 credits per 10 results.",60,600),
-        tool!("firecrawl_scrape","Firecrawl page","Web","Retrieve one public page as markdown when a search snippet is not enough to support a consequential claim.",["url"],"https://docs.firecrawl.dev/api-reference/endpoint/scrape","POST https://api.firecrawl.dev/v2/scrape for a single URL already found in evidence. One page per call; optional formats markdown and links (structured JSON goes through firecrawl_extract). Same Firecrawl API key as search. 1 credit.",60,86400),
-        tool!("firecrawl_map","Firecrawl map","Web","List a subject-owned site's pages, contact, about, team, press, and legal pages first.",["domain|url"],"https://docs.firecrawl.dev/api-reference/endpoint/map","POST https://api.firecrawl.dev/v2/map with optional search. Same registrable domain only, at most 100 links, never a social, publisher, or Q&A host. 1 credit per call.",60,86400),
-        tool!("firecrawl_batch_scrape","Firecrawl batch scrape","Web","Retrieve up to 10 evidence URLs as markdown in one job, such as the contact and about pages a map found.",["urls"],"https://docs.firecrawl.dev/api-reference/endpoint/batch-scrape","POST https://api.firecrawl.dev/v2/batch/scrape, then GET /v2/batch/scrape/{id} until done. URLs must already be in evidence; default 5, at most 10; markdown only; 1 credit per page. Polling is free; a job still running at the timeout is recorded as partial.",120,86400),
-        tool!("firecrawl_crawl","Firecrawl crawl","Web","Small crawl of a subject-owned site: up to 10 pages one link deep. Off by default.",["domain|url"],"https://docs.firecrawl.dev/api-reference/endpoint/crawl-post","POST https://api.firecrawl.dev/v2/crawl, then GET /v2/crawl/{id} until done. limit at most 10, maxDiscoveryDepth 1, same domain, markdown only, 1 credit per page. Disabled until enabled on the OSINT screen.",180,86400),
-        tool!("firecrawl_extract","Firecrawl extract","Web","Structured org name, legal name, domain, emails, social profiles, people, and address from one page.",["url"],"https://docs.firecrawl.dev/features/llm-extract","POST https://api.firecrawl.dev/v2/scrape with a JSON format and a fixed Argos schema {org_name, legal_name, domain, emails, social_profiles, people, address}. One page; 5 credits.",90,86400),
-        tool!("hunter_domain_finder","Hunter domain finder","Enrichment","Resolve an organization name to its website domain. Free.",["company"],"https://hunter.io/api-documentation/v2#domain-finder","GET https://api.hunter.io/v2/domain-finder. Company name of at least 3 characters; optional limit (1-10) and perfect_match. Free but rate-limited. Matches that are not perfect become inferred bindings. Inputs only from the prompt, Firecrawl, SociaVault, or Hunter.",25,86400),
-        tool!("hunter_email_count","Hunter email count","Enrichment","How many addresses Hunter has for a domain or company. Free; zero skips the paid domain search.",["domain|company"],"https://hunter.io/api-documentation/v2#email-count","GET https://api.hunter.io/v2/email-count with optional type (personal, generic). Free. A zero count skips hunter_domain_search; Hunter notes zero can also mean the domain is privacy-suppressed.",20,86400),
-        tool!("hunter_domain_search","Hunter domain search","Enrichment","Email addresses, roles, and the email pattern Hunter has for a company domain or name.",["domain|company"],"https://hunter.io/api-documentation/v2#domain-search","GET https://api.hunter.io/v2/domain-search. Enter the API key on a Hunter tool, or set HUNTER_API_KEY. The key is sent as X-API-KEY and is not stored on the tool input. At most 10 addresses per call. Inputs only from the prompt, Firecrawl, SociaVault, or Hunter.",25,600),
-        tool!("hunter_company_enrichment","Hunter company enrichment","Enrichment","Company profile for a domain: name, legal name, industry, size, address, tech stack, social handles, site emails.",["domain"],"https://hunter.io/api-documentation/v2#company-enrichment","GET https://api.hunter.io/v2/companies/find. 1 credit. Replaces hunter_tech_lookup (the old id still resolves here). Same Hunter API key as the other Hunter tools.",25,86400),
-        tool!("hunter_email_finder","Hunter email finder","Enrichment","Most likely professional email for a named person at a domain, company, or LinkedIn handle.",["domain|company|linkedin_handle","full_name|first_name|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-finder","GET https://api.hunter.io/v2/email-finder. Requires a domain, company, or LinkedIn handle, plus a full name or a first and last name unless the LinkedIn handle is enough. Same Hunter API key as the other Hunter tools.",25,600),
-        tool!("hunter_email_verifier","Hunter email verifier","Enrichment","Deliverability status and score for one email address, when a claim depends on deliverability.",["email"],"https://hunter.io/api-documentation/v2#email-verifier","GET https://api.hunter.io/v2/email-verifier. The check can take about 20 seconds; a 202 is retried. Same Hunter API key as the other Hunter tools.",40,604800),
-        tool!("hunter_email_insight","Hunter email insight","Enrichment","Whether an email is webmail, disposable, or gibberish, plus its MX records. Free.",["email"],"https://hunter.io/api-documentation/v2#email-insight","GET https://api.hunter.io/v2/email-insight. Free. Runs before enrichment: webmail and disposable addresses go to person enrichment only, company addresses to combined enrichment.",20,604800),
-        tool!("hunter_person_enrichment","Hunter person enrichment","Enrichment","Person profile for an email or LinkedIn handle: name, employer, location, social handles.",["email|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-enrichment","GET https://api.hunter.io/v2/people/find. 1 credit. 404 means no match. A 451 claimed_email response is stored without the person payload and yields no bindings.",25,86400),
-        tool!("hunter_combined_enrichment","Hunter combined enrichment","Enrichment","Person and company profile for one company email address in a single call.",["email"],"https://hunter.io/api-documentation/v2#combined-enrichment","GET https://api.hunter.io/v2/combined/find. Company email addresses only; webmail goes to person enrichment. 1 credit. A 451 claimed_email response is stored without the person payload and yields no bindings.",25,86400),
-        tool!("sociavault_profile","SociaVault profile","Social","Public profile stats, biography, outbound links, and account id for one evidence-supported account.",["platform","handle|user_id"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/{platform}/profile (YouTube /youtube/channel; LinkedIn /linkedin/profile or /linkedin/company; Instagram /instagram/basic-profile by user_id). Platforms: twitter, instagram, tiktok, youtube, facebook, linkedin, threads, twitch. Optional endpoint. Enter the API key on a SociaVault tool, or set SOCIAVAULT_API_KEY. The key is sent as X-API-Key and is not stored on the tool input. 1 credit.",40,86400),
-        tool!("sociavault_search","SociaVault search","Social","Search one platform's posts, videos, or hashtags for the subject's name, organization, or a hashtag.",["platform","query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/... Platforms and endpoints: instagram (hashtag), linkedin (posts), pinterest (search), reddit (search, subreddit), threads (search), tiktok (keyword, hashtag, top), twitter (search), youtube (search, hashtag). Optional endpoint and subreddit. 1 credit. Handles found only here stay unverified.",40,600),
-        tool!("sociavault_search_users","SociaVault account search","Social","Find accounts by name on Instagram, Threads, or TikTok.",["platform","query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/instagram/search, /threads/search-users, or /tiktok/search/users. 1 credit. Accounts found only here stay unverified until a profile call or a Firecrawl page links them to the subject.",40,600),
-        tool!("sociavault_user_content","SociaVault user content","Social","One account's own posts, videos, reels, highlights, playlists, boards, or schedule. No followers or single posts.",["platform","handle|user_id"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/... Platforms and endpoints: facebook (posts, reels), instagram (posts, highlights, reels), pinterest (boards), threads (posts), tiktok (videos, live), twitch (videos, schedule), twitter (tweets; tweets_all by user_id), youtube (videos, community_posts, lives, playlists, shorts). Optional endpoint. 1 credit. Runs after a profile call when a numeric id is needed.",40,3600),
-        tool!("sociavault_google_search","SociaVault Google search","Web","Google results for the same query when Firecrawl search was weak. Fallback only.",["query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/google/search. Never an opening pick: offered only when Firecrawl search failed, returned fewer than 3 results, returned only filtered hosts, or yielded no binding a later step needs. One page and one call per question; 1 credit.",40,600),
-        tool!("newsapi_search","NewsAPI article search","News","News articles that name the subject (exact phrase). Free-tier articles arrive 24 hours late and search reaches back one month, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/everything","GET https://newsapi.org/v2/everything with q as an exact phrase, pageSize at most 20, first page only. Optional from and to (YYYY-MM-DD), language, sort_by (relevancy default, publishedAt, popularity), and domains. Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY; it is sent as X-Api-Key, never in the URL. Developer plan: 100 requests a day, development use only. At most 2 NewsAPI calls per turn.",20,3600),
-        tool!("newsapi_headlines","NewsAPI top headlines","News","Top headlines that name the subject (exact phrase). Free-tier headlines arrive 24 hours late and cover one month at most, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/top-headlines","GET https://newsapi.org/v2/top-headlines with q as an exact phrase, pageSize at most 20. Optional country (2-letter code) and category (business, entertainment, general, health, science, sports, technology). Same NewsAPI key (NEWSAPI_API_KEY), sent as X-Api-Key, never in the URL. At most 2 NewsAPI calls per turn.",20,3600),
+        tool!("firecrawl_search","Firecrawl search","Web","Web search for titles, links, and descriptions. A new investigation runs two complementary searches before enrichment. Later searches are targeted follow-ups.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/search","POST https://api.firecrawl.dev/v2/search with query and limit (at most 10). Optional sources (web, news), categories (github, research), tbs time filter, and location. Enter the API key on this tool, or set FIRECRAWL_API_KEY. Results are snippets, not page content. Automatic investigation does not paginate. 2 credits per 10 results.",60,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("firecrawl_scrape","Firecrawl page","Web","Retrieve one public page as markdown when a search snippet is not enough to support a consequential claim.",["url"],"https://docs.firecrawl.dev/api-reference/endpoint/scrape","POST https://api.firecrawl.dev/v2/scrape for a single URL already found in evidence. One page per call; optional formats markdown and links (structured JSON goes through firecrawl_extract). Same Firecrawl API key as search. 1 credit.",60,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("firecrawl_map","Firecrawl map","Web","List a subject-owned site's pages, contact, about, team, press, and legal pages first.",["domain|url"],"https://docs.firecrawl.dev/api-reference/endpoint/map","POST https://api.firecrawl.dev/v2/map with optional search. Same registrable domain only, at most 100 links, never a social, publisher, or Q&A host. 1 credit per call.",60,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("firecrawl_batch_scrape","Firecrawl batch scrape","Web","Retrieve up to 10 evidence URLs as markdown in one job, such as the contact and about pages a map found.",["urls"],"https://docs.firecrawl.dev/api-reference/endpoint/batch-scrape","POST https://api.firecrawl.dev/v2/batch/scrape, then GET /v2/batch/scrape/{id} until done. URLs must already be in evidence; default 5, at most 10; markdown only; 1 credit per page. Polling is free; a job still running at the timeout is recorded as partial.",120,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("firecrawl_crawl","Firecrawl crawl","Web","Small crawl of a subject-owned site: up to 10 pages one link deep. Off by default.",["domain|url"],"https://docs.firecrawl.dev/api-reference/endpoint/crawl-post","POST https://api.firecrawl.dev/v2/crawl, then GET /v2/crawl/{id} until done. limit at most 10, maxDiscoveryDepth 1, same domain, markdown only, 1 credit per page. Disabled until enabled on the OSINT screen.",180,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("firecrawl_extract","Firecrawl extract","Web","Structured org name, legal name, domain, emails, social profiles, people, and address from one page.",["url"],"https://docs.firecrawl.dev/features/llm-extract","POST https://api.firecrawl.dev/v2/scrape with a JSON format and a fixed Argos schema {org_name, legal_name, domain, emails, social_profiles, people, address}. One page; 5 credits.",90,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("hunter_domain_finder","Hunter domain finder","Enrichment","Resolve an organization name to its website domain. Free.",["company"],"https://hunter.io/api-documentation/v2#domain-finder","GET https://api.hunter.io/v2/domain-finder. Company name of at least 3 characters; optional limit (1-10) and perfect_match. Free but rate-limited. Matches that are not perfect become inferred bindings. Inputs only from the prompt, Firecrawl, SociaVault, or Hunter.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("hunter_email_count","Hunter email count","Enrichment","How many addresses Hunter has for a domain or company. Free; zero skips the paid domain search.",["domain|company"],"https://hunter.io/api-documentation/v2#email-count","GET https://api.hunter.io/v2/email-count with optional type (personal, generic). Free. A zero count skips hunter_domain_search; Hunter notes zero can also mean the domain is privacy-suppressed.",20,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("hunter_domain_search","Hunter domain search","Enrichment","Email addresses, roles, and the email pattern Hunter has for a company domain or name.",["domain|company"],"https://hunter.io/api-documentation/v2#domain-search","GET https://api.hunter.io/v2/domain-search. Enter the API key on a Hunter tool, or set HUNTER_API_KEY. The key is sent as X-API-KEY and is not stored on the tool input. At most 10 addresses per call. Inputs only from the prompt, Firecrawl, SociaVault, or Hunter.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("hunter_company_enrichment","Hunter company enrichment","Enrichment","Company profile for a domain: name, legal name, industry, size, address, tech stack, social handles, site emails.",["domain"],"https://hunter.io/api-documentation/v2#company-enrichment","GET https://api.hunter.io/v2/companies/find. 1 credit. Replaces hunter_tech_lookup (the old id still resolves here). Same Hunter API key as the other Hunter tools.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("hunter_email_finder","Hunter email finder","Enrichment","Most likely professional email for a named person at a domain, company, or LinkedIn handle.",["domain|company|linkedin_handle","full_name|first_name|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-finder","GET https://api.hunter.io/v2/email-finder. Requires a domain, company, or LinkedIn handle, plus a full name or a first and last name unless the LinkedIn handle is enough. Same Hunter API key as the other Hunter tools.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("hunter_email_verifier","Hunter email verifier","Enrichment","Deliverability status and score for one email address, when a claim depends on deliverability.",["email"],"https://hunter.io/api-documentation/v2#email-verifier","GET https://api.hunter.io/v2/email-verifier. The check can take about 20 seconds; a 202 is retried. Same Hunter API key as the other Hunter tools.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("hunter_email_insight","Hunter email insight","Enrichment","Whether an email is webmail, disposable, or gibberish, plus its MX records. Free.",["email"],"https://hunter.io/api-documentation/v2#email-insight","GET https://api.hunter.io/v2/email-insight. Free. Runs before enrichment: webmail and disposable addresses go to person enrichment only, company addresses to combined enrichment.",20,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("hunter_person_enrichment","Hunter person enrichment","Enrichment","Person profile for an email or LinkedIn handle: name, employer, location, social handles.",["email|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-enrichment","GET https://api.hunter.io/v2/people/find. 1 credit. 404 means no match. A 451 claimed_email response is stored without the person payload and yields no bindings.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("hunter_combined_enrichment","Hunter combined enrichment","Enrichment","Person and company profile for one company email address in a single call.",["email"],"https://hunter.io/api-documentation/v2#combined-enrichment","GET https://api.hunter.io/v2/combined/find. Company email addresses only; webmail goes to person enrichment. 1 credit. A 451 claimed_email response is stored without the person payload and yields no bindings.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("sociavault_profile","SociaVault profile","Social","Public profile stats, biography, outbound links, and account id for one evidence-supported account.",["platform","handle|user_id"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/{platform}/profile (YouTube /youtube/channel; LinkedIn /linkedin/profile or /linkedin/company; Instagram /instagram/basic-profile by user_id). Platforms: twitter, instagram, tiktok, youtube, facebook, linkedin, threads, twitch. Optional endpoint. Enter the API key on a SociaVault tool, or set SOCIAVAULT_API_KEY. The key is sent as X-API-Key and is not stored on the tool input. 1 credit.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("sociavault_search","SociaVault search","Social","Search one platform's posts, videos, or hashtags for the subject's name, organization, or a hashtag.",["platform","query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/... Platforms and endpoints: instagram (hashtag), linkedin (posts), pinterest (search), reddit (search, subreddit), threads (search), tiktok (keyword, hashtag, top), twitter (search), youtube (search, hashtag). Optional endpoint and subreddit. 1 credit. Handles found only here stay unverified.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("sociavault_search_users","SociaVault account search","Social","Find accounts by name on Instagram, Threads, or TikTok.",["platform","query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/instagram/search, /threads/search-users, or /tiktok/search/users. 1 credit. Accounts found only here stay unverified until a profile call or a Firecrawl page links them to the subject.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("sociavault_user_content","SociaVault user content","Social","One account's own posts, videos, reels, highlights, playlists, boards, or schedule. No followers or single posts.",["platform","handle|user_id"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/... Platforms and endpoints: facebook (posts, reels), instagram (posts, highlights, reels), pinterest (boards), threads (posts), tiktok (videos, live), twitch (videos, schedule), twitter (tweets; tweets_all by user_id), youtube (videos, community_posts, lives, playlists, shorts). Optional endpoint. 1 credit. Runs after a profile call when a numeric id is needed.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("sociavault_google_search","SociaVault Google search","Web","Google results for the same query when Firecrawl search was weak. Fallback only.",["query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/google/search. Never an opening pick: offered only when Firecrawl search failed, returned fewer than 3 results, returned only filtered hosts, or yielded no binding a later step needs. One page and one call per question; 1 credit.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
+        tool!("newsapi_search","NewsAPI article search","News","News articles that name the subject (exact phrase). Free-tier articles arrive 24 hours late and search reaches back one month, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/everything","GET https://newsapi.org/v2/everything with q as an exact phrase, pageSize 10 (at most 10 articles), first page only. Optional from and to (YYYY-MM-DD), language, sort_by (relevancy default, publishedAt, popularity), and domains. Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY; it is sent as X-Api-Key, never in the URL. Developer plan: 100 requests a day, development use only. At most 2 NewsAPI calls per turn.",20,3600),
+        tool!("newsapi_headlines","NewsAPI top headlines","News","Top headlines that name the subject (exact phrase). Free-tier headlines arrive 24 hours late and cover one month at most, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/top-headlines","GET https://newsapi.org/v2/top-headlines with q as an exact phrase, pageSize 10 (at most 10 articles). Optional country (2-letter code) and category (business, entertainment, general, health, science, sports, technology). Same NewsAPI key (NEWSAPI_API_KEY), sent as X-Api-Key, never in the URL. At most 2 NewsAPI calls per turn.",20,3600),
         tool!("courtlistener_case_search","CourtListener case law","Legal","Court opinions (case law) that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=o with q as an exact phrase. First page only, at most 20 results, no highlighting, never semantic search. Optional court (court ids separated by spaces), filed_after and filed_before (YYYY-MM-DD). Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN; it is sent as Authorization: Token. Free tier 5/min, 50/hour, 125/day: at most 3 CourtListener calls per turn, 12 s apart.",30,86400),
         tool!("courtlistener_docket_search","CourtListener federal dockets","Legal","Federal (PACER/RECAP) dockets that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=r with q as an exact phrase. First page only, at most 20 results, no highlighting; no RECAP fetch or paid PACER pulls. Optional court and filed_after (YYYY-MM-DD). Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30,86400),
         tool!("courtlistener_judge_search","CourtListener judges","Legal","Judges whose name matches the subject (exact phrase), with court and position.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=p with q as an exact phrase. First page only, at most 20 results. Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30,86400),
@@ -1788,6 +1791,31 @@ fn rebase(url: &Url, base: &str) -> Result<Url> {
     Ok(next)
 }
 
+/// The User-Agent every OSINT request sends when `osint_user_agent` is unset or blank.
+pub const DEFAULT_USER_AGENT: &str = "Argos OSINT/0.1 (public research; contact: configure osint_user_agent)";
+
+/// The configured `osint_user_agent`, or None when it is unset, empty, or whitespace. The
+/// single place a blank setting is treated as unset, so it never overrides the default.
+pub fn custom_user_agent(setting: Option<&str>) -> Option<&str> {
+    setting.map(str::trim).filter(|agent| !agent.is_empty())
+}
+
+/// The User-Agent a request sends: a non-blank custom value, else [`DEFAULT_USER_AGENT`].
+/// Never empty.
+pub fn effective_user_agent(setting: Option<&str>) -> &str {
+    custom_user_agent(setting).unwrap_or(DEFAULT_USER_AGENT)
+}
+
+/// Headers every tool request carries besides its credential: the User-Agent (never
+/// empty) and, for CourtListener, `Accept: application/json`.
+fn request_headers(id: &str, user_agent: Option<&str>) -> Vec<(reqwest::header::HeaderName, String)> {
+    let mut headers = vec![(reqwest::header::USER_AGENT, effective_user_agent(user_agent).to_string())];
+    if news_legal::provider(id) == Some("courtlistener") {
+        headers.push((reqwest::header::ACCEPT, "application/json".to_string()));
+    }
+    headers
+}
+
 #[derive(Clone)]
 pub struct Executor {
     client: reqwest::Client,
@@ -1800,9 +1828,7 @@ impl Executor {
         let shared = SHARED.get_or_init(|| {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .user_agent(
-                    "Argos OSINT/0.1 (public research; contact: configure osint_user_agent)",
-                )
+                .user_agent(DEFAULT_USER_AGENT)
                 .build()
                 .expect("HTTP client");
             (
@@ -1843,10 +1869,11 @@ impl Executor {
         );
         let _permit = self.global.acquire().await?;
         self.pace_host(host, Duration::from_secs(1)).await;
-        let mut request = self.client.get(url).timeout(Duration::from_secs(20));
-        if let Some(agent) = user_agent {
-            request = request.header(reqwest::header::USER_AGENT, agent);
-        }
+        let request = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(20))
+            .header(reqwest::header::USER_AGENT, effective_user_agent(user_agent));
         let response = request.send().await?.error_for_status()?;
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -1878,6 +1905,8 @@ impl Executor {
     ) -> Result<ToolResult> {
         let id = canonical_tool_id(id);
         let def = definition(id).ok_or_else(|| anyhow!("unknown tool {id}"))?;
+        // A blank osint_user_agent is unset: requests fall back to DEFAULT_USER_AGENT.
+        let user_agent = custom_user_agent(user_agent);
         if ["nominatim_geocode", "sec_submissions"].contains(&id) {
             ensure!(
                 user_agent.is_some_and(|s| s.contains('@') || s.contains("http")),
@@ -1968,7 +1997,7 @@ impl Executor {
         let mut attempts = 0;
         let mut redirects = 0;
         let mut verifying = 0;
-        let accept_json = news_legal::provider(id) == Some("courtlistener");
+        let headers = request_headers(id, user_agent);
         // NewsAPI and CourtListener 429s are not retried: their daily quotas are tiny.
         let retry_429 = news_legal::provider(id).is_none();
         loop {
@@ -1980,13 +2009,10 @@ impl Executor {
             } else {
                 self.client.get(url.clone())
             };
-            if accept_json {
-                builder = builder.header(reqwest::header::ACCEPT, "application/json");
+            for (name, value) in &headers {
+                builder = builder.header(name, value);
             }
             builder = builder.timeout(Duration::from_secs(def.timeout_seconds));
-            if let Some(ua) = user_agent {
-                builder = builder.header(reqwest::header::USER_AGENT, ua);
-            }
             if let Some((name, value)) = &credential {
                 builder = builder.header(name, value);
             }
@@ -2308,6 +2334,49 @@ mod tests {
         assert!(result.observations.get("full_name").is_none());
         let bindings = crate::recon::investigation::rule_bindings("Who is jane@acmerobotics.com?", "call-s1", "hunter_person_enrichment", &result.observations);
         assert!(bindings.is_empty(), "{bindings:?}");
+    }
+
+    /// No tool request goes out with an empty User-Agent: an unset, empty, or whitespace
+    /// `osint_user_agent` falls back to the default, and a non-blank custom value wins.
+    #[test]
+    fn every_tool_request_sends_a_non_empty_user_agent() {
+        let agent = |headers: &[(reqwest::header::HeaderName, String)]| {
+            let found: Vec<&String> = headers.iter().filter(|(name, _)| name == reqwest::header::USER_AGENT).map(|(_, value)| value).collect();
+            assert_eq!(found.len(), 1, "exactly one User-Agent header");
+            found[0].clone()
+        };
+        let mut ids: Vec<&str> = registry().iter().map(|tool| tool.id).collect();
+        ids.push("hunter_tech_lookup");
+        assert_eq!(ids.len(), 56);
+        for id in ids {
+            for blank in [None, Some(""), Some("   "), Some(" \t\n ")] {
+                let sent = agent(&request_headers(canonical_tool_id(id), custom_user_agent(blank)));
+                assert!(!sent.trim().is_empty(), "{id}: {blank:?}");
+                assert_eq!(sent, DEFAULT_USER_AGENT, "{id}: {blank:?} falls back to the default");
+            }
+            assert_eq!(agent(&request_headers(id, custom_user_agent(Some("  Argos test@example.com  ")))), "Argos test@example.com", "{id}: a custom value wins");
+        }
+        assert!(DEFAULT_USER_AGENT.starts_with("Argos OSINT/0.1 ("));
+        assert_eq!(effective_user_agent(Some("\t")), DEFAULT_USER_AGENT);
+        assert_eq!(custom_user_agent(Some(" ")), None);
+    }
+
+    /// Every Firecrawl, SociaVault, and Hunter tool caches for one week; NewsAPI stays at
+    /// one hour and CourtListener at one day.
+    #[test]
+    fn primary_provider_tools_cache_for_one_week() {
+        let count = |prefix: &str| registry().iter().filter(|tool| tool.id.starts_with(prefix)).count();
+        assert_eq!((count("firecrawl_"), count("sociavault_"), count("hunter_")), (6, 5, 9));
+        assert_eq!(PRIMARY_PROVIDER_CACHE_SECONDS, 604_800);
+        for tool in registry() {
+            let ttl = tool.cache_seconds;
+            match tool.id.split('_').next().unwrap_or("") {
+                "firecrawl" | "sociavault" | "hunter" => assert_eq!(ttl, 604_800, "{}", tool.id),
+                "newsapi" => assert_eq!(ttl, 3600, "{}", tool.id),
+                "courtlistener" => assert_eq!(ttl, 86_400, "{}", tool.id),
+                _ => {}
+            }
+        }
     }
 
     #[test]

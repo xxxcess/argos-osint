@@ -462,7 +462,7 @@ async fn osint_command(command: OsintCommand) -> Result<()> {
                 "include an identifying contact email or URL"
             );
             let mut settings = SettingsFile::load()?;
-            settings.osint_user_agent = value;
+            settings.osint_user_agent = value.trim().to_string();
             settings.save()?;
             print_json(&serde_json::json!({"saved":true}))
         }

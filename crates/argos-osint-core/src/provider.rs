@@ -1338,6 +1338,8 @@ impl SettingsFile {
             return Ok(seeded());
         }
         let mut settings: Self = toml::from_str(&raw)?;
+        // A blank OSINT User-Agent is unset, so requests keep the built-in default.
+        settings.osint_user_agent = settings.osint_user_agent.trim().to_string();
         let legacy_provider = settings.writer_provider.clone();
         let legacy_model = if settings.writer_model.is_empty() {
             settings.model.clone()
@@ -1457,6 +1459,23 @@ mod tests {
         assert_eq!(reopened.defaults.recon, settings.defaults.recon);
         assert_eq!(reopened.defaults.synthesis, settings.defaults.synthesis);
         assert_eq!(reopened.osint_user_agent, settings.osint_user_agent);
+    }
+
+    /// A blank or whitespace `osint_user_agent` loads as unset, so requests keep the
+    /// default User-Agent; a custom value is kept (trimmed).
+    #[test]
+    fn a_blank_osint_user_agent_loads_as_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for raw in ["''", "'   '", "' \t '"] {
+            std::fs::write(&path, format!("osint_user_agent = {raw}\n")).unwrap();
+            let settings = SettingsFile::load_from(&path).unwrap();
+            assert_eq!(settings.osint_user_agent, "", "{raw}");
+            assert_eq!(crate::osint::effective_user_agent(Some(&settings.osint_user_agent)), crate::osint::DEFAULT_USER_AGENT);
+        }
+        std::fs::write(&path, "osint_user_agent = '  Argos test@example.com '\n").unwrap();
+        let settings = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(crate::osint::effective_user_agent(Some(&settings.osint_user_agent)), "Argos test@example.com");
     }
 
     #[test]

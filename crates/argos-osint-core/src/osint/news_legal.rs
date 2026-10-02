@@ -1,7 +1,7 @@
 //! News (NewsAPI) and court-record (CourtListener) adapters (issue #29). Both are keyed,
 //! fixed-host GETs: the NewsAPI key goes in `X-Api-Key` and the CourtListener token in
-//! `Authorization: Token …`, never in the URL. One page, at most 20 results, and the
-//! query is always the exact-phrase entity.
+//! `Authorization: Token …`, never in the URL. One page (at most 10 NewsAPI articles,
+//! at most 20 CourtListener results), and the query is always the exact-phrase entity.
 use super::{bounded, clip_text, domain, get, str_arg, url, Request};
 use anyhow::{anyhow, ensure, Result};
 use serde_json::{json, Value};
@@ -12,8 +12,15 @@ pub const COURTLISTENER_SEARCH: &str = "https://www.courtlistener.com/api/rest/v
 pub const COURTLISTENER_SITE: &str = "https://www.courtlistener.com";
 pub const NEWSAPI_HOST: &str = "newsapi.org";
 pub const COURTLISTENER_HOST: &str = "www.courtlistener.com";
-/// Results kept per call; NewsAPI `pageSize` is set to this.
-pub const MAX_RESULTS: usize = 20;
+/// NewsAPI articles per call (search and headlines); `pageSize` is set to this.
+pub const NEWS_MAX_RESULTS: usize = 10;
+/// CourtListener results kept per call (one page).
+pub const LEGAL_MAX_RESULTS: usize = 20;
+
+/// Results kept per call for a context tool.
+pub fn max_results(id: &str) -> usize {
+    if provider(id) == Some("newsapi") { NEWS_MAX_RESULTS } else { LEGAL_MAX_RESULTS }
+}
 /// CourtListener allows 5 requests a minute: at least 12 s between requests.
 pub const COURTLISTENER_SPACING: Duration = Duration::from_secs(12);
 /// Reason recorded on CourtListener steps skipped after a 429.
@@ -77,7 +84,7 @@ fn choice_arg<'a>(v: &'a Value, key: &str, allowed: &[&str]) -> Result<Option<&'
 pub fn request(id: &str, v: &Value) -> Result<Request> {
     let id = super::canonical_tool_id(id);
     let phrase = exact_phrase(str_arg(v, "query")?)?;
-    let size = MAX_RESULTS.to_string();
+    let size = NEWS_MAX_RESULTS.to_string();
     let mut pairs: Vec<(&str, String)> = vec![("q", phrase)];
     let (base, path): (&str, &[&str]) = match id {
         "newsapi_search" => {
@@ -222,7 +229,8 @@ pub fn http_error(id: &str, status: u16, raw: &str) -> Option<String> {
 }
 
 /// Observations for a context tool: `results` rows with title, date, source (or court),
-/// url, and snippet; at most 20. A NewsAPI `status: error` body is an error.
+/// url, and snippet; at most 10 for NewsAPI and 20 for CourtListener. A NewsAPI
+/// `status: error` body is an error.
 pub fn observations(id: &str, value: &Value) -> Result<(Value, bool)> {
     let id = super::canonical_tool_id(id);
     if let Some(message) = newsapi_error(value) {
@@ -234,10 +242,11 @@ pub fn observations(id: &str, value: &Value) -> Result<(Value, bool)> {
         (value.get("results").and_then(Value::as_array), value.get("count").and_then(Value::as_u64))
     };
     let rows: Vec<&Value> = rows.into_iter().flatten().collect();
-    let truncated = rows.len() > MAX_RESULTS || total.is_some_and(|total| total as usize > rows.len().min(MAX_RESULTS));
+    let limit = max_results(id);
+    let truncated = rows.len() > limit || total.is_some_and(|total| total as usize > rows.len().min(limit));
     let results: Vec<Value> = rows
         .into_iter()
-        .take(MAX_RESULTS)
+        .take(limit)
         .filter_map(|row| {
             let item = match id {
                 "newsapi_search" | "newsapi_headlines" => json!({
@@ -414,7 +423,9 @@ mod tests {
             assert_eq!(tool.inputs, ["query"], "{id}");
             assert!(tool.documentation.starts_with("https://newsapi.org/docs") || tool.documentation.starts_with("https://www.courtlistener.com/help/api/"), "{id}");
             assert!(tool.restrictions.contains("exact phrase"), "{id}");
-            assert!(tool.restrictions.contains("at most 20") || tool.restrictions.contains("pageSize at most 20"), "{id}");
+            let cap = if NEWS_TOOLS.contains(id) { "pageSize 10" } else { "at most 20 results" };
+            assert!(tool.restrictions.contains(cap), "{id}: {cap}");
+            assert!(!NEWS_TOOLS.contains(id) || !tool.restrictions.contains("20"), "{id}: no 20 in a NewsAPI policy");
             validate(id, &tool.example_input()).unwrap();
             assert_eq!(crate::osint::endpoint_cost(id).map(|cost| cost.credits), Some(0), "{id}: not credit-metered");
         }
@@ -448,9 +459,9 @@ mod tests {
                 "newsapi_search",
                 json!({"query": "Elon Musk", "from": "2026-09-01", "to": "2026-09-30", "language": "en", "sort_by": "publishedAt", "domains": "reuters.com, apnews.com"}),
                 "https://newsapi.org/v2/everything",
-                vec![("q", "\"Elon Musk\""), ("from", "2026-09-01"), ("to", "2026-09-30"), ("language", "en"), ("sortBy", "publishedAt"), ("domains", "reuters.com,apnews.com"), ("pageSize", "20")],
+                vec![("q", "\"Elon Musk\""), ("from", "2026-09-01"), ("to", "2026-09-30"), ("language", "en"), ("sortBy", "publishedAt"), ("domains", "reuters.com,apnews.com"), ("pageSize", "10")],
             ),
-            ("newsapi_headlines", json!({"query": "Elon Musk", "country": "US", "category": "business"}), "https://newsapi.org/v2/top-headlines", vec![("q", "\"Elon Musk\""), ("country", "us"), ("category", "business"), ("pageSize", "20")]),
+            ("newsapi_headlines", json!({"query": "Elon Musk", "country": "US", "category": "business"}), "https://newsapi.org/v2/top-headlines", vec![("q", "\"Elon Musk\""), ("country", "us"), ("category", "business"), ("pageSize", "10")]),
             (
                 "courtlistener_case_search",
                 json!({"query": "Elon Musk", "court": "ded cand", "filed_after": "2020-01-01", "filed_before": "2026-01-01"}),
@@ -505,7 +516,8 @@ mod tests {
         let body: Value = serde_json::from_str(&articles(&rows)).unwrap();
         let (value, truncated) = observations("newsapi_search", &body).unwrap();
         let results = value["results"].as_array().unwrap();
-        assert_eq!(results.len(), MAX_RESULTS);
+        assert_eq!(results.len(), NEWS_MAX_RESULTS);
+        assert_eq!(NEWS_MAX_RESULTS, 10);
         assert!(truncated);
         assert_eq!(results[0], json!({"title": "Elon Musk story 0", "date": "2026-09-30T14:00:00Z", "source": "Reuters", "url": "https://www.reuters.com/0", "snippet": "Elon Musk said."}));
         assert_eq!(value["context"], "news");
@@ -527,6 +539,32 @@ mod tests {
         let (value, _) = observations("courtlistener_judge_search", &judge).unwrap();
         assert_eq!(value["results"][0]["title"], "Kathaleen St. Jude McCormick");
         assert_eq!(value["results"][0]["court"], "Delaware Court of Chancery");
+        // CourtListener keeps its own cap of 20 rows; NewsAPI's 10 does not apply.
+        let many: Vec<Value> = (0..25).map(|n| opinion(&format!("Case {n} v. Musk"), "Elon Musk")).collect();
+        let (value, truncated) = observations("courtlistener_case_search", &serde_json::from_str(&search(&many)).unwrap()).unwrap();
+        assert_eq!((value["results"].as_array().unwrap().len(), LEGAL_MAX_RESULTS, truncated), (20, 20, true));
+        assert_eq!((max_results("newsapi_headlines"), max_results("courtlistener_docket_search")), (10, 20));
+    }
+
+    /// On the wire: both NewsAPI tools send a non-empty User-Agent. With no setting, or a
+    /// blank one (Recon passes the saved setting, blank by default), it is the default;
+    /// a custom value is sent as configured.
+    #[tokio::test]
+    async fn newsapi_requests_send_a_user_agent_and_a_blank_setting_falls_back_to_the_default() {
+        let fixture = serve(Arc::new(|_: &str| (200, articles(&[article("Elon Musk at Tesla", "Elon Musk spoke.", "https://www.reuters.com/a")])))).await;
+        let executor = Executor::new().unwrap();
+        let agent_of = |raw: &str| raw.lines().find_map(|line| line.to_ascii_lowercase().starts_with("user-agent:").then(|| line["user-agent:".len()..].trim().to_string()));
+        for tool in ["newsapi_search", "newsapi_headlines"] {
+            for (setting, want) in [(None, crate::osint::DEFAULT_USER_AGENT), (Some(""), crate::osint::DEFAULT_USER_AGENT), (Some("   "), crate::osint::DEFAULT_USER_AGENT), (Some("Argos test@example.com"), "Argos test@example.com")] {
+                let result = executor.run_configured(tool, json!({"query": "Elon Musk"}), setting, &keys()).await.unwrap();
+                assert_eq!(result.status, "completed", "{tool} {setting:?}: {:?}", result.error);
+                let raw = fixture.requests().last().cloned().unwrap();
+                let sent = agent_of(&raw).unwrap_or_default();
+                assert!(!sent.is_empty(), "{tool} {setting:?}: no empty User-Agent");
+                assert_eq!(sent, want, "{tool} {setting:?}");
+            }
+        }
+        assert_eq!(fixture.requests().len(), 8);
     }
 
     /// On the wire: the key travels only in its header, CourtListener gets Accept JSON,

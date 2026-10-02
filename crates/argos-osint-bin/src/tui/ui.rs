@@ -182,8 +182,8 @@ struct ApiKeySlot {
     button: ButtonId,
 }
 
-/// Key row for the selected keyed tool. Firecrawl, SociaVault, and Hunter tools each
-/// share one key per provider.
+/// Key row for the selected keyed tool. Firecrawl, SociaVault, Hunter, NewsAPI, and
+/// CourtListener tools each share one key per provider.
 fn api_key_slot(app: &App) -> Option<ApiKeySlot> {
     let id = osint::registry().get(app.tool_sel)?.id;
     let (field, button) = if id.starts_with("firecrawl_") {
@@ -192,6 +192,10 @@ fn api_key_slot(app: &App) -> Option<ApiKeySlot> {
         (FieldId::SociaVaultKey, ButtonId::SaveSociaVaultKey)
     } else if id.starts_with("hunter_") {
         (FieldId::HunterKey, ButtonId::SaveHunterKey)
+    } else if id.starts_with("newsapi_") {
+        (FieldId::NewsApiKey, ButtonId::SaveNewsApiKey)
+    } else if id.starts_with("courtlistener_") {
+        (FieldId::CourtListenerKey, ButtonId::SaveCourtListenerKey)
     } else {
         return None;
     };
@@ -371,14 +375,31 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                     item.role == "assistant" && item.run_id.as_deref() == Some(run.id.as_str())
                 });
                 if !answered && app.running_thread(&run.thread_id) {
+                    let stage = app.stage_label(&run.thread_id);
+                    let deadline = app.deadline_label(&run.thread_id);
+                    let title = if deadline.is_empty() {
+                        format!("· {stage}")
+                    } else {
+                        format!("· {stage} · {deadline}")
+                    };
                     blocks.push(ChatBlock {
                         key: format!("status:{}", run.id),
-                        title: format!("· {}", app.recon_stage),
+                        title,
                         body: String::new(),
                         collapsible: false,
                         message_index: None,
                         has_memory: false,
                     });
+                    if let Some((title, body)) = app.live_bubble(&run.thread_id) {
+                        blocks.push(ChatBlock {
+                            key: format!("stream:{}", run.id),
+                            title,
+                            body,
+                            collapsible: false,
+                            message_index: None,
+                            has_memory: false,
+                        });
+                    }
                 }
             }
         } else {
@@ -576,6 +597,9 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
     }
     if !plan.directives_note.is_empty() {
         lines.push(format!("   {}", plan.directives_note));
+    }
+    if !plan.deadline_note.is_empty() {
+        lines.push(plan.deadline_note.clone());
     }
     let model = if run.tool_picker_model.is_empty() {
         plan.picker_model.as_str()
@@ -872,6 +896,9 @@ struct FrameStamp {
     chat: bool,
     thread: Option<String>,
     stage: String,
+    live_shown: usize,
+    live_note: String,
+    deadline: String,
     messages: u64,
     calls: u64,
     runs: u64,
@@ -896,6 +923,23 @@ fn frame_stamp(app: &App, width: u16) -> FrameStamp {
         chat: app.recon_chat,
         thread: app.selected_thread.clone(),
         stage: app.recon_stage.clone(),
+        live_shown: app
+            .selected_thread
+            .as_ref()
+            .and_then(|id| app.live_bubble(id))
+            .map(|(_, body)| body.len())
+            .unwrap_or(0),
+        live_note: app
+            .selected_thread
+            .as_ref()
+            .and_then(|id| app.live_bubble(id))
+            .map(|(title, _)| title)
+            .unwrap_or_default(),
+        deadline: app
+            .selected_thread
+            .as_ref()
+            .map(|id| app.deadline_label(id))
+            .unwrap_or_default(),
         messages: message_stamp(&app.messages),
         calls: call_stamp(&app.calls),
         runs: run_stamp(&app.runs),
@@ -1062,6 +1106,22 @@ fn rows_for(app: &App, blocks: &[ChatBlock], width: usize) -> Vec<ChatRow> {
             }];
             clip_pieces(&mut pieces, width);
             rows.push(row(index, true, false, false, RowFace::Plain, pieces));
+            continue;
+        }
+        if block.key.starts_with("stream:") {
+            if index > 0 {
+                rows.push(row(index, false, false, false, RowFace::Plain, Vec::new()));
+            }
+            let mut pieces = vec![Piece {
+                text: block.title.clone(),
+                tone: Tone::Accent,
+            }];
+            clip_pieces(&mut pieces, width);
+            rows.push(row(index, true, false, false, RowFace::Plain, pieces));
+            for line in markdown::markdown_lines(&block.body, width) {
+                let face = if line.code { RowFace::Code } else { RowFace::Plain };
+                rows.push(row(index, false, false, false, face, line.pieces));
+            }
             continue;
         }
         let open = expanded(app, block);
@@ -1982,7 +2042,11 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
         FieldId::OsintInput if app.module == Some(ModuleId::Osint) => {
             Some(osint_areas(layout.body, api_key_slot(app).is_some()).input)
         }
-        FieldId::FirecrawlKey | FieldId::HunterKey | FieldId::SociaVaultKey
+        FieldId::FirecrawlKey
+        | FieldId::HunterKey
+        | FieldId::SociaVaultKey
+        | FieldId::NewsApiKey
+        | FieldId::CourtListenerKey
             if app.module == Some(ModuleId::Osint)
                 && api_key_slot(app).is_some_and(|slot| slot.field == field) =>
         {
@@ -2096,7 +2160,12 @@ fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &str, area: R
     };
     let secret = matches!(
         field,
-        FieldId::RouterKey | FieldId::FirecrawlKey | FieldId::HunterKey | FieldId::SociaVaultKey
+        FieldId::RouterKey
+            | FieldId::FirecrawlKey
+            | FieldId::HunterKey
+            | FieldId::SociaVaultKey
+            | FieldId::NewsApiKey
+            | FieldId::CourtListenerKey
     );
     let display = if secret {
         "•".repeat(value.chars().count())
@@ -2524,10 +2593,11 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(index, tool)| {
             let enabled = app.tool_enabled.get(index).copied().unwrap_or(true);
             ListItem::new(format!(
-                "{} {} · {}",
+                "{} {} · {}{}",
                 if enabled { "●" } else { "○" },
                 tool.category,
-                tool.name
+                tool.name,
+                if app.tool_needs_key(tool.id) { " · needs key" } else { "" }
             ))
             .style(if index == app.tool_sel {
                 theme::selected()
@@ -2567,10 +2637,13 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
             tool.name,
             tool.id,
             tool.category,
-            if app.tool_enabled.get(app.tool_sel).copied().unwrap_or(true) {
-                "enabled"
-            } else {
-                "disabled"
+            match (
+                app.tool_enabled.get(app.tool_sel).copied().unwrap_or(true),
+                app.tool_needs_key(tool.id),
+            ) {
+                (true, false) => "enabled",
+                (true, true) => "enabled · needs key",
+                (false, _) => "disabled",
             },
             tool.inputs.join(", "),
             tool.example_input(),

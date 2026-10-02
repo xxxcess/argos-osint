@@ -677,7 +677,7 @@ pub fn locked_host(id: &str) -> Option<&'static str> {
     } else if id.starts_with("hunter_") {
         Some("api.hunter.io")
     } else {
-        None
+        super::news_legal::locked_host(id)
     }
 }
 
@@ -938,7 +938,7 @@ mod tests {
     const TEST_KEY: &str = "test-key-not-a-secret";
 
     fn keys() -> ProviderKeys {
-        ProviderKeys { firecrawl: TEST_KEY.into(), hunter: TEST_KEY.into(), sociavault: TEST_KEY.into() }
+        ProviderKeys { firecrawl: TEST_KEY.into(), hunter: TEST_KEY.into(), sociavault: TEST_KEY.into(), newsapi: TEST_KEY.into(), courtlistener: TEST_KEY.into() }
     }
 
     fn query(req: &Request) -> Vec<(String, String)> {

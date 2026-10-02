@@ -375,6 +375,10 @@ pub struct ReconLimits {
     pub max_calls: u8,
     #[serde(default = "default_turn_seconds")]
     pub turn_seconds: u16,
+    /// Hard ceiling for the whole turn, in seconds. The computed deadline never exceeds
+    /// this, and never drops below `turn_seconds`. Missing values load as 900.
+    #[serde(default = "default_max_turn_seconds")]
+    pub max_turn_seconds: u16,
     /// Recurring Firecrawl credits available to automatic investigation.
     #[serde(default = "default_firecrawl_credits")]
     pub firecrawl_credits: u32,
@@ -411,6 +415,12 @@ pub struct ReconLimits {
     /// Google search a fallback candidate (spec default D3, to confirm).
     #[serde(default = "default_google_fallback_min_results")]
     pub google_fallback_min_results: u32,
+    /// NewsAPI calls one turn may make (issue #29; the free plan allows 100 a day).
+    #[serde(default = "default_news_calls_per_turn")]
+    pub news_calls_per_turn: u32,
+    /// CourtListener calls one turn may make (issue #29; free tier 5/min, 125/day).
+    #[serde(default = "default_legal_calls_per_turn")]
+    pub legal_calls_per_turn: u32,
     /// `monthly` restores the recurring allowance. `never` keeps a fixed pool.
     #[serde(default = "default_credit_reset")]
     pub credit_reset: String,
@@ -431,6 +441,13 @@ fn default_max_calls() -> u8 {
 }
 fn default_turn_seconds() -> u16 {
     300
+}
+/// Hard ceiling for one turn. Existing configs that omit the field load this.
+pub const DEFAULT_MAX_TURN_SECONDS: u16 = 900;
+pub const MIN_MAX_TURN_SECONDS: u16 = 120;
+pub const MAX_MAX_TURN_SECONDS: u16 = 1800;
+fn default_max_turn_seconds() -> u16 {
+    DEFAULT_MAX_TURN_SECONDS
 }
 fn default_firecrawl_credits() -> u32 {
     200
@@ -459,6 +476,16 @@ fn default_sociavault_turn_credits_later() -> u32 {
 fn default_google_fallback_min_results() -> u32 {
     GOOGLE_FALLBACK_MIN_RESULTS
 }
+/// Issue #29 default: at most 2 NewsAPI calls per turn.
+pub const NEWS_CALLS_PER_TURN: u32 = 2;
+/// Issue #29 default: at most 3 CourtListener calls per turn.
+pub const LEGAL_CALLS_PER_TURN: u32 = 3;
+fn default_news_calls_per_turn() -> u32 {
+    NEWS_CALLS_PER_TURN
+}
+fn default_legal_calls_per_turn() -> u32 {
+    LEGAL_CALLS_PER_TURN
+}
 fn default_credit_reset() -> String {
     "monthly".into()
 }
@@ -474,6 +501,7 @@ impl Default for ReconLimits {
             max_rounds: default_max_rounds(),
             max_calls: default_max_calls(),
             turn_seconds: default_turn_seconds(),
+            max_turn_seconds: default_max_turn_seconds(),
             firecrawl_credits: default_firecrawl_credits(),
             hunter_credits: default_hunter_credits(),
             sociavault_credits: default_sociavault_credits(),
@@ -485,6 +513,8 @@ impl Default for ReconLimits {
             sociavault_turn_credits_opening: SOCIAVAULT_TURN_CREDITS_OPENING,
             sociavault_turn_credits_later: SOCIAVAULT_TURN_CREDITS_LATER,
             google_fallback_min_results: GOOGLE_FALLBACK_MIN_RESULTS,
+            news_calls_per_turn: NEWS_CALLS_PER_TURN,
+            legal_calls_per_turn: LEGAL_CALLS_PER_TURN,
             credit_reset: default_credit_reset(),
             firecrawl_search_cost: default_search_cost(),
             firecrawl_scrape_cost: default_one_cost(),
@@ -495,6 +525,16 @@ impl Default for ReconLimits {
 }
 
 impl ReconLimits {
+    /// `max_turn_seconds` clamped to 120–1800. Zero or a missing field is 900.
+    pub fn effective_max_turn_seconds(&self) -> u16 {
+        let value = if self.max_turn_seconds == 0 {
+            DEFAULT_MAX_TURN_SECONDS
+        } else {
+            self.max_turn_seconds
+        };
+        value.clamp(MIN_MAX_TURN_SECONDS, MAX_MAX_TURN_SECONDS)
+    }
+
     pub fn allowance(&self, provider: &str) -> u32 {
         match provider {
             "firecrawl" => self.firecrawl_credits,
@@ -1249,11 +1289,58 @@ pub struct SettingsFile {
     /// SociaVault API key. A non-empty value overrides `SOCIAVAULT_API_KEY`.
     #[serde(default)]
     pub sociavault_api_key: String,
+    /// NewsAPI key. A non-empty value overrides `NEWSAPI_API_KEY`.
+    #[serde(default)]
+    pub newsapi_api_key: String,
+    /// CourtListener API token. A non-empty value overrides `COURTLISTENER_API_TOKEN`.
+    #[serde(default)]
+    pub courtlistener_api_token: String,
     #[serde(default)]
     pub recon_limits: ReconLimits,
 }
 
+/// Environment fallbacks for each keyed provider's setting.
+pub const KEY_ENV: &[(&str, &str)] = &[
+    ("firecrawl", "FIRECRAWL_API_KEY"),
+    ("hunter", "HUNTER_API_KEY"),
+    ("sociavault", "SOCIAVAULT_API_KEY"),
+    ("newsapi", "NEWSAPI_API_KEY"),
+    ("courtlistener", "COURTLISTENER_API_TOKEN"),
+];
+
 impl SettingsFile {
+    /// The saved key for a provider, if any (never the environment).
+    pub fn saved_key(&self, provider: &str) -> &str {
+        match provider {
+            "firecrawl" => &self.firecrawl_api_key,
+            "hunter" => &self.hunter_api_key,
+            "sociavault" => &self.sociavault_api_key,
+            "newsapi" => &self.newsapi_api_key,
+            "courtlistener" => &self.courtlistener_api_token,
+            _ => "",
+        }
+    }
+
+    /// The key a provider's tools use: a non-empty setting, else its environment variable.
+    pub fn provider_key(&self, provider: &str) -> String {
+        self.provider_key_with(provider, |name| std::env::var(name).ok())
+    }
+
+    /// [`Self::provider_key`] with an injected environment (tests).
+    pub fn provider_key_with(&self, provider: &str, env: impl Fn(&str) -> Option<String>) -> String {
+        let saved = self.saved_key(provider).trim();
+        if !saved.is_empty() {
+            return saved.to_string();
+        }
+        KEY_ENV
+            .iter()
+            .find(|(known, _)| *known == provider)
+            .and_then(|(_, name)| env(name))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
     pub fn load() -> Result<Self> {
         let path = crate::paths::config_path();
         Self::load_from(&path)
@@ -1273,6 +1360,8 @@ impl SettingsFile {
             return Ok(seeded());
         }
         let mut settings: Self = toml::from_str(&raw)?;
+        // A blank OSINT User-Agent is unset, so requests keep the built-in default.
+        settings.osint_user_agent = settings.osint_user_agent.trim().to_string();
         let legacy_provider = settings.writer_provider.clone();
         let legacy_model = if settings.writer_model.is_empty() {
             settings.model.clone()
@@ -1312,6 +1401,8 @@ impl SettingsFile {
                             | "firecrawl_api_key"
                             | "hunter_api_key"
                             | "sociavault_api_key"
+                            | "newsapi_api_key"
+                            | "courtlistener_api_token"
                             | "recon_limits"
                     )
                 })
@@ -1335,6 +1426,51 @@ impl SettingsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC2: NewsAPI and CourtListener keys come from settings, else the environment; a
+    /// saved key overrides the variable, and both fields survive a settings round trip.
+    #[test]
+    fn news_and_legal_keys_come_from_settings_then_env() {
+        let env = |name: &str| match name {
+            "NEWSAPI_API_KEY" => Some(" env-news ".to_string()),
+            "COURTLISTENER_API_TOKEN" => Some("env-court".to_string()),
+            _ => None,
+        };
+        let mut settings = SettingsFile::default();
+        assert_eq!(settings.provider_key_with("newsapi", env), "env-news");
+        assert_eq!(settings.provider_key_with("courtlistener", env), "env-court");
+        assert_eq!(settings.provider_key_with("newsapi", |_| None), "");
+        settings.newsapi_api_key = "saved-news".into();
+        settings.courtlistener_api_token = "saved-court".into();
+        assert_eq!(settings.provider_key_with("newsapi", env), "saved-news");
+        assert_eq!(settings.provider_key_with("courtlistener", env), "saved-court");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        settings.save_to(&path).unwrap();
+        let loaded = SettingsFile::load_from(&path).unwrap();
+        assert_eq!((loaded.newsapi_api_key.as_str(), loaded.courtlistener_api_token.as_str()), ("saved-news", "saved-court"));
+        // Both names are current keys: loading does not rewrite the file as a migration.
+        let before = std::fs::read_to_string(&path).unwrap();
+        SettingsFile::load_from(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!((loaded.recon_limits.news_calls_per_turn, loaded.recon_limits.legal_calls_per_turn), (2, 3));
+    }
+
+    #[test]
+    fn missing_max_turn_seconds_loads_as_900_and_the_range_is_120_to_1800() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[recon_limits]\nturn_seconds = 300\n").unwrap();
+        let loaded = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(loaded.recon_limits.max_turn_seconds, DEFAULT_MAX_TURN_SECONDS);
+        assert_eq!(loaded.recon_limits.effective_max_turn_seconds(), 900);
+        let low = ReconLimits { max_turn_seconds: 50, ..ReconLimits::default() };
+        assert_eq!(low.effective_max_turn_seconds(), MIN_MAX_TURN_SECONDS);
+        let high = ReconLimits { max_turn_seconds: 5_000, ..ReconLimits::default() };
+        assert_eq!(high.effective_max_turn_seconds(), MAX_MAX_TURN_SECONDS);
+        let mid = ReconLimits { max_turn_seconds: 1_200, ..ReconLimits::default() };
+        assert_eq!(mid.effective_max_turn_seconds(), 1_200);
+    }
 
     #[test]
     fn obsolete_research_configuration_is_ignored() {
@@ -1361,6 +1497,23 @@ mod tests {
         assert_eq!(reopened.defaults.recon, settings.defaults.recon);
         assert_eq!(reopened.defaults.synthesis, settings.defaults.synthesis);
         assert_eq!(reopened.osint_user_agent, settings.osint_user_agent);
+    }
+
+    /// A blank or whitespace `osint_user_agent` loads as unset, so requests keep the
+    /// default User-Agent; a custom value is kept (trimmed).
+    #[test]
+    fn a_blank_osint_user_agent_loads_as_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for raw in ["''", "'   '", "' \t '"] {
+            std::fs::write(&path, format!("osint_user_agent = {raw}\n")).unwrap();
+            let settings = SettingsFile::load_from(&path).unwrap();
+            assert_eq!(settings.osint_user_agent, "", "{raw}");
+            assert_eq!(crate::osint::effective_user_agent(Some(&settings.osint_user_agent)), crate::osint::DEFAULT_USER_AGENT);
+        }
+        std::fs::write(&path, "osint_user_agent = '  Argos test@example.com '\n").unwrap();
+        let settings = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(crate::osint::effective_user_agent(Some(&settings.osint_user_agent)), "Argos test@example.com");
     }
 
     #[test]

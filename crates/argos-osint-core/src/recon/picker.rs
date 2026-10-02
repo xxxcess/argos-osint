@@ -6,7 +6,11 @@
 //! are picked. Any other model uses chat completions with one JSON object per pick.
 use std::{
     collections::{HashMap, HashSet},
-    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
@@ -39,11 +43,13 @@ pub struct CatalogEntry {
     pub keyed: bool,
 }
 
-/// Enabled tools with a bindable input. Unkeyed tools stay, marked `keyed: false`.
+/// Enabled tools with a bindable input. Unkeyed tools stay, marked `keyed: false`, except
+/// News and Legal tools (#29): without their key they are left out entirely.
 pub fn eligible_catalog(enabled: &HashSet<String>, unkeyed: &HashSet<String>) -> Vec<CatalogEntry> {
     crate::osint::registry()
         .iter()
         .filter(|tool| enabled.contains(tool.id) && investigation::pickable(tool.id))
+        .filter(|tool| !(investigation::context_of(tool.id).is_some() && unkeyed.contains(tool.id)))
         .map(|tool| CatalogEntry {
             id: tool.id.into(),
             category: tool.category.into(),
@@ -149,6 +155,7 @@ pub struct Picker<'a> {
     pub failure: Option<String>,
     pub fallback_picks: usize,
     pub cost: f64,
+    clock: Option<Arc<Mutex<super::budget::TurnClock>>>,
 }
 
 impl<'a> Picker<'a> {
@@ -173,7 +180,12 @@ impl<'a> Picker<'a> {
             failure: None,
             fallback_picks: 0,
             cost: 0.0,
+            clock: None,
         }
+    }
+
+    pub(crate) fn bind_clock(&mut self, clock: Arc<Mutex<super::budget::TurnClock>>) {
+        self.clock = Some(clock);
     }
 
     /// Whether another provider request is allowed this turn.
@@ -187,10 +199,33 @@ impl<'a> Picker<'a> {
             return Err(anyhow!("cancelled"));
         }
         self.requests += 1;
-        let outcome = if self.transport == "decisions" {
-            let (state, questions) = decisions_request(request);
-            tokio::select! {
-                result = provider::decide(self.secret, &state, &questions) => result.map(|response| {
+        let limit = self.clock.as_ref().map(|clock| {
+            let mut clock = clock.lock().unwrap();
+            clock.note_round();
+            clock.recon_remaining()
+        });
+        let outcome = self.one_request(request, limit).await;
+        if let Err(err) = &outcome {
+            if err.to_string() == "cancelled" || super::deadline_hit(err) {
+                // Cancel and the recon deadline stop the turn; they are not a transport failure.
+            } else if super::provider_rate_limited(err) {
+                self.rate_limited = true;
+            } else {
+                self.failure = Some(err.to_string().chars().take(160).collect());
+            }
+        }
+        outcome
+    }
+
+    async fn one_request(&mut self, request: &PickRequest<'_>, limit: Option<Duration>) -> Result<PickReply> {
+        if limit.is_some_and(|limit| limit.is_zero()) {
+            return Err(anyhow!(super::budget::RECON_DEADLINE));
+        }
+        let decide = self.transport == "decisions";
+        let run = async {
+            if decide {
+                let (state, questions) = decisions_request(request);
+                provider::decide(self.secret, &state, &questions).await.map(|response| {
                     if let Some(cost) = response.cost {
                         self.cost += cost;
                     }
@@ -200,24 +235,26 @@ impl<'a> Picker<'a> {
                         confidence: answer.choice_probability(),
                         ..PickReply::default()
                     }
-                }),
-                _ = super::wait_cancel(self.cancel.clone()) => return Err(anyhow!("cancelled")),
-            }
-        } else {
-            let messages = chat_request(request);
-            tokio::select! {
-                result = provider::complete(self.secret, &messages, &[], |_| {}) => result.map(|response| parse_chat_pick(&response.content)),
-                _ = super::wait_cancel(self.cancel.clone()) => return Err(anyhow!("cancelled")),
+                })
+            } else {
+                let messages = chat_request(request);
+                provider::complete(self.secret, &messages, &[], |_| {})
+                    .await
+                    .map(|response| parse_chat_pick(&response.content))
             }
         };
-        if let Err(err) = &outcome {
-            if super::provider_rate_limited(err) {
-                self.rate_limited = true;
-            } else {
-                self.failure = Some(err.to_string().chars().take(160).collect());
+        if let Some(limit) = limit {
+            tokio::select! {
+                result = run => result,
+                _ = super::wait_cancel(self.cancel.clone()) => Err(anyhow!("cancelled")),
+                _ = tokio::time::sleep(limit) => Err(anyhow!(super::budget::RECON_DEADLINE)),
+            }
+        } else {
+            tokio::select! {
+                result = run => result,
+                _ = super::wait_cancel(self.cancel.clone()) => Err(anyhow!("cancelled")),
             }
         }
-        outcome
     }
 
     /// Builds the ordered list, one pick per request. Stops at `limit` tools, at `done`
@@ -251,7 +288,7 @@ impl<'a> Picker<'a> {
                 };
                 let reply = match self.ask(&request).await {
                     Ok(reply) => reply,
-                    Err(err) if err.to_string() == "cancelled" => return Err(err),
+                    Err(err) if err.to_string() == "cancelled" || super::deadline_hit(&err) => return Err(err),
                     Err(_) => break,
                 };
                 if reply.tool_id == DONE && allow_done {
@@ -371,6 +408,17 @@ impl<'a> Picker<'a> {
                 picked.push(id);
             }
         }
+        // A directive that targets news or legal gets its context tool even when the model
+        // left it out (the keyword rule already limited those targets to such prompts).
+        for id in context_additions(context.questions, &candidates, &picked, context.question) {
+            if picked.len() >= MAX_PICKS {
+                break;
+            }
+            let kind = investigation::context_of(&id).unwrap_or_default();
+            ordered.records.push(fallback_record(picked.len() + 1, &id, candidates.len(), &format!("A directive targets {kind}; Recon added its {kind} tool."), context.questions));
+            candidates.retain(|other| other != &id);
+            picked.push(id);
+        }
         ordered.tools = investigation::dependency_order(&picked, context.bindings, &ordered.produces);
         for record in ordered.records.iter_mut().filter(|record| record.position > 0 && matches!(record.outcome.as_str(), "accepted" | "fallback")) {
             if let Some(position) = ordered.tools.iter().position(|id| id == &record.tool_id) {
@@ -463,7 +511,7 @@ impl<'a> Picker<'a> {
                     };
                     return Ok(Some((String::new(), record)));
                 }
-                Err(err) if err.to_string() == "cancelled" => return Err(err),
+                Err(err) if err.to_string() == "cancelled" || super::deadline_hit(&err) => return Err(err),
                 Err(_) => {}
             }
         }
@@ -483,6 +531,46 @@ pub struct OrderContext<'a> {
     pub catalog: &'a [CatalogEntry],
     pub unkeyed: &'a HashSet<String>,
     pub max_calls: usize,
+}
+
+/// The context tools a turn should run for its news and legal directives: NewsAPI
+/// search (top headlines too when the prompt says headlines) for `news`; CourtListener
+/// case and docket search (judge search first when the prompt asks about a judge) for
+/// `legal`. Only candidates, in that order.
+pub fn context_tools(directives: &[Directive], candidates: &[String], question: &str) -> Vec<String> {
+    let entities: Vec<String> = directives.iter().flat_map(|item| item.entities.iter().cloned()).collect();
+    let mut wanted: Vec<&str> = Vec::new();
+    for kind in investigation::CONTEXT_KINDS {
+        if !directives.iter().any(|item| item.targets.iter().any(|target| target == kind)) {
+            continue;
+        }
+        if *kind == investigation::NEWS_KIND {
+            wanted.push("newsapi_search");
+            if investigation::directives::asks_for_headlines(question, &entities) {
+                wanted.push("newsapi_headlines");
+            }
+        } else {
+            if investigation::directives::asks_about_judge(question, &entities) {
+                wanted.push("courtlistener_judge_search");
+            }
+            wanted.extend(["courtlistener_case_search", "courtlistener_docket_search"]);
+        }
+    }
+    wanted.into_iter().filter(|id| candidates.iter().any(|known| known == id)).map(String::from).collect()
+}
+
+/// Context tools still missing after the picker: for each targeted kind with no picked
+/// tool of that kind, the first context tool of that kind among the candidates.
+fn context_additions(directives: &[Directive], candidates: &[String], picked: &[String], question: &str) -> Vec<String> {
+    let mut added: Vec<String> = Vec::new();
+    for id in context_tools(directives, candidates, question) {
+        let kind = investigation::context_of(&id);
+        let covered = picked.iter().chain(&added).any(|known| investigation::context_of(known) == kind);
+        if !covered {
+            added.push(id);
+        }
+    }
+    added
 }
 
 fn fallback_record(position: usize, id: &str, candidates: usize, reason: &str, questions: &[Directive]) -> PickRecord {
@@ -514,7 +602,8 @@ pub fn serves_for(tool_id: &str, directives: &[Directive]) -> Vec<String> {
 /// plan) every candidate stays.
 pub fn serving(candidates: Vec<String>, directives: &[Directive]) -> Vec<String> {
     if directives.is_empty() {
-        return candidates;
+        // News and Legal tools only ever serve a directive that targets their kind.
+        return candidates.into_iter().filter(|id| investigation::context_of(id).is_none()).collect();
     }
     candidates.into_iter().filter(|id| !serves_for(id, directives).is_empty()).collect()
 }

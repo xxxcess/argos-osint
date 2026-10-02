@@ -2859,8 +2859,8 @@ use super::{Binding, Directive};
 
 pub(crate) mod directives;
 pub use directives::{
-    directive_entities, directive_for_target, directive_query, fallback_directives,
-    grounded_query, parse_directives, refers_back, relevance_gate, GroundedQuery, QUALIFIERS,
+    context_gate, directive_entities, directive_for_target, directive_query,
+    fallback_directives, grounded_query, parse_directives, refers_back, relevance_gate, GroundedQuery, QUALIFIERS,
 };
 mod tool_io;
 pub use tool_io::{
@@ -2871,6 +2871,11 @@ pub use tool_io::{
 };
 pub use tool_io::{allowed_producer, binding_allowed, restricted_sources, GATES};
 pub use tool_io::{bind_step, evidence_kinds};
+pub use tool_io::{context_of, CONTEXT_KINDS, LEGAL_KIND, NEWS_KIND};
+#[cfg(test)]
+pub use directives::context_targets;
+#[cfg(test)]
+pub use tool_io::prompt_dates;
 use tool_io::coordinates_in_text;
 
 pub(crate) fn social_or_publisher(domain: &str) -> bool {
@@ -3133,7 +3138,9 @@ pub fn fallback_order(
         costs: &costs,
         hits: &[],
     });
-    let mut order: Vec<String> = Vec::new();
+    // News and Legal tools lead for directives that target their kind (#29); the opening
+    // restriction still puts a primary tool first.
+    let mut order: Vec<String> = super::picker::context_tools(questions, candidates, question);
     let ranked_ids = ranked.actions.iter().map(|action| action.tool_id.as_str());
     for id in ranked_ids.chain(ladder(question, bindings)) {
         if enabled.contains(id) && !order.iter().any(|known| known == id) {

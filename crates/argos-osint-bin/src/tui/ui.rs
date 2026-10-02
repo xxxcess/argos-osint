@@ -620,8 +620,9 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
             } else {
                 format!(" ({})", binding.qualifier)
             };
+            let inferred = if binding.inferred { " · inferred" } else { "" };
             lines.push(format!(
-                "   found {} {}{qualifier} · evidence {}",
+                "   found {} {}{qualifier} · evidence {}{inferred}",
                 binding.kind, binding.value, binding.evidence_id
             ));
         }
@@ -629,11 +630,17 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
     let explicit: Vec<_> = plan
         .bindings
         .iter()
-        .filter(|binding| binding.step_id.is_empty())
+        .filter(|binding| binding.step_id.is_empty() && !binding.inferred)
         .map(|binding| format!("{} {}", binding.kind, binding.value))
         .collect();
     if !explicit.is_empty() {
         lines.push(format!("From the question: {}", explicit.join("; ")));
+    }
+    if !plan.binding_notes.is_empty() {
+        lines.push("Binding extraction:".into());
+        for note in &plan.binding_notes {
+            lines.push(format!("   {note}"));
+        }
     }
     if !plan.fallback_requests.is_empty() {
         lines.push("Fallback requests:".into());
@@ -3149,7 +3156,16 @@ mod tests {
                 evidence_id: "call-s1".into(),
                 step_id: "s1".into(),
                 qualifier: "github".into(),
+                inferred: false,
+            }, Binding {
+                kind: "handle".into(),
+                value: "janeroe".into(),
+                evidence_id: "call-s1".into(),
+                step_id: "s1".into(),
+                qualifier: "facebook".into(),
+                inferred: true,
             }],
+            binding_notes: vec!["s1 firecrawl_search: rules found 1; Recon model added 0".into()],
             fallback_requests: vec!["hunter_email_finder failed. Recon chose firecrawl_scrape as s3.".into()],
             ..Default::default()
         };
@@ -3181,6 +3197,9 @@ mod tests {
             "s2. sociavault_profile — q1 · after s1",
             "input handle=janeroe (handle from call-s1)",
             "found handle janeroe (github) · evidence call-s1",
+            "found handle janeroe (facebook) · evidence call-s1 · inferred",
+            "Binding extraction:",
+            "s1 firecrawl_search: rules found 1; Recon model added 0",
             "Fallback requests:",
         ] {
             assert!(block.body.contains(needle), "missing {needle:?} in\n{}", block.body);

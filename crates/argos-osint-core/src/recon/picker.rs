@@ -47,7 +47,7 @@ pub fn eligible_catalog(enabled: &HashSet<String>, unkeyed: &HashSet<String>) ->
             id: tool.id.into(),
             category: tool.category.into(),
             description: tool.description.chars().take(140).collect(),
-            inputs: tool.inputs.iter().map(|input| input.to_string()).collect(),
+            inputs: investigation::catalog_inputs(tool.id),
             keyed: !unkeyed.contains(tool.id),
         })
         .collect()
@@ -455,9 +455,8 @@ fn fallback_record(position: usize, id: &str, candidates: usize, reason: &str, q
 /// Question ids whose evidence a tool's inputs or outputs cover.
 pub fn serves_for(tool_id: &str, questions: &[DerivedQuestion]) -> Vec<String> {
     let kinds: Vec<&str> = investigation::output_kinds(tool_id)
-        .iter()
+        .into_iter()
         .chain(investigation::input_kinds(tool_id))
-        .copied()
         .collect();
     let ids: Vec<String> = questions
         .iter()
@@ -471,6 +470,19 @@ pub fn serves_for(tool_id: &str, questions: &[DerivedQuestion]) -> Vec<String> {
     }
 }
 
+/// One known binding for the picker state: kind and value, plus the handle's platform
+/// and whether it was inferred from another platform.
+fn known_binding(binding: &Binding) -> Value {
+    let mut item = json!({"kind": binding.kind, "value": binding.value.chars().take(120).collect::<String>()});
+    if !binding.qualifier.is_empty() {
+        item["platform"] = json!(binding.qualifier);
+    }
+    if binding.inferred {
+        item["inferred"] = json!(true);
+    }
+    item
+}
+
 fn state(request: &PickRequest<'_>) -> Value {
     let candidates: HashSet<&str> = request.candidates.iter().map(String::as_str).collect();
     let catalog: Vec<&CatalogEntry> = request
@@ -478,14 +490,14 @@ fn state(request: &PickRequest<'_>) -> Value {
         .iter()
         .filter(|entry| candidates.contains(entry.id.as_str()))
         .collect();
-    let dependencies: Vec<Value> = investigation::DEPENDENCIES
+    let dependencies: Vec<Value> = investigation::dependencies()
         .iter()
         .filter(|row| candidates.contains(row.tool) || request.picked.iter().any(|id| id == row.tool))
         .map(|row| json!({"tool": row.tool, "needs": row.needs, "producers": row.producers}))
         .collect();
     let mut value = json!({
         "questions": request.questions.iter().map(|item| json!({"id": item.id, "text": item.text, "evidence": item.evidence})).collect::<Vec<_>>(),
-        "known_bindings": request.bindings.iter().take(24).map(|binding| json!({"kind": binding.kind, "value": binding.value.chars().take(120).collect::<String>()})).collect::<Vec<_>>(),
+        "known_bindings": request.bindings.iter().take(24).map(known_binding).collect::<Vec<_>>(),
         "already_picked": request.picked.iter().enumerate().map(|(index, id)| json!({"position": index + 1, "tool_id": id})).collect::<Vec<_>>(),
         "dependencies": dependencies,
         "catalog": catalog,

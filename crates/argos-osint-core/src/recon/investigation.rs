@@ -3018,136 +3018,18 @@ fn bitcoin_in(text: &str) -> Option<String> {
 
 use super::{Binding, DerivedQuestion};
 
-/// Closed binding vocabulary shared by questions, the picker, and the binder.
-pub const BINDING_KINDS: &[&str] = &[
-    "domain", "ip", "email", "handle", "platform", "person_name", "org_name", "cve", "package",
-    "address", "wallet",
-];
-
-/// Page URLs are an internal binding: `firecrawl_scrape` and `wayback_availability` need a
-/// URL from a previous hit, and the closed vocabulary has no kind for it.
-pub const URL_KIND: &str = "url";
-
-/// Platforms SociaVault profile routes accept.
-pub const SOCIAVAULT_PLATFORMS: &[&str] = &[
-    "twitter", "instagram", "tiktok", "youtube", "facebook", "linkedin", "threads", "twitch",
-];
-
-pub fn known_kind(kind: &str) -> bool {
-    BINDING_KINDS.contains(&kind) || kind == URL_KIND
-}
-
-/// One row of the declared dependency table. Every inner slice is a set of
-/// alternatives; all slices must be satisfied before the tool can run.
-pub struct Dependency {
-    pub tool: &'static str,
-    pub needs: &'static [&'static [&'static str]],
-    pub producers: &'static [&'static str],
-}
-
-/// Declared input dependencies. These edges are code, not model output: the picker may
-/// add edges, it may not remove these.
-pub const DEPENDENCIES: &[Dependency] = &[
-    Dependency { tool: "sociavault_profile", needs: &[&["platform"], &["handle"]], producers: &["firecrawl_search"] },
-    Dependency { tool: "hunter_email_finder", needs: &[&["person_name"], &["domain", "org_name"]], producers: &["firecrawl_search", "hunter_domain_search"] },
-    Dependency { tool: "hunter_email_verifier", needs: &[&["email"]], producers: &["hunter_email_finder", "hunter_domain_search"] },
-    Dependency { tool: "hunter_domain_search", needs: &[&["domain"]], producers: &["firecrawl_search", "crtsh_certificates"] },
-    Dependency { tool: "hunter_tech_lookup", needs: &[&["domain"]], producers: &["firecrawl_search", "crtsh_certificates"] },
-    Dependency { tool: "crtsh_certificates", needs: &[&["domain"]], producers: &["firecrawl_search"] },
-    Dependency { tool: "hackertarget_hostsearch", needs: &[&["domain"]], producers: &["firecrawl_search"] },
-    Dependency { tool: "arin_rdap", needs: &[&["ip"]], producers: &["mnemonic_passive_dns"] },
-    Dependency { tool: "apnic_rdap", needs: &[&["ip"]], producers: &["mnemonic_passive_dns"] },
-    Dependency { tool: "ripestat_network_info", needs: &[&["ip"]], producers: &["mnemonic_passive_dns"] },
-    Dependency { tool: "shodan_internetdb", needs: &[&["ip"]], producers: &["mnemonic_passive_dns"] },
-    Dependency { tool: "mnemonic_passive_dns", needs: &[&["domain", "ip"]], producers: &["firecrawl_search"] },
-    Dependency { tool: "keybase_identity", needs: &[&["handle"]], producers: &["firecrawl_search", "sociavault_profile"] },
-    Dependency { tool: "wikipedia_users", needs: &[&["handle"]], producers: &["firecrawl_search", "sociavault_profile"] },
-    Dependency { tool: "firecrawl_scrape", needs: &[&["url"]], producers: &["firecrawl_search"] },
-];
-
-pub fn dependency(tool_id: &str) -> Option<&'static Dependency> {
-    DEPENDENCIES.iter().find(|row| row.tool == tool_id)
-}
-
-/// Binding kinds each catalog tool can take, used to check that a question's evidence
-/// matches some enabled tool input. `overpass_places` takes coordinates, which have no
-/// binding kind, so it is not offered to the picker.
-pub fn input_kinds(tool_id: &str) -> &'static [&'static str] {
-    match tool_id {
-        "crtsh_certificates" | "hackertarget_hostsearch" | "commoncrawl_urls" | "hunter_domain_search"
-        | "hunter_tech_lookup" | "arquivo_history" | "urlscan_search" => &["domain"],
-        "mnemonic_passive_dns" => &["domain", "ip"],
-        "ripestat_network_info" | "arin_rdap" | "apnic_rdap" | "sans_ip_activity" | "shodan_internetdb" => &["ip"],
-        "wayback_availability" | "firecrawl_scrape" => &["url", "domain"],
-        "github_repositories" | "gitlab_projects" | "grepapp_code_search" => &["handle", "org_name", "person_name", "package"],
-        "gleif_entities" | "sec_submissions" => &["org_name"],
-        "wikidata_entities" => &["org_name", "person_name"],
-        "keybase_identity" | "wikipedia_users" => &["handle"],
-        "stackexchange_users" => &["person_name", "handle"],
-        "nominatim_geocode" | "census_geocode" => &["address"],
-        "blockchain_address" | "blockstream_address" | "mempool_address" => &["wallet"],
-        "nvd_cve" | "cve_record" => &["cve"],
-        "osv_package" => &["package"],
-        "firecrawl_search" => &["person_name", "org_name", "domain", "handle", "email", "address", "cve", "ip", "wallet", "package"],
-        "hunter_email_finder" => &["person_name", "domain", "org_name"],
-        "hunter_email_verifier" => &["email"],
-        "sociavault_profile" => &["platform", "handle"],
-        _ => &[],
-    }
-}
-
-/// Binding kinds a tool's observation typically yields. Used for `depends_on` and the
-/// dependency fix together with the declared producers.
-pub fn output_kinds(tool_id: &str) -> &'static [&'static str] {
-    match tool_id {
-        "firecrawl_search" => &["domain", "url", "handle", "platform", "person_name", "org_name", "email"],
-        "firecrawl_scrape" => &["domain", "email", "handle", "platform", "url"],
-        "hunter_domain_search" => &["email", "person_name", "domain"],
-        "hunter_email_finder" => &["email"],
-        "crtsh_certificates" | "commoncrawl_urls" => &["domain"],
-        "hackertarget_hostsearch" | "mnemonic_passive_dns" | "shodan_internetdb" => &["domain", "ip"],
-        "sociavault_profile" => &["handle", "platform", "url", "domain"],
-        "wikidata_entities" => &["org_name", "person_name", "domain"],
-        "keybase_identity" => &["handle", "domain"],
-        "gleif_entities" | "sec_submissions" => &["org_name", "address"],
-        "github_repositories" | "gitlab_projects" => &["handle", "url"],
-        _ => &[],
-    }
-}
-
-/// Tools the picker may be offered: enabled, and with at least one bindable input.
-pub fn pickable(tool_id: &str) -> bool {
-    !input_kinds(tool_id).is_empty()
-}
+mod tool_io;
+pub use tool_io::{
+    accept_bindings, bind_arguments, catalog_inputs, consumers_of, dependencies, dependency,
+    domains_in, input_kinds, known_kind, output_kinds, packages_in, per_platform_targets,
+    pickable, plausible_person_name, question_platforms, rule_bindings, tool_row, unmet_kinds,
+    unmet_needs, vet_model_bindings, BINDING_KINDS, COORDINATES_KIND, URL_KIND,
+};
+use tool_io::coordinates_in_text;
 
 fn social_or_publisher(domain: &str) -> bool {
     let host = domain.trim_start_matches("www.").to_ascii_lowercase();
     account_platform_host(&host) || publisher_host(&host)
-}
-
-fn have(bindings: &[Binding], kind: &str) -> bool {
-    match kind {
-        "platform" => bindings.iter().any(|binding| {
-            binding.kind == "platform"
-                || (binding.kind == "handle" && SOCIAVAULT_PLATFORMS.contains(&binding.qualifier.as_str()))
-        }),
-        "domain" => bindings
-            .iter()
-            .any(|binding| binding.kind == "domain" && !social_or_publisher(&binding.value)),
-        _ => bindings.iter().any(|binding| binding.kind == kind),
-    }
-}
-
-/// Declared needs of a tool that the bindings do not satisfy yet.
-pub fn unmet_needs(tool_id: &str, bindings: &[Binding]) -> Vec<String> {
-    let Some(row) = dependency(tool_id) else {
-        return Vec::new();
-    };
-    row.needs
-        .iter()
-        .filter(|group| !group.iter().any(|kind| have(bindings, kind)))
-        .map(|group| group.join(" or "))
-        .collect()
 }
 
 fn first<'a>(bindings: &'a [Binding], kind: &str) -> Option<&'a Binding> {
@@ -3160,229 +3042,102 @@ fn first_domain(bindings: &[Binding]) -> Option<&Binding> {
         .find(|binding| binding.kind == "domain" && !social_or_publisher(&binding.value))
 }
 
-/// Arguments for one step from accepted bindings. Returns the arguments, the fills as
-/// `input=value (kind from evidence)`, and the inputs still missing. Never passes a
-/// social or news host to Hunter.
-pub fn bind_arguments(
-    tool_id: &str,
-    bindings: &[Binding],
-    question: &str,
-    query_hint: &str,
-) -> (Value, Vec<String>, Vec<String>) {
-    let mut args = serde_json::Map::new();
-    let mut filled = Vec::new();
-    let mut missing = Vec::new();
-    let mut put = |input: &str, binding: Option<&Binding>, args: &mut serde_json::Map<String, Value>| -> bool {
-        match binding {
-            Some(binding) => {
-                args.insert(input.into(), json!(binding.value));
-                filled.push(format!("{input}={} ({} from {})", binding.value, binding.kind, binding.evidence_id));
-                true
-            }
-            None => false,
-        }
-    };
-    let name = first(bindings, "org_name").or_else(|| first(bindings, "person_name"));
-    match tool_id {
-        "firecrawl_search" => {
-            let hint = clip_query(query_hint);
-            let query = if hint.is_empty() { subject_of(question) } else { hint };
-            args.insert("query".into(), json!(query));
-            args.insert("limit".into(), json!(5));
-        }
-        "firecrawl_scrape" => {
-            if !put("url", first(bindings, URL_KIND), &mut args) {
-                missing.push("url".into());
-            }
-        }
-        "wayback_availability" => {
-            let url = first(bindings, URL_KIND).cloned().or_else(|| {
-                first_domain(bindings).map(|binding| Binding {
-                    value: format!("https://{}", binding.value),
-                    ..binding.clone()
-                })
-            });
-            if !put("url", url.as_ref(), &mut args) {
-                missing.push("url".into());
-            }
-        }
-        "sociavault_profile" => {
-            let handle = bindings
-                .iter()
-                .find(|binding| binding.kind == "handle" && SOCIAVAULT_PLATFORMS.contains(&binding.qualifier.as_str()))
-                .or_else(|| first(bindings, "handle"));
-            let platform = handle
-                .filter(|binding| SOCIAVAULT_PLATFORMS.contains(&binding.qualifier.as_str()))
-                .map(|binding| Binding {
-                    kind: "platform".into(),
-                    value: binding.qualifier.clone(),
-                    ..binding.clone()
-                })
-                .or_else(|| first(bindings, "platform").cloned());
-            if !put("platform", platform.as_ref(), &mut args) {
-                missing.push("platform".into());
-            }
-            if !put("handle", handle, &mut args) {
-                missing.push("handle".into());
-            }
-        }
-        "hunter_email_finder" => {
-            let company = first_domain(bindings).map(|binding| ("domain", binding)).or_else(|| first(bindings, "org_name").map(|binding| ("company", binding)));
-            match company {
-                Some((input, binding)) => {
-                    put(input, Some(binding), &mut args);
-                }
-                None => missing.push("domain or company".into()),
-            }
-            if !put("full_name", first(bindings, "person_name"), &mut args) {
-                missing.push("full_name".into());
-            }
-        }
-        "hunter_email_verifier" => {
-            if !put("email", first(bindings, "email"), &mut args) {
-                missing.push("email".into());
-            }
-        }
-        "hunter_domain_search" | "hunter_tech_lookup" | "crtsh_certificates" | "hackertarget_hostsearch"
-        | "commoncrawl_urls" => {
-            if !put("domain", first_domain(bindings), &mut args) {
-                missing.push("domain".into());
-            }
-        }
-        "urlscan_search" => {
-            if !put("domain", first_domain(bindings), &mut args) {
-                missing.push("domain".into());
-            }
-        }
-        "arquivo_history" => {
-            if !put("domain_or_url", first_domain(bindings), &mut args) {
-                missing.push("domain_or_url".into());
-            }
-        }
-        "mnemonic_passive_dns" => {
-            if !put("domain_or_ip", first_domain(bindings).or_else(|| first(bindings, "ip")), &mut args) {
-                missing.push("domain_or_ip".into());
-            }
-        }
-        "ripestat_network_info" | "arin_rdap" | "apnic_rdap" | "sans_ip_activity" | "shodan_internetdb" => {
-            if !put("ip", first(bindings, "ip"), &mut args) {
-                missing.push("ip".into());
-            }
-        }
-        "keybase_identity" | "wikipedia_users" => {
-            if !put("username", first(bindings, "handle"), &mut args) {
-                missing.push("username".into());
-            }
-        }
-        "stackexchange_users" => {
-            if !put("name", first(bindings, "person_name").or_else(|| first(bindings, "handle")), &mut args) {
-                missing.push("name".into());
-            }
-        }
-        "github_repositories" | "gitlab_projects" | "grepapp_code_search" => {
-            if !put("query", first(bindings, "handle").or(name).or_else(|| first(bindings, "package")), &mut args) {
-                missing.push("query".into());
-            }
-        }
-        "wikidata_entities" => {
-            if !put("name", name, &mut args) {
-                missing.push("name".into());
-            }
-        }
-        "gleif_entities" => {
-            if !put("company_name", first(bindings, "org_name"), &mut args) {
-                missing.push("company_name".into());
-            }
-        }
-        "sec_submissions" => {
-            if !put("name", first(bindings, "org_name"), &mut args) {
-                missing.push("name".into());
-            }
-        }
-        "nominatim_geocode" => {
-            if !put("address_or_place", first(bindings, "address"), &mut args) {
-                missing.push("address_or_place".into());
-            }
-        }
-        "census_geocode" => {
-            if !put("us_address", first(bindings, "address"), &mut args) {
-                missing.push("us_address".into());
-            }
-        }
-        "blockchain_address" | "blockstream_address" | "mempool_address" => {
-            if !put("bitcoin_address", first(bindings, "wallet"), &mut args) {
-                missing.push("bitcoin_address".into());
-            }
-        }
-        "nvd_cve" | "cve_record" => {
-            if !put("cve_id", first(bindings, "cve"), &mut args) {
-                missing.push("cve_id".into());
-            }
-        }
-        "osv_package" => {
-            // Package bindings are `ecosystem:name@version`.
-            let parsed = first(bindings, "package").and_then(|binding| {
-                let (ecosystem, rest) = binding.value.split_once(':')?;
-                let (name, version) = rest.rsplit_once('@')?;
-                Some((ecosystem.to_string(), name.to_string(), version.to_string(), binding.clone()))
-            });
-            match parsed {
-                Some((ecosystem, name, version, binding)) => {
-                    args.insert("ecosystem".into(), json!(ecosystem));
-                    args.insert("package_name".into(), json!(name));
-                    args.insert("version".into(), json!(version));
-                    filled.push(format!("package={} (package from {})", binding.value, binding.evidence_id));
-                }
-                None => missing.push("ecosystem, package_name, version".into()),
-            }
-        }
-        _ => missing.push(format!("{tool_id} inputs have no binding kind")),
-    }
-    (Value::Object(args), filled, missing)
-}
+/// Webmail hosts: an address there says nothing about the owner's organization.
+const FREE_MAIL: &[&str] = &[
+    "gmail.com", "googlemail.com", "yahoo.com", "outlook.com", "hotmail.com", "live.com",
+    "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "mail.com",
+    "yandex.com", "zoho.com",
+];
 
-/// Bindings already known from the user's question.
+/// Bindings already known from the user's question: every kind in `PROMPT_KINDS`.
 pub fn question_bindings(question: &str) -> Vec<Binding> {
-    let mut found: Vec<Binding> = Vec::new();
-    let mut push = |kind: &str, value: String, qualifier: &str| {
+    fn add(found: &mut Vec<Binding>, kind: &str, value: String, qualifier: &str) {
         let value = value.trim().to_string();
-        if value.is_empty() || found.iter().any(|binding| binding.kind == kind && binding.value.eq_ignore_ascii_case(&value)) {
+        if value.is_empty()
+            || found.iter().any(|binding| binding.kind == kind && binding.value.eq_ignore_ascii_case(&value) && binding.qualifier == qualifier)
+        {
             return;
         }
         found.push(Binding {
             kind: kind.into(),
             value,
             evidence_id: "question".into(),
-            step_id: String::new(),
             qualifier: qualifier.into(),
+            ..Binding::default()
         });
-    };
+    }
+    let mut found: Vec<Binding> = Vec::new();
     let mut explicit = super::explicit_entities(question);
     explicit.sort();
+    let emails = emails_in(question);
     for (kind, value) in explicit {
         match kind.as_str() {
-            "domain" | "ip" | "cve" => push(&kind, value, ""),
-            "url" => push(URL_KIND, value, ""),
+            "domain" => {
+                let is_email_host = emails.iter().any(|email| email.ends_with(&format!("@{value}")));
+                if domains_in(&value).contains(&value) && !account_platform_host(&value) && !is_email_host {
+                    add(&mut found, "domain", value, "");
+                }
+            }
+            "ip" | "cve" => add(&mut found, &kind, value, ""),
+            "url" => {
+                if let Some(host) = url::Url::parse(&value).ok().and_then(|url| url.host_str().map(|host| host.trim_start_matches("www.").to_string())) {
+                    if !social_or_publisher(&host) && domains_in(&host).contains(&host) {
+                        add(&mut found, "domain", host, "");
+                    }
+                }
+                add(&mut found, URL_KIND, value, "");
+            }
             _ => {}
         }
     }
-    for email in emails_in(question) {
-        push("email", email, "");
+    for email in &emails {
+        add(&mut found, "email", email.clone(), "");
+        if let Some((_, host)) = email.rsplit_once('@') {
+            if !FREE_MAIL.contains(&host) {
+                add(&mut found, "domain", host.to_string(), "");
+            }
+        }
     }
-    if let Some(wallet) = bitcoin_in(question) {
-        push("wallet", wallet, "");
+    for wallet in tool_io::bitcoins_in(question) {
+        add(&mut found, "wallet", wallet, "");
+    }
+    for package in packages_in(question) {
+        add(&mut found, "package", package, "");
+    }
+    for value in coordinates_in_text(question) {
+        add(&mut found, COORDINATES_KIND, value, "");
     }
     for handle in super::extract_social_handles(&[question.to_string()]) {
-        push("handle", handle.handle, &handle.platform);
+        add(&mut found, "handle", handle.handle, &handle.platform);
+    }
+    // A bare `@handle`, or "username X" / "handle X", with no platform named.
+    let words: Vec<&str> = question.split_whitespace().collect();
+    for (index, word) in words.iter().enumerate() {
+        let token = word.trim_matches(|ch: char| matches!(ch, '?' | '!' | ',' | '.' | '"' | '\'' | '(' | ')'));
+        let candidate = if let Some(rest) = token.strip_prefix('@') {
+            Some(rest)
+        } else if index > 0
+            && matches!(words[index - 1].to_ascii_lowercase().trim_matches(|ch: char| !ch.is_alphanumeric()), "username" | "handle" | "user" | "alias" | "screenname")
+        {
+            Some(token)
+        } else {
+            None
+        };
+        if let Some(handle) = candidate.and_then(|value| osint::social_token(value).ok()) {
+            if handle.len() >= 2 && !found.iter().any(|binding| binding.kind == "handle" && binding.value.eq_ignore_ascii_case(&handle)) {
+                add(&mut found, "handle", handle, "");
+            }
+        }
     }
     let subject = super::question_subject(question);
+    let name = display_name(&subject);
     match target_kind(question) {
-        "person" if !subject.is_empty() => push("person_name", display_name(&subject), ""),
-        "organization" if !subject.is_empty() => push("org_name", display_name(&subject), ""),
+        "person" if plausible_person_name(&name) => add(&mut found, "person_name", name, ""),
+        "organization" if !subject.is_empty() && name.split_whitespace().count() <= 8 => add(&mut found, "org_name", name, ""),
         _ => {}
     }
     if gap_kind(question) == "place" && !subject.is_empty() {
-        push("address", subject, "");
+        add(&mut found, "address", subject, "");
     }
     found
 }
@@ -3479,180 +3234,19 @@ pub fn parse_questions(value: &Value, enabled: &HashSet<String>) -> Result<Vec<D
     Ok(questions)
 }
 
-fn strings_in(value: &Value, out: &mut Vec<String>) {
-    if out.len() >= 600 {
-        return;
-    }
-    match value {
-        Value::String(text) => out.push(text.chars().take(2_000).collect()),
-        Value::Array(items) => items.iter().for_each(|item| strings_in(item, out)),
-        Value::Object(map) => map.values().for_each(|item| strings_in(item, out)),
-        _ => {}
-    }
-}
-
-fn hits_in(evidence_id: &str, observations: &Value) -> Vec<SearchHit> {
-    observations
-        .get("results")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|row| SearchHit {
-            evidence_id: evidence_id.into(),
-            title: row.get("title").and_then(Value::as_str).unwrap_or("").into(),
-            url: row.get("url").and_then(Value::as_str).unwrap_or("").into(),
-            snippet: row
-                .get("snippet")
-                .or_else(|| row.get("description"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .into(),
-            retrieved_at: String::new(),
-            query_role: ACCOUNTS.into(),
-        })
-        .filter(|hit| !hit.url.is_empty())
-        .collect()
-}
-
-/// Keeps only bindings in the vocabulary whose value occurs in the observation text.
-/// The model, a page, or a rule may not introduce a value the observation lacks.
-pub fn accept_bindings(candidates: Vec<Binding>, observation: &str) -> Vec<Binding> {
-    let haystack = observation.to_ascii_lowercase();
-    let mut kept: Vec<Binding> = Vec::new();
-    for binding in candidates {
-        let value = binding.value.trim();
-        if !known_kind(&binding.kind) || value.is_empty() || value.chars().count() > 300 {
-            continue;
-        }
-        if !haystack.contains(&value.to_ascii_lowercase()) {
-            continue;
-        }
-        if binding.kind == "handle" && !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')) {
-            continue;
-        }
-        if kept.iter().any(|existing| existing.kind == binding.kind && existing.value.eq_ignore_ascii_case(value)) {
-            continue;
-        }
-        kept.push(Binding {
-            value: value.into(),
-            ..binding
-        });
-    }
-    kept
-}
-
-/// Rule binder for one observation: subject accounts from profile URLs, the subject's
-/// own domain and name from entity selection, and domain, IP, email, CVE, and wallet
-/// scanners. Values are checked against the observation by `accept_bindings`.
-pub fn rule_bindings(question: &str, evidence_id: &str, tool_id: &str, observations: &Value) -> Vec<Binding> {
-    let observation = observations.to_string();
-    let mut texts = Vec::new();
-    strings_in(observations, &mut texts);
-    let mut candidates: Vec<Binding> = Vec::new();
-    let mut push = |kind: &str, value: &str, qualifier: &str| {
-        candidates.push(Binding {
-            kind: kind.into(),
-            value: value.into(),
-            evidence_id: evidence_id.into(),
-            step_id: String::new(),
-            qualifier: qualifier.into(),
-        });
-    };
-    let hits = hits_in(evidence_id, observations);
-    if !hits.is_empty() {
-        for account in fallback_accounts(question, &hits) {
-            push("handle", &account.handle, &account.platform);
-        }
-        for entity in select_entities(question, &hits).iter().filter(|entity| entity.selected) {
-            match entity.entity_type.as_str() {
-                "person" => push("person_name", &entity.canonical_name, ""),
-                "organization" => push("org_name", &entity.canonical_name, ""),
-                _ => {}
-            }
-            for identifier in &entity.identifiers {
-                if identifier.kind == "domain" && !social_or_publisher(&identifier.value) {
-                    push("domain", &identifier.value, "");
-                }
-            }
-        }
-        for hit in hits.iter().take(5) {
-            let own = url::Url::parse(&hit.url)
-                .ok()
-                .and_then(|url| url.host_str().map(|host| !social_or_publisher(host)))
-                .unwrap_or(false);
-            if own {
-                push(URL_KIND, &hit.url, "");
-            }
-        }
-    } else {
-        for handle in super::extract_social_handles(&texts) {
-            if tool_id == "sociavault_profile" || names_subject(&subject_of(question), &handle.handle) {
-                push("handle", &handle.handle, &handle.platform);
-            }
-        }
-    }
-    for text in &texts {
-        for (kind, value) in super::explicit_entities(text) {
-            match kind.as_str() {
-                "domain" if !social_or_publisher(&value) && !value.ends_with(".png") && !value.ends_with(".jpg") => {
-                    push("domain", &value, "")
-                }
-                "ip" | "cve" => push(&kind, &value, ""),
-                "url" if tool_id != "firecrawl_search" => {
-                    let own = url::Url::parse(&value)
-                        .ok()
-                        .and_then(|url| url.host_str().map(|host| !social_or_publisher(host)))
-                        .unwrap_or(false);
-                    if own {
-                        push(URL_KIND, &value, "");
-                    }
-                }
-                _ => {}
-            }
-        }
-        for email in emails_in(text) {
-            push("email", &email, "");
-        }
-        if let Some(wallet) = bitcoin_in(text) {
-            push("wallet", &wallet, "");
-        }
-    }
-    let mut per_kind: HashMap<String, usize> = HashMap::new();
-    accept_bindings(candidates, &observation)
-        .into_iter()
-        .filter(|binding| {
-            let count = per_kind.entry(binding.kind.clone()).or_default();
-            *count += 1;
-            *count <= 5
-        })
-        .collect()
-}
-
 /// Default picking ladders when the picker model is unavailable, by what the question
 /// already provides.
 fn ladder(question: &str, bindings: &[Binding]) -> Vec<&'static str> {
-    let has = |kind: &str| bindings.iter().any(|binding| binding.kind == kind);
     let mut order: Vec<&'static str> = Vec::new();
-    if has("cve") {
-        order.extend(["nvd_cve", "cve_record"]);
-    }
-    if has("wallet") {
-        order.extend(["blockstream_address", "mempool_address", "blockchain_address"]);
-    }
-    if has("email") {
-        order.extend(["hunter_email_verifier"]);
-    }
-    if has("ip") {
-        order.extend(["ripestat_network_info", "arin_rdap", "shodan_internetdb", "mnemonic_passive_dns", "sans_ip_activity"]);
-    }
-    if has("domain") {
-        order.extend(["crtsh_certificates", "hunter_domain_search", "mnemonic_passive_dns", "hackertarget_hostsearch", "urlscan_search", "wayback_availability"]);
-    }
-    if has("address") {
-        order.extend(["nominatim_geocode"]);
-    }
-    if has("package") {
-        order.extend(["osv_package"]);
+    // Identifier kinds first, each with the tools the table says consume it.
+    for kind in ["cve", "wallet", "email", "ip", "domain", "address", COORDINATES_KIND, "package", URL_KIND, "handle"] {
+        if bindings.iter().any(|binding| binding.kind == kind) {
+            for tool in consumers_of(kind) {
+                if !order.contains(&tool) {
+                    order.push(tool);
+                }
+            }
+        }
     }
     match target_kind(question) {
         "person" => order.extend(["firecrawl_search", "wikidata_entities", "sociavault_profile", "keybase_identity", "stackexchange_users", "github_repositories", "firecrawl_scrape"]),
@@ -3752,8 +3346,9 @@ pub fn dependency_order(
         'scan: for index in 0..order.len() {
             let tool = order[index].clone();
             let Some(row) = dependency(&tool) else { continue };
-            for group in row.needs {
-                if group.iter().any(|kind| have(known, kind)) {
+            let unmet = unmet_kinds(&tool, known);
+            for group in &row.needs {
+                if !unmet.contains(group) {
                     continue;
                 }
                 let earlier = order[..index]
@@ -3796,7 +3391,7 @@ pub fn depends_on(
         .flat_map(|group| group.split(" or ").map(String::from).collect::<Vec<_>>())
         .collect();
     for kind in chat_needs.get(tool).into_iter().flatten() {
-        if !have(known, kind) && !wanted.contains(kind) {
+        if !known.iter().any(|binding| &binding.kind == kind) && !wanted.contains(kind) {
             wanted.push(kind.clone());
         }
     }
@@ -4520,14 +4115,14 @@ mod tests {
 
 
     fn binding(kind: &str, value: &str, evidence: &str) -> Binding {
-        Binding { kind: kind.into(), value: value.into(), evidence_id: evidence.into(), step_id: String::new(), qualifier: String::new() }
+        Binding { kind: kind.into(), value: value.into(), evidence_id: evidence.into(), ..Default::default() }
     }
 
     #[test]
     fn binder_maps_kinds_to_inputs_and_never_hands_hunter_a_social_host() {
         let social = vec![binding("domain", "x.com", "call-1")];
         let (_, _, missing) = bind_arguments("hunter_domain_search", &social, "who is jane?", "");
-        assert_eq!(missing, vec!["domain".to_string()]);
+        assert_eq!(missing, vec!["domain or company".to_string()]);
         let mixed = vec![binding("domain", "nytimes.com", "call-1"), binding("domain", "example.org", "call-2")];
         let (args, filled, missing) = bind_arguments("hunter_domain_search", &mixed, "who is jane?", "");
         assert!(missing.is_empty());
@@ -4542,7 +4137,7 @@ mod tests {
         assert_eq!(args, json!({"username": "janeexample"}));
         let (args, _, _) = bind_arguments("firecrawl_search", &[], "who is jane example?", "Which accounts belong to Jane Example?");
         assert_eq!(args["query"], json!("Which accounts belong to Jane Example?"));
-        assert!(unmet_needs("sociavault_profile", &[]).len() == 2);
+        assert_eq!(unmet_needs("sociavault_profile", &[]), vec!["handle".to_string()]);
         assert!(unmet_needs("crtsh_certificates", &mixed).is_empty());
     }
 
@@ -4572,7 +4167,8 @@ mod tests {
         let deps = depends_on(&order, at("sociavault_profile"), &[], &HashMap::new(), &HashMap::new());
         assert!(deps.contains(&at("firecrawl_search")));
         assert_eq!(fallback_questions("who is jane example?").len(), 3);
-        assert!(!pickable("overpass_places"));
-        assert!(DEPENDENCIES.iter().all(|row| osint::definition(row.tool).is_some()));
+        // Geocoder coordinates make Overpass reachable.
+        assert!(pickable("overpass_places"));
+        assert!(dependencies().iter().all(|row| osint::definition(row.tool).is_some()));
     }
 }

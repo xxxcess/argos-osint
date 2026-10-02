@@ -236,6 +236,7 @@ pub async fn run_turn(
             gate: &gate,
             catalog: &catalog,
             unkeyed: &unkeyed,
+            opening,
         },
         &mut picker,
         cancel,
@@ -289,6 +290,7 @@ pub async fn continue_turn(
             gate: &gate,
             catalog: &catalog,
             unkeyed: &unkeyed,
+            opening: false,
         },
         &mut picker,
         cancel,
@@ -410,6 +412,20 @@ struct TurnModels<'a> {
     gate: &'a ModelGate,
     catalog: &'a [picker::CatalogEntry],
     unkeyed: &'a HashSet<String>,
+    /// First turn of the thread: the SociaVault allowance is `opening_sociavault_calls`.
+    opening: bool,
+}
+
+/// SociaVault calls this turn: `opening_sociavault_calls` on a thread's first turn and
+/// four later (the per-turn cap PR #24 used), never more than the credits cover.
+fn per_platform_allowance(service: &super::Service, opening: bool) -> usize {
+    let limits = &service.settings.recon_limits;
+    let cap = if opening { usize::from(limits.opening_sociavault_calls) } else { 4 };
+    let cost = limits.sociavault_call_cost.max(1);
+    let credits = Store::open(&service.db_path)
+        .and_then(|store| store.credits_available("sociavault", limits))
+        .unwrap_or(0);
+    cap.min((credits / cost) as usize)
 }
 
 async fn execute_ordered(
@@ -430,6 +446,7 @@ async fn execute_ordered(
         recon_secret: models.recon_secret,
         gate: models.gate,
         cancel,
+        per_platform_allowance: per_platform_allowance(service, models.opening),
     };
     let db = service.db_path.clone();
     let run_id = run.id.clone();
@@ -480,6 +497,8 @@ pub(crate) struct StepEnv<'a> {
     pub recon_secret: &'a ProviderSecret,
     pub gate: &'a ModelGate,
     pub cancel: &'a Arc<AtomicBool>,
+    /// Calls a per-platform tool (SociaVault) may make this turn.
+    pub per_platform_allowance: usize,
 }
 
 const DONE_STATES: &[&str] = &["completed", "no_results", "failed", "rate_limited", "deferred", "skipped", "cancelled", "timeout"];
@@ -489,10 +508,13 @@ fn usable(status: &str) -> bool {
 }
 
 /// Runs the ordered plan one step at a time. Each step's empty inputs are bound from
-/// accepted bindings first; after a completed step, bindings come from that observation
-/// only. A failed step with dependents that still lack inputs gets one fallback pick
-/// (two per turn). Disabled, unkeyed, or over-budget steps are deferred, with a
-/// replacement pick when fewer than three executable steps would remain.
+/// accepted bindings (`investigation::TOOLS`); after a completed step, the rule extractor
+/// parses the kinds that tool produces, and the Recon model augments it when a later step
+/// needs a handle or still lacks an input. A step whose dependents are still starved
+/// gets one fallback pick (two per turn). A per-platform tool (SociaVault) becomes one
+/// step per question platform with a handle, within the turn allowance. Disabled,
+/// unkeyed, or over-budget steps are deferred, with a replacement pick when fewer than
+/// three executable steps would remain.
 pub(crate) async fn execute_steps<R, F>(
     plan: &mut Plan,
     env: &StepEnv<'_>,
@@ -512,8 +534,7 @@ where
         if env.cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("cancelled"));
         }
-        let step = plan.calls[index].clone();
-        if DONE_STATES.contains(&step.status.as_str()) {
+        if DONE_STATES.contains(&plan.calls[index].status.as_str()) {
             index += 1;
             continue;
         }
@@ -523,31 +544,42 @@ where
             .filter(|call| !call.call_id.is_empty())
             .count();
         if dispatched >= env.max_calls {
+            let tool = plan.calls[index].tool_id.clone();
             plan.calls[index].status = "deferred".into();
-            plan.deferred.push(format!("{} — the call budget was reached", step.tool_id));
+            plan.deferred.push(format!("{tool} — the call budget was reached"));
             index += 1;
             continue;
         }
-        let serves: Vec<String> = step.reason.split(", ").filter(|id| !id.is_empty()).map(String::from).collect();
-        let hint = query_hint(&plan.derived_questions, &serves);
-        let (arguments, filled, missing) = investigation::bind_arguments(&step.tool_id, &plan.bindings, env.question, &hint);
-        if !missing.is_empty() || crate::osint::validate(&step.tool_id, &arguments).is_err() {
-            plan.calls[index].status = "skipped".into();
-            let line = format!("{} {}: no binding for {}", step.step_id, step.tool_id, if missing.is_empty() { "a valid input".into() } else { missing.join(", ") });
-            if !plan.unresolved_inputs.contains(&line) {
-                plan.unresolved_inputs.push(line);
+        if !plan.calls[index].bound && investigation::tool_row(&plan.calls[index].tool_id).is_some_and(|row| row.per_platform) {
+            expand_per_platform(plan, index, env, dispatched);
+        }
+        let step = plan.calls[index].clone();
+        if step.status == "deferred" {
+            index += 1;
+            continue;
+        }
+        if !step.bound {
+            let serves: Vec<String> = step.reason.split(", ").filter(|id| !id.is_empty()).map(String::from).collect();
+            let hint = query_hint(&plan.derived_questions, &serves);
+            let (arguments, filled, missing) = investigation::bind_arguments(&step.tool_id, &plan.bindings, env.question, &hint);
+            if !missing.is_empty() || crate::osint::validate(&step.tool_id, &arguments).is_err() {
+                plan.calls[index].status = "skipped".into();
+                let line = format!("{} {}: no binding for {}", step.step_id, step.tool_id, if missing.is_empty() { "a valid input".into() } else { missing.join(", ") });
+                if !plan.unresolved_inputs.contains(&line) {
+                    plan.unresolved_inputs.push(line);
+                }
+                persist(plan, "binding inputs")?;
+                index += 1;
+                continue;
             }
-            persist(plan, "binding inputs")?;
-            index += 1;
-            continue;
+            if step.arguments != arguments {
+                plan.calls[index].filled = filled
+                    .into_iter()
+                    .filter(|fill| !fill.ends_with("from question)"))
+                    .collect();
+            }
+            plan.calls[index].arguments = arguments;
         }
-        if step.arguments != arguments {
-            plan.calls[index].filled = filled
-                .into_iter()
-                .filter(|fill| !fill.ends_with("from question)"))
-                .collect();
-        }
-        plan.calls[index].arguments = arguments;
         let label = format!("running {}", step.tool_id);
         progress(&label);
         persist(plan, &label)?;
@@ -563,7 +595,7 @@ where
                     .count();
                 if executable < picker::MIN_PICKS {
                     let purpose = format!("{} could not run ({reason}); pick a replacement so at least three tools run", step.tool_id);
-                    request_fallback(plan, env, picker, index, &purpose, progress).await?;
+                    request_fallback(plan, env, picker, index, &purpose, &[], progress).await?;
                 }
             }
             StepOutcome::Ran(call_id, result) => {
@@ -576,45 +608,37 @@ where
                     return Err(anyhow!("cancelled"));
                 }
                 let ok = usable(&result.status);
-                let mut accepted = Vec::new();
                 if ok {
                     progress("binding inputs");
-                    accepted = investigation::rule_bindings(env.question, &call_id, &step.tool_id, &result.observations);
-                    let mut staged = plan.bindings.clone();
-                    staged.extend(accepted.iter().cloned());
-                    let starved = plan.calls[index + 1..].iter().any(|later| {
-                        later.status == "pending"
-                            && !investigation::bind_arguments(&later.tool_id, &staged, env.question, "").2.is_empty()
-                    });
-                    if starved {
-                        match model_bindings(env, &call_id, &step.tool_id, &result.observations).await {
-                            Ok(found) => accepted.extend(found),
-                            Err(err) if cancelled(&err) => return Err(err),
-                            Err(_) => {}
-                        }
-                    }
-                    for mut binding in accepted.clone() {
+                    let accepted = extract_bindings(plan, env, index, &call_id, &result.observations).await?;
+                    for mut binding in accepted {
                         binding.step_id = step.step_id.clone();
-                        if !plan.bindings.iter().any(|known| known.kind == binding.kind && known.value.eq_ignore_ascii_case(&binding.value)) {
+                        if !plan.bindings.iter().any(|known| {
+                            known.kind == binding.kind && known.value.eq_ignore_ascii_case(&binding.value) && known.qualifier == binding.qualifier
+                        }) {
                             plan.bindings.push(binding);
                         }
                     }
                 }
                 results.push((call_id, result));
                 let is_fallback = step.pick_reason.starts_with("fallback:");
-                if (!ok || accepted.is_empty()) && !is_fallback && !fallback_for.contains(&step.step_id) {
+                if !is_fallback && !fallback_for.contains(&step.step_id) {
                     let starved: Vec<String> = plan.calls[index + 1..]
                         .iter()
-                        .filter(|later| later.status == "pending" && later.depends_on.contains(&step.step_id))
+                        .filter(|later| later.status == "pending" && !later.bound && later.depends_on.contains(&step.step_id))
                         .filter(|later| !investigation::bind_arguments(&later.tool_id, &plan.bindings, env.question, "").2.is_empty())
                         .map(|later| later.tool_id.clone())
                         .collect();
                     if !starved.is_empty() {
                         fallback_for.insert(step.step_id.clone());
-                        let needs: Vec<String> = starved
-                            .iter()
-                            .flat_map(|tool| investigation::unmet_needs(tool, &plan.bindings))
-                            .collect();
+                        let mut needs: Vec<String> = Vec::new();
+                        for tool in &starved {
+                            for need in investigation::unmet_needs(tool, &plan.bindings) {
+                                if !needs.contains(&need) {
+                                    needs.push(need);
+                                }
+                            }
+                        }
                         let purpose = format!(
                             "{} {} and {} still need {}",
                             step.tool_id,
@@ -622,7 +646,7 @@ where
                             starved.join(", "),
                             if needs.is_empty() { "its output".into() } else { needs.join("; ") }
                         );
-                        request_fallback(plan, env, picker, index, &purpose, progress).await?;
+                        request_fallback(plan, env, picker, index, &purpose, &needs, progress).await?;
                     }
                 }
             }
@@ -631,6 +655,123 @@ where
         index += 1;
     }
     Ok(results)
+}
+
+/// Bindings from one completed observation: the rule extractor for the kinds the tool
+/// produces, then the Recon model when a later pending step takes a handle (and this
+/// tool yields handles) or still lacks an input. Skipped after a provider 429. The
+/// outcome is recorded in `plan.binding_notes`.
+async fn extract_bindings(
+    plan: &mut Plan,
+    env: &StepEnv<'_>,
+    index: usize,
+    call_id: &str,
+    observations: &Value,
+) -> Result<Vec<super::Binding>> {
+    let step = plan.calls[index].clone();
+    let mut accepted = investigation::rule_bindings(env.question, call_id, &step.tool_id, observations);
+    let mut staged = plan.bindings.clone();
+    staged.extend(accepted.iter().cloned());
+    let later: Vec<&PlanCall> = plan.calls[index + 1..].iter().filter(|later| later.status == "pending").collect();
+    let starved = later
+        .iter()
+        .any(|later| !later.bound && !investigation::bind_arguments(&later.tool_id, &staged, env.question, "").2.is_empty());
+    let yields_handles = investigation::output_kinds(&step.tool_id).contains(&"handle");
+    let wants_handles = later
+        .iter()
+        .any(|later| investigation::input_kinds(&later.tool_id).contains(&"handle") || investigation::tool_row(&later.tool_id).is_some_and(|row| row.per_platform));
+    let rules = accepted.len();
+    let note = if !(starved || yields_handles && wants_handles) {
+        "Recon model not needed".to_string()
+    } else if env.gate.limited() {
+        "Recon model skipped: the provider rate-limited an earlier call this turn".to_string()
+    } else if env.recon_secret.model.trim().is_empty() {
+        "Recon model skipped: no Recon model is configured".to_string()
+    } else {
+        match model_bindings(env, call_id, &step.tool_id, observations).await {
+            Ok(found) => {
+                let mut added = 0;
+                for binding in found {
+                    if !accepted.iter().any(|known| known.kind == binding.kind && known.value.eq_ignore_ascii_case(&binding.value) && known.qualifier == binding.qualifier) {
+                        accepted.push(binding);
+                        added += 1;
+                    }
+                }
+                format!("Recon model added {added}")
+            }
+            Err(err) if cancelled(&err) => return Err(err),
+            Err(err) => format!("Recon model failed: {}", err.to_string().chars().take(120).collect::<String>()),
+        }
+    };
+    plan.binding_notes.push(format!("{} {}: rules found {rules}; {note}", step.step_id, step.tool_id));
+    Ok(accepted)
+}
+
+/// Expands a per-platform step (SociaVault) into one pre-bound step per question
+/// platform with a handle: `s2a`, `s2b`, … in question priority, within the turn
+/// allowance and the call budget. A question platform without its own handle borrows
+/// the subject's best-supported handle as an inferred binding. Platforms over the
+/// allowance are deferred with the reason; with no handle at all the step is left for
+/// the binder to skip and the starved-step fallback to handle.
+fn expand_per_platform(plan: &mut Plan, index: usize, env: &StepEnv<'_>, dispatched: usize) {
+    let step = plan.calls[index].clone();
+    let mut texts: Vec<(String, String)> = plan.derived_questions.iter().map(|item| (item.id.clone(), item.text.clone())).collect();
+    texts.push(("question".into(), env.question.to_string()));
+    let platforms = investigation::question_platforms(&texts);
+    let (targets, unresolved) = investigation::per_platform_targets(&platforms, &plan.bindings, env.question);
+    if targets.is_empty() {
+        return;
+    }
+    let budget = env.max_calls.saturating_sub(dispatched);
+    let take = env.per_platform_allowance.min(budget);
+    let reason = if env.per_platform_allowance <= budget {
+        format!("the {} allowance this turn is {}", step.tool_id, env.per_platform_allowance)
+    } else {
+        "the call budget was reached".to_string()
+    };
+    let mut calls = Vec::new();
+    for (position, (platform, binding, qid)) in targets.iter().enumerate() {
+        let letter = (b'a' + position as u8) as char;
+        let step_id = if targets.len() == 1 { step.step_id.clone() } else { format!("{}{letter}", step.step_id) };
+        let source = if binding.inferred {
+            format!("handle inferred for {platform} from {} on {}", binding.evidence_id, plan.bindings.iter().find(|known| known.kind == "handle" && known.value == binding.value && !known.inferred).map(|known| known.qualifier.as_str()).unwrap_or("another platform"))
+        } else {
+            format!("handle from {}", binding.evidence_id)
+        };
+        let mut call = PlanCall {
+            step_id,
+            arguments: json!({"platform": platform, "handle": binding.value}),
+            filled: vec![format!("platform={platform} ({source})"), format!("handle={} ({source})", binding.value)],
+            reason: if qid.is_empty() || qid == "question" { step.reason.clone() } else { qid.clone() },
+            bound: true,
+            ..step.clone()
+        };
+        if position >= take {
+            call.status = "deferred".into();
+            plan.deferred.push(format!("{} {platform}:{} — {reason}", step.tool_id, binding.value));
+        }
+        if binding.inferred && !plan.bindings.iter().any(|known| known.kind == "handle" && known.value == binding.value && known.qualifier == *platform) {
+            plan.bindings.push(binding.clone());
+        }
+        calls.push(call);
+    }
+    for line in unresolved {
+        let line = format!("{} {}: {line}", step.step_id, step.tool_id);
+        if !plan.unresolved_inputs.contains(&line) {
+            plan.unresolved_inputs.push(line);
+        }
+    }
+    let first_id = calls[0].step_id.clone();
+    plan.calls.splice(index..=index, calls);
+    if first_id != step.step_id {
+        for later in plan.calls.iter_mut() {
+            for dep in later.depends_on.iter_mut() {
+                if *dep == step.step_id {
+                    *dep = first_id.clone();
+                }
+            }
+        }
+    }
 }
 
 /// Asks the picker for one fallback after step `index`, inserts it as the next step, and
@@ -642,6 +783,7 @@ async fn request_fallback(
     picker: &mut picker::Picker<'_>,
     index: usize,
     purpose: &str,
+    needs: &[String],
     progress: &mut (impl FnMut(&str) + Send),
 ) -> Result<()> {
     let failed = plan.calls[index].clone();
@@ -651,13 +793,32 @@ async fn request_fallback(
     }
     progress("picking fallback");
     let planned: HashSet<&str> = plan.calls.iter().map(|call| call.tool_id.as_str()).collect();
-    let candidates: Vec<String> = env
+    let need_kinds: Vec<&str> = needs.iter().flat_map(|need| need.split(" or ")).collect();
+    // Candidates the binder can run now. For a missing binding, only tools whose
+    // observation yields that kind; an accounts search may repeat Firecrawl search once.
+    let accounts_search = need_kinds.contains(&"handle")
+        && env.catalog.iter().any(|entry| entry.id == "firecrawl_search")
+        && !plan.calls.iter().any(|call| call.tool_id == "firecrawl_search" && call.bound);
+    let runnable = |id: &str| investigation::bind_arguments(id, &plan.bindings, env.question, "-").2.is_empty();
+    let yields = |id: &str| need_kinds.is_empty() || investigation::output_kinds(id).iter().any(|kind| need_kinds.contains(kind));
+    let mut candidates: Vec<String> = env
         .catalog
         .iter()
         .map(|entry| entry.id.clone())
-        .filter(|id| !planned.contains(id.as_str()))
+        .filter(|id| !planned.contains(id.as_str()) && runnable(id) && yields(id))
         .collect();
-    let picked: Vec<String> = plan.calls.iter().map(|call| call.tool_id.clone()).collect();
+    if accounts_search && !candidates.iter().any(|id| id == "firecrawl_search") {
+        candidates.insert(0, "firecrawl_search".into());
+    }
+    if candidates.is_empty() && need_kinds.is_empty() {
+        candidates = env.catalog.iter().map(|entry| entry.id.clone()).filter(|id| !planned.contains(id.as_str())).collect();
+    }
+    let picked: Vec<String> = plan
+        .calls
+        .iter()
+        .map(|call| call.tool_id.clone())
+        .filter(|id| !(accounts_search && id == "firecrawl_search"))
+        .collect();
     let questions = plan.derived_questions.clone();
     let bindings = plan.bindings.clone();
     let context = picker::OrderContext {
@@ -678,10 +839,18 @@ async fn request_fallback(
             let serves = record.serves.clone();
             plan.fallback_requests.push(format!("{purpose}. Recon {asked}; it chose {tool_id} as {step_id}."));
             plan.picks.push(record.clone());
+            // A repeated Firecrawl search looks for the subject's accounts.
+            let repeat = planned.contains(tool_id.as_str());
+            let subject = super::question_subject(env.question);
             let call = PlanCall {
                 step_id: step_id.clone(),
                 tool_id: tool_id.clone(),
-                arguments: json!({}),
+                arguments: if repeat {
+                    json!({"query": format!("{subject} official social media accounts profiles handles"), "limit": 5})
+                } else {
+                    json!({})
+                },
+                bound: repeat,
                 depends_on: Vec::new(),
                 reason: serves.join(", "),
                 expected: investigation::output_kinds(&tool_id).join(", "),
@@ -715,7 +884,10 @@ async fn request_fallback(
 fn next_step_number(plan: &Plan) -> usize {
     plan.calls
         .iter()
-        .filter_map(|call| call.step_id.strip_prefix('s')?.parse::<usize>().ok())
+        .filter_map(|call| {
+            let digits: String = call.step_id.strip_prefix('s')?.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<usize>().ok()
+        })
         .max()
         .unwrap_or(0)
         + 1
@@ -733,8 +905,9 @@ async fn model_bindings(
         return Ok(Vec::new());
     }
     let user = format!(
-        "Question: {}\nTool: {tool_id}\nEvidence id: {call_id}\nObservation: {}\nReturn JSON {{\"bindings\":[{{\"kind\":string,\"value\":string,\"evidence_id\":string,\"platform\":string}}]}}. kind is one of {}. platform only for a handle.",
+        "Question: {}\nSubject: {}\nTool: {tool_id}\nEvidence id: {call_id}\nObservation: {}\nReturn JSON {{\"bindings\":[{{\"kind\":string,\"value\":string,\"evidence_id\":string,\"platform\":string}}]}}. kind is one of {}. For each account of the subject return kind handle with the bare handle (no @) and platform (twitter, truthsocial, instagram, facebook, youtube, tiktok, threads, linkedin, twitch, github, keybase).",
         env.question,
+        super::question_subject(env.question),
         super::packet_observation(observations),
         investigation::BINDING_KINDS.join(", ")
     );
@@ -746,7 +919,8 @@ async fn model_bindings(
         env.cancel,
     )
     .await?;
-    Ok(parse_model_bindings(&value, call_id, &observations.to_string()))
+    let parsed = parse_model_bindings(&value, call_id, &observations.to_string());
+    Ok(investigation::vet_model_bindings(env.question, call_id, tool_id, observations, parsed))
 }
 
 pub(crate) fn parse_model_bindings(value: &Value, call_id: &str, observation: &str) -> Vec<super::Binding> {
@@ -776,11 +950,8 @@ pub(crate) fn parse_model_bindings(value: &Value, call_id: &str, observation: &s
                 value: item.get("value")?.as_str()?.trim().to_string(),
                 evidence_id: call_id.into(),
                 step_id: String::new(),
-                qualifier: if kind == "handle" && investigation::ACCOUNT_PLATFORMS.contains(&platform.as_str()) {
-                    platform
-                } else {
-                    String::new()
-                },
+                qualifier: if kind == "handle" { platform } else { String::new() },
+                ..Default::default()
             })
         })
         .collect();
@@ -2164,7 +2335,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel };
+        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 4 };
         let mut session = picker::Picker::new(&secret, &cancel);
         let ran = std::sync::Mutex::new(Vec::new());
         let runner = |call: PlanCall| {
@@ -2223,7 +2394,7 @@ mod tests {
         first.arguments = json!({"query": "Example Org", "limit": 5});
         let mut plan = Plan {
             derived_questions: investigation::fallback_questions(question),
-            bindings: vec![super::super::Binding { kind: "domain".into(), value: "example.org".into(), evidence_id: "call-s1".into(), step_id: "s1".into(), qualifier: String::new() }],
+            bindings: vec![super::super::Binding { kind: "domain".into(), value: "example.org".into(), evidence_id: "call-s1".into(), step_id: "s1".into(), ..Default::default() }],
             calls: vec![first, step("s2", "crtsh_certificates", &["s1"])],
             planning_mode: "tool_picker".into(),
             ..Plan::default()
@@ -2235,7 +2406,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel };
+        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 4 };
         let picker_secret = none.clone();
         let mut session = picker::Picker::new(&picker_secret, &cancel);
         let ran = std::sync::Mutex::new(Vec::new());
@@ -2268,7 +2439,7 @@ mod tests {
         let unkeyed = HashSet::new();
         let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let gate = ModelGate::default();
-        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel };
+        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 4 };
         let mut session = picker::Picker::new(&none, &cancel);
         let flag = cancel.clone();
         let runner = |call: PlanCall| {
@@ -2318,5 +2489,138 @@ mod tests {
         let reserved: i64 = store.conn.query_row("SELECT COALESCE(SUM(reserved),0) FROM provider_quota", [], |row| row.get(0)).unwrap();
         assert_eq!(reserved, 0);
         assert_eq!(held, 0);
+    }
+
+    fn trump_search() -> Value {
+        json!({"results": [
+            {"title": "Donald J. Trump (@realDonaldTrump) - Truth Social", "url": "https://truthsocial.com/@realDonaldTrump", "snippet": "Truth Social posts by Donald J. Trump."},
+            {"title": "Donald J. Trump (@realDonaldTrump) / X", "url": "https://x.com/realDonaldTrump", "snippet": "45th & 47th President of the United States"},
+            {"title": "Trump Truth Social archive scraper - Apify", "url": "https://apify.com/scraper/truth-social", "snippet": "Scrape posts from any Truth Social account."},
+            {"title": "Trump's social life", "url": "https://news.example.com/trump-social", "snippet": "His Instagram account is realdonaldtrump, followed by millions."}
+        ]})
+    }
+
+    const TRUMP: &str = "recon donald trumps social life. refer to his social accounts for context.";
+
+    fn derived(texts: &[&str]) -> Vec<super::super::DerivedQuestion> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(n, text)| super::super::DerivedQuestion { id: format!("q{}", n + 1), text: text.to_string(), ..Default::default() })
+            .collect()
+    }
+
+    #[test]
+    fn an_imperative_social_prompt_names_the_person_not_the_sentence() {
+        assert_eq!(super::super::question_subject(TRUMP), "donald trump");
+        let known = investigation::question_bindings(TRUMP);
+        assert!(!known.iter().any(|binding| binding.kind == "person_name" && binding.value.split_whitespace().count() > 4), "{known:?}");
+        let rules = investigation::rule_bindings(TRUMP, "call-s1", "firecrawl_search", &trump_search());
+        let handles: Vec<(String, String)> = rules
+            .iter()
+            .filter(|binding| binding.kind == "handle")
+            .map(|binding| (binding.qualifier.clone(), binding.value.clone()))
+            .collect();
+        assert!(handles.contains(&("truthsocial".into(), "realDonaldTrump".into())), "{handles:?}");
+        assert!(handles.contains(&("twitter".into(), "realDonaldTrump".into())), "{handles:?}");
+        assert!(rules.iter().all(|binding| binding.evidence_id == "call-s1"));
+        assert!(!rules.iter().any(|binding| binding.kind == "person_name" && binding.value.to_ascii_lowercase().contains("scraper")), "{rules:?}");
+        assert!(!rules.iter().any(|binding| binding.kind == "domain" && binding.value == "apify.com"), "{rules:?}");
+    }
+
+    #[tokio::test]
+    async fn trump_social_run_fills_one_sociavault_call_per_question_platform_and_keybase() {
+        let model_reply = json!({"bindings": [
+            {"kind": "handle", "value": "@realDonaldTrump", "platform": "Truth Social", "evidence_id": "call-s1"},
+            {"kind": "handle", "value": "realdonaldtrump", "platform": "Instagram", "evidence_id": "call-s1"},
+            {"kind": "person_name", "value": "Trump Truth Social archive scraper", "evidence_id": "call-s1"}
+        ]});
+        let (base, bodies) = scripted(vec![(200, model_reply.to_string(), true)]).await;
+        let recon = chat_model(&base);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
+        let mut plan = Plan {
+            derived_questions: derived(&[
+                "What does Donald Trump post on Twitter?",
+                "How does Donald Trump present himself on Instagram?",
+                "Does Donald Trump run a Facebook page?",
+            ]),
+            calls: vec![step("s1", "firecrawl_search", &[]), step("s2", "sociavault_profile", &["s1"]), step("s3", "keybase_identity", &["s1"])],
+            ..Plan::default()
+        };
+        plan.bindings = investigation::question_bindings(TRUMP);
+        let unkeyed = HashSet::new();
+        let gate = ModelGate::default();
+        let env = StepEnv { question: TRUMP, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &recon, gate: &gate, cancel: &cancel, per_platform_allowance: 2 };
+        let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
+        let mut session = picker::Picker::new(&none, &cancel);
+        let ran = std::sync::Mutex::new(Vec::new());
+        let runner = |call: PlanCall| {
+            ran.lock().unwrap().push((call.step_id.clone(), call.tool_id.clone(), call.arguments.clone()));
+            let observation = if call.tool_id == "firecrawl_search" { trump_search() } else { json!({"ok": true}) };
+            let id = format!("call-{}", call.step_id);
+            async move { Ok(StepOutcome::Ran(id, Box::new(result(&call.tool_id, "completed", observation)))) }
+        };
+        let mut progress = |_: &str| {};
+        let mut persist = |_: &Plan, _: &str| Ok(());
+        execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
+        let ran = ran.lock().unwrap().clone();
+        let steps: Vec<&str> = ran.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(steps, ["s1", "s2a", "s2b", "s3"], "{ran:?}\n{plan:#?}");
+        assert_eq!(ran[1].2, json!({"platform": "twitter", "handle": "realDonaldTrump"}));
+        assert_eq!(ran[2].2, json!({"platform": "instagram", "handle": "realdonaldtrump"}), "the model-found Instagram handle is used");
+        assert!(ran[3].2["username"].as_str().unwrap().eq_ignore_ascii_case("realDonaldTrump"), "{:?}", ran[3]);
+        let facebook = plan.calls.iter().find(|call| call.arguments["platform"] == "facebook").expect("facebook step kept");
+        assert_eq!(facebook.status, "deferred");
+        assert!(facebook.filled.iter().any(|fill| fill.contains("inferred for facebook")), "{:?}", facebook.filled);
+        assert!(plan.deferred.iter().any(|line| line.contains("sociavault_profile facebook") && line.contains("allowance")), "{:?}", plan.deferred);
+        assert!(plan.bindings.iter().any(|binding| binding.qualifier == "facebook" && binding.inferred));
+        assert!(plan.bindings.iter().any(|binding| binding.qualifier == "truthsocial" && binding.value == "realDonaldTrump" && !binding.inferred));
+        assert!(!plan.bindings.iter().any(|binding| binding.kind == "person_name" && binding.value.contains("scraper")));
+        assert!(plan.binding_notes.first().is_some_and(|note| note.starts_with("s1 firecrawl_search: rules found") && note.contains("Recon model added 1")), "{:?}", plan.binding_notes);
+        assert!(!bodies.lock().unwrap().is_empty(), "the Recon model binding step ran");
+        assert!(plan.unresolved_inputs.is_empty(), "{:?}", plan.unresolved_inputs);
+        assert!(plan.fallback_requests.is_empty(), "{:?}", plan.fallback_requests);
+    }
+
+    #[tokio::test]
+    async fn no_handle_after_the_search_fires_the_starved_fallback_accounts_search() {
+        let (base, bodies) = scripted(vec![choice("firecrawl_search", 0.7)]).await;
+        let secret = jev(&base);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
+        let mut plan = Plan {
+            derived_questions: derived(&["What does Donald Trump post on Twitter?", "Who follows Donald Trump?", "What is Donald Trump's background?"]),
+            calls: vec![step("s1", "firecrawl_search", &[]), step("s2", "sociavault_profile", &["s1"]), step("s3", "keybase_identity", &["s1"])],
+            ..Plan::default()
+        };
+        plan.bindings = investigation::question_bindings(TRUMP);
+        let unkeyed = HashSet::new();
+        let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
+        let gate = ModelGate::default();
+        let env = StepEnv { question: TRUMP, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 1 };
+        let mut session = picker::Picker::new(&secret, &cancel);
+        let ran = std::sync::Mutex::new(Vec::new());
+        let runner = |call: PlanCall| {
+            ran.lock().unwrap().push((call.step_id.clone(), call.tool_id.clone(), call.arguments.clone()));
+            let observation = if call.pick_reason.starts_with("fallback:") {
+                trump_search()
+            } else {
+                json!({"results": [{"title": "Trump Truth Social archive scraper - Apify", "url": "https://apify.com/scraper/truth-social", "snippet": "Scrape posts from any account."}]})
+            };
+            let id = format!("call-{}", call.step_id);
+            async move { Ok(StepOutcome::Ran(id, Box::new(result(&call.tool_id, "completed", observation)))) }
+        };
+        let mut progress = |_: &str| {};
+        let mut persist = |_: &Plan, _: &str| Ok(());
+        execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
+        assert_eq!(bodies.lock().unwrap().len(), 1, "one fallback pick");
+        assert_eq!(plan.fallback_requests.len(), 1, "{:?}", plan.fallback_requests);
+        assert!(plan.fallback_requests[0].contains("handle"), "{:?}", plan.fallback_requests);
+        let ran = ran.lock().unwrap().clone();
+        assert_eq!(ran[1].1, "firecrawl_search", "{ran:?}");
+        assert!(ran[1].2["query"].as_str().unwrap().contains("official social media accounts"), "{ran:?}");
+        assert_eq!(ran[2].2, json!({"platform": "twitter", "handle": "realDonaldTrump"}), "{ran:?}");
+        assert!(plan.binding_notes.iter().any(|note| note.contains("no Recon model is configured")), "{:?}", plan.binding_notes);
     }
 }

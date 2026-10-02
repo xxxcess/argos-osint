@@ -70,13 +70,6 @@ pub struct ToolSuggestion {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct AnswerAssessment {
-    pub answered: bool,
-    pub tools: Vec<ToolSuggestion>,
-}
-
 /// Tools that could supply context the current results do not. At least three when the registry allows it.
 #[allow(dead_code)]
 pub fn additional_tools(
@@ -458,7 +451,7 @@ pub struct Account {
 /// Platforms whose accounts Recon extracts and attaches to the subject.
 pub const ACCOUNT_PLATFORMS: &[&str] = &[
     "twitter", "truthsocial", "instagram", "facebook", "youtube", "tiktok", "threads", "linkedin",
-    "twitch", "github", "keybase", "wikipedia",
+    "twitch", "github", "keybase", "wikipedia", "pinterest",
 ];
 
 /// Sites that host accounts. Their domains are never organizations in a result set.
@@ -466,7 +459,7 @@ fn account_platform_host(host: &str) -> bool {
     const HOSTS: &[&str] = &[
         "x.com", "twitter.com", "truthsocial.com", "instagram.com", "facebook.com", "fb.com",
         "youtube.com", "youtu.be", "tiktok.com", "threads.net", "linkedin.com", "twitch.tv",
-        "github.com", "gitlab.com", "keybase.io", "reddit.com", "medium.com", "substack.com",
+        "github.com", "gitlab.com", "keybase.io", "reddit.com", "pinterest.com", "medium.com", "substack.com",
         "rumble.com", "gettr.com", "parler.com", "bsky.app", "mastodon.social", "linktr.ee",
     ];
     HOSTS
@@ -477,6 +470,7 @@ fn account_platform_host(host: &str) -> bool {
 /// Deterministic extraction: profile URLs (x.com/<h>, twitter.com/<h>, truthsocial.com/@<h>,
 /// instagram.com/<h>, facebook.com/<h>, github.com/<h>, keybase.io/<h>, youtube.com/@<h>, …)
 /// in result links and text. Keeps only accounts that belong to the subject.
+#[allow(dead_code)]
 pub fn fallback_accounts(question: &str, hits: &[SearchHit]) -> Vec<Account> {
     let subject = subject_of(question);
     let mut accounts = Vec::new();
@@ -496,110 +490,6 @@ pub fn fallback_accounts(question: &str, hits: &[SearchHit]) -> Vec<Account> {
     accounts
 }
 
-/// Accounts the Recon model extracted. Each must use a known platform, be a valid handle,
-/// appear in the results, and belong to the subject (its handle or its result names it).
-#[allow(dead_code)]
-pub fn accounts_from_model(value: &Value, question: &str, hits: &[SearchHit]) -> Vec<Account> {
-    let subject = subject_of(question);
-    let mut accounts = Vec::new();
-    let Some(rows) = value.get("accounts").and_then(Value::as_array) else {
-        return accounts;
-    };
-    for row in rows.iter().take(24) {
-        let platform = row
-            .get("platform")
-            .and_then(Value::as_str)
-            .map(normalize_platform)
-            .unwrap_or_default();
-        let raw = row.get("handle").and_then(Value::as_str).unwrap_or("").trim();
-        if raw.is_empty() {
-            continue;
-        }
-        let (platform, handle) = if raw.contains('/') {
-            match super::extract_social_handles(&[raw.to_string()]).into_iter().next() {
-                Some(found) => (found.platform, found.handle),
-                None => continue,
-            }
-        } else {
-            let Ok(token) = osint::social_token(raw) else {
-                continue;
-            };
-            let handle = match platform.as_str() {
-                "facebook" => format!("https://www.facebook.com/{token}"),
-                "linkedin" => format!("https://www.linkedin.com/in/{token}"),
-                _ => token,
-            };
-            (platform, handle)
-        };
-        if !ACCOUNT_PLATFORMS.contains(&platform.as_str()) {
-            continue;
-        }
-        let needle = handle
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(&handle)
-            .to_ascii_lowercase();
-        let Some(source) = hits.iter().find(|hit| {
-            appears_as_token(&format!("{} {} {}", hit.url, hit.title, hit.snippet), &needle)
-        }) else {
-            continue;
-        };
-        // A handle that does not carry the subject's name needs its own profile page
-        // titled with the subject; a mention inside an article about the subject is not enough.
-        let profile = hits.iter().any(|hit| {
-            appears_as_token(&hit.url, &needle) && names_subject(&subject, &hit.title)
-        });
-        if names_subject(&subject, &handle) || profile {
-            push_account(&mut accounts, &platform, &handle, &source.evidence_id, "model");
-        }
-    }
-    accounts
-}
-
-/// The handle appears whole in the text, not inside a longer handle or word.
-#[allow(dead_code)]
-fn appears_as_token(text: &str, needle: &str) -> bool {
-    let text = text.to_ascii_lowercase();
-    let part = |ch: Option<char>| ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-    !needle.is_empty()
-        && text.match_indices(needle).any(|(index, _)| {
-            !part(text[..index].chars().next_back()) && !part(text[index + needle.len()..].chars().next())
-        })
-}
-
-/// Tools the Recon model picked to answer the question, limited to enabled, non-Firecrawl tools.
-#[allow(dead_code)]
-pub fn model_tool_picks(value: &Value, enabled: &HashSet<String>) -> Vec<ToolSuggestion> {
-    let mut tools: Vec<ToolSuggestion> = Vec::new();
-    for row in value.get("tools").and_then(Value::as_array).into_iter().flatten().take(12) {
-        let Some(id) = row.get("tool_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(tool) = osint::definition(id) else {
-            continue;
-        };
-        if tool.id.starts_with("firecrawl_")
-            || !enabled.contains(tool.id)
-            || tools.iter().any(|item| item.tool_id == tool.id)
-        {
-            continue;
-        }
-        let reason = row
-            .get("reason")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|reason| !reason.is_empty())
-            .map(clip_query)
-            .unwrap_or_else(|| format!("The Recon model picked {} for this question.", tool.name));
-        tools.push(ToolSuggestion {
-            tool_id: tool.id.into(),
-            reason,
-        });
-    }
-    tools
-}
-
 #[allow(dead_code)]
 fn normalize_platform(value: &str) -> String {
     let compact: String = value
@@ -617,6 +507,7 @@ fn normalize_platform(value: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn push_account(accounts: &mut Vec<Account>, platform: &str, handle: &str, evidence: &str, source: &str) {
     if let Some(existing) = accounts.iter_mut().find(|account| {
         account.platform == platform && account.handle.eq_ignore_ascii_case(handle)
@@ -632,19 +523,6 @@ fn push_account(accounts: &mut Vec<Account>, platform: &str, handle: &str, evide
         evidence_id: evidence.into(),
         sources: vec![source.into()],
     });
-}
-
-/// Model accounts first, then pattern accounts, deduplicated by platform and handle.
-#[allow(dead_code)]
-pub fn merge_accounts(model: &[Account], pattern: &[Account]) -> Vec<Account> {
-    let mut merged = Vec::new();
-    for account in model.iter().chain(pattern) {
-        for source in &account.sources {
-            push_account(&mut merged, &account.platform, &account.handle, &account.evidence_id, source);
-        }
-    }
-    merged.truncate(16);
-    merged
 }
 
 /// Attaches the accounts to the subject entity as handles, creating the subject entity
@@ -708,67 +586,6 @@ pub fn attach_accounts(
             entity.evidence_ids.push(account.evidence_id.clone());
         }
     }
-}
-
-/// `twitter @realDonaldTrump (model, pattern)`, for the decision block.
-#[allow(dead_code)]
-pub fn account_line(account: &Account) -> String {
-    let handle = if account.handle.contains('/') {
-        account.handle.clone()
-    } else {
-        format!("@{}", account.handle)
-    };
-    format!("{} {handle} ({})", account.platform, account.sources.join(", "))
-}
-
-#[allow(dead_code)]
-pub fn assessment_from_model(value: &Value, fallback: &[ToolSuggestion]) -> Option<AnswerAssessment> {
-    let answered = value.get("answered")?.as_bool()?;
-    if answered {
-        return Some(AnswerAssessment {
-            answered: true,
-            tools: Vec::new(),
-        });
-    }
-    let mut tools: Vec<ToolSuggestion> = Vec::new();
-    if let Some(rows) = value.get("tools").and_then(Value::as_array) {
-        for row in rows {
-            let Some(id) = row.get("tool_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if osint::definition(id).is_none() || tools.iter().any(|tool| tool.tool_id == id) {
-                continue;
-            }
-            let reason = row
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if reason.is_empty() {
-                continue;
-            }
-            tools.push(ToolSuggestion {
-                tool_id: id.into(),
-                reason: reason.into(),
-            });
-        }
-    }
-    for suggestion in fallback {
-        if tools.len() >= 3 {
-            break;
-        }
-        if tools.iter().any(|tool| tool.tool_id == suggestion.tool_id) {
-            continue;
-        }
-        tools.push(suggestion.clone());
-    }
-    if tools.len() < 3 {
-        return None;
-    }
-    Some(AnswerAssessment {
-        answered: false,
-        tools,
-    })
 }
 
 #[allow(dead_code)]
@@ -2559,7 +2376,7 @@ fn propose(tool_id: &str, input: &SelectionInput<'_>) -> Option<ProposedAction> 
                 "Deliverability was requested for an address in the question.",
             )
         }
-        "hunter_tech_lookup" if kind == "technology" => {
+        "hunter_company_enrichment" if kind == "technology" => {
             let entity = entity?;
             let domain = domain?;
             grounded(
@@ -3038,8 +2855,13 @@ fn bitcoin_in(text: &str) -> Option<String> {
 // binding, fallback questions, rule binders, and the deterministic picker.
 // ---------------------------------------------------------------------------
 
-use super::{Binding, DerivedQuestion};
+use super::{Binding, Directive};
 
+pub(crate) mod directives;
+pub use directives::{
+    directive_entities, directive_for_target, directive_query, fallback_directives,
+    grounded_query, parse_directives, refers_back, relevance_gate, GroundedQuery, QUALIFIERS,
+};
 mod tool_io;
 pub use tool_io::{
     accept_bindings, bind_arguments, catalog_inputs, consumers_of, dependencies, dependency,
@@ -3047,9 +2869,11 @@ pub use tool_io::{
     pickable, plausible_person_name, question_platforms, rule_bindings, tool_row, unmet_kinds,
     unmet_needs, vet_model_bindings, BINDING_KINDS, COORDINATES_KIND, URL_KIND,
 };
+pub use tool_io::{allowed_producer, binding_allowed, restricted_sources, GATES};
+pub use tool_io::{bind_step, evidence_kinds};
 use tool_io::coordinates_in_text;
 
-fn social_or_publisher(domain: &str) -> bool {
+pub(crate) fn social_or_publisher(domain: &str) -> bool {
     let host = domain.trim_start_matches("www.").to_ascii_lowercase();
     account_platform_host(&host) || publisher_host(&host)
 }
@@ -3063,13 +2887,6 @@ fn first_domain(bindings: &[Binding]) -> Option<&Binding> {
         .iter()
         .find(|binding| binding.kind == "domain" && !social_or_publisher(&binding.value))
 }
-
-/// Webmail hosts: an address there says nothing about the owner's organization.
-const FREE_MAIL: &[&str] = &[
-    "gmail.com", "googlemail.com", "yahoo.com", "outlook.com", "hotmail.com", "live.com",
-    "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "mail.com",
-    "yandex.com", "zoho.com",
-];
 
 /// Bindings already known from the user's question: every kind in `PROMPT_KINDS`.
 pub fn question_bindings(question: &str) -> Vec<Binding> {
@@ -3115,7 +2932,7 @@ pub fn question_bindings(question: &str) -> Vec<Binding> {
     for email in &emails {
         add(&mut found, "email", email.clone(), "");
         if let Some((_, host)) = email.rsplit_once('@') {
-            if !FREE_MAIL.contains(&host) {
+            if !crate::osint::webmail_host(host) {
                 add(&mut found, "domain", host.to_string(), "");
             }
         }
@@ -3168,11 +2985,11 @@ pub fn question_bindings(question: &str) -> Vec<Binding> {
 /// handle and platform bindings with the question id as evidence, marked `unverified`.
 /// The handle must occur verbatim in that question, must name the subject (a derived
 /// question is model text), and is skipped when the user's own question already gave it.
-pub fn derived_question_handles(question: &str, questions: &[DerivedQuestion], known: &[Binding]) -> Vec<Binding> {
+pub fn derived_question_handles(question: &str, questions: &[Directive], known: &[Binding]) -> Vec<Binding> {
     let subject = subject_of(question);
     let mut found: Vec<Binding> = Vec::new();
     for item in questions {
-        let text = item.text.as_str();
+        let text = item.goal.as_str();
         let mut pairs: Vec<(String, String)> = super::extract_social_handles(&[text.to_string()])
             .into_iter()
             .map(|handle| (handle.handle, handle.platform))
@@ -3205,131 +3022,24 @@ pub fn derived_question_handles(question: &str, questions: &[DerivedQuestion], k
     found
 }
 
-/// The query of the one accounts search a starved handle step may add. A person's search
-/// names the platforms the questions ask about ("Elon Musk official X Twitter Instagram
-/// account") so profile pages outrank Q&A and aggregator pages; others ask for the
-/// official website and accounts.
-pub fn accounts_search_query(question: &str, questions: &[DerivedQuestion], bindings: &[Binding]) -> String {
-    let subject = display_name(&subject_of(question));
-    let person = target_kind(question) == "person" || bindings.iter().any(|binding| binding.kind == "person_name");
-    if !person {
-        return format!("{subject} official website social media accounts");
-    }
-    let mut texts: Vec<(String, String)> = questions.iter().map(|item| (item.id.clone(), item.text.clone())).collect();
-    texts.push(("question".into(), question.to_string()));
-    let mut labels: Vec<&str> = Vec::new();
-    for (platform, _) in question_platforms(&texts) {
-        let label = match platform.as_str() {
-            "twitter" => "X Twitter",
-            "instagram" => "Instagram",
-            "facebook" => "Facebook",
-            "tiktok" => "TikTok",
-            "youtube" => "YouTube",
-            "linkedin" => "LinkedIn",
-            "threads" => "Threads",
-            "twitch" => "Twitch",
-            _ => continue,
-        };
-        if !labels.contains(&label) {
-            labels.push(label);
-        }
-    }
-    if labels.is_empty() {
-        labels = vec!["X Twitter", "Instagram"];
-    }
-    format!("{subject} official {} account", labels.join(" "))
-}
-
-/// Three fixed questions when the Recon model is unavailable or its reply fails:
-/// identity, associated accounts or domains, and a corroborating public record.
-pub fn fallback_questions(question: &str) -> Vec<DerivedQuestion> {
-    let subject = display_name(&subject_of(question));
-    let kind = target_kind(question);
-    let named = if kind == "person" { "person_name" } else { "org_name" };
-    let identity = DerivedQuestion {
-        id: "q1".into(),
-        text: format!("Who or what is {subject}, and which authoritative identifiers describe it?"),
-        serves: "Establishes the subject before any enrichment.".into(),
-        needs: Vec::new(),
-        evidence: vec![named.into(), "domain".into()],
-    };
-    let second = if matches!(kind, "person" | "organization") {
-        DerivedQuestion {
-            id: "q2".into(),
-            text: format!("Which online accounts and handles belong to {subject}?"),
-            serves: "Finds handles that profile tools can enrich.".into(),
-            needs: vec![named.into()],
-            evidence: vec!["handle".into(), "platform".into()],
-        }
+/// The one accounts search a starved handle step may add: the entity of the directive
+/// that targets handles plus the fixed `official account` qualifier (`Elon Musk official
+/// account`), with its grounding label. `None` without a directive entity.
+pub fn accounts_search_query(question: &str, directives: &[Directive]) -> Option<(String, GroundedQuery)> {
+    let fallback;
+    let directives = if directives.is_empty() {
+        fallback = fallback_directives(question, &[]);
+        fallback.as_slice()
     } else {
-        DerivedQuestion {
-            id: "q2".into(),
-            text: format!("Which domains, hosts, or addresses are associated with {subject}?"),
-            serves: "Finds infrastructure identifiers that lookup tools accept.".into(),
-            needs: Vec::new(),
-            evidence: vec!["domain".into(), "ip".into()],
-        }
+        directives
     };
-    let record: (&str, Vec<&str>) = match gap_kind(question) {
-        "contacts" | "deliverability" => ("Which public record confirms a contact address for", vec!["email"]),
-        "infrastructure" | "registration" => ("Which registration or network record corroborates", vec!["domain", "ip"]),
-        "vulnerability" => ("Which published advisory record describes", vec!["cve"]),
-        "bitcoin" => ("Which public ledger record shows activity for", vec!["wallet"]),
-        "place" => ("Which public geographic record locates", vec!["address"]),
-        "code" => ("Which public code repository corroborates", vec!["handle", "org_name"]),
-        _ => ("Which independent public record corroborates what is known about", vec![named, "domain"]),
-    };
-    let third = DerivedQuestion {
-        id: "q3".into(),
-        text: format!("{} {subject}?", record.0),
-        serves: "Corroborates the answer with an independent record.".into(),
-        needs: Vec::new(),
-        evidence: record.1.into_iter().map(String::from).collect(),
-    };
-    vec![identity, second, third]
-}
-
-/// Validates a Recon reply: exactly three questions with ids q1–q3, non-empty text,
-/// closed-vocabulary needs and evidence, and evidence that some enabled tool accepts.
-pub fn parse_questions(value: &Value, enabled: &HashSet<String>) -> Result<Vec<DerivedQuestion>, String> {
-    let list = value
-        .get("questions")
-        .and_then(Value::as_array)
-        .ok_or("the reply has no questions array")?;
-    if list.len() != 3 {
-        return Err(format!("expected exactly 3 questions, got {}", list.len()));
-    }
-    let mut questions = Vec::new();
-    for (index, item) in list.iter().enumerate() {
-        let question: DerivedQuestion = serde_json::from_value(item.clone())
-            .map_err(|err| format!("question {} is malformed: {err}", index + 1))?;
-        let expected = format!("q{}", index + 1);
-        if question.id != expected {
-            return Err(format!("question {} must have id {expected}", index + 1));
-        }
-        let text = question.text.trim();
-        if text.is_empty() || text.chars().count() > 300 {
-            return Err(format!("{expected} text must be 1 to 300 characters"));
-        }
-        for kind in question.needs.iter().chain(&question.evidence) {
-            if !BINDING_KINDS.contains(&kind.as_str()) {
-                return Err(format!("{expected} uses {kind}, which is not in the binding vocabulary"));
-            }
-        }
-        let answerable = question.evidence.iter().any(|kind| {
-            enabled
-                .iter()
-                .any(|tool| pickable(tool) && input_kinds(tool).contains(&kind.as_str()))
-        });
-        if !answerable {
-            return Err(format!("{expected} evidence matches no enabled tool input"));
-        }
-        questions.push(DerivedQuestion {
-            text: text.into(),
-            ..question
-        });
-    }
-    Ok(questions)
+    let directive = directive_for_target(directives, "handle").or_else(|| directives.first())?;
+    let entity = directive.entities.first()?;
+    let qualifier = QUALIFIERS.iter().find(|(kind, _)| *kind == "handle").map(|(_, value)| *value).unwrap_or("");
+    let query = format!("{entity} {qualifier}");
+    grounded_query(&query, &directive.entities, &[]).then(|| {
+        (directive.id.clone(), GroundedQuery { query, source: format!("{} entity + qualifier", directive.id) })
+    })
 }
 
 /// Default picking ladders when the picker model is unavailable, by what the question
@@ -3347,9 +3057,17 @@ fn ladder(question: &str, bindings: &[Binding]) -> Vec<&'static str> {
         }
     }
     match target_kind(question) {
-        "person" => order.extend(["firecrawl_search", "wikidata_entities", "sociavault_profile", "keybase_identity", "stackexchange_users", "github_repositories", "firecrawl_scrape"]),
-        "organization" => order.extend(["firecrawl_search", "wikidata_entities", "hunter_domain_search", "sociavault_profile", "gleif_entities", "sec_submissions", "crtsh_certificates", "firecrawl_scrape"]),
-        _ => order.extend(["firecrawl_search", "wikidata_entities", "firecrawl_scrape", "github_repositories"]),
+        // Primary providers first (Firecrawl, SociaVault, Hunter), then gap-fillers.
+        "person" => order.extend([
+            "firecrawl_search", "sociavault_profile", "sociavault_search_users", "sociavault_user_content", "firecrawl_scrape",
+            "hunter_person_enrichment", "wikidata_entities", "keybase_identity", "stackexchange_users", "github_repositories",
+        ]),
+        "organization" => order.extend([
+            "firecrawl_search", "hunter_domain_finder", "hunter_company_enrichment", "firecrawl_map", "firecrawl_batch_scrape",
+            "hunter_email_count", "hunter_domain_search", "sociavault_profile", "wikidata_entities", "gleif_entities",
+            "sec_submissions", "crtsh_certificates", "firecrawl_scrape",
+        ]),
+        _ => order.extend(["firecrawl_search", "sociavault_search", "firecrawl_scrape", "wikidata_entities", "github_repositories"]),
     }
     order
 }
@@ -3358,7 +3076,7 @@ fn ladder(question: &str, bindings: &[Binding]) -> Vec<&'static str> {
 /// the default ladder, keeping only candidates not already picked. Unkeyed tools go last.
 pub fn fallback_order(
     question: &str,
-    questions: &[DerivedQuestion],
+    questions: &[Directive],
     bindings: &[Binding],
     candidates: &[String],
     unkeyed: &HashSet<String>,
@@ -3392,8 +3110,8 @@ pub fn fallback_order(
     for item in questions {
         gaps.push(Gap {
             id: item.id.clone(),
-            question: item.text.clone(),
-            kind: gap_kind(&item.text).into(),
+            question: item.goal.clone(),
+            kind: gap_kind(&item.goal).into(),
         });
     }
     let enabled: HashSet<String> = candidates.iter().cloned().collect();
@@ -3449,9 +3167,9 @@ pub fn dependency_order(
                 if !unmet.contains(group) {
                     continue;
                 }
-                let earlier = order[..index]
-                    .iter()
-                    .any(|other| row.producers.contains(&other.as_str()) || group.iter().any(|kind| produces(other, kind)));
+                let earlier = order[..index].iter().any(|other| {
+                    allowed_producer(&tool, other) && (row.producers.contains(&other.as_str()) || group.iter().any(|kind| produces(other, kind)))
+                });
                 if earlier {
                     continue;
                 }
@@ -3467,11 +3185,30 @@ pub fn dependency_order(
                 }
             }
         }
+        // Gates: email count before domain search, email insight before enrichment.
+        if !moved {
+            for (first, second) in GATES {
+                let at_first = order.iter().position(|id| canonical(id) == *first);
+                let at_second = order.iter().position(|id| canonical(id) == *second);
+                if let (Some(at_first), Some(at_second)) = (at_first, at_second) {
+                    if at_first > at_second {
+                        let gate = order.remove(at_first);
+                        order.insert(at_second, gate);
+                        moved = true;
+                        break;
+                    }
+                }
+            }
+        }
         if !moved {
             break;
         }
     }
     order
+}
+
+fn canonical(id: &str) -> &str {
+    crate::osint::canonical_tool_id(id)
 }
 
 /// Earlier steps whose output a step needs: declared producers and output kinds for
@@ -3497,11 +3234,13 @@ pub fn depends_on(
     let mut deps = Vec::new();
     for (earlier, other) in order[..index].iter().enumerate() {
         let declared = !wanted.is_empty() && producers.contains(&other.as_str());
-        let yields = wanted.iter().any(|kind| {
-            output_kinds(other).contains(&kind.as_str())
-                || chat_produces.get(other).is_some_and(|kinds| kinds.contains(kind))
-        });
-        if declared || yields {
+        let yields = allowed_producer(tool, other)
+            && wanted.iter().any(|kind| {
+                output_kinds(other).contains(&kind.as_str())
+                    || chat_produces.get(other).is_some_and(|kinds| kinds.contains(kind))
+            });
+        let gated = GATES.iter().any(|(first, second)| *first == canonical(other) && *second == canonical(tool));
+        if declared || yields || gated {
             deps.push(earlier);
         }
     }
@@ -3563,7 +3302,7 @@ mod tests {
     }
 
     #[test]
-    fn unanswered_questions_name_three_more_tools_and_answered_ones_name_none() {
+    fn additional_tools_name_three_more_unused_tools() {
         let enabled = enabled_all();
         let mut used = HashSet::new();
         used.insert("firecrawl_search".into());
@@ -3571,18 +3310,6 @@ mod tests {
         assert!(tools.len() >= 3);
         assert!(tools.iter().all(|tool| tool.tool_id != "firecrawl_search"));
         assert!(tools.iter().any(|tool| tool.tool_id == "crtsh_certificates"));
-        let fallback = tools.clone();
-        let answered = assessment_from_model(&json!({"answered": true, "tools": [{"tool_id": "crtsh_certificates", "reason": "ignored"}]}), &fallback).unwrap();
-        assert!(answered.answered);
-        assert!(answered.tools.is_empty());
-        let partial = assessment_from_model(
-            &json!({"answered": false, "tools": [{"tool_id": "wikidata_entities", "reason": "Confirm the named organization."}]}),
-            &fallback,
-        )
-        .unwrap();
-        assert!(!partial.answered);
-        assert!(partial.tools.len() >= 3);
-        assert_eq!(partial.tools[0].tool_id, "wikidata_entities");
     }
 
     #[test]
@@ -3764,7 +3491,7 @@ mod tests {
         assert!(contact_actions
             .actions
             .iter()
-            .all(|action| action.tool_id != "hunter_tech_lookup"));
+            .all(|action| action.tool_id != "hunter_company_enrichment"));
         let tech = gaps_for(
             "what technology stack does Amazon use?",
             ADAPTIVE,
@@ -3787,7 +3514,7 @@ mod tests {
         assert!(tech_actions
             .actions
             .iter()
-            .any(|action| action.tool_id == "hunter_tech_lookup"));
+            .any(|action| action.tool_id == "hunter_company_enrichment"));
         assert!(tech_actions
             .actions
             .iter()
@@ -3966,12 +3693,22 @@ mod tests {
         input(TRUMP, DISCOVERY, true, entities, gaps, enabled, empty, empty, credits, costs, hits)
     }
 
+    /// The legacy isolation path ranks by description; the SociaVault search, content,
+    /// and Google tools added in #27 are picker-driven, so these tests leave them out.
+    fn legacy_enabled() -> HashSet<String> {
+        let mut enabled = enabled_all();
+        for id in ["sociavault_search", "sociavault_search_users", "sociavault_user_content", "sociavault_google_search"] {
+            enabled.remove(id);
+        }
+        enabled
+    }
+
     #[test]
     fn tool_isolation_runs_the_suggested_tools_with_subject_inputs_and_no_firecrawl() {
         let hits = trump_hits();
         let entities = select_entities(TRUMP, &hits);
         let gaps = gaps_for(TRUMP, DISCOVERY, &entities, None);
-        let enabled = enabled_all();
+        let enabled = legacy_enabled();
         let empty = HashSet::new();
         let credits = HashMap::from([
             ("firecrawl".into(), 20),
@@ -4007,7 +3744,7 @@ mod tests {
         let hits = trump_hits();
         let entities = select_entities(TRUMP, &hits);
         let gaps = gaps_for(TRUMP, DISCOVERY, &entities, None);
-        let enabled = enabled_all();
+        let enabled = legacy_enabled();
         let empty = HashSet::new();
         let credits = HashMap::from([("sociavault".into(), 5), ("firecrawl".into(), 20)]);
         let costs = HashMap::new();
@@ -4116,47 +3853,10 @@ mod tests {
     }
 
     #[test]
-    fn model_accounts_are_grounded_owned_and_merged_with_the_fallback() {
-        let hits = account_hits();
-        let value = json!({
-            "accounts": [
-                {"platform": "X", "handle": "@realDonaldTrump", "evidence_id": "e2"},
-                {"platform": "Truth Social", "handle": "https://truthsocial.com/@realDonaldTrump"},
-                {"platform": "twitter", "handle": "trumpfakeaccount"},
-                {"platform": "twitter", "handle": "apreporter"},
-                {"platform": "myspace", "handle": "realDonaldTrump"},
-                {"platform": "facebook", "handle": "DonaldTrump"}
-            ],
-            "tools": [
-                {"tool_id": "firecrawl_search", "reason": "search again"},
-                {"tool_id": "keybase_identity", "reason": "Check proofs for the handle."},
-                {"tool_id": "not_a_tool", "reason": "x"}
-            ]
-        });
-        let model = accounts_from_model(&value, TRUMP, &hits);
-        assert_eq!(model.len(), 2, "{model:?}");
-        assert!(model.iter().all(|account| account.handle.eq_ignore_ascii_case("realDonaldTrump")));
-        let tools = model_tool_picks(&value, &enabled_all());
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].tool_id, "keybase_identity");
-        let merged = merge_accounts(&model, &fallback_accounts(TRUMP, &hits));
-        let twitter = merged
-            .iter()
-            .find(|account| account.platform == "twitter")
-            .unwrap();
-        assert_eq!(twitter.sources, ["model", "pattern"]);
-        assert_eq!(
-            merged.iter().filter(|account| account.platform == "twitter").count(),
-            1
-        );
-        assert_eq!(account_line(twitter), "twitter @realDonaldTrump (model, pattern)");
-    }
-
-    #[test]
     fn account_platforms_attach_to_the_subject_and_are_never_entities() {
         let hits = account_hits();
         let mut entities = select_entities(TRUMP, &hits);
-        let accounts = merge_accounts(&[], &fallback_accounts(TRUMP, &hits));
+        let accounts = fallback_accounts(TRUMP, &hits);
         attach_accounts(TRUMP, &hits, &mut entities, &accounts);
         for name in ["truthsocial", "truth social", "instagram", "x", "github", "keybase", "apnews"] {
             assert!(entities.iter().all(|entity| !entity.canonical_name.eq_ignore_ascii_case(name)), "{name}: {entities:?}");
@@ -4219,23 +3919,28 @@ mod tests {
     #[test]
     fn binder_maps_kinds_to_inputs_and_never_hands_hunter_a_social_host() {
         let social = vec![binding("domain", "x.com", "call-1")];
-        let (_, _, missing) = bind_arguments("hunter_domain_search", &social, "who is jane?", "");
+        let (_, _, missing) = bind_arguments("hunter_domain_search", &social, "who is jane example?", None);
         assert_eq!(missing, vec!["domain or company".to_string()]);
-        let mixed = vec![binding("domain", "nytimes.com", "call-1"), binding("domain", "example.org", "call-2")];
-        let (args, filled, missing) = bind_arguments("hunter_domain_search", &mixed, "who is jane?", "");
+        // Hunter takes only prompt or primary-provider bindings (D1).
+        let primary = |kind: &str, value: &str, evidence: &str| Binding { source_tool: "firecrawl_search".into(), ..binding(kind, value, evidence) };
+        let mixed = vec![primary("domain", "nytimes.com", "call-1"), primary("domain", "example.org", "call-2")];
+        let (args, filled, missing) = bind_arguments("hunter_domain_search", &mixed, "who is jane?", None);
         assert!(missing.is_empty());
         assert_eq!(args, json!({"domain": "example.org"}));
-        assert_eq!(filled, vec!["domain=example.org (domain from call-2)".to_string()]);
+        assert_eq!(filled, vec!["domain=example.org (domain from call-2 via firecrawl_search)".to_string()]);
         let handle = Binding { qualifier: "twitter".into(), ..binding("handle", "janeexample", "call-3") };
-        let (args, _, missing) = bind_arguments("sociavault_profile", std::slice::from_ref(&handle), "who is jane?", "");
+        let (args, _, missing) = bind_arguments("sociavault_profile", std::slice::from_ref(&handle), "who is jane?", None);
         assert!(missing.is_empty());
         assert_eq!(args, json!({"platform": "twitter", "handle": "janeexample"}));
         assert!(osint::validate("sociavault_profile", &args).is_ok());
-        let (args, _, _) = bind_arguments("keybase_identity", &[handle], "who is jane?", "");
+        let (args, _, _) = bind_arguments("keybase_identity", &[handle], "who is jane?", None);
         assert_eq!(args, json!({"username": "janeexample"}));
-        let (args, _, _) = bind_arguments("firecrawl_search", &[], "who is jane example?", "Which accounts belong to Jane Example?");
-        assert_eq!(args["query"], json!("Which accounts belong to Jane Example?"));
-        assert_eq!(unmet_needs("sociavault_profile", &[]), vec!["handle".to_string()]);
+        // A search query is the directive entity plus its fixed qualifier, never question text.
+        let directives = fallback_directives("who is jane example?", &[]);
+        let (args, filled, _) = bind_arguments("firecrawl_search", &[], "who is jane example?", Some(&directives[1]));
+        assert_eq!(args["query"], json!("Jane Example official account"));
+        assert_eq!(filled, vec!["query=Jane Example official account (d2 entity + qualifier)".to_string()]);
+        assert_eq!(unmet_needs("sociavault_profile", &[]), vec!["handle or platform_id".to_string()]);
         assert!(unmet_needs("crtsh_certificates", &mixed).is_empty());
     }
 
@@ -4264,7 +3969,7 @@ mod tests {
         assert_eq!(kept[0], "hunter_email_verifier");
         let deps = depends_on(&order, at("sociavault_profile"), &[], &HashMap::new(), &HashMap::new());
         assert!(deps.contains(&at("firecrawl_search")));
-        assert_eq!(fallback_questions("who is jane example?").len(), 3);
+        assert_eq!(fallback_directives("who is jane example?", &[]).len(), 3);
         // Geocoder coordinates make Overpass reachable.
         assert!(pickable("overpass_places"));
         assert!(dependencies().iter().all(|row| osint::definition(row.tool).is_some()));

@@ -396,9 +396,21 @@ pub struct ReconLimits {
     /// Maximum Hunter calls on the opening turn. Zero disables opening enrichment.
     #[serde(default = "default_opening_cap")]
     pub opening_hunter_calls: u8,
-    /// Maximum SociaVault calls on the opening turn.
-    #[serde(default = "default_opening_cap")]
+    /// Retired: SociaVault spending per turn is `sociavault_turn_credits_*`. Kept so older
+    /// settings files still load; not read.
+    #[serde(default = "default_opening_cap", skip_serializing)]
     pub opening_sociavault_calls: u8,
+    /// SociaVault credits one turn may spend on a thread's first turn (spec default D4,
+    /// to confirm). Still capped by the remaining SociaVault credits.
+    #[serde(default = "default_sociavault_turn_credits_opening")]
+    pub sociavault_turn_credits_opening: u32,
+    /// SociaVault credits one turn may spend on later turns (spec default D4, to confirm).
+    #[serde(default = "default_sociavault_turn_credits_later")]
+    pub sociavault_turn_credits_later: u32,
+    /// Firecrawl search counts as weak below this many results, which makes SociaVault
+    /// Google search a fallback candidate (spec default D3, to confirm).
+    #[serde(default = "default_google_fallback_min_results")]
+    pub google_fallback_min_results: u32,
     /// `monthly` restores the recurring allowance. `never` keeps a fixed pool.
     #[serde(default = "default_credit_reset")]
     pub credit_reset: String,
@@ -432,6 +444,21 @@ fn default_sociavault_credits() -> u32 {
 fn default_opening_cap() -> u8 {
     1
 }
+/// Spec default D4 (author's default, to confirm): 3 SociaVault credits on the opening turn.
+pub const SOCIAVAULT_TURN_CREDITS_OPENING: u32 = 3;
+/// Spec default D4 (author's default, to confirm): 8 SociaVault credits on later turns.
+pub const SOCIAVAULT_TURN_CREDITS_LATER: u32 = 8;
+/// Spec default D3 (author's default, to confirm): Firecrawl search with fewer results is weak.
+pub const GOOGLE_FALLBACK_MIN_RESULTS: u32 = 3;
+fn default_sociavault_turn_credits_opening() -> u32 {
+    SOCIAVAULT_TURN_CREDITS_OPENING
+}
+fn default_sociavault_turn_credits_later() -> u32 {
+    SOCIAVAULT_TURN_CREDITS_LATER
+}
+fn default_google_fallback_min_results() -> u32 {
+    GOOGLE_FALLBACK_MIN_RESULTS
+}
 fn default_credit_reset() -> String {
     "monthly".into()
 }
@@ -455,6 +482,9 @@ impl Default for ReconLimits {
             sociavault_trial_credits: 0,
             opening_hunter_calls: default_opening_cap(),
             opening_sociavault_calls: default_opening_cap(),
+            sociavault_turn_credits_opening: SOCIAVAULT_TURN_CREDITS_OPENING,
+            sociavault_turn_credits_later: SOCIAVAULT_TURN_CREDITS_LATER,
+            google_fallback_min_results: GOOGLE_FALLBACK_MIN_RESULTS,
             credit_reset: default_credit_reset(),
             firecrawl_search_cost: default_search_cost(),
             firecrawl_scrape_cost: default_one_cost(),
@@ -484,14 +514,36 @@ impl ReconLimits {
     }
 
     pub fn configured_cost(&self, tool_id: &str) -> Option<(&'static str, u32)> {
-        let priced = |provider: &'static str, credits: u32| Some((provider, credits));
-        match tool_id {
-            "firecrawl_search" => priced("firecrawl", self.firecrawl_search_cost),
-            "firecrawl_scrape" => priced("firecrawl", self.firecrawl_scrape_cost),
-            "hunter_domain_search" | "hunter_email_finder" | "hunter_email_verifier"
-            | "hunter_tech_lookup" => priced("hunter", self.hunter_call_cost),
-            "sociavault_profile" => priced("sociavault", self.sociavault_call_cost),
-            _ => None,
+        self.configured_cost_for(tool_id, &serde_json::Value::Null)
+    }
+
+    /// Credits to hold for one call: the configured per-call price, times the pages a
+    /// batch scrape or crawl asks for. Free Hunter reads stay at zero.
+    pub fn configured_cost_for(
+        &self,
+        tool_id: &str,
+        args: &serde_json::Value,
+    ) -> Option<(&'static str, u32)> {
+        let base = crate::osint::estimated_cost(tool_id, args)?;
+        let credits = match crate::osint::canonical_tool_id(tool_id) {
+            "firecrawl_search" => self.firecrawl_search_cost,
+            "firecrawl_scrape" | "firecrawl_map" => self.firecrawl_scrape_cost,
+            "firecrawl_batch_scrape" | "firecrawl_crawl" => base.credits * self.firecrawl_scrape_cost,
+            "firecrawl_extract" => base.credits,
+            _ if base.provider == "hunter" && base.credits == 0 => 0,
+            _ if base.provider == "hunter" => self.hunter_call_cost,
+            _ if base.provider == "sociavault" => self.sociavault_call_cost,
+            _ => base.credits,
+        };
+        Some((base.provider, credits))
+    }
+
+    /// SociaVault credits one turn may spend before remaining credits are considered.
+    pub fn sociavault_turn_credits(&self, opening: bool) -> u32 {
+        if opening {
+            self.sociavault_turn_credits_opening
+        } else {
+            self.sociavault_turn_credits_later
         }
     }
 }

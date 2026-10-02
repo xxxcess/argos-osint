@@ -1,34 +1,23 @@
-//! Terminal layouts for one memory's directive graph.
-//!
-//! Positions are computed once per draw from a seeded layout. The canvas is not a
-//! physics simulation.
+//! Terminal layouts for one memory's investigation graph.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use argos_osint_core::recon::{force_links, recon_path, GraphNode, GraphNodeKind, MemoryGraph};
 
 use super::app::{App, GraphView, Target};
-use super::theme::{self, panel};
+use super::theme;
 
-struct Spot {
+struct Chip {
     node_id: String,
-    x: f64,
-    y: f64,
+    x: u16,
+    y: u16,
+    width: u16,
     label: String,
-}
-
-struct Stroke {
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    color: ratatui::style::Color,
-    label: String,
+    color: Color,
 }
 
 pub fn selectable<'a>(graph: &'a MemoryGraph, view: GraphView) -> Vec<&'a GraphNode> {
@@ -56,11 +45,12 @@ pub fn inspector(app: &App) -> String {
         }
         return "Select a node.".into();
     };
-    let mut lines = vec![
-        format!("{}  {}", node.kind.label(), node.label),
-        node.detail.clone(),
-        String::new(),
-    ];
+    let mut lines = vec![node.kind.label().to_ascii_uppercase(), node.label.clone()];
+    if !node.detail.is_empty() {
+        lines.push(String::new());
+        lines.push(node.detail.clone());
+    }
+    let mut relations = Vec::new();
     for edge in &app.brain_graph.edges {
         if edge.from != node.id && edge.to != node.id {
             continue;
@@ -80,415 +70,473 @@ pub fn inspector(app: &App) -> String {
             .as_deref()
             .map(|id| format!(" {id}"))
             .unwrap_or_default();
-        lines.push(format!("{}{directive}  {other}", edge.kind.verb()));
+        relations.push(format!("{}{directive}  {other}", edge.kind.verb()));
+    }
+    if !relations.is_empty() {
+        lines.push(String::new());
+        lines.push("Relations".into());
+        lines.extend(relations);
     }
     lines.join("\n")
 }
 
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
-    let rows = split_vertical(area, [Constraint::Length(3), Constraint::Min(0)]);
-    let tabs = split_horizontal(
-        rows[0],
+    let chrome = graph_chrome(area);
+    draw_view_tabs(frame, app, chrome.tabs);
+    if app.brain_graph.is_empty() {
+        frame.render_widget(
+            Paragraph::new("This memory has no investigation graph.")
+                .style(theme::dim())
+                .wrap(Wrap { trim: true }),
+            chrome.canvas,
+        );
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(legend_line()).style(theme::muted()),
+        chrome.legend,
+    );
+    if app.graph_view == GraphView::Path || area.width < 56 {
+        draw_tree(frame, app, chrome.canvas);
+    } else {
+        draw_grid(frame, app, chrome.canvas);
+    }
+    frame.render_widget(
+        Paragraph::new(inspector(app))
+            .style(theme::text())
+            .wrap(Wrap { trim: true }),
+        chrome.inspector,
+    );
+}
+
+struct GraphChrome {
+    tabs: Rect,
+    legend: Rect,
+    canvas: Rect,
+    inspector: Rect,
+}
+
+fn graph_chrome(area: Rect) -> GraphChrome {
+    let rows = split_vertical(
+        area,
+        [
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ],
+    );
+    let wide = area.width >= 56;
+    let cols = if wide {
+        split_horizontal(
+            rows[2],
+            [Constraint::Percentage(70), Constraint::Percentage(30)],
+        )
+    } else {
+        split_vertical(
+            rows[2],
+            [Constraint::Percentage(62), Constraint::Percentage(38)],
+        )
+    };
+    GraphChrome {
+        tabs: rows[0],
+        legend: rows[1],
+        canvas: cols[0],
+        inspector: cols[1],
+    }
+}
+
+fn draw_view_tabs(frame: &mut Frame, app: &App, area: Rect) {
+    let slots = split_horizontal(
+        area,
         [
             Constraint::Ratio(1, 3),
             Constraint::Ratio(1, 3),
             Constraint::Ratio(1, 3),
         ],
     );
-    for (view, rect) in GraphView::ALL.into_iter().zip(tabs) {
-        let selected = app.graph_view == view || app.focus == Target::GraphView(view);
-        let style = if app.graph_view == view {
+    for (view, rect) in GraphView::ALL.into_iter().zip(slots) {
+        let active = app.graph_view == view;
+        let focused = app.focus == Target::GraphView(view);
+        let style = if focused {
             theme::selected()
-        } else if selected {
-            theme::accent()
+        } else if active {
+            theme::accent().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             theme::dim()
         };
         frame.render_widget(
             Paragraph::new(view.title())
                 .alignment(ratatui::layout::Alignment::Center)
-                .style(style)
-                .block(panel("")),
+                .style(style),
             rect,
         );
     }
-    if app.brain_graph.is_empty() {
-        frame.render_widget(
-            Paragraph::new("This memory has no investigation graph.")
-                .style(theme::text())
-                .block(panel(" Graph "))
-                .wrap(Wrap { trim: true }),
-            rows[1],
-        );
-        return;
-    }
-    let cols = split_horizontal(
-        rows[1],
-        [Constraint::Percentage(68), Constraint::Percentage(32)],
-    );
-    let inner = inset(cols[0]);
-    let (spots, strokes) = layout(app, inner.width.max(1) as f64, inner.height.max(1) as f64);
-    let width = inner.width.max(1) as f64;
-    let height = inner.height.max(1) as f64;
+}
+
+fn legend_line() -> String {
+    "  ● entity   ◆ topic   ★ finding   · evidence   1 force · 2 directive · 3 path".into()
+}
+
+fn draw_tree(frame: &mut Frame, app: &App, area: Rect) {
+    let lines = tree_lines(app);
+    let selected = app.graph_node;
+    let painted = lines
+        .into_iter()
+        .enumerate()
+        .map(|(_index, (node_index, text))| {
+            let style = if node_index == Some(selected) {
+                theme::selected()
+            } else if node_index.is_some() {
+                theme::text()
+            } else {
+                theme::dim()
+            };
+            Line::from(Span::styled(text, style))
+        })
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Canvas::default()
-            .block(panel(match app.graph_view {
-                GraphView::Force => " Force ",
-                GraphView::Directive => " Directive ",
-                GraphView::Path => " Path ",
-            }))
-            .x_bounds([0.0, width])
-            .y_bounds([0.0, height])
-            .paint(move |ctx| {
-                for stroke in &strokes {
-                    ctx.draw(&CanvasLine {
-                        x1: stroke.x1,
-                        y1: height - stroke.y1,
-                        x2: stroke.x2,
-                        y2: height - stroke.y2,
-                        color: stroke.color,
-                    });
-                    if !stroke.label.is_empty() {
-                        let x = (stroke.x1 + stroke.x2) / 2.0;
-                        let y = (stroke.y1 + stroke.y2) / 2.0;
-                        ctx.print(x, height - y, stroke.label.clone());
-                    }
-                }
-                for spot in &spots {
-                    let style = if spot_selected(app, &spot.node_id) {
-                        Style::default()
-                            .fg(theme::GREEN)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme::TEXT)
-                    };
-                    ctx.print(
-                        spot.x,
-                        height - spot.y,
-                        Line::from(Span::styled(spot.label.clone(), style)),
-                    );
-                }
-            }),
-        cols[0],
-    );
-    frame.render_widget(
-        Paragraph::new(inspector(app))
+        Paragraph::new(painted)
             .style(theme::text())
-            .block(panel(" Inspector "))
-            .wrap(Wrap { trim: true }),
-        cols[1],
+            .wrap(Wrap { trim: false }),
+        area,
     );
 }
 
-fn spot_selected(app: &App, node_id: &str) -> bool {
-    selectable(&app.brain_graph, app.graph_view)
-        .get(app.graph_node)
-        .is_some_and(|node| node.id == node_id)
-}
-
-pub fn hit(app: &App, area: Rect, x: u16, y: u16) -> Option<Target> {
-    let rows = split_vertical(area, [Constraint::Length(3), Constraint::Min(0)]);
-    if contains(rows[0], x, y) {
-        let tabs = split_horizontal(
-            rows[0],
-            [
-                Constraint::Ratio(1, 3),
-                Constraint::Ratio(1, 3),
-                Constraint::Ratio(1, 3),
-            ],
-        );
-        return tabs
-            .into_iter()
-            .zip(GraphView::ALL)
-            .find_map(|(rect, view)| contains(rect, x, y).then_some(Target::GraphView(view)));
-    }
-    if app.brain_graph.is_empty() || !contains(rows[1], x, y) {
-        return None;
-    }
-    let cols = split_horizontal(
-        rows[1],
-        [Constraint::Percentage(68), Constraint::Percentage(32)],
-    );
-    let inner = inset(cols[0]);
-    if !contains(inner, x, y) {
-        return None;
-    }
-    let (spots, _) = layout(app, inner.width.max(1) as f64, inner.height.max(1) as f64);
-    let nodes = selectable(&app.brain_graph, app.graph_view);
-    let mut best: Option<(usize, f64)> = None;
-    for spot in &spots {
-        let Some(index) = nodes.iter().position(|node| node.id == spot.node_id) else {
-            continue;
-        };
-        let dx = f64::from(x) - (f64::from(inner.x) + spot.x);
-        let dy = f64::from(y) - (f64::from(inner.y) + spot.y);
-        let width = spot.label.chars().count() as f64;
-        if dx < -1.0 || dx > width + 1.0 || dy.abs() > 1.0 {
-            continue;
-        }
-        let distance = dx * dx + dy * dy;
-        if best.is_none_or(|(_, nearest)| distance < nearest) {
-            best = Some((index, distance));
-        }
-    }
-    best.map(|(index, _)| Target::GraphNode(index))
-}
-
-fn layout(app: &App, width: f64, height: f64) -> (Vec<Spot>, Vec<Stroke>) {
-    match app.graph_view {
-        GraphView::Force => layout_force(&app.brain_graph, app.graph_node, width, height),
-        GraphView::Directive => layout_directive(&app.brain_graph, width, height),
-        GraphView::Path => layout_path(&app.brain_graph, width, height),
-    }
-}
-
-fn layout_force(
-    graph: &MemoryGraph,
-    selected: usize,
-    width: f64,
-    height: f64,
-) -> (Vec<Spot>, Vec<Stroke>) {
-    let nodes = selectable(graph, GraphView::Force);
+fn tree_lines(app: &App) -> Vec<(Option<usize>, String)> {
+    let graph = &app.brain_graph;
+    let nodes = selectable(graph, GraphView::Path);
     let index_of = |id: &str| nodes.iter().position(|node| node.id == id);
-    let pairs = force_links(graph)
-        .into_iter()
-        .filter_map(|link| Some((index_of(&link.from)?, index_of(&link.to)?, link.directive)))
-        .collect::<Vec<_>>();
-    let bare: Vec<(usize, usize)> = pairs.iter().map(|(from, to, _)| (*from, *to)).collect();
-    let positions = force_positions(nodes.len(), &bare, width, height);
-    let selected_id = nodes.get(selected).map(|node| node.id.as_str());
-    let spots = nodes
-        .iter()
-        .zip(positions)
-        .map(|(node, (x, y))| Spot {
-            node_id: node.id.clone(),
-            x,
-            y,
-            label: truncate(&node_label(node), 18),
-        })
-        .collect::<Vec<_>>();
-    let strokes = pairs
-        .into_iter()
-        .filter_map(|(from, to, directive)| {
-            let left = spots.get(from)?;
-            let right = spots.get(to)?;
-            let incident = selected_id == Some(left.node_id.as_str())
-                || selected_id == Some(right.node_id.as_str());
-            Some(Stroke {
-                x1: left.x,
-                y1: left.y,
-                x2: right.x,
-                y2: right.y,
-                color: theme::directive_color(&directive),
-                label: if incident { directive } else { String::new() },
-            })
-        })
-        .collect();
-    (spots, strokes)
-}
-
-fn layout_directive(graph: &MemoryGraph, width: f64, height: f64) -> (Vec<Spot>, Vec<Stroke>) {
-    let mut columns: [Vec<&GraphNode>; 6] = [
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    ];
-    for node in &graph.nodes {
-        columns[column_of(node.kind) as usize].push(node);
-    }
-    let mut spots = Vec::new();
-    let mut at: std::collections::HashMap<String, (f64, f64)> = std::collections::HashMap::new();
-    for (col, nodes) in columns.iter().enumerate() {
-        let count = nodes.len().max(1);
-        for (row, node) in nodes.iter().enumerate() {
-            let x = (col as f64 + 0.08) * width / 6.0;
-            let y = (row as f64 + 1.0) * height / (count as f64 + 1.0);
-            let x = x.clamp(1.0, (width - 8.0).max(1.0));
-            let y = y.clamp(1.0, (height - 1.0).max(1.0));
-            at.insert(node.id.clone(), (x, y));
-            spots.push(Spot {
-                node_id: node.id.clone(),
-                x,
-                y,
-                label: truncate(&node_label(node), 14),
-            });
-        }
-    }
-    let mut strokes = Vec::new();
-    for edge in &graph.edges {
-        let Some((x1, y1)) = at.get(&edge.from).copied() else {
-            continue;
-        };
-        let Some((x2, y2)) = at.get(&edge.to).copied() else {
-            continue;
-        };
-        let color = edge
-            .directive
-            .as_deref()
-            .map(theme::directive_color)
-            .unwrap_or(theme::DIM);
-        push_elbow(&mut strokes, x1, y1, x2, y2, color, edge.kind.verb());
-    }
-    (spots, strokes)
-}
-
-fn layout_path(graph: &MemoryGraph, width: f64, height: f64) -> (Vec<Spot>, Vec<Stroke>) {
     let path = recon_path(graph);
-    if path.bands.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-    let band_h = height / path.bands.len() as f64;
-    let x_of = |col: f64| ((col + 0.08) * width / 5.0).clamp(1.0, (width - 10.0).max(1.0));
-    let mut spots = Vec::new();
-    let mut strokes = Vec::new();
-    let investigation = graph
+    let mut lines = Vec::new();
+    if let Some(investigation) = graph
         .nodes
         .iter()
-        .find(|node| node.kind == GraphNodeKind::Investigation);
-    let inv_y = (height / 2.0).clamp(1.0, (height - 1.0).max(1.0));
-    let inv_x = x_of(0.0);
-    if let Some(node) = investigation {
-        spots.push(Spot {
-            node_id: node.id.clone(),
-            x: inv_x,
-            y: inv_y,
-            label: truncate(&node.label, 16),
-        });
+        .find(|node| node.kind == GraphNodeKind::Investigation)
+    {
+        lines.push((
+            index_of(&investigation.id),
+            format!("{}  {}", glyph(investigation.kind), investigation.label),
+        ));
     }
     for (band_index, band) in path.bands.iter().enumerate() {
-        let y = (band_h * band_index as f64 + band_h / 2.0).clamp(1.0, (height - 1.0).max(1.0));
-        let directive = graph.nodes.iter().find(|node| {
+        let last_band = band_index + 1 == path.bands.len();
+        let branch = if last_band { "└─" } else { "├─" };
+        let pad = if last_band { "  " } else { "│ " };
+        if let Some(directive) = graph.nodes.iter().find(|node| {
             node.kind == GraphNodeKind::Directive && node.label == band.directive_label
-        });
-        let dir_x = x_of(1.0);
-        if let Some(node) = directive {
-            spots.push(Spot {
-                node_id: node.id.clone(),
-                x: dir_x,
-                y,
-                label: truncate(&node.label, 8),
-            });
-            strokes.push(Stroke {
-                x1: inv_x,
-                y1: inv_y,
-                x2: dir_x,
-                y2: y,
-                color: theme::directive_color(&band.directive_id),
-                label: String::new(),
-            });
-        }
-        let subject_nodes = graph
-            .nodes
-            .iter()
-            .filter(|node| band.subjects.iter().any(|label| label == &node.label))
-            .collect::<Vec<_>>();
-        let subject_x = x_of(2.0);
-        for (offset, node) in subject_nodes.iter().enumerate() {
-            let subject_y = (y + offset as f64).min((height - 1.0).max(1.0));
-            spots.push(Spot {
-                node_id: node.id.clone(),
-                x: subject_x,
-                y: subject_y,
-                label: truncate(&node.label, 14),
-            });
-            strokes.push(Stroke {
-                x1: dir_x,
-                y1: y,
-                x2: subject_x,
-                y2: subject_y,
-                color: theme::directive_color(&band.directive_id),
-                label: String::new(),
-            });
-        }
-        let evidence_nodes = graph
-            .nodes
-            .iter()
-            .filter(|node| {
-                node.kind == GraphNodeKind::Evidence
-                    && node.tags.iter().any(|tag| tag == &band.directive_id)
-            })
-            .collect::<Vec<_>>();
-        let evidence_x = x_of(3.0);
-        let from_x = if subject_nodes.is_empty() {
-            dir_x
+        }) {
+            lines.push((
+                index_of(&directive.id),
+                format!("{branch} {}  {}", glyph(directive.kind), directive.label),
+            ));
         } else {
-            subject_x
-        };
-        let from_y = y;
-        for (offset, node) in evidence_nodes.iter().enumerate() {
-            let evidence_y = (y + offset as f64).min((height - 1.0).max(1.0));
-            spots.push(Spot {
-                node_id: node.id.clone(),
-                x: evidence_x,
-                y: evidence_y,
-                label: truncate(&node.label, 12),
-            });
-            strokes.push(Stroke {
-                x1: from_x,
-                y1: from_y,
-                x2: evidence_x,
-                y2: evidence_y,
-                color: theme::directive_color(&band.directive_id),
-                label: String::new(),
-            });
+            lines.push((None, format!("{branch} {}", band.directive_label)));
         }
-        let find_x = x_of(4.0);
-        let link_x = if evidence_nodes.is_empty() {
-            from_x
-        } else {
-            evidence_x
-        };
+        let mut children = Vec::new();
+        for subject in &band.subjects {
+            if let Some(node) = graph.nodes.iter().find(|node| node.label == *subject) {
+                children.push(node);
+            }
+        }
+        children.extend(graph.nodes.iter().filter(|node| {
+            node.kind == GraphNodeKind::Evidence
+                && node.tags.iter().any(|tag| tag == &band.directive_id)
+        }));
         if let Some(label) = &band.finding {
             if let Some(node) = graph
                 .nodes
                 .iter()
                 .find(|node| node.kind == GraphNodeKind::Finding && node.label == *label)
             {
-                spots.push(Spot {
-                    node_id: node.id.clone(),
-                    x: find_x,
-                    y,
-                    label: truncate(label, 16),
-                });
-                strokes.push(Stroke {
-                    x1: link_x,
-                    y1: y,
-                    x2: find_x,
-                    y2: y,
-                    color: theme::directive_color(&band.directive_id),
-                    label: String::new(),
-                });
+                children.push(node);
             }
-        } else {
-            spots.push(Spot {
-                node_id: String::new(),
-                x: find_x,
-                y,
-                label: "no finding".into(),
-            });
-            strokes.push(Stroke {
-                x1: link_x,
-                y1: y,
-                x2: find_x,
-                y2: y,
-                color: theme::DIM,
-                label: String::new(),
-            });
+        }
+        for (child_index, node) in children.iter().enumerate() {
+            let last = child_index + 1 == children.len();
+            let mark = if last { "└─" } else { "├─" };
+            lines.push((
+                index_of(&node.id),
+                format!("{pad}{mark} {}  {}", glyph(node.kind), node.label),
+            ));
+        }
+        if children.is_empty() {
+            lines.push((None, format!("{pad}└─ no finding")));
         }
     }
-    (spots, strokes)
+    if lines.is_empty() {
+        for (index, node) in nodes.iter().enumerate() {
+            lines.push((Some(index), format!("{}  {}", glyph(node.kind), node.label)));
+        }
+    }
+    lines
 }
 
-fn node_label(node: &GraphNode) -> String {
-    match node.kind {
-        GraphNodeKind::Finding => format!("★ {}", node.label),
-        GraphNodeKind::Entity => format!("● {}", node.label),
-        GraphNodeKind::Topic => format!("◆ {}", node.label),
-        GraphNodeKind::Directive => node.label.clone(),
-        _ => node.label.clone(),
+fn draw_grid(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width < 4 || area.height < 2 {
+        return;
+    }
+    let width = area.width as usize;
+    let height = area.height as usize;
+    let mut grid = vec![(' ', theme::MUTED); width * height];
+    let chips = match app.graph_view {
+        GraphView::Directive => layout_directive(app, width, height),
+        _ => layout_force(app, width, height),
+    };
+    let selected = selectable(&app.brain_graph, app.graph_view)
+        .get(app.graph_node)
+        .map(|node| node.id.as_str());
+    paint_edges(&mut grid, width, height, app, &chips, selected);
+    for chip in &chips {
+        let focused = selected == Some(chip.node_id.as_str());
+        paint_chip(&mut grid, width, height, chip, focused);
+    }
+    let lines = (0..height)
+        .map(|row| {
+            let mut spans = Vec::new();
+            let mut run = String::new();
+            let mut color = theme::MUTED;
+            for col in 0..width {
+                let (ch, next) = grid[row * width + col];
+                if next != color && !run.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut run),
+                        Style::default().fg(color),
+                    ));
+                    color = next;
+                } else if run.is_empty() {
+                    color = next;
+                }
+                run.push(ch);
+            }
+            if !run.is_empty() {
+                spans.push(Span::styled(run, Style::default().fg(color)));
+            }
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).style(theme::text()), area);
+}
+
+fn paint_chip(grid: &mut [(char, Color)], width: usize, height: usize, chip: &Chip, focused: bool) {
+    let color = if focused { theme::GREEN } else { chip.color };
+    let text: Vec<char> = chip.label.chars().take(chip.width as usize).collect();
+    for (offset, ch) in text.into_iter().enumerate() {
+        let x = chip.x as usize + offset;
+        let y = chip.y as usize;
+        if x < width && y < height {
+            grid[y * width + x] = (ch, color);
+        }
+    }
+}
+
+fn paint_edges(
+    grid: &mut [(char, Color)],
+    width: usize,
+    height: usize,
+    app: &App,
+    chips: &[Chip],
+    selected: Option<&str>,
+) {
+    let at = |id: &str| {
+        chips
+            .iter()
+            .find(|chip| chip.node_id == id)
+            .map(|chip| (chip.x + chip.width.min(2), chip.y))
+    };
+    for edge in &app.brain_graph.edges {
+        let Some((x1, y1)) = at(&edge.from) else {
+            continue;
+        };
+        let Some((x2, y2)) = at(&edge.to) else {
+            continue;
+        };
+        let incident = selected == Some(edge.from.as_str()) || selected == Some(edge.to.as_str());
+        let color = if incident {
+            edge.directive
+                .as_deref()
+                .map(theme::directive_color)
+                .unwrap_or(theme::ACCENT)
+        } else {
+            theme::MUTED
+        };
+        draw_elbow(grid, width, height, x1, y1, x2, y2, color);
+    }
+}
+
+fn draw_elbow(
+    grid: &mut [(char, Color)],
+    width: usize,
+    height: usize,
+    x1: u16,
+    y1: u16,
+    x2: u16,
+    y2: u16,
+    color: Color,
+) {
+    let mid = x1.saturating_add(x2) / 2;
+    plot_h(grid, width, height, x1, mid, y1, color);
+    plot_v(grid, width, height, mid, y1, y2, color);
+    plot_h(grid, width, height, mid, x2, y2, color);
+}
+
+fn plot_h(
+    grid: &mut [(char, Color)],
+    width: usize,
+    height: usize,
+    x1: u16,
+    x2: u16,
+    y: u16,
+    color: Color,
+) {
+    if y as usize >= height {
+        return;
+    }
+    let (lo, hi) = if x1 <= x2 { (x1, x2) } else { (x2, x1) };
+    for x in lo..=hi {
+        plot(grid, width, height, x, y, '─', color);
+    }
+}
+
+fn plot_v(
+    grid: &mut [(char, Color)],
+    width: usize,
+    height: usize,
+    x: u16,
+    y1: u16,
+    y2: u16,
+    color: Color,
+) {
+    if x as usize >= width {
+        return;
+    }
+    let (lo, hi) = if y1 <= y2 { (y1, y2) } else { (y2, y1) };
+    for y in lo..=hi {
+        plot(grid, width, height, x, y, '│', color);
+    }
+}
+
+fn plot(
+    grid: &mut [(char, Color)],
+    width: usize,
+    height: usize,
+    x: u16,
+    y: u16,
+    ch: char,
+    color: Color,
+) {
+    let x = x as usize;
+    let y = y as usize;
+    if x >= width || y >= height {
+        return;
+    }
+    let i = y * width + x;
+    let existing = grid[i].0;
+    let next = match (existing, ch) {
+        (' ', c) | (c, ' ') => c,
+        ('─', '│') | ('│', '─') => '┼',
+        (prev, _) if prev != ' ' && !matches!(prev, '─' | '│' | '┼') => prev,
+        (_, c) => c,
+    };
+    if matches!(existing, '●' | '◆' | '★' | '·') {
+        return;
+    }
+    grid[i] = (next, color);
+}
+
+fn layout_directive(app: &App, width: usize, height: usize) -> Vec<Chip> {
+    let mut columns: [Vec<&GraphNode>; 6] = Default::default();
+    for node in &app.brain_graph.nodes {
+        columns[column_of(node.kind) as usize].push(node);
+    }
+    let col_w = (width / 6).max(8);
+    let mut chips = Vec::new();
+    for (col, nodes) in columns.iter().enumerate() {
+        let count = nodes.len().max(1);
+        for (row, node) in nodes.iter().enumerate() {
+            let x = (col * col_w + 1).min(width.saturating_sub(4));
+            let y = ((row + 1) * height / (count + 1)).clamp(0, height.saturating_sub(1));
+            chips.push(chip_for(
+                node,
+                x as u16,
+                y as u16,
+                (col_w.saturating_sub(2) as u16).max(4),
+            ));
+        }
+    }
+    deoverlap(&mut chips, height);
+    chips
+}
+
+fn layout_force(app: &App, width: usize, height: usize) -> Vec<Chip> {
+    let nodes = selectable(&app.brain_graph, GraphView::Force);
+    let index_of = |id: &str| nodes.iter().position(|node| node.id == id);
+    let pairs: Vec<(usize, usize)> = force_links(&app.brain_graph)
+        .into_iter()
+        .filter_map(|link| Some((index_of(&link.from)?, index_of(&link.to)?)))
+        .collect();
+    let positions = force_positions(nodes.len(), &pairs, width as f64 * 2.0, height as f64);
+    let mut chips = nodes
+        .iter()
+        .zip(positions)
+        .map(|(node, (x, y))| {
+            let x = (x / 2.0).clamp(1.0, (width.saturating_sub(6)) as f64) as u16;
+            let y = y.clamp(0.0, (height.saturating_sub(1)) as f64) as u16;
+            chip_for(node, x, y, 16)
+        })
+        .collect::<Vec<_>>();
+    deoverlap(&mut chips, height);
+    chips
+}
+
+fn chip_for(node: &GraphNode, x: u16, y: u16, max_width: u16) -> Chip {
+    let label = format!("{} {}", glyph(node.kind), node.label);
+    let width = (label.chars().count() as u16 + 1).min(max_width).max(3);
+    Chip {
+        node_id: node.id.clone(),
+        x,
+        y,
+        width,
+        label: truncate(&label, width as usize),
+        color: theme::node_color(match node.kind {
+            GraphNodeKind::Investigation => "investigation",
+            GraphNodeKind::Directive => "directive",
+            GraphNodeKind::Entity => "entity",
+            GraphNodeKind::Topic => "topic",
+            GraphNodeKind::Finding => "finding",
+            GraphNodeKind::Evidence => "evidence",
+            GraphNodeKind::Source => "source",
+        }),
+    }
+}
+
+fn deoverlap(chips: &mut [Chip], height: usize) {
+    chips.sort_by_key(|chip| (chip.y, chip.x));
+    let mut used: Vec<(u16, u16, u16)> = Vec::new();
+    for chip in chips.iter_mut() {
+        let mut y = chip.y;
+        while used
+            .iter()
+            .any(|(ux, uy, uw)| *uy == y && chip.x < ux + uw && chip.x + chip.width > *ux)
+        {
+            y = y.saturating_add(1);
+            if y as usize >= height {
+                break;
+            }
+        }
+        chip.y = y.min(height.saturating_sub(1) as u16);
+        used.push((chip.x, chip.y, chip.width));
+    }
+}
+
+fn glyph(kind: GraphNodeKind) -> &'static str {
+    match kind {
+        GraphNodeKind::Finding => "★",
+        GraphNodeKind::Entity => "●",
+        GraphNodeKind::Topic => "◆",
+        GraphNodeKind::Directive => "▸",
+        GraphNodeKind::Evidence => "·",
+        GraphNodeKind::Source => "○",
+        GraphNodeKind::Investigation => "▣",
     }
 }
 
@@ -503,40 +551,51 @@ fn column_of(kind: GraphNodeKind) -> u8 {
     }
 }
 
-fn push_elbow(
-    strokes: &mut Vec<Stroke>,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    color: ratatui::style::Color,
-    label: &str,
-) {
-    let mid = (x1 + x2) / 2.0;
-    strokes.push(Stroke {
-        x1,
-        y1,
-        x2: mid,
-        y2: y1,
-        color,
-        label: String::new(),
-    });
-    strokes.push(Stroke {
-        x1: mid,
-        y1,
-        x2: mid,
-        y2,
-        color,
-        label: label.to_string(),
-    });
-    strokes.push(Stroke {
-        x1: mid,
-        y1: y2,
-        x2,
-        y2,
-        color,
-        label: String::new(),
-    });
+pub fn hit(app: &App, area: Rect, x: u16, y: u16) -> Option<Target> {
+    let chrome = graph_chrome(area);
+    if contains(chrome.tabs, x, y) {
+        let tabs = split_horizontal(
+            chrome.tabs,
+            [
+                Constraint::Ratio(1, 3),
+                Constraint::Ratio(1, 3),
+                Constraint::Ratio(1, 3),
+            ],
+        );
+        return tabs
+            .into_iter()
+            .zip(GraphView::ALL)
+            .find_map(|(rect, view)| contains(rect, x, y).then_some(Target::GraphView(view)));
+    }
+    if app.brain_graph.is_empty() || !contains(chrome.canvas, x, y) {
+        return None;
+    }
+    if app.graph_view == GraphView::Path || area.width < 56 {
+        let row = y.saturating_sub(chrome.canvas.y) as usize;
+        return tree_lines(app)
+            .into_iter()
+            .nth(row)
+            .and_then(|(index, _)| index.map(Target::GraphNode));
+    }
+    let width = chrome.canvas.width as usize;
+    let height = chrome.canvas.height as usize;
+    let chips = match app.graph_view {
+        GraphView::Directive => layout_directive(app, width, height),
+        _ => layout_force(app, width, height),
+    };
+    let nodes = selectable(&app.brain_graph, app.graph_view);
+    let local_x = x.saturating_sub(chrome.canvas.x);
+    let local_y = y.saturating_sub(chrome.canvas.y);
+    chips.into_iter().find_map(|chip| {
+        if local_y == chip.y && local_x >= chip.x && local_x < chip.x + chip.width {
+            nodes
+                .iter()
+                .position(|node| node.id == chip.node_id)
+                .map(Target::GraphNode)
+        } else {
+            None
+        }
+    })
 }
 
 pub fn force_positions(
@@ -572,7 +631,7 @@ pub fn force_positions(
         for i in 0..count {
             for j in (i + 1)..count {
                 let dx = pos[i].0 - pos[j].0;
-                let dy = pos[i].1 - pos[j].1;
+                let dy = (pos[i].1 - pos[j].1) * 2.0;
                 let dist = (dx * dx + dy * dy).sqrt().max(0.01);
                 let force = k * k / dist;
                 disp[i].0 += dx / dist * force;
@@ -586,7 +645,7 @@ pub fn force_positions(
                 continue;
             }
             let dx = pos[from].0 - pos[to].0;
-            let dy = pos[from].1 - pos[to].1;
+            let dy = (pos[from].1 - pos[to].1) * 2.0;
             let dist = (dx * dx + dy * dy).sqrt().max(0.01);
             let force = dist * dist / k;
             disp[from].0 -= dx / dist * force;
@@ -630,15 +689,6 @@ fn split_horizontal(area: Rect, constraints: impl IntoIterator<Item = Constraint
         .constraints(constraints)
         .split(area)
         .to_vec()
-}
-
-fn inset(area: Rect) -> Rect {
-    Rect {
-        x: area.x.saturating_add(1),
-        y: area.y.saturating_add(1),
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    }
 }
 
 fn contains(area: Rect, x: u16, y: u16) -> bool {

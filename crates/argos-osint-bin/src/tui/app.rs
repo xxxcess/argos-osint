@@ -93,6 +93,13 @@ pub enum Overlay {
     Memories { message_id: String },
     Block { title: String, body: String },
     Choice(ChoiceKind),
+    Palette,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteItem {
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Clone, Debug)]
@@ -451,6 +458,8 @@ pub struct App {
     pub choice_items: Vec<ChoiceItem>,
     pub choice_sel: usize,
     pub choice_note: String,
+    pub palette_query: String,
+    pub palette_sel: usize,
     pub grok_signed_in: bool,
     pub openai_signed_in: bool,
     access_probe: bool,
@@ -621,6 +630,8 @@ impl App {
             choice_items: Vec::new(),
             choice_sel: 0,
             choice_note: String::new(),
+            palette_query: String::new(),
+            palette_sel: 0,
             grok_signed_in: argos_osint_core::grok_oauth::login_present(),
             openai_signed_in: false,
             access_probe: false,
@@ -728,6 +739,144 @@ impl App {
         self.module = None;
         self.set_focus(Target::App(self.launcher_sel));
         self.status = "Home".into();
+    }
+
+    pub fn palette_items(&self) -> Vec<PaletteItem> {
+        let query = self.palette_query.trim().to_ascii_lowercase();
+        let mut items = vec![
+            ("home", "Home"),
+            ("recon", "Open Recon"),
+            ("brain", "Open Brain"),
+            ("osint", "Open OSINT"),
+            ("providers", "Open Providers"),
+            ("system", "Open System"),
+            ("new", "New investigation"),
+            ("sessions", "Investigation list"),
+            ("help", "Shortcuts"),
+            ("cancel", "Cancel running turn"),
+            ("resume", "Resume remaining steps"),
+            ("insights", "Retry insight extraction"),
+            ("create-memory", "Create memory"),
+            ("clear-log", "Clear event log"),
+        ];
+        items.retain(|(id, label)| {
+            query.is_empty()
+                || id.contains(&query)
+                || label.to_ascii_lowercase().contains(&query)
+        });
+        items
+            .into_iter()
+            .map(|(id, label)| PaletteItem {
+                id: id.into(),
+                label: label.into(),
+            })
+            .collect()
+    }
+
+    fn open_palette(&mut self) {
+        if self.overlay == Overlay::Palette {
+            self.overlay = Overlay::None;
+            return;
+        }
+        self.overlay = Overlay::Palette;
+        self.palette_query.clear();
+        self.palette_sel = 0;
+        self.scrolls.popup = 0;
+    }
+
+    fn run_palette(&mut self, id: &str) {
+        self.overlay = Overlay::None;
+        match id {
+            "home" => self.go_home(),
+            "recon" => self.select(0),
+            "brain" => self.select(1),
+            "osint" => self.select(2),
+            "providers" => self.select(3),
+            "system" => self.select(4),
+            "new" => {
+                let created = self.new_thread().map(|_| "New investigation".into());
+                self.report(created);
+                self.module = Some(ModuleId::Recon);
+                self.launcher_sel = 0;
+            }
+            "sessions" => {
+                self.module = Some(ModuleId::Recon);
+                self.recon_chat = false;
+                self.set_focus(Target::Field(FieldId::ReconSearch));
+            }
+            "help" => {
+                self.overlay = Overlay::Help;
+                self.scrolls.popup = 0;
+            }
+            "cancel" => self.activate_button(ButtonId::CancelRun),
+            "resume" => self.activate_button(ButtonId::ResumeRun),
+            "insights" => self.activate_button(ButtonId::RetryInsights),
+            "create-memory" => {
+                self.select(1);
+                self.activate_button(ButtonId::CreateMemory);
+            }
+            "clear-log" => self.activate_button(ButtonId::ClearLog),
+            _ => {}
+        }
+    }
+
+    fn run_slash(&mut self, input: &str) -> Result<String> {
+        let mut parts = input.trim().trim_start_matches('/').splitn(2, char::is_whitespace);
+        let name = parts.next().unwrap_or("").to_ascii_lowercase();
+        match name.as_str() {
+            "help" | "?" => {
+                self.overlay = Overlay::Help;
+                self.scrolls.popup = 0;
+                self.input.clear();
+                Ok("Shortcuts".into())
+            }
+            "new" => {
+                self.new_thread()?;
+                self.input.clear();
+                Ok("New investigation".into())
+            }
+            "sessions" => {
+                self.recon_chat = false;
+                self.input.clear();
+                self.set_focus(Target::Field(FieldId::ReconSearch));
+                Ok("Investigations".into())
+            }
+            "cancel" => self.recon_command(":cancel"),
+            "resume" => {
+                self.activate_button(ButtonId::ResumeRun);
+                self.input.clear();
+                Ok("Resume requested".into())
+            }
+            "insights" => {
+                self.activate_button(ButtonId::RetryInsights);
+                self.input.clear();
+                Ok("Insights requested".into())
+            }
+            "home" => {
+                self.go_home();
+                Ok("Home".into())
+            }
+            "brain" | "osint" | "providers" | "system" | "recon" => {
+                let index = match name.as_str() {
+                    "recon" => 0,
+                    "brain" => 1,
+                    "osint" => 2,
+                    "providers" => 3,
+                    _ => 4,
+                };
+                self.select(index);
+                Ok(format!("{} open", ModuleId::ALL[index].title()))
+            }
+            "palette" => {
+                self.open_palette();
+                Ok("Commands".into())
+            }
+            "" => {
+                self.open_palette();
+                Ok("Commands".into())
+            }
+            other => Err(anyhow::anyhow!("Unknown command /{other}")),
+        }
     }
 
     fn select(&mut self, index: usize) {
@@ -2222,6 +2371,11 @@ impl App {
                 self.set_focus(Target::Transcript);
                 super::ui::open_memory(self, index);
             }
+            Target::Choice(index) if self.overlay == Overlay::Palette => {
+                if let Some(id) = self.palette_items().get(index).map(|item| item.id.clone()) {
+                    self.run_palette(&id);
+                }
+            }
             Target::Choice(index) => self.apply_choice(index),
             Target::CloseOverlay => {
                 self.overlay = Overlay::None;
@@ -2304,7 +2458,11 @@ impl App {
         if input.is_empty() {
             return;
         }
-        let result = self.recon_command(&input);
+        let result = if input.starts_with('/') {
+            self.run_slash(&input)
+        } else {
+            self.recon_command(&input)
+        };
         self.report(result);
     }
 
@@ -2380,6 +2538,37 @@ impl App {
         }
         if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
             return self.arm_quit();
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K')) {
+            self.open_palette();
+            return true;
+        }
+        if self.overlay == Overlay::Palette {
+            match key.code {
+                KeyCode::Esc => self.activate_target(Target::CloseOverlay),
+                KeyCode::Up | KeyCode::Char('k') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.palette_sel = self.palette_sel.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let last = self.palette_items().len().saturating_sub(1);
+                    self.palette_sel = (self.palette_sel + 1).min(last);
+                }
+                KeyCode::Enter => {
+                    if let Some(item) = self.palette_items().get(self.palette_sel).cloned() {
+                        self.run_palette(&item.id);
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.palette_query.pop();
+                    self.palette_sel = 0;
+                }
+                KeyCode::Char(c) if !c.is_control() => {
+                    self.palette_query.push(c);
+                    self.palette_sel = 0;
+                }
+                _ => {}
+            }
+            return true;
         }
         if let Overlay::Choice(_) = self.overlay {
             if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('d')) {
@@ -3244,6 +3433,8 @@ mod tests {
             choice_items: Vec::new(),
             choice_sel: 0,
             choice_note: String::new(),
+            palette_query: String::new(),
+            palette_sel: 0,
             grok_signed_in: false,
             openai_signed_in: false,
             access_probe: false,

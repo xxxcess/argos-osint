@@ -1306,6 +1306,11 @@ impl Focus {
         if let Some(domain) = &self.explicit_domain {
             return host == domain || host.ends_with(&format!(".{domain}"));
         }
+        // A subject-named page on a wiki, Q&A, news, or account host (elonmusk.fandom.com)
+        // is a citation, not the subject's own site.
+        if publisher_host(host) || account_platform_host(host) {
+            return false;
+        }
         let tokens = content_tokens(&self.subject);
         if tokens.is_empty() {
             return false;
@@ -1457,7 +1462,20 @@ fn publisher_host(host: &str) -> bool {
     let call_sign = site.starts_with(['k', 'w'])
         && (site.len() == 4 || (site.len() == 6 && site.ends_with("tv")))
         && site.chars().all(|ch| ch.is_ascii_lowercase());
+    // Q&A, wiki, aggregator, scraper-marketplace, and other user-generated sites: a page
+    // there is a citation about the subject, never the subject's own site or name.
+    const CITATION_SITES: &[&str] = &[
+        "quora", "reddit", "medium", "fandom", "wikia", "answers", "ask", "wikipedia", "wikiwand",
+        "wikimili", "wikimedia", "wikidata", "everybodywiki", "dbpedia", "famousbirthdays",
+        "celebritynetworth", "imdb", "pinterest", "tumblr", "scribd", "slideshare", "socialblade",
+        "stackexchange", "stackoverflow", "apify", "rapidapi", "brainly", "chegg", "crunchbase",
+        "ranker", "statista", "similarweb", "trustpilot", "glassdoor", "zoominfo", "rocketreach",
+        "linktree", "substack", "blogspot", "wordpress", "weebly", "wix", "tiktokcounter",
+        "livecounts", "socialcounts", "hypeauditor", "noxinfluencer", "influencermarketinghub",
+    ];
     OUTLETS.contains(&site)
+        || CITATION_SITES.contains(&site)
+        || labels.iter().any(|label| matches!(*label, "quora" | "fandom" | "wikia" | "wikipedia" | "answers"))
         || call_sign
         || site.contains("news")
         || NEWS_WORDS
@@ -1507,7 +1525,11 @@ fn names_subject(subject: &str, value: &str) -> bool {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .collect::<String>()
         .to_ascii_lowercase();
-    subject_tokens.iter().all(|token| compact.contains(token.as_str()))
+    // A possessive with the apostrophe dropped ("musks") still names "musk".
+    subject_tokens.iter().all(|token| {
+        compact.contains(token.as_str())
+            || token.len() > 4 && token.ends_with('s') && !token.ends_with("ss") && compact.contains(&token[..token.len() - 1])
+    })
 }
 
 /// Capitalized two-to-four word names such as `Eric Trump`, not headlines.
@@ -3140,6 +3162,82 @@ pub fn question_bindings(question: &str) -> Vec<Binding> {
         add(&mut found, "address", subject, "");
     }
     found
+}
+
+/// Handles the derived questions name ("the follower count of Twitter handle @elonmusk"):
+/// handle and platform bindings with the question id as evidence, marked `unverified`.
+/// The handle must occur verbatim in that question, must name the subject (a derived
+/// question is model text), and is skipped when the user's own question already gave it.
+pub fn derived_question_handles(question: &str, questions: &[DerivedQuestion], known: &[Binding]) -> Vec<Binding> {
+    let subject = subject_of(question);
+    let mut found: Vec<Binding> = Vec::new();
+    for item in questions {
+        let text = item.text.as_str();
+        let mut pairs: Vec<(String, String)> = super::extract_social_handles(&[text.to_string()])
+            .into_iter()
+            .map(|handle| (handle.handle, handle.platform))
+            .collect();
+        for word in text.split_whitespace() {
+            let token = word.trim_matches(|ch: char| matches!(ch, '?' | '!' | ',' | '.' | '"' | '\'' | '(' | ')' | '\u{201c}' | '\u{201d}'));
+            if let Some(handle) = token.strip_prefix('@').and_then(|value| osint::social_token(value).ok()) {
+                if handle.len() >= 2 && !pairs.iter().any(|(known, _)| known.eq_ignore_ascii_case(&handle)) {
+                    pairs.push((handle, String::new()));
+                }
+            }
+        }
+        for (handle, platform) in pairs {
+            let verbatim = text.to_ascii_lowercase().contains(&handle.to_ascii_lowercase());
+            let duplicate = known.iter().chain(found.iter()).any(|binding| {
+                binding.kind == "handle" && binding.value.eq_ignore_ascii_case(&handle) && (binding.qualifier == platform || platform.is_empty())
+            });
+            if verbatim && !duplicate && names_subject(&subject, &handle) {
+                found.push(Binding {
+                    kind: "handle".into(),
+                    value: handle,
+                    evidence_id: item.id.clone(),
+                    qualifier: platform,
+                    unverified: true,
+                    ..Binding::default()
+                });
+            }
+        }
+    }
+    found
+}
+
+/// The query of the one accounts search a starved handle step may add. A person's search
+/// names the platforms the questions ask about ("Elon Musk official X Twitter Instagram
+/// account") so profile pages outrank Q&A and aggregator pages; others ask for the
+/// official website and accounts.
+pub fn accounts_search_query(question: &str, questions: &[DerivedQuestion], bindings: &[Binding]) -> String {
+    let subject = display_name(&subject_of(question));
+    let person = target_kind(question) == "person" || bindings.iter().any(|binding| binding.kind == "person_name");
+    if !person {
+        return format!("{subject} official website social media accounts");
+    }
+    let mut texts: Vec<(String, String)> = questions.iter().map(|item| (item.id.clone(), item.text.clone())).collect();
+    texts.push(("question".into(), question.to_string()));
+    let mut labels: Vec<&str> = Vec::new();
+    for (platform, _) in question_platforms(&texts) {
+        let label = match platform.as_str() {
+            "twitter" => "X Twitter",
+            "instagram" => "Instagram",
+            "facebook" => "Facebook",
+            "tiktok" => "TikTok",
+            "youtube" => "YouTube",
+            "linkedin" => "LinkedIn",
+            "threads" => "Threads",
+            "twitch" => "Twitch",
+            _ => continue,
+        };
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    if labels.is_empty() {
+        labels = vec!["X Twitter", "Instagram"];
+    }
+    format!("{subject} official {} account", labels.join(" "))
 }
 
 /// Three fixed questions when the Recon model is unavailable or its reply fails:

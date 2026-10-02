@@ -631,7 +631,14 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
         .bindings
         .iter()
         .filter(|binding| binding.step_id.is_empty() && !binding.inferred)
-        .map(|binding| format!("{} {}", binding.kind, binding.value))
+        .map(|binding| {
+            let platform = if binding.qualifier.is_empty() { String::new() } else { format!(" ({})", binding.qualifier) };
+            if binding.unverified {
+                format!("{} {}{platform} · named in {}, unverified", binding.kind, binding.value, binding.evidence_id)
+            } else {
+                format!("{} {}{platform}", binding.kind, binding.value)
+            }
+        })
         .collect();
     if !explicit.is_empty() {
         lines.push(format!("From the question: {}", explicit.join("; ")));
@@ -3157,6 +3164,7 @@ mod tests {
                 step_id: "s1".into(),
                 qualifier: "github".into(),
                 inferred: false,
+                unverified: false,
             }, Binding {
                 kind: "handle".into(),
                 value: "janeroe".into(),
@@ -3164,6 +3172,15 @@ mod tests {
                 step_id: "s1".into(),
                 qualifier: "facebook".into(),
                 inferred: true,
+                unverified: false,
+            }, Binding {
+                kind: "handle".into(),
+                value: "janeroe".into(),
+                evidence_id: "q1".into(),
+                step_id: String::new(),
+                qualifier: "twitter".into(),
+                inferred: false,
+                unverified: true,
             }],
             binding_notes: vec!["s1 firecrawl_search: rules found 1; Recon model added 0".into()],
             fallback_requests: vec!["hunter_email_finder failed. Recon chose firecrawl_scrape as s3.".into()],
@@ -3199,6 +3216,7 @@ mod tests {
             "found handle janeroe (github) · evidence call-s1",
             "found handle janeroe (facebook) · evidence call-s1 · inferred",
             "Binding extraction:",
+            "From the question: handle janeroe (twitter) · named in q1, unverified",
             "s1 firecrawl_search: rules found 1; Recon model added 0",
             "Fallback requests:",
         ] {

@@ -317,22 +317,29 @@ fn usable(binding: &Binding) -> bool {
 /// Exact bindings before inferred ones, in the order found.
 fn candidates<'a>(bindings: &'a [Binding], kind: &str) -> Vec<&'a Binding> {
     let mut found: Vec<&Binding> = bindings.iter().filter(|binding| binding.kind == kind && usable(binding)).collect();
-    found.sort_by_key(|binding| binding.inferred);
+    found.sort_by_key(|binding| (binding.inferred, binding.unverified));
     found
 }
 
-/// The handle with the most support for the subject: names the subject, then seen on
-/// the most platforms or observations, then first found. Inferred pairings never count.
+/// The handle with the most support for the subject: observed in evidence before named
+/// only in a question, then names the subject, then seen on the most platforms or
+/// observations, then first found. Inferred pairings never count.
 pub fn best_handle<'a>(bindings: &'a [Binding], subject: &str) -> Option<&'a Binding> {
     let handles: Vec<&Binding> = bindings.iter().filter(|binding| binding.kind == "handle" && !binding.inferred).collect();
-    let support = |value: &str| handles.iter().filter(|other| other.value.eq_ignore_ascii_case(value)).count();
+    let support = |value: &str| handles.iter().filter(|other| other.value.eq_ignore_ascii_case(value) && !other.unverified).count();
     handles
         .iter()
         .enumerate()
         .max_by_key(|(index, binding)| {
-            (names_subject(subject, &binding.value), support(&binding.value), usize::MAX - index)
+            (!binding.unverified, names_subject(subject, &binding.value), support(&binding.value), usize::MAX - index)
         })
         .map(|(_, binding)| *binding)
+}
+
+/// The handle bound for `platform`: an observed one first, then one a question named.
+fn platform_handle<'a>(bindings: &'a [Binding], platform: &str) -> Option<&'a Binding> {
+    let on = |binding: &&Binding| binding.kind == "handle" && binding.qualifier == platform && !binding.inferred;
+    bindings.iter().filter(on).find(|binding| !binding.unverified).or_else(|| bindings.iter().find(on))
 }
 
 /// `ecosystem:name@version` as (ecosystem, name, version).
@@ -358,6 +365,8 @@ struct Chosen {
 fn source(binding: &Binding) -> String {
     if binding.inferred {
         format!("{} inferred for {} from {}", binding.kind, binding.qualifier, binding.evidence_id)
+    } else if binding.unverified {
+        format!("{} named in {}, unverified", binding.kind, binding.evidence_id)
     } else {
         format!("{} from {}", binding.kind, binding.evidence_id)
     }
@@ -394,10 +403,7 @@ fn choose(fill: &Fill, bindings: &[Binding], subject: &str, hint: &str) -> Optio
             })
         }
         How::Username(platform) => {
-            let binding = bindings
-                .iter()
-                .find(|binding| binding.kind == "handle" && binding.qualifier == platform && !binding.inferred)
-                .or_else(|| best_handle(bindings, subject))?;
+            let binding = platform_handle(bindings, platform).or_else(|| best_handle(bindings, subject))?;
             Some(plain(fill.input, binding, json!(binding.value)))
         }
         How::PackageParts => {
@@ -1095,9 +1101,7 @@ pub fn per_platform_targets(
         return (targets, unresolved);
     }
     for (platform, qid) in platforms {
-        let exact = bindings
-            .iter()
-            .find(|binding| binding.kind == "handle" && &binding.qualifier == platform && !binding.inferred);
+        let exact = platform_handle(bindings, platform);
         match exact {
             Some(binding) => targets.push((platform.clone(), binding.clone(), qid.clone())),
             None => match best_handle(bindings, &subject) {

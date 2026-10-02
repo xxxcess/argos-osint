@@ -480,6 +480,9 @@ fn known_binding(binding: &Binding) -> Value {
     if binding.inferred {
         item["inferred"] = json!(true);
     }
+    if binding.unverified {
+        item["unverified"] = json!(true);
+    }
     item
 }
 

@@ -58,7 +58,8 @@ pub async fn execute_budgeted(
                 }
             }
         }
-        affordable.push(call.clone());
+        // The step loop already ordered this call after its producers.
+        affordable.push(PlanCall { depends_on: Vec::new(), ..call.clone() });
     }
     drop(store);
     if affordable.is_empty() {
@@ -210,6 +211,8 @@ pub async fn run_turn(
     let picker_secret = picker_secret(service, run)?;
     let mut picker = picker::Picker::new(&picker_secret, cancel);
     plan.bindings = investigation::question_bindings(question);
+    let named = investigation::derived_question_handles(question, &plan.derived_questions, &plan.bindings);
+    plan.bindings.extend(named);
     plan.picker_model = picker_snapshot(run, &picker_secret);
     let max_calls = usize::from(run.max_calls);
     let ordered = picker
@@ -565,6 +568,9 @@ where
             if !missing.is_empty() || crate::osint::validate(&step.tool_id, &arguments).is_err() {
                 plan.calls[index].status = "skipped".into();
                 let line = format!("{} {}: no binding for {}", step.step_id, step.tool_id, if missing.is_empty() { "a valid input".into() } else { missing.join(", ") });
+                // The skip reason replaces the planning-time line for this step.
+                let prefix = format!("{} {}: ", step.step_id, step.tool_id);
+                plan.unresolved_inputs.retain(|known| !known.starts_with(&prefix) || known.contains("no handle found"));
                 if !plan.unresolved_inputs.contains(&line) {
                     plan.unresolved_inputs.push(line);
                 }
@@ -582,9 +588,32 @@ where
         }
         let label = format!("running {}", step.tool_id);
         progress(&label);
+        refresh_unresolved(plan);
         persist(plan, &label)?;
         let call = plan.calls[index].clone();
-        match runner(call).await? {
+        let outcome = match runner(call).await {
+            Ok(outcome) => outcome,
+            Err(err) if cancelled(&err) || env.cancel.load(Ordering::Relaxed) => {
+                plan.calls[index].status = "cancelled".into();
+                persist(plan, "cancelled")?;
+                return Err(err);
+            }
+            // One step's dispatch error fails that step, not the turn.
+            Err(err) => {
+                plan.calls[index].status = "failed".into();
+                plan.binding_notes.push(format!(
+                    "{} {}: not run: {}",
+                    step.step_id,
+                    step.tool_id,
+                    err.to_string().chars().take(160).collect::<String>()
+                ));
+                after_step(plan, env, picker, index, false, &mut fallback_for, progress).await?;
+                persist(plan, "running tools")?;
+                index += 1;
+                continue;
+            }
+        };
+        match outcome {
             StepOutcome::NotRun(reason) => {
                 plan.calls[index].status = "deferred".into();
                 plan.deferred.push(format!("{} — {reason}", step.tool_id));
@@ -614,47 +643,98 @@ where
                     for mut binding in accepted {
                         binding.step_id = step.step_id.clone();
                         if !plan.bindings.iter().any(|known| {
-                            known.kind == binding.kind && known.value.eq_ignore_ascii_case(&binding.value) && known.qualifier == binding.qualifier
+                            known.kind == binding.kind && known.value.eq_ignore_ascii_case(&binding.value) && known.qualifier == binding.qualifier && !known.unverified
                         }) {
+                            // An observed value supersedes the same value named in a question.
+                            plan.bindings.retain(|known| {
+                                !(known.unverified && known.kind == binding.kind && known.value.eq_ignore_ascii_case(&binding.value) && known.qualifier == binding.qualifier)
+                            });
                             plan.bindings.push(binding);
                         }
                     }
                 }
                 results.push((call_id, result));
-                let is_fallback = step.pick_reason.starts_with("fallback:");
-                if !is_fallback && !fallback_for.contains(&step.step_id) {
-                    let starved: Vec<String> = plan.calls[index + 1..]
-                        .iter()
-                        .filter(|later| later.status == "pending" && !later.bound && later.depends_on.contains(&step.step_id))
-                        .filter(|later| !investigation::bind_arguments(&later.tool_id, &plan.bindings, env.question, "").2.is_empty())
-                        .map(|later| later.tool_id.clone())
-                        .collect();
-                    if !starved.is_empty() {
-                        fallback_for.insert(step.step_id.clone());
-                        let mut needs: Vec<String> = Vec::new();
-                        for tool in &starved {
-                            for need in investigation::unmet_needs(tool, &plan.bindings) {
-                                if !needs.contains(&need) {
-                                    needs.push(need);
-                                }
-                            }
-                        }
-                        let purpose = format!(
-                            "{} {} and {} still need {}",
-                            step.tool_id,
-                            if ok { "returned no usable binding" } else { "failed" },
-                            starved.join(", "),
-                            if needs.is_empty() { "its output".into() } else { needs.join("; ") }
-                        );
-                        request_fallback(plan, env, picker, index, &purpose, &needs, progress).await?;
-                    }
-                }
+                after_step(plan, env, picker, index, ok, &mut fallback_for, progress).await?;
             }
         }
+        refresh_unresolved(plan);
         persist(plan, "running tools")?;
         index += 1;
     }
+    // Every step was visited; anything still pending could not be bound.
+    for call in plan.calls.iter_mut().filter(|call| call.status == "pending" || call.status.is_empty()) {
+        call.status = "skipped".into();
+    }
+    refresh_unresolved(plan);
     Ok(results)
+}
+
+/// After step `index` ran (or failed to dispatch): when a later step that depends on it
+/// is still starved, one fallback pick for the kinds it lacks (once per step).
+async fn after_step(
+    plan: &mut Plan,
+    env: &StepEnv<'_>,
+    picker: &mut picker::Picker<'_>,
+    index: usize,
+    ok: bool,
+    fallback_for: &mut HashSet<String>,
+    progress: &mut (impl FnMut(&str) + Send),
+) -> Result<()> {
+    let step = plan.calls[index].clone();
+    if step.pick_reason.starts_with("fallback:") || fallback_for.contains(&step.step_id) {
+        return Ok(());
+    }
+    let fallbacks: HashSet<&str> = plan
+        .calls
+        .iter()
+        .filter(|call| call.pick_reason.starts_with("fallback:"))
+        .map(|call| call.step_id.as_str())
+        .collect();
+    // A step already waiting on a fallback pick does not ask for a second one.
+    let starved: Vec<String> = plan.calls[index + 1..]
+        .iter()
+        .filter(|later| later.status == "pending" && !later.bound && later.depends_on.contains(&step.step_id))
+        .filter(|later| !later.depends_on.iter().any(|dep| fallbacks.contains(dep.as_str())))
+        .filter(|later| !investigation::bind_arguments(&later.tool_id, &plan.bindings, env.question, "").2.is_empty())
+        .map(|later| later.tool_id.clone())
+        .collect();
+    if starved.is_empty() {
+        return Ok(());
+    }
+    fallback_for.insert(step.step_id.clone());
+    let mut needs: Vec<String> = Vec::new();
+    for tool in &starved {
+        for need in investigation::unmet_needs(tool, &plan.bindings) {
+            if !needs.contains(&need) {
+                needs.push(need);
+            }
+        }
+    }
+    let purpose = format!(
+        "{} {} and {} still need {}",
+        step.tool_id,
+        if ok { "returned no usable binding" } else { "failed" },
+        starved.join(", "),
+        if needs.is_empty() { "its output".into() } else { needs.join("; ") }
+    );
+    request_fallback(plan, env, picker, index, &purpose, &needs, progress).await
+}
+
+/// `plan.unresolved_inputs` after a fill: a line stays only while its step is still
+/// waiting or was skipped for it. Lines of steps that were filled, ran, or were deferred
+/// for another reason drop out.
+fn refresh_unresolved(plan: &mut Plan) {
+    let settled: HashSet<String> = plan
+        .calls
+        .iter()
+        .filter(|call| !call.call_id.is_empty() || !call.filled.is_empty() || matches!(call.status.as_str(), "completed" | "no_results" | "failed" | "rate_limited" | "timeout" | "deferred" | "cancelled"))
+        .map(|call| call.step_id.clone())
+        .collect();
+    plan.unresolved_inputs.retain(|line| {
+        let step = line.split_whitespace().next().unwrap_or("");
+        // A per-platform line names a platform the expansion could not cover.
+        line.contains("no handle found") || !settled.contains(step)
+    });
 }
 
 /// Bindings from one completed observation: the rule extractor for the kinds the tool
@@ -703,7 +783,13 @@ async fn extract_bindings(
             Err(err) => format!("Recon model failed: {}", err.to_string().chars().take(120).collect::<String>()),
         }
     };
-    plan.binding_notes.push(format!("{} {}: rules found {rules}; {note}", step.step_id, step.tool_id));
+    let query = step
+        .arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .map(|query| format!(" (query \"{}\")", query.chars().take(120).collect::<String>()))
+        .unwrap_or_default();
+    plan.binding_notes.push(format!("{} {}{query}: rules found {rules}; {note}", step.step_id, step.tool_id));
     Ok(accepted)
 }
 
@@ -735,6 +821,8 @@ fn expand_per_platform(plan: &mut Plan, index: usize, env: &StepEnv<'_>, dispatc
         let step_id = if targets.len() == 1 { step.step_id.clone() } else { format!("{}{letter}", step.step_id) };
         let source = if binding.inferred {
             format!("handle inferred for {platform} from {} on {}", binding.evidence_id, plan.bindings.iter().find(|known| known.kind == "handle" && known.value == binding.value && !known.inferred).map(|known| known.qualifier.as_str()).unwrap_or("another platform"))
+        } else if binding.unverified {
+            format!("handle named in {}, unverified", binding.evidence_id)
         } else {
             format!("handle from {}", binding.evidence_id)
         };
@@ -841,12 +929,15 @@ async fn request_fallback(
             plan.picks.push(record.clone());
             // A repeated Firecrawl search looks for the subject's accounts.
             let repeat = planned.contains(tool_id.as_str());
-            let subject = super::question_subject(env.question);
+            let query = investigation::accounts_search_query(env.question, &plan.derived_questions, &plan.bindings);
+            if repeat {
+                plan.binding_notes.push(format!("{step_id} {tool_id}: accounts search query \"{query}\""));
+            }
             let call = PlanCall {
                 step_id: step_id.clone(),
                 tool_id: tool_id.clone(),
                 arguments: if repeat {
-                    json!({"query": format!("{subject} official social media accounts profiles handles"), "limit": 5})
+                    json!({"query": query, "limit": 5})
                 } else {
                     json!({})
                 },
@@ -861,11 +952,17 @@ async fn request_fallback(
                 ..PlanCall::default()
             };
             plan.calls.insert(index + 1, call);
-            for later in plan.calls[index + 2..].iter_mut() {
-                for dep in later.depends_on.iter_mut() {
-                    if dep == &failed.step_id {
-                        *dep = step_id.clone();
-                    }
+            // Only later steps still missing a kind this fallback yields wait on it; the
+            // others keep their dependencies.
+            let yields = investigation::output_kinds(&tool_id);
+            let bindings = plan.bindings.clone();
+            for later in plan.calls[index + 2..].iter_mut().filter(|later| later.status == "pending" && !later.bound) {
+                let waits = investigation::unmet_kinds(&later.tool_id, &bindings)
+                    .iter()
+                    .any(|kinds| kinds.iter().any(|kind| yields.contains(kind)));
+                if waits && !later.depends_on.contains(&step_id) {
+                    later.depends_on.retain(|dep| dep != &failed.step_id);
+                    later.depends_on.push(step_id.clone());
                 }
             }
         }
@@ -2577,7 +2674,7 @@ mod tests {
         assert!(plan.bindings.iter().any(|binding| binding.qualifier == "facebook" && binding.inferred));
         assert!(plan.bindings.iter().any(|binding| binding.qualifier == "truthsocial" && binding.value == "realDonaldTrump" && !binding.inferred));
         assert!(!plan.bindings.iter().any(|binding| binding.kind == "person_name" && binding.value.contains("scraper")));
-        assert!(plan.binding_notes.first().is_some_and(|note| note.starts_with("s1 firecrawl_search: rules found") && note.contains("Recon model added 1")), "{:?}", plan.binding_notes);
+        assert!(plan.binding_notes.first().is_some_and(|note| note.starts_with("s1 firecrawl_search (query ") && note.contains("rules found") && note.contains("Recon model added 1")), "{:?}", plan.binding_notes);
         assert!(!bodies.lock().unwrap().is_empty(), "the Recon model binding step ran");
         assert!(plan.unresolved_inputs.is_empty(), "{:?}", plan.unresolved_inputs);
         assert!(plan.fallback_requests.is_empty(), "{:?}", plan.fallback_requests);
@@ -2619,8 +2716,245 @@ mod tests {
         assert!(plan.fallback_requests[0].contains("handle"), "{:?}", plan.fallback_requests);
         let ran = ran.lock().unwrap().clone();
         assert_eq!(ran[1].1, "firecrawl_search", "{ran:?}");
-        assert!(ran[1].2["query"].as_str().unwrap().contains("official social media accounts"), "{ran:?}");
+        assert_eq!(ran[1].2["query"], json!("Donald Trump official X Twitter account"), "{ran:?}");
         assert_eq!(ran[2].2, json!({"platform": "twitter", "handle": "realDonaldTrump"}), "{ran:?}");
         assert!(plan.binding_notes.iter().any(|note| note.contains("no Recon model is configured")), "{:?}", plan.binding_notes);
+    }
+
+    const ELON: &str = "what is elon musk total follower count on socials?";
+
+    fn ordered(tools: &[&str]) -> picker::Ordered {
+        picker::Ordered {
+            tools: tools.iter().map(|tool| tool.to_string()).collect(),
+            records: Vec::new(),
+            replies: HashMap::new(),
+            needs: HashMap::new(),
+            produces: HashMap::new(),
+            mode: "tool_picker".into(),
+            transport: "decisions".into(),
+            note: String::new(),
+        }
+    }
+
+    fn quora_search() -> Value {
+        json!({"results": [
+            {"title": "What is Elon Musk's page? - Quora", "url": "https://www.quora.com/What-is-Elon-Musk-s-page", "snippet": "Elon Musk is the CEO of Tesla and SpaceX. Answered by many users."}
+        ]})
+    }
+
+    #[test]
+    fn an_attribute_question_names_the_person_and_drops_qa_hosts() {
+        assert_eq!(super::super::question_subject(ELON), "elon musk");
+        assert_eq!(super::super::question_subject("what is the total follower count of Elon Musk?"), "Elon Musk");
+        assert_eq!(super::super::question_subject("Bill Gates net worth"), "Bill Gates");
+        let rules = investigation::rule_bindings(ELON, "call-s1", "firecrawl_search", &quora_search());
+        assert!(rules.iter().any(|binding| binding.kind == "person_name" && binding.value == "Elon Musk"), "{rules:?}");
+        assert!(!rules.iter().any(|binding| binding.value.to_ascii_lowercase().contains("quora")), "Q&A hosts stay citations: {rules:?}");
+        for host in ["https://www.reddit.com/r/x/comments/1/elon", "https://elonmusk.fandom.com/wiki/Elon", "https://en.wikipedia.org/wiki/Elon_Musk", "https://apify.com/x/elon-scraper", "https://medium.com/@a/elon-musk"] {
+            let observation = json!({"results": [{"title": "Elon Musk - overview", "url": host, "snippet": "Elon Musk overview"}]});
+            let found = investigation::rule_bindings(ELON, "call-s1", "firecrawl_search", &observation);
+            assert!(!found.iter().any(|binding| matches!(binding.kind.as_str(), "domain" | "org_name" | "url")), "{host}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn a_handle_named_in_a_derived_question_is_an_unverified_binding() {
+        let questions = derived(&[
+            "Which social media handles are associated with Elon Musk?",
+            "What is the follower count of Twitter handle \"@elonmusk\"?",
+            "Which source reports the total follower count of @someoneelse?",
+        ]);
+        let known = investigation::question_bindings(ELON);
+        let named = investigation::derived_question_handles(ELON, &questions, &known);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert_eq!((named[0].value.as_str(), named[0].qualifier.as_str(), named[0].evidence_id.as_str()), ("elonmusk", "twitter", "q2"));
+        assert!(named[0].unverified && !named[0].inferred);
+        let mut bindings = known;
+        bindings.extend(named);
+        let (args, filled, missing) = investigation::bind_arguments("sociavault_profile", &bindings, ELON, "");
+        assert!(missing.is_empty());
+        assert_eq!(args, json!({"platform": "twitter", "handle": "elonmusk"}));
+        assert!(filled.iter().all(|fill| fill.contains("named in q2, unverified")), "{filled:?}");
+        assert_eq!(investigation::bind_arguments("keybase_identity", &bindings, ELON, "").0, json!({"username": "elonmusk"}));
+        assert_eq!(investigation::bind_arguments("wikipedia_users", &bindings, ELON, "").0, json!({"username": "elonmusk"}));
+        // An observed handle outranks one a question only named.
+        bindings.push(super::super::Binding { kind: "handle".into(), value: "elonmusk_real".into(), qualifier: "twitter".into(), evidence_id: "call-s1".into(), ..Default::default() });
+        assert_eq!(investigation::bind_arguments("sociavault_profile", &bindings, ELON, "").0["handle"], json!("elonmusk_real"));
+        let (_, request) = super::super::synthesis_request(ELON, &Plan { derived_questions: questions, bindings, ..Plan::default() }, &[]).unwrap();
+        assert!(request.contains("\"unverified\":true"), "{request}");
+    }
+
+    /// The live run's shape: s1 finds only a Q&A page (person_name Elon Musk), the
+    /// fallback accounts search s8 finds nothing. s2 and s5 still run on the name, the
+    /// handle steps are skipped with a reason, Unresolved names only those, and Synthesis
+    /// gets a request.
+    #[tokio::test]
+    async fn a_fallback_with_no_bindings_still_runs_the_satisfied_steps_and_reaches_synthesis() {
+        let (base, bodies) = scripted(vec![choice("firecrawl_search", 0.7)]).await;
+        let secret = jev(&base);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
+        let mut plan = Plan {
+            derived_questions: derived(&[
+                "Which social media handles are associated with Elon Musk?",
+                "What is the follower count of Elon Musk's Twitter account?",
+                "Which source reports Elon Musk's total follower count?",
+            ]),
+            ..Plan::default()
+        };
+        plan.bindings = investigation::question_bindings(ELON);
+        let tools = ["firecrawl_search", "stackexchange_users", "sociavault_profile", "keybase_identity", "wikidata_entities", "firecrawl_scrape", "wikipedia_users"];
+        apply_order(&mut plan, &ordered(&tools), ELON);
+        assert!(plan.calls[1..].iter().all(|call| call.depends_on.contains(&"s1".to_string())), "{:?}", plan.calls);
+        let planned: Vec<String> = plan.unresolved_inputs.clone();
+        assert!(planned.contains(&"s2 stackexchange_users: name".to_string()), "{planned:?}");
+        let unkeyed = HashSet::new();
+        let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
+        let gate = ModelGate::default();
+        let env = StepEnv { question: ELON, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 1 };
+        let mut session = picker::Picker::new(&secret, &cancel);
+        let ran = std::sync::Mutex::new(Vec::new());
+        let runner = |call: PlanCall| {
+            ran.lock().unwrap().push((call.step_id.clone(), call.tool_id.clone(), call.arguments.clone()));
+            let observation = match (call.step_id.as_str(), call.tool_id.as_str()) {
+                ("s1", _) => quora_search(),
+                (_, "firecrawl_search") => json!({"results": [
+                    {"title": "Top 100 most followed accounts - Social Blade", "url": "https://socialblade.com/twitter/top/100/followers", "snippet": "Follower statistics, updated daily."}
+                ]}),
+                _ => json!({"items": []}),
+            };
+            let id = format!("call-{}", call.step_id);
+            async move { Ok(StepOutcome::Ran(id, Box::new(result(&call.tool_id, "completed", observation)))) }
+        };
+        let mut progress = |_: &str| {};
+        let mut persist = |_: &Plan, _: &str| Ok(());
+        let results = execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.expect("the turn completes");
+        let ran = ran.lock().unwrap().clone();
+        let steps: Vec<&str> = ran.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(steps, ["s1", "s8", "s2", "s5"], "{ran:?}\n{plan:#?}");
+        assert_eq!(ran[2].2, json!({"name": "Elon Musk"}));
+        assert_eq!(ran[3].2, json!({"name": "Elon Musk"}));
+        assert_eq!(bodies.lock().unwrap().len(), 1, "one fallback pick");
+        // The accounts search names the platforms the questions ask about, and is logged.
+        assert_eq!(ran[1].2["query"], json!("Elon Musk official X Twitter account"));
+        assert!(plan.binding_notes.iter().any(|note| note.contains("s8 firecrawl_search (query \"Elon Musk official X Twitter account\"): rules found 0")), "{:?}", plan.binding_notes);
+        // Only steps that need what the fallback yields wait on it.
+        let by_id = |id: &str| plan.calls.iter().find(|call| call.step_id == id).unwrap().clone();
+        assert_eq!(by_id("s2").depends_on, vec!["s1".to_string()]);
+        assert_eq!(by_id("s5").depends_on, vec!["s1".to_string()]);
+        for id in ["s3", "s4", "s6", "s7"] {
+            let depends_on = by_id(id).depends_on;
+            assert!(depends_on.contains(&"s8".to_string()) && !depends_on.contains(&"s1".to_string()), "{id}: {depends_on:?}");
+            assert_eq!(by_id(id).status, "skipped", "{id}");
+        }
+        assert!(plan.calls.iter().all(|call| DONE_STATES.contains(&call.status.as_str())), "no step is left pending");
+        assert_eq!(
+            plan.unresolved_inputs,
+            vec![
+                "s3 sociavault_profile: no binding for platform, handle".to_string(),
+                "s4 keybase_identity: no binding for username or domain".to_string(),
+                "s6 firecrawl_scrape: no binding for url".to_string(),
+                "s7 wikipedia_users: no binding for username".to_string(),
+            ]
+        );
+        assert!(!plan.bindings.iter().any(|binding| binding.value.to_ascii_lowercase().contains("quora") || binding.value.contains("socialblade")), "{:?}", plan.bindings);
+        assert_eq!(results.len(), 4);
+        let (system, request) = super::super::synthesis_request(ELON, &plan, &results).unwrap();
+        assert!(system.contains("Q1:") && request.contains("call-s5") && request.contains(ELON));
+    }
+
+    #[tokio::test]
+    async fn a_question_handle_fills_the_handle_steps_without_a_fallback() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
+        let mut plan = Plan {
+            derived_questions: derived(&[
+                "Which social media handles are associated with Elon Musk?",
+                "What is the follower count of Twitter handle \"@elonmusk\"?",
+                "Which source reports Elon Musk's total follower count?",
+            ]),
+            ..Plan::default()
+        };
+        plan.bindings = investigation::question_bindings(ELON);
+        let named = investigation::derived_question_handles(ELON, &plan.derived_questions, &plan.bindings);
+        plan.bindings.extend(named);
+        apply_order(&mut plan, &ordered(&["firecrawl_search", "sociavault_profile", "keybase_identity", "wikipedia_users"]), ELON);
+        let unkeyed = HashSet::new();
+        let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
+        let gate = ModelGate::default();
+        let env = StepEnv { question: ELON, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 1 };
+        let mut session = picker::Picker::new(&none, &cancel);
+        let ran = std::sync::Mutex::new(Vec::new());
+        let runner = |call: PlanCall| {
+            ran.lock().unwrap().push((call.step_id.clone(), call.arguments.clone()));
+            let observation = if call.step_id == "s1" { quora_search() } else { json!({"items": []}) };
+            let id = format!("call-{}", call.step_id);
+            async move { Ok(StepOutcome::Ran(id, Box::new(result(&call.tool_id, "completed", observation)))) }
+        };
+        let mut progress = |_: &str| {};
+        let mut persist = |_: &Plan, _: &str| Ok(());
+        execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
+        let ran = ran.lock().unwrap().clone();
+        assert_eq!(ran.len(), 4, "{ran:?}");
+        assert_eq!(ran[1].1, json!({"platform": "twitter", "handle": "elonmusk"}));
+        assert_eq!(ran[2].1, json!({"username": "elonmusk"}));
+        assert_eq!(ran[3].1, json!({"username": "elonmusk"}));
+        assert!(plan.calls[1].filled.iter().any(|fill| fill.contains("named in q2, unverified")), "{:?}", plan.calls[1].filled);
+        assert!(plan.fallback_requests.is_empty(), "{:?}", plan.fallback_requests);
+        assert!(plan.unresolved_inputs.is_empty(), "{:?}", plan.unresolved_inputs);
+        assert_eq!(session.requests, 0);
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_error_fails_the_step_and_the_loop_goes_on() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
+        let question = "What is known about example.org?";
+        let mut plan = Plan { derived_questions: investigation::fallback_questions(question), ..Plan::default() };
+        plan.bindings = investigation::question_bindings(question);
+        apply_order(&mut plan, &ordered(&["crtsh_certificates", "hackertarget_hostsearch"]), question);
+        let unkeyed = HashSet::new();
+        let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
+        let gate = ModelGate::default();
+        let env = StepEnv { question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, per_platform_allowance: 1 };
+        let mut session = picker::Picker::new(&none, &cancel);
+        let runner = |call: PlanCall| async move {
+            if call.step_id == "s1" {
+                Err(anyhow!("plan made no progress"))
+            } else {
+                Ok(StepOutcome::Ran(format!("call-{}", call.step_id), Box::new(result(&call.tool_id, "completed", json!({"raw": "www.example.org,93.184.216.34"})))))
+            }
+        };
+        let mut progress = |_: &str| {};
+        let mut persist = |_: &Plan, _: &str| Ok(());
+        let results = execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
+        assert_eq!(plan.calls[0].status, "failed");
+        assert_eq!(plan.calls[1].status, "completed");
+        assert_eq!(results.len(), 1);
+        assert!(plan.binding_notes.iter().any(|note| note.starts_with("s1 crtsh_certificates: not run")));
+    }
+
+    #[tokio::test]
+    async fn a_budgeted_call_with_a_dependency_from_an_earlier_batch_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        let service = super::super::Service::new(&db, crate::secrets::AuthFile::default(), SettingsFile::default()).unwrap();
+        let store = Store::open(&db).unwrap();
+        let thread = store.new_thread("t").unwrap();
+        let user = store.add_message(&thread.id, "user", "who is elon musk?", None).unwrap();
+        let run = store.new_run(&thread.id, &user.id, "local / m", "local / m").unwrap();
+        drop(store);
+        let cancel = Arc::new(AtomicBool::new(false));
+        // Invalid arguments fail inside the executor without a network request.
+        let call = PlanCall {
+            step_id: "s2".into(),
+            tool_id: "stackexchange_users".into(),
+            arguments: json!({}),
+            depends_on: vec!["s8".into()],
+            ..PlanCall::default()
+        };
+        let results = execute_budgeted(&service, &run, &[call], &cancel).await.expect("no 'plan made no progress'");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.status, "failed");
     }
 }

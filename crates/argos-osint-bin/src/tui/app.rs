@@ -135,11 +135,79 @@ pub enum FieldId {
     SociaVaultKey,
     ReconProvider,
     ReconModel,
+    PickerProvider,
+    PickerModel,
     SynthesisProvider,
     SynthesisModel,
     RouterKey,
     RouterEndpoint,
     Composer,
+}
+
+/// The model role the Defaults tab is editing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefaultsRole {
+    Recon,
+    ToolPicker,
+    Synthesis,
+}
+
+impl DefaultsRole {
+    pub const ALL: [DefaultsRole; 3] = [
+        DefaultsRole::Recon,
+        DefaultsRole::ToolPicker,
+        DefaultsRole::Synthesis,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DefaultsRole::Recon => "Recon",
+            DefaultsRole::ToolPicker => "Tool picker",
+            DefaultsRole::Synthesis => "Synthesis",
+        }
+    }
+
+    /// The settings key the System event log names when this role changes.
+    pub fn settings_key(self) -> &'static str {
+        match self {
+            DefaultsRole::Recon => "defaults.recon",
+            DefaultsRole::ToolPicker => "defaults.tool_picker",
+            DefaultsRole::Synthesis => "defaults.synthesis",
+        }
+    }
+
+    pub fn provider_field(self) -> FieldId {
+        match self {
+            DefaultsRole::Recon => FieldId::ReconProvider,
+            DefaultsRole::ToolPicker => FieldId::PickerProvider,
+            DefaultsRole::Synthesis => FieldId::SynthesisProvider,
+        }
+    }
+
+    pub fn model_field(self) -> FieldId {
+        match self {
+            DefaultsRole::Recon => FieldId::ReconModel,
+            DefaultsRole::ToolPicker => FieldId::PickerModel,
+            DefaultsRole::Synthesis => FieldId::SynthesisModel,
+        }
+    }
+
+    pub fn save_button(self) -> ButtonId {
+        match self {
+            DefaultsRole::Recon => ButtonId::SaveRecon,
+            DefaultsRole::ToolPicker => ButtonId::SavePicker,
+            DefaultsRole::Synthesis => ButtonId::SaveSynthesis,
+        }
+    }
+
+    fn of_field(field: FieldId) -> Option<DefaultsRole> {
+        match field {
+            FieldId::ReconProvider | FieldId::ReconModel => Some(DefaultsRole::Recon),
+            FieldId::PickerProvider | FieldId::PickerModel => Some(DefaultsRole::ToolPicker),
+            FieldId::SynthesisProvider | FieldId::SynthesisModel => Some(DefaultsRole::Synthesis),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,8 +218,9 @@ pub enum ButtonId {
     Pin,
     Delete,
     SaveRecon,
+    SavePicker,
     SaveSynthesis,
-    ToggleDefaultRole,
+    DefaultRole(DefaultsRole),
     RefreshModels,
     NewThread,
     DeleteThread,
@@ -225,7 +294,7 @@ enum WorkEvent {
         outcome: Result<(String, osint::ToolResult), String>,
     },
     CatalogDone {
-        synthesis: bool,
+        role: DefaultsRole,
         provider: String,
         outcome: Result<Vec<ListedModel>, String>,
     },
@@ -289,9 +358,11 @@ pub struct App {
     osint_cancel: Option<Arc<AtomicBool>>,
     pub recon_provider: String,
     pub recon_model: String,
+    pub picker_provider: String,
+    pub picker_model: String,
     pub synthesis_provider: String,
     pub synthesis_model: String,
-    pub defaults_synthesis: bool,
+    pub defaults_role: DefaultsRole,
     pub model_catalog: Vec<ListedModel>,
     pub catalog_for: String,
     pub choice_items: Vec<ChoiceItem>,
@@ -322,6 +393,7 @@ pub struct App {
     pub settings: SettingsFile,
     pub hardware: HardwareProfile,
     auth_path: PathBuf,
+    settings_path: PathBuf,
     store: Store,
     provider_tx: UnboundedSender<ProviderEvent>,
     provider_rx: UnboundedReceiver<ProviderEvent>,
@@ -380,6 +452,7 @@ impl App {
         let auth = AuthFile::load()?;
         let settings = SettingsFile::load()?;
         let recon_default = provider::role_secret(&auth, &settings, "recon")?;
+        let picker_default = provider::role_secret(&auth, &settings, "tool-picker")?;
         let synthesis_default = provider::role_secret(&auth, &settings, "synthesis")?;
         let router = provider::account_secret(&auth, "openrouter");
         let (provider_tx, provider_rx) = unbounded_channel();
@@ -439,9 +512,11 @@ impl App {
             osint_cancel: None,
             recon_provider: provider::effective_kind(&recon_default),
             recon_model: recon_default.model,
+            picker_provider: provider::effective_kind(&picker_default),
+            picker_model: picker_default.model,
             synthesis_provider: provider::effective_kind(&synthesis_default),
             synthesis_model: synthesis_default.model,
-            defaults_synthesis: false,
+            defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),
             choice_items: Vec::new(),
@@ -472,6 +547,7 @@ impl App {
             settings,
             hardware: hardware::profile_cached(false),
             auth_path: paths::auth_path(),
+            settings_path: paths::config_path(),
             store,
             provider_tx,
             provider_rx,
@@ -575,6 +651,8 @@ impl App {
             FieldId::SociaVaultKey => &self.sociavault_key,
             FieldId::ReconProvider => &self.recon_provider,
             FieldId::ReconModel => &self.recon_model,
+            FieldId::PickerProvider => &self.picker_provider,
+            FieldId::PickerModel => &self.picker_model,
             FieldId::SynthesisProvider => &self.synthesis_provider,
             FieldId::SynthesisModel => &self.synthesis_model,
             FieldId::RouterKey => &self.router_key,
@@ -597,6 +675,8 @@ impl App {
             FieldId::SociaVaultKey => &mut self.sociavault_key,
             FieldId::ReconProvider => &mut self.recon_provider,
             FieldId::ReconModel => &mut self.recon_model,
+            FieldId::PickerProvider => &mut self.picker_provider,
+            FieldId::PickerModel => &mut self.picker_model,
             FieldId::SynthesisProvider => &mut self.synthesis_provider,
             FieldId::SynthesisModel => &mut self.synthesis_model,
             FieldId::RouterKey => &mut self.router_key,
@@ -845,7 +925,7 @@ impl App {
         let key = self.firecrawl_key.trim().to_string();
         anyhow::ensure!(!key.is_empty(), "Enter a Firecrawl API key");
         self.settings.firecrawl_api_key = key;
-        self.settings.save()?;
+        self.save_settings()?;
         Ok("Firecrawl API key saved".into())
     }
 
@@ -853,7 +933,7 @@ impl App {
         let key = self.hunter_key.trim().to_string();
         anyhow::ensure!(!key.is_empty(), "Enter a Hunter API key");
         self.settings.hunter_api_key = key;
-        self.settings.save()?;
+        self.save_settings()?;
         Ok("Hunter API key saved".into())
     }
 
@@ -861,7 +941,7 @@ impl App {
         let key = self.sociavault_key.trim().to_string();
         anyhow::ensure!(!key.is_empty(), "Enter a SociaVault API key");
         self.settings.sociavault_api_key = key;
-        self.settings.save()?;
+        self.save_settings()?;
         Ok("SociaVault API key saved".into())
     }
 
@@ -960,10 +1040,10 @@ impl App {
                 }
             }
             WorkEvent::CatalogDone {
-                synthesis,
+                role,
                 provider,
                 outcome,
-            } => self.finish_catalog(synthesis, provider, outcome),
+            } => self.finish_catalog(role, provider, outcome),
             WorkEvent::Access { grok, openai } => {
                 if grok {
                     self.grok_signed_in = true;
@@ -996,11 +1076,7 @@ impl App {
     }
 
     pub fn role_provider(&self) -> String {
-        let raw = if self.defaults_synthesis {
-            &self.synthesis_provider
-        } else {
-            &self.recon_provider
-        };
+        let raw = self.field(self.defaults_role.provider_field());
         match provider::normalize_kind(raw).as_str() {
             "openai" => "openai-chatgpt".into(),
             "grok-subscription" => "grok".into(),
@@ -1009,32 +1085,20 @@ impl App {
     }
 
     fn role_model(&self) -> String {
-        if self.defaults_synthesis {
-            self.synthesis_model.clone()
-        } else {
-            self.recon_model.clone()
-        }
+        self.field(self.defaults_role.model_field()).to_string()
     }
 
     fn set_role_provider(&mut self, id: &str) {
-        if self.defaults_synthesis {
-            self.synthesis_provider = id.to_string();
-        } else {
-            self.recon_provider = id.to_string();
-        }
+        *self.field_mut(self.defaults_role.provider_field()) = id.to_string();
     }
 
     fn set_role_model(&mut self, id: &str) {
-        if self.defaults_synthesis {
-            self.synthesis_model = id.to_string();
-        } else {
-            self.recon_model = id.to_string();
-        }
+        *self.field_mut(self.defaults_role.model_field()) = id.to_string();
     }
 
     pub fn field_display(&self, field: FieldId) -> String {
         match field {
-            FieldId::ReconProvider | FieldId::SynthesisProvider => {
+            FieldId::ReconProvider | FieldId::PickerProvider | FieldId::SynthesisProvider => {
                 let kind = self.field(field);
                 if kind.is_empty() {
                     String::new()
@@ -1047,14 +1111,14 @@ impl App {
     }
 
     fn refresh_catalog(&mut self) {
-        let synthesis = self.defaults_synthesis;
+        let role = self.defaults_role;
         let provider = self.role_provider();
         if provider.is_empty() {
             self.status = "Choose a provider first".into();
             return;
         }
         if provider == "openai-chatgpt" {
-            self.finish_catalog(synthesis, provider, Ok(codex_models()));
+            self.finish_catalog(role, provider, Ok(codex_models()));
             return;
         }
         self.status = "Loading models this account can call".into();
@@ -1071,7 +1135,7 @@ impl App {
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::CatalogDone {
-                synthesis,
+                role,
                 provider,
                 outcome,
             });
@@ -1080,11 +1144,11 @@ impl App {
 
     fn finish_catalog(
         &mut self,
-        synthesis: bool,
+        role: DefaultsRole,
         provider: String,
         outcome: Result<Vec<ListedModel>, String>,
     ) {
-        if self.defaults_synthesis != synthesis || self.role_provider() != provider {
+        if self.defaults_role != role || self.role_provider() != provider {
             return;
         }
         match outcome {
@@ -1117,11 +1181,10 @@ impl App {
     }
 
     fn open_default_picker(&mut self, field: FieldId) {
-        let synthesis = matches!(field, FieldId::SynthesisProvider | FieldId::SynthesisModel);
-        if synthesis != self.defaults_synthesis {
+        if DefaultsRole::of_field(field) != Some(self.defaults_role) {
             return;
         }
-        if matches!(field, FieldId::ReconProvider | FieldId::SynthesisProvider) {
+        if field == self.defaults_role.provider_field() {
             self.open_provider_picker();
         } else {
             self.open_model_picker();
@@ -1145,7 +1208,7 @@ impl App {
         self.scrolls.popup = 0;
         self.overlay = Overlay::Choice(ChoiceKind::Model);
         if provider == "openai-chatgpt" {
-            self.finish_catalog(self.defaults_synthesis, provider, Ok(codex_models()));
+            self.finish_catalog(self.defaults_role, provider, Ok(codex_models()));
             self.choice_note = "ChatGPT subscription exposes the Codex default.".into();
             self.status = "ChatGPT subscription uses the Codex default".into();
             return;
@@ -1192,14 +1255,11 @@ impl App {
 
     fn rebuild_model_choices(&mut self) {
         let current = self.role_model();
-        let items = self
-            .model_catalog
-            .iter()
-            .map(|model| ChoiceItem {
-                id: model.id.clone(),
-                label: model_label(model),
-            })
-            .collect();
+        let items = role_model_items(
+            self.defaults_role,
+            &self.role_provider(),
+            &self.model_catalog,
+        );
         self.set_choices(items, &current);
     }
 
@@ -1449,61 +1509,16 @@ impl App {
                     Ok("Recon started from result".into())
                 })
             }
-            ButtonId::SaveRecon => {
-                let provider = self.recon_provider.trim();
-                let model = self.recon_model.trim();
-                if provider.is_empty() || model.is_empty() {
-                    Err(anyhow::anyhow!("Provider and model are required"))
-                } else {
-                    let kind = provider::normalize_kind(provider);
-                    let kind = if kind == "openai" {
-                        "openai-chatgpt".into()
-                    } else {
-                        kind
-                    };
-                    if !matches!(
-                        kind.as_str(),
-                        "grok" | "openai-chatgpt" | "openrouter" | "local"
-                    ) {
-                        self.status = "Choose Grok, OpenAI, OpenRouter, or local".into();
-                        return;
-                    }
-                    self.settings.defaults.recon.provider = kind;
-                    self.settings.defaults.recon.model = model.into();
-                    self.settings.save().map(|_| {
-                        format!(
-                            "Recon: {} / {}",
-                            self.settings.defaults.recon.provider, model
-                        )
-                    })
+            ButtonId::SaveRecon => self.save_role(DefaultsRole::Recon),
+            ButtonId::SavePicker => self.save_role(DefaultsRole::ToolPicker),
+            ButtonId::SaveSynthesis => self.save_role(DefaultsRole::Synthesis),
+            ButtonId::DefaultRole(role) => {
+                if self.defaults_role != role {
+                    self.defaults_role = role;
+                    self.model_catalog.clear();
+                    self.catalog_for.clear();
                 }
-            }
-            ButtonId::SaveSynthesis => {
-                let provider = self.synthesis_provider.trim();
-                let model = self.synthesis_model.trim();
-                if provider.is_empty() || model.is_empty() {
-                    Err(anyhow::anyhow!("Provider and model are required"))
-                } else {
-                    let kind = provider::normalize_kind(provider);
-                    self.settings.defaults.synthesis.provider = kind;
-                    self.settings.defaults.synthesis.model = model.into();
-                    self.settings
-                        .save()
-                        .map(|_| "Synthesis default saved".into())
-                }
-            }
-            ButtonId::ToggleDefaultRole => {
-                self.defaults_synthesis = !self.defaults_synthesis;
-                self.model_catalog.clear();
-                self.catalog_for.clear();
-                Ok(format!(
-                    "{} default",
-                    if self.defaults_synthesis {
-                        "Synthesis"
-                    } else {
-                        "Recon"
-                    }
-                ))
+                Ok(format!("{} default", role.label()))
             }
             ButtonId::RefreshModels => {
                 self.refresh_catalog();
@@ -1545,6 +1560,61 @@ impl App {
             }
         };
         self.report(result);
+    }
+
+    /// Saves one role's provider and model. Only `settings.toml` changes; credentials
+    /// stay where they are. The change is recorded in the System event log.
+    fn save_role(&mut self, role: DefaultsRole) -> Result<String> {
+        let provider = self.field(role.provider_field()).trim().to_string();
+        let model = self.field(role.model_field()).trim().to_string();
+        if provider.is_empty() || model.is_empty() {
+            anyhow::bail!("Provider and model are required");
+        }
+        let kind = provider::normalize_kind(&provider);
+        let kind = if kind == "openai" && role != DefaultsRole::Synthesis {
+            "openai-chatgpt".into()
+        } else {
+            kind
+        };
+        if role != DefaultsRole::Synthesis
+            && !matches!(
+                kind.as_str(),
+                "grok" | "openai-chatgpt" | "openrouter" | "local"
+            )
+        {
+            anyhow::bail!("Choose Grok, OpenAI, OpenRouter, or local");
+        }
+        let assignment = self.settings.defaults.role_mut(match role {
+            DefaultsRole::Recon => "recon",
+            DefaultsRole::ToolPicker => "tool-picker",
+            DefaultsRole::Synthesis => "synthesis",
+        })
+        .ok_or_else(|| anyhow::anyhow!("unknown role"))?;
+        let before = format!("{} / {}", assignment.provider, assignment.model);
+        assignment.provider = kind.clone();
+        assignment.model = model.clone();
+        self.save_settings()?;
+        let after = format!("{kind} / {model}");
+        if before != after {
+            self.push_log("info", format!("{}: {before} -> {after}", role.settings_key()));
+        }
+        Ok(match role {
+            DefaultsRole::Recon => format!("Recon: {after}"),
+            DefaultsRole::ToolPicker => format!(
+                "Tool picker: {after} ({})",
+                provider::picker_transport(&model)
+            ),
+            DefaultsRole::Synthesis => "Synthesis default saved".into(),
+        })
+    }
+
+    /// Writes `config.toml`. Tests point `settings_path` at a temp file.
+    fn save_settings(&self) -> Result<()> {
+        if self.settings_path == paths::config_path() {
+            self.settings.save()
+        } else {
+            self.settings.save_to(&self.settings_path)
+        }
     }
 
     fn report(&mut self, result: Result<String>) {
@@ -2495,6 +2565,8 @@ pub fn is_picker_field(field: FieldId) -> bool {
         field,
         FieldId::ReconProvider
             | FieldId::ReconModel
+            | FieldId::PickerProvider
+            | FieldId::PickerModel
             | FieldId::SynthesisProvider
             | FieldId::SynthesisModel
     )
@@ -2508,6 +2580,31 @@ fn provider_label(kind: &str) -> &'static str {
         "local" => "Local",
         _ => "Provider",
     }
+}
+
+/// Model choices for a role. The tool picker on OpenRouter always offers the decisions
+/// models first, even when `GET /api/v1/models` omits them.
+fn role_model_items(role: DefaultsRole, provider: &str, catalog: &[ListedModel]) -> Vec<ChoiceItem> {
+    let mut items = Vec::new();
+    let picker = role == DefaultsRole::ToolPicker && provider == "openrouter";
+    if picker {
+        for (id, label) in provider::DECISIONS_MODELS {
+            items.push(ChoiceItem {
+                id: id.to_string(),
+                label: format!("{label} · {id}"),
+            });
+        }
+    }
+    for model in catalog {
+        if picker && items.iter().any(|item| item.id == model.id) {
+            continue;
+        }
+        items.push(ChoiceItem {
+            id: model.id.clone(),
+            label: model_label(model),
+        });
+    }
+    items
 }
 
 fn model_label(model: &ListedModel) -> String {
@@ -2699,9 +2796,11 @@ mod tests {
             osint_cancel: None,
             recon_provider: String::new(),
             recon_model: String::new(),
+            picker_provider: String::new(),
+            picker_model: String::new(),
             synthesis_provider: String::new(),
             synthesis_model: String::new(),
-            defaults_synthesis: false,
+            defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),
             choice_items: Vec::new(),
@@ -2732,6 +2831,7 @@ mod tests {
             settings: SettingsFile::default(),
             hardware: HardwareProfile::unknown(),
             auth_path: PathBuf::new(),
+            settings_path: PathBuf::new(),
             store: Store::memory().unwrap(),
             provider_tx,
             provider_rx,
@@ -2832,6 +2932,82 @@ mod tests {
     }
 
     #[test]
+    fn defaults_tool_picker_saves_only_its_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app();
+        app.settings_path = dir.path().join("config.toml");
+        app.auth_path = dir.path().join("auth.json");
+        let mut router = provider::account_secret(&app.auth, "openrouter");
+        router.api_key = Some("router-key".into());
+        app.auth.set_account(router);
+        app.settings.defaults.recon.provider = "grok".into();
+        app.settings.defaults.recon.model = "grok-4.6".into();
+        app.settings.defaults.synthesis.provider = "openrouter".into();
+        app.settings.defaults.synthesis.model = "openrouter/free".into();
+        app.recon_provider = "grok".into();
+        app.recon_model = "grok-4.6".into();
+        app.synthesis_provider = "openrouter".into();
+        app.synthesis_model = "openrouter/free".into();
+        let auth_before = serde_json::to_string(&app.auth).unwrap();
+
+        click(&mut app, Target::App(3));
+        click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
+        click(
+            &mut app,
+            Target::Button(ButtonId::DefaultRole(DefaultsRole::ToolPicker)),
+        );
+        assert_eq!(app.defaults_role, DefaultsRole::ToolPicker);
+        click(&mut app, Target::Field(FieldId::PickerProvider));
+        assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)));
+        let openrouter = app
+            .choice_items
+            .iter()
+            .position(|item| item.id == "openrouter")
+            .unwrap();
+        click(&mut app, Target::Choice(openrouter));
+        assert_eq!(app.picker_provider, "openrouter");
+
+        // The account catalog omits Jev; the picker list still offers it first.
+        app.on_work_event(WorkEvent::CatalogDone {
+            role: DefaultsRole::ToolPicker,
+            provider: "openrouter".into(),
+            outcome: Ok(vec![ListedModel {
+                id: "openai/gpt-5-mini".into(),
+                name: "GPT-5 mini".into(),
+                free: false,
+            }]),
+        });
+        click(&mut app, Target::Field(FieldId::PickerModel));
+        assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Model)));
+        assert_eq!(app.choice_items[0].id, "typesafe/jev-1.13");
+        assert!(app.choice_items[0].label.contains("Jev 1.13 (decisions)"));
+        assert_eq!(app.choice_items[1].id, "openai/gpt-5-mini");
+        click(&mut app, Target::Choice(0));
+        assert_eq!(app.picker_model, "typesafe/jev-1.13");
+
+        click(&mut app, Target::Button(ButtonId::SavePicker));
+        assert!(app.status.contains("decisions"), "{}", app.status);
+        assert_eq!(app.settings.defaults.tool_picker.provider, "openrouter");
+        assert_eq!(app.settings.defaults.tool_picker.model, "typesafe/jev-1.13");
+        assert_eq!(app.settings.defaults.recon.provider, "grok");
+        assert_eq!(app.settings.defaults.recon.model, "grok-4.6");
+        assert_eq!(app.settings.defaults.synthesis.provider, "openrouter");
+        assert_eq!(app.settings.defaults.synthesis.model, "openrouter/free");
+        assert_eq!(app.recon_model, "grok-4.6");
+        assert_eq!(app.synthesis_model, "openrouter/free");
+        assert!(app
+            .log
+            .iter()
+            .any(|line| line.text.starts_with("defaults.tool_picker:")));
+        let saved = std::fs::read_to_string(&app.settings_path).unwrap();
+        assert!(saved.contains("[defaults.tool_picker]"), "{saved}");
+        assert!(saved.contains("typesafe/jev-1.13"));
+        assert!(!saved.contains("router-key"));
+        assert!(!app.auth_path.exists());
+        assert_eq!(serde_json::to_string(&app.auth).unwrap(), auth_before);
+    }
+
+    #[test]
     fn subscription_progress_and_result_update_the_correct_page() {
         let mut app = app();
         app.provider_pending = Some(ProviderPage::Grok);
@@ -2874,7 +3050,7 @@ mod tests {
                 .any(|(x, y)| super::super::ui::hit_test(&app, x, y) == Some(target)));
         }
         app.provider_page = ProviderPage::Defaults;
-        app.defaults_synthesis = true;
+        app.defaults_role = DefaultsRole::Synthesis;
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
@@ -2923,7 +3099,7 @@ mod tests {
         }];
         app.catalog_for = "grok".into();
         app.on_work_event(WorkEvent::CatalogDone {
-            synthesis: false,
+            role: DefaultsRole::Recon,
             provider: "openrouter".into(),
             outcome: Ok(vec![
                 ListedModel {
@@ -2951,7 +3127,7 @@ mod tests {
         assert_eq!(app.recon_model, "beta");
         assert!(matches!(app.overlay, Overlay::None));
 
-        click(&mut app, Target::Button(ButtonId::ToggleDefaultRole));
+        click(&mut app, Target::Button(ButtonId::DefaultRole(DefaultsRole::Synthesis)));
         click(&mut app, Target::Field(FieldId::SynthesisProvider));
         assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)));
         assert_eq!(app.choice_items[0].id, "grok");
@@ -2977,7 +3153,7 @@ mod tests {
         click(&mut app, Target::Choice(0));
         assert_eq!(app.synthesis_model, "codex-default");
         app.on_work_event(WorkEvent::CatalogDone {
-            synthesis: true,
+            role: DefaultsRole::Synthesis,
             provider: "grok".into(),
             outcome: Ok(vec![ListedModel {
                 id: "not-allowed".into(),

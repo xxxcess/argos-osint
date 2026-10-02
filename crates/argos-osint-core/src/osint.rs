@@ -1642,6 +1642,73 @@ fn provider_credential(
     }
     Ok(None)
 }
+/// A short reason from an error body. An HTML error page (a CDN block page such as
+/// Stack Exchange's "This IP address ... has been blocked") becomes its title and the
+/// sentence that says why, instead of the first 250 bytes of markup.
+fn error_summary(raw: &str) -> String {
+    let trimmed = raw.trim_start();
+    if !(trimmed.starts_with('<') && trimmed.to_ascii_lowercase().contains("<html")) {
+        return raw.chars().take(250).collect();
+    }
+    let lower = raw.to_ascii_lowercase();
+    let title = lower
+        .find("<title>")
+        .and_then(|start| lower[start..].find("</title>").map(|end| raw[start + 7..start + end].trim().to_string()))
+        .unwrap_or_default();
+    let mut text = String::new();
+    let mut in_tag = false;
+    let mut skip_until: Option<&str> = None;
+    let mut index = 0;
+    while index < raw.len() {
+        if let Some(close) = skip_until {
+            match lower[index..].find(close) {
+                Some(at) => index += at + close.len(),
+                None => break,
+            }
+            skip_until = None;
+            continue;
+        }
+        let rest = &lower[index..];
+        if rest.starts_with("<style") {
+            skip_until = Some("</style>");
+            continue;
+        }
+        if rest.starts_with("<script") {
+            skip_until = Some("</script>");
+            continue;
+        }
+        let ch = raw[index..].chars().next().unwrap_or(' ');
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if !in_tag => text.push(ch),
+            _ => {}
+        }
+        index += ch.len_utf8();
+    }
+    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = words.strip_prefix(title.as_str()).unwrap_or(&words).trim();
+    // Sentences end at ". " so dotted values (an IP address) stay whole.
+    let reason = body
+        .split(". ")
+        .find(|sentence| {
+            let sentence = sentence.to_ascii_lowercase();
+            ["blocked", "denied", "forbidden", "not allowed", "rate limit"].iter().any(|word| sentence.contains(word))
+        })
+        .map(|sentence| sentence.trim().trim_end_matches('.'))
+        .unwrap_or("");
+    let summary = match (title.is_empty(), reason.is_empty()) {
+        (false, false) => format!("{title}: {reason}"),
+        (false, true) => title,
+        (true, false) => reason.to_string(),
+        (true, true) => words,
+    };
+    summary.chars().take(250).collect()
+}
+
 #[derive(Clone)]
 pub struct Executor {
     client: reqwest::Client,
@@ -1928,10 +1995,7 @@ impl Executor {
                     "failed"
                 }
                 .into();
-                result.error = Some(format!(
-                    "HTTP {status}: {}",
-                    result.raw.chars().take(250).collect::<String>()
-                ));
+                result.error = Some(format!("HTTP {status}: {}", error_summary(&result.raw)));
                 return Ok(result);
             }
             match parse_observations(id, &result.raw, &content_type, req.ndjson) {
@@ -1971,6 +2035,16 @@ impl Executor {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_html_block_page_becomes_a_short_reason() {
+        let page = "<html>\n<head>\n<title>Forbidden - Stack Exchange</title>\n<style type=\"text/css\">body { color: #333; }</style></head><body><h1>Access Denied</h1><p>This IP address 104.28.164.108 has been blocked from access to our services. If you believe this to be in error, please contact us.</p><script>document.getElementById('x');</script></body></html>";
+        assert_eq!(
+            super::error_summary(page),
+            "Forbidden - Stack Exchange: Access Denied This IP address 104.28.164.108 has been blocked from access to our services"
+        );
+        assert_eq!(super::error_summary("{\"error\":\"bad key\"}"), "{\"error\":\"bad key\"}");
+    }
+
     use super::*;
     #[test]
     fn registry_and_validation() {

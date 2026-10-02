@@ -57,7 +57,7 @@ enum Command {
     Logout,
     /// Print the host profile.
     Hardware,
-    /// List the active text model catalog.
+    /// List the model catalog for a role: recon, tool-picker, or synthesis.
     Models {
         #[arg(long, default_value = "synthesis")]
         role: String,
@@ -183,6 +183,7 @@ enum OsintCommand {
 #[derive(Subcommand)]
 enum DefaultsCommand {
     Show,
+    /// Set a role's provider and model. Role: recon, tool-picker, or synthesis.
     Set {
         role: String,
         #[arg(long)]
@@ -314,7 +315,7 @@ async fn login() -> Result<()> {
     let mut auth = AuthFile::load()?;
     auth.set_account(secret);
     auth.save()?;
-    println!("Provider account saved. Set Recon and Synthesis models with `argos defaults set`.");
+    println!("Provider account saved. Set Recon, Tool picker, and Synthesis models with `argos defaults set`.");
     Ok(())
 }
 
@@ -332,16 +333,62 @@ async fn models(role: &str) -> Result<()> {
     let auth = AuthFile::load()?;
     let settings = SettingsFile::load()?;
     let secret = provider::role_secret(&auth, &settings, role)?;
-    println!("{} / {}", provider::effective_kind(&secret), secret.model);
-    match provider::list_models(&secret).await {
-        Ok(models) => {
-            for model in models {
-                println!("{model}");
-            }
+    let picker = provider::role_name(role) == Some("tool_picker");
+    let kind = provider::effective_kind(&secret);
+    if picker {
+        println!("{kind} / {} ({})", secret.model, provider::picker_transport(&secret.model));
+    } else {
+        println!("{kind} / {}", secret.model);
+    }
+    let listed = match provider::list_models(&secret).await {
+        Ok(models) => models,
+        Err(err) => {
+            eprintln!("catalog unavailable: {err}");
+            Vec::new()
         }
-        Err(err) => eprintln!("catalog unavailable: {err}"),
+    };
+    for line in model_lines(picker, &kind, &listed) {
+        println!("{line}");
     }
     Ok(())
+}
+
+/// Catalog lines for a role. The tool picker on OpenRouter always lists the decisions
+/// models first, even when `GET /models` omits them.
+fn model_lines(picker: bool, kind: &str, listed: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    if picker && kind == "openrouter" {
+        for (id, label) in provider::DECISIONS_MODELS {
+            lines.push(format!("{id}  {label}"));
+        }
+    }
+    for model in listed {
+        if picker && provider::DECISIONS_MODELS.iter().any(|(id, _)| id == model) {
+            continue;
+        }
+        lines.push(model.clone());
+    }
+    lines
+}
+
+/// `defaults show` JSON: each role's provider and model, plus the picker transport.
+fn defaults_json(auth: &AuthFile, settings: &SettingsFile) -> Result<serde_json::Value> {
+    let role = |name: &str| -> Result<(String, String)> {
+        let secret = provider::role_secret(auth, settings, name)?;
+        Ok((provider::effective_kind(&secret), secret.model))
+    };
+    let (recon_provider, recon_model) = role("recon")?;
+    let (picker_provider, picker_model) = role("tool-picker")?;
+    let (synthesis_provider, synthesis_model) = role("synthesis")?;
+    Ok(serde_json::json!({
+        "recon": {"provider": recon_provider, "model": recon_model},
+        "tool_picker": {
+            "provider": picker_provider,
+            "transport": provider::picker_transport(&picker_model),
+            "model": picker_model,
+        },
+        "synthesis": {"provider": synthesis_provider, "model": synthesis_model},
+    }))
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
@@ -354,11 +401,7 @@ fn defaults_command(command: DefaultsCommand) -> Result<()> {
     match command {
         DefaultsCommand::Show => {
             let auth = AuthFile::load()?;
-            let recon = provider::role_secret(&auth, &settings, "recon")?;
-            let synthesis = provider::role_secret(&auth, &settings, "synthesis")?;
-            print_json(
-                &serde_json::json!({"recon":{"provider":provider::effective_kind(&recon),"model":recon.model},"synthesis":{"provider":provider::effective_kind(&synthesis),"model":synthesis.model}}),
-            )
+            print_json(&defaults_json(&auth, &settings)?)
         }
         DefaultsCommand::Set {
             role,
@@ -374,11 +417,10 @@ fn defaults_command(command: DefaultsCommand) -> Result<()> {
                 ),
                 "unknown provider"
             );
-            let target = match role.as_str() {
-                "recon" => &mut settings.defaults.recon,
-                "synthesis" => &mut settings.defaults.synthesis,
-                _ => return Err(anyhow!("role must be recon or synthesis")),
-            };
+            let target = settings
+                .defaults
+                .role_mut(&role)
+                .ok_or_else(|| anyhow!("role must be recon, tool-picker, or synthesis"))?;
             target.provider = kind;
             target.model = model.trim().into();
             settings.save()?;
@@ -438,7 +480,26 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                 .get_thread(&thread_id)?
                 .ok_or_else(|| anyhow!("thread not found"))?;
             let messages = store.list_messages(&thread_id)?;
-            print_json(&serde_json::json!({"thread":thread,"messages":messages}))
+            // Runs carry the plan, including tool-picker picks and their probabilities.
+            let runs: Vec<serde_json::Value> = store
+                .runs_for_thread(&thread_id)?
+                .into_iter()
+                .map(|run| {
+                    let plan = run
+                        .plan_json
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+                    serde_json::json!({
+                        "id": run.id,
+                        "state": run.state,
+                        "recon_model": run.recon_model,
+                        "tool_picker_model": run.tool_picker_model,
+                        "synthesis_model": run.synthesis_model,
+                        "plan": plan,
+                    })
+                })
+                .collect();
+            print_json(&serde_json::json!({"thread":thread,"messages":messages,"runs":runs}))
         }
         ReconCommand::Rename { thread_id, title } => print_json(
             &serde_json::json!({"renamed":open_store()?.rename_thread(&thread_id,&title)?}),
@@ -634,4 +695,34 @@ async fn ask_thread(thread_id: &str, question: &str) -> Result<()> {
     print_json(
         &serde_json::json!({"run":run,"messages":store.list_messages(thread_id)?,"calls":store.calls_for_run(&run.id)?}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_show_includes_the_tool_picker_transport() {
+        let mut settings = SettingsFile::default();
+        settings.defaults.seed_tool_picker();
+        settings.defaults.synthesis = provider::ModelAssignment { provider: "grok".into(), model: "grok-4.6".into() };
+        let shown = defaults_json(&AuthFile::default(), &settings).unwrap();
+        assert_eq!(shown["tool_picker"]["provider"], "openrouter");
+        assert_eq!(shown["tool_picker"]["model"], provider::TOOL_PICKER_MODEL);
+        assert_eq!(shown["tool_picker"]["transport"], "decisions");
+        assert_eq!(shown["synthesis"]["model"], "grok-4.6");
+        settings.defaults.role_mut("tool-picker").unwrap().model = "x-ai/grok-4".into();
+        let shown = defaults_json(&AuthFile::default(), &settings).unwrap();
+        assert_eq!(shown["tool_picker"]["transport"], "chat");
+        assert!(settings.defaults.role_mut("writer").is_none());
+    }
+
+    #[test]
+    fn tool_picker_catalog_lists_jev_even_when_the_api_omits_it() {
+        let lines = model_lines(true, "openrouter", &["x-ai/grok-4".into(), provider::TOOL_PICKER_MODEL.into()]);
+        assert_eq!(lines[0], "typesafe/jev-1.13  Jev 1.13 (decisions)");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(model_lines(false, "openrouter", &["x-ai/grok-4".into()]), vec!["x-ai/grok-4".to_string()]);
+        assert!(model_lines(true, "grok", &[]).is_empty());
+    }
 }

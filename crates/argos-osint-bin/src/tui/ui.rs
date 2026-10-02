@@ -375,14 +375,31 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                     item.role == "assistant" && item.run_id.as_deref() == Some(run.id.as_str())
                 });
                 if !answered && app.running_thread(&run.thread_id) {
+                    let stage = app.stage_label(&run.thread_id);
+                    let deadline = app.deadline_label(&run.thread_id);
+                    let title = if deadline.is_empty() {
+                        format!("· {stage}")
+                    } else {
+                        format!("· {stage} · {deadline}")
+                    };
                     blocks.push(ChatBlock {
                         key: format!("status:{}", run.id),
-                        title: format!("· {}", app.recon_stage),
+                        title,
                         body: String::new(),
                         collapsible: false,
                         message_index: None,
                         has_memory: false,
                     });
+                    if let Some((title, body)) = app.live_bubble(&run.thread_id) {
+                        blocks.push(ChatBlock {
+                            key: format!("stream:{}", run.id),
+                            title,
+                            body,
+                            collapsible: false,
+                            message_index: None,
+                            has_memory: false,
+                        });
+                    }
                 }
             }
         } else {
@@ -580,6 +597,9 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan) -> Vec<String> {
     }
     if !plan.directives_note.is_empty() {
         lines.push(format!("   {}", plan.directives_note));
+    }
+    if !plan.deadline_note.is_empty() {
+        lines.push(plan.deadline_note.clone());
     }
     let model = if run.tool_picker_model.is_empty() {
         plan.picker_model.as_str()
@@ -876,6 +896,9 @@ struct FrameStamp {
     chat: bool,
     thread: Option<String>,
     stage: String,
+    live_shown: usize,
+    live_note: String,
+    deadline: String,
     messages: u64,
     calls: u64,
     runs: u64,
@@ -900,6 +923,23 @@ fn frame_stamp(app: &App, width: u16) -> FrameStamp {
         chat: app.recon_chat,
         thread: app.selected_thread.clone(),
         stage: app.recon_stage.clone(),
+        live_shown: app
+            .selected_thread
+            .as_ref()
+            .and_then(|id| app.live_bubble(id))
+            .map(|(_, body)| body.len())
+            .unwrap_or(0),
+        live_note: app
+            .selected_thread
+            .as_ref()
+            .and_then(|id| app.live_bubble(id))
+            .map(|(title, _)| title)
+            .unwrap_or_default(),
+        deadline: app
+            .selected_thread
+            .as_ref()
+            .map(|id| app.deadline_label(id))
+            .unwrap_or_default(),
         messages: message_stamp(&app.messages),
         calls: call_stamp(&app.calls),
         runs: run_stamp(&app.runs),
@@ -1066,6 +1106,22 @@ fn rows_for(app: &App, blocks: &[ChatBlock], width: usize) -> Vec<ChatRow> {
             }];
             clip_pieces(&mut pieces, width);
             rows.push(row(index, true, false, false, RowFace::Plain, pieces));
+            continue;
+        }
+        if block.key.starts_with("stream:") {
+            if index > 0 {
+                rows.push(row(index, false, false, false, RowFace::Plain, Vec::new()));
+            }
+            let mut pieces = vec![Piece {
+                text: block.title.clone(),
+                tone: Tone::Accent,
+            }];
+            clip_pieces(&mut pieces, width);
+            rows.push(row(index, true, false, false, RowFace::Plain, pieces));
+            for line in markdown::markdown_lines(&block.body, width) {
+                let face = if line.code { RowFace::Code } else { RowFace::Plain };
+                rows.push(row(index, false, false, false, face, line.pieces));
+            }
             continue;
         }
         let open = expanded(app, block);

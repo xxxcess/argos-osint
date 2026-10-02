@@ -106,6 +106,15 @@ pub fn definition(id: &str) -> Option<&'static ToolDefinition> {
     registry().iter().find(|t| t.id == id)
 }
 
+/// Extra wall time a Firecrawl job may spend polling after its POST. Batch scrape and
+/// crawl poll until the tool timeout; every other tool returns zero.
+pub fn job_poll_seconds(id: &str) -> u64 {
+    match canonical_tool_id(id) {
+        "firecrawl_batch_scrape" | "firecrawl_crawl" => definition(id).map(|tool| tool.timeout_seconds).unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// Old tool ids that still resolve: `hunter_tech_lookup` became `hunter_company_enrichment`.
 pub fn canonical_tool_id(id: &str) -> &str {
     match id {

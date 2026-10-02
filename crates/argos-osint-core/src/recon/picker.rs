@@ -6,7 +6,11 @@
 //! are picked. Any other model uses chat completions with one JSON object per pick.
 use std::{
     collections::{HashMap, HashSet},
-    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
@@ -151,6 +155,7 @@ pub struct Picker<'a> {
     pub failure: Option<String>,
     pub fallback_picks: usize,
     pub cost: f64,
+    clock: Option<Arc<Mutex<super::budget::TurnClock>>>,
 }
 
 impl<'a> Picker<'a> {
@@ -175,7 +180,12 @@ impl<'a> Picker<'a> {
             failure: None,
             fallback_picks: 0,
             cost: 0.0,
+            clock: None,
         }
+    }
+
+    pub(crate) fn bind_clock(&mut self, clock: Arc<Mutex<super::budget::TurnClock>>) {
+        self.clock = Some(clock);
     }
 
     /// Whether another provider request is allowed this turn.
@@ -189,10 +199,33 @@ impl<'a> Picker<'a> {
             return Err(anyhow!("cancelled"));
         }
         self.requests += 1;
-        let outcome = if self.transport == "decisions" {
-            let (state, questions) = decisions_request(request);
-            tokio::select! {
-                result = provider::decide(self.secret, &state, &questions) => result.map(|response| {
+        let limit = self.clock.as_ref().map(|clock| {
+            let mut clock = clock.lock().unwrap();
+            clock.note_round();
+            clock.recon_remaining()
+        });
+        let outcome = self.one_request(request, limit).await;
+        if let Err(err) = &outcome {
+            if err.to_string() == "cancelled" || super::deadline_hit(err) {
+                // Cancel and the recon deadline stop the turn; they are not a transport failure.
+            } else if super::provider_rate_limited(err) {
+                self.rate_limited = true;
+            } else {
+                self.failure = Some(err.to_string().chars().take(160).collect());
+            }
+        }
+        outcome
+    }
+
+    async fn one_request(&mut self, request: &PickRequest<'_>, limit: Option<Duration>) -> Result<PickReply> {
+        if limit.is_some_and(|limit| limit.is_zero()) {
+            return Err(anyhow!(super::budget::RECON_DEADLINE));
+        }
+        let decide = self.transport == "decisions";
+        let run = async {
+            if decide {
+                let (state, questions) = decisions_request(request);
+                provider::decide(self.secret, &state, &questions).await.map(|response| {
                     if let Some(cost) = response.cost {
                         self.cost += cost;
                     }
@@ -202,24 +235,26 @@ impl<'a> Picker<'a> {
                         confidence: answer.choice_probability(),
                         ..PickReply::default()
                     }
-                }),
-                _ = super::wait_cancel(self.cancel.clone()) => return Err(anyhow!("cancelled")),
-            }
-        } else {
-            let messages = chat_request(request);
-            tokio::select! {
-                result = provider::complete(self.secret, &messages, &[], |_| {}) => result.map(|response| parse_chat_pick(&response.content)),
-                _ = super::wait_cancel(self.cancel.clone()) => return Err(anyhow!("cancelled")),
+                })
+            } else {
+                let messages = chat_request(request);
+                provider::complete(self.secret, &messages, &[], |_| {})
+                    .await
+                    .map(|response| parse_chat_pick(&response.content))
             }
         };
-        if let Err(err) = &outcome {
-            if super::provider_rate_limited(err) {
-                self.rate_limited = true;
-            } else {
-                self.failure = Some(err.to_string().chars().take(160).collect());
+        if let Some(limit) = limit {
+            tokio::select! {
+                result = run => result,
+                _ = super::wait_cancel(self.cancel.clone()) => Err(anyhow!("cancelled")),
+                _ = tokio::time::sleep(limit) => Err(anyhow!(super::budget::RECON_DEADLINE)),
+            }
+        } else {
+            tokio::select! {
+                result = run => result,
+                _ = super::wait_cancel(self.cancel.clone()) => Err(anyhow!("cancelled")),
             }
         }
-        outcome
     }
 
     /// Builds the ordered list, one pick per request. Stops at `limit` tools, at `done`
@@ -253,7 +288,7 @@ impl<'a> Picker<'a> {
                 };
                 let reply = match self.ask(&request).await {
                     Ok(reply) => reply,
-                    Err(err) if err.to_string() == "cancelled" => return Err(err),
+                    Err(err) if err.to_string() == "cancelled" || super::deadline_hit(&err) => return Err(err),
                     Err(_) => break,
                 };
                 if reply.tool_id == DONE && allow_done {
@@ -476,7 +511,7 @@ impl<'a> Picker<'a> {
                     };
                     return Ok(Some((String::new(), record)));
                 }
-                Err(err) if err.to_string() == "cancelled" => return Err(err),
+                Err(err) if err.to_string() == "cancelled" || super::deadline_hit(&err) => return Err(err),
                 Err(_) => {}
             }
         }

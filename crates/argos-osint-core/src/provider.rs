@@ -375,6 +375,10 @@ pub struct ReconLimits {
     pub max_calls: u8,
     #[serde(default = "default_turn_seconds")]
     pub turn_seconds: u16,
+    /// Hard ceiling for the whole turn, in seconds. The computed deadline never exceeds
+    /// this, and never drops below `turn_seconds`. Missing values load as 900.
+    #[serde(default = "default_max_turn_seconds")]
+    pub max_turn_seconds: u16,
     /// Recurring Firecrawl credits available to automatic investigation.
     #[serde(default = "default_firecrawl_credits")]
     pub firecrawl_credits: u32,
@@ -438,6 +442,13 @@ fn default_max_calls() -> u8 {
 fn default_turn_seconds() -> u16 {
     300
 }
+/// Hard ceiling for one turn. Existing configs that omit the field load this.
+pub const DEFAULT_MAX_TURN_SECONDS: u16 = 900;
+pub const MIN_MAX_TURN_SECONDS: u16 = 120;
+pub const MAX_MAX_TURN_SECONDS: u16 = 1800;
+fn default_max_turn_seconds() -> u16 {
+    DEFAULT_MAX_TURN_SECONDS
+}
 fn default_firecrawl_credits() -> u32 {
     200
 }
@@ -490,6 +501,7 @@ impl Default for ReconLimits {
             max_rounds: default_max_rounds(),
             max_calls: default_max_calls(),
             turn_seconds: default_turn_seconds(),
+            max_turn_seconds: default_max_turn_seconds(),
             firecrawl_credits: default_firecrawl_credits(),
             hunter_credits: default_hunter_credits(),
             sociavault_credits: default_sociavault_credits(),
@@ -513,6 +525,16 @@ impl Default for ReconLimits {
 }
 
 impl ReconLimits {
+    /// `max_turn_seconds` clamped to 120–1800. Zero or a missing field is 900.
+    pub fn effective_max_turn_seconds(&self) -> u16 {
+        let value = if self.max_turn_seconds == 0 {
+            DEFAULT_MAX_TURN_SECONDS
+        } else {
+            self.max_turn_seconds
+        };
+        value.clamp(MIN_MAX_TURN_SECONDS, MAX_MAX_TURN_SECONDS)
+    }
+
     pub fn allowance(&self, provider: &str) -> u32 {
         match provider {
             "firecrawl" => self.firecrawl_credits,
@@ -1432,6 +1454,22 @@ mod tests {
         SettingsFile::load_from(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         assert_eq!((loaded.recon_limits.news_calls_per_turn, loaded.recon_limits.legal_calls_per_turn), (2, 3));
+    }
+
+    #[test]
+    fn missing_max_turn_seconds_loads_as_900_and_the_range_is_120_to_1800() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[recon_limits]\nturn_seconds = 300\n").unwrap();
+        let loaded = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(loaded.recon_limits.max_turn_seconds, DEFAULT_MAX_TURN_SECONDS);
+        assert_eq!(loaded.recon_limits.effective_max_turn_seconds(), 900);
+        let low = ReconLimits { max_turn_seconds: 50, ..ReconLimits::default() };
+        assert_eq!(low.effective_max_turn_seconds(), MIN_MAX_TURN_SECONDS);
+        let high = ReconLimits { max_turn_seconds: 5_000, ..ReconLimits::default() };
+        assert_eq!(high.effective_max_turn_seconds(), MAX_MAX_TURN_SECONDS);
+        let mid = ReconLimits { max_turn_seconds: 1_200, ..ReconLimits::default() };
+        assert_eq!(mid.effective_max_turn_seconds(), 1_200);
     }
 
     #[test]

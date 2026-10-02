@@ -10,6 +10,7 @@ pub const DIM: Color = Color::Rgb(120, 150, 162);
 pub const SELECT: Color = Color::Rgb(14, 92, 72);
 pub const WARN: Color = Color::Rgb(232, 176, 96);
 pub const RED: Color = Color::Rgb(232, 112, 104);
+pub const VIOLET: Color = Color::Rgb(176, 140, 232);
 /// Raised band behind a user prompt, the same role as Grok Build's `bg_light` prompt band.
 pub const USER_BAND: Color = Color::Rgb(12, 36, 44);
 /// Fenced code background, quieter than the user band.
@@ -55,4 +56,13 @@ pub fn warn() -> Style {
 
 pub fn error() -> Style {
     Style::default().fg(RED).bg(BG)
+}
+
+pub fn directive_color(id: &str) -> Color {
+    match id {
+        "d1" => WARN,
+        "d2" => ACCENT,
+        "d3" => VIOLET,
+        _ => DIM,
+    }
 }

@@ -11,8 +11,8 @@ use ratatui::Frame;
 use super::markdown::{self, Piece, Tone};
 
 use super::app::{
-    is_picker_field, App, ButtonId, ChoiceKind, DefaultsRole, FieldId, ModuleId, Overlay,
-    ProviderPage, Target,
+    is_picker_field, App, BrainListMode, BrainPage, ButtonId, ChoiceKind, DefaultsRole, FieldId,
+    GraphView, ModuleId, Overlay, ProviderPage, Target,
 };
 use super::theme::{self, panel};
 use argos_osint_core::osint;
@@ -109,28 +109,59 @@ fn composer_parts(area: Rect) -> (Rect, Rect) {
     (parts[0], parts[1])
 }
 
-fn brain_areas(area: Rect) -> Vec<Rect> {
-    let outer = split_vertical(area, [Constraint::Length(1), Constraint::Min(0)]);
-    let columns = split_horizontal(
-        outer[1],
-        [Constraint::Percentage(52), Constraint::Percentage(48)],
+fn brain_pages(area: Rect) -> (Rect, Rect) {
+    let rows = split_vertical(area, [Constraint::Length(3), Constraint::Min(0)]);
+    (rows[0], rows[1])
+}
+
+struct BrainList {
+    actions: Rect,
+    query: Rect,
+    list: Rect,
+    recall: Rect,
+}
+
+fn brain_list(area: Rect) -> BrainList {
+    let rows = split_vertical(
+        area,
+        [
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(4),
+            Constraint::Length(8),
+        ],
     );
-    let form = split_vertical(
-        columns[0],
+    BrainList {
+        actions: rows[0],
+        query: rows[1],
+        list: rows[2],
+        recall: rows[3],
+    }
+}
+
+struct BrainForm {
+    app: Rect,
+    conversation: Rect,
+    insight: Rect,
+    actions: Rect,
+}
+
+fn brain_form(area: Rect) -> BrainForm {
+    let rows = split_vertical(
+        area,
         [
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(0),
         ],
     );
-    let results = split_vertical(columns[1], [Constraint::Min(4), Constraint::Length(6)]);
-    vec![
-        outer[0], form[0], form[1], form[2], form[3], form[4], form[5], results[0], results[1],
-    ]
+    BrainForm {
+        app: rows[0],
+        conversation: rows[1],
+        insight: rows[2],
+        actions: rows[3],
+    }
 }
 
 fn provider_areas(area: Rect) -> Vec<Rect> {
@@ -581,11 +612,16 @@ fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock 
 /// probabilities stay in `plan_json` (`recon show`); they are not rendered here.
 fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(if matches!(plan.directives_mode.as_str(), "directives_fallback" | "questions_fallback") {
-        "Directives (fallback set):".to_string()
-    } else {
-        "Directives:".to_string()
-    });
+    lines.push(
+        if matches!(
+            plan.directives_mode.as_str(),
+            "directives_fallback" | "questions_fallback"
+        ) {
+            "Directives (fallback set):".to_string()
+        } else {
+            "Directives:".to_string()
+        },
+    );
     for directive in &plan.directives {
         let mut row = format!("   {}: {}", directive.id, directive.goal);
         if !directive.entities.is_empty() {
@@ -670,9 +706,16 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> 
         .iter()
         .filter(|binding| binding.step_id.is_empty() && !binding.inferred)
         .map(|binding| {
-            let platform = if binding.qualifier.is_empty() { String::new() } else { format!(" ({})", binding.qualifier) };
+            let platform = if binding.qualifier.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", binding.qualifier)
+            };
             if binding.unverified {
-                format!("{} {}{platform} · named in {}, unverified", binding.kind, binding.value, binding.evidence_id)
+                format!(
+                    "{} {}{platform} · named in {}, unverified",
+                    binding.kind, binding.value, binding.evidence_id
+                )
             } else {
                 format!("{} {}{platform}", binding.kind, binding.value)
             }
@@ -711,7 +754,9 @@ fn matching_call<'a>(calls: &'a [recon::Call], step: &recon::PlanCall) -> Option
             return Some(found);
         }
     }
-    calls.iter().find(|call| call.tool_id == step.tool_id && call.inputs == step.arguments)
+    calls
+        .iter()
+        .find(|call| call.tool_id == step.tool_id && call.inputs == step.arguments)
 }
 
 fn result_count(observations: &serde_json::Value) -> Option<usize> {
@@ -727,7 +772,11 @@ fn result_count(observations: &serde_json::Value) -> Option<usize> {
 fn result_summary(call: &recon::Call) -> Option<String> {
     let result = call.result.as_ref()?;
     let mut parts = vec![result.status.clone()];
-    parts.push(if result.cached { "cache".into() } else { "live".into() });
+    parts.push(if result.cached {
+        "cache".into()
+    } else {
+        "live".into()
+    });
     if let Some(count) = result_count(&result.observations) {
         parts.push(format!(
             "{count} result{}",
@@ -1181,7 +1230,11 @@ fn rows_for(app: &App, blocks: &[ChatBlock], width: usize) -> Vec<ChatRow> {
             clip_pieces(&mut pieces, width);
             rows.push(row(index, true, false, false, RowFace::Plain, pieces));
             for line in markdown::markdown_lines(&block.body, width) {
-                let face = if line.code { RowFace::Code } else { RowFace::Plain };
+                let face = if line.code {
+                    RowFace::Code
+                } else {
+                    RowFace::Plain
+                };
                 rows.push(row(index, false, false, false, face, line.pieces));
             }
             continue;
@@ -1467,12 +1520,22 @@ pub fn page(app: &mut App, direction: i32) {
             let room = inset(transcript_rect(app)).height.max(1) as i32;
             scroll_chat(app, direction * room);
         }
-        Some(ModuleId::Brain) if matches!(app.focus, Target::Memory(_)) => {
+        Some(ModuleId::Brain)
+            if app.brain_page == BrainPage::Memories
+                && app.brain_list_mode == BrainListMode::List
+                && matches!(app.focus, Target::Memory(_)) =>
+        {
             let room = (memory_room(app) / 2).max(1) as i32;
             let max = memory_max(app);
             nudge_list(&mut app.scrolls.memories, direction * room, max);
         }
-        Some(ModuleId::Brain) => nudge(&mut app.scrolls.recall, direction * 6, 10_000),
+        Some(ModuleId::Brain)
+            if app.brain_page == BrainPage::Memories
+                && app.brain_list_mode == BrainListMode::List =>
+        {
+            nudge(&mut app.scrolls.recall, direction * 6, 10_000);
+        }
+        Some(ModuleId::Brain) => {}
         Some(ModuleId::Osint) if matches!(app.focus, Target::Tool(_)) => {
             let room = (tool_room(app) / 2).max(1) as i32;
             let max = tool_max(app);
@@ -1541,16 +1604,21 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
                 Region::None
             }
         }
-        Some(ModuleId::Brain) => {
-            let rows = brain_areas(body);
-            if contains(rows[7], x, y) {
+        Some(ModuleId::Brain)
+            if app.brain_page == BrainPage::Memories
+                && app.brain_list_mode == BrainListMode::List =>
+        {
+            let (_, rest) = brain_pages(body);
+            let layout = brain_list(rest);
+            if contains(layout.list, x, y) {
                 Region::Memories
-            } else if contains(rows[8], x, y) {
+            } else if contains(layout.recall, x, y) {
                 Region::Recall
             } else {
                 Region::None
             }
         }
+        Some(ModuleId::Brain) => Region::None,
         Some(ModuleId::Osint) => {
             let layout = osint_areas(body, api_key_slot(app).is_some());
             let list = layout.list;
@@ -1594,10 +1662,11 @@ fn thread_room(app: &App) -> usize {
 }
 
 fn memory_room(app: &App) -> usize {
-    brain_areas(chrome(app.screen, app).body)[7]
-        .height
-        .saturating_sub(2) as usize
-        / 2
+    if app.brain_page != BrainPage::Memories || app.brain_list_mode != BrainListMode::List {
+        return 1;
+    }
+    let (_, rest) = brain_pages(chrome(app.screen, app).body);
+    brain_list(rest).list.height.saturating_sub(2) as usize / 2
 }
 
 fn tool_room(app: &App) -> usize {
@@ -1747,27 +1816,41 @@ pub fn focus_order(app: &App) -> Vec<Target> {
         }
         Some(ModuleId::Brain) => {
             let mut order = vec![Target::Home];
-            order.extend(
-                [
-                    FieldId::BrainApp,
-                    FieldId::BrainConversation,
-                    FieldId::BrainInsight,
-                    FieldId::BrainQuery,
-                ]
-                .map(Target::Field),
-            );
-            order.extend(
-                [
-                    ButtonId::Add,
-                    ButtonId::Recall,
-                    ButtonId::Pin,
-                    ButtonId::Delete,
-                    ButtonId::OpenSource,
-                ]
-                .map(Target::Button),
-            );
-            if !app.memories.is_empty() {
-                order.push(Target::Memory(app.memory_sel));
+            order.extend(BrainPage::ALL.map(Target::BrainTab));
+            match (app.brain_page, app.brain_list_mode) {
+                (BrainPage::Graph, _) => {
+                    order.extend(GraphView::ALL.map(Target::GraphView));
+                    if !super::graph::selectable(&app.brain_graph, app.graph_view).is_empty() {
+                        order.push(Target::GraphNode(app.graph_node));
+                    }
+                }
+                (_, BrainListMode::Create) => {
+                    order.extend(
+                        [
+                            FieldId::BrainApp,
+                            FieldId::BrainConversation,
+                            FieldId::BrainInsight,
+                        ]
+                        .map(Target::Field),
+                    );
+                    order.extend([ButtonId::Add, ButtonId::BrainBack].map(Target::Button));
+                }
+                _ => {
+                    order.push(Target::Button(ButtonId::CreateMemory));
+                    order.push(Target::Field(FieldId::BrainQuery));
+                    order.extend(
+                        [
+                            ButtonId::Recall,
+                            ButtonId::Pin,
+                            ButtonId::Delete,
+                            ButtonId::OpenSource,
+                        ]
+                        .map(Target::Button),
+                    );
+                    if !app.memories.is_empty() {
+                        order.push(Target::Memory(app.memory_sel));
+                    }
+                }
             }
             order
         }
@@ -1973,37 +2056,61 @@ fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
 }
 
 fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
-    let rows = brain_areas(body);
-    if contains(rows[1], x, y) {
-        return Some(Target::Field(FieldId::BrainApp));
+    let (tabs, rest) = brain_pages(body);
+    if contains(tabs, x, y) {
+        let areas = button_areas(tabs, BrainPage::ALL.len());
+        return areas
+            .into_iter()
+            .zip(BrainPage::ALL)
+            .find_map(|(rect, page)| contains(rect, x, y).then_some(Target::BrainTab(page)));
     }
-    if contains(rows[2], x, y) {
-        return Some(Target::Field(FieldId::BrainConversation));
+    if app.brain_page == BrainPage::Graph {
+        return super::graph::hit(app, rest, x, y);
     }
-    if contains(rows[3], x, y) {
-        return Some(Target::Field(FieldId::BrainInsight));
+    if app.brain_list_mode == BrainListMode::Create {
+        let form = brain_form(rest);
+        if contains(form.app, x, y) {
+            return Some(Target::Field(FieldId::BrainApp));
+        }
+        if contains(form.conversation, x, y) {
+            return Some(Target::Field(FieldId::BrainConversation));
+        }
+        if contains(form.insight, x, y) {
+            return Some(Target::Field(FieldId::BrainInsight));
+        }
+        if contains(form.actions, x, y) {
+            let buttons = button_areas(form.actions, 2);
+            let ids = [ButtonId::Add, ButtonId::BrainBack];
+            return buttons
+                .iter()
+                .position(|rect| contains(*rect, x, y))
+                .map(|index| Target::Button(ids[index]));
+        }
+        return None;
     }
-    if contains(rows[4], x, y) {
+    let layout = brain_list(rest);
+    if contains(layout.query, x, y) {
         return Some(Target::Field(FieldId::BrainQuery));
     }
-    if contains(rows[5], x, y) {
-        let buttons = button_areas(rows[5], 2);
-        let ids = [ButtonId::Add, ButtonId::Recall];
+    if contains(layout.actions, x, y) {
+        let buttons = button_areas(layout.actions, 5);
+        let ids = [
+            ButtonId::CreateMemory,
+            ButtonId::Recall,
+            ButtonId::Pin,
+            ButtonId::Delete,
+            ButtonId::OpenSource,
+        ];
         return buttons
             .iter()
             .position(|rect| contains(*rect, x, y))
             .map(|index| Target::Button(ids[index]));
     }
-    if contains(rows[6], x, y) {
-        let buttons = button_areas(rows[6], 3);
-        let ids = [ButtonId::Pin, ButtonId::Delete, ButtonId::OpenSource];
-        return buttons
-            .iter()
-            .position(|rect| contains(*rect, x, y))
-            .map(|index| Target::Button(ids[index]));
-    }
-    if contains(rows[7], x, y) && y > rows[7].y && y + 1 < rows[7].y + rows[7].height {
-        let index = app.scrolls.memories as usize + (y - rows[7].y - 1) as usize / 2;
+    if contains(layout.list, x, y)
+        && y > layout.list.y
+        && y + 1 < layout.list.y + layout.list.height
+    {
+        let index = app.scrolls.memories as usize + (y - layout.list.y - 1) as usize / 2;
         if index < app.memories.len() {
             return Some(Target::Memory(index));
         }
@@ -2172,18 +2279,25 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
             let key = osint_areas(layout.body, true).key;
             Some(split_horizontal(key, [Constraint::Min(8), Constraint::Length(16)])[0])
         }
-        FieldId::BrainApp
-        | FieldId::BrainConversation
-        | FieldId::BrainInsight
-        | FieldId::BrainQuery
-            if app.module == Some(ModuleId::Brain) =>
+        FieldId::BrainQuery
+            if app.module == Some(ModuleId::Brain)
+                && app.brain_page == BrainPage::Memories
+                && app.brain_list_mode == BrainListMode::List =>
         {
-            let rows = brain_areas(layout.body);
+            let (_, rest) = brain_pages(layout.body);
+            Some(brain_list(rest).query)
+        }
+        FieldId::BrainApp | FieldId::BrainConversation | FieldId::BrainInsight
+            if app.module == Some(ModuleId::Brain)
+                && app.brain_page == BrainPage::Memories
+                && app.brain_list_mode == BrainListMode::Create =>
+        {
+            let (_, rest) = brain_pages(layout.body);
+            let form = brain_form(rest);
             match field {
-                FieldId::BrainApp => Some(rows[1]),
-                FieldId::BrainConversation => Some(rows[2]),
-                FieldId::BrainInsight => Some(rows[3]),
-                _ => Some(rows[4]),
+                FieldId::BrainConversation => Some(form.conversation),
+                FieldId::BrainInsight => Some(form.insight),
+                _ => Some(form.app),
             }
         }
         FieldId::ReconProvider
@@ -2716,7 +2830,11 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
                 if enabled { "●" } else { "○" },
                 tool.category,
                 tool.name,
-                if app.tool_needs_key(tool.id) { " · needs key" } else { "" }
+                if app.tool_needs_key(tool.id) {
+                    " · needs key"
+                } else {
+                    ""
+                }
             ))
             .style(if index == app.tool_sel {
                 theme::selected()
@@ -2807,29 +2925,53 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
-    let rows = brain_areas(area);
-    frame.render_widget(
-        Paragraph::new(" Save, recall, pin, or delete insights. Categories: fact, identity, preference, contact, project, goal, task").style(theme::accent()),
-        rows[0],
-    );
-    draw_field(frame, app, FieldId::BrainApp, " Source app ", rows[1]);
-    draw_field(
-        frame,
-        app,
-        FieldId::BrainConversation,
-        " Conversation ",
-        rows[2],
-    );
-    draw_field(frame, app, FieldId::BrainInsight, " Insight ", rows[3]);
-    draw_field(frame, app, FieldId::BrainQuery, " Recall ", rows[4]);
-    let save_row = button_areas(rows[5], 2);
-    draw_button(frame, app, ButtonId::Add, "Save", save_row[0]);
-    draw_button(frame, app, ButtonId::Recall, "Recall", save_row[1]);
-    let edit_row = button_areas(rows[6], 3);
-    draw_button(frame, app, ButtonId::Pin, "Pin", edit_row[0]);
-    draw_button(frame, app, ButtonId::Delete, "Delete", edit_row[1]);
-    draw_button(frame, app, ButtonId::OpenSource, "Source", edit_row[2]);
-    let room = rows[7].height.saturating_sub(2) as usize / 2;
+    let (tabs, rest) = brain_pages(area);
+    let tab_areas = button_areas(tabs, BrainPage::ALL.len());
+    for (page, rect) in BrainPage::ALL.into_iter().zip(tab_areas) {
+        let selected = app.brain_page == page || app.focus == Target::BrainTab(page);
+        frame.render_widget(
+            Paragraph::new(page.title())
+                .alignment(Alignment::Center)
+                .style(if app.brain_page == page {
+                    theme::selected()
+                } else if selected {
+                    theme::accent()
+                } else {
+                    theme::dim()
+                })
+                .block(panel("")),
+            rect,
+        );
+    }
+    if app.brain_page == BrainPage::Graph {
+        super::graph::draw(frame, app, rest);
+        return;
+    }
+    if app.brain_list_mode == BrainListMode::Create {
+        let form = brain_form(rest);
+        draw_field(frame, app, FieldId::BrainApp, " Source app ", form.app);
+        draw_field(
+            frame,
+            app,
+            FieldId::BrainConversation,
+            " Conversation ",
+            form.conversation,
+        );
+        draw_field(frame, app, FieldId::BrainInsight, " Insight ", form.insight);
+        let actions = button_areas(form.actions, 2);
+        draw_button(frame, app, ButtonId::Add, "Save", actions[0]);
+        draw_button(frame, app, ButtonId::BrainBack, "Back", actions[1]);
+        return;
+    }
+    let layout = brain_list(rest);
+    let actions = button_areas(layout.actions, 5);
+    draw_button(frame, app, ButtonId::CreateMemory, "Create", actions[0]);
+    draw_button(frame, app, ButtonId::Recall, "Recall", actions[1]);
+    draw_button(frame, app, ButtonId::Pin, "Pin", actions[2]);
+    draw_button(frame, app, ButtonId::Delete, "Delete", actions[3]);
+    draw_button(frame, app, ButtonId::OpenSource, "Source", actions[4]);
+    draw_field(frame, app, FieldId::BrainQuery, " Recall ", layout.query);
+    let room = layout.list.height.saturating_sub(2) as usize / 2;
     let items = app
         .memories
         .iter()
@@ -2854,7 +2996,7 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
             })
         })
         .collect::<Vec<_>>();
-    frame.render_widget(List::new(items).block(panel(" Memories ")), rows[7]);
+    frame.render_widget(List::new(items).block(panel(" Memories ")), layout.list);
     let recalled = if let Some(insight) = &app.selected_insight {
         let origins = insight
             .sources
@@ -2896,7 +3038,7 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
             .block(panel(" Recall "))
             .scroll((app.scrolls.recall, 0))
             .wrap(Wrap { trim: true }),
-        rows[8],
+        layout.recall,
     );
 }
 
@@ -3218,6 +3360,7 @@ fn help_text(app: &App) -> &'static str {
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nCtrl+U/Ctrl+D scroll · the wheel scrolls the pane under the pointer\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors, run stages, and tool results\n↑↓ select a line · Enter folds a tool result\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",
+        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Create replaces the list with the form\nSave stores the memory and returns to the list. Back or Esc leaves the form\nGraph draws the selected memory\n1 force · 2 directive · 3 path\n↑↓ or h/j/k/l move the selected node\nEsc returns home from the list · ? opens this card",
         Some(ModuleId::Providers) => "Providers\n\nEach account tab stores that provider only\nDefaults sets Recon and Synthesis separately\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
         _ => "Controls\n\nTab moves between fields and buttons\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }
@@ -3347,9 +3490,21 @@ mod tests {
         let plan = Plan {
             planning_mode: "tool_picker".into(),
             directives: vec![
-                directive("d1", "Establish the subject's identity and public roles", &["person_name", "org_name", "url"]),
-                directive("d2", "Find the subject's official online accounts and websites", &["handle", "domain", "url"]),
-                directive("d3", "Find organizations affiliated with the subject and their contact domains", &["org_name", "domain", "email"]),
+                directive(
+                    "d1",
+                    "Establish the subject's identity and public roles",
+                    &["person_name", "org_name", "url"],
+                ),
+                directive(
+                    "d2",
+                    "Find the subject's official online accounts and websites",
+                    &["handle", "domain", "url"],
+                ),
+                directive(
+                    "d3",
+                    "Find organizations affiliated with the subject and their contact domains",
+                    &["org_name", "domain", "email"],
+                ),
             ],
             directives_mode: "directives_fallback".into(),
             picker_transport: "decisions".into(),
@@ -3382,36 +3537,42 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            bindings: vec![Binding {
-                kind: "handle".into(),
-                value: "janeroe".into(),
-                evidence_id: "call-s1".into(),
-                step_id: "s1".into(),
-                qualifier: "github".into(),
-                inferred: false,
-                unverified: false,
-                source_tool: String::new(),
-            }, Binding {
-                kind: "handle".into(),
-                value: "janeroe".into(),
-                evidence_id: "call-s1".into(),
-                step_id: "s1".into(),
-                qualifier: "facebook".into(),
-                inferred: true,
-                unverified: false,
-                source_tool: String::new(),
-            }, Binding {
-                kind: "handle".into(),
-                value: "janeroe".into(),
-                evidence_id: "d2".into(),
-                step_id: String::new(),
-                qualifier: "twitter".into(),
-                inferred: false,
-                unverified: true,
-                source_tool: String::new(),
-            }],
+            bindings: vec![
+                Binding {
+                    kind: "handle".into(),
+                    value: "janeroe".into(),
+                    evidence_id: "call-s1".into(),
+                    step_id: "s1".into(),
+                    qualifier: "github".into(),
+                    inferred: false,
+                    unverified: false,
+                    source_tool: String::new(),
+                },
+                Binding {
+                    kind: "handle".into(),
+                    value: "janeroe".into(),
+                    evidence_id: "call-s1".into(),
+                    step_id: "s1".into(),
+                    qualifier: "facebook".into(),
+                    inferred: true,
+                    unverified: false,
+                    source_tool: String::new(),
+                },
+                Binding {
+                    kind: "handle".into(),
+                    value: "janeroe".into(),
+                    evidence_id: "d2".into(),
+                    step_id: String::new(),
+                    qualifier: "twitter".into(),
+                    inferred: false,
+                    unverified: true,
+                    source_tool: String::new(),
+                },
+            ],
             binding_notes: vec!["s1 firecrawl_search: rules found 1; Recon model added 0".into()],
-            fallback_requests: vec!["hunter_email_finder failed. Recon chose firecrawl_scrape as s3.".into()],
+            fallback_requests: vec![
+                "hunter_email_finder failed. Recon chose firecrawl_scrape as s3.".into(),
+            ],
             ..Default::default()
         };
         let run = recon::Run {
@@ -3459,7 +3620,13 @@ mod tests {
             completed_at: Some("2026-10-02T00:00:00Z".into()),
         }];
         let block = plan_block(&run, &calls, true);
-        assert!(block.title.starts_with("Recon log · tool picker (decisions)"), "{}", block.title);
+        assert!(
+            block
+                .title
+                .starts_with("Recon log · tool picker (decisions)"),
+            "{}",
+            block.title
+        );
         for needle in [
             "Directives (fallback set):",
             "d1: Establish the subject's identity and public roles · entities Jane Roe · targets person_name, org_name, url",
@@ -3480,10 +3647,19 @@ mod tests {
         ] {
             assert!(block.body.contains(needle), "missing {needle:?} in\n{}", block.body);
         }
-        assert!(!block.body.contains("0.87"), "probabilities stay out of the row");
-        assert!(!block.body.contains("Jane Roe role"), "raw observations stay out of the decision row");
+        assert!(
+            !block.body.contains("0.87"),
+            "probabilities stay out of the row"
+        );
+        assert!(
+            !block.body.contains("Jane Roe role"),
+            "raw observations stay out of the decision row"
+        );
         let logged = tool_result_log(&calls[0]).unwrap();
-        assert_eq!(logged.summary, "Firecrawl search completed · live · 2 results");
+        assert_eq!(
+            logged.summary,
+            "Firecrawl search completed · live · 2 results"
+        );
         assert!(logged.detail.contains("Jane Roe role"));
         assert!(logged.detail.contains("https://example.test/jane"));
     }

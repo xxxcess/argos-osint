@@ -345,7 +345,11 @@ async fn models(role: &str) -> Result<()> {
     let picker = provider::role_name(role) == Some("tool_picker");
     let kind = provider::effective_kind(&secret);
     if picker {
-        println!("{kind} / {} ({})", secret.model, provider::picker_transport(&secret.model));
+        println!(
+            "{kind} / {} ({})",
+            secret.model,
+            provider::picker_transport(&secret.model)
+        );
     } else {
         println!("{kind} / {}", secret.model);
     }
@@ -604,13 +608,17 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                 changed = true;
             }
             if let Some(value) = turn_seconds {
-                anyhow::ensure!((300..=900).contains(&value), "turn-seconds must be 300..900");
+                anyhow::ensure!(
+                    (300..=900).contains(&value),
+                    "turn-seconds must be 300..900"
+                );
                 settings.recon_limits.turn_seconds = value;
                 changed = true;
             }
             if let Some(value) = max_turn_seconds {
                 anyhow::ensure!(
-                    (provider::MIN_MAX_TURN_SECONDS..=provider::MAX_MAX_TURN_SECONDS).contains(&value),
+                    (provider::MIN_MAX_TURN_SECONDS..=provider::MAX_MAX_TURN_SECONDS)
+                        .contains(&value),
                     "max-turn-seconds must be 120..1800"
                 );
                 settings.recon_limits.max_turn_seconds = value;
@@ -673,8 +681,16 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                 &mut changed,
             );
             for (slot, value, name) in [
-                (&mut settings.recon_limits.news_calls_per_turn, news_calls_per_turn, "news-calls-per-turn"),
-                (&mut settings.recon_limits.legal_calls_per_turn, legal_calls_per_turn, "legal-calls-per-turn"),
+                (
+                    &mut settings.recon_limits.news_calls_per_turn,
+                    news_calls_per_turn,
+                    "news-calls-per-turn",
+                ),
+                (
+                    &mut settings.recon_limits.legal_calls_per_turn,
+                    legal_calls_per_turn,
+                    "legal-calls-per-turn",
+                ),
             ] {
                 if let Some(value) = value {
                     anyhow::ensure!(value <= 10, "{name} must be 0..10");
@@ -688,10 +704,7 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                 changed = true;
             }
             if let Some(value) = opening_sociavault {
-                anyhow::ensure!(
-                    (0..=4).contains(&value),
-                    "opening-sociavault must be 0..4"
-                );
+                anyhow::ensure!((0..=4).contains(&value), "opening-sociavault must be 0..4");
                 settings.recon_limits.opening_sociavault_calls = value;
                 changed = true;
             }
@@ -714,9 +727,14 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
 async fn ask_thread(thread_id: &str, question: &str) -> Result<()> {
     let service = recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
     let run = service
-        .ask(thread_id, question, Arc::new(AtomicBool::new(false)), |event| {
-            write_turn_event(&event, &mut std::io::stderr());
-        })
+        .ask(
+            thread_id,
+            question,
+            Arc::new(AtomicBool::new(false)),
+            |event| {
+                write_turn_event(&event, &mut std::io::stderr());
+            },
+        )
         .await?;
     let store = open_store()?;
     print_json(
@@ -731,7 +749,9 @@ fn write_turn_event(event: &recon::TurnEvent, out: &mut impl std::io::Write) {
             let _ = write!(out, "{text}");
             let _ = out.flush();
         }
-        recon::TurnEvent::Stage(text) | recon::TurnEvent::AnswerNote(text) | recon::TurnEvent::Deadline(text) => {
+        recon::TurnEvent::Stage(text)
+        | recon::TurnEvent::AnswerNote(text)
+        | recon::TurnEvent::Deadline(text) => {
             let _ = writeln!(out, "{text}");
         }
     }
@@ -745,7 +765,10 @@ mod tests {
     fn defaults_show_includes_the_tool_picker_transport() {
         let mut settings = SettingsFile::default();
         settings.defaults.seed_tool_picker();
-        settings.defaults.synthesis = provider::ModelAssignment { provider: "grok".into(), model: "grok-4.6".into() };
+        settings.defaults.synthesis = provider::ModelAssignment {
+            provider: "grok".into(),
+            model: "grok-4.6".into(),
+        };
         let shown = defaults_json(&AuthFile::default(), &settings).unwrap();
         assert_eq!(shown["tool_picker"]["provider"], "openrouter");
         assert_eq!(shown["tool_picker"]["model"], provider::TOOL_PICKER_MODEL);
@@ -761,10 +784,16 @@ mod tests {
     fn synthesis_deltas_go_to_the_event_stream_without_a_newline_between_tokens() {
         let mut out = Vec::new();
         write_turn_event(&recon::TurnEvent::Stage("synthesizing".into()), &mut out);
-        write_turn_event(&recon::TurnEvent::Deadline("Deadline 6m 10s: 11 calls, ~52k chars evidence".into()), &mut out);
+        write_turn_event(
+            &recon::TurnEvent::Deadline("Deadline 6m 10s: 11 calls, ~52k chars evidence".into()),
+            &mut out,
+        );
         write_turn_event(&recon::TurnEvent::AnswerDelta("Hel".into()), &mut out);
         write_turn_event(&recon::TurnEvent::AnswerDelta("lo".into()), &mut out);
-        write_turn_event(&recon::TurnEvent::AnswerNote("fixing citations…".into()), &mut out);
+        write_turn_event(
+            &recon::TurnEvent::AnswerNote("fixing citations…".into()),
+            &mut out,
+        );
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "synthesizing\nDeadline 6m 10s: 11 calls, ~52k chars evidence\nHellofixing citations…\n"
@@ -773,10 +802,17 @@ mod tests {
 
     #[test]
     fn tool_picker_catalog_lists_jev_even_when_the_api_omits_it() {
-        let lines = model_lines(true, "openrouter", &["x-ai/grok-4".into(), provider::TOOL_PICKER_MODEL.into()]);
+        let lines = model_lines(
+            true,
+            "openrouter",
+            &["x-ai/grok-4".into(), provider::TOOL_PICKER_MODEL.into()],
+        );
         assert_eq!(lines[0], "typesafe/jev-1.13  Jev 1.13 (decisions)");
         assert_eq!(lines.len(), 2);
-        assert_eq!(model_lines(false, "openrouter", &["x-ai/grok-4".into()]), vec!["x-ai/grok-4".to_string()]);
+        assert_eq!(
+            model_lines(false, "openrouter", &["x-ai/grok-4".into()]),
+            vec!["x-ai/grok-4".to_string()]
+        );
         assert!(model_lines(true, "grok", &[]).is_empty());
     }
 }

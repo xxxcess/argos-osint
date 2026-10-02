@@ -18,7 +18,9 @@ mod news_legal;
 #[cfg(test)]
 pub(crate) use news_legal::fixture;
 mod providers;
-pub use news_legal::{context_kind, COURTLISTENER_RATE_LIMIT, COURTLISTENER_SPACING, LEGAL_TOOLS, NEWS_TOOLS};
+pub use news_legal::{
+    context_kind, COURTLISTENER_RATE_LIMIT, COURTLISTENER_SPACING, LEGAL_TOOLS, NEWS_TOOLS,
+};
 pub use providers::{
     batch_urls, map_rank, select_route, sociavault_account_platforms, sociavault_endpoint_hint,
     sociavault_platforms, sociavault_routes, webmail_host, RouteInput, SociaVaultRoute,
@@ -110,7 +112,9 @@ pub fn definition(id: &str) -> Option<&'static ToolDefinition> {
 /// crawl poll until the tool timeout; every other tool returns zero.
 pub fn job_poll_seconds(id: &str) -> u64 {
     match canonical_tool_id(id) {
-        "firecrawl_batch_scrape" | "firecrawl_crawl" => definition(id).map(|tool| tool.timeout_seconds).unwrap_or(0),
+        "firecrawl_batch_scrape" | "firecrawl_crawl" => {
+            definition(id).map(|tool| tool.timeout_seconds).unwrap_or(0)
+        }
         _ => 0,
     }
 }
@@ -159,13 +163,22 @@ pub fn endpoint_cost(id: &str) -> Option<EndpointCost> {
         "firecrawl_crawl" => Some(cost("firecrawl", providers::CRAWL_MAX_PAGES as u32)),
         "firecrawl_extract" => Some(cost("firecrawl", providers::EXTRACT_CREDITS)),
         // Free Hunter reads: no credits, but the key and the rate limit still apply.
-        "hunter_domain_finder" | "hunter_email_count" | "hunter_email_insight" => Some(cost("hunter", 0)),
-        "hunter_domain_search" | "hunter_email_finder" | "hunter_email_verifier"
-        | "hunter_company_enrichment" | "hunter_person_enrichment"
+        "hunter_domain_finder" | "hunter_email_count" | "hunter_email_insight" => {
+            Some(cost("hunter", 0))
+        }
+        "hunter_domain_search"
+        | "hunter_email_finder"
+        | "hunter_email_verifier"
+        | "hunter_company_enrichment"
+        | "hunter_person_enrichment"
         | "hunter_combined_enrichment" => Some(cost("hunter", 1)),
-        id if id.starts_with("sociavault_") && definition(id).is_some() => Some(cost("sociavault", 1)),
+        id if id.starts_with("sociavault_") && definition(id).is_some() => {
+            Some(cost("sociavault", 1))
+        }
         // Not credit-metered: the per-turn call caps are their only budget.
-        id if news_legal::provider(id).is_some() => news_legal::provider(id).map(|provider| cost(provider, 0)),
+        id if news_legal::provider(id).is_some() => {
+            news_legal::provider(id).map(|provider| cost(provider, 0))
+        }
         _ => None,
     }
 }
@@ -175,11 +188,18 @@ pub fn endpoint_cost(id: &str) -> Option<EndpointCost> {
 pub fn estimated_cost(id: &str, args: &Value) -> Option<EndpointCost> {
     let base = endpoint_cost(id)?;
     let pages = match canonical_tool_id(id) {
-        "firecrawl_batch_scrape" => batch_urls(args).map(|urls| urls.len() as u32).unwrap_or(base.credits),
-        "firecrawl_crawl" => providers::crawl_limit(args).map(|limit| limit as u32).unwrap_or(base.credits),
+        "firecrawl_batch_scrape" => batch_urls(args)
+            .map(|urls| urls.len() as u32)
+            .unwrap_or(base.credits),
+        "firecrawl_crawl" => providers::crawl_limit(args)
+            .map(|limit| limit as u32)
+            .unwrap_or(base.credits),
         _ => return Some(base),
     };
-    Some(EndpointCost { credits: pages.max(1), ..base })
+    Some(EndpointCost {
+        credits: pages.max(1),
+        ..base
+    })
 }
 
 pub fn scarce_provider(id: &str) -> bool {
@@ -217,7 +237,9 @@ fn optional_keys(id: &str) -> &'static [&'static str] {
         "hunter_domain_search" => &["limit"],
         "hunter_domain_finder" => &["limit", "perfect_match"],
         "hunter_email_count" => &["type"],
-        "sociavault_profile" | "sociavault_user_content" | "sociavault_search_users" => &["endpoint"],
+        "sociavault_profile" | "sociavault_user_content" | "sociavault_search_users" => {
+            &["endpoint"]
+        }
         "sociavault_search" => &["endpoint", "subreddit"],
         "hunter_email_finder" => &["last_name"],
         "github_repositories" | "gitlab_projects" => &["limit", "page"],
@@ -234,7 +256,9 @@ fn key_schema(key: &str) -> Value {
     match key {
         "latitude" | "longitude" => json!({"type": "number"}),
         "radius_m" | "limit" | "offset" => json!({"type": "integer"}),
-        "urls" | "sources" | "categories" | "formats" => json!({"type": "array", "items": {"type": "string"}}),
+        "urls" | "sources" | "categories" | "formats" => {
+            json!({"type": "array", "items": {"type": "string"}})
+        }
         "perfect_match" => json!({"type": "boolean"}),
         _ => json!({"type": "string"}),
     }
@@ -287,7 +311,11 @@ impl ToolDefinition {
                 "email" => json!("ada@example.org"),
                 "platform" => {
                     let served = providers::sociavault_platforms(self.id);
-                    json!(if served.contains(&"twitter") { "twitter" } else { served.first().copied().unwrap_or("twitter") })
+                    json!(if served.contains(&"twitter") {
+                        "twitter"
+                    } else {
+                        served.first().copied().unwrap_or("twitter")
+                    })
                 }
                 "handle" => json!("example"),
                 "first_name" => json!("Ada"),
@@ -963,10 +991,21 @@ fn parse_observations(
             markdown.chars().count() > clipped.chars().count(),
         ));
     }
-    if matches!(id, "firecrawl_map" | "firecrawl_batch_scrape" | "firecrawl_crawl" | "firecrawl_extract") {
-        if v.get("success").and_then(Value::as_bool) == Some(false) || v.get("status").and_then(Value::as_str) == Some("failed") {
-            let message = v.get("error").map(|err| err.to_string()).unwrap_or_else(|| "job failed".into());
-            return Err(anyhow!("Firecrawl {id} failed: {}", message.chars().take(250).collect::<String>()));
+    if matches!(
+        id,
+        "firecrawl_map" | "firecrawl_batch_scrape" | "firecrawl_crawl" | "firecrawl_extract"
+    ) {
+        if v.get("success").and_then(Value::as_bool) == Some(false)
+            || v.get("status").and_then(Value::as_str) == Some("failed")
+        {
+            let message = v
+                .get("error")
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "job failed".into());
+            return Err(anyhow!(
+                "Firecrawl {id} failed: {}",
+                message.chars().take(250).collect::<String>()
+            ));
         }
         return Ok(match id {
             "firecrawl_map" => (providers::map_observations(&v, ""), false),
@@ -979,8 +1018,15 @@ fn parse_observations(
     }
     if id.starts_with("sociavault_") && id != "sociavault_profile" {
         if v.get("success").and_then(Value::as_bool) == Some(false) {
-            let message = v.get("error").or_else(|| v.get("message")).map(|err| err.to_string()).unwrap_or_else(|| "request failed".into());
-            return Err(anyhow!("SociaVault {id} failed: {}", message.chars().take(250).collect::<String>()));
+            let message = v
+                .get("error")
+                .or_else(|| v.get("message"))
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "request failed".into());
+            return Err(anyhow!(
+                "SociaVault {id} failed: {}",
+                message.chars().take(250).collect::<String>()
+            ));
         }
         return Ok((providers::sociavault_items(id, &v), false));
     }
@@ -1028,18 +1074,40 @@ fn no_results(id: &str, value: &Value) -> bool {
     if id == "nvd_cve" && value.get("totalResults").and_then(Value::as_u64) == Some(0) {
         return true;
     }
-    let empty = |key: &str| value.get(key).and_then(Value::as_array).is_none_or(Vec::is_empty);
+    let empty = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    };
     match id {
         "firecrawl_map" => return empty("urls"),
         "firecrawl_batch_scrape" | "firecrawl_crawl" => return empty("pages"),
         "firecrawl_extract" => {
-            return ["org_name", "legal_name", "domain", "address"].iter().all(|key| value.get(*key).and_then(Value::as_str).unwrap_or("").is_empty())
-                && ["emails", "social_profiles", "people"].iter().all(|key| empty(key));
+            return ["org_name", "legal_name", "domain", "address"]
+                .iter()
+                .all(|key| {
+                    value
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .is_empty()
+                })
+                && ["emails", "social_profiles", "people"]
+                    .iter()
+                    .all(|key| empty(key));
         }
         "hunter_domain_finder" => return empty("companies"),
         "hunter_email_count" => return value.get("total").and_then(Value::as_u64) == Some(0),
-        "hunter_person_enrichment" => return value.get("claimed_email").is_some() || value.get("full_name").is_none_or(Value::is_null) && value.get("email").is_none_or(Value::is_null),
-        "hunter_combined_enrichment" => return value.get("claimed_email").is_some() || value.get("person").is_none() && value.get("company").is_none(),
+        "hunter_person_enrichment" => {
+            return value.get("claimed_email").is_some()
+                || value.get("full_name").is_none_or(Value::is_null)
+                    && value.get("email").is_none_or(Value::is_null)
+        }
+        "hunter_combined_enrichment" => {
+            return value.get("claimed_email").is_some()
+                || value.get("person").is_none() && value.get("company").is_none()
+        }
         "sociavault_google_search" => return empty("results"),
         id if news_legal::provider(id).is_some() => return empty("results"),
         "sociavault_search" | "sociavault_search_users" | "sociavault_user_content" => {
@@ -1169,7 +1237,12 @@ fn request(id: &str, v: &Value) -> Result<Request> {
     }
     if matches!(
         id,
-        "hunter_domain_finder" | "hunter_email_count" | "hunter_company_enrichment" | "hunter_email_insight" | "hunter_person_enrichment" | "hunter_combined_enrichment"
+        "hunter_domain_finder"
+            | "hunter_email_count"
+            | "hunter_company_enrichment"
+            | "hunter_email_insight"
+            | "hunter_person_enrichment"
+            | "hunter_combined_enrichment"
     ) {
         return providers::hunter_request(id, v);
     }
@@ -1655,12 +1728,24 @@ fn provider_credential(
     }
     match news_legal::provider(id) {
         Some("newsapi") => {
-            let key = keyed(&keys.newsapi, "Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY")?;
-            return Ok(Some((reqwest::header::HeaderName::from_static("x-api-key"), key)));
+            let key = keyed(
+                &keys.newsapi,
+                "Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY",
+            )?;
+            return Ok(Some((
+                reqwest::header::HeaderName::from_static("x-api-key"),
+                key,
+            )));
         }
         Some(_) => {
-            let key = keyed(&keys.courtlistener, "Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN")?;
-            return Ok(Some((reqwest::header::AUTHORIZATION, format!("Token {key}"))));
+            let key = keyed(
+                &keys.courtlistener,
+                "Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN",
+            )?;
+            return Ok(Some((
+                reqwest::header::AUTHORIZATION,
+                format!("Token {key}"),
+            )));
         }
         None => {}
     }
@@ -1687,7 +1772,11 @@ fn error_summary(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
     let title = lower
         .find("<title>")
-        .and_then(|start| lower[start..].find("</title>").map(|end| raw[start + 7..start + end].trim().to_string()))
+        .and_then(|start| {
+            lower[start..]
+                .find("</title>")
+                .map(|end| raw[start + 7..start + end].trim().to_string())
+        })
         .unwrap_or_default();
     let mut text = String::new();
     let mut in_tag = false;
@@ -1730,7 +1819,15 @@ fn error_summary(raw: &str) -> String {
         .split(". ")
         .find(|sentence| {
             let sentence = sentence.to_ascii_lowercase();
-            ["blocked", "denied", "forbidden", "not allowed", "rate limit"].iter().any(|word| sentence.contains(word))
+            [
+                "blocked",
+                "denied",
+                "forbidden",
+                "not allowed",
+                "rate limit",
+            ]
+            .iter()
+            .any(|word| sentence.contains(word))
         })
         .map(|sentence| sentence.trim().trim_end_matches('.'))
         .unwrap_or("");
@@ -1752,7 +1849,9 @@ pub fn host_interval(id: &str) -> Duration {
         _ if news_legal::provider(id) == Some("newsapi") => Duration::from_secs(1),
         // Hunter allows 15 requests per second; Firecrawl and SociaVault keep 1/s.
         _ if id.starts_with("hunter_") => Duration::from_millis(67),
-        _ if id.starts_with("firecrawl_") || id.starts_with("sociavault_") => Duration::from_secs(1),
+        _ if id.starts_with("firecrawl_") || id.starts_with("sociavault_") => {
+            Duration::from_secs(1)
+        }
         "hackertarget_hostsearch" | "overpass_places" => Duration::from_secs(2),
         "github_repositories" | "nvd_cve" => Duration::from_secs(6),
         _ => Duration::from_millis(250),
@@ -1762,7 +1861,11 @@ pub fn host_interval(id: &str) -> Duration {
 /// The bare key a credential header carries (`Bearer …` and `Token …` stripped).
 fn credential_key(credential: &Option<(reqwest::header::HeaderName, String)>) -> Option<&str> {
     let (_, value) = credential.as_ref()?;
-    let key = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("Token ")).unwrap_or(value).trim();
+    let key = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("Token "))
+        .unwrap_or(value)
+        .trim();
     (key.len() >= 4).then_some(key)
 }
 
@@ -1783,25 +1886,34 @@ fn redact_key(result: &mut ToolResult, credential: &Option<(reqwest::header::Hea
 
 /// Test-only base URLs for fixed hosts, so executor tests can reach a local server.
 #[cfg(test)]
-pub(crate) static TEST_BASES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+pub(crate) static TEST_BASES: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
 fn test_base(host: &str) -> Option<String> {
-    TEST_BASES.lock().unwrap().iter().find(|(known, _)| known == host).map(|(_, base)| base.clone())
+    TEST_BASES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(known, _)| known == host)
+        .map(|(_, base)| base.clone())
 }
 
 #[cfg(test)]
 fn rebase(url: &Url, base: &str) -> Result<Url> {
     let base = Url::parse(base)?;
     let mut next = url.clone();
-    next.set_scheme(base.scheme()).map_err(|_| anyhow!("scheme"))?;
-    next.set_host(base.host_str()).map_err(|_| anyhow!("host"))?;
+    next.set_scheme(base.scheme())
+        .map_err(|_| anyhow!("scheme"))?;
+    next.set_host(base.host_str())
+        .map_err(|_| anyhow!("host"))?;
     next.set_port(base.port()).map_err(|_| anyhow!("port"))?;
     Ok(next)
 }
 
 /// The User-Agent every OSINT request sends when `osint_user_agent` is unset or blank.
-pub const DEFAULT_USER_AGENT: &str = "Argos OSINT/0.1 (public research; contact: configure osint_user_agent)";
+pub const DEFAULT_USER_AGENT: &str =
+    "Argos OSINT/0.1 (public research; contact: configure osint_user_agent)";
 
 /// The configured `osint_user_agent`, or None when it is unset, empty, or whitespace. The
 /// single place a blank setting is treated as unset, so it never overrides the default.
@@ -1817,8 +1929,14 @@ pub fn effective_user_agent(setting: Option<&str>) -> &str {
 
 /// Headers every tool request carries besides its credential: the User-Agent (never
 /// empty) and, for CourtListener, `Accept: application/json`.
-fn request_headers(id: &str, user_agent: Option<&str>) -> Vec<(reqwest::header::HeaderName, String)> {
-    let mut headers = vec![(reqwest::header::USER_AGENT, effective_user_agent(user_agent).to_string())];
+fn request_headers(
+    id: &str,
+    user_agent: Option<&str>,
+) -> Vec<(reqwest::header::HeaderName, String)> {
+    let mut headers = vec![(
+        reqwest::header::USER_AGENT,
+        effective_user_agent(user_agent).to_string(),
+    )];
     if news_legal::provider(id) == Some("courtlistener") {
         headers.push((reqwest::header::ACCEPT, "application/json".to_string()));
     }
@@ -1882,7 +2000,10 @@ impl Executor {
             .client
             .get(url)
             .timeout(Duration::from_secs(20))
-            .header(reqwest::header::USER_AGENT, effective_user_agent(user_agent));
+            .header(
+                reqwest::header::USER_AGENT,
+                effective_user_agent(user_agent),
+            );
         let response = request.send().await?.error_for_status()?;
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -1988,7 +2109,10 @@ impl Executor {
         let req = request(id, &inputs)?;
         let host = req.url.host_str().unwrap_or("").to_string();
         if let Some(locked) = providers::locked_host(id) {
-            ensure!(host == locked && req.url.scheme() == "https", "request host is not allowed for {id}");
+            ensure!(
+                host == locked && req.url.scheme() == "https",
+                "request host is not allowed for {id}"
+            );
         }
         let _permit = self.global.acquire().await?;
         let interval = host_interval(id);
@@ -2055,7 +2179,8 @@ impl Executor {
                 url = next;
                 continue;
             }
-            if ((response.status().as_u16() == 429 && retry_429) || response.status().is_server_error())
+            if ((response.status().as_u16() == 429 && retry_429)
+                || response.status().is_server_error())
                 && attempts < 3
             {
                 let delay = response
@@ -2116,15 +2241,19 @@ impl Executor {
                 }
                 .into();
                 result.error = Some(
-                    news_legal::http_error(id, status.as_u16(), &result.raw)
-                        .unwrap_or_else(|| format!("HTTP {status}: {}", error_summary(&result.raw))),
+                    news_legal::http_error(id, status.as_u16(), &result.raw).unwrap_or_else(|| {
+                        format!("HTTP {status}: {}", error_summary(&result.raw))
+                    }),
                 );
                 redact_key(&mut result, &credential);
                 return Ok(result);
             }
             let mut partial = false;
             if let Some(base) = req.poll {
-                match self.poll_job(base, &result.raw, &credential, def.timeout_seconds).await {
+                match self
+                    .poll_job(base, &result.raw, &credential, def.timeout_seconds)
+                    .await
+                {
                     Ok((raw, done)) => {
                         result.raw = raw;
                         result.credits_reported = reported_credits(&result.raw);
@@ -2143,7 +2272,9 @@ impl Executor {
                     result.truncated |= cut;
                 }
                 Err(e) => {
-                    result.status = if e.to_string().contains("quota") || e.to_string().contains("(rateLimited)") {
+                    result.status = if e.to_string().contains("quota")
+                        || e.to_string().contains("(rateLimited)")
+                    {
                         "rate_limited"
                     } else {
                         "failed"
@@ -2183,27 +2314,44 @@ impl Executor {
         let mut last = String::new();
         while std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            let mut builder = self.client.get(status_url.clone()).timeout(Duration::from_secs(20));
+            let mut builder = self
+                .client
+                .get(status_url.clone())
+                .timeout(Duration::from_secs(20));
             if let Some((name, value)) = credential {
                 builder = builder.header(name, value);
             }
-            let Ok(response) = builder.send().await else { continue };
+            let Ok(response) = builder.send().await else {
+                continue;
+            };
             let code = response.status();
             if code.as_u16() == 429 || code.is_server_error() {
                 continue;
             }
             let (text, _) = read_body(response, 4_000_000).await?;
-            ensure!(code.is_success(), "job status HTTP {code}: {}", error_summary(&text));
+            ensure!(
+                code.is_success(),
+                "job status HTTP {code}: {}",
+                error_summary(&text)
+            );
             let state = serde_json::from_str::<Value>(&text)
                 .ok()
-                .and_then(|value| value.get("status").and_then(Value::as_str).map(str::to_string))
+                .and_then(|value| {
+                    value
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .unwrap_or_default();
             last = text;
             if matches!(state.as_str(), "completed" | "failed" | "cancelled") {
                 return Ok((last, true));
             }
         }
-        let mut cancel = self.client.delete(status_url).timeout(Duration::from_secs(10));
+        let mut cancel = self
+            .client
+            .delete(status_url)
+            .timeout(Duration::from_secs(10));
         if let Some((name, value)) = credential {
             cancel = cancel.header(name, value);
         }
@@ -2218,19 +2366,33 @@ impl Executor {
 /// `GET {base}/{id}` for the job a Firecrawl POST started. The id is checked and the host
 /// stays api.firecrawl.dev.
 fn job_status_url(base: &str, started: &str) -> Result<Url> {
-    let value: Value = serde_json::from_str(started).map_err(|e| anyhow!("malformed job response: {e}"))?;
+    let value: Value =
+        serde_json::from_str(started).map_err(|e| anyhow!("malformed job response: {e}"))?;
     ensure!(
         value.get("success").and_then(Value::as_bool) != Some(false),
         "job was not accepted: {}",
-        value.get("error").map(Value::to_string).unwrap_or_default().chars().take(200).collect::<String>()
+        value
+            .get("error")
+            .map(Value::to_string)
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect::<String>()
     );
-    let job = value.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("job response has no id"))?;
+    let job = value
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("job response has no id"))?;
     ensure!(
-        (1..=100).contains(&job.len()) && job.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+        (1..=100).contains(&job.len())
+            && job.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
         "invalid job id"
     );
     let status_url = Url::parse(&format!("{base}/{job}"))?;
-    ensure!(status_url.host_str() == Some("api.firecrawl.dev"), "job host is not allowed");
+    ensure!(
+        status_url.host_str() == Some("api.firecrawl.dev"),
+        "job host is not allowed"
+    );
     Ok(status_url)
 }
 
@@ -2272,12 +2434,18 @@ fn annotate(id: &str, inputs: &Value, result: &mut ToolResult) {
         let site = str_arg(inputs, "domain")
             .ok()
             .map(str::to_string)
-            .or_else(|| str_arg(inputs, "url").ok().and_then(|page| Url::parse(page).ok()?.host_str().map(str::to_string)))
+            .or_else(|| {
+                str_arg(inputs, "url")
+                    .ok()
+                    .and_then(|page| Url::parse(page).ok()?.host_str().map(str::to_string))
+            })
             .unwrap_or_default();
         result.observations = providers::map_observations(&raw, &site);
         return;
     }
-    let Some(object) = result.observations.as_object_mut() else { return };
+    let Some(object) = result.observations.as_object_mut() else {
+        return;
+    };
     if id.starts_with("sociavault_") {
         let route = select_route(id, inputs).ok();
         let platform = route.map(|route| route.platform).unwrap_or("");
@@ -2295,9 +2463,14 @@ fn annotate(id: &str, inputs: &Value, result: &mut ToolResult) {
         }
     }
     if id == "hunter_domain_finder" {
-        let perfect = inputs.get("perfect_match").is_some_and(|flag| flag == &json!(true) || flag == &json!("true"));
+        let perfect = inputs
+            .get("perfect_match")
+            .is_some_and(|flag| flag == &json!(true) || flag == &json!("true"));
         object.insert("perfect_match".into(), json!(perfect));
-        object.insert("company".into(), inputs.get("company").cloned().unwrap_or(Value::Null));
+        object.insert(
+            "company".into(),
+            inputs.get("company").cloned().unwrap_or(Value::Null),
+        );
     }
     if id == "hunter_email_count" {
         for key in ["domain", "company"] {
@@ -2316,7 +2489,10 @@ mod tests {
             super::error_summary(page),
             "Forbidden - Stack Exchange: Access Denied This IP address 104.28.164.108 has been blocked from access to our services"
         );
-        assert_eq!(super::error_summary("{\"error\":\"bad key\"}"), "{\"error\":\"bad key\"}");
+        assert_eq!(
+            super::error_summary("{\"error\":\"bad key\"}"),
+            "{\"error\":\"bad key\"}"
+        );
     }
 
     use super::*;
@@ -2341,7 +2517,12 @@ mod tests {
         assert!(result.raw.is_empty() && result.error.is_none() && !result.truncated);
         assert_eq!(result.observations["claimed_email"], true);
         assert!(result.observations.get("full_name").is_none());
-        let bindings = crate::recon::investigation::rule_bindings("Who is jane@acmerobotics.com?", "call-s1", "hunter_person_enrichment", &result.observations);
+        let bindings = crate::recon::investigation::rule_bindings(
+            "Who is jane@acmerobotics.com?",
+            "call-s1",
+            "hunter_person_enrichment",
+            &result.observations,
+        );
         assert!(bindings.is_empty(), "{bindings:?}");
     }
 
@@ -2350,7 +2531,11 @@ mod tests {
     #[test]
     fn every_tool_request_sends_a_non_empty_user_agent() {
         let agent = |headers: &[(reqwest::header::HeaderName, String)]| {
-            let found: Vec<&String> = headers.iter().filter(|(name, _)| name == reqwest::header::USER_AGENT).map(|(_, value)| value).collect();
+            let found: Vec<&String> = headers
+                .iter()
+                .filter(|(name, _)| name == reqwest::header::USER_AGENT)
+                .map(|(_, value)| value)
+                .collect();
             assert_eq!(found.len(), 1, "exactly one User-Agent header");
             found[0].clone()
         };
@@ -2359,11 +2544,24 @@ mod tests {
         assert_eq!(ids.len(), 56);
         for id in ids {
             for blank in [None, Some(""), Some("   "), Some(" \t\n ")] {
-                let sent = agent(&request_headers(canonical_tool_id(id), custom_user_agent(blank)));
+                let sent = agent(&request_headers(
+                    canonical_tool_id(id),
+                    custom_user_agent(blank),
+                ));
                 assert!(!sent.trim().is_empty(), "{id}: {blank:?}");
-                assert_eq!(sent, DEFAULT_USER_AGENT, "{id}: {blank:?} falls back to the default");
+                assert_eq!(
+                    sent, DEFAULT_USER_AGENT,
+                    "{id}: {blank:?} falls back to the default"
+                );
             }
-            assert_eq!(agent(&request_headers(id, custom_user_agent(Some("  Argos test@example.com  ")))), "Argos test@example.com", "{id}: a custom value wins");
+            assert_eq!(
+                agent(&request_headers(
+                    id,
+                    custom_user_agent(Some("  Argos test@example.com  "))
+                )),
+                "Argos test@example.com",
+                "{id}: a custom value wins"
+            );
         }
         assert!(DEFAULT_USER_AGENT.starts_with("Argos OSINT/0.1 ("));
         assert_eq!(effective_user_agent(Some("\t")), DEFAULT_USER_AGENT);
@@ -2374,8 +2572,16 @@ mod tests {
     /// one hour and CourtListener at one day.
     #[test]
     fn primary_provider_tools_cache_for_one_week() {
-        let count = |prefix: &str| registry().iter().filter(|tool| tool.id.starts_with(prefix)).count();
-        assert_eq!((count("firecrawl_"), count("sociavault_"), count("hunter_")), (6, 5, 9));
+        let count = |prefix: &str| {
+            registry()
+                .iter()
+                .filter(|tool| tool.id.starts_with(prefix))
+                .count()
+        };
+        assert_eq!(
+            (count("firecrawl_"), count("sociavault_"), count("hunter_")),
+            (6, 5, 9)
+        );
         assert_eq!(PRIMARY_PROVIDER_CACHE_SECONDS, 604_800);
         for tool in registry() {
             let ttl = tool.cache_seconds;
@@ -2415,13 +2621,27 @@ mod tests {
             search.body,
             Some(json!({"query":"who is example","limit":3,"sources":["web"]}))
         );
-        let page = request("firecrawl_scrape", &json!({"url":"https://example.org/about"})).unwrap();
+        let page = request(
+            "firecrawl_scrape",
+            &json!({"url":"https://example.org/about"}),
+        )
+        .unwrap();
         assert_eq!(page.url.as_str(), "https://api.firecrawl.dev/v2/scrape");
         assert_eq!(page.body.as_ref().unwrap()["formats"][0], "markdown");
-        assert!(request("firecrawl_scrape", &json!({"url":"http://127.0.0.1/secret"})).is_err());
+        assert!(request(
+            "firecrawl_scrape",
+            &json!({"url":"http://127.0.0.1/secret"})
+        )
+        .is_err());
         assert_eq!(endpoint_cost("firecrawl_search").unwrap().credits, 2);
-        assert_eq!(endpoint_cost("firecrawl_scrape").unwrap().provider, "firecrawl");
-        assert_eq!(endpoint_cost("hunter_email_verifier").unwrap().provider, "hunter");
+        assert_eq!(
+            endpoint_cost("firecrawl_scrape").unwrap().provider,
+            "firecrawl"
+        );
+        assert_eq!(
+            endpoint_cost("hunter_email_verifier").unwrap().provider,
+            "hunter"
+        );
         assert_eq!(endpoint_cost("sociavault_profile").unwrap().credits, 1);
         assert!(endpoint_cost("wikidata_entities").is_none());
         assert_eq!(

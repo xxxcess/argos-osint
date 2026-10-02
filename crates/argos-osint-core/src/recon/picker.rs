@@ -66,9 +66,12 @@ pub const GOOGLE_FALLBACK_TOOL: &str = "sociavault_google_search";
 
 /// Prompts whose identifier needs a gap-filler first (an IP, CVE, wallet, or coordinates).
 fn gap_filler_prompt(bindings: &[Binding]) -> bool {
-    bindings
-        .iter()
-        .any(|binding| matches!(binding.kind.as_str(), "ip" | "cve" | "wallet" | "coordinates") && binding.evidence_id == "question")
+    bindings.iter().any(|binding| {
+        matches!(
+            binding.kind.as_str(),
+            "ip" | "cve" | "wallet" | "coordinates"
+        ) && binding.evidence_id == "question"
+    })
 }
 
 /// Candidates offered for the next ordering pick. Until a primary-provider tool
@@ -77,22 +80,43 @@ fn gap_filler_prompt(bindings: &[Binding]) -> bool {
 /// primary tools the prompt's bindings can run now. Gap-fillers join after
 /// the first primary pick, or at once for an IP, CVE, wallet, or coordinates prompt.
 /// SociaVault Google search is never offered here.
-pub fn offered_candidates(remaining: &[String], picked: &[String], bindings: &[Binding], question: &str) -> Vec<String> {
-    let all: Vec<String> = remaining.iter().filter(|id| id.as_str() != GOOGLE_FALLBACK_TOOL).cloned().collect();
-    if gap_filler_prompt(bindings) || picked.iter().any(|id| crate::osint::primary_provider(id).is_some()) {
+pub fn offered_candidates(
+    remaining: &[String],
+    picked: &[String],
+    bindings: &[Binding],
+    question: &str,
+) -> Vec<String> {
+    let all: Vec<String> = remaining
+        .iter()
+        .filter(|id| id.as_str() != GOOGLE_FALLBACK_TOOL)
+        .cloned()
+        .collect();
+    if gap_filler_prompt(bindings)
+        || picked
+            .iter()
+            .any(|id| crate::osint::primary_provider(id).is_some())
+    {
         return all;
     }
     // SociaVault profile and searches open once a handle or name is known; a profile then
     // takes its handle from the search that runs before it.
-    let named = bindings.iter().any(|binding| matches!(binding.kind.as_str(), "handle" | "person_name" | "org_name"))
+    let named = bindings
+        .iter()
+        .any(|binding| matches!(binding.kind.as_str(), "handle" | "person_name" | "org_name"))
         || !super::question_subject(question).trim().is_empty();
     let opening: Vec<String> = all
         .iter()
         .filter(|id| {
             crate::osint::primary_provider(id).is_some()
                 && (id.as_str() == "firecrawl_search"
-                    || named && matches!(id.as_str(), "sociavault_profile" | "sociavault_search" | "sociavault_search_users")
-                    || investigation::bind_arguments(id, bindings, question, None).2.is_empty())
+                    || named
+                        && matches!(
+                            id.as_str(),
+                            "sociavault_profile" | "sociavault_search" | "sociavault_search_users"
+                        )
+                    || investigation::bind_arguments(id, bindings, question, None)
+                        .2
+                        .is_empty())
         })
         .cloned()
         .collect();
@@ -164,7 +188,8 @@ impl<'a> Picker<'a> {
         let unavailable = if secret.model.trim().is_empty() {
             Some("tool_picker_unavailable: no tool-picker model is configured".to_string())
         } else if transport == "decisions"
-            && (provider::effective_kind(secret) != "openrouter" || provider::resolved_key(secret).is_none())
+            && (provider::effective_kind(secret) != "openrouter"
+                || provider::resolved_key(secret).is_none())
         {
             Some("tool_picker_unavailable: Jev needs a connected OpenRouter key".to_string())
         } else {
@@ -190,7 +215,10 @@ impl<'a> Picker<'a> {
 
     /// Whether another provider request is allowed this turn.
     pub fn can_call(&self) -> bool {
-        self.unavailable.is_none() && !self.rate_limited && self.failure.is_none() && self.requests < MAX_REQUESTS
+        self.unavailable.is_none()
+            && !self.rate_limited
+            && self.failure.is_none()
+            && self.requests < MAX_REQUESTS
     }
 
     /// One request. A 429 stops later picker calls in the turn.
@@ -217,7 +245,11 @@ impl<'a> Picker<'a> {
         outcome
     }
 
-    async fn one_request(&mut self, request: &PickRequest<'_>, limit: Option<Duration>) -> Result<PickReply> {
+    async fn one_request(
+        &mut self,
+        request: &PickRequest<'_>,
+        limit: Option<Duration>,
+    ) -> Result<PickReply> {
         if limit.is_some_and(|limit| limit.is_zero()) {
             return Err(anyhow!(super::budget::RECON_DEADLINE));
         }
@@ -225,17 +257,23 @@ impl<'a> Picker<'a> {
         let run = async {
             if decide {
                 let (state, questions) = decisions_request(request);
-                provider::decide(self.secret, &state, &questions).await.map(|response| {
-                    if let Some(cost) = response.cost {
-                        self.cost += cost;
-                    }
-                    let answer = response.answers.get("next_tool").cloned().unwrap_or_default();
-                    PickReply {
-                        tool_id: answer.choice.clone().unwrap_or_default(),
-                        confidence: answer.choice_probability(),
-                        ..PickReply::default()
-                    }
-                })
+                provider::decide(self.secret, &state, &questions)
+                    .await
+                    .map(|response| {
+                        if let Some(cost) = response.cost {
+                            self.cost += cost;
+                        }
+                        let answer = response
+                            .answers
+                            .get("next_tool")
+                            .cloned()
+                            .unwrap_or_default();
+                        PickReply {
+                            tool_id: answer.choice.clone().unwrap_or_default(),
+                            confidence: answer.choice_probability(),
+                            ..PickReply::default()
+                        }
+                    })
             } else {
                 let messages = chat_request(request);
                 provider::complete(self.secret, &messages, &[], |_| {})
@@ -263,14 +301,23 @@ impl<'a> Picker<'a> {
     /// deterministic picker. After a 429 or a transport error the deterministic picker
     /// finishes the list.
     pub async fn order(&mut self, context: &OrderContext<'_>) -> Result<Ordered> {
-        let mut candidates: Vec<String> = serving(context.catalog.iter().map(|entry| entry.id.clone()).filter(|id| id != GOOGLE_FALLBACK_TOOL).collect(), context.questions);
+        let mut candidates: Vec<String> = serving(
+            context
+                .catalog
+                .iter()
+                .map(|entry| entry.id.clone())
+                .filter(|id| id != GOOGLE_FALLBACK_TOOL)
+                .collect(),
+            context.questions,
+        );
         let limit = context.max_calls.clamp(1, MAX_PICKS).min(candidates.len());
         let mut ordered = Ordered::default();
         let mut picked: Vec<String> = Vec::new();
         let mut done = false;
         let mut model_picks = 0usize;
         while picked.len() < limit && !candidates.is_empty() && self.can_call() {
-            let offer = offered_candidates(&candidates, &picked, context.bindings, context.question);
+            let offer =
+                offered_candidates(&candidates, &picked, context.bindings, context.question);
             let allow_done = picked.len() >= MIN_PICKS;
             let mut rejected: Option<String> = None;
             let mut choice: Option<PickReply> = None;
@@ -288,7 +335,9 @@ impl<'a> Picker<'a> {
                 };
                 let reply = match self.ask(&request).await {
                     Ok(reply) => reply,
-                    Err(err) if err.to_string() == "cancelled" || super::deadline_hit(&err) => return Err(err),
+                    Err(err) if err.to_string() == "cancelled" || super::deadline_hit(&err) => {
+                        return Err(err)
+                    }
                     Err(_) => break,
                 };
                 if reply.tool_id == DONE && allow_done {
@@ -350,14 +399,20 @@ impl<'a> Picker<'a> {
                     candidates: offer.len(),
                 });
                 if !reply.needs.is_empty() {
-                    ordered.needs.insert(reply.tool_id.clone(), reply.needs.clone());
+                    ordered
+                        .needs
+                        .insert(reply.tool_id.clone(), reply.needs.clone());
                 }
                 if !reply.produces.is_empty() {
-                    ordered.produces.insert(reply.tool_id.clone(), reply.produces.clone());
+                    ordered
+                        .produces
+                        .insert(reply.tool_id.clone(), reply.produces.clone());
                 }
                 candidates.retain(|id| id != &reply.tool_id);
                 picked.push(reply.tool_id.clone());
-                ordered.replies.insert(reply.tool_id.clone(), PickReply { serves, ..reply });
+                ordered
+                    .replies
+                    .insert(reply.tool_id.clone(), PickReply { serves, ..reply });
                 model_picks += 1;
                 continue;
             }
@@ -379,12 +434,28 @@ impl<'a> Picker<'a> {
                 .records
                 .iter()
                 .filter(|record| record.outcome == "accepted")
-                .all(|record| record.confidence.is_some_and(|value| value < CONFIDENCE_FLOOR));
+                .all(|record| {
+                    record
+                        .confidence
+                        .is_some_and(|value| value < CONFIDENCE_FLOOR)
+                });
         if low {
-            for record in ordered.records.iter_mut().filter(|record| record.outcome == "accepted") {
+            for record in ordered
+                .records
+                .iter_mut()
+                .filter(|record| record.outcome == "accepted")
+            {
                 record.outcome = "low_confidence".into();
             }
-            candidates = serving(context.catalog.iter().map(|entry| entry.id.clone()).filter(|id| id != GOOGLE_FALLBACK_TOOL).collect(), context.questions);
+            candidates = serving(
+                context
+                    .catalog
+                    .iter()
+                    .map(|entry| entry.id.clone())
+                    .filter(|id| id != GOOGLE_FALLBACK_TOOL)
+                    .collect(),
+                context.questions,
+            );
             picked.clear();
             ordered.replies.clear();
             ordered.needs.clear();
@@ -397,13 +468,25 @@ impl<'a> Picker<'a> {
         if !done {
             // One pick at a time so the opening restriction lifts after a primary pick.
             while picked.len() < target {
-                let offer = offered_candidates(&candidates, &picked, context.bindings, context.question);
+                let offer =
+                    offered_candidates(&candidates, &picked, context.bindings, context.question);
                 // An opening set the ladders do not rank still yields its first tool.
                 let opening = offer.len() < candidates.len();
-                let Some(id) = self.deterministic(context, &offer).into_iter().next().or_else(|| offer.first().filter(|_| opening).cloned()) else {
+                let Some(id) = self
+                    .deterministic(context, &offer)
+                    .into_iter()
+                    .next()
+                    .or_else(|| offer.first().filter(|_| opening).cloned())
+                else {
                     break;
                 };
-                ordered.records.push(fallback_record(picked.len() + 1, &id, offer.len(), "Deterministic fallback picker.", context.questions));
+                ordered.records.push(fallback_record(
+                    picked.len() + 1,
+                    &id,
+                    offer.len(),
+                    "Deterministic fallback picker.",
+                    context.questions,
+                ));
                 candidates.retain(|other| other != &id);
                 picked.push(id);
             }
@@ -415,24 +498,49 @@ impl<'a> Picker<'a> {
                 break;
             }
             let kind = investigation::context_of(&id).unwrap_or_default();
-            ordered.records.push(fallback_record(picked.len() + 1, &id, candidates.len(), &format!("A directive targets {kind}; Recon added its {kind} tool."), context.questions));
+            ordered.records.push(fallback_record(
+                picked.len() + 1,
+                &id,
+                candidates.len(),
+                &format!("A directive targets {kind}; Recon added its {kind} tool."),
+                context.questions,
+            ));
             candidates.retain(|other| other != &id);
             picked.push(id);
         }
-        ordered.tools = investigation::dependency_order(&picked, context.bindings, &ordered.produces);
-        for record in ordered.records.iter_mut().filter(|record| record.position > 0 && matches!(record.outcome.as_str(), "accepted" | "fallback")) {
+        ordered.tools =
+            investigation::dependency_order(&picked, context.bindings, &ordered.produces);
+        for record in ordered.records.iter_mut().filter(|record| {
+            record.position > 0 && matches!(record.outcome.as_str(), "accepted" | "fallback")
+        }) {
             if let Some(position) = ordered.tools.iter().position(|id| id == &record.tool_id) {
                 record.position = position + 1;
             }
         }
-        ordered.mode = if model_picks > 0 { "tool_picker" } else { "tool_picker_fallback" }.into();
-        ordered.transport = if model_picks > 0 { self.transport } else { "fallback" }.into();
+        ordered.mode = if model_picks > 0 {
+            "tool_picker"
+        } else {
+            "tool_picker_fallback"
+        }
+        .into();
+        ordered.transport = if model_picks > 0 {
+            self.transport
+        } else {
+            "fallback"
+        }
+        .into();
         ordered.note = self.note(model_picks, picked.len(), done, low);
         Ok(ordered)
     }
 
     fn deterministic(&self, context: &OrderContext<'_>, candidates: &[String]) -> Vec<String> {
-        investigation::fallback_order(context.question, context.questions, context.bindings, candidates, context.unkeyed)
+        investigation::fallback_order(
+            context.question,
+            context.questions,
+            context.bindings,
+            candidates,
+            context.unkeyed,
+        )
     }
 
     fn note(&self, model_picks: usize, total: usize, done: bool, low: bool) -> String {
@@ -447,7 +555,9 @@ impl<'a> Picker<'a> {
             parts.push("The provider rate-limited the picker, so no further picker calls were made this turn and the deterministic picker finished the list.".into());
         }
         if let Some(reason) = &self.failure {
-            parts.push(format!("The picker call failed ({reason}); the deterministic picker finished the list."));
+            parts.push(format!(
+                "The picker call failed ({reason}); the deterministic picker finished the list."
+            ));
         }
         if low {
             parts.push(format!("Every pick was below {CONFIDENCE_FLOOR} confidence, so the deterministic order was used."));
@@ -492,7 +602,11 @@ impl<'a> Picker<'a> {
                         transport: self.transport.into(),
                         outcome: "accepted".into(),
                         confidence: reply.confidence,
-                        reason: if reply.reason.is_empty() { purpose.into() } else { reply.reason.clone() },
+                        reason: if reply.reason.is_empty() {
+                            purpose.into()
+                        } else {
+                            reply.reason.clone()
+                        },
                         serves: checked_serves(&reply.tool_id, &reply.serves, context.questions),
                         candidates: candidates.len(),
                     };
@@ -505,19 +619,34 @@ impl<'a> Picker<'a> {
                         transport: self.transport.into(),
                         outcome: "rejected".into(),
                         confidence: reply.confidence,
-                        reason: format!("{} is not an available fallback", if reply.tool_id.is_empty() { "an empty reply" } else { reply.tool_id.as_str() }),
+                        reason: format!(
+                            "{} is not an available fallback",
+                            if reply.tool_id.is_empty() {
+                                "an empty reply"
+                            } else {
+                                reply.tool_id.as_str()
+                            }
+                        ),
                         serves: Vec::new(),
                         candidates: candidates.len(),
                     };
                     return Ok(Some((String::new(), record)));
                 }
-                Err(err) if err.to_string() == "cancelled" || super::deadline_hit(&err) => return Err(err),
+                Err(err) if err.to_string() == "cancelled" || super::deadline_hit(&err) => {
+                    return Err(err)
+                }
                 Err(_) => {}
             }
         }
         let id = self.deterministic(context, candidates).into_iter().next();
         Ok(id.map(|id| {
-            let record = fallback_record(picked.len() + 1, &id, candidates.len(), purpose, context.questions);
+            let record = fallback_record(
+                picked.len() + 1,
+                &id,
+                candidates.len(),
+                purpose,
+                context.questions,
+            );
             (id, record)
         }))
     }
@@ -537,11 +666,21 @@ pub struct OrderContext<'a> {
 /// search (top headlines too when the prompt says headlines) for `news`; CourtListener
 /// case and docket search (judge search first when the prompt asks about a judge) for
 /// `legal`. Only candidates, in that order.
-pub fn context_tools(directives: &[Directive], candidates: &[String], question: &str) -> Vec<String> {
-    let entities: Vec<String> = directives.iter().flat_map(|item| item.entities.iter().cloned()).collect();
+pub fn context_tools(
+    directives: &[Directive],
+    candidates: &[String],
+    question: &str,
+) -> Vec<String> {
+    let entities: Vec<String> = directives
+        .iter()
+        .flat_map(|item| item.entities.iter().cloned())
+        .collect();
     let mut wanted: Vec<&str> = Vec::new();
     for kind in investigation::CONTEXT_KINDS {
-        if !directives.iter().any(|item| item.targets.iter().any(|target| target == kind)) {
+        if !directives
+            .iter()
+            .any(|item| item.targets.iter().any(|target| target == kind))
+        {
             continue;
         }
         if *kind == investigation::NEWS_KIND {
@@ -556,16 +695,28 @@ pub fn context_tools(directives: &[Directive], candidates: &[String], question: 
             wanted.extend(["courtlistener_case_search", "courtlistener_docket_search"]);
         }
     }
-    wanted.into_iter().filter(|id| candidates.iter().any(|known| known == id)).map(String::from).collect()
+    wanted
+        .into_iter()
+        .filter(|id| candidates.iter().any(|known| known == id))
+        .map(String::from)
+        .collect()
 }
 
 /// Context tools still missing after the picker: for each targeted kind with no picked
 /// tool of that kind, the first context tool of that kind among the candidates.
-fn context_additions(directives: &[Directive], candidates: &[String], picked: &[String], question: &str) -> Vec<String> {
+fn context_additions(
+    directives: &[Directive],
+    candidates: &[String],
+    picked: &[String],
+    question: &str,
+) -> Vec<String> {
     let mut added: Vec<String> = Vec::new();
     for id in context_tools(directives, candidates, question) {
         let kind = investigation::context_of(&id);
-        let covered = picked.iter().chain(&added).any(|known| investigation::context_of(known) == kind);
+        let covered = picked
+            .iter()
+            .chain(&added)
+            .any(|known| investigation::context_of(known) == kind);
         if !covered {
             added.push(id);
         }
@@ -573,7 +724,13 @@ fn context_additions(directives: &[Directive], candidates: &[String], picked: &[
     added
 }
 
-fn fallback_record(position: usize, id: &str, candidates: usize, reason: &str, questions: &[Directive]) -> PickRecord {
+fn fallback_record(
+    position: usize,
+    id: &str,
+    candidates: usize,
+    reason: &str,
+    questions: &[Directive],
+) -> PickRecord {
     PickRecord {
         position,
         tool_id: id.into(),
@@ -593,7 +750,11 @@ pub fn serves_for(tool_id: &str, directives: &[Directive]) -> Vec<String> {
     let kinds = investigation::evidence_kinds(tool_id);
     directives
         .iter()
-        .filter(|item| item.targets.iter().any(|kind| kinds.contains(&kind.as_str())))
+        .filter(|item| {
+            item.targets
+                .iter()
+                .any(|kind| kinds.contains(&kind.as_str()))
+        })
         .map(|item| item.id.clone())
         .collect()
 }
@@ -603,16 +764,26 @@ pub fn serves_for(tool_id: &str, directives: &[Directive]) -> Vec<String> {
 pub fn serving(candidates: Vec<String>, directives: &[Directive]) -> Vec<String> {
     if directives.is_empty() {
         // News and Legal tools only ever serve a directive that targets their kind.
-        return candidates.into_iter().filter(|id| investigation::context_of(id).is_none()).collect();
+        return candidates
+            .into_iter()
+            .filter(|id| investigation::context_of(id).is_none())
+            .collect();
     }
-    candidates.into_iter().filter(|id| !serves_for(id, directives).is_empty()).collect()
+    candidates
+        .into_iter()
+        .filter(|id| !serves_for(id, directives).is_empty())
+        .collect()
 }
 
 /// A reply's `serves`, kept only where the directive's targets overlap the tool's kinds;
 /// otherwise the directives the tool serves.
 fn checked_serves(tool_id: &str, claimed: &[String], directives: &[Directive]) -> Vec<String> {
     let valid = serves_for(tool_id, directives);
-    let kept: Vec<String> = claimed.iter().filter(|id| valid.contains(id)).cloned().collect();
+    let kept: Vec<String> = claimed
+        .iter()
+        .filter(|id| valid.contains(id))
+        .cloned()
+        .collect();
     if kept.is_empty() {
         valid
     } else {
@@ -623,7 +794,8 @@ fn checked_serves(tool_id: &str, claimed: &[String], directives: &[Directive]) -
 /// One known binding for the picker state: kind and value, plus the handle's platform
 /// and whether it was inferred from another platform.
 fn known_binding(binding: &Binding) -> Value {
-    let mut item = json!({"kind": binding.kind, "value": binding.value.chars().take(120).collect::<String>()});
+    let mut item =
+        json!({"kind": binding.kind, "value": binding.value.chars().take(120).collect::<String>()});
     if !binding.qualifier.is_empty() {
         item["platform"] = json!(binding.qualifier);
     }
@@ -645,7 +817,9 @@ fn state(request: &PickRequest<'_>) -> Value {
         .collect();
     let dependencies: Vec<Value> = investigation::dependencies()
         .iter()
-        .filter(|row| candidates.contains(row.tool) || request.picked.iter().any(|id| id == row.tool))
+        .filter(|row| {
+            candidates.contains(row.tool) || request.picked.iter().any(|id| id == row.tool)
+        })
         .map(|row| json!({"tool": row.tool, "needs": row.needs, "producers": row.producers}))
         .collect();
     let mut value = json!({
@@ -676,14 +850,21 @@ pub fn decisions_request(request: &PickRequest<'_>) -> (Value, Value) {
                 entry.category,
                 entry.description,
                 entry.inputs.join(", "),
-                if entry.keyed { "" } else { " Not keyed: it cannot run without an API key." }
+                if entry.keyed {
+                    ""
+                } else {
+                    " Not keyed: it cannot run without an API key."
+                }
             ),
             None => id.clone(),
         };
         criteria.insert(id.clone(), json!(text));
     }
     if request.allow_done {
-        criteria.insert(DONE.into(), json!("Stop: the tools already picked are enough to meet all three directives."));
+        criteria.insert(
+            DONE.into(),
+            json!("Stop: the tools already picked are enough to meet all three directives."),
+        );
     }
     let instructions = if request.purpose.is_empty() {
         "Pick the single best OSINT tool to run next for the three directives in `directives`, given `known_bindings` and the tools in `already_picked`. Prefer tools whose inputs are known or produced by an already picked tool (see `dependencies`). Avoid tools that are not keyed."
@@ -735,7 +916,12 @@ pub fn parse_chat_pick(text: &str) -> PickReply {
     let qid = |item: &str| matches!(item, "d1" | "d2" | "d3");
     let kind = |item: &str| investigation::known_kind(item);
     PickReply {
-        tool_id: value.get("tool_id").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+        tool_id: value
+            .get("tool_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string(),
         confidence: None,
         serves: strings("serves", &qid),
         needs: strings("needs", &kind),

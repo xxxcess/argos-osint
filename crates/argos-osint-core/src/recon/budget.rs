@@ -38,12 +38,18 @@ pub struct ScheduledCall {
 /// A live call as the catalog defines it. Cache hits are marked by the caller.
 pub fn scheduled(tool_id: &str, cached: bool) -> ScheduledCall {
     let id = osint::canonical_tool_id(tool_id);
-    let timeout = osint::definition(id).map(|tool| tool.timeout_seconds).unwrap_or(30);
+    let timeout = osint::definition(id)
+        .map(|tool| tool.timeout_seconds)
+        .unwrap_or(30);
     ScheduledCall {
         tool_id: id.to_string(),
         timeout_seconds: timeout,
         cached,
-        poll_seconds: if cached { 0 } else { osint::job_poll_seconds(id) },
+        poll_seconds: if cached {
+            0
+        } else {
+            osint::job_poll_seconds(id)
+        },
     }
 }
 
@@ -54,7 +60,11 @@ pub fn tool_allowance_seconds(calls: &[ScheduledCall]) -> u64 {
     if live.is_empty() {
         return 0;
     }
-    let longest = live.iter().map(|call| call.timeout_seconds).max().unwrap_or(0);
+    let longest = live
+        .iter()
+        .map(|call| call.timeout_seconds)
+        .max()
+        .unwrap_or(0);
     let sum: u64 = live.iter().map(|call| call.timeout_seconds).sum();
     let concurrent = longest.max(sum / TOOL_CONCURRENCY);
     let court = live
@@ -69,7 +79,11 @@ pub fn tool_allowance_seconds(calls: &[ScheduledCall]) -> u64 {
 /// 300s plus 1s per 1,000 characters, capped by `ceiling`. A repair pass adds half of
 /// that again, still not past the ceiling.
 pub fn synthesis_allowance_seconds(chars: usize, repair: bool) -> u64 {
-    synthesis_allowance_capped(chars, repair, u64::from(crate::provider::MAX_MAX_TURN_SECONDS))
+    synthesis_allowance_capped(
+        chars,
+        repair,
+        u64::from(crate::provider::MAX_MAX_TURN_SECONDS),
+    )
 }
 
 pub fn synthesis_allowance_capped(chars: usize, repair: bool, ceiling: u64) -> u64 {
@@ -86,7 +100,10 @@ pub fn synthesis_allowance_capped(chars: usize, repair: bool, ceiling: u64) -> u
 /// `clamp(recon + tools + synthesis, floor, ceiling)`. The ceiling is at least the floor.
 pub fn deadline_seconds(recon: u64, tools: u64, synthesis: u64, floor: u64, ceiling: u64) -> u64 {
     let ceiling = ceiling.max(floor);
-    recon.saturating_add(tools).saturating_add(synthesis).clamp(floor, ceiling)
+    recon
+        .saturating_add(tools)
+        .saturating_add(synthesis)
+        .clamp(floor, ceiling)
 }
 
 pub fn format_span(total: u64) -> String {
@@ -283,7 +300,10 @@ impl TurnClock {
     /// Synthesis allowance still unused, and never past the hard ceiling.
     pub fn synthesis_remaining(&self) -> Duration {
         let allowance = Duration::from_secs(self.synthesis_seconds());
-        let used = self.synthesis_started.map(|at| at.elapsed()).unwrap_or_default();
+        let used = self
+            .synthesis_started
+            .map(|at| at.elapsed())
+            .unwrap_or_default();
         allowance.saturating_sub(used).min(self.ceiling_remaining())
     }
 
@@ -332,11 +352,20 @@ mod tests {
     fn more_calls_mean_more_tool_time_and_cache_hits_add_nothing() {
         let one = live("crtsh_certificates");
         // Four calls still fit in one concurrency slot; the fifth makes the sum exceed the longest timeout.
-        let five = tool_allowance_seconds(&[one.clone(), one.clone(), one.clone(), one.clone(), one.clone()]);
+        let five = tool_allowance_seconds(&[
+            one.clone(),
+            one.clone(),
+            one.clone(),
+            one.clone(),
+            one.clone(),
+        ]);
         assert!(five > tool_allowance_seconds(std::slice::from_ref(&one)));
         let cached = scheduled("crtsh_certificates", true);
         assert_eq!(tool_allowance_seconds(std::slice::from_ref(&cached)), 0);
-        assert_eq!(tool_allowance_seconds(&[cached, one.clone()]), tool_allowance_seconds(std::slice::from_ref(&one)));
+        assert_eq!(
+            tool_allowance_seconds(&[cached, one.clone()]),
+            tool_allowance_seconds(std::slice::from_ref(&one))
+        );
     }
 
     #[test]
@@ -347,12 +376,21 @@ mod tests {
         assert_eq!(two, one + COURTLISTENER_SPACING.as_secs());
         assert_eq!(one, case.timeout_seconds, "one call has no spacing gap");
         let job = live("firecrawl_batch_scrape");
-        let without = ScheduledCall { poll_seconds: 0, ..job.clone() };
+        let without = ScheduledCall {
+            poll_seconds: 0,
+            ..job.clone()
+        };
         assert!(job.poll_seconds > 0);
-        assert_eq!(tool_allowance_seconds(std::slice::from_ref(&job)), tool_allowance_seconds(std::slice::from_ref(&without)) + job.poll_seconds);
+        assert_eq!(
+            tool_allowance_seconds(std::slice::from_ref(&job)),
+            tool_allowance_seconds(std::slice::from_ref(&without)) + job.poll_seconds
+        );
         let crawl = live("firecrawl_crawl");
         assert!(crawl.poll_seconds >= 120);
-        assert_eq!(tool_allowance_seconds(&[scheduled("firecrawl_search", false)]).saturating_sub(60), 0);
+        assert_eq!(
+            tool_allowance_seconds(&[scheduled("firecrawl_search", false)]).saturating_sub(60),
+            0
+        );
     }
 
     #[test]
@@ -371,14 +409,20 @@ mod tests {
         assert_eq!(clock.synthesis_seconds(), 300);
         clock.note_round();
         let remaining = clock.recon_remaining().as_secs();
-        assert!((44..=45).contains(&remaining), "a round keeps about 45s, got {remaining}");
+        assert!(
+            (44..=45).contains(&remaining),
+            "a round keeps about 45s, got {remaining}"
+        );
         clock.raise_calls(vec![live("crtsh_certificates")]);
         clock.begin_tools();
         assert!(!clock.tools_blocked());
         let mut tight = TurnClock::new(300, 300);
         tight.raise_calls(vec![live("crtsh_certificates")]);
         tight.begin_tools();
-        assert!(!tight.tools_blocked(), "a 300s ceiling still leaves a tool window");
+        assert!(
+            !tight.tools_blocked(),
+            "a 300s ceiling still leaves a tool window"
+        );
     }
 
     #[test]
@@ -386,7 +430,11 @@ mod tests {
         assert_eq!(deadline_seconds(10, 10, 10, 300, 900), 300);
         assert_eq!(deadline_seconds(200, 200, 200, 300, 900), 600);
         assert_eq!(deadline_seconds(400, 400, 400, 300, 900), 900);
-        assert_eq!(deadline_seconds(10, 10, 10, 800, 120), 800, "ceiling is raised to the floor");
+        assert_eq!(
+            deadline_seconds(10, 10, 10, 800, 120),
+            800,
+            "ceiling is raised to the floor"
+        );
     }
 
     #[test]
@@ -402,12 +450,19 @@ mod tests {
     #[test]
     fn aging_the_tool_clock_blocks_new_calls_and_cache_hits_do_not_extend_it() {
         let mut clock = TurnClock::new(30, 900);
-        clock.raise_calls(vec![live("courtlistener_case_search"), live("courtlistener_case_search")]);
+        clock.raise_calls(vec![
+            live("courtlistener_case_search"),
+            live("courtlistener_case_search"),
+        ]);
         clock.begin_tools();
         assert!(!clock.tools_blocked());
         let held = clock.tool_seconds();
         clock.raise_calls(vec![scheduled("courtlistener_case_search", true)]);
-        assert_eq!(clock.tool_seconds(), held, "a later cache-only refresh does not shrink the hold");
+        assert_eq!(
+            clock.tool_seconds(),
+            held,
+            "a later cache-only refresh does not shrink the hold"
+        );
         clock.age(Duration::from_secs(held + 1));
         assert!(clock.tools_blocked());
     }
@@ -422,7 +477,10 @@ mod tests {
         assert!(first[0].ends_with("0 calls"));
         clock.raise_calls(vec![live("crtsh_certificates")]);
         let second = clock.take_labels();
-        assert!(second[0].contains("1 calls") || second[0].contains("1 call"), "{second:?}");
+        assert!(
+            second[0].contains("1 calls") || second[0].contains("1 call"),
+            "{second:?}"
+        );
         clock.set_evidence(52_000);
         clock.begin_synthesis();
         let third = clock.label();

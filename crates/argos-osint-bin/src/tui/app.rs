@@ -125,6 +125,44 @@ impl ProviderPage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrainPage {
+    Memories,
+    Graph,
+}
+impl BrainPage {
+    pub const ALL: [Self; 2] = [Self::Memories, Self::Graph];
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Memories => "Memories",
+            Self::Graph => "Graph",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrainListMode {
+    List,
+    Create,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphView {
+    Force,
+    Directive,
+    Path,
+}
+impl GraphView {
+    pub const ALL: [Self; 3] = [Self::Force, Self::Directive, Self::Path];
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Force => "Force",
+            Self::Directive => "Directive",
+            Self::Path => "Path",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldId {
     BrainApp,
     BrainConversation,
@@ -246,6 +284,8 @@ pub enum ButtonId {
     SaveNewsApiKey,
     SaveCourtListenerKey,
     OpenSource,
+    CreateMemory,
+    BrainBack,
     ClearLog,
     GrokSignIn,
     GrokCheck,
@@ -262,6 +302,9 @@ pub enum Target {
     App(usize),
     Home,
     ProviderTab(ProviderPage),
+    BrainTab(BrainPage),
+    GraphView(GraphView),
+    GraphNode(usize),
     Memory(usize),
     Thread(usize),
     Tool(usize),
@@ -428,6 +471,12 @@ pub struct App {
     pub memories: Vec<Memory>,
     pub selected_insight: Option<recon::InsightView>,
     pub memory_sel: usize,
+    pub brain_page: BrainPage,
+    pub brain_list_mode: BrainListMode,
+    pub graph_view: GraphView,
+    pub brain_graph: recon::MemoryGraph,
+    brain_graph_for: Option<String>,
+    pub graph_node: usize,
     pub hits: Vec<ScoredMemory>,
     pub auth: AuthFile,
     pub settings: SettingsFile,
@@ -592,6 +641,12 @@ impl App {
             memories,
             selected_insight: None,
             memory_sel: 0,
+            brain_page: BrainPage::Memories,
+            brain_list_mode: BrainListMode::List,
+            graph_view: GraphView::Force,
+            brain_graph: recon::MemoryGraph::default(),
+            brain_graph_for: None,
+            graph_node: 0,
             hits: Vec::new(),
             auth,
             settings,
@@ -695,7 +750,7 @@ impl App {
         self.set_focus(match self.module {
             Some(ModuleId::Recon) if self.threads.is_empty() => Target::Field(FieldId::ReconSearch),
             Some(ModuleId::Recon) => Target::Thread(self.thread_sel),
-            Some(ModuleId::Brain) => Target::Field(FieldId::BrainApp),
+            Some(ModuleId::Brain) => Target::Button(ButtonId::CreateMemory),
             Some(ModuleId::Osint) => Target::Field(FieldId::OsintSearch),
             Some(ModuleId::Providers) => Target::ProviderTab(self.provider_page),
             _ => Target::Button(ButtonId::RefreshHardware),
@@ -1035,7 +1090,11 @@ impl App {
     }
 
     pub fn tool_needs_key_with(&self, id: &str, env: impl Fn(&str) -> Option<String>) -> bool {
-        osint::endpoint_cost(id).is_some_and(|cost| self.settings.provider_key_with(cost.provider, env).is_empty())
+        osint::endpoint_cost(id).is_some_and(|cost| {
+            self.settings
+                .provider_key_with(cost.provider, env)
+                .is_empty()
+        })
     }
 
     fn run_osint(&mut self) -> Result<()> {
@@ -1057,7 +1116,8 @@ impl App {
         } else if tool.id.starts_with("newsapi_") && !self.newsapi_key.trim().is_empty() {
             // An empty field falls back to NEWSAPI_API_KEY.
             self.remember_newsapi_key()?;
-        } else if tool.id.starts_with("courtlistener_") && !self.courtlistener_key.trim().is_empty() {
+        } else if tool.id.starts_with("courtlistener_") && !self.courtlistener_key.trim().is_empty()
+        {
             self.remember_courtlistener_key()?;
         }
         let service =
@@ -1522,7 +1582,7 @@ impl App {
 
     fn save_insight(&mut self) -> Result<String> {
         let (category, text) = argos_osint_core::brain::parse_typed_memory(&self.brain_insight);
-        self.store.add_memory(
+        let memory = self.store.add_memory(
             &text,
             category,
             false,
@@ -1534,14 +1594,64 @@ impl App {
             },
         )?;
         self.memories = self.store.list_memories()?;
+        self.memory_sel = self
+            .memories
+            .iter()
+            .position(|item| item.id == memory.id)
+            .unwrap_or(0);
+        self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
         self.brain_insight.clear();
+        self.brain_list_mode = BrainListMode::List;
+        self.brain_graph_for = None;
+        self.sync_graph();
+        self.set_focus(Target::Memory(self.memory_sel));
         Ok("Insight saved with source".into())
+    }
+
+    fn sync_graph(&mut self) {
+        let id = self
+            .memories
+            .get(self.memory_sel)
+            .map(|memory| memory.id.clone());
+        if self.brain_graph_for == id {
+            return;
+        }
+        self.brain_graph_for = id.clone();
+        self.graph_node = 0;
+        self.brain_graph = match &id {
+            Some(id) => self.store.graph_for_memory(id).unwrap_or_default(),
+            None => recon::MemoryGraph::default(),
+        };
+    }
+
+    fn move_graph_node(&mut self, delta: i32) {
+        let count = super::graph::selectable(&self.brain_graph, self.graph_view).len();
+        if count == 0 {
+            return;
+        }
+        let next = (self.graph_node as i32 + delta).clamp(0, count as i32 - 1) as usize;
+        self.graph_node = next;
+        self.set_focus(Target::GraphNode(next));
     }
 
     fn activate_button(&mut self, button: ButtonId) {
         let result = match button {
             ButtonId::Send => {
                 self.submit();
+                return;
+            }
+            ButtonId::CreateMemory => {
+                self.brain_page = BrainPage::Memories;
+                self.brain_list_mode = BrainListMode::Create;
+                self.set_focus(Target::Field(FieldId::BrainApp));
+                self.cursor = self.brain_app.chars().count();
+                self.status = "New memory".into();
+                return;
+            }
+            ButtonId::BrainBack => {
+                self.brain_list_mode = BrainListMode::List;
+                self.set_focus(Target::Button(ButtonId::CreateMemory));
+                self.status = "Memories".into();
                 return;
             }
             ButtonId::Add => self.save_insight(),
@@ -1574,6 +1684,8 @@ impl App {
                         self.memories = memories;
                         self.memory_sel =
                             self.memory_sel.min(self.memories.len().saturating_sub(1));
+                        self.brain_graph_for = None;
+                        self.sync_graph();
                         "Memory deleted".into()
                     })
             }
@@ -1769,19 +1881,25 @@ impl App {
         {
             anyhow::bail!("Choose Grok, OpenAI, OpenRouter, or local");
         }
-        let assignment = self.settings.defaults.role_mut(match role {
-            DefaultsRole::Recon => "recon",
-            DefaultsRole::ToolPicker => "tool-picker",
-            DefaultsRole::Synthesis => "synthesis",
-        })
-        .ok_or_else(|| anyhow::anyhow!("unknown role"))?;
+        let assignment = self
+            .settings
+            .defaults
+            .role_mut(match role {
+                DefaultsRole::Recon => "recon",
+                DefaultsRole::ToolPicker => "tool-picker",
+                DefaultsRole::Synthesis => "synthesis",
+            })
+            .ok_or_else(|| anyhow::anyhow!("unknown role"))?;
         let before = format!("{} / {}", assignment.provider, assignment.model);
         assignment.provider = kind.clone();
         assignment.model = model.clone();
         self.save_settings()?;
         let after = format!("{kind} / {model}");
         if before != after {
-            self.push_log("info", format!("{}: {before} -> {after}", role.settings_key()));
+            self.push_log(
+                "info",
+                format!("{}: {before} -> {after}", role.settings_key()),
+            );
         }
         Ok(match role {
             DefaultsRole::Recon => format!("Recon: {after}"),
@@ -2030,12 +2148,43 @@ impl App {
                 self.provider_page = page;
                 self.set_focus(target);
             }
+            Target::BrainTab(page) => {
+                self.brain_page = page;
+                if page == BrainPage::Graph {
+                    self.sync_graph();
+                    let count = super::graph::selectable(&self.brain_graph, self.graph_view).len();
+                    if count == 0 {
+                        self.set_focus(Target::BrainTab(BrainPage::Graph));
+                    } else {
+                        self.graph_node = self.graph_node.min(count - 1);
+                        self.set_focus(Target::GraphNode(self.graph_node));
+                    }
+                } else {
+                    self.set_focus(target);
+                }
+            }
+            Target::GraphView(view) => {
+                self.graph_view = view;
+                self.graph_node = 0;
+                self.set_focus(
+                    if super::graph::selectable(&self.brain_graph, view).is_empty() {
+                        Target::GraphView(view)
+                    } else {
+                        Target::GraphNode(0)
+                    },
+                );
+            }
+            Target::GraphNode(index) => {
+                self.graph_node = index;
+                self.set_focus(target);
+            }
             Target::Memory(index) => {
                 self.memory_sel = index;
                 self.selected_insight = self
                     .memories
                     .get(index)
                     .and_then(|m| self.store.insight_for_memory(&m.id).ok().flatten());
+                self.sync_graph();
                 self.set_focus(target);
             }
             Target::Thread(index) => {
@@ -2356,6 +2505,32 @@ impl App {
             KeyCode::Enter => self.on_enter(),
             KeyCode::Backspace => self.edit_backspace(),
             KeyCode::Delete => self.edit_delete(),
+            KeyCode::Char(c)
+                if self.module == Some(ModuleId::Brain)
+                    && self.brain_page == BrainPage::Graph
+                    && !self.field_focused()
+                    && matches!(c, '1' | '2' | '3') =>
+            {
+                self.activate_target(Target::GraphView(match c {
+                    '1' => GraphView::Force,
+                    '2' => GraphView::Directive,
+                    _ => GraphView::Path,
+                }));
+            }
+            KeyCode::Left | KeyCode::Char('h')
+                if self.module == Some(ModuleId::Brain)
+                    && self.brain_page == BrainPage::Graph
+                    && !self.field_focused() =>
+            {
+                self.move_graph_node(-1);
+            }
+            KeyCode::Right | KeyCode::Char('l')
+                if self.module == Some(ModuleId::Brain)
+                    && self.brain_page == BrainPage::Graph
+                    && !self.field_focused() =>
+            {
+                self.move_graph_node(1);
+            }
             KeyCode::Left if self.field_focused() => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Right if self.field_focused() => {
                 if let Target::Field(field) = self.focus {
@@ -2499,6 +2674,12 @@ impl App {
             }
             return;
         }
+        if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Create {
+            self.brain_list_mode = BrainListMode::List;
+            self.set_focus(Target::Button(ButtonId::CreateMemory));
+            self.status = "Memories".into();
+            return;
+        }
         if self.module == Some(ModuleId::Recon) && self.recon_chat {
             self.recon_chat = false;
             self.set_focus(if self.threads.is_empty() {
@@ -2576,9 +2757,14 @@ impl App {
                 super::ui::move_chat(self, delta);
             }
             Target::Memory(_) => self.move_memory(delta),
+            Target::GraphNode(_) => self.move_graph_node(delta),
             Target::Tool(_) => self.move_tool(delta),
             _ => match self.module {
                 None => self.move_home(delta),
+                Some(ModuleId::Brain) if self.brain_page == BrainPage::Graph => {
+                    self.move_graph_node(delta);
+                }
+                Some(ModuleId::Brain) if self.brain_list_mode == BrainListMode::Create => {}
                 Some(ModuleId::Brain) => self.move_memory(delta),
                 Some(ModuleId::Osint) => self.move_tool(delta),
                 Some(ModuleId::System) => {
@@ -2624,6 +2810,7 @@ impl App {
             .and_then(|memory| self.store.insight_for_memory(&memory.id).ok().flatten());
         let room = super::ui::memory_room_for(self);
         super::ui::reveal_index(&mut self.scrolls.memories, next, room);
+        self.sync_graph();
         self.set_focus(Target::Memory(next));
     }
 
@@ -2787,7 +2974,11 @@ fn provider_label(kind: &str) -> &'static str {
 
 /// Model choices for a role. The tool picker on OpenRouter always offers the decisions
 /// models first, even when `GET /api/v1/models` omits them.
-fn role_model_items(role: DefaultsRole, provider: &str, catalog: &[ListedModel]) -> Vec<ChoiceItem> {
+fn role_model_items(
+    role: DefaultsRole,
+    provider: &str,
+    catalog: &[ListedModel],
+) -> Vec<ChoiceItem> {
     let mut items = Vec::new();
     let picker = role == DefaultsRole::ToolPicker && provider == "openrouter";
     if picker {
@@ -3073,6 +3264,12 @@ mod tests {
             memories: Vec::new(),
             selected_insight: None,
             memory_sel: 0,
+            brain_page: BrainPage::Memories,
+            brain_list_mode: BrainListMode::List,
+            graph_view: GraphView::Force,
+            brain_graph: recon::MemoryGraph::default(),
+            brain_graph_for: None,
+            graph_node: 0,
             hits: Vec::new(),
             auth: AuthFile::default(),
             settings: SettingsFile::default(),
@@ -3115,6 +3312,22 @@ mod tests {
     fn brain_tab_still_edits_and_recalls_sourced_memories() {
         let mut app = app();
         click(&mut app, Target::App(1));
+        let listed = super::super::ui::focus_order(&app);
+        assert!(listed.contains(&Target::Button(ButtonId::CreateMemory)));
+        assert!(listed.contains(&Target::Memory(0)) || app.memories.is_empty());
+        assert!(!listed
+            .iter()
+            .any(|target| matches!(target, Target::Field(FieldId::BrainApp))));
+        click(&mut app, Target::Button(ButtonId::CreateMemory));
+        assert_eq!(app.brain_list_mode, BrainListMode::Create);
+        assert_eq!(app.focus, Target::Field(FieldId::BrainApp));
+        let forming = super::super::ui::focus_order(&app);
+        assert!(forming.contains(&Target::Field(FieldId::BrainApp)));
+        assert!(forming.contains(&Target::Button(ButtonId::BrainBack)));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert!(app.memories.is_empty());
+        click(&mut app, Target::Button(ButtonId::CreateMemory));
         click(&mut app, Target::Field(FieldId::BrainApp));
         type_text(&mut app, "chat");
         click(&mut app, Target::Field(FieldId::BrainConversation));
@@ -3122,7 +3335,18 @@ mod tests {
         click(&mut app, Target::Field(FieldId::BrainInsight));
         type_text(&mut app, "project: Atlas launch");
         click(&mut app, Target::Button(ButtonId::Add));
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
         assert_eq!(app.memories[0].source.conversation_id, "thread-1");
+        let listed = super::super::ui::focus_order(&app);
+        assert!(listed.contains(&Target::Button(ButtonId::CreateMemory)));
+        assert!(listed.contains(&Target::Memory(app.memory_sel)));
+        assert!(!listed
+            .iter()
+            .any(|target| matches!(target, Target::Field(FieldId::BrainInsight))));
+        click(&mut app, Target::BrainTab(BrainPage::Graph));
+        assert_eq!(app.brain_page, BrainPage::Graph);
+        assert!(app.brain_graph.is_empty());
+        click(&mut app, Target::BrainTab(BrainPage::Memories));
         click(&mut app, Target::Field(FieldId::BrainQuery));
         type_text(&mut app, "Atlas");
         click(&mut app, Target::Button(ButtonId::Recall));
@@ -3374,7 +3598,10 @@ mod tests {
         assert_eq!(app.recon_model, "beta");
         assert!(matches!(app.overlay, Overlay::None));
 
-        click(&mut app, Target::Button(ButtonId::DefaultRole(DefaultsRole::Synthesis)));
+        click(
+            &mut app,
+            Target::Button(ButtonId::DefaultRole(DefaultsRole::Synthesis)),
+        );
         click(&mut app, Target::Field(FieldId::SynthesisProvider));
         assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)));
         assert_eq!(app.choice_items[0].id, "grok");
@@ -3690,7 +3917,11 @@ mod tests {
         });
         app.note_finished_calls();
         app.note_finished_calls();
-        let logged: Vec<_> = app.log.iter().filter(|line| !line.detail.is_empty()).collect();
+        let logged: Vec<_> = app
+            .log
+            .iter()
+            .filter(|line| !line.detail.is_empty())
+            .collect();
         assert_eq!(logged.len(), 1);
         assert!(logged[0].text.contains("cache"));
         assert!(logged[0].text.contains("2 results"));
@@ -3707,7 +3938,11 @@ mod tests {
         assert!(body.contains("cache"));
         assert!(!body.contains("Jane Roe role"));
         app.select(4);
-        let index = app.log.iter().position(|line| !line.detail.is_empty()).unwrap();
+        let index = app
+            .log
+            .iter()
+            .position(|line| !line.detail.is_empty())
+            .unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.log_sel = index;
         let id = app.log[index].id;
@@ -3784,8 +4019,15 @@ mod tests {
         assert!(hit(&app, Target::Field(FieldId::SociaVaultKey)));
         assert!(hit(&app, Target::Button(ButtonId::SaveSociaVaultKey)));
         // Every tool of a provider shares its key row.
-        for (id, field) in [("firecrawl_map", FieldId::FirecrawlKey), ("sociavault_google_search", FieldId::SociaVaultKey), ("hunter_company_enrichment", FieldId::HunterKey)] {
-            app.tool_sel = osint::registry().iter().position(|tool| tool.id == id).unwrap();
+        for (id, field) in [
+            ("firecrawl_map", FieldId::FirecrawlKey),
+            ("sociavault_google_search", FieldId::SociaVaultKey),
+            ("hunter_company_enrichment", FieldId::HunterKey),
+        ] {
+            app.tool_sel = osint::registry()
+                .iter()
+                .position(|tool| tool.id == id)
+                .unwrap();
             assert!(hit(&app, Target::Field(field)), "{id}");
         }
         app.tool_sel = 0;
@@ -3804,26 +4046,45 @@ mod tests {
         app.settings_path = dir.path().join("config.toml");
         app.screen = Rect::new(0, 0, 100, 36);
         app.select(2);
-        let select = |app: &mut App, id: &str| app.tool_sel = osint::registry().iter().position(|tool| tool.id == id).unwrap();
+        let select = |app: &mut App, id: &str| {
+            app.tool_sel = osint::registry()
+                .iter()
+                .position(|tool| tool.id == id)
+                .unwrap()
+        };
         for id in ["newsapi_search", "newsapi_headlines"] {
             select(&mut app, id);
             assert!(hit(&app, Target::Field(FieldId::NewsApiKey)), "{id}");
             assert!(hit(&app, Target::Button(ButtonId::SaveNewsApiKey)), "{id}");
             assert!(!hit(&app, Target::Field(FieldId::CourtListenerKey)), "{id}");
         }
-        for id in ["courtlistener_case_search", "courtlistener_docket_search", "courtlistener_judge_search"] {
+        for id in [
+            "courtlistener_case_search",
+            "courtlistener_docket_search",
+            "courtlistener_judge_search",
+        ] {
             select(&mut app, id);
             assert!(hit(&app, Target::Field(FieldId::CourtListenerKey)), "{id}");
-            assert!(hit(&app, Target::Button(ButtonId::SaveCourtListenerKey)), "{id}");
+            assert!(
+                hit(&app, Target::Button(ButtonId::SaveCourtListenerKey)),
+                "{id}"
+            );
         }
         // Without a saved or environment key every tool of the provider needs one.
         let no_env = |_: &str| None;
         for id in osint::NEWS_TOOLS.iter().chain(osint::LEGAL_TOOLS) {
             assert!(app.tool_needs_key_with(id, no_env), "{id}");
         }
-        assert!(!app.tool_needs_key_with("crtsh_certificates", no_env), "keyless tools never need one");
-        let env_court = |name: &str| (name == "COURTLISTENER_API_TOKEN").then(|| "env-token".to_string());
-        assert!(!app.tool_needs_key_with("courtlistener_judge_search", env_court), "the env fallback counts");
+        assert!(
+            !app.tool_needs_key_with("crtsh_certificates", no_env),
+            "keyless tools never need one"
+        );
+        let env_court =
+            |name: &str| (name == "COURTLISTENER_API_TOKEN").then(|| "env-token".to_string());
+        assert!(
+            !app.tool_needs_key_with("courtlistener_judge_search", env_court),
+            "the env fallback counts"
+        );
         // Saving from the key row stores it for the provider.
         select(&mut app, "newsapi_headlines");
         app.newsapi_key = "news-secret-29".into();
@@ -3833,20 +4094,40 @@ mod tests {
         app.courtlistener_key = "court-secret-29".into();
         click(&mut app, Target::Button(ButtonId::SaveCourtListenerKey));
         assert_eq!(app.status, "CourtListener API token saved");
-        assert_eq!((app.settings.newsapi_api_key.as_str(), app.settings.courtlistener_api_token.as_str()), ("news-secret-29", "court-secret-29"));
+        assert_eq!(
+            (
+                app.settings.newsapi_api_key.as_str(),
+                app.settings.courtlistener_api_token.as_str()
+            ),
+            ("news-secret-29", "court-secret-29")
+        );
         for id in osint::NEWS_TOOLS.iter().chain(osint::LEGAL_TOOLS) {
-            assert!(!app.tool_needs_key_with(id, no_env), "{id}: one key enables every tool of the provider");
+            assert!(
+                !app.tool_needs_key_with(id, no_env),
+                "{id}: one key enables every tool of the provider"
+            );
         }
         let saved = std::fs::read_to_string(&app.settings_path).unwrap();
-        assert!(saved.contains("newsapi_api_key") && saved.contains("courtlistener_api_token"), "{saved}");
+        assert!(
+            saved.contains("newsapi_api_key") && saved.contains("courtlistener_api_token"),
+            "{saved}"
+        );
         // The key field is masked on screen and "needs key" shows on unkeyed tools.
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
-        terminal.draw(|frame| super::super::ui::draw(frame, &app)).unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
         let text = screen_text(&terminal);
-        assert!(!text.contains("court-secret-29") && text.contains("•••••"), "masked key field");
+        assert!(
+            !text.contains("court-secret-29") && text.contains("•••••"),
+            "masked key field"
+        );
         app.settings.courtlistener_api_token.clear();
         if std::env::var("COURTLISTENER_API_TOKEN").is_err() {
-            terminal.draw(|frame| super::super::ui::draw(frame, &app)).unwrap();
+            terminal
+                .draw(|frame| super::super::ui::draw(frame, &app))
+                .unwrap();
             assert!(screen_text(&terminal).contains("needs key"));
         }
     }
@@ -3868,7 +4149,8 @@ mod tests {
         app.recon_chat = true;
         app.screen = Rect::new(0, 0, 100, 40);
         app.selected_thread = Some("t-open".into());
-        app.running.insert("t-open".into(), Arc::new(AtomicBool::new(false)));
+        app.running
+            .insert("t-open".into(), Arc::new(AtomicBool::new(false)));
         app.messages = vec![recon::Message {
             id: "m1".into(),
             thread_id: "t-open".into(),
@@ -3897,33 +4179,78 @@ mod tests {
         }];
         let label = "Deadline 6m 10s: 11 calls, ~52k chars evidence";
         app.recon_stage = "synthesizing".into();
-        app.recon_stages.insert("t-open".into(), "synthesizing".into());
-        app.on_work_event(WorkEvent::Deadline { thread_id: "t-open".into(), label: label.into() });
-        assert!(app.on_work_event(WorkEvent::AnswerDelta { thread_id: "t-open".into(), text: "Hel".into() }));
-        assert!(!app.on_work_event(WorkEvent::AnswerDelta { thread_id: "t-open".into(), text: "lo".into() }));
+        app.recon_stages
+            .insert("t-open".into(), "synthesizing".into());
+        app.on_work_event(WorkEvent::Deadline {
+            thread_id: "t-open".into(),
+            label: label.into(),
+        });
+        assert!(app.on_work_event(WorkEvent::AnswerDelta {
+            thread_id: "t-open".into(),
+            text: "Hel".into()
+        }));
+        assert!(!app.on_work_event(WorkEvent::AnswerDelta {
+            thread_id: "t-open".into(),
+            text: "lo".into()
+        }));
         // A thread that is not on screen keeps every token.
-        app.on_work_event(WorkEvent::AnswerDelta { thread_id: "t-hidden".into(), text: "Hid".into() });
-        app.on_work_event(WorkEvent::AnswerDelta { thread_id: "t-hidden".into(), text: "den".into() });
+        app.on_work_event(WorkEvent::AnswerDelta {
+            thread_id: "t-hidden".into(),
+            text: "Hid".into(),
+        });
+        app.on_work_event(WorkEvent::AnswerDelta {
+            thread_id: "t-hidden".into(),
+            text: "den".into(),
+        });
         assert_eq!(app.live_answers["t-hidden"].text, "Hidden");
         let blocks = super::super::ui::chat_blocks(&app);
-        let stream = blocks.iter().find(|block| block.key == "stream:run-1").unwrap();
+        let stream = blocks
+            .iter()
+            .find(|block| block.key == "stream:run-1")
+            .unwrap();
         assert_eq!(stream.title, "Recon · streaming");
         assert_eq!(stream.body, "Hel");
-        assert!(blocks.iter().any(|block| block.key == "status:run-1" && block.title.contains(label)));
+        assert!(blocks
+            .iter()
+            .any(|block| block.key == "status:run-1" && block.title.contains(label)));
         assert!(!blocks.iter().any(|block| block.body.contains("Hidden")));
-        app.live_answers.get_mut("t-open").unwrap().painted = Some(Instant::now() - Duration::from_millis(50));
+        app.live_answers.get_mut("t-open").unwrap().painted =
+            Some(Instant::now() - Duration::from_millis(50));
         assert!(flush_streams(&mut app));
         let blocks = super::super::ui::chat_blocks(&app);
-        assert_eq!(blocks.iter().find(|block| block.key == "stream:run-1").unwrap().body, "Hello");
-        app.on_work_event(WorkEvent::AnswerNote { thread_id: "t-open".into(), text: "fixing citations…".into() });
+        assert_eq!(
+            blocks
+                .iter()
+                .find(|block| block.key == "stream:run-1")
+                .unwrap()
+                .body,
+            "Hello"
+        );
+        app.on_work_event(WorkEvent::AnswerNote {
+            thread_id: "t-open".into(),
+            text: "fixing citations…".into(),
+        });
         let blocks = super::super::ui::chat_blocks(&app);
-        assert_eq!(blocks.iter().find(|block| block.key == "stream:run-1").unwrap().title, "fixing citations…");
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
-        terminal.draw(|frame| super::super::ui::draw(frame, &app)).unwrap();
+        assert_eq!(
+            blocks
+                .iter()
+                .find(|block| block.key == "stream:run-1")
+                .unwrap()
+                .title,
+            "fixing citations…"
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
         let painted = screen_text(&terminal);
         assert!(painted.contains("Hello"), "{painted}");
         assert!(painted.contains("fixing citations"), "{painted}");
-        app.on_work_event(WorkEvent::ReconDone { thread_id: "t-open".into(), outcome: Ok(()) });
+        app.on_work_event(WorkEvent::ReconDone {
+            thread_id: "t-open".into(),
+            outcome: Ok(()),
+        });
         assert!(!app.live_answers.contains_key("t-open"));
         app.messages = vec![
             recon::Message {
@@ -3947,7 +4274,9 @@ mod tests {
         ];
         let blocks = super::super::ui::chat_blocks(&app);
         assert!(blocks.iter().all(|block| !block.key.starts_with("stream:")));
-        assert!(blocks.iter().any(|block| block.body == "Repaired answer [call-1]."));
+        assert!(blocks
+            .iter()
+            .any(|block| block.body == "Repaired answer [call-1]."));
     }
 
     fn hit(app: &App, target: Target) -> bool {

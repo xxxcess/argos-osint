@@ -568,7 +568,9 @@ impl ReconLimits {
         let credits = match crate::osint::canonical_tool_id(tool_id) {
             "firecrawl_search" => self.firecrawl_search_cost,
             "firecrawl_scrape" | "firecrawl_map" => self.firecrawl_scrape_cost,
-            "firecrawl_batch_scrape" | "firecrawl_crawl" => base.credits * self.firecrawl_scrape_cost,
+            "firecrawl_batch_scrape" | "firecrawl_crawl" => {
+                base.credits * self.firecrawl_scrape_cost
+            }
             "firecrawl_extract" => base.credits,
             _ if base.provider == "hunter" && base.credits == 0 => 0,
             _ if base.provider == "hunter" => self.hunter_call_cost,
@@ -1327,7 +1329,11 @@ impl SettingsFile {
     }
 
     /// [`Self::provider_key`] with an injected environment (tests).
-    pub fn provider_key_with(&self, provider: &str, env: impl Fn(&str) -> Option<String>) -> String {
+    pub fn provider_key_with(
+        &self,
+        provider: &str,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> String {
         let saved = self.saved_key(provider).trim();
         if !saved.is_empty() {
             return saved.to_string();
@@ -1438,22 +1444,40 @@ mod tests {
         };
         let mut settings = SettingsFile::default();
         assert_eq!(settings.provider_key_with("newsapi", env), "env-news");
-        assert_eq!(settings.provider_key_with("courtlistener", env), "env-court");
+        assert_eq!(
+            settings.provider_key_with("courtlistener", env),
+            "env-court"
+        );
         assert_eq!(settings.provider_key_with("newsapi", |_| None), "");
         settings.newsapi_api_key = "saved-news".into();
         settings.courtlistener_api_token = "saved-court".into();
         assert_eq!(settings.provider_key_with("newsapi", env), "saved-news");
-        assert_eq!(settings.provider_key_with("courtlistener", env), "saved-court");
+        assert_eq!(
+            settings.provider_key_with("courtlistener", env),
+            "saved-court"
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         settings.save_to(&path).unwrap();
         let loaded = SettingsFile::load_from(&path).unwrap();
-        assert_eq!((loaded.newsapi_api_key.as_str(), loaded.courtlistener_api_token.as_str()), ("saved-news", "saved-court"));
+        assert_eq!(
+            (
+                loaded.newsapi_api_key.as_str(),
+                loaded.courtlistener_api_token.as_str()
+            ),
+            ("saved-news", "saved-court")
+        );
         // Both names are current keys: loading does not rewrite the file as a migration.
         let before = std::fs::read_to_string(&path).unwrap();
         SettingsFile::load_from(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-        assert_eq!((loaded.recon_limits.news_calls_per_turn, loaded.recon_limits.legal_calls_per_turn), (2, 3));
+        assert_eq!(
+            (
+                loaded.recon_limits.news_calls_per_turn,
+                loaded.recon_limits.legal_calls_per_turn
+            ),
+            (2, 3)
+        );
     }
 
     #[test]
@@ -1462,13 +1486,25 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[recon_limits]\nturn_seconds = 300\n").unwrap();
         let loaded = SettingsFile::load_from(&path).unwrap();
-        assert_eq!(loaded.recon_limits.max_turn_seconds, DEFAULT_MAX_TURN_SECONDS);
+        assert_eq!(
+            loaded.recon_limits.max_turn_seconds,
+            DEFAULT_MAX_TURN_SECONDS
+        );
         assert_eq!(loaded.recon_limits.effective_max_turn_seconds(), 900);
-        let low = ReconLimits { max_turn_seconds: 50, ..ReconLimits::default() };
+        let low = ReconLimits {
+            max_turn_seconds: 50,
+            ..ReconLimits::default()
+        };
         assert_eq!(low.effective_max_turn_seconds(), MIN_MAX_TURN_SECONDS);
-        let high = ReconLimits { max_turn_seconds: 5_000, ..ReconLimits::default() };
+        let high = ReconLimits {
+            max_turn_seconds: 5_000,
+            ..ReconLimits::default()
+        };
         assert_eq!(high.effective_max_turn_seconds(), MAX_MAX_TURN_SECONDS);
-        let mid = ReconLimits { max_turn_seconds: 1_200, ..ReconLimits::default() };
+        let mid = ReconLimits {
+            max_turn_seconds: 1_200,
+            ..ReconLimits::default()
+        };
         assert_eq!(mid.effective_max_turn_seconds(), 1_200);
     }
 
@@ -1509,11 +1545,17 @@ mod tests {
             std::fs::write(&path, format!("osint_user_agent = {raw}\n")).unwrap();
             let settings = SettingsFile::load_from(&path).unwrap();
             assert_eq!(settings.osint_user_agent, "", "{raw}");
-            assert_eq!(crate::osint::effective_user_agent(Some(&settings.osint_user_agent)), crate::osint::DEFAULT_USER_AGENT);
+            assert_eq!(
+                crate::osint::effective_user_agent(Some(&settings.osint_user_agent)),
+                crate::osint::DEFAULT_USER_AGENT
+            );
         }
         std::fs::write(&path, "osint_user_agent = '  Argos test@example.com '\n").unwrap();
         let settings = SettingsFile::load_from(&path).unwrap();
-        assert_eq!(crate::osint::effective_user_agent(Some(&settings.osint_user_agent)), "Argos test@example.com");
+        assert_eq!(
+            crate::osint::effective_user_agent(Some(&settings.osint_user_agent)),
+            "Argos test@example.com"
+        );
     }
 
     #[test]
@@ -1523,14 +1565,22 @@ mod tests {
         assert_eq!(missing.defaults.tool_picker.provider, TOOL_PICKER_PROVIDER);
         assert_eq!(missing.defaults.tool_picker.model, TOOL_PICKER_MODEL);
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[defaults.synthesis]\nprovider = 'grok'\nmodel = 'grok-4.6'\n").unwrap();
+        std::fs::write(
+            &path,
+            "[defaults.synthesis]\nprovider = 'grok'\nmodel = 'grok-4.6'\n",
+        )
+        .unwrap();
         let settings = SettingsFile::load_from(&path).unwrap();
         assert_eq!(settings.defaults.synthesis.model, "grok-4.6");
         assert_eq!(settings.defaults.synthesis.provider, "grok");
         assert_eq!(settings.defaults.tool_picker.model, TOOL_PICKER_MODEL);
         assert!(settings.defaults.recon.model.is_empty());
         // A saved picker assignment is never overwritten.
-        std::fs::write(&path, "[defaults.tool_picker]\nprovider = 'grok'\nmodel = 'grok-4.6'\n").unwrap();
+        std::fs::write(
+            &path,
+            "[defaults.tool_picker]\nprovider = 'grok'\nmodel = 'grok-4.6'\n",
+        )
+        .unwrap();
         let kept = SettingsFile::load_from(&path).unwrap();
         assert_eq!(kept.defaults.tool_picker.model, "grok-4.6");
         assert_eq!(picker_transport(&kept.defaults.tool_picker.model), "chat");
@@ -1566,10 +1616,16 @@ mod tests {
             loop {
                 let n = socket.read(&mut buffer).await.unwrap();
                 request.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                let Some(end) = request.find("\r\n\r\n") else { continue };
+                let Some(end) = request.find("\r\n\r\n") else {
+                    continue;
+                };
                 let length = request[..end]
                     .lines()
-                    .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap())
+                    })
                     .unwrap_or(0);
                 if request.len() >= end + 4 + length || n == 0 {
                     break;
@@ -1588,12 +1644,22 @@ mod tests {
             stt_model: None,
             device: None,
         };
-        assert_eq!(decisions_url("https://openrouter.ai/api/v1"), "https://openrouter.ai/api/alpha/decisions");
+        assert_eq!(
+            decisions_url("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/alpha/decisions"
+        );
         let questions = json!({"next_tool": {"type": "choice", "instructions": "Pick", "criteria": {"firecrawl_search": "search", "wikidata_entities": "record"}}});
-        let response = decide(&secret, &json!({"q1": "Who?"}), &questions).await.unwrap();
+        let response = decide(&secret, &json!({"q1": "Who?"}), &questions)
+            .await
+            .unwrap();
         let request = seen.lock().unwrap().clone();
-        assert!(request.starts_with("POST /api/alpha/decisions "), "{request}");
-        assert!(request.to_ascii_lowercase().contains("authorization: bearer sk-or-test"));
+        assert!(
+            request.starts_with("POST /api/alpha/decisions "),
+            "{request}"
+        );
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer sk-or-test"));
         assert!(request.contains("X-Title") || request.to_ascii_lowercase().contains("x-title"));
         assert!(request.contains("\"model\":\"typesafe/jev-1.13\""));
         let pick = &response.answers["next_tool"];
@@ -1607,7 +1673,9 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_decisions_smoke() {
-        let Ok(key) = std::env::var("OPENROUTER_API_KEY") else { return };
+        let Ok(key) = std::env::var("OPENROUTER_API_KEY") else {
+            return;
+        };
         let secret = ProviderSecret {
             kind: "openrouter".into(),
             base_url: "https://openrouter.ai/api/v1".into(),
@@ -1617,7 +1685,13 @@ mod tests {
             device: None,
         };
         let questions = json!({"next_tool": {"type": "choice", "instructions": "Which tool should run first to find the official website of Example Org?", "criteria": {"firecrawl_search": "Web search", "nvd_cve": "CVE record lookup"}}});
-        let response = decide(&secret, &json!({"question": "official website of Example Org"}), &questions).await.unwrap();
+        let response = decide(
+            &secret,
+            &json!({"question": "official website of Example Org"}),
+            &questions,
+        )
+        .await
+        .unwrap();
         assert!(response.answers["next_tool"].choice.is_some());
     }
 }

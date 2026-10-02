@@ -30,25 +30,98 @@ pub const QUALIFIERS: &[(&str, &str)] = &[
 /// Catalog tool ids are checked as well. Account platforms (Twitter, Instagram, …) are
 /// not providers here and stay allowed.
 pub const PROVIDER_TERMS: &[&str] = &[
-    "firecrawl", "sociavault", "hunter", "hunter.io", "wikidata", "keybase", "crt.sh", "crtsh",
-    "mnemonic", "hackertarget", "ripestat", "rdap", "arin", "apnic", "wayback", "common crawl",
-    "commoncrawl", "arquivo", "github", "gitlab", "grep.app", "grepapp", "gleif", "edgar",
-    "stack exchange", "stackexchange", "wikipedia", "nominatim", "overpass", "blockchain.com",
-    "blockstream", "mempool", "mempool.space", "nvd", "osv", "sans isc", "shodan", "internetdb",
-    "urlscan", "google", "api", "newsapi", "news api", "courtlistener", "court listener",
+    "firecrawl",
+    "sociavault",
+    "hunter",
+    "hunter.io",
+    "wikidata",
+    "keybase",
+    "crt.sh",
+    "crtsh",
+    "mnemonic",
+    "hackertarget",
+    "ripestat",
+    "rdap",
+    "arin",
+    "apnic",
+    "wayback",
+    "common crawl",
+    "commoncrawl",
+    "arquivo",
+    "github",
+    "gitlab",
+    "grep.app",
+    "grepapp",
+    "gleif",
+    "edgar",
+    "stack exchange",
+    "stackexchange",
+    "wikipedia",
+    "nominatim",
+    "overpass",
+    "blockchain.com",
+    "blockstream",
+    "mempool",
+    "mempool.space",
+    "nvd",
+    "osv",
+    "sans isc",
+    "shodan",
+    "internetdb",
+    "urlscan",
+    "google",
+    "api",
+    "newsapi",
+    "news api",
+    "courtlistener",
+    "court listener",
 ];
 
 /// Prompt words that ask about news or current events (#29): the `news` context target.
 const NEWS_WORDS: &[&str] = &[
-    "news", "headline", "headlines", "current events", "recent", "recently", "lately", "latest",
-    "controversy", "controversies", "controversial", "scandal", "scandals", "in the press",
-    "what's happening with", "what is happening with", "whats happening with",
+    "news",
+    "headline",
+    "headlines",
+    "current events",
+    "recent",
+    "recently",
+    "lately",
+    "latest",
+    "controversy",
+    "controversies",
+    "controversial",
+    "scandal",
+    "scandals",
+    "in the press",
+    "what's happening with",
+    "what is happening with",
+    "whats happening with",
 ];
 /// Prompt words that ask about courts or legal trouble (#29): the `legal` context target.
 const LEGAL_WORDS: &[&str] = &[
-    "lawsuit", "lawsuits", "sued", "suing", "court case", "court cases", "in court", "court ruling",
-    "court rulings", "court records", "court filings", "litigation", "ruling", "rulings", "judge", "judges", "legal trouble", "legal troubles",
-    "legal issues", "legal case", "legal cases", "indicted", "indictment",
+    "lawsuit",
+    "lawsuits",
+    "sued",
+    "suing",
+    "court case",
+    "court cases",
+    "in court",
+    "court ruling",
+    "court rulings",
+    "court records",
+    "court filings",
+    "litigation",
+    "ruling",
+    "rulings",
+    "judge",
+    "judges",
+    "legal trouble",
+    "legal troubles",
+    "legal issues",
+    "legal case",
+    "legal cases",
+    "indicted",
+    "indictment",
 ];
 
 /// Prompt words that ask for top headlines rather than an article search.
@@ -61,7 +134,9 @@ const JUDGE_WORDS: &[&str] = &["judge", "judges", "justice", "justices", "magist
 /// by the same entity exemption [`names_tool_except`] uses for provider names.
 fn asks(question: &str, thread: &[String], words: &[&str]) -> bool {
     let entities: Vec<String> = subject_entities(question, thread);
-    words.iter().any(|word| outside_entities(word, question, &entities, Span::Whole))
+    words
+        .iter()
+        .any(|word| outside_entities(word, question, &entities, Span::Whole))
 }
 
 /// Context kinds (`news`, `legal`) the prompt asks about, by the deterministic keyword
@@ -99,10 +174,16 @@ pub fn asks_about_judge(question: &str, entities: &[String]) -> bool {
 fn apply_context_targets(directives: &mut [Directive], question: &str, thread: &[String]) {
     let wanted = context_targets_in(question, thread);
     for item in directives.iter_mut() {
-        item.targets.retain(|kind| !super::tool_io::CONTEXT_KINDS.contains(&kind.as_str()) || wanted.contains(&kind.as_str()));
+        item.targets.retain(|kind| {
+            !super::tool_io::CONTEXT_KINDS.contains(&kind.as_str())
+                || wanted.contains(&kind.as_str())
+        });
     }
     for kind in wanted {
-        if !directives.iter().any(|item| item.targets.iter().any(|known| known == kind)) {
+        if !directives
+            .iter()
+            .any(|item| item.targets.iter().any(|known| known == kind))
+        {
             if let Some(first) = directives.first_mut() {
                 first.targets.push(kind.to_string());
             }
@@ -122,12 +203,27 @@ const QUESTION_WORDS: &[&str] = &[
 
 /// Prompt kinds a directive must target so their tools stay eligible: an IP, CVE,
 /// wallet, coordinates, address, package, email, or domain in the prompt.
-const PROMPT_TARGETS: &[&str] = &["ip", "cve", "wallet", "coordinates", "address", "package", "email", "domain"];
+const PROMPT_TARGETS: &[&str] = &[
+    "ip",
+    "cve",
+    "wallet",
+    "coordinates",
+    "address",
+    "package",
+    "email",
+    "domain",
+];
 
 fn words_of(text: &str) -> Vec<String> {
     text.to_ascii_lowercase()
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' { ch } else { ' ' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' {
+                ch
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .map(|word| word.trim_matches('.').to_string())
@@ -172,9 +268,13 @@ fn entity_mask(words: &[String], entities: &[String], span: Span) -> Vec<bool> {
                 Span::Part => (1..=name.len()).rev().collect(),
             };
             for len in lengths {
-                let Some(run) = words.get(start..start + len) else { continue };
+                let Some(run) = words.get(start..start + len) else {
+                    continue;
+                };
                 if name.windows(len).any(|window| window == run) {
-                    mask[start..start + len].iter_mut().for_each(|owned| *owned = true);
+                    mask[start..start + len]
+                        .iter_mut()
+                        .for_each(|owned| *owned = true);
                     break;
                 }
             }
@@ -192,13 +292,20 @@ fn outside_entities(term: &str, text: &str, entities: &[String], span: Span) -> 
         return false;
     }
     let mask = entity_mask(&words, entities, span);
-    (0..=words.len() - term_words.len()).any(|start| words[start..start + term_words.len()] == term_words[..] && !mask[start..start + term_words.len()].iter().any(|owned| *owned))
+    (0..=words.len() - term_words.len()).any(|start| {
+        words[start..start + term_words.len()] == term_words[..]
+            && !mask[start..start + term_words.len()]
+                .iter()
+                .any(|owned| *owned)
+    })
 }
 
 /// A dotted or underscored term (`hunter.io`, tool ids) occurs in a prompt entity as
 /// written. Plain words go through [`outside_entities`].
 fn in_entity(term: &str, entities: &[String]) -> bool {
-    entities.iter().any(|entity| entity.to_ascii_lowercase().contains(term))
+    entities
+        .iter()
+        .any(|entity| entity.to_ascii_lowercase().contains(term))
 }
 
 /// [`names_tool`], ignoring any tool or provider word that belongs to one of `entities`
@@ -206,14 +313,26 @@ fn in_entity(term: &str, entities: &[String]) -> bool {
 /// still name their subject. A tool word outside those entities still counts.
 pub fn names_tool_except(text: &str, entities: &[String]) -> Option<String> {
     let lower = text.to_ascii_lowercase();
-    let mut ids: Vec<&str> = crate::osint::registry().iter().map(|tool| tool.id).collect();
+    let mut ids: Vec<&str> = crate::osint::registry()
+        .iter()
+        .map(|tool| tool.id)
+        .collect();
     ids.push("hunter_tech_lookup");
-    if let Some(id) = ids.into_iter().find(|id| lower.contains(id) && !in_entity(id, entities)) {
+    if let Some(id) = ids
+        .into_iter()
+        .find(|id| lower.contains(id) && !in_entity(id, entities))
+    {
         return Some(id.to_string());
     }
     PROVIDER_TERMS
         .iter()
-        .find(|term| if term.contains('.') { lower.contains(*term) && !in_entity(term, entities) } else { outside_entities(term, text, entities, Span::Part) })
+        .find(|term| {
+            if term.contains('.') {
+                lower.contains(*term) && !in_entity(term, entities)
+            } else {
+                outside_entities(term, text, entities, Span::Part)
+            }
+        })
         .map(|term| term.to_string())
 }
 
@@ -223,7 +342,18 @@ const NAME_BREAKS: &[&str] = &[
     "lately", "recently", "today", "any", "for", "this", "these", "that", "did", "does", "do",
 ];
 /// Words after which a prompt names its subject ("news about X", "the head of X").
-const NAME_MARKERS: &[&str] = &["about", "with", "against", "involving", "around", "regarding", "of", "on", "for", "re"];
+const NAME_MARKERS: &[&str] = &[
+    "about",
+    "with",
+    "against",
+    "involving",
+    "around",
+    "regarding",
+    "of",
+    "on",
+    "for",
+    "re",
+];
 /// Second words of an identity prompt ("who owns Fox News?"), whose whole subject is a name.
 const IDENTITY_VERBS: &[&str] = &[
     "is", "was", "owns", "runs", "founded", "leads", "manages", "operates", "controls", "created",
@@ -234,21 +364,36 @@ const IDENTITY_VERBS: &[&str] = &[
 fn framing_word(word: &str) -> bool {
     let word = word.to_ascii_lowercase();
     let in_list = |list: &[&str]| list.iter().any(|item| !item.contains(' ') && *item == word);
-    in_list(NEWS_WORDS) || in_list(LEGAL_WORDS) || in_list(CONTEXT_FILLER) || in_list(HEADLINE_WORDS) || in_list(JUDGE_WORDS)
+    in_list(NEWS_WORDS)
+        || in_list(LEGAL_WORDS)
+        || in_list(CONTEXT_FILLER)
+        || in_list(HEADLINE_WORDS)
+        || in_list(JUDGE_WORDS)
         || PRONOUNS.contains(&word.as_str())
         || QUESTION_WORDS.contains(&word.as_str())
-        || matches!(word.as_str(), "the" | "a" | "an" | "top" | "new" | "week" | "stories" | "s")
+        || matches!(
+            word.as_str(),
+            "the" | "a" | "an" | "top" | "new" | "week" | "stories" | "s"
+        )
 }
 
 /// Runs of two or more capitalized words ("Elon Musk", "Fox News", "Judge Judy"). A
 /// sentence-initial framing word is dropped while two words remain ("Latest Fox News").
 fn name_runs(question: &str) -> Vec<String> {
-    let bare = |word: &str| word.split(['\'', '\u{2019}']).next().unwrap_or("").trim_matches(|ch: char| !ch.is_alphanumeric()).to_string();
+    let bare = |word: &str| {
+        word.split(['\'', '\u{2019}'])
+            .next()
+            .unwrap_or("")
+            .trim_matches(|ch: char| !ch.is_alphanumeric())
+            .to_string()
+    };
     let words: Vec<&str> = question.split_whitespace().collect();
     let capital = |word: &str| {
         let token = bare(word);
         let lower = token.to_ascii_lowercase();
-        token.chars().next().is_some_and(char::is_uppercase) && !QUESTION_WORDS.contains(&lower.as_str()) && !PRONOUNS.contains(&lower.as_str())
+        token.chars().next().is_some_and(char::is_uppercase)
+            && !QUESTION_WORDS.contains(&lower.as_str())
+            && !PRONOUNS.contains(&lower.as_str())
     };
     let mut runs = Vec::new();
     let mut index = 0;
@@ -258,7 +403,10 @@ fn name_runs(question: &str) -> Vec<String> {
             continue;
         }
         let mut end = index;
-        while end + 1 < words.len() && capital(words[end + 1]) && !words[end].ends_with([',', '?', '.', ';', '!', ':']) {
+        while end + 1 < words.len()
+            && capital(words[end + 1])
+            && !words[end].ends_with([',', '?', '.', ';', '!', ':'])
+        {
             end += 1;
         }
         let mut start = index;
@@ -266,7 +414,15 @@ fn name_runs(question: &str) -> Vec<String> {
             start += 1;
         }
         if end > start {
-            let run: Vec<String> = words[start..=end].iter().map(|word| word.trim_end_matches(|ch: char| !ch.is_alphanumeric()).trim_end_matches("'s").trim_end_matches("\u{2019}s").to_string()).collect();
+            let run: Vec<String> = words[start..=end]
+                .iter()
+                .map(|word| {
+                    word.trim_end_matches(|ch: char| !ch.is_alphanumeric())
+                        .trim_end_matches("'s")
+                        .trim_end_matches("\u{2019}s")
+                        .to_string()
+                })
+                .collect();
             runs.push(run.join(" "));
         }
         index = end + 1;
@@ -281,11 +437,24 @@ fn name_runs(question: &str) -> Vec<String> {
 fn phrase_name(question: &str) -> Option<String> {
     let tokens: Vec<String> = subject_phrase(question)
         .split_whitespace()
-        .map(|word| word.trim_matches(|ch: char| !(ch.is_alphanumeric() || ch == '\'' || ch == '\u{2019}' || ch == '.' || ch == '-' || ch == '&')).to_string())
+        .map(|word| {
+            word.trim_matches(|ch: char| {
+                !(ch.is_alphanumeric()
+                    || ch == '\''
+                    || ch == '\u{2019}'
+                    || ch == '.'
+                    || ch == '-'
+                    || ch == '&')
+            })
+            .to_string()
+        })
         .filter(|word| !word.is_empty())
         .collect();
     let lower = |word: &str| word.to_ascii_lowercase();
-    let start = tokens.iter().rposition(|word| NAME_MARKERS.contains(&lower(word).as_str())).map_or(0, |at| at + 1);
+    let start = tokens
+        .iter()
+        .rposition(|word| NAME_MARKERS.contains(&lower(word).as_str()))
+        .map_or(0, |at| at + 1);
     let mut name: Vec<String> = Vec::new();
     for token in &tokens[start..] {
         if NAME_BREAKS.contains(&lower(token).as_str()) {
@@ -294,17 +463,25 @@ fn phrase_name(question: &str) -> Option<String> {
             }
             break;
         }
-        let owner = token.strip_suffix("'s").or_else(|| token.strip_suffix("\u{2019}s"));
+        let owner = token
+            .strip_suffix("'s")
+            .or_else(|| token.strip_suffix("\u{2019}s"));
         name.push(owner.unwrap_or(token).to_string());
         if owner.is_some() {
             break;
         }
     }
     let first: Vec<String> = words_of(&question.replace(['\'', '\u{2019}'], " "));
-    let identity = first.first().is_some_and(|word| matches!(word.as_str(), "who" | "what" | "which"))
-        && first.get(1).is_some_and(|word| IDENTITY_VERBS.contains(&word.as_str()));
+    let identity = first
+        .first()
+        .is_some_and(|word| matches!(word.as_str(), "who" | "what" | "which"))
+        && first
+            .get(1)
+            .is_some_and(|word| IDENTITY_VERBS.contains(&word.as_str()));
     if !identity {
-        while name.last().is_some_and(|word| framing_word(word) && !word.chars().next().is_some_and(char::is_uppercase)) {
+        while name.last().is_some_and(|word| {
+            framing_word(word) && !word.chars().next().is_some_and(char::is_uppercase)
+        }) {
             name.pop();
         }
     }
@@ -348,11 +525,19 @@ const LEAD_WORDS: &[&str] = &[
 fn subject_phrase(question: &str) -> String {
     let subject = super::super::question_subject(question);
     let words: Vec<&str> = subject.split_whitespace().collect();
-    let bare = |word: &str| word.trim_matches(|ch: char| !ch.is_alphanumeric()).to_ascii_lowercase();
+    let bare = |word: &str| {
+        word.trim_matches(|ch: char| !ch.is_alphanumeric())
+            .to_ascii_lowercase()
+    };
     let mut end = words.len();
     for (index, word) in words.iter().enumerate() {
-        let next = words.get(index + 1).map(|next| bare(next)).unwrap_or_default();
-        if bare(word) == "and" && (QUESTION_WORDS.contains(&next.as_str()) || PRONOUNS.contains(&next.as_str())) {
+        let next = words
+            .get(index + 1)
+            .map(|next| bare(next))
+            .unwrap_or_default();
+        if bare(word) == "and"
+            && (QUESTION_WORDS.contains(&next.as_str()) || PRONOUNS.contains(&next.as_str()))
+        {
             end = index;
             break;
         }
@@ -362,7 +547,11 @@ fn subject_phrase(question: &str) -> String {
         start += 1;
     }
     let phrase = words[start..end].join(" ");
-    phrase.trim_end_matches("'s").trim_end_matches('\u{2019}').trim().to_string()
+    phrase
+        .trim_end_matches("'s")
+        .trim_end_matches('\u{2019}')
+        .trim()
+        .to_string()
 }
 
 /// A follow-up that points back at the thread's subject ("what about his companies?").
@@ -383,7 +572,10 @@ pub fn directive_entities(question: &str, thread: &[String]) -> Vec<String> {
     if super::target_kind(question) == "other" {
         let mut explicit = super::super::explicit_entities(question);
         explicit.sort();
-        if let Some((_, value)) = explicit.into_iter().find(|(kind, _)| matches!(kind.as_str(), "domain" | "ip" | "email" | "url" | "cve")) {
+        if let Some((_, value)) = explicit
+            .into_iter()
+            .find(|(kind, _)| matches!(kind.as_str(), "domain" | "ip" | "email" | "url" | "cve"))
+        {
             return vec![value];
         }
         if let Some(email) = emails_in(question).into_iter().next() {
@@ -396,7 +588,11 @@ pub fn directive_entities(question: &str, thread: &[String]) -> Vec<String> {
         }
     }
     let subject = subject_phrase(question);
-    if subject.is_empty() || words_of(&subject).iter().all(|word| PRONOUNS.contains(&word.as_str())) {
+    if subject.is_empty()
+        || words_of(&subject)
+            .iter()
+            .all(|word| PRONOUNS.contains(&word.as_str()))
+    {
         return Vec::new();
     }
     vec![display_name(&subject)]
@@ -405,11 +601,54 @@ pub fn directive_entities(question: &str, thread: &[String]) -> Vec<String> {
 /// Words a news or legal prompt wraps around its subject ("in the news about …",
 /// "… been sued"), stripped so the entity stays a bare name.
 const CONTEXT_FILLER: &[&str] = &[
-    "been", "sued", "suing", "being", "in", "the", "news", "headlines", "lately", "recently", "recent",
-    "latest", "court", "courts", "case", "cases", "lawsuit", "lawsuits", "litigation", "legal",
-    "trouble", "troubles", "issues", "ruling", "rulings", "controversy", "controversies", "any",
-    "of", "about", "with", "against", "involving", "on", "or", "and", "since", "before", "after",
-    "until", "what's", "whats", "happening", "current", "events", "press", "judge", "judges",
+    "been",
+    "sued",
+    "suing",
+    "being",
+    "in",
+    "the",
+    "news",
+    "headlines",
+    "lately",
+    "recently",
+    "recent",
+    "latest",
+    "court",
+    "courts",
+    "case",
+    "cases",
+    "lawsuit",
+    "lawsuits",
+    "litigation",
+    "legal",
+    "trouble",
+    "troubles",
+    "issues",
+    "ruling",
+    "rulings",
+    "controversy",
+    "controversies",
+    "any",
+    "of",
+    "about",
+    "with",
+    "against",
+    "involving",
+    "on",
+    "or",
+    "and",
+    "since",
+    "before",
+    "after",
+    "until",
+    "what's",
+    "whats",
+    "happening",
+    "current",
+    "events",
+    "press",
+    "judge",
+    "judges",
 ];
 
 /// The subject of a news or legal prompt: a run of two or more capitalized words
@@ -417,10 +656,19 @@ const CONTEXT_FILLER: &[&str] = &[
 /// phrase, with the context words around it removed.
 fn context_entity(question: &str) -> Option<String> {
     // A subject name with a framing word in it ("Judge Judy", "Fox News") stays whole.
-    if let Some(name) = name_runs(question).into_iter().find(|name| words_of(name).iter().any(|word| framing_word(word)) && !words_of(name).iter().all(|word| framing_word(word))) {
+    if let Some(name) = name_runs(question).into_iter().find(|name| {
+        words_of(name).iter().any(|word| framing_word(word))
+            && !words_of(name).iter().all(|word| framing_word(word))
+    }) {
         return Some(name);
     }
-    let bare = |word: &str| word.split(['\'', '\u{2019}']).next().unwrap_or("").trim_matches(|ch: char| !ch.is_alphanumeric()).to_string();
+    let bare = |word: &str| {
+        word.split(['\'', '\u{2019}'])
+            .next()
+            .unwrap_or("")
+            .trim_matches(|ch: char| !ch.is_alphanumeric())
+            .to_string()
+    };
     let words: Vec<&str> = question.split_whitespace().collect();
     let capital = |word: &str| {
         let token = bare(word);
@@ -434,11 +682,21 @@ fn context_entity(question: &str) -> Option<String> {
         if capital(words[index]) {
             let mut end = index;
             // A run stops after a word that ends a clause ("Musk," or "Musk?").
-            while end + 1 < words.len() && capital(words[end + 1]) && !words[end].ends_with([',', '?', '.', ';', '!']) {
+            while end + 1 < words.len()
+                && capital(words[end + 1])
+                && !words[end].ends_with([',', '?', '.', ';', '!'])
+            {
                 end += 1;
             }
             if end > index {
-                let run: Vec<String> = words[index..=end].iter().map(|word| word.trim_end_matches(|ch: char| !ch.is_alphanumeric()).trim_end_matches("'s").to_string()).collect();
+                let run: Vec<String> = words[index..=end]
+                    .iter()
+                    .map(|word| {
+                        word.trim_end_matches(|ch: char| !ch.is_alphanumeric())
+                            .trim_end_matches("'s")
+                            .to_string()
+                    })
+                    .collect();
                 return Some(run.join(" "));
             }
             index = end + 1;
@@ -449,17 +707,33 @@ fn context_entity(question: &str) -> Option<String> {
     let trim = |phrase: &str| {
         let mut tokens: Vec<String> = phrase
             .split_whitespace()
-            .map(|word| word.trim_matches(|ch: char| !(ch.is_alphanumeric() || ch == '\'' || ch == '.' || ch == '-')).trim_end_matches("'s").to_string())
+            .map(|word| {
+                word.trim_matches(|ch: char| {
+                    !(ch.is_alphanumeric() || ch == '\'' || ch == '.' || ch == '-')
+                })
+                .trim_end_matches("'s")
+                .to_string()
+            })
             .filter(|word| !word.is_empty())
             .collect();
-        while tokens.first().is_some_and(|word| CONTEXT_FILLER.contains(&word.to_ascii_lowercase().as_str()) || QUESTION_WORDS.contains(&word.to_ascii_lowercase().as_str())) {
+        while tokens.first().is_some_and(|word| {
+            CONTEXT_FILLER.contains(&word.to_ascii_lowercase().as_str())
+                || QUESTION_WORDS.contains(&word.to_ascii_lowercase().as_str())
+        }) {
             tokens.remove(0);
         }
-        if let Some(cut) = tokens.iter().position(|word| CONTEXT_FILLER.contains(&word.to_ascii_lowercase().as_str())) {
+        if let Some(cut) = tokens
+            .iter()
+            .position(|word| CONTEXT_FILLER.contains(&word.to_ascii_lowercase().as_str()))
+        {
             tokens.truncate(cut);
         }
         let entity = tokens.join(" ");
-        (!entity.is_empty() && !words_of(&entity).iter().all(|word| PRONOUNS.contains(&word.as_str()))).then_some(entity)
+        (!entity.is_empty()
+            && !words_of(&entity)
+                .iter()
+                .all(|word| PRONOUNS.contains(&word.as_str())))
+        .then_some(entity)
     };
     let lower = question.to_ascii_lowercase();
     for marker in [" about ", " with ", " against ", " involving "] {
@@ -482,7 +756,13 @@ fn prompt_targets(question: &str) -> Vec<String> {
     kinds
 }
 
-fn directive(id: &str, goal: &str, entities: &[String], targets: &[&str], done_when: &str) -> Directive {
+fn directive(
+    id: &str,
+    goal: &str,
+    entities: &[String],
+    targets: &[&str],
+    done_when: &str,
+) -> Directive {
     Directive {
         id: id.into(),
         goal: goal.into(),
@@ -547,19 +827,29 @@ pub fn goal_error_for(goal: &str, entities: &[String]) -> Option<String> {
         return Some("the goal is empty".into());
     }
     if words.len() > MAX_GOAL_WORDS {
-        return Some(format!("the goal has {} words; at most {MAX_GOAL_WORDS}", words.len()));
+        return Some(format!(
+            "the goal has {} words; at most {MAX_GOAL_WORDS}",
+            words.len()
+        ));
     }
-    let first = words[0].trim_matches(|ch: char| !ch.is_alphanumeric()).to_ascii_lowercase();
+    let first = words[0]
+        .trim_matches(|ch: char| !ch.is_alphanumeric())
+        .to_ascii_lowercase();
     if goal.ends_with('?') || QUESTION_WORDS.contains(&first.as_str()) {
         return Some("the goal must be an imperative, not a question".into());
     }
-    names_tool_except(goal, entities).map(|term| format!("the goal names a tool or provider ({term})"))
+    names_tool_except(goal, entities)
+        .map(|term| format!("the goal names a tool or provider ({term})"))
 }
 
 /// Whether `entity` occurs in `text`, compared without case.
 fn span_in(text: &str, entity: &str) -> bool {
     let entity = entity.trim();
-    !text.is_empty() && !entity.is_empty() && text.to_ascii_lowercase().contains(&entity.to_ascii_lowercase())
+    !text.is_empty()
+        && !entity.is_empty()
+        && text
+            .to_ascii_lowercase()
+            .contains(&entity.to_ascii_lowercase())
 }
 
 /// A copied pronoun ("these", "his") is not a subject the investigation can search.
@@ -573,14 +863,23 @@ fn pronoun_only(entity: &str) -> bool {
 /// a follow-up), and targets from the binding vocabulary. A Recon-written `query` that
 /// breaks the grounded-query rules is dropped (the deterministic query is used).
 #[cfg(test)]
-pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Result<Vec<Directive>, String> {
+pub fn parse_directives(
+    value: &Value,
+    question: &str,
+    thread: &[String],
+) -> Result<Vec<Directive>, String> {
     parse_directives_with(value, question, thread, "")
 }
 
 /// [`parse_directives`] where a follow-up may also name a verbatim span of the previous
 /// turn's synthesis. On a pronoun follow-up those names are kept; a reply that names none
 /// falls back to the thread subject.
-pub fn parse_directives_with(value: &Value, question: &str, thread: &[String], prior: &str) -> Result<Vec<Directive>, String> {
+pub fn parse_directives_with(
+    value: &Value,
+    question: &str,
+    thread: &[String],
+    prior: &str,
+) -> Result<Vec<Directive>, String> {
     let list = value
         .get("directives")
         .and_then(Value::as_array)
@@ -595,7 +894,8 @@ pub fn parse_directives_with(value: &Value, question: &str, thread: &[String], p
     let prompt_entities: Vec<String> = fallback_entities.iter().chain(thread).cloned().collect();
     let mut directives = Vec::new();
     for (index, item) in list.iter().enumerate() {
-        let mut parsed: Directive = serde_json::from_value(item.clone()).map_err(|err| format!("directive {} is malformed: {err}", index + 1))?;
+        let mut parsed: Directive = serde_json::from_value(item.clone())
+            .map_err(|err| format!("directive {} is malformed: {err}", index + 1))?;
         let expected = format!("d{}", index + 1);
         if parsed.id != expected {
             return Err(format!("directive {} must have id {expected}", index + 1));
@@ -607,13 +907,19 @@ pub fn parse_directives_with(value: &Value, question: &str, thread: &[String], p
                 continue;
             }
             let verbatim = lower_question.contains(&entity.to_ascii_lowercase());
-            let thread_subject = thread.iter().any(|known| known.eq_ignore_ascii_case(entity));
+            let thread_subject = thread
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(entity));
             let from_prior = span_in(prior, entity);
             if !verbatim && !thread_subject && !from_prior {
-                return Err(format!("{expected}: entity \"{entity}\" is not in the user's prompt"));
+                return Err(format!(
+                    "{expected}: entity \"{entity}\" is not in the user's prompt"
+                ));
             }
             if names_tool_except(entity, &prompt_entities).is_some() {
-                return Err(format!("{expected}: entity \"{entity}\" names a tool or provider"));
+                return Err(format!(
+                    "{expected}: entity \"{entity}\" names a tool or provider"
+                ));
             }
             let shown = display_name(entity);
             if !entities.contains(&shown) {
@@ -632,7 +938,10 @@ pub fn parse_directives_with(value: &Value, question: &str, thread: &[String], p
         if refers_back(question) && !thread.is_empty() {
             entities.retain(|entity| {
                 !pronoun_only(entity)
-                    && (thread.iter().any(|known| known.eq_ignore_ascii_case(entity)) || span_in(prior, entity))
+                    && (thread
+                        .iter()
+                        .any(|known| known.eq_ignore_ascii_case(entity))
+                        || span_in(prior, entity))
             });
         }
         if entities.is_empty() {
@@ -644,7 +953,9 @@ pub fn parse_directives_with(value: &Value, question: &str, thread: &[String], p
         }
         for kind in &parsed.targets {
             if !super::tool_io::target_kind_allowed(kind) {
-                return Err(format!("{expected} targets {kind}, which is not in the binding vocabulary"));
+                return Err(format!(
+                    "{expected} targets {kind}, which is not in the binding vocabulary"
+                ));
             }
         }
         if parsed.done_when.chars().count() > 200 {
@@ -673,7 +984,12 @@ pub fn qualifier_for(directive: &Directive) -> &'static str {
     directive
         .targets
         .iter()
-        .find_map(|kind| QUALIFIERS.iter().find(|(known, _)| known == kind).map(|(_, qualifier)| *qualifier))
+        .find_map(|kind| {
+            QUALIFIERS
+                .iter()
+                .find(|(known, _)| known == kind)
+                .map(|(_, qualifier)| *qualifier)
+        })
         .unwrap_or("")
 }
 
@@ -682,7 +998,11 @@ pub fn qualifier_for(directive: &Directive) -> &'static str {
 /// qualifier, with no question words and no tool or provider names.
 pub fn grounded_query(query: &str, entities: &[String], values: &[String]) -> bool {
     let query = query.trim();
-    if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS || query.split_whitespace().count() > MAX_QUERY_WORDS || query.contains('?') {
+    if query.is_empty()
+        || query.chars().count() > MAX_QUERY_CHARS
+        || query.split_whitespace().count() > MAX_QUERY_WORDS
+        || query.contains('?')
+    {
         return false;
     }
     let known: Vec<String> = entities.iter().chain(values).cloned().collect();
@@ -690,7 +1010,12 @@ pub fn grounded_query(query: &str, entities: &[String], values: &[String]) -> bo
         return false;
     }
     let mut rest = format!(" {} ", query.to_ascii_lowercase());
-    let mut grounded: Vec<String> = entities.iter().chain(values).map(|value| value.trim().to_ascii_lowercase()).filter(|value| !value.is_empty()).collect();
+    let mut grounded: Vec<String> = entities
+        .iter()
+        .chain(values)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect();
     grounded.sort_by_key(|value| std::cmp::Reverse(value.len()));
     let mut anchored = false;
     for value in grounded {
@@ -701,7 +1026,11 @@ pub fn grounded_query(query: &str, entities: &[String], values: &[String]) -> bo
         }
     }
     let rest = rest.split_whitespace().collect::<Vec<_>>().join(" ");
-    anchored && (rest.is_empty() || QUALIFIERS.iter().any(|(_, qualifier)| !qualifier.is_empty() && *qualifier == rest))
+    anchored
+        && (rest.is_empty()
+            || QUALIFIERS
+                .iter()
+                .any(|(_, qualifier)| !qualifier.is_empty() && *qualifier == rest))
 }
 
 /// A query and the label of where it came from, e.g. `d2 entity + qualifier`.
@@ -713,7 +1042,13 @@ pub struct GroundedQuery {
 
 fn clip_words(value: &str, words: usize) -> String {
     let clipped: Vec<&str> = value.split_whitespace().take(words.max(1)).collect();
-    clipped.join(" ").chars().take(MAX_QUERY_CHARS).collect::<String>().trim().to_string()
+    clipped
+        .join(" ")
+        .chars()
+        .take(MAX_QUERY_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// The query a directive gives a search tool: Recon's query when it is grounded, else
@@ -722,50 +1057,105 @@ fn clip_words(value: &str, words: usize) -> String {
 pub fn directive_query(directive: &Directive, qualified: bool) -> Option<GroundedQuery> {
     let entity = directive.entities.first()?;
     let label = |query: &str| {
-        let bare = directive.entities.iter().any(|known| known.eq_ignore_ascii_case(query.trim()));
-        format!("{} entity{}", directive.id, if bare { "" } else { " + qualifier" })
+        let bare = directive
+            .entities
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(query.trim()));
+        format!(
+            "{} entity{}",
+            directive.id,
+            if bare { "" } else { " + qualifier" }
+        )
     };
-    if qualified && !directive.query.is_empty() && grounded_query(&directive.query, &directive.entities, &[]) {
-        return Some(GroundedQuery { query: directive.query.trim().to_string(), source: label(&directive.query) });
+    if qualified
+        && !directive.query.is_empty()
+        && grounded_query(&directive.query, &directive.entities, &[])
+    {
+        return Some(GroundedQuery {
+            query: directive.query.trim().to_string(),
+            source: label(&directive.query),
+        });
     }
-    let qualifier = if qualified { qualifier_for(directive) } else { "" };
+    let qualifier = if qualified {
+        qualifier_for(directive)
+    } else {
+        ""
+    };
     let room = MAX_QUERY_WORDS - qualifier.split_whitespace().count();
     let entity = clip_words(entity, room);
-    let query = if qualifier.is_empty() { entity } else { format!("{entity} {qualifier}") };
+    let query = if qualifier.is_empty() {
+        entity
+    } else {
+        format!("{entity} {qualifier}")
+    };
     let source = label(&query);
     Some(GroundedQuery { query, source })
 }
 
 /// The directive a search for `target` serves: the first one targeting that kind.
-pub fn directive_for_target<'a>(directives: &'a [Directive], target: &str) -> Option<&'a Directive> {
-    directives.iter().find(|item| item.targets.iter().any(|kind| kind == target))
+pub fn directive_for_target<'a>(
+    directives: &'a [Directive],
+    target: &str,
+) -> Option<&'a Directive> {
+    directives
+        .iter()
+        .find(|item| item.targets.iter().any(|kind| kind == target))
 }
 
 /// Binding kinds a search result must earn by mentioning the subject.
 pub const GATED_KINDS: &[&str] = &["domain", "org_name", "email", "url"];
 /// Tools whose observation is a list of search results.
-pub const SEARCH_RESULT_TOOLS: &[&str] = &["firecrawl_search", "sociavault_google_search", "sociavault_search"];
+pub const SEARCH_RESULT_TOOLS: &[&str] = &[
+    "firecrawl_search",
+    "sociavault_google_search",
+    "sociavault_search",
+];
 
 /// The result names the subject: its title, description, or URL contains a directive
 /// entity, or every name token of one.
 fn result_mentions(row: &Value, entities: &[String]) -> bool {
-    let field = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-    let text = [field("title"), field("description"), field("snippet"), field("url")].join(" ");
+    let field = |key: &str| {
+        row.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let text = [
+        field("title"),
+        field("description"),
+        field("snippet"),
+        field("url"),
+    ]
+    .join(" ");
     let lower = text.to_ascii_lowercase();
     let compact: String = lower.chars().filter(char::is_ascii_alphanumeric).collect();
     entities.iter().any(|entity| {
         let entity_lower = entity.to_ascii_lowercase();
-        let entity_compact: String = entity_lower.chars().filter(char::is_ascii_alphanumeric).collect();
-        lower.contains(&entity_lower) || !entity_compact.is_empty() && compact.contains(&entity_compact) || names_subject(entity, &text)
+        let entity_compact: String = entity_lower
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
+        lower.contains(&entity_lower)
+            || !entity_compact.is_empty() && compact.contains(&entity_compact)
+            || names_subject(entity, &text)
     })
 }
 
 /// Relevance gate for search results: a domain, org_name, email, or url binding from a
 /// search tool is kept only when a result that contains the value also mentions the
 /// subject. Returns the kept and the dropped bindings. Other tools pass unchanged.
-pub fn relevance_gate(tool_id: &str, entities: &[String], observations: &Value, bindings: Vec<Binding>) -> (Vec<Binding>, Vec<Binding>) {
+pub fn relevance_gate(
+    tool_id: &str,
+    entities: &[String],
+    observations: &Value,
+    bindings: Vec<Binding>,
+) -> (Vec<Binding>, Vec<Binding>) {
     let tool = crate::osint::canonical_tool_id(tool_id);
-    let rows: Vec<&Value> = observations.get("results").and_then(Value::as_array).map(|rows| rows.iter().collect()).unwrap_or_default();
+    let rows: Vec<&Value> = observations
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().collect())
+        .unwrap_or_default();
     if !SEARCH_RESULT_TOOLS.contains(&tool) || rows.is_empty() || entities.is_empty() {
         return (bindings, Vec::new());
     }
@@ -790,7 +1180,6 @@ pub fn relevance_gate(tool_id: &str, entities: &[String], observations: &Value, 
     (kept, dropped)
 }
 
-
 /// Relevance gate for News and Legal results (#29): a row is kept only when its title or
 /// snippet contains a directive entity, or every name token of one. Returns the
 /// observation with the failing rows removed and the titles of the dropped rows.
@@ -804,7 +1193,12 @@ pub fn context_gate(entities: &[String], observations: &Value) -> (Value, Vec<St
     }
     let mut dropped = Vec::new();
     rows.retain(|row| {
-        let field = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+        let field = |key: &str| {
+            row.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
         let text = format!("{} {}", field("title"), field("snippet"));
         let lower = text.to_ascii_lowercase();
         let keep = entities.iter().any(|entity| {
@@ -814,8 +1208,13 @@ pub fn context_gate(entities: &[String], observations: &Value) -> (Value, Vec<St
                 .filter(|token| !token.is_empty())
                 .map(String::from)
                 .collect();
-            let words: Vec<String> = lower.split(|ch: char| !ch.is_alphanumeric()).filter(|word| !word.is_empty()).map(String::from).collect();
-            (!entity_lower.is_empty() && lower.contains(&entity_lower)) || (!tokens.is_empty() && tokens.iter().all(|token| words.contains(token)))
+            let words: Vec<String> = lower
+                .split(|ch: char| !ch.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(String::from)
+                .collect();
+            (!entity_lower.is_empty() && lower.contains(&entity_lower))
+                || (!tokens.is_empty() && tokens.iter().all(|token| words.contains(token)))
         });
         if !keep {
             dropped.push(field("title"));

@@ -365,18 +365,34 @@ mod tests {
                 .unwrap()
         };
         let fresh = Store::memory().unwrap();
-        assert!(columns(&fresh).iter().any(|name| name == "tool_picker_model"));
-        let version: i64 = fresh.conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert!(columns(&fresh)
+            .iter()
+            .any(|name| name == "tool_picker_model"));
+        let version: i64 = fresh
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
         assert_eq!(version, 8);
         // A version-7 database without the column gains it, keeping existing runs.
         let file = tempfile::NamedTempFile::new().unwrap();
         let store = Store::open(file.path()).unwrap();
         store.conn.execute_batch("INSERT INTO recon_threads(id,title,created_at,updated_at) VALUES ('t','T','now','now'); INSERT INTO recon_runs(id,thread_id,turn_id,state,stage,recon_model,synthesis_model,created_at,updated_at) VALUES ('r','t','m','completed','complete','grok / a','grok / b','now','now'); ALTER TABLE recon_runs DROP COLUMN tool_picker_model; PRAGMA user_version=7;").unwrap();
-        assert!(!columns(&store).iter().any(|name| name == "tool_picker_model"));
+        assert!(!columns(&store)
+            .iter()
+            .any(|name| name == "tool_picker_model"));
         drop(store);
         let reopened = Store::open(file.path()).unwrap();
-        assert!(columns(&reopened).iter().any(|name| name == "tool_picker_model"));
-        let snapshot: String = reopened.conn.query_row("SELECT tool_picker_model FROM recon_runs WHERE id='r'", [], |row| row.get(0)).unwrap();
+        assert!(columns(&reopened)
+            .iter()
+            .any(|name| name == "tool_picker_model"));
+        let snapshot: String = reopened
+            .conn
+            .query_row(
+                "SELECT tool_picker_model FROM recon_runs WHERE id='r'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(snapshot, "");
     }
 }

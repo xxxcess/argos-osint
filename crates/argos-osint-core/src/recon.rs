@@ -1,5 +1,9 @@
 //! Persistent investigations and evidence-grounded model orchestration.
 pub(crate) mod budget;
+mod graph;
+pub use graph::{
+    force_links, recon_path, ForceLink, GraphNode, GraphNodeKind, MemoryGraph, PathBand, ReconPath,
+};
 pub(crate) mod investigation;
 mod orchestrate;
 mod picker;
@@ -249,9 +253,10 @@ pub enum TurnEvent {
 impl std::fmt::Display for TurnEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Stage(text) | Self::AnswerNote(text) | Self::Deadline(text) | Self::AnswerDelta(text) => {
-                f.write_str(text)
-            }
+            Self::Stage(text)
+            | Self::AnswerNote(text)
+            | Self::Deadline(text)
+            | Self::AnswerDelta(text) => f.write_str(text),
         }
     }
 }
@@ -1073,8 +1078,10 @@ impl Store {
         thread_id: &str,
         entities: &[investigation::SelectedEntity],
     ) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM investigation_entities WHERE thread_id=?1", [thread_id])?;
+        self.conn.execute(
+            "DELETE FROM investigation_entities WHERE thread_id=?1",
+            [thread_id],
+        )?;
         for entity in entities {
             self.conn.execute(
                 "INSERT INTO investigation_entities(id,thread_id,canonical_name,entity_type,identifiers_json,evidence_json,relationships_json,unresolved_json,certainty,why,selected,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)",
@@ -1155,14 +1162,21 @@ impl Store {
         let _ = remaining;
         Ok(())
     }
-    pub fn credits_available(&self, provider_name: &str, limits: &provider::ReconLimits) -> Result<u32> {
+    pub fn credits_available(
+        &self,
+        provider_name: &str,
+        limits: &provider::ReconLimits,
+    ) -> Result<u32> {
         self.touch_quota(provider_name, limits)?;
         let (trial, reserved, spent, allowance): (i64, i64, i64, i64) = self.conn.query_row(
             "SELECT trial_remaining,reserved,spent,allowance FROM provider_quota WHERE provider=?1",
             [provider_name],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
-        let allowance_left = allowance.saturating_sub(spent).saturating_sub(reserved).max(0);
+        let allowance_left = allowance
+            .saturating_sub(spent)
+            .saturating_sub(reserved)
+            .max(0);
         Ok(u32::try_from(trial.max(0) + allowance_left).unwrap_or(u32::MAX))
     }
     pub fn reserve_credits(
@@ -1188,7 +1202,10 @@ impl Store {
         )?;
         let trial_left = u32::try_from(trial.max(0)).unwrap_or(0);
         let allowance_left = u32::try_from(
-            allowance.saturating_sub(spent).saturating_sub(reserved).max(0),
+            allowance
+                .saturating_sub(spent)
+                .saturating_sub(reserved)
+                .max(0),
         )
         .unwrap_or(0);
         if trial_left.saturating_add(allowance_left) < cost {
@@ -1343,12 +1360,27 @@ impl Store {
             reference: None,
         };
         tx.execute("UPDATE memories SET source_json=?1 WHERE id IN (SELECT memory_id FROM insight_claims) AND source_json LIKE ?2",params![serde_json::to_string(&deleted_source)?,format!("%{tid}%")])?;
-        tx.execute("DELETE FROM investigation_strategies WHERE thread_id=?1", [tid])?;
-        tx.execute("DELETE FROM investigation_hypotheses WHERE thread_id=?1", [tid])?;
+        tx.execute(
+            "DELETE FROM investigation_strategies WHERE thread_id=?1",
+            [tid],
+        )?;
+        tx.execute(
+            "DELETE FROM investigation_hypotheses WHERE thread_id=?1",
+            [tid],
+        )?;
         tx.execute("DELETE FROM investigation_gaps WHERE thread_id=?1", [tid])?;
-        tx.execute("DELETE FROM investigation_actions WHERE thread_id=?1", [tid])?;
-        tx.execute("DELETE FROM investigation_entities WHERE thread_id=?1", [tid])?;
-        tx.execute("DELETE FROM investigation_discovery WHERE thread_id=?1", [tid])?;
+        tx.execute(
+            "DELETE FROM investigation_actions WHERE thread_id=?1",
+            [tid],
+        )?;
+        tx.execute(
+            "DELETE FROM investigation_entities WHERE thread_id=?1",
+            [tid],
+        )?;
+        tx.execute(
+            "DELETE FROM investigation_discovery WHERE thread_id=?1",
+            [tid],
+        )?;
         tx.execute("DELETE FROM recon_messages WHERE thread_id=?1", [tid])?;
         tx.execute("DELETE FROM recon_runs WHERE thread_id=?1", [tid])?;
         tx.execute(
@@ -1606,7 +1638,10 @@ fn focus_phrase(phrase: &str) -> String {
     }
     // "the total follower count of elon musk" -> "elon musk".
     let rest = {
-        let bare = rest.strip_prefix("the ").or_else(|| rest.strip_prefix("The ")).unwrap_or(rest);
+        let bare = rest
+            .strip_prefix("the ")
+            .or_else(|| rest.strip_prefix("The "))
+            .unwrap_or(rest);
         let first = bare.split_whitespace().next().unwrap_or("");
         match bare.to_ascii_lowercase().find(" of ") {
             Some(at) if attribute_word(first) => bare[at + 4..].trim_start(),
@@ -1630,10 +1665,17 @@ fn focus_phrase(phrase: &str) -> String {
     let rest = match social_cut {
         Some(index) => {
             let head = rest[..index].trim();
-            match head.strip_suffix("'s").or_else(|| head.strip_suffix("\u{2019}s")) {
+            match head
+                .strip_suffix("'s")
+                .or_else(|| head.strip_suffix("\u{2019}s"))
+            {
                 Some(stripped) => stripped,
                 // Missing apostrophe: "trumps social life" -> "trump". Not for "ss" ("Ross").
-                None if head.len() > 3 && head.ends_with('s') && !head.ends_with("ss") && head.contains(' ') => {
+                None if head.len() > 3
+                    && head.ends_with('s')
+                    && !head.ends_with("ss")
+                    && head.contains(' ') =>
+                {
                     &head[..head.len() - 1]
                 }
                 None => head,
@@ -1660,12 +1702,42 @@ fn focus_phrase(phrase: &str) -> String {
 /// not part of its name.
 fn attribute_word(word: &str) -> bool {
     const WORDS: &[&str] = &[
-        "total", "follower", "followers", "following", "subscriber", "subscribers", "count",
-        "counts", "number", "net", "worth", "age", "birthday", "birthdate", "height", "salary",
-        "income", "handles", "usernames", "accounts", "posts", "tweets", "socials", "latest",
-        "recent", "current", "official", "biggest", "main", "likes", "views", "audience",
+        "total",
+        "follower",
+        "followers",
+        "following",
+        "subscriber",
+        "subscribers",
+        "count",
+        "counts",
+        "number",
+        "net",
+        "worth",
+        "age",
+        "birthday",
+        "birthdate",
+        "height",
+        "salary",
+        "income",
+        "handles",
+        "usernames",
+        "accounts",
+        "posts",
+        "tweets",
+        "socials",
+        "latest",
+        "recent",
+        "current",
+        "official",
+        "biggest",
+        "main",
+        "likes",
+        "views",
+        "audience",
     ];
-    let word = word.trim_matches(|ch: char| !ch.is_alphanumeric()).to_ascii_lowercase();
+    let word = word
+        .trim_matches(|ch: char| !ch.is_alphanumeric())
+        .to_ascii_lowercase();
     WORDS.contains(&word.as_str())
 }
 
@@ -1689,7 +1761,10 @@ pub(crate) fn deadline_hit(err: &anyhow::Error) -> bool {
 /// HTTP 429 or a provider rate-limit message.
 pub(crate) fn provider_rate_limited(err: &anyhow::Error) -> bool {
     let text = err.to_string().to_ascii_lowercase();
-    text.contains("429") || text.contains("rate limit") || text.contains("rate-limit") || text.contains("too many requests")
+    text.contains("429")
+        || text.contains("rate limit")
+        || text.contains("rate-limit")
+        || text.contains("too many requests")
 }
 
 fn interrogative(word: &str) -> bool {
@@ -1991,7 +2066,10 @@ fn social_from_url(url: &url::Url) -> Option<SocialHandle> {
                 handle: token(first)?,
             }
         }
-        "keybase.io" if !reserved_social_segment(first) && !matches!(first, "docs" | "_" | "inc" | "blog") => {
+        "keybase.io"
+            if !reserved_social_segment(first)
+                && !matches!(first, "docs" | "_" | "inc" | "blog") =>
+        {
             SocialHandle {
                 platform: "keybase".into(),
                 handle: token(first)?,
@@ -2325,7 +2403,11 @@ pub fn validate_ordered_plan(plan: &Plan) -> Result<()> {
             !call.step_id.is_empty() && ids.insert(call.step_id.as_str()),
             "duplicate or empty step ID"
         );
-        ensure!(osint::definition(&call.tool_id).is_some(), "unknown tool {}", call.tool_id);
+        ensure!(
+            osint::definition(&call.tool_id).is_some(),
+            "unknown tool {}",
+            call.tool_id
+        );
         // A tool may repeat only as a pre-bound step with different arguments.
         let key = if call.bound {
             format!("{}:{}", call.tool_id, call.arguments)
@@ -2334,14 +2416,21 @@ pub fn validate_ordered_plan(plan: &Plan) -> Result<()> {
         };
         ensure!(tools.insert(key), "duplicate tool {}", call.tool_id);
         ensure!(call.arguments.is_object(), "arguments must be an object");
-        if call.arguments.as_object().is_some_and(|args| !args.is_empty()) {
+        if call
+            .arguments
+            .as_object()
+            .is_some_and(|args| !args.is_empty())
+        {
             osint::validate(&call.tool_id, &call.arguments)?;
         }
     }
     let mut seen = HashSet::new();
     for call in &plan.calls {
         for dep in &call.depends_on {
-            ensure!(seen.contains(dep.as_str()), "a step may depend only on an earlier step");
+            ensure!(
+                seen.contains(dep.as_str()),
+                "a step may depend only on an earlier step"
+            );
         }
         seen.insert(call.step_id.as_str());
     }
@@ -2542,7 +2631,10 @@ impl Service {
         )?;
         drop(store);
         let title_task = self.begin_title(tid, question, &recon_secret);
-        let clock = turn_clock(turn_seconds, self.settings.recon_limits.effective_max_turn_seconds());
+        let clock = turn_clock(
+            turn_seconds,
+            self.settings.recon_limits.effective_max_turn_seconds(),
+        );
         let outcome = self
             .ask_inner(
                 &run,
@@ -2559,7 +2651,11 @@ impl Service {
         }
         match outcome {
             Ok(note) => {
-                let stage = if note.is_some() { "cut short" } else { "complete" };
+                let stage = if note.is_some() {
+                    "cut short"
+                } else {
+                    "complete"
+                };
                 Store::open(&self.db_path)?.set_run(
                     &run.id,
                     "completed",
@@ -2638,7 +2734,10 @@ impl Service {
         }
         ensure!(store.restart_run(rid)?, "run could not restart");
         drop(store);
-        let clock = turn_clock(run.turn_seconds, self.settings.recon_limits.effective_max_turn_seconds());
+        let clock = turn_clock(
+            run.turn_seconds,
+            self.settings.recon_limits.effective_max_turn_seconds(),
+        );
         let picker_plan = stored_plan
             .as_ref()
             .is_some_and(|plan| !plan.directives.is_empty());
@@ -2647,8 +2746,16 @@ impl Service {
             // Questions are re-derived and tools re-picked only when the plan has no calls.
             let plan = stored_plan.expect("picker plan");
             if plan.calls.is_empty() {
-                self.ask_inner(&run, &question, &recon_secret, &synthesis_secret, &cancel, &clock, &mut progress)
-                    .await
+                self.ask_inner(
+                    &run,
+                    &question,
+                    &recon_secret,
+                    &synthesis_secret,
+                    &cancel,
+                    &clock,
+                    &mut progress,
+                )
+                .await
             } else {
                 orchestrate::continue_turn(
                     self,
@@ -2742,8 +2849,18 @@ impl Service {
         };
         match outcome {
             Ok(note) => {
-                let stage = if note.is_some() { "cut short" } else { "complete" };
-                Store::open(&self.db_path)?.set_run(rid, "completed", stage, None, note.as_deref())?;
+                let stage = if note.is_some() {
+                    "cut short"
+                } else {
+                    "complete"
+                };
+                Store::open(&self.db_path)?.set_run(
+                    rid,
+                    "completed",
+                    stage,
+                    None,
+                    note.as_deref(),
+                )?;
             }
             Err(err) => {
                 let store = Store::open(&self.db_path)?;
@@ -2770,7 +2887,11 @@ impl Service {
         let mut finished = HashSet::new();
         // A dependency outside this batch was settled by the caller (the step loop runs
         // one call per batch), so only in-batch dependencies gate a call.
-        let batch: HashSet<&str> = plan.calls.iter().map(|call| call.step_id.as_str()).collect();
+        let batch: HashSet<&str> = plan
+            .calls
+            .iter()
+            .map(|call| call.step_id.as_str())
+            .collect();
         while finished.len() < plan.calls.len() {
             if cancel.load(Ordering::Relaxed) {
                 return Err(anyhow!("cancelled"));
@@ -2910,7 +3031,13 @@ impl Service {
             drop(clock);
             let mut logged = plan.clone();
             logged.deadline_note = note;
-            Store::open(&self.db_path)?.set_run(&run.id, "running", "synthesizing", Some(&logged), None)?;
+            Store::open(&self.db_path)?.set_run(
+                &run.id,
+                "running",
+                "synthesizing",
+                Some(&logged),
+                None,
+            )?;
             for label in labels {
                 progress(TurnEvent::Deadline(label));
             }
@@ -2949,7 +3076,9 @@ impl Service {
                 let mut clock = clock.lock().unwrap();
                 clock.mark_repair();
                 let labels = clock.take_labels();
-                let extra = Duration::from_secs(budget::synthesis_allowance_seconds(synthesis_user.chars().count(), false) / 2);
+                let extra = Duration::from_secs(
+                    budget::synthesis_allowance_seconds(synthesis_user.chars().count(), false) / 2,
+                );
                 let limit = extra.min(clock.ceiling_remaining());
                 drop(clock);
                 for label in labels {
@@ -2977,7 +3106,8 @@ impl Service {
                     return Err(err);
                 }
                 Err(_) => {
-                    let note = self.keep_partial(run, plan, results, &answer, budget::STREAM_LOST)?;
+                    let note =
+                        self.keep_partial(run, plan, results, &answer, budget::STREAM_LOST)?;
                     return Ok(Some(note));
                 }
             };
@@ -2994,8 +3124,17 @@ impl Service {
         let (answer, dropped) = settle_citations(&answer, results)?;
         if !dropped.is_empty() {
             let mut logged = plan.clone();
-            logged.binding_notes.push(format!("Synthesis cited unknown evidence id(s) {}; they were dropped after the repair", dropped.join(", ")));
-            Store::open(&self.db_path)?.set_run(&run.id, "running", "synthesizing", Some(&logged), None)?;
+            logged.binding_notes.push(format!(
+                "Synthesis cited unknown evidence id(s) {}; they were dropped after the repair",
+                dropped.join(", ")
+            ));
+            Store::open(&self.db_path)?.set_run(
+                &run.id,
+                "running",
+                "synthesizing",
+                Some(&logged),
+                None,
+            )?;
         }
         let answer_msg = self.store_answer(run, recalled, &answer, results)?;
         let cited_ids = citation_ids(&answer);
@@ -3037,7 +3176,13 @@ impl Service {
         let mut logged = plan.clone();
         logged.deadline_note = note.clone();
         logged.binding_notes.push(note.clone());
-        Store::open(&self.db_path)?.set_run(&run.id, "running", "synthesizing", Some(&logged), None)?;
+        Store::open(&self.db_path)?.set_run(
+            &run.id,
+            "running",
+            "synthesizing",
+            Some(&logged),
+            None,
+        )?;
         if reason == "cancelled" && streamed.trim().is_empty() {
             return Ok(note);
         }
@@ -3058,14 +3203,20 @@ impl Service {
     ) -> Result<Message> {
         let mut store = Store::open(&self.db_path)?;
         ensure!(
-            store.get_run(&run.id)?.is_some_and(|r| r.state == "running"),
+            store
+                .get_run(&run.id)?
+                .is_some_and(|r| r.state == "running"),
             "run no longer active"
         );
         let cited_ids = citation_ids(answer);
         let known: HashSet<&str> = results.iter().map(|(id, _)| id.as_str()).collect();
-        let cited_ids: Vec<String> = cited_ids.into_iter().filter(|id| known.contains(id.as_str())).collect();
+        let cited_ids: Vec<String> = cited_ids
+            .into_iter()
+            .filter(|id| known.contains(id.as_str()))
+            .collect();
         let memory_ids: Vec<String> = recalled.iter().map(|item| item.memory_id.clone()).collect();
-        let answer_msg = store.add_answer(&run.thread_id, &run.id, answer, &cited_ids, &memory_ids)?;
+        let answer_msg =
+            store.add_answer(&run.thread_id, &run.id, answer, &cited_ids, &memory_ids)?;
         store.conn.execute(
             "INSERT INTO extraction_jobs(answer_id,run_id,state,updated_at) VALUES (?1,?2,'queued',?3)",
             params![answer_msg.id, run.id, now()],
@@ -3208,7 +3359,9 @@ fn persist_claims(
 fn turn_clock(floor: u16, max_turn: u16) -> Arc<std::sync::Mutex<budget::TurnClock>> {
     let floor = u64::from(floor);
     let ceiling = u64::from(max_turn).max(floor);
-    Arc::new(std::sync::Mutex::new(budget::TurnClock::new(floor, ceiling)))
+    Arc::new(std::sync::Mutex::new(budget::TurnClock::new(
+        floor, ceiling,
+    )))
 }
 
 struct Streamed {
@@ -3233,10 +3386,16 @@ async fn await_completion(
     run_id: &str,
 ) -> Result<Streamed> {
     if cancel.load(Ordering::Relaxed) {
-        return Ok(Streamed { text: String::new(), cut: Some("cancelled") });
+        return Ok(Streamed {
+            text: String::new(),
+            cut: Some("cancelled"),
+        });
     }
     if limit.is_zero() {
-        return Ok(Streamed { text: String::new(), cut: Some(budget::SYNTHESIS_DEADLINE) });
+        return Ok(Streamed {
+            text: String::new(),
+            cut: Some(budget::SYNTHESIS_DEADLINE),
+        });
     }
     let (ceiling_at, idle_limit) = {
         let clock = clock.lock().unwrap();
@@ -3254,13 +3413,22 @@ async fn await_completion(
     loop {
         let now = std::time::Instant::now();
         if now >= ceiling_at {
-            return Ok(Streamed { text, cut: Some(budget::SYNTHESIS_DEADLINE) });
+            return Ok(Streamed {
+                text,
+                cut: Some(budget::SYNTHESIS_DEADLINE),
+            });
         }
         if !(saw && forward) && started.elapsed() >= limit {
-            return Ok(Streamed { text, cut: Some(budget::SYNTHESIS_DEADLINE) });
+            return Ok(Streamed {
+                text,
+                cut: Some(budget::SYNTHESIS_DEADLINE),
+            });
         }
         if saw && forward && last.elapsed() >= idle_limit {
-            return Ok(Streamed { text, cut: Some(budget::SYNTHESIS_IDLE) });
+            return Ok(Streamed {
+                text,
+                cut: Some(budget::SYNTHESIS_IDLE),
+            });
         }
         let ceiling_left = ceiling_at.saturating_duration_since(now);
         let limit_left = limit.saturating_sub(started.elapsed());
@@ -3338,7 +3506,10 @@ fn cut_short_answer(streamed: &str, results: &[(String, ToolResult)], reason: &s
 
 fn cut_footer(reason: &str) -> String {
     if reason == budget::STREAM_LOST {
-        format!("{} ({reason}). The text received so far was kept.", budget::CUT_SHORT)
+        format!(
+            "{} ({reason}). The text received so far was kept.",
+            budget::CUT_SHORT
+        )
     } else {
         format!("{} ({reason}). {}", budget::CUT_SHORT, budget::CUT_NOTE)
     }
@@ -3351,19 +3522,26 @@ fn evidence_summary(results: &[(String, ToolResult)]) -> String {
         return lines.join("\n");
     }
     for (id, result) in results {
-        let detail = result.error.clone().filter(|error| !error.is_empty()).unwrap_or_else(|| {
-            result
-                .observations
-                .pointer("/results/0/title")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string()
-        });
+        let detail = result
+            .error
+            .clone()
+            .filter(|error| !error.is_empty())
+            .unwrap_or_else(|| {
+                result
+                    .observations
+                    .pointer("/results/0/title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            });
         let detail: String = detail.chars().take(140).collect();
         if detail.is_empty() {
             lines.push(format!("- {id}: {} {}", result.tool_id, result.status));
         } else {
-            lines.push(format!("- {id}: {} {} — {detail}", result.tool_id, result.status));
+            lines.push(format!(
+                "- {id}: {} {} — {detail}",
+                result.tool_id, result.status
+            ));
         }
     }
     lines.join("\n")
@@ -3376,12 +3554,20 @@ const DIRECTIVE_SYNTHESIS: &str = "Answer from the tool results only. First answ
 /// question, d1–d3, the ordered plan with step status, accepted bindings, and the evidence
 /// packets; Synthesis answers the user question, then reports each directive as met,
 /// partly met, or not met.
-fn synthesis_request(question: &str, plan: &Plan, results: &[(String, ToolResult)], prior: &str) -> Result<(String, String)> {
+fn synthesis_request(
+    question: &str,
+    plan: &Plan,
+    results: &[(String, ToolResult)],
+    prior: &str,
+) -> Result<(String, String)> {
     let packet:Vec<_>=results.iter().map(|(cid,r)|json!({"evidence_id":cid,"tool":r.tool_id,"status":r.status,"source_url":r.source_url,"retrieved_at":r.retrieved_at,"observations":packet_observation(&r.observations),"error":r.error,"truncated":r.truncated})).collect();
     if plan.directives.is_empty() {
         return Ok((
             BRIEF_SYNTHESIS.into(),
-            format!("Question: {question}\nEvidence: {}", serde_json::to_string(&packet)?),
+            format!(
+                "Question: {question}\nEvidence: {}",
+                serde_json::to_string(&packet)?
+            ),
         ));
     }
     let questions: Vec<Value> = plan
@@ -3471,7 +3657,11 @@ fn validate_citations(answer: &str, evidence: &[(String, ToolResult)]) -> Result
             }
         }
     }
-    ensure!(unknown.is_empty(), "answer contains unknown evidence ID {}", unknown.join(", "));
+    ensure!(
+        unknown.is_empty(),
+        "answer contains unknown evidence ID {}",
+        unknown.join(", ")
+    );
     if evidence.iter().any(|(_, r)| r.status == "completed") {
         ensure!(found, "answer is missing evidence citations");
     }
@@ -3511,14 +3701,21 @@ fn normalize_citations(answer: &str, allowed: &HashSet<&str>) -> (String, Vec<St
 /// After the repair: unknown ids are dropped (and returned for the run log) as long as a
 /// valid citation remains. Fails only when completed evidence exists and no valid
 /// citation is left.
-fn settle_citations(answer: &str, evidence: &[(String, ToolResult)]) -> Result<(String, Vec<String>)> {
+fn settle_citations(
+    answer: &str,
+    evidence: &[(String, ToolResult)],
+) -> Result<(String, Vec<String>)> {
     let allowed: HashSet<&str> = evidence.iter().map(|(id, _)| id.as_str()).collect();
     let (normalized, dropped) = normalize_citations(answer, &allowed);
-    if evidence.iter().any(|(_, r)| r.status == "completed") && citation_ids(&normalized).is_empty() {
+    if evidence.iter().any(|(_, r)| r.status == "completed") && citation_ids(&normalized).is_empty()
+    {
         if dropped.is_empty() {
             bail!("answer is missing evidence citations");
         }
-        bail!("answer contains unknown evidence ID {} and no valid citation", dropped.join(", "));
+        bail!(
+            "answer contains unknown evidence ID {} and no valid citation",
+            dropped.join(", ")
+        );
     }
     Ok((normalized, dropped))
 }
@@ -3560,7 +3757,12 @@ mod tests {
     #[test]
     fn ac6_citation_groups_split_validate_each_id_and_normalize() {
         let evidence = vec![cited("call-a", "completed"), cited("call-b", "completed")];
-        for answer in ["Musk runs Tesla [call-a, call-b].", "Musk runs Tesla [call-a; call-b].", "Musk runs Tesla [call-a][call-b].", "Musk runs Tesla [call-a call-b]."] {
+        for answer in [
+            "Musk runs Tesla [call-a, call-b].",
+            "Musk runs Tesla [call-a; call-b].",
+            "Musk runs Tesla [call-a][call-b].",
+            "Musk runs Tesla [call-a call-b].",
+        ] {
             assert!(validate_citations(answer, &evidence).is_ok(), "{answer}");
             assert_eq!(citation_ids(answer), ["call-a", "call-b"], "{answer}");
             let (normalized, dropped) = settle_citations(answer, &evidence).unwrap();
@@ -3568,33 +3770,65 @@ mod tests {
             assert!(dropped.is_empty());
         }
         // Each unknown id is named, not the whole group.
-        let error = validate_citations("Musk runs Tesla [call-a, call-x, call-y].", &evidence).unwrap_err().to_string();
+        let error = validate_citations("Musk runs Tesla [call-a, call-x, call-y].", &evidence)
+            .unwrap_err()
+            .to_string();
         assert_eq!(error, "answer contains unknown evidence ID call-x, call-y");
         // After the repair: an unknown id is stripped while a valid one remains.
-        let (normalized, dropped) = settle_citations("Musk runs Tesla [call-a, call-x]. D2: met [call-y].", &evidence).unwrap();
+        let (normalized, dropped) = settle_citations(
+            "Musk runs Tesla [call-a, call-x]. D2: met [call-y].",
+            &evidence,
+        )
+        .unwrap();
         assert_eq!(normalized, "Musk runs Tesla [call-a]. D2: met.");
         assert_eq!(dropped, ["call-x", "call-y"]);
         // No valid citation left fails; so does no citation at all with completed evidence.
-        assert!(settle_citations("Musk runs Tesla [call-x; call-y].", &evidence).unwrap_err().to_string().contains("no valid citation"));
-        assert!(settle_citations("Musk runs Tesla.", &evidence).unwrap_err().to_string().contains("missing evidence citations"));
+        assert!(
+            settle_citations("Musk runs Tesla [call-x; call-y].", &evidence)
+                .unwrap_err()
+                .to_string()
+                .contains("no valid citation")
+        );
+        assert!(settle_citations("Musk runs Tesla.", &evidence)
+            .unwrap_err()
+            .to_string()
+            .contains("missing evidence citations"));
         // Without completed evidence an uncited answer stands.
         assert!(settle_citations("Nothing was found.", &[cited("call-a", "failed")]).is_ok());
         // Non-citation brackets stay as written.
-        let (normalized, _) = settle_citations("Handles [x.com] and [call-a,call-b]", &evidence).unwrap();
+        let (normalized, _) =
+            settle_citations("Handles [x.com] and [call-a,call-b]", &evidence).unwrap();
         assert_eq!(normalized, "Handles [x.com] and [call-a][call-b]");
     }
     /// The live run's failure: three real ids in one bracket.
     #[test]
     fn replay_elon_multi_id_bracket_citation_validates() {
-        let ids = ["call-1759372800-10777-9", "call-1759372800-10777-5", "call-1759372800-10777-15"];
-        let evidence: Vec<(String, ToolResult)> = ids.iter().map(|id| cited(id, "completed")).collect();
-        let answer = format!("Elon Musk is the CEO of Tesla and SpaceX [{}, {}, {}].", ids[0], ids[1], ids[2]);
+        let ids = [
+            "call-1759372800-10777-9",
+            "call-1759372800-10777-5",
+            "call-1759372800-10777-15",
+        ];
+        let evidence: Vec<(String, ToolResult)> =
+            ids.iter().map(|id| cited(id, "completed")).collect();
+        let answer = format!(
+            "Elon Musk is the CEO of Tesla and SpaceX [{}, {}, {}].",
+            ids[0], ids[1], ids[2]
+        );
         assert!(validate_citations(&answer, &evidence).is_ok());
         let (normalized, dropped) = settle_citations(&answer, &evidence).unwrap();
-        assert_eq!(normalized, format!("Elon Musk is the CEO of Tesla and SpaceX [{}][{}][{}].", ids[0], ids[1], ids[2]));
+        assert_eq!(
+            normalized,
+            format!(
+                "Elon Musk is the CEO of Tesla and SpaceX [{}][{}][{}].",
+                ids[0], ids[1], ids[2]
+            )
+        );
         assert!(dropped.is_empty());
         assert_eq!(citation_ids(&normalized), ids);
-        assert!(BRIEF_SYNTHESIS.contains("one evidence ID per bracket") && DIRECTIVE_SYNTHESIS.contains("one evidence ID per bracket"));
+        assert!(
+            BRIEF_SYNTHESIS.contains("one evidence ID per bracket")
+                && DIRECTIVE_SYNTHESIS.contains("one evidence ID per bracket")
+        );
     }
     #[test]
     fn investigation_titles_drop_labels_and_stay_short() {
@@ -3713,8 +3947,8 @@ mod tests {
             error: None,
             cached: false,
             truncated: false,
-        credits_charged: 0,
-        credits_reported: None,
+            credits_charged: 0,
+            credits_reported: None,
         };
         let evidence = vec![("call-one".into(), result)];
         let claim = json!({"entity":"8.8.8.8","namespace":"ip","predicate":"registrant","object":"Example Org","topic":"ownership","claim":"Example Org is the listed registrant.","classification":"fact","confidence":0.8,"evidence_ids":["call-one"]});
@@ -3774,8 +4008,8 @@ mod tests {
             error: None,
             cached: false,
             truncated: false,
-        credits_charged: 0,
-        credits_reported: None,
+            credits_charged: 0,
+            credits_reported: None,
         };
         store.finish_call(&call_id, &result).unwrap();
         let answer = store
@@ -3860,8 +4094,12 @@ mod tests {
         assert!(text.contains("rate limit was reached"));
         assert!(text.contains("5 tool result(s) from this run are saved"));
         assert!(text.contains("resume run run-1"));
-        assert!(provider_rate_limited(&anyhow!("provider 429 Too Many Requests")));
-        assert!(!provider_rate_limited(&anyhow!("provider 401 Unauthorized")));
+        assert!(provider_rate_limited(&anyhow!(
+            "provider 429 Too Many Requests"
+        )));
+        assert!(!provider_rate_limited(&anyhow!(
+            "provider 401 Unauthorized"
+        )));
         assert!(!synthesis_failure(anyhow!("provider 500"), "r", 1)
             .to_string()
             .contains("rate limit"));
@@ -3874,12 +4112,23 @@ mod tests {
         assert!(!is_broad_question("certificates for example.org"));
         assert_eq!(question_subject("who is jeff bezos?"), "jeff bezos");
         assert_eq!(
-            question_subject("what can you tell me about donald trump and his social media activity?"),
+            question_subject(
+                "what can you tell me about donald trump and his social media activity?"
+            ),
             "donald trump"
         );
-        assert_eq!(question_subject("Tell me about Jeff Bezos's companies"), "Jeff Bezos");
-        assert_eq!(question_subject("What is known about example.org?"), "example.org");
-        assert_eq!(question_subject("who owns example.com?"), "owns example.com");
+        assert_eq!(
+            question_subject("Tell me about Jeff Bezos's companies"),
+            "Jeff Bezos"
+        );
+        assert_eq!(
+            question_subject("What is known about example.org?"),
+            "example.org"
+        );
+        assert_eq!(
+            question_subject("who owns example.com?"),
+            "owns example.com"
+        );
         let elements = extract_grounding(&[
             "https://www.wikidata.org/wiki/Q312556".into(),
             "Jeff Bezos is an American businessman".into(),
@@ -4030,7 +4279,10 @@ mod tests {
         ]);
         let entities = investigation::select_entities("who is Elon Musk?", &hits);
         assert!(entities.iter().any(|entity| {
-            entity.identifiers.iter().any(|identifier| identifier.kind == "twitter")
+            entity
+                .identifiers
+                .iter()
+                .any(|identifier| identifier.kind == "twitter")
         }));
         assert!(entities.iter().any(|entity| {
             entity
@@ -4080,18 +4332,33 @@ mod tests {
             credit_reset: "never".into(),
             ..provider::ReconLimits::default()
         };
-        let hold = store.reserve_credits("hunter", 1, &limits).unwrap().unwrap();
+        let hold = store
+            .reserve_credits("hunter", 1, &limits)
+            .unwrap()
+            .unwrap();
         assert_eq!(hold.trial_credits, 1);
         assert_eq!(hold.allowance_credits, 0);
         store.reconcile_credits(&hold, 1).unwrap();
-        let hold = store.reserve_credits("hunter", 1, &limits).unwrap().unwrap();
+        let hold = store
+            .reserve_credits("hunter", 1, &limits)
+            .unwrap()
+            .unwrap();
         assert_eq!(hold.allowance_credits, 1);
         store.release_credits(&hold).unwrap();
-        let hold = store.reserve_credits("hunter", 1, &limits).unwrap().unwrap();
+        let hold = store
+            .reserve_credits("hunter", 1, &limits)
+            .unwrap()
+            .unwrap();
         store.reconcile_credits(&hold, 1).unwrap();
-        let hold = store.reserve_credits("hunter", 1, &limits).unwrap().unwrap();
+        let hold = store
+            .reserve_credits("hunter", 1, &limits)
+            .unwrap()
+            .unwrap();
         store.reconcile_credits(&hold, 1).unwrap();
-        assert!(store.reserve_credits("hunter", 1, &limits).unwrap().is_none());
+        assert!(store
+            .reserve_credits("hunter", 1, &limits)
+            .unwrap()
+            .is_none());
         store
             .conn
             .execute(
@@ -4143,7 +4410,13 @@ mod tests {
                 call_id: "call-1".into(),
                 ..PlanCall::default()
             }],
-            bindings: vec![Binding { kind: "domain".into(), value: "example.org".into(), evidence_id: "call-1".into(), step_id: "s1".into(), ..Default::default() }],
+            bindings: vec![Binding {
+                kind: "domain".into(),
+                value: "example.org".into(),
+                evidence_id: "call-1".into(),
+                step_id: "s1".into(),
+                ..Default::default()
+            }],
             ..Plan::default()
         };
         let (system, user) = synthesis_request(question, &plan, &evidence, "").unwrap();
@@ -4151,15 +4424,29 @@ mod tests {
         for item in &plan.directives {
             assert!(user.contains(&item.goal), "{} missing", item.id);
         }
-        assert!(user.contains("\"d3\"") && user.contains("Ordered plan") && user.contains("Accepted bindings"));
+        assert!(
+            user.contains("\"d3\"")
+                && user.contains("Ordered plan")
+                && user.contains("Accepted bindings")
+        );
         assert!(user.contains("call-1") && user.contains("example.org"));
-        assert!(system.contains("D1:") && system.contains("D3:") && system.contains("First answer the user's question"));
+        assert!(
+            system.contains("D1:")
+                && system.contains("D3:")
+                && system.contains("First answer the user's question")
+        );
         assert!(system.contains("one evidence ID per bracket") && system.contains("partly met"));
-        assert!(validate_citations("Jane runs example.org [call-1]. Q1: yes [call-1]", &evidence).is_ok());
-        assert!(validate_citations("Jane runs example.org [call-999].", &evidence)
-            .unwrap_err()
-            .to_string()
-            .contains("unknown evidence ID"));
+        assert!(validate_citations(
+            "Jane runs example.org [call-1]. Q1: yes [call-1]",
+            &evidence
+        )
+        .is_ok());
+        assert!(
+            validate_citations("Jane runs example.org [call-999].", &evidence)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown evidence ID")
+        );
         let (brief, _) = synthesis_request(question, &Plan::default(), &evidence, "").unwrap();
         assert_eq!(brief, BRIEF_SYNTHESIS);
         let prior = "George Soros and Jeff Yass joined the spending.";
@@ -4178,15 +4465,32 @@ mod tests {
             .new_run_with_models(
                 &thread.id,
                 &user.id,
-                ["grok / recon", "openrouter / typesafe/jev-1.13", "grok / synth"],
-                RunLimits { max_rounds: 6, max_calls: 12, turn_seconds: 300 },
+                [
+                    "grok / recon",
+                    "openrouter / typesafe/jev-1.13",
+                    "grok / synth",
+                ],
+                RunLimits {
+                    max_rounds: 6,
+                    max_calls: 12,
+                    turn_seconds: 300,
+                },
             )
             .unwrap();
         let loaded = store.get_run(&run.id).unwrap().unwrap();
         assert_eq!(loaded.tool_picker_model, "openrouter / typesafe/jev-1.13");
         assert_eq!(loaded.recon_model, "grok / recon");
-        let legacy = store.new_run(&thread.id, &user.id, "a / b", "c / d").unwrap();
-        assert_eq!(store.get_run(&legacy.id).unwrap().unwrap().tool_picker_model, "");
+        let legacy = store
+            .new_run(&thread.id, &user.id, "a / b", "c / d")
+            .unwrap();
+        assert_eq!(
+            store
+                .get_run(&legacy.id)
+                .unwrap()
+                .unwrap()
+                .tool_picker_model,
+            ""
+        );
         // Old plan_json without the new fields still loads.
         let old: Plan = serde_json::from_str(r#"{"objective":"x","calls":[{"step_id":"a","tool_id":"crtsh_certificates","arguments":{"domain":"example.org"}}]}"#).unwrap();
         assert!(old.directives.is_empty() && old.calls[0].status.is_empty());

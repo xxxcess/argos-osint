@@ -27,5 +27,14 @@ Firecrawl, SociaVault, and Hunter are the primary OSINT providers. Each has one 
 | SociaVault | profile, search, search users, user content, Google search | 44 one-credit routes. Followers/following and single-post routes are excluded. Google search is only a fallback after a weak Firecrawl search. |
 | Hunter | domain finder, email count, domain search, email finder, email verifier, company enrichment, email insight, person enrichment, combined enrichment | Read endpoints only. Inputs come from the prompt, Firecrawl, SociaVault, or earlier Hunter calls. `hunter_tech_lookup` is an alias for company enrichment. |
 
+NewsAPI and CourtListener (issue #29) are keyed context providers, not primary providers. NewsAPI uses `newsapi_api_key` or `NEWSAPI_API_KEY`, sent only as the `X-Api-Key` header to `newsapi.org`. CourtListener uses `courtlistener_api_token` or `COURTLISTENER_API_TOKEN`, sent only as `Authorization: Token <token>` (with `Accept: application/json`) to `www.courtlistener.com`. Neither key ever appears in a URL, tool input, cache key, plan, or stored body (a body that echoes the key is stored redacted). Both are listed at 0 credits; their budgets are per-turn call caps.
+
+| Provider | Tools | Notes |
+|---|---|---|
+| NewsAPI | article search (`/v2/everything`), top headlines (`/v2/top-headlines`) | Exact-phrase `q`, `pageSize` 20, no pagination. Optional `from`/`to`, `language`, `sort_by`, `domains` (search) and `country`, `category` (headlines). Developer plan: 100 requests a day, articles 24 h late, one month back. Cache 3600 s. `status: error` bodies (`apiKeyInvalid`, `apiKeyMissing`, `rateLimited`, …) become failed results with readable messages. |
+| CourtListener | case law (`type=o`), federal dockets (`type=r`), judges (`type=p`) on `GET /api/rest/v4/search/` | Exact-phrase `q`, first page only, at most 20 results, no `highlight`, never semantic or POST search. Optional `court`, `filed_after`, `filed_before` (case law). Free tier 5/min, 50/hour, 125/day: requests are spaced 12 s apart and 429s are not retried. Cache 86400 s. 401/403 become failed results with readable messages. |
+
+Recon limits add `news_calls_per_turn` (default 2) and `legal_calls_per_turn` (default 3). Failed and rate-limited results are never cached.
+
 Recon limits add `sociavault_turn_credits_opening` (default 3), `sociavault_turn_credits_later` (default 8), and `google_fallback_min_results` (default 3). These are spec defaults that still need confirmation. `opening_sociavault_calls` is still read from older settings files but is no longer used.
 

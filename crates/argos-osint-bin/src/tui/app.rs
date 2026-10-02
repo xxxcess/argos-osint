@@ -133,6 +133,8 @@ pub enum FieldId {
     FirecrawlKey,
     HunterKey,
     SociaVaultKey,
+    NewsApiKey,
+    CourtListenerKey,
     ReconProvider,
     ReconModel,
     PickerProvider,
@@ -238,6 +240,8 @@ pub enum ButtonId {
     SaveFirecrawlKey,
     SaveHunterKey,
     SaveSociaVaultKey,
+    SaveNewsApiKey,
+    SaveCourtListenerKey,
     OpenSource,
     ClearLog,
     GrokSignIn,
@@ -323,6 +327,8 @@ pub struct App {
     pub firecrawl_key: String,
     pub hunter_key: String,
     pub sociavault_key: String,
+    pub newsapi_key: String,
+    pub courtlistener_key: String,
     osint_inputs: HashMap<String, String>,
     pub selected_thread: Option<String>,
     pub threads: Vec<recon::Thread>,
@@ -476,6 +482,8 @@ impl App {
             firecrawl_key: settings.firecrawl_api_key.clone(),
             hunter_key: settings.hunter_api_key.clone(),
             sociavault_key: settings.sociavault_api_key.clone(),
+            newsapi_key: settings.newsapi_api_key.clone(),
+            courtlistener_key: settings.courtlistener_api_token.clone(),
             selected_thread,
             threads,
             thread_states,
@@ -649,6 +657,8 @@ impl App {
             FieldId::FirecrawlKey => &self.firecrawl_key,
             FieldId::HunterKey => &self.hunter_key,
             FieldId::SociaVaultKey => &self.sociavault_key,
+            FieldId::NewsApiKey => &self.newsapi_key,
+            FieldId::CourtListenerKey => &self.courtlistener_key,
             FieldId::ReconProvider => &self.recon_provider,
             FieldId::ReconModel => &self.recon_model,
             FieldId::PickerProvider => &self.picker_provider,
@@ -673,6 +683,8 @@ impl App {
             FieldId::FirecrawlKey => &mut self.firecrawl_key,
             FieldId::HunterKey => &mut self.hunter_key,
             FieldId::SociaVaultKey => &mut self.sociavault_key,
+            FieldId::NewsApiKey => &mut self.newsapi_key,
+            FieldId::CourtListenerKey => &mut self.courtlistener_key,
             FieldId::ReconProvider => &mut self.recon_provider,
             FieldId::ReconModel => &mut self.recon_model,
             FieldId::PickerProvider => &mut self.picker_provider,
@@ -945,6 +957,31 @@ impl App {
         Ok("SociaVault API key saved".into())
     }
 
+    fn remember_newsapi_key(&mut self) -> Result<String> {
+        let key = self.newsapi_key.trim().to_string();
+        anyhow::ensure!(!key.is_empty(), "Enter a NewsAPI key");
+        self.settings.newsapi_api_key = key;
+        self.save_settings()?;
+        Ok("NewsAPI key saved".into())
+    }
+
+    fn remember_courtlistener_key(&mut self) -> Result<String> {
+        let key = self.courtlistener_key.trim().to_string();
+        anyhow::ensure!(!key.is_empty(), "Enter a CourtListener API token");
+        self.settings.courtlistener_api_token = key;
+        self.save_settings()?;
+        Ok("CourtListener API token saved".into())
+    }
+
+    /// The tool's provider has no key saved and none in its environment variable.
+    pub fn tool_needs_key(&self, id: &str) -> bool {
+        self.tool_needs_key_with(id, |name| std::env::var(name).ok())
+    }
+
+    pub fn tool_needs_key_with(&self, id: &str, env: impl Fn(&str) -> Option<String>) -> bool {
+        osint::endpoint_cost(id).is_some_and(|cost| self.settings.provider_key_with(cost.provider, env).is_empty())
+    }
+
     fn run_osint(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.osint_cancel.is_none(),
@@ -961,6 +998,11 @@ impl App {
             self.remember_hunter_key()?;
         } else if tool.id.starts_with("sociavault_") {
             self.remember_sociavault_key()?;
+        } else if tool.id.starts_with("newsapi_") && !self.newsapi_key.trim().is_empty() {
+            // An empty field falls back to NEWSAPI_API_KEY.
+            self.remember_newsapi_key()?;
+        } else if tool.id.starts_with("courtlistener_") && !self.courtlistener_key.trim().is_empty() {
+            self.remember_courtlistener_key()?;
         }
         let service =
             recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
@@ -1475,6 +1517,8 @@ impl App {
             ButtonId::SaveFirecrawlKey => self.remember_firecrawl_key(),
             ButtonId::SaveHunterKey => self.remember_hunter_key(),
             ButtonId::SaveSociaVaultKey => self.remember_sociavault_key(),
+            ButtonId::SaveNewsApiKey => self.remember_newsapi_key(),
+            ButtonId::SaveCourtListenerKey => self.remember_courtlistener_key(),
             ButtonId::OpenSource => self
                 .open_insight_source()
                 .map(|_| "Source thread opened".into()),
@@ -2763,6 +2807,8 @@ mod tests {
             firecrawl_key: String::new(),
             hunter_key: String::new(),
             sociavault_key: String::new(),
+            newsapi_key: String::new(),
+            courtlistener_key: String::new(),
             selected_thread: None,
             threads: Vec::new(),
             thread_states: HashMap::new(),
@@ -3485,6 +3531,63 @@ mod tests {
         assert!(!hit(&app, Target::Field(FieldId::FirecrawlKey)));
         assert!(!hit(&app, Target::Field(FieldId::HunterKey)));
         assert!(!hit(&app, Target::Field(FieldId::SociaVaultKey)));
+    }
+
+    /// AC2: NewsAPI and CourtListener tools each show a masked key row with a Save
+    /// button; saving stores the key for every tool of the provider, and a tool without
+    /// a saved or environment key shows "needs key".
+    #[test]
+    fn news_and_legal_key_fields_save_and_show_needs_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app();
+        app.settings_path = dir.path().join("config.toml");
+        app.screen = Rect::new(0, 0, 100, 36);
+        app.select(2);
+        let select = |app: &mut App, id: &str| app.tool_sel = osint::registry().iter().position(|tool| tool.id == id).unwrap();
+        for id in ["newsapi_search", "newsapi_headlines"] {
+            select(&mut app, id);
+            assert!(hit(&app, Target::Field(FieldId::NewsApiKey)), "{id}");
+            assert!(hit(&app, Target::Button(ButtonId::SaveNewsApiKey)), "{id}");
+            assert!(!hit(&app, Target::Field(FieldId::CourtListenerKey)), "{id}");
+        }
+        for id in ["courtlistener_case_search", "courtlistener_docket_search", "courtlistener_judge_search"] {
+            select(&mut app, id);
+            assert!(hit(&app, Target::Field(FieldId::CourtListenerKey)), "{id}");
+            assert!(hit(&app, Target::Button(ButtonId::SaveCourtListenerKey)), "{id}");
+        }
+        // Without a saved or environment key every tool of the provider needs one.
+        let no_env = |_: &str| None;
+        for id in osint::NEWS_TOOLS.iter().chain(osint::LEGAL_TOOLS) {
+            assert!(app.tool_needs_key_with(id, no_env), "{id}");
+        }
+        assert!(!app.tool_needs_key_with("crtsh_certificates", no_env), "keyless tools never need one");
+        let env_court = |name: &str| (name == "COURTLISTENER_API_TOKEN").then(|| "env-token".to_string());
+        assert!(!app.tool_needs_key_with("courtlistener_judge_search", env_court), "the env fallback counts");
+        // Saving from the key row stores it for the provider.
+        select(&mut app, "newsapi_headlines");
+        app.newsapi_key = "news-secret-29".into();
+        click(&mut app, Target::Button(ButtonId::SaveNewsApiKey));
+        assert_eq!(app.status, "NewsAPI key saved");
+        select(&mut app, "courtlistener_case_search");
+        app.courtlistener_key = "court-secret-29".into();
+        click(&mut app, Target::Button(ButtonId::SaveCourtListenerKey));
+        assert_eq!(app.status, "CourtListener API token saved");
+        assert_eq!((app.settings.newsapi_api_key.as_str(), app.settings.courtlistener_api_token.as_str()), ("news-secret-29", "court-secret-29"));
+        for id in osint::NEWS_TOOLS.iter().chain(osint::LEGAL_TOOLS) {
+            assert!(!app.tool_needs_key_with(id, no_env), "{id}: one key enables every tool of the provider");
+        }
+        let saved = std::fs::read_to_string(&app.settings_path).unwrap();
+        assert!(saved.contains("newsapi_api_key") && saved.contains("courtlistener_api_token"), "{saved}");
+        // The key field is masked on screen and "needs key" shows on unkeyed tools.
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        terminal.draw(|frame| super::super::ui::draw(frame, &app)).unwrap();
+        let text = screen_text(&terminal);
+        assert!(!text.contains("court-secret-29") && text.contains("•••••"), "masked key field");
+        app.settings.courtlistener_api_token.clear();
+        if std::env::var("COURTLISTENER_API_TOKEN").is_err() {
+            terminal.draw(|frame| super::super::ui::draw(frame, &app)).unwrap();
+            assert!(screen_text(&terminal).contains("needs key"));
+        }
     }
 
     fn screen_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {

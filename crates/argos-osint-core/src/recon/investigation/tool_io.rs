@@ -104,8 +104,83 @@ pub const PROMPT_KINDS: &[&str] = &[
 #[cfg_attr(not(test), allow(dead_code))]
 pub const PROMPT_ONLY: &[(&str, &str)] = &[];
 
+/// Directive context kinds (#29): a directive may target them, but they are not binding
+/// kinds and no tool binds them. News tools serve `news`, Legal tools serve `legal`.
+pub const NEWS_KIND: &str = "news";
+pub const LEGAL_KIND: &str = "legal";
+pub const CONTEXT_KINDS: &[&str] = &[NEWS_KIND, LEGAL_KIND];
+
 pub fn known_kind(kind: &str) -> bool {
     BINDING_KINDS.contains(&kind) || kind == URL_KIND || kind == COORDINATES_KIND
+}
+
+/// A kind a directive may target: a binding kind or a context kind.
+pub fn target_kind_allowed(kind: &str) -> bool {
+    known_kind(kind) || CONTEXT_KINDS.contains(&kind)
+}
+
+/// The context kind a tool serves (`news`, `legal`), if it is a context tool.
+pub fn context_of(tool_id: &str) -> Option<&'static str> {
+    tool_row(tool_id).map(|row| row.context).filter(|kind| !kind.is_empty())
+}
+
+const MONTHS: &[&str] = &["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+
+/// A date at the start of `words`: `2026-03-15`, `March 2026`, `March 15, 2026`,
+/// `15 March 2026`, or a bare year. `end` picks the last day of a month or year.
+fn date_at(words: &[String], end: bool) -> Option<String> {
+    let first = words.first()?;
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(first, "%Y-%m-%d") {
+        return Some(date.format("%Y-%m-%d").to_string());
+    }
+    let year = |word: &str| word.parse::<i32>().ok().filter(|year| (1900..=2100).contains(year));
+    let month = |word: &str| MONTHS.iter().position(|name| *name == word || (word.len() >= 3 && name.starts_with(word) && word.len() <= name.len())).map(|index| index as u32 + 1);
+    let day = |word: &str| word.parse::<u32>().ok().filter(|day| (1..=31).contains(day));
+    let build = |y: i32, m: u32, d: Option<u32>| {
+        let date = match d {
+            Some(d) => chrono::NaiveDate::from_ymd_opt(y, m, d)?,
+            None if end => {
+                let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+                chrono::NaiveDate::from_ymd_opt(ny, nm, 1)?.pred_opt()?
+            }
+            None => chrono::NaiveDate::from_ymd_opt(y, m, 1)?,
+        };
+        Some(date.format("%Y-%m-%d").to_string())
+    };
+    let second = words.get(1).map(String::as_str).unwrap_or("");
+    let third = words.get(2).map(String::as_str).unwrap_or("");
+    if let Some(m) = month(first) {
+        if let (Some(d), Some(y)) = (day(second), year(third)) {
+            return build(y, m, Some(d));
+        }
+        return year(second).and_then(|y| build(y, m, None));
+    }
+    if let (Some(d), Some(m), Some(y)) = (day(first), month(second), year(third)) {
+        return build(y, m, Some(d));
+    }
+    year(first).and_then(|y| build(y, if end { 12 } else { 1 }, if end { Some(31) } else { Some(1) }))
+}
+
+/// Dates the prompt writes: `(start, end)` from "since/after/from <date>" and
+/// "before/until/through <date>". None otherwise; dates are never invented.
+pub fn prompt_dates(question: &str) -> (Option<String>, Option<String>) {
+    let words: Vec<String> = question
+        .to_ascii_lowercase()
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '?' || ch == '!')
+        .map(|word| word.trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-')).to_string())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let (mut start, mut end) = (None, None);
+    for (index, word) in words.iter().enumerate() {
+        let rest = &words[index + 1..];
+        match word.as_str() {
+            "since" | "after" | "from" if start.is_none() => start = date_at(rest, false),
+            "before" if end.is_none() => end = date_at(rest, false),
+            "until" | "through" | "till" if end.is_none() => end = date_at(rest, true),
+            _ => {}
+        }
+    }
+    (start, end)
 }
 
 /// The SociaVault tools whose observation lists accounts found by search: those handles
@@ -149,6 +224,11 @@ pub enum How {
     Coordinates,
     /// The derived question's text, else the subject.
     SearchQuery,
+    /// The directive entity alone (News and Legal tools send it as an exact phrase).
+    EntityPhrase,
+    /// A date written in the prompt: `true` for a start ("since March 2026"), `false` for
+    /// an end ("before May 2026"). Never filled otherwise.
+    PromptDate(bool),
 }
 
 pub struct Fill {
@@ -186,6 +266,9 @@ pub struct ToolIo {
     pub optional: &'static [Fill],
     /// Handles this tool finds are search results: `unverified` until confirmed.
     pub unverified_handles: bool,
+    /// Directive context kind (`news` or `legal`) a context tool serves. Context tools
+    /// produce no bindings, only evidence, and serve only directives targeting the kind.
+    pub context: &'static str,
 }
 
 const fn fill(kind: &'static str, input: &'static str) -> Fill {
@@ -209,10 +292,12 @@ const fn row(tool: &'static str, slots: &'static [Slot], produces: &'static [&'s
         per_platform: false,
         optional: &[],
         unverified_handles: false,
+        context: "",
     }
 }
 
 const DOMAIN: Slot = Slot { fills: &[fill("domain", "domain")] };
+const ENTITY_PHRASE: Slot = Slot { fills: &[fill_how(QUERY_KIND, "query", How::EntityPhrase)] };
 const IP: Slot = Slot { fills: &[fill("ip", "ip")] };
 const CVE: Slot = Slot { fills: &[fill("cve", "cve_id")] };
 const WALLET: Slot = Slot { fills: &[fill("wallet", "bitcoin_address")] };
@@ -385,6 +470,13 @@ pub const TOOLS: &[ToolIo] = &[
             &["handle", "url", "domain", "email"],
         )
     },
+    // Context tools (#29): the entity alone, dates only when the prompt writes one, and no
+    // bindings: their URLs are evidence and citations only (D1 unchanged).
+    ToolIo { context: NEWS_KIND, optional: &[fill_how(QUERY_KIND, "from", How::PromptDate(true)), fill_how(QUERY_KIND, "to", How::PromptDate(false))], ..row("newsapi_search", &[ENTITY_PHRASE], &[]) },
+    ToolIo { context: NEWS_KIND, ..row("newsapi_headlines", &[ENTITY_PHRASE], &[]) },
+    ToolIo { context: LEGAL_KIND, optional: &[fill_how(QUERY_KIND, "filed_after", How::PromptDate(true)), fill_how(QUERY_KIND, "filed_before", How::PromptDate(false))], ..row("courtlistener_case_search", &[ENTITY_PHRASE], &[]) },
+    ToolIo { context: LEGAL_KIND, optional: &[fill_how(QUERY_KIND, "filed_after", How::PromptDate(true))], ..row("courtlistener_docket_search", &[ENTITY_PHRASE], &[]) },
+    ToolIo { context: LEGAL_KIND, ..row("courtlistener_judge_search", &[ENTITY_PHRASE], &[]) },
     // No declared producer: Recon inserts it bound, after a weak Firecrawl search (D3).
     row("sociavault_google_search", &[Slot { fills: &[fill_how(QUERY_KIND, "query", How::SearchQuery)] }], &["domain", "url", "handle", "person_name", "org_name", "email"]),
 ];
@@ -736,6 +828,30 @@ fn choose(fill: &Fill, bindings: &[Binding], ctx: &Ctx) -> Option<Chosen> {
                 sources: vec![ground(binding); 2],
             })
         }
+        How::EntityPhrase => match ctx.directive {
+            Some(directive) => {
+                let grounded = super::directive_query(directive, false)?;
+                Some(Chosen {
+                    filled: vec![format!("{}={} ({})", fill.input, grounded.query, grounded.source)],
+                    args: vec![(fill.input, json!(grounded.query))],
+                    sources: vec![grounded.source],
+                })
+            }
+            None => {
+                let hint = clip_query(hint);
+                let query = if hint.is_empty() { subject.to_string() } else { hint };
+                (!query.is_empty()).then(|| Chosen { args: vec![(fill.input, json!(query))], filled: Vec::new(), sources: vec![PROMPT_SOURCE.into()] })
+            }
+        },
+        How::PromptDate(start) => {
+            let (from, to) = prompt_dates(ctx.question);
+            let date = if start { from } else { to }?;
+            Some(Chosen {
+                filled: vec![format!("{}={date} (date in the prompt)", fill.input)],
+                args: vec![(fill.input, json!(date))],
+                sources: vec![PROMPT_SOURCE.into()],
+            })
+        }
         How::SearchQuery => match ctx.directive {
             // The directive's entity plus its fixed qualifier, never question text.
             Some(directive) => {
@@ -834,7 +950,7 @@ fn entity_choice(slot: &Slot, eligible: &[Binding], ctx: &Ctx, tool: &str) -> Op
     let label = format!("{} entity", directive.id);
     for fill in slot.fills.iter().filter(|fill| name_like(fill)) {
         match fill.how {
-            How::SearchQuery => return choose(fill, eligible, ctx),
+            How::SearchQuery | How::EntityPhrase => return choose(fill, eligible, ctx),
             How::PlatformQuery(query_tool) => {
                 // Platform searches send the entity alone.
                 let grounded = super::directive_query(directive, false)?;
@@ -943,6 +1059,9 @@ pub fn bind_step(tool_id: &str, bindings: &[Binding], question: &str, directive:
 /// Kinds a tool reports evidence about: what it produces, or for a tool that produces no
 /// bindings (a verifier, a balance lookup), the kinds it takes.
 pub fn evidence_kinds(tool_id: &str) -> Vec<&'static str> {
+    if let Some(kind) = context_of(tool_id) {
+        return vec![kind];
+    }
     let produced = output_kinds(tool_id);
     if produced.is_empty() {
         input_kinds(tool_id)

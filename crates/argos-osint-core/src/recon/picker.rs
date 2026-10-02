@@ -39,11 +39,13 @@ pub struct CatalogEntry {
     pub keyed: bool,
 }
 
-/// Enabled tools with a bindable input. Unkeyed tools stay, marked `keyed: false`.
+/// Enabled tools with a bindable input. Unkeyed tools stay, marked `keyed: false`, except
+/// News and Legal tools (#29): without their key they are left out entirely.
 pub fn eligible_catalog(enabled: &HashSet<String>, unkeyed: &HashSet<String>) -> Vec<CatalogEntry> {
     crate::osint::registry()
         .iter()
         .filter(|tool| enabled.contains(tool.id) && investigation::pickable(tool.id))
+        .filter(|tool| !(investigation::context_of(tool.id).is_some() && unkeyed.contains(tool.id)))
         .map(|tool| CatalogEntry {
             id: tool.id.into(),
             category: tool.category.into(),
@@ -371,6 +373,17 @@ impl<'a> Picker<'a> {
                 picked.push(id);
             }
         }
+        // A directive that targets news or legal gets its context tool even when the model
+        // left it out (the keyword rule already limited those targets to such prompts).
+        for id in context_additions(context.questions, &candidates, &picked, context.question) {
+            if picked.len() >= MAX_PICKS {
+                break;
+            }
+            let kind = investigation::context_of(&id).unwrap_or_default();
+            ordered.records.push(fallback_record(picked.len() + 1, &id, candidates.len(), &format!("A directive targets {kind}; Recon added its {kind} tool."), context.questions));
+            candidates.retain(|other| other != &id);
+            picked.push(id);
+        }
         ordered.tools = investigation::dependency_order(&picked, context.bindings, &ordered.produces);
         for record in ordered.records.iter_mut().filter(|record| record.position > 0 && matches!(record.outcome.as_str(), "accepted" | "fallback")) {
             if let Some(position) = ordered.tools.iter().position(|id| id == &record.tool_id) {
@@ -485,6 +498,46 @@ pub struct OrderContext<'a> {
     pub max_calls: usize,
 }
 
+/// The context tools a turn should run for its news and legal directives: NewsAPI
+/// search (top headlines too when the prompt says headlines) for `news`; CourtListener
+/// case and docket search (judge search first when the prompt asks about a judge) for
+/// `legal`. Only candidates, in that order.
+pub fn context_tools(directives: &[Directive], candidates: &[String], question: &str) -> Vec<String> {
+    let lower = question.to_ascii_lowercase();
+    let mut wanted: Vec<&str> = Vec::new();
+    for kind in investigation::CONTEXT_KINDS {
+        if !directives.iter().any(|item| item.targets.iter().any(|target| target == kind)) {
+            continue;
+        }
+        if *kind == investigation::NEWS_KIND {
+            wanted.push("newsapi_search");
+            if lower.contains("headline") {
+                wanted.push("newsapi_headlines");
+            }
+        } else {
+            if lower.contains("judge") {
+                wanted.push("courtlistener_judge_search");
+            }
+            wanted.extend(["courtlistener_case_search", "courtlistener_docket_search"]);
+        }
+    }
+    wanted.into_iter().filter(|id| candidates.iter().any(|known| known == id)).map(String::from).collect()
+}
+
+/// Context tools still missing after the picker: for each targeted kind with no picked
+/// tool of that kind, the first context tool of that kind among the candidates.
+fn context_additions(directives: &[Directive], candidates: &[String], picked: &[String], question: &str) -> Vec<String> {
+    let mut added: Vec<String> = Vec::new();
+    for id in context_tools(directives, candidates, question) {
+        let kind = investigation::context_of(&id);
+        let covered = picked.iter().chain(&added).any(|known| investigation::context_of(known) == kind);
+        if !covered {
+            added.push(id);
+        }
+    }
+    added
+}
+
 fn fallback_record(position: usize, id: &str, candidates: usize, reason: &str, questions: &[Directive]) -> PickRecord {
     PickRecord {
         position,
@@ -514,7 +567,8 @@ pub fn serves_for(tool_id: &str, directives: &[Directive]) -> Vec<String> {
 /// plan) every candidate stays.
 pub fn serving(candidates: Vec<String>, directives: &[Directive]) -> Vec<String> {
     if directives.is_empty() {
-        return candidates;
+        // News and Legal tools only ever serve a directive that targets their kind.
+        return candidates.into_iter().filter(|id| investigation::context_of(id).is_none()).collect();
     }
     candidates.into_iter().filter(|id| !serves_for(id, directives).is_empty()).collect()
 }

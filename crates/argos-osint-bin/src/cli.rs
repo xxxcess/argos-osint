@@ -150,6 +150,12 @@ enum ReconCommand {
         hunter_call_cost: Option<u32>,
         #[arg(long)]
         sociavault_call_cost: Option<u32>,
+        /// NewsAPI calls per turn (default 2).
+        #[arg(long)]
+        news_calls_per_turn: Option<u32>,
+        /// CourtListener calls per turn (default 3).
+        #[arg(long)]
+        legal_calls_per_turn: Option<u32>,
     },
 }
 
@@ -578,6 +584,8 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             firecrawl_scrape_cost,
             hunter_call_cost,
             sociavault_call_cost,
+            news_calls_per_turn,
+            legal_calls_per_turn,
         } => {
             let mut settings = SettingsFile::load()?;
             let mut changed = false;
@@ -652,6 +660,16 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                 sociavault_call_cost,
                 &mut changed,
             );
+            for (slot, value, name) in [
+                (&mut settings.recon_limits.news_calls_per_turn, news_calls_per_turn, "news-calls-per-turn"),
+                (&mut settings.recon_limits.legal_calls_per_turn, legal_calls_per_turn, "legal-calls-per-turn"),
+            ] {
+                if let Some(value) = value {
+                    anyhow::ensure!(value <= 10, "{name} must be 0..10");
+                    *slot = value;
+                    changed = true;
+                }
+            }
             if let Some(value) = opening_hunter {
                 anyhow::ensure!((0..=4).contains(&value), "opening-hunter must be 0..4");
                 settings.recon_limits.opening_hunter_calls = value;

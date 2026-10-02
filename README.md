@@ -22,13 +22,22 @@ Each turn checks Brain first. Recon then turns the prompt into exactly three dir
 
 All nine Hunter tools share one key. Enter it on any Hunter tool, or export `HUNTER_API_KEY`. A saved key overrides the environment variable. The SociaVault tools work the same way with `SOCIAVAULT_API_KEY`, and the Firecrawl tools with `FIRECRAWL_API_KEY`. The old `hunter_tech_lookup` id still runs as `hunter_company_enrichment`. Handles and company domains found in earlier results feed SociaVault profiles and Hunter domain lookups in the same turn when the picker orders them. Social-network hosts such as `x.com` stay on the profile lookup and are never sent to Hunter.
 
-OSINT lists 50 HTTP lookup tools in thirteen categories. Of these, 20 belong to the primary providers:
+OSINT lists 55 HTTP lookup tools in fifteen categories. Of these, 20 belong to the primary providers:
 
 | Provider | Tools | Routes |
 |---|---|---|
 | Firecrawl | `firecrawl_search`, `firecrawl_scrape`, `firecrawl_map`, `firecrawl_batch_scrape`, `firecrawl_crawl` (off by default), `firecrawl_extract` | 6 endpoints |
 | SociaVault | `sociavault_profile` (10), `sociavault_search` (12), `sociavault_search_users` (3), `sociavault_user_content` (18), `sociavault_google_search` (1) | 44 one-credit routes; no followers/following or single-post routes |
 | Hunter | `hunter_domain_finder`, `hunter_email_count`, `hunter_domain_search`, `hunter_email_finder`, `hunter_email_verifier`, `hunter_company_enrichment`, `hunter_email_insight`, `hunter_person_enrichment`, `hunter_combined_enrichment` | 9 read endpoints |
+
+Five more are keyed context tools (issue #29):
+
+| Provider | Tools | Key |
+|---|---|---|
+| NewsAPI (News) | `newsapi_search` (`/v2/everything`), `newsapi_headlines` (`/v2/top-headlines`) | `NEWSAPI_API_KEY` or the key field on a News tool; sent as `X-Api-Key` |
+| CourtListener (Legal) | `courtlistener_case_search` (opinions), `courtlistener_docket_search` (federal dockets), `courtlistener_judge_search` | `COURTLISTENER_API_TOKEN` or the key field on a Legal tool; sent as `Authorization: Token …` |
+
+Recon uses them only when the prompt asks about news, current events, recent activity, or controversies (`news`), or about lawsuits, court cases, litigation, rulings, judges, or legal trouble (`legal`); a plain "who is X?" uses neither. They search the bare subject as an exact phrase (`"Elon Musk"`), take dates only when the prompt writes one ("since March 2026"), read one page of at most 20 results, and keep only results whose title or snippet names the subject. At most 2 NewsAPI and 3 CourtListener calls run per turn (`recon limits --news-calls-per-turn`, `--legal-calls-per-turn`), CourtListener requests are spaced 12 s apart, and a CourtListener 429 skips the rest of that turn's CourtListener steps. Free-tier NewsAPI articles are 24 hours old and reach back one month. A tool without its key shows "needs key" and is never picked. Their results are evidence and citations only; they feed no other tool.
 
 The other 30 tools are gap-fillers (DNS, certificates, RDAP, archives, code search, registries, geocoding, wallets, CVEs, IP reputation). Choose a tool to see its input schema, example, documentation, access restrictions, result, and source. Manual runs remain in history and can be attached to a Recon thread without another request. Prev and Next move through saved manual results. A standalone result does not create a Brain insight; Recon extracts insights from cited evidence after synthesis. Some public services require an identifying User-Agent and impose quotas or licensing limits. Set one before SEC or Nominatim lookups:
 

@@ -35,8 +35,53 @@ pub const PROVIDER_TERMS: &[&str] = &[
     "commoncrawl", "arquivo", "github", "gitlab", "grep.app", "grepapp", "gleif", "edgar",
     "stack exchange", "stackexchange", "wikipedia", "nominatim", "overpass", "blockchain.com",
     "blockstream", "mempool", "mempool.space", "nvd", "osv", "sans isc", "shodan", "internetdb",
-    "urlscan", "google", "api",
+    "urlscan", "google", "api", "newsapi", "news api", "courtlistener", "court listener",
 ];
+
+/// Prompt words that ask about news or current events (#29): the `news` context target.
+const NEWS_WORDS: &[&str] = &[
+    "news", "headline", "headlines", "current events", "recent", "recently", "lately", "latest",
+    "controversy", "controversies", "controversial", "scandal", "scandals", "in the press",
+    "what's happening with", "what is happening with", "whats happening with",
+];
+/// Prompt words that ask about courts or legal trouble (#29): the `legal` context target.
+const LEGAL_WORDS: &[&str] = &[
+    "lawsuit", "lawsuits", "sued", "suing", "court case", "court cases", "in court", "court ruling",
+    "court rulings", "court records", "court filings", "litigation", "ruling", "rulings", "judge", "judges", "legal trouble", "legal troubles",
+    "legal issues", "legal case", "legal cases", "indicted", "indictment",
+];
+
+/// Context kinds (`news`, `legal`) the prompt asks about, by the deterministic keyword
+/// rule. A plain "who is X?" yields neither, which saves the providers' daily quotas.
+pub fn context_targets(question: &str) -> Vec<&'static str> {
+    let lower = question.to_ascii_lowercase().replace('\u{2019}', "'");
+    let padded = format!(" {} ", lower.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '\'' { ch } else { ' ' }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "));
+    let hit = |words: &[&str]| words.iter().any(|word| padded.contains(&format!(" {word} ")));
+    let mut kinds = Vec::new();
+    if hit(NEWS_WORDS) {
+        kinds.push(super::tool_io::NEWS_KIND);
+    }
+    if hit(LEGAL_WORDS) {
+        kinds.push(super::tool_io::LEGAL_KIND);
+    }
+    kinds
+}
+
+/// Context targets follow the keyword rule: added to d1 when the prompt asks for them,
+/// removed where it does not.
+fn apply_context_targets(directives: &mut [Directive], question: &str) {
+    let wanted = context_targets(question);
+    for item in directives.iter_mut() {
+        item.targets.retain(|kind| !super::tool_io::CONTEXT_KINDS.contains(&kind.as_str()) || wanted.contains(&kind.as_str()));
+    }
+    for kind in wanted {
+        if !directives.iter().any(|item| item.targets.iter().any(|known| known == kind)) {
+            if let Some(first) = directives.first_mut() {
+                first.targets.push(kind.to_string());
+            }
+        }
+    }
+}
 
 const PRONOUNS: &[&str] = &[
     "he", "him", "his", "himself", "she", "her", "hers", "herself", "they", "them", "their",
@@ -172,11 +217,82 @@ pub fn directive_entities(question: &str, thread: &[String]) -> Vec<String> {
             return vec![email];
         }
     }
+    if !context_targets(question).is_empty() {
+        if let Some(entity) = context_entity(question) {
+            return vec![display_name(&entity)];
+        }
+    }
     let subject = subject_phrase(question);
     if subject.is_empty() || words_of(&subject).iter().all(|word| PRONOUNS.contains(&word.as_str())) {
         return Vec::new();
     }
     vec![display_name(&subject)]
+}
+
+/// Words a news or legal prompt wraps around its subject ("in the news about …",
+/// "… been sued"), stripped so the entity stays a bare name.
+const CONTEXT_FILLER: &[&str] = &[
+    "been", "sued", "suing", "being", "in", "the", "news", "headlines", "lately", "recently", "recent",
+    "latest", "court", "courts", "case", "cases", "lawsuit", "lawsuits", "litigation", "legal",
+    "trouble", "troubles", "issues", "ruling", "rulings", "controversy", "controversies", "any",
+    "of", "about", "with", "against", "involving", "on", "or", "and", "since", "before", "after",
+    "until", "what's", "whats", "happening", "current", "events", "press", "judge", "judges",
+];
+
+/// The subject of a news or legal prompt: a run of two or more capitalized words
+/// ("Elon Musk"), else the words after about/with/against/involving, else the subject
+/// phrase, with the context words around it removed.
+fn context_entity(question: &str) -> Option<String> {
+    let bare = |word: &str| word.split(['\'', '\u{2019}']).next().unwrap_or("").trim_matches(|ch: char| !ch.is_alphanumeric()).to_string();
+    let words: Vec<&str> = question.split_whitespace().collect();
+    let capital = |word: &str| {
+        let token = bare(word);
+        token.chars().next().is_some_and(char::is_uppercase)
+            && !QUESTION_WORDS.contains(&token.to_ascii_lowercase().as_str())
+            && !PRONOUNS.contains(&token.to_ascii_lowercase().as_str())
+            && !CONTEXT_FILLER.contains(&token.to_ascii_lowercase().as_str())
+    };
+    let mut index = 0;
+    while index < words.len() {
+        if capital(words[index]) {
+            let mut end = index;
+            // A run stops after a word that ends a clause ("Musk," or "Musk?").
+            while end + 1 < words.len() && capital(words[end + 1]) && !words[end].ends_with([',', '?', '.', ';', '!']) {
+                end += 1;
+            }
+            if end > index {
+                let run: Vec<String> = words[index..=end].iter().map(|word| word.trim_end_matches(|ch: char| !ch.is_alphanumeric()).trim_end_matches("'s").to_string()).collect();
+                return Some(run.join(" "));
+            }
+            index = end + 1;
+        } else {
+            index += 1;
+        }
+    }
+    let trim = |phrase: &str| {
+        let mut tokens: Vec<String> = phrase
+            .split_whitespace()
+            .map(|word| word.trim_matches(|ch: char| !(ch.is_alphanumeric() || ch == '\'' || ch == '.' || ch == '-')).trim_end_matches("'s").to_string())
+            .filter(|word| !word.is_empty())
+            .collect();
+        while tokens.first().is_some_and(|word| CONTEXT_FILLER.contains(&word.to_ascii_lowercase().as_str()) || QUESTION_WORDS.contains(&word.to_ascii_lowercase().as_str())) {
+            tokens.remove(0);
+        }
+        if let Some(cut) = tokens.iter().position(|word| CONTEXT_FILLER.contains(&word.to_ascii_lowercase().as_str())) {
+            tokens.truncate(cut);
+        }
+        let entity = tokens.join(" ");
+        (!entity.is_empty() && !words_of(&entity).iter().all(|word| PRONOUNS.contains(&word.as_str()))).then_some(entity)
+    };
+    let lower = question.to_ascii_lowercase();
+    for marker in [" about ", " with ", " against ", " involving "] {
+        if let Some(at) = lower.find(marker) {
+            if let Some(entity) = trim(&question[at + marker.len()..]) {
+                return Some(entity);
+            }
+        }
+    }
+    trim(&subject_phrase(question))
 }
 
 fn prompt_targets(question: &str) -> Vec<String> {
@@ -217,7 +333,7 @@ pub fn fallback_directives(question: &str, thread: &[String]) -> Vec<Directive> 
             first.targets.push(kind);
         }
     }
-    vec![
+    let mut list = vec![
         first,
         directive(
             "d2",
@@ -233,7 +349,9 @@ pub fn fallback_directives(question: &str, thread: &[String]) -> Vec<Directive> 
             &["org_name", "domain", "email"],
             "at least one affiliated organization or contact domain is accepted",
         ),
-    ]
+    ];
+    apply_context_targets(&mut list, question);
+    list
 }
 
 /// Why a goal is not a valid directive goal, if it is not (tests; parsing uses
@@ -320,7 +438,7 @@ pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Res
             return Err(format!("{expected} has no targets"));
         }
         for kind in &parsed.targets {
-            if !super::known_kind(kind) {
+            if !super::tool_io::target_kind_allowed(kind) {
                 return Err(format!("{expected} targets {kind}, which is not in the binding vocabulary"));
             }
         }
@@ -336,6 +454,11 @@ pub fn parse_directives(value: &Value, question: &str, thread: &[String]) -> Res
         if !directives.iter().any(|item| item.targets.contains(&kind)) {
             directives[0].targets.push(kind);
         }
+    }
+    apply_context_targets(&mut directives, question);
+    // A directive left with no target after the rule keeps d1's identity kinds.
+    for item in directives.iter_mut().filter(|item| item.targets.is_empty()) {
+        item.targets = vec!["person_name".into(), "org_name".into(), "url".into()];
     }
     Ok(directives)
 }
@@ -462,3 +585,37 @@ pub fn relevance_gate(tool_id: &str, entities: &[String], observations: &Value, 
     (kept, dropped)
 }
 
+
+/// Relevance gate for News and Legal results (#29): a row is kept only when its title or
+/// snippet contains a directive entity, or every name token of one. Returns the
+/// observation with the failing rows removed and the titles of the dropped rows.
+pub fn context_gate(entities: &[String], observations: &Value) -> (Value, Vec<String>) {
+    let mut gated = observations.clone();
+    let Some(rows) = gated.get_mut("results").and_then(Value::as_array_mut) else {
+        return (gated, Vec::new());
+    };
+    if entities.is_empty() {
+        return (gated, Vec::new());
+    }
+    let mut dropped = Vec::new();
+    rows.retain(|row| {
+        let field = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+        let text = format!("{} {}", field("title"), field("snippet"));
+        let lower = text.to_ascii_lowercase();
+        let keep = entities.iter().any(|entity| {
+            let entity_lower = entity.trim().to_ascii_lowercase();
+            let tokens: Vec<String> = entity_lower
+                .split(|ch: char| !ch.is_alphanumeric())
+                .filter(|token| !token.is_empty())
+                .map(String::from)
+                .collect();
+            let words: Vec<String> = lower.split(|ch: char| !ch.is_alphanumeric()).filter(|word| !word.is_empty()).map(String::from).collect();
+            (!entity_lower.is_empty() && lower.contains(&entity_lower)) || (!tokens.is_empty() && tokens.iter().all(|token| words.contains(token)))
+        });
+        if !keep {
+            dropped.push(field("title"));
+        }
+        keep
+    });
+    (gated, dropped)
+}

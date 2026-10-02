@@ -14,7 +14,11 @@ use std::{
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
+mod news_legal;
+#[cfg(test)]
+pub(crate) use news_legal::fixture;
 mod providers;
+pub use news_legal::{context_kind, COURTLISTENER_RATE_LIMIT, COURTLISTENER_SPACING, LEGAL_TOOLS, NEWS_TOOLS};
 pub use providers::{
     batch_urls, map_rank, select_route, sociavault_account_platforms, sociavault_endpoint_hint,
     sociavault_platforms, sociavault_routes, webmail_host, RouteInput, SociaVaultRoute,
@@ -87,6 +91,11 @@ pub fn registry() -> &'static [ToolDefinition] {
         tool!("sociavault_search_users","SociaVault account search","Social","Find accounts by name on Instagram, Threads, or TikTok.",["platform","query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/instagram/search, /threads/search-users, or /tiktok/search/users. 1 credit. Accounts found only here stay unverified until a profile call or a Firecrawl page links them to the subject.",40,600),
         tool!("sociavault_user_content","SociaVault user content","Social","One account's own posts, videos, reels, highlights, playlists, boards, or schedule. No followers or single posts.",["platform","handle|user_id"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/... Platforms and endpoints: facebook (posts, reels), instagram (posts, highlights, reels), pinterest (boards), threads (posts), tiktok (videos, live), twitch (videos, schedule), twitter (tweets; tweets_all by user_id), youtube (videos, community_posts, lives, playlists, shorts). Optional endpoint. 1 credit. Runs after a profile call when a numeric id is needed.",40,3600),
         tool!("sociavault_google_search","SociaVault Google search","Web","Google results for the same query when Firecrawl search was weak. Fallback only.",["query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/google/search. Never an opening pick: offered only when Firecrawl search failed, returned fewer than 3 results, returned only filtered hosts, or yielded no binding a later step needs. One page and one call per question; 1 credit.",40,600),
+        tool!("newsapi_search","NewsAPI article search","News","News articles that name the subject (exact phrase). Free-tier articles arrive 24 hours late and search reaches back one month, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/everything","GET https://newsapi.org/v2/everything with q as an exact phrase, pageSize at most 20, first page only. Optional from and to (YYYY-MM-DD), language, sort_by (relevancy default, publishedAt, popularity), and domains. Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY; it is sent as X-Api-Key, never in the URL. Developer plan: 100 requests a day, development use only. At most 2 NewsAPI calls per turn.",20,3600),
+        tool!("newsapi_headlines","NewsAPI top headlines","News","Top headlines that name the subject (exact phrase). Free-tier headlines arrive 24 hours late and cover one month at most, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/top-headlines","GET https://newsapi.org/v2/top-headlines with q as an exact phrase, pageSize at most 20. Optional country (2-letter code) and category (business, entertainment, general, health, science, sports, technology). Same NewsAPI key (NEWSAPI_API_KEY), sent as X-Api-Key, never in the URL. At most 2 NewsAPI calls per turn.",20,3600),
+        tool!("courtlistener_case_search","CourtListener case law","Legal","Court opinions (case law) that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=o with q as an exact phrase. First page only, at most 20 results, no highlighting, never semantic search. Optional court (court ids separated by spaces), filed_after and filed_before (YYYY-MM-DD). Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN; it is sent as Authorization: Token. Free tier 5/min, 50/hour, 125/day: at most 3 CourtListener calls per turn, 12 s apart.",30,86400),
+        tool!("courtlistener_docket_search","CourtListener federal dockets","Legal","Federal (PACER/RECAP) dockets that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=r with q as an exact phrase. First page only, at most 20 results, no highlighting; no RECAP fetch or paid PACER pulls. Optional court and filed_after (YYYY-MM-DD). Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30,86400),
+        tool!("courtlistener_judge_search","CourtListener judges","Legal","Judges whose name matches the subject (exact phrase), with court and position.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=p with q as an exact phrase. First page only, at most 20 results. Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30,86400),
     ]).as_slice()
 }
 pub fn definition(id: &str) -> Option<&'static ToolDefinition> {
@@ -143,6 +152,8 @@ pub fn endpoint_cost(id: &str) -> Option<EndpointCost> {
         | "hunter_company_enrichment" | "hunter_person_enrichment"
         | "hunter_combined_enrichment" => Some(cost("hunter", 1)),
         id if id.starts_with("sociavault_") && definition(id).is_some() => Some(cost("sociavault", 1)),
+        // Not credit-metered: the per-turn call caps are their only budget.
+        id if news_legal::provider(id).is_some() => news_legal::provider(id).map(|provider| cost(provider, 0)),
         _ => None,
     }
 }
@@ -200,6 +211,10 @@ fn optional_keys(id: &str) -> &'static [&'static str] {
         "github_repositories" | "gitlab_projects" => &["limit", "page"],
         "stackexchange_users" => &["site"],
         "overpass_places" => &["feature"],
+        "newsapi_search" => &["from", "to", "language", "sort_by", "domains"],
+        "newsapi_headlines" => &["country", "category"],
+        "courtlistener_case_search" => &["court", "filed_after", "filed_before"],
+        "courtlistener_docket_search" => &["court", "filed_after"],
         _ => &[],
     }
 }
@@ -845,6 +860,9 @@ fn parse_observations(
         return Ok((json!(rows), raw.lines().count() > 100));
     }
     let v: Value = serde_json::from_str(raw).map_err(|e| anyhow!("malformed JSON: {e}"))?;
+    if news_legal::provider(id).is_some() {
+        return news_legal::observations(id, &v);
+    }
     if let Some(error) = v.get("error").or_else(|| v.get("errors")) {
         if !error.is_null() {
             return Err(anyhow!(
@@ -1011,6 +1029,7 @@ fn no_results(id: &str, value: &Value) -> bool {
         "hunter_person_enrichment" => return value.get("claimed_email").is_some() || value.get("full_name").is_none_or(Value::is_null) && value.get("email").is_none_or(Value::is_null),
         "hunter_combined_enrichment" => return value.get("claimed_email").is_some() || value.get("person").is_none() && value.get("company").is_none(),
         "sociavault_google_search" => return empty("results"),
+        id if news_legal::provider(id).is_some() => return empty("results"),
         "sociavault_search" | "sociavault_search_users" | "sociavault_user_content" => {
             return empty("accounts") && empty("links") && empty("texts");
         }
@@ -1132,6 +1151,9 @@ fn request(id: &str, v: &Value) -> Result<Request> {
     }
     if id.starts_with("sociavault_") {
         return providers::sociavault_request(id, v);
+    }
+    if news_legal::provider(id).is_some() {
+        return news_legal::request(id, v);
     }
     if matches!(
         id,
@@ -1583,6 +1605,8 @@ pub struct ProviderKeys {
     pub firecrawl: String,
     pub hunter: String,
     pub sociavault: String,
+    pub newsapi: String,
+    pub courtlistener: String,
 }
 fn provider_credential(
     id: &str,
@@ -1616,6 +1640,17 @@ fn provider_credential(
             reqwest::header::HeaderName::from_static("x-api-key"),
             key,
         )));
+    }
+    match news_legal::provider(id) {
+        Some("newsapi") => {
+            let key = keyed(&keys.newsapi, "Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY")?;
+            return Ok(Some((reqwest::header::HeaderName::from_static("x-api-key"), key)));
+        }
+        Some(_) => {
+            let key = keyed(&keys.courtlistener, "Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN")?;
+            return Ok(Some((reqwest::header::AUTHORIZATION, format!("Token {key}"))));
+        }
+        None => {}
     }
     if id.starts_with("sociavault_") {
         let key = keyed(
@@ -1694,6 +1729,63 @@ fn error_summary(raw: &str) -> String {
         (true, true) => words,
     };
     summary.chars().take(250).collect()
+}
+
+/// Minimum spacing between requests to one host for a tool.
+pub fn host_interval(id: &str) -> Duration {
+    let id = canonical_tool_id(id);
+    match id {
+        "nominatim_geocode" | "urlscan_search" => Duration::from_secs(1),
+        _ if news_legal::provider(id) == Some("courtlistener") => news_legal::COURTLISTENER_SPACING,
+        _ if news_legal::provider(id) == Some("newsapi") => Duration::from_secs(1),
+        // Hunter allows 15 requests per second; Firecrawl and SociaVault keep 1/s.
+        _ if id.starts_with("hunter_") => Duration::from_millis(67),
+        _ if id.starts_with("firecrawl_") || id.starts_with("sociavault_") => Duration::from_secs(1),
+        "hackertarget_hostsearch" | "overpass_places" => Duration::from_secs(2),
+        "github_repositories" | "nvd_cve" => Duration::from_secs(6),
+        _ => Duration::from_millis(250),
+    }
+}
+
+/// The bare key a credential header carries (`Bearer …` and `Token …` stripped).
+fn credential_key(credential: &Option<(reqwest::header::HeaderName, String)>) -> Option<&str> {
+    let (_, value) = credential.as_ref()?;
+    let key = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("Token ")).unwrap_or(value).trim();
+    (key.len() >= 4).then_some(key)
+}
+
+/// A provider body that echoes the key never reaches storage with it.
+fn redact(raw: String, credential: &Option<(reqwest::header::HeaderName, String)>) -> String {
+    match credential_key(credential) {
+        Some(key) if raw.contains(key) => raw.replace(key, "[redacted]"),
+        _ => raw,
+    }
+}
+
+fn redact_key(result: &mut ToolResult, credential: &Option<(reqwest::header::HeaderName, String)>) {
+    result.raw = redact(std::mem::take(&mut result.raw), credential);
+    if let Some(error) = result.error.take() {
+        result.error = Some(redact(error, credential));
+    }
+}
+
+/// Test-only base URLs for fixed hosts, so executor tests can reach a local server.
+#[cfg(test)]
+pub(crate) static TEST_BASES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_base(host: &str) -> Option<String> {
+    TEST_BASES.lock().unwrap().iter().find(|(known, _)| known == host).map(|(_, base)| base.clone())
+}
+
+#[cfg(test)]
+fn rebase(url: &Url, base: &str) -> Result<Url> {
+    let base = Url::parse(base)?;
+    let mut next = url.clone();
+    next.set_scheme(base.scheme()).map_err(|_| anyhow!("scheme"))?;
+    next.set_host(base.host_str()).map_err(|_| anyhow!("host"))?;
+    next.set_port(base.port()).map_err(|_| anyhow!("port"))?;
+    Ok(next)
 }
 
 #[derive(Clone)]
@@ -1861,20 +1953,24 @@ impl Executor {
             ensure!(host == locked && req.url.scheme() == "https", "request host is not allowed for {id}");
         }
         let _permit = self.global.acquire().await?;
-        let interval = match id {
-            "nominatim_geocode" | "urlscan_search" => Duration::from_secs(1),
-            // Hunter allows 15 requests per second; Firecrawl and SociaVault keep 1/s.
-            _ if id.starts_with("hunter_") => Duration::from_millis(67),
-            _ if id.starts_with("firecrawl_") || id.starts_with("sociavault_") => Duration::from_secs(1),
-            "hackertarget_hostsearch" | "overpass_places" => Duration::from_secs(2),
-            "github_repositories" | "nvd_cve" => Duration::from_secs(6),
-            _ => Duration::from_millis(250),
+        let interval = host_interval(id);
+        #[cfg(test)]
+        let (url_override, interval) = match test_base(&host) {
+            Some(base) => (Some(base), Duration::ZERO),
+            None => (None, interval),
         };
         self.pace_host(&host, interval).await;
         let mut url = req.url.clone();
+        #[cfg(test)]
+        if let Some(base) = url_override {
+            url = rebase(&url, &base)?;
+        }
         let mut attempts = 0;
         let mut redirects = 0;
         let mut verifying = 0;
+        let accept_json = news_legal::provider(id) == Some("courtlistener");
+        // NewsAPI and CourtListener 429s are not retried: their daily quotas are tiny.
+        let retry_429 = news_legal::provider(id).is_none();
         loop {
             attempts += 1;
             let mut builder = if let Some(body) = &req.body {
@@ -1884,6 +1980,9 @@ impl Executor {
             } else {
                 self.client.get(url.clone())
             };
+            if accept_json {
+                builder = builder.header(reqwest::header::ACCEPT, "application/json");
+            }
             builder = builder.timeout(Duration::from_secs(def.timeout_seconds));
             if let Some(ua) = user_agent {
                 builder = builder.header(reqwest::header::USER_AGENT, ua);
@@ -1921,7 +2020,7 @@ impl Executor {
                 url = next;
                 continue;
             }
-            if (response.status().as_u16() == 429 || response.status().is_server_error())
+            if ((response.status().as_u16() == 429 && retry_429) || response.status().is_server_error())
                 && attempts < 3
             {
                 let delay = response
@@ -1950,6 +2049,7 @@ impl Executor {
                 .unwrap_or("")
                 .to_string();
             let (raw, truncated) = read_body(response, 1_000_000).await?;
+            let raw = redact(raw, &credential);
             let credits_reported = reported_credits(&raw);
             let mut result = ToolResult {
                 tool_id: id.into(),
@@ -1980,7 +2080,11 @@ impl Executor {
                     "failed"
                 }
                 .into();
-                result.error = Some(format!("HTTP {status}: {}", error_summary(&result.raw)));
+                result.error = Some(
+                    news_legal::http_error(id, status.as_u16(), &result.raw)
+                        .unwrap_or_else(|| format!("HTTP {status}: {}", error_summary(&result.raw))),
+                );
+                redact_key(&mut result, &credential);
                 return Ok(result);
             }
             let mut partial = false;
@@ -2004,13 +2108,14 @@ impl Executor {
                     result.truncated |= cut;
                 }
                 Err(e) => {
-                    result.status = if e.to_string().contains("quota") {
+                    result.status = if e.to_string().contains("quota") || e.to_string().contains("(rateLimited)") {
                         "rate_limited"
                     } else {
                         "failed"
                     }
                     .into();
                     result.error = Some(e.to_string());
+                    redact_key(&mut result, &credential);
                     return Ok(result);
                 }
             }
@@ -2207,16 +2312,16 @@ mod tests {
 
     #[test]
     fn registry_and_validation() {
-        assert_eq!(registry().len(), 50);
+        assert_eq!(registry().len(), 55);
         let ids: std::collections::HashSet<_> = registry().iter().map(|t| t.id).collect();
-        assert_eq!(ids.len(), 50);
+        assert_eq!(ids.len(), 55);
         assert_eq!(
             registry()
                 .iter()
                 .map(|t| t.category)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            13
+            15
         );
         for t in registry() {
             assert!(!t.description.is_empty());

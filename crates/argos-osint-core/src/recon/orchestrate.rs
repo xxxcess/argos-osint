@@ -3,6 +3,7 @@
 //! synthesize.
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::{atomic::Ordering, Arc},
 };
 
@@ -120,6 +121,7 @@ fn settle_holds(
 /// orders tools one pick per request, Recon runs that order one step at a time with
 /// grounded binding and fallbacks, then Synthesis answers the user question and reports
 /// d1–d3.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     service: &super::Service,
     run: &Run,
@@ -127,9 +129,10 @@ pub async fn run_turn(
     recon_secret: &ProviderSecret,
     synthesis_secret: &ProviderSecret,
     cancel: &Arc<AtomicBool>,
-    progress: &mut (impl FnMut(&str) + Send),
-) -> Result<()> {
-    progress("deriving directives");
+    clock: &Arc<std::sync::Mutex<super::budget::TurnClock>>,
+    progress: &mut (impl FnMut(super::TurnEvent) + Send),
+) -> Result<Option<String>> {
+    stage(progress, "deriving directives");
     let store = Store::open(&service.db_path)?;
     store.set_run(&run.id, "running", "deriving directives", None, None)?;
     for (kind, value) in super::explicit_entities(question) {
@@ -187,6 +190,7 @@ pub async fn run_turn(
     let unkeyed = unkeyed_tools(service);
     let catalog = picker::eligible_catalog(&enabled, &unkeyed);
     let gate = ModelGate::default();
+    gate.bind_clock(clock.clone(), service.db_path.clone());
     let thread = thread_subject(&Store::open(&service.db_path)?, &run.thread_id, &run.id)?;
     let derived = derive_directives(
         recon_secret,
@@ -206,10 +210,12 @@ pub async fn run_turn(
         directives_note: derived.note,
         ..Plan::default()
     };
-    progress("picking tools");
+    publish(&gate, &mut plan, progress);
+    stage(progress, "picking tools");
     Store::open(&service.db_path)?.set_run(&run.id, "running", "picking tools", Some(&plan), None)?;
     let picker_secret = picker_secret(service, run)?;
     let mut picker = picker::Picker::new(&picker_secret, cancel);
+    picker.bind_clock(clock.clone());
     plan.bindings = investigation::question_bindings(question);
     let named = investigation::derived_question_handles(question, &plan.directives, &plan.bindings);
     plan.bindings.extend(named);
@@ -228,6 +234,8 @@ pub async fn run_turn(
     apply_order(&mut plan, &ordered, question);
     plan.picker_requests = picker.requests;
     plan.picker_cost = picker.cost;
+    sync_budget(&plan, &gate);
+    publish(&gate, &mut plan, progress);
     Store::open(&service.db_path)?.set_run(&run.id, "running", "picking tools", Some(&plan), None)?;
     let results = execute_ordered(
         service,
@@ -259,6 +267,7 @@ pub async fn run_turn(
                 opening,
                 synthesis_secret,
                 cancel,
+                clock,
             },
             progress,
         )
@@ -267,6 +276,7 @@ pub async fn run_turn(
 
 /// Resume of a tool-picker plan: completed steps are skipped and the next step runs with
 /// the bindings saved on the plan. Questions are not re-derived and tools not re-picked.
+#[allow(clippy::too_many_arguments)]
 pub async fn continue_turn(
     service: &super::Service,
     run: &Run,
@@ -274,15 +284,18 @@ pub async fn continue_turn(
     mut plan: Plan,
     (recon_secret, synthesis_secret): (&ProviderSecret, &ProviderSecret),
     cancel: &Arc<AtomicBool>,
-    progress: &mut (impl FnMut(&str) + Send),
-) -> Result<()> {
+    clock: &Arc<std::sync::Mutex<super::budget::TurnClock>>,
+    progress: &mut (impl FnMut(super::TurnEvent) + Send),
+) -> Result<Option<String>> {
     let enabled = enabled_tools(&service.db_path)?;
     let unkeyed = unkeyed_tools(service);
     let catalog = picker::eligible_catalog(&enabled, &unkeyed);
     let picker_secret = picker_secret(service, run)?;
     let mut picker = picker::Picker::new(&picker_secret, cancel);
+    picker.bind_clock(clock.clone());
     let gate = ModelGate::default();
-    progress("resuming tools");
+    gate.bind_clock(clock.clone(), service.db_path.clone());
+    stage(progress, "resuming tools");
     let mut results = execute_ordered(
         service,
         run,
@@ -328,6 +341,7 @@ pub async fn continue_turn(
                 opening,
                 synthesis_secret,
                 cancel,
+                clock,
             },
             progress,
         )
@@ -494,7 +508,7 @@ async fn execute_ordered(
     models: TurnModels<'_>,
     picker: &mut picker::Picker<'_>,
     cancel: &Arc<AtomicBool>,
-    progress: &mut (impl FnMut(&str) + Send),
+    progress: &mut (impl FnMut(super::TurnEvent) + Send),
 ) -> Result<Vec<(String, ToolResult)>> {
     let missing = missing_keys(service);
     let env = StepEnv {
@@ -744,7 +758,7 @@ pub(crate) async fn execute_steps<R, F>(
     env: &StepEnv<'_>,
     picker: &mut picker::Picker<'_>,
     mut runner: R,
-    progress: &mut (impl FnMut(&str) + Send),
+    progress: &mut (impl FnMut(super::TurnEvent) + Send),
     persist: &mut (impl FnMut(&Plan, &str) -> Result<()> + Send),
 ) -> Result<Vec<(String, ToolResult)>>
 where
@@ -855,7 +869,26 @@ where
             }
         }
         let label = format!("running {}", step.tool_id);
-        progress(&label);
+        sync_budget(plan, env.gate);
+        if let Some(clock) = env.gate.clock() {
+            clock.lock().unwrap().begin_tools();
+        }
+        publish(env.gate, plan, progress);
+        let cached = call_cached(env.gate, &plan.calls[index]);
+        if !cached && env.gate.clock().is_some_and(|clock| clock.lock().unwrap().tools_blocked()) {
+            plan.calls[index].status = "skipped".into();
+            plan.deferred.push(format!("{} — {}", step.tool_id, super::budget::TURN_BUDGET));
+            plan.binding_notes.push(format!(
+                "{} {}: skipped: {}",
+                step.step_id,
+                step.tool_id,
+                super::budget::TURN_BUDGET
+            ));
+            persist(plan, "running tools")?;
+            index += 1;
+            continue;
+        }
+        stage(progress, &label);
         refresh_unresolved(plan);
         persist(plan, &label)?;
         let call = plan.calls[index].clone();
@@ -915,7 +948,7 @@ where
                 }
                 let ok = usable(&result.status);
                 if ok {
-                    progress("binding inputs");
+                    stage(progress, "binding inputs");
                     let accepted = extract_bindings(plan, env, index, &call_id, &result.observations).await?;
                     for mut binding in accepted {
                         binding.step_id = step.step_id.clone();
@@ -986,7 +1019,7 @@ async fn after_step(
     index: usize,
     ok: bool,
     fallback_for: &mut HashSet<String>,
-    progress: &mut (impl FnMut(&str) + Send),
+    progress: &mut (impl FnMut(super::TurnEvent) + Send),
 ) -> Result<()> {
     let step = plan.calls[index].clone();
     if step.pick_reason.starts_with("fallback:") || fallback_for.contains(&step.step_id) {
@@ -1225,14 +1258,14 @@ async fn request_fallback(
     index: usize,
     purpose: &str,
     needs: &[String],
-    progress: &mut (impl FnMut(&str) + Send),
+    progress: &mut (impl FnMut(super::TurnEvent) + Send),
 ) -> Result<()> {
     let failed = plan.calls[index].clone();
     if picker.fallback_picks >= picker::MAX_FALLBACK_PICKS {
         plan.fallback_requests.push(format!("{purpose}. Not requested: the turn's fallback limit is reached."));
         return Ok(());
     }
-    progress("picking fallback");
+    stage(progress, "picking fallback");
     let planned: HashSet<&str> = plan.calls.iter().map(|call| call.tool_id.as_str()).collect();
     let need_kinds: Vec<&str> = needs.iter().flat_map(|need| need.split(" or ")).collect();
     // Candidates the binder can run now. For a missing binding, only tools whose
@@ -1470,7 +1503,7 @@ pub(crate) async fn derive_directives(
     );
     let first = match model_json(secret, gate, DIRECTIVE_SYSTEM, &user, cancel).await {
         Ok(value) => value,
-        Err(err) if cancelled(&err) => return Err(err),
+        Err(err) if cancelled(&err) || super::deadline_hit(&err) => return Err(err),
         Err(err) => {
             let reason: String = err.to_string().chars().take(160).collect();
             return Ok(fallback(format!("Directive derivation was unavailable ({reason}), so fixed directives were used.")));
@@ -1497,7 +1530,7 @@ pub(crate) async fn derive_directives(
                 "Recon's directives failed validation twice ({error}; then {second}), so fixed directives were used."
             ))),
         },
-        Err(err) if cancelled(&err) => Err(err),
+        Err(err) if cancelled(&err) || super::deadline_hit(&err) => Err(err),
         Err(err) => {
             let reason: String = err.to_string().chars().take(160).collect();
             Ok(fallback(format!("The directive repair was unavailable ({reason}), so fixed directives were used.")))
@@ -2114,16 +2147,92 @@ async fn model_subset(
     ))
 }
 
+fn stage(progress: &mut impl FnMut(super::TurnEvent), text: &str) {
+    progress(super::TurnEvent::Stage(text.to_string()));
+}
+
+/// Copies the clock's latest deadline onto the plan and emits it when the text changed.
+fn publish(gate: &ModelGate, plan: &mut Plan, progress: &mut impl FnMut(super::TurnEvent)) {
+    let Some(clock) = gate.clock() else {
+        return;
+    };
+    let mut clock = clock.lock().unwrap();
+    plan.deadline_note = clock.breakdown();
+    let labels = clock.take_labels();
+    drop(clock);
+    for label in labels {
+        progress(super::TurnEvent::Deadline(label));
+    }
+}
+
+fn sync_budget(plan: &Plan, gate: &ModelGate) {
+    let Some(clock) = gate.clock() else {
+        return;
+    };
+    let store = gate.db().and_then(|path| Store::open(&path).ok());
+    let calls = plan
+        .calls
+        .iter()
+        .filter(|call| !call.tool_id.is_empty())
+        .filter(|call| !matches!(call.status.as_str(), "deferred" | "skipped" | "cancelled"))
+        .map(|call| {
+            let cached = store.as_ref().and_then(|store| {
+                let key = format!("{}:v1:{}", call.tool_id, serde_json::to_string(&call.arguments).ok()?);
+                store.cache_get(&key).ok().flatten()
+            }).is_some();
+            super::budget::scheduled(&call.tool_id, cached)
+        })
+        .collect();
+    clock.lock().unwrap().raise_calls(calls);
+}
+
+fn call_cached(gate: &ModelGate, call: &PlanCall) -> bool {
+    let Some(path) = gate.db() else {
+        return false;
+    };
+    let Ok(store) = Store::open(&path) else {
+        return false;
+    };
+    let Ok(args) = serde_json::to_string(&call.arguments) else {
+        return false;
+    };
+    store.cache_get(&format!("{}:v1:{args}", call.tool_id)).ok().flatten().is_some()
+}
+
 /// Stops further Recon model calls in a turn after a provider rate limit, so the rule
 /// fallbacks run instead of repeating requests the provider will refuse.
-#[derive(Default)]
 pub(crate) struct ModelGate {
     limited: AtomicBool,
+    clock: std::sync::Mutex<Option<Arc<std::sync::Mutex<super::budget::TurnClock>>>>,
+    db: std::sync::Mutex<Option<PathBuf>>,
+}
+
+impl Default for ModelGate {
+    fn default() -> Self {
+        Self {
+            limited: AtomicBool::new(false),
+            clock: std::sync::Mutex::new(None),
+            db: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 impl ModelGate {
     fn limited(&self) -> bool {
         self.limited.load(Ordering::Relaxed)
+    }
+
+    fn bind_clock(&self, clock: Arc<std::sync::Mutex<super::budget::TurnClock>>, db: PathBuf) {
+        *self.clock.lock().unwrap() = Some(clock);
+        *self.db.lock().unwrap() = Some(db);
+    }
+
+    fn clock(&self) -> Option<Arc<std::sync::Mutex<super::budget::TurnClock>>> {
+        self.clock.lock().unwrap().clone()
+    }
+
+    fn db(&self) -> Option<PathBuf> {
+        self.db.lock().unwrap().clone()
     }
 }
 
@@ -2143,17 +2252,41 @@ async fn model_json(
         super::chat("system", system.into()),
         super::chat("user", user.into()),
     ];
-    let response = tokio::select! {
-        result = provider::complete(secret, &messages, &[], |_| {}) => match result {
-            Ok(response) => response,
-            Err(err) => {
-                if super::provider_rate_limited(&err) {
-                    gate.limited.store(true, Ordering::Relaxed);
+    let limit = gate.clock().map(|clock| {
+        let mut clock = clock.lock().unwrap();
+        clock.note_round();
+        clock.recon_remaining()
+    });
+    let response = if let Some(limit) = limit {
+        if limit.is_zero() {
+            return Err(anyhow!(super::budget::RECON_DEADLINE));
+        }
+        tokio::select! {
+            result = provider::complete(secret, &messages, &[], |_| {}) => match result {
+                Ok(response) => response,
+                Err(err) => {
+                    if super::provider_rate_limited(&err) {
+                        gate.limited.store(true, Ordering::Relaxed);
+                    }
+                    return Err(err);
                 }
-                return Err(err);
-            }
-        },
-        _ = super::wait_cancel(cancel.clone()) => return Err(anyhow!("cancelled")),
+            },
+            _ = super::wait_cancel(cancel.clone()) => return Err(anyhow!("cancelled")),
+            _ = tokio::time::sleep(limit) => return Err(anyhow!(super::budget::RECON_DEADLINE)),
+        }
+    } else {
+        tokio::select! {
+            result = provider::complete(secret, &messages, &[], |_| {}) => match result {
+                Ok(response) => response,
+                Err(err) => {
+                    if super::provider_rate_limited(&err) {
+                        gate.limited.store(true, Ordering::Relaxed);
+                    }
+                    return Err(err);
+                }
+            },
+            _ = super::wait_cancel(cancel.clone()) => return Err(anyhow!("cancelled")),
+        }
     };
     super::parse_json(&response.content)
 }
@@ -2161,6 +2294,7 @@ async fn model_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn action(tool_id: &str, arguments: Value) -> investigation::ProposedAction {
         investigation::ProposedAction {
@@ -2735,7 +2869,11 @@ mod tests {
             async move { Ok(StepOutcome::Ran(id, Box::new(result(&call.tool_id, "failed", Value::Null)))) }
         };
         let mut progress_log = Vec::new();
-        let mut progress = |stage: &str| progress_log.push(stage.to_string());
+        let mut progress = |event: super::super::TurnEvent| {
+            if let super::super::TurnEvent::Stage(stage) = event {
+                progress_log.push(stage);
+            }
+        };
         let mut persist = |_: &Plan, _: &str| Ok(());
         let results = execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
         assert_eq!(bodies.lock().unwrap().len(), 1, "exactly one fallback request");
@@ -2805,7 +2943,7 @@ mod tests {
             ran.lock().unwrap().push((call.step_id.clone(), call.arguments.clone()));
             async move { Ok(StepOutcome::Ran("call-s2".into(), Box::new(result(&call.tool_id, "completed", json!({"hostnames": ["www.example.org", "api.example.org"]}))))) }
         };
-        let mut progress = |_: &str| {};
+        let mut progress = |_: super::super::TurnEvent| {};
         let mut persist = |_: &Plan, _: &str| Ok(());
         execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
         let ran = ran.lock().unwrap().clone();
@@ -2837,7 +2975,7 @@ mod tests {
             flag.store(true, Ordering::Relaxed);
             async move { Ok(StepOutcome::Ran("call-s1".into(), Box::new(result(&call.tool_id, "cancelled", Value::Null)))) }
         };
-        let mut progress = |_: &str| {};
+        let mut progress = |_: super::super::TurnEvent| {};
         let mut persist = |_: &Plan, _: &str| Ok(());
         let outcome = execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await;
         assert!(outcome.is_err_and(|err| cancelled(&err)));
@@ -2954,7 +3092,7 @@ mod tests {
             let id = format!("call-{}", call.step_id);
             async move { Ok(StepOutcome::Ran(id, Box::new(result(&call.tool_id, "completed", observation)))) }
         };
-        let mut progress = |_: &str| {};
+        let mut progress = |_: super::super::TurnEvent| {};
         let mut persist = |_: &Plan, _: &str| Ok(());
         execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
         let ran = ran.lock().unwrap().clone();
@@ -3004,7 +3142,7 @@ mod tests {
             let id = format!("call-{}", call.step_id);
             async move { Ok(StepOutcome::Ran(id, Box::new(result(&call.tool_id, "completed", observation)))) }
         };
-        let mut progress = |_: &str| {};
+        let mut progress = |_: super::super::TurnEvent| {};
         let mut persist = |_: &Plan, _: &str| Ok(());
         execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
         assert_eq!(bodies.lock().unwrap().len(), 1, "one fallback pick");
@@ -3122,7 +3260,7 @@ mod tests {
             let id = format!("call-{}", call.step_id);
             async move { Ok(StepOutcome::Ran(id, Box::new(result(&call.tool_id, "completed", observation)))) }
         };
-        let mut progress = |_: &str| {};
+        let mut progress = |_: super::super::TurnEvent| {};
         let mut persist = |_: &Plan, _: &str| Ok(());
         let results = execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.expect("the turn completes");
         let ran = ran.lock().unwrap().clone();
@@ -3187,7 +3325,7 @@ mod tests {
             let id = format!("call-{}", call.step_id);
             async move { Ok(StepOutcome::Ran(id, Box::new(result(&call.tool_id, "completed", observation)))) }
         };
-        let mut progress = |_: &str| {};
+        let mut progress = |_: super::super::TurnEvent| {};
         let mut persist = |_: &Plan, _: &str| Ok(());
         execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
         let ran = ran.lock().unwrap().clone();
@@ -3221,7 +3359,7 @@ mod tests {
                 Ok(StepOutcome::Ran(format!("call-{}", call.step_id), Box::new(result(&call.tool_id, "completed", json!({"raw": "www.example.org,93.184.216.34"})))))
             }
         };
-        let mut progress = |_: &str| {};
+        let mut progress = |_: super::super::TurnEvent| {};
         let mut persist = |_: &Plan, _: &str| Ok(());
         let results = execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
         assert_eq!(plan.calls[0].status, "failed");
@@ -3308,7 +3446,7 @@ mod tests {
             let id = format!("call-{}", call.step_id);
             async move { Ok(StepOutcome::Ran(id, Box::new(outcome))) }
         };
-        let mut progress = |_: &str| {};
+        let mut progress = |_: super::super::TurnEvent| {};
         let mut persist = |_: &Plan, _: &str| Ok(());
         ground_fixtures(plan);
         execute_steps(plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
@@ -3795,7 +3933,7 @@ mod tests {
             let id = format!("call-{}", call.step_id);
             async move { Ok(StepOutcome::Ran(id, Box::new(outcome))) }
         };
-        let mut progress = |_: &str| {};
+        let mut progress = |_: super::super::TurnEvent| {};
         let mut persist = |_: &Plan, _: &str| Ok(());
         let results = execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
         let ran = ran.lock().unwrap().clone();
@@ -4005,7 +4143,8 @@ mod tests {
         let recon = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
         let cancel = Arc::new(AtomicBool::new(false));
         let mut progress = Vec::new();
-        let outcome = run_turn(&service, &run, question, &recon, &synthesis, &cancel, &mut |stage: &str| progress.push(stage.to_string())).await;
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(300, 900)));
+        let outcome = run_turn(&service, &run, question, &recon, &synthesis, &cancel, &clock, &mut |event| progress.push(event.to_string())).await;
         let store = Store::open(&db).unwrap();
         if outcome.is_ok() {
             store.set_run(&run.id, "completed", "complete", None, None).unwrap();
@@ -4246,5 +4385,411 @@ mod tests {
         assert!(Store::open(&db).unwrap().cache_get(&key).unwrap().is_some(), "a completed result is cached");
         assert!(!key.contains(SENTINEL_KEY));
         drop(fixture);
+    }
+
+    struct Desk {
+        _dir: tempfile::TempDir,
+        db: std::path::PathBuf,
+        service: super::super::Service,
+        run: super::super::Run,
+        question: String,
+    }
+
+    fn desk() -> Desk {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        let service = super::super::Service::new(&db, crate::secrets::AuthFile::default(), SettingsFile::default()).unwrap();
+        let store = Store::open(&db).unwrap();
+        let thread = store.new_thread("t").unwrap();
+        let question = "What is known about example.org?".to_string();
+        let user = store.add_message(&thread.id, "user", &question, None).unwrap();
+        let run = store.new_run(&thread.id, &user.id, "local / m", "local / m").unwrap();
+        Desk { _dir: dir, db, service, run, question }
+    }
+
+    fn answer_text(db: &std::path::Path, thread_id: &str) -> Option<String> {
+        Store::open(db).unwrap().list_messages(thread_id).unwrap().into_iter().find(|message| message.role == "assistant").map(|message| message.content)
+    }
+
+    fn settle_run(db: &std::path::Path, run_id: &str, cancel: &AtomicBool, outcome: Result<Option<String>>) -> (String, String) {
+        let store = Store::open(db).unwrap();
+        match &outcome {
+            Ok(note) => {
+                let stage = if note.is_some() { "cut short" } else { "complete" };
+                store.set_run(run_id, "completed", stage, None, note.as_deref()).unwrap();
+            }
+            Err(err) => {
+                if cancel.load(Ordering::Relaxed) || err.to_string() == "cancelled" {
+                    store.cancel_run(run_id).unwrap();
+                } else {
+                    store.set_run(run_id, "failed", "failed", None, Some(&err.to_string())).unwrap();
+                }
+            }
+        }
+        let run = store.get_run(run_id).unwrap().unwrap();
+        (run.state, run.stage)
+    }
+
+    fn remember(desk: &Desk, results: &[(String, ToolResult)]) {
+        let store = Store::open(&desk.db).unwrap();
+        for (id, found) in results {
+            store.conn.execute(
+                "INSERT INTO osint_calls(id,tool_id,run_id,thread_id,turn_id,origin,inputs_json,status,started_at) VALUES (?1,?2,?3,?4,?5,'recon','{}','queued',?6)",
+                rusqlite::params![id, found.tool_id, desk.run.id, desk.run.thread_id, desk.run.turn_id, super::super::now()],
+            ).unwrap();
+            assert!(store.finish_call(id, found).unwrap(), "{id}");
+        }
+    }
+
+    async fn synthesize(
+        desk: &Desk,
+        secret: &ProviderSecret,
+        plan: &Plan,
+        results: &[(String, ToolResult)],
+        clock: &Arc<std::sync::Mutex<super::super::budget::TurnClock>>,
+        cancel: &Arc<AtomicBool>,
+        progress: &mut (impl FnMut(super::super::TurnEvent) + Send),
+    ) -> Result<Option<String>> {
+        remember(desk, results);
+        let recalled: &[super::super::RecallInsight] = &[];
+        desk.service.finish_answer(
+            super::super::AnswerContext {
+                run: &desk.run,
+                question: &desk.question,
+                plan,
+                results,
+                recalled,
+                max_calls: 8,
+                opening: false,
+                synthesis_secret: secret,
+                cancel,
+                clock,
+            },
+            progress,
+        )
+        .await
+    }
+
+    enum ChatReply {
+        Pieces(Vec<String>),
+        Hang(String),
+        Raw(u16, String),
+    }
+
+    fn sse_payload(parts: &[String]) -> String {
+        let mut payload = String::new();
+        for part in parts {
+            let chunk = json!({"choices": [{"delta": {"content": part}}]});
+            payload.push_str(&format!("data: {chunk}\n\n"));
+        }
+        payload.push_str("data: [DONE]\n\n");
+        payload
+    }
+
+    async fn chat_server(reply: impl Fn(String) -> ChatReply + Send + Sync + 'static) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let reply = Arc::new(reply);
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let reply = reply.clone();
+                tokio::spawn(async move {
+                    let mut raw = Vec::new();
+                    let mut buffer = vec![0u8; 65536];
+                    while let Ok(n) = socket.read(&mut buffer).await {
+                        raw.extend_from_slice(&buffer[..n]);
+                        let text = String::from_utf8_lossy(&raw).to_string();
+                        let done = text.find("\r\n\r\n").is_some_and(|end| {
+                            let length = text[..end].lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|value| value.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                            raw.len() >= end + 4 + length
+                        });
+                        if n == 0 || done {
+                            break;
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&raw).to_string();
+                    let _ = socket.set_nodelay(true);
+                    match reply(text) {
+                        ChatReply::Pieces(parts) => {
+                            let payload = sse_payload(&parts);
+                            let http = format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}", payload.len());
+                            let _ = socket.write_all(http.as_bytes()).await;
+                        }
+                        ChatReply::Hang(part) => {
+                            let payload = sse_payload(std::slice::from_ref(&part));
+                            let head = payload.trim_end_matches("data: [DONE]\n\n");
+                            let http = format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: keep-alive\r\n\r\n{head}");
+                            let _ = socket.write_all(http.as_bytes()).await;
+                            let _ = socket.flush().await;
+                            std::future::pending::<()>().await;
+                        }
+                        ChatReply::Raw(status, body) => {
+                            let reason = if status == 200 { "OK" } else { "Bad Request" };
+                            let http = format!("HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                            let _ = socket.write_all(http.as_bytes()).await;
+                        }
+                    }
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    fn sample_evidence() -> (String, ToolResult) {
+        let mut found = result("crtsh_certificates", "completed", json!({"results": [{"title": "example.org certificates"}]}));
+        found.source_url = "https://crt.sh/?q=example.org".into();
+        ("call-ev".into(), found)
+    }
+
+    fn deltas(events: &[super::super::TurnEvent]) -> String {
+        events.iter().filter_map(|event| match event {
+            super::super::TurnEvent::AnswerDelta(text) => Some(text.as_str()),
+            _ => None,
+        }).collect()
+    }
+
+    /// Overflow calls are skipped as `turn budget`. A cache hit still runs, and synthesis
+    /// still produces the answer.
+    #[tokio::test]
+    async fn slow_tools_that_overrun_are_skipped_and_synthesis_still_answers() {
+        let desk = desk();
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(30, 900)));
+        let gate = ModelGate::default();
+        gate.bind_clock(clock.clone(), desk.db.clone());
+        let cached_args = json!({"domain": "cached.example"});
+        let cache_key = format!("crtsh_certificates:v1:{}", serde_json::to_string(&cached_args).unwrap());
+        Store::open(&desk.db).unwrap().cache_put(&cache_key, &result("crtsh_certificates", "completed", json!({"results": [{"title": "cached"}]})), 3600).unwrap();
+        let mut plan = Plan {
+            calls: vec![
+                bound("s1", "crtsh_certificates", json!({"domain": "one.example"})),
+                bound("s2", "crtsh_certificates", json!({"domain": "two.example"})),
+                bound("s3", "crtsh_certificates", cached_args),
+            ],
+            ..Plan::default()
+        };
+        ground_fixtures(&mut plan);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
+        let unkeyed = HashSet::new();
+        let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
+        let env = StepEnv { question: &desk.question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls: 1, google_min_results: 3, news_calls: 2, legal_calls: 3 };
+        let mut session = picker::Picker::new(&none, &cancel);
+        let aged = clock.clone();
+        let runner = move |call: PlanCall| {
+            let aged = aged.clone();
+            async move {
+                if call.step_id == "s1" {
+                    aged.lock().unwrap().age(Duration::from_secs(31));
+                }
+                Ok(StepOutcome::Ran(format!("call-{}", call.step_id), Box::new(result(&call.tool_id, "completed", json!({"results": [{"title": call.step_id}]})))))
+            }
+        };
+        let mut progress = |_: super::super::TurnEvent| {};
+        let mut persist = |_: &Plan, _: &str| Ok(());
+        let results = execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await.unwrap();
+        assert_eq!(plan.calls[1].status, "skipped");
+        assert!(plan.deferred.iter().any(|line| line.contains("turn budget")), "{:?}", plan.deferred);
+        assert!(plan.binding_notes.iter().any(|line| line.contains("s2 crtsh_certificates: skipped: turn budget")), "{:?}", plan.binding_notes);
+        assert_eq!(plan.calls[2].status, "completed", "a cache hit still runs when the tool allowance is spent");
+        assert!(results.iter().any(|(id, _)| id == "call-s1") && results.iter().any(|(id, _)| id == "call-s3"), "{:?}", results.iter().map(|(id, _)| id).collect::<Vec<_>>());
+        let base = chat_server(|text| {
+            let cited = text.match_indices("evidence_id").filter_map(|(at, _)| {
+                let id: String = text[at + 11..].trim_start_matches(['\\', '"', ':', ' ']).chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_').collect();
+                (!id.is_empty() && id != "question").then_some(id)
+            }).next().unwrap_or_else(|| "call-s1".into());
+            ChatReply::Pieces(vec![format!("Certificates for example.org [{cited}].")])
+        }).await;
+        let mut events = Vec::new();
+        let outcome = synthesize(&desk, &chat_model(&base), &plan, &results, &clock, &cancel, &mut |event| events.push(event)).await;
+        assert!(outcome.as_ref().is_ok_and(|note| note.is_none()), "{outcome:?} {events:?}");
+        let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome);
+        assert_eq!((state.as_str(), stage.as_str()), ("completed", "complete"));
+        let answer = answer_text(&desk.db, &desk.run.thread_id).unwrap();
+        assert!(answer.contains("Certificates for example.org"), "{answer}");
+        assert!(!deltas(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn synthesis_past_its_allowance_completes_with_the_evidence_summary() {
+        let desk = desk();
+        let mut clock = super::super::budget::TurnClock::new(300, 900);
+        clock.synthesis_override = Some(0);
+        let clock = Arc::new(std::sync::Mutex::new(clock));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let results = vec![sample_evidence()];
+        let plan = Plan::default();
+        let secret = chat_model("http://127.0.0.1:9/v1");
+        let outcome = synthesize(&desk, &secret, &plan, &results, &clock, &cancel, &mut |_| {}).await;
+        let note = outcome.as_ref().expect("an allowance cutoff completes the turn").clone().unwrap();
+        assert!(note.contains(super::super::budget::CUT_NOTE), "{note}");
+        let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome);
+        assert_eq!((state.as_str(), stage.as_str()), ("completed", "cut short"));
+        let answer = answer_text(&desk.db, &desk.run.thread_id).unwrap();
+        assert!(answer.contains("Evidence:"), "{answer}");
+        assert!(answer.contains("call-ev"), "{answer}");
+        assert!(answer.contains("example.org certificates"), "{answer}");
+        assert!(answer.contains(super::super::budget::CUT_SHORT) && answer.contains(super::super::budget::CUT_NOTE), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn streamed_deltas_arrive_in_order_and_match_the_saved_answer() {
+        let desk = desk();
+        let parts = ["Alpha ", "beta ", "gamma [call-ev]."];
+        let sent: Vec<String> = parts.iter().map(|part| (*part).to_string()).collect();
+        let base = chat_server(move |_| ChatReply::Pieces(sent.clone())).await;
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(300, 900)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let results = vec![sample_evidence()];
+        let mut events = Vec::new();
+        let outcome = synthesize(&desk, &chat_model(&base), &Plan::default(), &results, &clock, &cancel, &mut |event| events.push(event)).await;
+        assert!(outcome.as_ref().is_ok_and(|note| note.is_none()), "{outcome:?}");
+        let streamed: String = parts.concat();
+        assert_eq!(deltas(&events), streamed);
+        settle_run(&desk.db, &desk.run.id, &cancel, outcome);
+        assert_eq!(answer_text(&desk.db, &desk.run.thread_id).as_deref(), Some(streamed.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_streamed_answer_with_a_bad_citation_ends_on_the_repaired_answer() {
+        let desk = desk();
+        let bad = "The record names example.org [call-missing].";
+        let fixed = "The record names example.org [call-ev].";
+        let base = chat_server({
+            let bad = bad.to_string();
+            let fixed = fixed.to_string();
+            move |text| {
+                if text.contains("Repair this answer") {
+                    ChatReply::Pieces(vec![fixed.clone()])
+                } else {
+                    ChatReply::Pieces(vec![bad.clone()])
+                }
+            }
+        }).await;
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(300, 900)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let results = vec![sample_evidence()];
+        let mut events = Vec::new();
+        let outcome = synthesize(&desk, &chat_model(&base), &Plan::default(), &results, &clock, &cancel, &mut |event| events.push(event)).await;
+        assert!(outcome.as_ref().is_ok_and(|note| note.is_none()), "{outcome:?}");
+        assert_eq!(deltas(&events), bad);
+        assert!(events.iter().any(|event| matches!(event, super::super::TurnEvent::AnswerNote(text) if text == "fixing citations…")));
+        settle_run(&desk.db, &desk.run.id, &cancel, outcome);
+        assert_eq!(answer_text(&desk.db, &desk.run.thread_id).as_deref(), Some(fixed));
+    }
+
+    #[tokio::test]
+    async fn an_idle_stall_or_the_ceiling_keeps_the_partial_answer() {
+        let partial = "Partial finding [call-ev].";
+        let idle_desk = desk();
+        let mut clock = super::super::budget::TurnClock::new(300, 900);
+        clock.idle = Duration::from_millis(300);
+        let clock = Arc::new(std::sync::Mutex::new(clock));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let results = vec![sample_evidence()];
+        let base = chat_server(|_| ChatReply::Hang(partial.into())).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), synthesize(&idle_desk, &chat_model(&base), &Plan::default(), &results, &clock, &cancel, &mut |_| {})).await.expect("idle cutoff");
+        let (state, stage) = settle_run(&idle_desk.db, &idle_desk.run.id, &cancel, outcome);
+        assert_eq!((state.as_str(), stage.as_str()), ("completed", "cut short"));
+        let answer = answer_text(&idle_desk.db, &idle_desk.run.thread_id).unwrap();
+        assert!(answer.contains(partial), "{answer}");
+        assert!(answer.contains("Evidence:") && answer.contains(super::super::budget::SYNTHESIS_IDLE), "{answer}");
+        assert!(answer.contains(super::super::budget::CUT_NOTE), "{answer}");
+
+        let later = desk();
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(2, 2)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let results = vec![sample_evidence()];
+        let base = chat_server(|_| ChatReply::Hang(partial.into())).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), synthesize(&later, &chat_model(&base), &Plan::default(), &results, &clock, &cancel, &mut |_| {})).await.expect("ceiling cutoff");
+        let (state, stage) = settle_run(&later.db, &later.run.id, &cancel, outcome);
+        assert_eq!((state.as_str(), stage.as_str()), ("completed", "cut short"));
+        let answer = answer_text(&later.db, &later.run.thread_id).unwrap();
+        assert!(answer.contains(partial) && answer.contains(super::super::budget::SYNTHESIS_DEADLINE), "{answer}");
+        assert!(answer.contains("Evidence:") && answer.contains(super::super::budget::CUT_NOTE), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn cancel_during_synthesis_marks_the_run_cancelled_and_keeps_partial_text() {
+        let desk = desk();
+        let partial = "Partial finding [call-ev].";
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(300, 900)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let results = vec![sample_evidence()];
+        let base = chat_server(|_| ChatReply::Hang(partial.into())).await;
+        let flag = cancel.clone();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), synthesize(&desk, &chat_model(&base), &Plan::default(), &results, &clock, &cancel, &mut |event| {
+            if matches!(event, super::super::TurnEvent::AnswerDelta(_)) {
+                flag.store(true, Ordering::Relaxed);
+            }
+        })).await.expect("cancel stops the stream");
+        assert!(outcome.as_ref().is_err_and(|err| err.to_string() == "cancelled"), "{outcome:?}");
+        let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome);
+        assert_eq!((state.as_str(), stage.as_str()), ("cancelled", "cancelled"));
+        let answer = answer_text(&desk.db, &desk.run.thread_id).unwrap();
+        assert!(answer.contains(partial), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn cancel_during_tools_marks_the_run_cancelled() {
+        let desk = desk();
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(300, 900)));
+        let gate = ModelGate::default();
+        gate.bind_clock(clock, desk.db.clone());
+        let mut plan = Plan {
+            calls: vec![
+                bound("s1", "crtsh_certificates", json!({"domain": "one.example"})),
+                bound("s2", "crtsh_certificates", json!({"domain": "two.example"})),
+            ],
+            ..Plan::default()
+        };
+        ground_fixtures(&mut plan);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
+        let unkeyed = HashSet::new();
+        let none = ProviderSecret { model: String::new(), ..chat_model("http://127.0.0.1:9/v1") };
+        let env = StepEnv { question: &desk.question, catalog: &catalog, unkeyed: &unkeyed, max_calls: 12, recon_secret: &none, gate: &gate, cancel: &cancel, sociavault_calls: 1, google_min_results: 3, news_calls: 2, legal_calls: 3 };
+        let mut session = picker::Picker::new(&none, &cancel);
+        let flag = cancel.clone();
+        let runner = move |call: PlanCall| {
+            let flag = flag.clone();
+            async move {
+                flag.store(true, Ordering::Relaxed);
+                Ok(StepOutcome::Ran(format!("call-{}", call.step_id), Box::new(result(&call.tool_id, "completed", json!({"raw": "ok"})))))
+            }
+        };
+        let mut progress = |_: super::super::TurnEvent| {};
+        let mut persist = |_: &Plan, _: &str| Ok(());
+        let outcome = execute_steps(&mut plan, &env, &mut session, runner, &mut progress, &mut persist).await;
+        assert!(outcome.as_ref().is_err_and(|err| err.to_string() == "cancelled"));
+        assert_eq!(plan.calls[0].status, "cancelled");
+        assert_ne!(plan.calls[1].status, "completed");
+        let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome.map(|_| None));
+        assert_eq!((state.as_str(), stage.as_str()), ("cancelled", "cancelled"));
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_rejects_streaming_still_returns_the_answer() {
+        let desk = desk();
+        let answer = "Listed in certificates [call-ev].";
+        let base = chat_server({
+            let answer = answer.to_string();
+            move |text| {
+                if text.contains("\"stream\":true") {
+                    ChatReply::Raw(400, String::new())
+                } else {
+                    ChatReply::Raw(200, json!({"choices": [{"message": {"content": answer}}]}).to_string())
+                }
+            }
+        }).await;
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(300, 900)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let results = vec![sample_evidence()];
+        let mut events = Vec::new();
+        let outcome = synthesize(&desk, &chat_model(&base), &Plan::default(), &results, &clock, &cancel, &mut |event| events.push(event)).await;
+        assert!(outcome.as_ref().is_ok_and(|note| note.is_none()), "{outcome:?} {events:?}");
+        assert_eq!(deltas(&events), answer);
+        settle_run(&desk.db, &desk.run.id, &cancel, outcome);
+        assert_eq!(answer_text(&desk.db, &desk.run.thread_id).as_deref(), Some(answer));
     }
 }

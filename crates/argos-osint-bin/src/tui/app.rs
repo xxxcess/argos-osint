@@ -310,6 +310,28 @@ enum WorkEvent {
         thread_id: String,
         outcome: Result<(), String>,
     },
+    AnswerDelta {
+        thread_id: String,
+        text: String,
+    },
+    AnswerNote {
+        thread_id: String,
+        text: String,
+    },
+    Deadline {
+        thread_id: String,
+        label: String,
+    },
+}
+
+/// Synthesis text for a thread that is still streaming. Deltas for a thread that is not
+/// open stay here until the turn finishes; they are not dropped.
+#[derive(Default)]
+struct LiveAnswer {
+    text: String,
+    shown: String,
+    note: String,
+    painted: Option<Instant>,
 }
 
 pub struct App {
@@ -343,6 +365,10 @@ pub struct App {
     pub manual_runs: Vec<recon::Call>,
     pub manual_run_pos: usize,
     pub recon_stage: String,
+    /// Latest stage for a thread that is running, including one that is not selected.
+    recon_stages: HashMap<String, String>,
+    live_answers: HashMap<String, LiveAnswer>,
+    deadlines: HashMap<String, String>,
     /// False on the investigation list. True when a transcript fills the screen.
     pub recon_chat: bool,
     pub scrolls: Scrolls,
@@ -497,6 +523,9 @@ impl App {
             manual_runs,
             manual_run_pos,
             recon_stage: "ready".into(),
+            recon_stages: HashMap::new(),
+            live_answers: HashMap::new(),
+            deadlines: HashMap::new(),
             recon_chat: false,
             scrolls: Scrolls {
                 chat: chat_scroll,
@@ -806,7 +835,11 @@ impl App {
         self.scrolls.chat = thread.scroll.clamp(0, i64::from(u16::MAX)) as u16;
         self.chat_follow = self.scrolls.chat == 0;
         self.chat_sel = usize::MAX;
-        self.recon_stage = "ready".into();
+        self.recon_stage = self
+            .recon_stages
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| "ready".into());
         self.refresh_threads()?;
         if record && self.thread_history.last().map(String::as_str) != Some(id) {
             self.thread_history
@@ -852,11 +885,8 @@ impl App {
             let progress_tx = tx.clone();
             let thread_id = tid.clone();
             let outcome = service
-                .ask(&tid, &question, cancel, move |stage| {
-                    let _ = progress_tx.send(WorkEvent::ReconStage {
-                        thread_id: thread_id.clone(),
-                        stage: stage.into(),
-                    });
+                .ask(&tid, &question, cancel, move |event| {
+                    let _ = progress_tx.send(work_event(&thread_id, event));
                 })
                 .await
                 .map(|_| ())
@@ -891,11 +921,8 @@ impl App {
             let progress_tx = tx.clone();
             let thread_id = tid.clone();
             let outcome = service
-                .resume(&run.id, cancel, move |stage| {
-                    let _ = progress_tx.send(WorkEvent::ReconStage {
-                        thread_id: thread_id.clone(),
-                        stage: stage.into(),
-                    });
+                .resume(&run.id, cancel, move |event| {
+                    let _ = progress_tx.send(work_event(&thread_id, event));
                 })
                 .await
                 .map(|_| ())
@@ -1021,18 +1048,34 @@ impl App {
         Ok(())
     }
 
-    fn on_work_event(&mut self, event: WorkEvent) {
+    fn on_work_event(&mut self, event: WorkEvent) -> bool {
         match event {
             WorkEvent::ReconStage { thread_id, stage } => {
                 self.push_log("info", format!("Recon {stage}"));
+                self.recon_stages.insert(thread_id.clone(), stage.clone());
                 if self.selected_thread.as_deref() == Some(&thread_id) {
                     self.recon_stage = stage;
                     let _ = self.refresh_selected();
                     let _ = self.refresh_threads();
                 }
+                true
+            }
+            WorkEvent::AnswerDelta { thread_id, text } => self.note_delta(&thread_id, &text),
+            WorkEvent::AnswerNote { thread_id, text } => {
+                self.push_log("info", text.clone());
+                self.live_answers.entry(thread_id.clone()).or_default().note = text;
+                self.selected_thread.as_deref() == Some(&thread_id)
+            }
+            WorkEvent::Deadline { thread_id, label } => {
+                self.push_log("info", label.clone());
+                self.deadlines.insert(thread_id.clone(), label);
+                self.selected_thread.as_deref() == Some(&thread_id)
             }
             WorkEvent::ReconDone { thread_id, outcome } => {
                 self.running.remove(&thread_id);
+                self.live_answers.remove(&thread_id);
+                self.deadlines.remove(&thread_id);
+                self.recon_stages.remove(&thread_id);
                 match &outcome {
                     Ok(()) => self.push_log("info", "Recon turn complete"),
                     Err(err) => self.push_log("error", format!("Recon failed: {err}")),
@@ -1048,6 +1091,7 @@ impl App {
                 if let Ok(memories) = self.store.list_memories() {
                     self.memories = memories;
                 }
+                true
             }
             WorkEvent::OsintDone { outcome } => {
                 self.osint_cancel = None;
@@ -1080,12 +1124,16 @@ impl App {
                         self.status = err;
                     }
                 }
+                true
             }
             WorkEvent::CatalogDone {
                 role,
                 provider,
                 outcome,
-            } => self.finish_catalog(role, provider, outcome),
+            } => {
+                self.finish_catalog(role, provider, outcome);
+                true
+            }
             WorkEvent::Access { grok, openai } => {
                 if grok {
                     self.grok_signed_in = true;
@@ -1098,6 +1146,7 @@ impl App {
                 if matches!(self.overlay, Overlay::Choice(ChoiceKind::Provider)) {
                     self.rebuild_provider_choices();
                 }
+                true
             }
             WorkEvent::InsightDone { thread_id, outcome } => {
                 if self.selected_thread.as_deref() == Some(&thread_id) {
@@ -1113,8 +1162,52 @@ impl App {
                         self.memories = memories;
                     }
                 }
+                true
             }
         }
+    }
+
+    pub(crate) fn stage_label(&self, thread_id: &str) -> String {
+        self.recon_stages
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_else(|| self.recon_stage.clone())
+    }
+
+    pub(crate) fn deadline_label(&self, thread_id: &str) -> String {
+        self.deadlines.get(thread_id).cloned().unwrap_or_default()
+    }
+
+    /// Title and visible text of the streaming answer bubble, when there is something to show.
+    pub(crate) fn live_bubble(&self, thread_id: &str) -> Option<(String, String)> {
+        let live = self.live_answers.get(thread_id)?;
+        if live.shown.is_empty() && live.note.is_empty() {
+            return None;
+        }
+        let title = if live.note.is_empty() {
+            "Recon · streaming".to_string()
+        } else {
+            live.note.clone()
+        };
+        Some((title, live.shown.clone()))
+    }
+
+    /// Appends a synthesis delta. The first one shows immediately; later ones wait 50ms
+    /// so the transcript does not redraw on every token. A thread that is not open still
+    /// keeps the text.
+    fn note_delta(&mut self, thread_id: &str, text: &str) -> bool {
+        let live = self.live_answers.entry(thread_id.to_string()).or_default();
+        live.text.push_str(text);
+        let due = live.shown.is_empty()
+            || live
+                .painted
+                .is_none_or(|painted| painted.elapsed() >= Duration::from_millis(50));
+        if !due {
+            return false;
+        }
+        live.shown.clone_from(&live.text);
+        live.painted = Some(Instant::now());
+        self.selected_thread.as_deref() == Some(thread_id)
     }
 
     pub fn role_provider(&self) -> String {
@@ -2760,6 +2853,16 @@ pub async fn run(mut app: App) -> Result<()> {
     }
 }
 
+fn work_event(thread_id: &str, event: recon::TurnEvent) -> WorkEvent {
+    let thread_id = thread_id.to_string();
+    match event {
+        recon::TurnEvent::Stage(stage) => WorkEvent::ReconStage { thread_id, stage },
+        recon::TurnEvent::AnswerDelta(text) => WorkEvent::AnswerDelta { thread_id, text },
+        recon::TurnEvent::AnswerNote(text) => WorkEvent::AnswerNote { thread_id, text },
+        recon::TurnEvent::Deadline(label) => WorkEvent::Deadline { thread_id, label },
+    }
+}
+
 fn pump(app: &mut App) -> bool {
     let mut dirty = false;
     while let Ok(message) = app.provider_rx.try_recv() {
@@ -2767,8 +2870,32 @@ fn pump(app: &mut App) -> bool {
         dirty = true;
     }
     while let Ok(message) = app.work_rx.try_recv() {
-        app.on_work_event(message);
-        dirty = true;
+        dirty |= app.on_work_event(message);
+    }
+    dirty |= flush_streams(app);
+    dirty
+}
+
+/// Copies buffered synthesis text into the bubble once 50ms have passed since the last paint.
+fn flush_streams(app: &mut App) -> bool {
+    let now = Instant::now();
+    let selected = app.selected_thread.clone();
+    let mut dirty = false;
+    for (id, live) in &mut app.live_answers {
+        if live.shown == live.text {
+            continue;
+        }
+        let due = live
+            .painted
+            .is_none_or(|painted| now.duration_since(painted) >= Duration::from_millis(50));
+        if !due {
+            continue;
+        }
+        live.shown.clone_from(&live.text);
+        live.painted = Some(now);
+        if selected.as_deref() == Some(id.as_str()) {
+            dirty = true;
+        }
     }
     dirty
 }
@@ -2822,6 +2949,9 @@ mod tests {
             manual_runs: Vec::new(),
             manual_run_pos: 0,
             recon_stage: "ready".into(),
+            recon_stages: HashMap::new(),
+            live_answers: HashMap::new(),
+            deadlines: HashMap::new(),
             recon_chat: false,
             scrolls: Scrolls::default(),
             expanded: HashSet::new(),
@@ -3598,6 +3728,95 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn synthesis_deltas_fill_the_live_bubble_and_the_saved_answer_replaces_them() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.screen = Rect::new(0, 0, 100, 40);
+        app.selected_thread = Some("t-open".into());
+        app.running.insert("t-open".into(), Arc::new(AtomicBool::new(false)));
+        app.messages = vec![recon::Message {
+            id: "m1".into(),
+            thread_id: "t-open".into(),
+            sequence: 1,
+            role: "user".into(),
+            content: "who?".into(),
+            run_id: None,
+            created_at: String::new(),
+        }];
+        app.runs = vec![recon::Run {
+            id: "run-1".into(),
+            thread_id: "t-open".into(),
+            turn_id: "m1".into(),
+            state: "running".into(),
+            stage: "synthesizing".into(),
+            recon_model: String::new(),
+            synthesis_model: String::new(),
+            tool_picker_model: String::new(),
+            max_rounds: 1,
+            max_calls: 4,
+            turn_seconds: 300,
+            plan_json: None,
+            error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }];
+        let label = "Deadline 6m 10s: 11 calls, ~52k chars evidence";
+        app.recon_stage = "synthesizing".into();
+        app.recon_stages.insert("t-open".into(), "synthesizing".into());
+        app.on_work_event(WorkEvent::Deadline { thread_id: "t-open".into(), label: label.into() });
+        assert!(app.on_work_event(WorkEvent::AnswerDelta { thread_id: "t-open".into(), text: "Hel".into() }));
+        assert!(!app.on_work_event(WorkEvent::AnswerDelta { thread_id: "t-open".into(), text: "lo".into() }));
+        // A thread that is not on screen keeps every token.
+        app.on_work_event(WorkEvent::AnswerDelta { thread_id: "t-hidden".into(), text: "Hid".into() });
+        app.on_work_event(WorkEvent::AnswerDelta { thread_id: "t-hidden".into(), text: "den".into() });
+        assert_eq!(app.live_answers["t-hidden"].text, "Hidden");
+        let blocks = super::super::ui::chat_blocks(&app);
+        let stream = blocks.iter().find(|block| block.key == "stream:run-1").unwrap();
+        assert_eq!(stream.title, "Recon · streaming");
+        assert_eq!(stream.body, "Hel");
+        assert!(blocks.iter().any(|block| block.key == "status:run-1" && block.title.contains(label)));
+        assert!(!blocks.iter().any(|block| block.body.contains("Hidden")));
+        app.live_answers.get_mut("t-open").unwrap().painted = Some(Instant::now() - Duration::from_millis(50));
+        assert!(flush_streams(&mut app));
+        let blocks = super::super::ui::chat_blocks(&app);
+        assert_eq!(blocks.iter().find(|block| block.key == "stream:run-1").unwrap().body, "Hello");
+        app.on_work_event(WorkEvent::AnswerNote { thread_id: "t-open".into(), text: "fixing citations…".into() });
+        let blocks = super::super::ui::chat_blocks(&app);
+        assert_eq!(blocks.iter().find(|block| block.key == "stream:run-1").unwrap().title, "fixing citations…");
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|frame| super::super::ui::draw(frame, &app)).unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("Hello"), "{painted}");
+        assert!(painted.contains("fixing citations"), "{painted}");
+        app.on_work_event(WorkEvent::ReconDone { thread_id: "t-open".into(), outcome: Ok(()) });
+        assert!(!app.live_answers.contains_key("t-open"));
+        app.messages = vec![
+            recon::Message {
+                id: "m1".into(),
+                thread_id: "t-open".into(),
+                sequence: 1,
+                role: "user".into(),
+                content: "who?".into(),
+                run_id: None,
+                created_at: String::new(),
+            },
+            recon::Message {
+                id: "m2".into(),
+                thread_id: "t-open".into(),
+                sequence: 2,
+                role: "assistant".into(),
+                content: "Repaired answer [call-1].".into(),
+                run_id: Some("run-1".into()),
+                created_at: String::new(),
+            },
+        ];
+        let blocks = super::super::ui::chat_blocks(&app);
+        assert!(blocks.iter().all(|block| !block.key.starts_with("stream:")));
+        assert!(blocks.iter().any(|block| block.body == "Repaired answer [call-1]."));
     }
 
     fn hit(app: &App, target: Target) -> bool {

@@ -76,7 +76,7 @@ argos remember --app research --conversation thread-123 'A manually saved fact'
 argos recall 'What do I know?'
 ```
 
-`recon show` includes each run's plan, with the directives, input grounding, bindings, and per-pick tool-picker records (transport, confidence, reason). `recon delete` removes the thread and its contribution links. The default keeps uniquely sourced insight text; `--with-insights` removes unsupported extracted insights while preserving user pinned or edited ones. Shared insights keep surviving sources. `recon limits` shows or changes the per-turn round, call, and time budgets. `osint enable` and `osint disable` control tools. CLI commands return JSON where practical and use the same store, registry, and executor as the TUI.
+`recon show` includes each run's plan, with the directives, input grounding, bindings, and per-pick tool-picker records (transport, confidence, reason). `recon delete` removes the thread and its contribution links. The default keeps uniquely sourced insight text; `--with-insights` removes unsupported extracted insights while preserving user pinned or edited ones. Shared insights keep surviving sources. `recon limits` shows or changes the per-turn round, call, and time budgets, including `--max-turn-seconds` (default 900, range 120 to 1800), the hard ceiling for one turn. A turn's deadline grows with recon rounds, scheduled tool time, and the evidence packet, and it never drops below `turn_seconds`. Synthesis text streams into the transcript and to stderr for `argos ask`; stdout stays the final JSON. `osint enable` and `osint disable` control tools. CLI commands return JSON where practical and use the same store, registry, and executor as the TUI.
 
 ## State and migration
 

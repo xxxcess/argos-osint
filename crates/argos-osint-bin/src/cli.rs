@@ -156,6 +156,9 @@ enum ReconCommand {
         /// CourtListener calls per turn (default 3).
         #[arg(long)]
         legal_calls_per_turn: Option<u32>,
+        /// Hard ceiling for one turn, in seconds (default 900, range 120..1800).
+        #[arg(long)]
+        max_turn_seconds: Option<u16>,
     },
 }
 
@@ -552,8 +555,8 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             let service =
                 recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
             let run = service
-                .resume(&run_id, Arc::new(AtomicBool::new(false)), |stage| {
-                    eprintln!("{stage}")
+                .resume(&run_id, Arc::new(AtomicBool::new(false)), |event| {
+                    write_turn_event(&event, &mut std::io::stderr());
                 })
                 .await?;
             let store = open_store()?;
@@ -586,6 +589,7 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             sociavault_call_cost,
             news_calls_per_turn,
             legal_calls_per_turn,
+            max_turn_seconds,
         } => {
             let mut settings = SettingsFile::load()?;
             let mut changed = false;
@@ -602,6 +606,14 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             if let Some(value) = turn_seconds {
                 anyhow::ensure!((30..=900).contains(&value), "turn-seconds must be 30..900");
                 settings.recon_limits.turn_seconds = value;
+                changed = true;
+            }
+            if let Some(value) = max_turn_seconds {
+                anyhow::ensure!(
+                    (provider::MIN_MAX_TURN_SECONDS..=provider::MAX_MAX_TURN_SECONDS).contains(&value),
+                    "max-turn-seconds must be 120..1800"
+                );
+                settings.recon_limits.max_turn_seconds = value;
                 changed = true;
             }
             let assign = |slot: &mut u32, value: Option<u32>, changed: &mut bool| {
@@ -702,17 +714,27 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
 async fn ask_thread(thread_id: &str, question: &str) -> Result<()> {
     let service = recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
     let run = service
-        .ask(
-            thread_id,
-            question,
-            Arc::new(AtomicBool::new(false)),
-            |stage| eprintln!("{stage}"),
-        )
+        .ask(thread_id, question, Arc::new(AtomicBool::new(false)), |event| {
+            write_turn_event(&event, &mut std::io::stderr());
+        })
         .await?;
     let store = open_store()?;
     print_json(
         &serde_json::json!({"run":run,"messages":store.list_messages(thread_id)?,"calls":store.calls_for_run(&run.id)?}),
     )
+}
+
+/// Synthesis tokens go to stderr as they arrive. Stdout stays the final JSON from `print_json`.
+fn write_turn_event(event: &recon::TurnEvent, out: &mut impl std::io::Write) {
+    match event {
+        recon::TurnEvent::AnswerDelta(text) => {
+            let _ = write!(out, "{text}");
+            let _ = out.flush();
+        }
+        recon::TurnEvent::Stage(text) | recon::TurnEvent::AnswerNote(text) | recon::TurnEvent::Deadline(text) => {
+            let _ = writeln!(out, "{text}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -733,6 +755,20 @@ mod tests {
         let shown = defaults_json(&AuthFile::default(), &settings).unwrap();
         assert_eq!(shown["tool_picker"]["transport"], "chat");
         assert!(settings.defaults.role_mut("writer").is_none());
+    }
+
+    #[test]
+    fn synthesis_deltas_go_to_the_event_stream_without_a_newline_between_tokens() {
+        let mut out = Vec::new();
+        write_turn_event(&recon::TurnEvent::Stage("synthesizing".into()), &mut out);
+        write_turn_event(&recon::TurnEvent::Deadline("Deadline 6m 10s: 11 calls, ~52k chars evidence".into()), &mut out);
+        write_turn_event(&recon::TurnEvent::AnswerDelta("Hel".into()), &mut out);
+        write_turn_event(&recon::TurnEvent::AnswerDelta("lo".into()), &mut out);
+        write_turn_event(&recon::TurnEvent::AnswerNote("fixing citations…".into()), &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "synthesizing\nDeadline 6m 10s: 11 calls, ~52k chars evidence\nHellofixing citations…\n"
+        );
     }
 
     #[test]

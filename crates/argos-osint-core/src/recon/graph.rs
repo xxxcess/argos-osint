@@ -608,7 +608,10 @@ pub fn graph_brief(graph: &MemoryGraph) -> String {
 }
 
 fn ordered_serves(call: &PlanCall, directives: &[Directive]) -> Vec<String> {
-    let known: HashSet<&str> = directives.iter().map(|directive| directive.id.as_str()).collect();
+    let known: HashSet<&str> = directives
+        .iter()
+        .map(|directive| directive.id.as_str())
+        .collect();
     directive_ids(&call.reason)
         .into_iter()
         .filter(|id| known.contains(id.as_str()))
@@ -705,7 +708,9 @@ fn keep_node(node: &GraphNode, chosen: Option<&str>) -> bool {
         GraphNodeKind::Directive => {
             node.id == format!("directive:{chosen}") || node.label == chosen
         }
-        GraphNodeKind::Evidence => node.tags.is_empty() || node.tags.iter().any(|tag| tag == chosen),
+        GraphNodeKind::Evidence => {
+            node.tags.is_empty() || node.tags.iter().any(|tag| tag == chosen)
+        }
         _ => true,
     }
 }
@@ -960,10 +965,7 @@ mod tests {
         let path = recon_path(&graph);
         assert_eq!(path.bands.len(), 1);
         assert_eq!(path.bands[0].directive_id, "d2");
-        assert_eq!(
-            path.bands[0].finding.as_deref(),
-            Some("owns → x.com")
-        );
+        assert_eq!(path.bands[0].finding.as_deref(), Some("owns → x.com"));
         assert!(path.bands[0]
             .subjects
             .iter()

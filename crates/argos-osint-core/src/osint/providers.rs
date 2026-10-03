@@ -3,7 +3,8 @@
 //! Every route here is a fixed-host GET or POST built from validated inputs, like the
 //! adapters in `osint.rs`.
 use super::{
-    bounded, clip_text, domain, email_address, get, https_on_host, linkedin_handle, number_arg,
+    bounded, clip_page, clip_text, domain, email_address, get, https_on_host, linkedin_handle,
+    number_arg,
     profile_path_token, push_link, social_token, str_arg, url, url_arg, Request,
 };
 use anyhow::{anyhow, ensure, Result};
@@ -1203,7 +1204,7 @@ pub fn job_observations(value: &Value, partial: bool) -> (Value, bool) {
         .take(BATCH_SCRAPE_MAX_URLS)
         .map(|page| {
             let markdown = page.get("markdown").and_then(Value::as_str).unwrap_or("");
-            let clipped: String = markdown.chars().take(2500).collect();
+            let clipped = clip_page(markdown);
             clipped_any |= clipped.chars().count() < markdown.chars().count();
             json!({
                 "url": page.pointer("/metadata/sourceURL").or_else(|| page.pointer("/metadata/url")).and_then(Value::as_str).unwrap_or(""),
@@ -1224,38 +1225,87 @@ pub fn job_observations(value: &Value, partial: bool) -> (Value, bool) {
     )
 }
 
-pub fn extract_observations(value: &Value) -> Value {
+/// Extracted names, addresses, and profile URLs. Whitespace stays so a postal
+/// address is still an address; only a runaway field is cut.
+fn keep_extract_text(value: &str, truncated: &mut bool) -> String {
+    let trimmed = value.trim();
+    const LIMIT: usize = 2_000;
+    if trimmed.chars().count() <= LIMIT {
+        trimmed.to_string()
+    } else {
+        *truncated = true;
+        let mut clipped: String = trimmed.chars().take(LIMIT - 1).collect();
+        clipped.push('…');
+        clipped
+    }
+}
+
+pub fn extract_observations(value: &Value) -> (Value, bool) {
     let data = value.get("data").unwrap_or(value);
     let found = data
         .get("json")
         .or_else(|| data.get("extract"))
         .cloned()
         .unwrap_or(Value::Null);
-    let text = |key: &str| {
+    let mut truncated = false;
+    let text = |key: &str, truncated: &mut bool| {
         found
             .get(key)
             .and_then(Value::as_str)
-            .map(clip_text)
+            .map(|value| keep_extract_text(value, truncated))
             .unwrap_or_default()
     };
-    let list = |key: &str, limit: usize| -> Vec<Value> {
+    let strings = |key: &str, limit: usize, truncated: &mut bool| -> Vec<Value> {
         found
             .get(key)
             .and_then(Value::as_array)
-            .map(|items| items.iter().take(limit).cloned().collect())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(limit)
+                    .map(|item| Value::String(keep_extract_text(item, truncated)))
+                    .collect()
+            })
             .unwrap_or_default()
     };
-    json!({
-        "url": data.pointer("/metadata/sourceURL").and_then(Value::as_str).unwrap_or(""),
-        "org_name": text("org_name"),
-        "legal_name": text("legal_name"),
-        "domain": text("domain"),
-        "emails": list("emails", 10),
-        "social_profiles": list("social_profiles", 10),
-        "people": list("people", 10),
-        "address": text("address"),
-        "evidence_form": "extract",
-    })
+    let people: Vec<Value> = found
+        .get("people")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(25)
+                .map(|person| {
+                    let name = person
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(|value| keep_extract_text(value, &mut truncated))
+                        .unwrap_or_default();
+                    let title = person
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(|value| keep_extract_text(value, &mut truncated))
+                        .unwrap_or_default();
+                    json!({"name": name, "title": title})
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (
+        json!({
+            "url": data.pointer("/metadata/sourceURL").and_then(Value::as_str).unwrap_or(""),
+            "org_name": text("org_name", &mut truncated),
+            "legal_name": text("legal_name", &mut truncated),
+            "domain": text("domain", &mut truncated),
+            "emails": strings("emails", 25, &mut truncated),
+            "social_profiles": strings("social_profiles", 25, &mut truncated),
+            "people": people,
+            "address": text("address", &mut truncated),
+            "evidence_form": "extract",
+        }),
+        truncated,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2117,6 +2167,54 @@ mod tests {
             false,
         );
         assert_eq!(done["status"], "completed");
+        let contact = format!("Jane Example jane@acmerobotics.com {}", "word ".repeat(1_200));
+        assert!(contact.chars().count() > 2_500);
+        let (kept, truncated) = job_observations(
+            &json!({"status": "completed", "data": [
+                {"markdown": contact, "metadata": {"sourceURL": "https://acmerobotics.com/contact", "title": "Contact"}}
+            ]}),
+            false,
+        );
+        assert!(!truncated);
+        assert_eq!(kept["pages"][0]["markdown"], contact);
+        let huge = "b".repeat(super::super::PAGE_MARKDOWN_CHARS + 40);
+        let (clipped, truncated) = job_observations(
+            &json!({"status": "completed", "data": [{"markdown": huge}]}),
+            false,
+        );
+        assert!(truncated);
+        let markdown = clipped["pages"][0]["markdown"].as_str().unwrap();
+        assert!(markdown.ends_with('…'));
+        assert_eq!(markdown.chars().count(), super::super::PAGE_MARKDOWN_CHARS);
+    }
+
+    #[test]
+    fn extract_keeps_addresses_and_people() {
+        let address = "100 Market Street\nSuite 4\nSan Francisco, CA 94105";
+        let payload = json!({
+            "data": {
+                "json": {
+                    "org_name": "Acme Robotics Incorporated",
+                    "legal_name": "Acme Robotics Incorporated",
+                    "domain": "acmerobotics.com",
+                    "emails": ["jane@acmerobotics.com"],
+                    "social_profiles": ["https://x.com/acmerobotics"],
+                    "people": [{"name": "Jane Example", "title": "Chief Executive Officer", "bio": "ignored"}],
+                    "address": address
+                },
+                "metadata": {"sourceURL": "https://acmerobotics.com/about"}
+            }
+        });
+        let (found, truncated) = extract_observations(&payload);
+        assert!(!truncated);
+        assert_eq!(found["address"], address);
+        assert_eq!(found["org_name"], "Acme Robotics Incorporated");
+        assert_eq!(found["emails"][0], "jane@acmerobotics.com");
+        assert_eq!(found["people"][0]["name"], "Jane Example");
+        assert_eq!(found["people"][0]["title"], "Chief Executive Officer");
+        assert!(found["people"][0].get("bio").is_none());
+        assert_eq!(found["evidence_form"], "extract");
+        assert_eq!(found["url"], "https://acmerobotics.com/about");
     }
 
     #[test]

@@ -39,68 +39,123 @@ pub struct ToolDefinition {
     pub timeout_seconds: u64,
     pub cache_seconds: u64,
 }
-/// Cache lifetime for every Firecrawl, SociaVault, and Hunter tool: one week. Their calls
-/// spend paid credits, so a completed result is reused for 604800 s.
-pub const PRIMARY_PROVIDER_CACHE_SECONDS: u64 = 604_800;
-macro_rules! tool { ($id:expr,$name:expr,$category:expr,$description:expr,[$($input:expr),*],$doc:expr,$restriction:expr,$timeout:expr,$cache:expr) => { ToolDefinition {id:$id,name:$name,category:$category,description:$description,inputs:&[$($input),*],documentation:$doc,restrictions:$restriction,timeout_seconds:$timeout,cache_seconds:$cache} }; }
+
+/// How often a provider's pricing plan restores credits. A tool caches a completed
+/// result for that long, so the same lookup is not paid for again until the plan would
+/// have restored the credits. A provider that does not restore credits caches for a month.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanInterval {
+    Daily,
+    Weekly,
+    Monthly,
+    /// Prepaid packs, or no credit plan at all.
+    Never,
+}
+
+pub const CACHE_DAY_SECONDS: u64 = 86_400;
+pub const CACHE_WEEK_SECONDS: u64 = 7 * CACHE_DAY_SECONDS;
+/// Thirty days. Expiry is a duration from the call, not a calendar month.
+pub const CACHE_MONTH_SECONDS: u64 = 30 * CACHE_DAY_SECONDS;
+
+impl PlanInterval {
+    pub const fn cache_seconds(self) -> u64 {
+        match self {
+            Self::Daily => CACHE_DAY_SECONDS,
+            Self::Weekly => CACHE_WEEK_SECONDS,
+            Self::Monthly | Self::Never => CACHE_MONTH_SECONDS,
+        }
+    }
+}
+
+/// The pricing-plan interval that sets this tool's cache lifetime.
+///
+/// Firecrawl and Hunter restore a monthly credit allotment; a yearly bill still resets
+/// those credits each month. SociaVault sells prepaid packs that never expire. NewsAPI's
+/// developer plan, CourtListener's free tier, and HackerTarget's free allowance each
+/// restore daily. Every other catalog tool has no credit plan.
+pub fn plan_interval(id: &str) -> PlanInterval {
+    let id = canonical_tool_id(id);
+    if let Some(provider) = primary_provider(id) {
+        return match provider {
+            "firecrawl" | "hunter" => PlanInterval::Monthly,
+            // SociaVault prepaid packs do not reset. Any other primary provider
+            // without a restoring plan is treated the same way.
+            _ => PlanInterval::Never,
+        };
+    }
+    if news_legal::provider(id).is_some() {
+        return PlanInterval::Daily;
+    }
+    match id {
+        "hackertarget_hostsearch" => PlanInterval::Daily,
+        _ => PlanInterval::Never,
+    }
+}
+
+/// Cache lifetime for one catalog tool, from [`plan_interval`].
+pub fn cache_seconds(id: &str) -> u64 {
+    plan_interval(id).cache_seconds()
+}
+
+macro_rules! tool { ($id:expr,$name:expr,$category:expr,$description:expr,[$($input:expr),*],$doc:expr,$restriction:expr,$timeout:expr) => { ToolDefinition {id:$id,name:$name,category:$category,description:$description,inputs:&[$($input),*],documentation:$doc,restrictions:$restriction,timeout_seconds:$timeout,cache_seconds:cache_seconds($id)} }; }
 pub fn registry() -> &'static [ToolDefinition] {
     static TOOLS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
     TOOLS.get_or_init(|| vec![
-        tool!("crtsh_certificates","crt.sh certificates","Domains","Discover certificate records and hostnames.",["domain"],"https://crt.sh/","Public service; availability varies.",30,86400),
-        tool!("mnemonic_passive_dns","mnemonic Passive DNS","Domains","Historical hostname and IP relationships.",["domain_or_ip"],"https://docs.mnemonic.no/service-integration-guides/passivedns/docs/public/01-public_api.html","Public endpoint; bounded pagination and quotas apply.",30,3600),
-        tool!("hackertarget_hostsearch","HackerTarget Host Search","Domains","Indexed subdomains and IPs.",["domain"],"https://hackertarget.com/ip-tools/","Free daily allowance and request rate apply.",20,3600),
-        tool!("ripestat_network_info","RIPEstat network info","Networks","Announced prefix and routing ASN for an IP.",["ip"],"https://stat.ripe.net/docs/data_api","Routing origin is not website ownership.",20,3600),
-        tool!("arin_rdap","ARIN RDAP","Networks","IP registration and contacts.",["ip"],"https://www.arin.net/resources/registry/whois/rdap/","Regional registry may redirect.",25,86400),
-        tool!("apnic_rdap","APNIC RDAP","Networks","Asia-Pacific IP registration records.",["ip"],"https://www.apnic.net/about-apnic/whois_search/about/rdap/","Regional registry may redirect.",25,86400),
-        tool!("wayback_availability","Wayback availability","Archives","Locate an available historical snapshot.",["url"],"https://archive.org/help/wayback_api.php","Snapshot availability does not reveal page contents.",30,3600),
-        tool!("commoncrawl_urls","Common Crawl URLs","Archives","Crawled URLs and archive references.",["domain"],"https://index.commoncrawl.org/","Indexed crawl coverage is incomplete.",40,86400),
-        tool!("arquivo_history","Arquivo.pt history","Archives","Archived versions of a site.",["domain_or_url"],"https://arquivo.pt/api","Archive coverage is incomplete.",40,86400),
-        tool!("github_repositories","GitHub repositories","Code","Public repository names and metadata.",["query"],"https://docs.github.com/en/rest/search/search","Anonymous and search-specific quotas; not code search.",20,300),
-        tool!("gitlab_projects","GitLab projects","Code","Public project metadata.",["query"],"https://docs.gitlab.com/api/projects/","Public projects only; rate limits apply.",20,300),
-        tool!("grepapp_code_search","grep.app code search","Code","Source references to a string.",["query"],"https://grep.app/api","Snippets are untrusted evidence.",20,300),
-        tool!("gleif_entities","GLEIF LEI entities","Organizations","Legal entities, LEIs and relationships.",["company_name|lei"],"https://www.gleif.org/en/lei-data/gleif-api","Search matches require identity confirmation.",25,86400),
-        tool!("sec_submissions","SEC EDGAR submissions","Organizations","US reporting entity and filing metadata.",["cik|name|ticker"],"https://www.sec.gov/search-filings/edgar-application-programming-interfaces","Identifying User-Agent required; US reporting entities.",30,3600),
-        tool!("wikidata_entities","Wikidata entities","Organizations","Find public organization entities and claims.",["name|qid"],"https://www.wikidata.org/wiki/Wikidata:REST_API","Search matches are candidates, not verified identity.",25,3600),
-        tool!("keybase_identity","Keybase identity","Identities","Public profile and external identity proofs.",["username|domain"],"https://keybase.io/docs/api/1.0/call/user/lookup","Account does not establish physical identity.",20,3600),
-        tool!("stackexchange_users","Stack Exchange users","Identities","Public profiles matching a display name.",["name"],"https://api.stackexchange.com/docs/users","Display names may be ambiguous.",20,3600),
-        tool!("wikipedia_users","Wikipedia users","Identities","Account registration and edit metadata.",["username"],"https://www.mediawiki.org/wiki/API:Users","Account does not establish physical identity.",20,3600),
-        tool!("nominatim_geocode","Nominatim geocode","Places","Place or address coordinates.",["address_or_place"],"https://operations.osmfoundation.org/policies/nominatim/","OpenStreetMap attribution; one request/second; no autocomplete or bulk queries.",20,86400),
-        tool!("census_geocode","US Census geocode","Places","Coordinates for a US street address.",["us_address"],"https://www.census.gov/data/developers/data-sets/Geocoding-services.html","US addresses only.",20,86400),
-        tool!("overpass_places","Overpass places","Places","Mapped features around coordinates.",["latitude","longitude","radius_m"],"https://wiki.openstreetmap.org/wiki/Overpass_API","Bounded radius and feature allowlist; OpenStreetMap attribution.",35,3600),
-        tool!("blockchain_address","Blockchain.com Bitcoin address","Bitcoin","Bitcoin address balance and activity totals.",["bitcoin_address"],"https://www.blockchain.com/explorer/api/blockchain_api","Bitcoin only; address does not establish owner.",20,120),
-        tool!("blockstream_address","Blockstream Bitcoin address","Bitcoin","Bitcoin address activity.",["bitcoin_address"],"https://github.com/Blockstream/esplora/blob/master/API.md","Bitcoin only; address does not establish owner.",20,120),
-        tool!("mempool_address","mempool.space Bitcoin address","Bitcoin","Confirmed and unconfirmed address activity.",["bitcoin_address"],"https://mempool.space/docs/api/rest","Bitcoin only; address does not establish owner.",20,120),
-        tool!("nvd_cve","NVD CVE","Vulnerabilities","CVE description, severity and affected products.",["cve_id"],"https://nvd.nist.gov/developers/start-here","Advisory does not prove live exploitability.",25,3600),
-        tool!("osv_package","OSV package query","Vulnerabilities","Vulnerabilities affecting a package version or commit.",["ecosystem","package_name","version|commit"],"https://google.github.io/osv.dev/api/","Package coordinates and versions must match the target.",25,3600),
-        tool!("cve_record","CVE published record","Vulnerabilities","Published CVE record and references.",["cve_id"],"https://cveawg.mitre.org/api-docs/","Advisory does not prove live exploitability.",25,3600),
-        tool!("sans_ip_activity","SANS ISC IP activity","Exposure","Reported attack activity for an IP.",["ip"],"https://isc.sans.edu/api/","Reports are historical observations.",25,600),
-        tool!("shodan_internetdb","Shodan InternetDB","Exposure","Observed ports, hostnames and vulnerability associations.",["ip"],"https://internetdb.shodan.io/","Free access is noncommercial; observations may be old.",20,600),
-        tool!("urlscan_search","urlscan search","Exposure","Search existing website scan records.",["domain|query"],"https://urlscan.io/docs/api/","Search only; no scan submission; historical observations.",20,600),
-        tool!("firecrawl_search","Firecrawl search","Web","Web search for titles, links, and descriptions. A new investigation runs two complementary searches before enrichment. Later searches are targeted follow-ups.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/search","POST https://api.firecrawl.dev/v2/search with query and limit (at most 10). Optional sources (web, news), categories (github, research), tbs time filter, and location. Enter the API key on this tool, or set FIRECRAWL_API_KEY. Results are snippets, not page content. Automatic investigation does not paginate. 2 credits per 10 results.",60,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("firecrawl_scrape","Firecrawl page","Web","Retrieve one public page as markdown when a search snippet is not enough to support a consequential claim.",["url"],"https://docs.firecrawl.dev/api-reference/endpoint/scrape","POST https://api.firecrawl.dev/v2/scrape for a single URL already found in evidence. One page per call; optional formats markdown and links (structured JSON goes through firecrawl_extract). Same Firecrawl API key as search. 1 credit.",60,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("firecrawl_map","Firecrawl map","Web","List a subject-owned site's pages, contact, about, team, press, and legal pages first.",["domain|url"],"https://docs.firecrawl.dev/api-reference/endpoint/map","POST https://api.firecrawl.dev/v2/map with optional search. Same registrable domain only, at most 100 links, never a social, publisher, or Q&A host. 1 credit per call.",60,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("firecrawl_batch_scrape","Firecrawl batch scrape","Web","Retrieve up to 10 evidence URLs as markdown in one job, such as the contact and about pages a map found.",["urls"],"https://docs.firecrawl.dev/api-reference/endpoint/batch-scrape","POST https://api.firecrawl.dev/v2/batch/scrape, then GET /v2/batch/scrape/{id} until done. URLs must already be in evidence; default 5, at most 10; markdown only; 1 credit per page. Polling is free; a job still running at the timeout is recorded as partial.",120,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("firecrawl_crawl","Firecrawl crawl","Web","Small crawl of a subject-owned site: up to 10 pages one link deep. Off by default.",["domain|url"],"https://docs.firecrawl.dev/api-reference/endpoint/crawl-post","POST https://api.firecrawl.dev/v2/crawl, then GET /v2/crawl/{id} until done. limit at most 10, maxDiscoveryDepth 1, same domain, markdown only, 1 credit per page. Disabled until enabled on the OSINT screen.",180,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("firecrawl_extract","Firecrawl extract","Web","Structured org name, legal name, domain, emails, social profiles, people, and address from one page.",["url"],"https://docs.firecrawl.dev/features/llm-extract","POST https://api.firecrawl.dev/v2/scrape with a JSON format and a fixed Argos schema {org_name, legal_name, domain, emails, social_profiles, people, address}. One page; 5 credits.",90,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("hunter_domain_finder","Hunter domain finder","Enrichment","Resolve an organization name to its website domain. Free.",["company"],"https://hunter.io/api-documentation/v2#domain-finder","GET https://api.hunter.io/v2/domain-finder. Company name of at least 3 characters; optional limit (1-10) and perfect_match. Free but rate-limited. Matches that are not perfect become inferred bindings. Inputs only from the prompt, Firecrawl, SociaVault, or Hunter.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("hunter_email_count","Hunter email count","Enrichment","How many addresses Hunter has for a domain or company. Free; zero skips the paid domain search.",["domain|company"],"https://hunter.io/api-documentation/v2#email-count","GET https://api.hunter.io/v2/email-count with optional type (personal, generic). Free. A zero count skips hunter_domain_search; Hunter notes zero can also mean the domain is privacy-suppressed.",20,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("hunter_domain_search","Hunter domain search","Enrichment","Email addresses, roles, and the email pattern Hunter has for a company domain or name.",["domain|company"],"https://hunter.io/api-documentation/v2#domain-search","GET https://api.hunter.io/v2/domain-search. Enter the API key on a Hunter tool, or set HUNTER_API_KEY. The key is sent as X-API-KEY and is not stored on the tool input. At most 10 addresses per call. Inputs only from the prompt, Firecrawl, SociaVault, or Hunter.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("hunter_company_enrichment","Hunter company enrichment","Enrichment","Company profile for a domain: name, legal name, industry, size, address, tech stack, social handles, site emails.",["domain"],"https://hunter.io/api-documentation/v2#company-enrichment","GET https://api.hunter.io/v2/companies/find. 1 credit. Replaces hunter_tech_lookup (the old id still resolves here). Same Hunter API key as the other Hunter tools.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("hunter_email_finder","Hunter email finder","Enrichment","Most likely professional email for a named person at a domain, company, or LinkedIn handle.",["domain|company|linkedin_handle","full_name|first_name|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-finder","GET https://api.hunter.io/v2/email-finder. Requires a domain, company, or LinkedIn handle, plus a full name or a first and last name unless the LinkedIn handle is enough. Same Hunter API key as the other Hunter tools.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("hunter_email_verifier","Hunter email verifier","Enrichment","Deliverability status and score for one email address, when a claim depends on deliverability.",["email"],"https://hunter.io/api-documentation/v2#email-verifier","GET https://api.hunter.io/v2/email-verifier. The check can take about 20 seconds; a 202 is retried. Same Hunter API key as the other Hunter tools.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("hunter_email_insight","Hunter email insight","Enrichment","Whether an email is webmail, disposable, or gibberish, plus its MX records. Free.",["email"],"https://hunter.io/api-documentation/v2#email-insight","GET https://api.hunter.io/v2/email-insight. Free. Runs before enrichment: webmail and disposable addresses go to person enrichment only, company addresses to combined enrichment.",20,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("hunter_person_enrichment","Hunter person enrichment","Enrichment","Person profile for an email or LinkedIn handle: name, employer, location, social handles.",["email|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-enrichment","GET https://api.hunter.io/v2/people/find. 1 credit. 404 means no match. A 451 claimed_email response is stored without the person payload and yields no bindings.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("hunter_combined_enrichment","Hunter combined enrichment","Enrichment","Person and company profile for one company email address in a single call.",["email"],"https://hunter.io/api-documentation/v2#combined-enrichment","GET https://api.hunter.io/v2/combined/find. Company email addresses only; webmail goes to person enrichment. 1 credit. A 451 claimed_email response is stored without the person payload and yields no bindings.",25,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("sociavault_profile","SociaVault profile","Social","Public profile stats, biography, outbound links, and account id for one evidence-supported account.",["platform","handle|user_id"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/{platform}/profile (YouTube /youtube/channel; LinkedIn /linkedin/profile or /linkedin/company; Instagram /instagram/basic-profile by user_id). Platforms: twitter, instagram, tiktok, youtube, facebook, linkedin, threads, twitch. Optional endpoint. Enter the API key on a SociaVault tool, or set SOCIAVAULT_API_KEY. The key is sent as X-API-Key and is not stored on the tool input. 1 credit.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("sociavault_search","SociaVault search","Social","Search one platform's posts, videos, or hashtags for the subject's name, organization, or a hashtag.",["platform","query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/... Platforms and endpoints: instagram (hashtag), linkedin (posts), pinterest (search), reddit (search, subreddit), threads (search), tiktok (keyword, hashtag, top), twitter (search), youtube (search, hashtag). Optional endpoint and subreddit. 1 credit. Handles found only here stay unverified.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("sociavault_search_users","SociaVault account search","Social","Find accounts by name on Instagram, Threads, or TikTok.",["platform","query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/instagram/search, /threads/search-users, or /tiktok/search/users. 1 credit. Accounts found only here stay unverified until a profile call or a Firecrawl page links them to the subject.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("sociavault_user_content","SociaVault user content","Social","One account's own posts, videos, reels, highlights, playlists, boards, or schedule. No followers or single posts.",["platform","handle|user_id"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/... Platforms and endpoints: facebook (posts, reels), instagram (posts, highlights, reels), pinterest (boards), threads (posts), tiktok (videos, live), twitch (videos, schedule), twitter (tweets; tweets_all by user_id), youtube (videos, community_posts, lives, playlists, shorts). Optional endpoint. 1 credit. Runs after a profile call when a numeric id is needed.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("sociavault_google_search","SociaVault Google search","Web","Google results for the same query when Firecrawl search was weak. Fallback only.",["query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/google/search. Never an opening pick: offered only when Firecrawl search failed, returned fewer than 3 results, returned only filtered hosts, or yielded no binding a later step needs. One page and one call per question; 1 credit.",40,PRIMARY_PROVIDER_CACHE_SECONDS),
-        tool!("newsapi_search","NewsAPI article search","News","News articles that name the subject (exact phrase). Free-tier articles arrive 24 hours late and search reaches back one month, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/everything","GET https://newsapi.org/v2/everything with q as an exact phrase, pageSize 10 (at most 10 articles), first page only. Optional from and to (YYYY-MM-DD), language, sort_by (relevancy default, publishedAt, popularity), and domains. Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY; it is sent as X-Api-Key, never in the URL. Developer plan: 100 requests a day, development use only. At most 2 NewsAPI calls per turn.",20,3600),
-        tool!("newsapi_headlines","NewsAPI top headlines","News","Top headlines that name the subject (exact phrase). Free-tier headlines arrive 24 hours late and cover one month at most, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/top-headlines","GET https://newsapi.org/v2/top-headlines with q as an exact phrase, pageSize 10 (at most 10 articles). Optional country (2-letter code) and category (business, entertainment, general, health, science, sports, technology). Same NewsAPI key (NEWSAPI_API_KEY), sent as X-Api-Key, never in the URL. At most 2 NewsAPI calls per turn.",20,3600),
-        tool!("courtlistener_case_search","CourtListener case law","Legal","Court opinions (case law) that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=o with q as an exact phrase. First page only, at most 20 results, no highlighting, never semantic search. Optional court (court ids separated by spaces), filed_after and filed_before (YYYY-MM-DD). Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN; it is sent as Authorization: Token. Free tier 5/min, 50/hour, 125/day: at most 3 CourtListener calls per turn, 12 s apart.",30,86400),
-        tool!("courtlistener_docket_search","CourtListener federal dockets","Legal","Federal (PACER/RECAP) dockets that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=r with q as an exact phrase. First page only, at most 20 results, no highlighting; no RECAP fetch or paid PACER pulls. Optional court and filed_after (YYYY-MM-DD). Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30,86400),
-        tool!("courtlistener_judge_search","CourtListener judges","Legal","Judges whose name matches the subject (exact phrase), with court and position.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=p with q as an exact phrase. First page only, at most 20 results. Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30,86400),
+        tool!("crtsh_certificates","crt.sh certificates","Domains","Discover certificate records and hostnames.",["domain"],"https://crt.sh/","Public service; availability varies.",30),
+        tool!("mnemonic_passive_dns","mnemonic Passive DNS","Domains","Historical hostname and IP relationships.",["domain_or_ip"],"https://docs.mnemonic.no/service-integration-guides/passivedns/docs/public/01-public_api.html","Public endpoint; bounded pagination and quotas apply.",30),
+        tool!("hackertarget_hostsearch","HackerTarget Host Search","Domains","Indexed subdomains and IPs.",["domain"],"https://hackertarget.com/ip-tools/","Free daily allowance and request rate apply.",20),
+        tool!("ripestat_network_info","RIPEstat network info","Networks","Announced prefix and routing ASN for an IP.",["ip"],"https://stat.ripe.net/docs/data_api","Routing origin is not website ownership.",20),
+        tool!("arin_rdap","ARIN RDAP","Networks","IP registration and contacts.",["ip"],"https://www.arin.net/resources/registry/whois/rdap/","Regional registry may redirect.",25),
+        tool!("apnic_rdap","APNIC RDAP","Networks","Asia-Pacific IP registration records.",["ip"],"https://www.apnic.net/about-apnic/whois_search/about/rdap/","Regional registry may redirect.",25),
+        tool!("wayback_availability","Wayback availability","Archives","Locate an available historical snapshot.",["url"],"https://archive.org/help/wayback_api.php","Snapshot availability does not reveal page contents.",30),
+        tool!("commoncrawl_urls","Common Crawl URLs","Archives","Crawled URLs and archive references.",["domain"],"https://index.commoncrawl.org/","Indexed crawl coverage is incomplete.",40),
+        tool!("arquivo_history","Arquivo.pt history","Archives","Archived versions of a site.",["domain_or_url"],"https://arquivo.pt/api","Archive coverage is incomplete.",40),
+        tool!("github_repositories","GitHub repositories","Code","Public repository names and metadata.",["query"],"https://docs.github.com/en/rest/search/search","Anonymous and search-specific quotas; not code search.",20),
+        tool!("gitlab_projects","GitLab projects","Code","Public project metadata.",["query"],"https://docs.gitlab.com/api/projects/","Public projects only; rate limits apply.",20),
+        tool!("grepapp_code_search","grep.app code search","Code","Source references to a string.",["query"],"https://grep.app/api","Snippets are untrusted evidence.",20),
+        tool!("gleif_entities","GLEIF LEI entities","Organizations","Legal entities, LEIs and relationships.",["company_name|lei"],"https://www.gleif.org/en/lei-data/gleif-api","Search matches require identity confirmation.",25),
+        tool!("sec_submissions","SEC EDGAR submissions","Organizations","US reporting entity and filing metadata.",["cik|name|ticker"],"https://www.sec.gov/search-filings/edgar-application-programming-interfaces","Identifying User-Agent required; US reporting entities.",30),
+        tool!("wikidata_entities","Wikidata entities","Organizations","Find public organization entities and claims.",["name|qid"],"https://www.wikidata.org/wiki/Wikidata:REST_API","Search matches are candidates, not verified identity.",25),
+        tool!("keybase_identity","Keybase identity","Identities","Public profile and external identity proofs.",["username|domain"],"https://keybase.io/docs/api/1.0/call/user/lookup","Account does not establish physical identity.",20),
+        tool!("stackexchange_users","Stack Exchange users","Identities","Public profiles matching a display name.",["name"],"https://api.stackexchange.com/docs/users","Display names may be ambiguous.",20),
+        tool!("wikipedia_users","Wikipedia users","Identities","Account registration and edit metadata.",["username"],"https://www.mediawiki.org/wiki/API:Users","Account does not establish physical identity.",20),
+        tool!("nominatim_geocode","Nominatim geocode","Places","Place or address coordinates.",["address_or_place"],"https://operations.osmfoundation.org/policies/nominatim/","OpenStreetMap attribution; one request/second; no autocomplete or bulk queries.",20),
+        tool!("census_geocode","US Census geocode","Places","Coordinates for a US street address.",["us_address"],"https://www.census.gov/data/developers/data-sets/Geocoding-services.html","US addresses only.",20),
+        tool!("overpass_places","Overpass places","Places","Mapped features around coordinates.",["latitude","longitude","radius_m"],"https://wiki.openstreetmap.org/wiki/Overpass_API","Bounded radius and feature allowlist; OpenStreetMap attribution.",35),
+        tool!("blockchain_address","Blockchain.com Bitcoin address","Bitcoin","Bitcoin address balance and activity totals.",["bitcoin_address"],"https://www.blockchain.com/explorer/api/blockchain_api","Bitcoin only; address does not establish owner.",20),
+        tool!("blockstream_address","Blockstream Bitcoin address","Bitcoin","Bitcoin address activity.",["bitcoin_address"],"https://github.com/Blockstream/esplora/blob/master/API.md","Bitcoin only; address does not establish owner.",20),
+        tool!("mempool_address","mempool.space Bitcoin address","Bitcoin","Confirmed and unconfirmed address activity.",["bitcoin_address"],"https://mempool.space/docs/api/rest","Bitcoin only; address does not establish owner.",20),
+        tool!("nvd_cve","NVD CVE","Vulnerabilities","CVE description, severity and affected products.",["cve_id"],"https://nvd.nist.gov/developers/start-here","Advisory does not prove live exploitability.",25),
+        tool!("osv_package","OSV package query","Vulnerabilities","Vulnerabilities affecting a package version or commit.",["ecosystem","package_name","version|commit"],"https://google.github.io/osv.dev/api/","Package coordinates and versions must match the target.",25),
+        tool!("cve_record","CVE published record","Vulnerabilities","Published CVE record and references.",["cve_id"],"https://cveawg.mitre.org/api-docs/","Advisory does not prove live exploitability.",25),
+        tool!("sans_ip_activity","SANS ISC IP activity","Exposure","Reported attack activity for an IP.",["ip"],"https://isc.sans.edu/api/","Reports are historical observations.",25),
+        tool!("shodan_internetdb","Shodan InternetDB","Exposure","Observed ports, hostnames and vulnerability associations.",["ip"],"https://internetdb.shodan.io/","Free access is noncommercial; observations may be old.",20),
+        tool!("urlscan_search","urlscan search","Exposure","Search existing website scan records.",["domain|query"],"https://urlscan.io/docs/api/","Search only; no scan submission; historical observations.",20),
+        tool!("firecrawl_search","Firecrawl search","Web","Web search for titles, links, and descriptions. A new investigation runs two complementary searches before enrichment. Later searches are targeted follow-ups.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/search","POST https://api.firecrawl.dev/v2/search with query and limit (at most 10). Optional sources (web, news), categories (github, research), tbs time filter, and location. Enter the API key on this tool, or set FIRECRAWL_API_KEY. Results are snippets, not page content. Automatic investigation does not paginate. 2 credits per 10 results.",60),
+        tool!("firecrawl_scrape","Firecrawl page","Web","Retrieve one public page as markdown when a search snippet is not enough to support a consequential claim.",["url"],"https://docs.firecrawl.dev/api-reference/endpoint/scrape","POST https://api.firecrawl.dev/v2/scrape for a single URL already found in evidence. One page per call; optional formats markdown and links (structured JSON goes through firecrawl_extract). Same Firecrawl API key as search. 1 credit.",60),
+        tool!("firecrawl_map","Firecrawl map","Web","List a subject-owned site's pages, contact, about, team, press, and legal pages first.",["domain|url"],"https://docs.firecrawl.dev/api-reference/endpoint/map","POST https://api.firecrawl.dev/v2/map with optional search. Same registrable domain only, at most 100 links, never a social, publisher, or Q&A host. 1 credit per call.",60),
+        tool!("firecrawl_batch_scrape","Firecrawl batch scrape","Web","Retrieve up to 10 evidence URLs as markdown in one job, such as the contact and about pages a map found.",["urls"],"https://docs.firecrawl.dev/api-reference/endpoint/batch-scrape","POST https://api.firecrawl.dev/v2/batch/scrape, then GET /v2/batch/scrape/{id} until done. URLs must already be in evidence; default 5, at most 10; markdown only; 1 credit per page. Polling is free; a job still running at the timeout is recorded as partial.",120),
+        tool!("firecrawl_crawl","Firecrawl crawl","Web","Small crawl of a subject-owned site: up to 10 pages one link deep. Off by default.",["domain|url"],"https://docs.firecrawl.dev/api-reference/endpoint/crawl-post","POST https://api.firecrawl.dev/v2/crawl, then GET /v2/crawl/{id} until done. limit at most 10, maxDiscoveryDepth 1, same domain, markdown only, 1 credit per page. Disabled until enabled on the OSINT screen.",180),
+        tool!("firecrawl_extract","Firecrawl extract","Web","Structured org name, legal name, domain, emails, social profiles, people, and address from one page.",["url"],"https://docs.firecrawl.dev/features/llm-extract","POST https://api.firecrawl.dev/v2/scrape with a JSON format and a fixed Argos schema {org_name, legal_name, domain, emails, social_profiles, people, address}. One page; 5 credits.",90),
+        tool!("hunter_domain_finder","Hunter domain finder","Enrichment","Resolve an organization name to its website domain. Free.",["company"],"https://hunter.io/api-documentation/v2#domain-finder","GET https://api.hunter.io/v2/domain-finder. Company name of at least 3 characters; optional limit (1-10) and perfect_match. Free but rate-limited. Matches that are not perfect become inferred bindings. Inputs only from the prompt, Firecrawl, SociaVault, or Hunter.",25),
+        tool!("hunter_email_count","Hunter email count","Enrichment","How many addresses Hunter has for a domain or company. Free; zero skips the paid domain search.",["domain|company"],"https://hunter.io/api-documentation/v2#email-count","GET https://api.hunter.io/v2/email-count with optional type (personal, generic). Free. A zero count skips hunter_domain_search; Hunter notes zero can also mean the domain is privacy-suppressed.",20),
+        tool!("hunter_domain_search","Hunter domain search","Enrichment","Email addresses, roles, and the email pattern Hunter has for a company domain or name.",["domain|company"],"https://hunter.io/api-documentation/v2#domain-search","GET https://api.hunter.io/v2/domain-search. Enter the API key on a Hunter tool, or set HUNTER_API_KEY. The key is sent as X-API-KEY and is not stored on the tool input. At most 10 addresses per call. Inputs only from the prompt, Firecrawl, SociaVault, or Hunter.",25),
+        tool!("hunter_company_enrichment","Hunter company enrichment","Enrichment","Company profile for a domain: name, legal name, industry, size, address, tech stack, social handles, site emails.",["domain"],"https://hunter.io/api-documentation/v2#company-enrichment","GET https://api.hunter.io/v2/companies/find. 1 credit. Replaces hunter_tech_lookup (the old id still resolves here). Same Hunter API key as the other Hunter tools.",25),
+        tool!("hunter_email_finder","Hunter email finder","Enrichment","Most likely professional email for a named person at a domain, company, or LinkedIn handle.",["domain|company|linkedin_handle","full_name|first_name|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-finder","GET https://api.hunter.io/v2/email-finder. Requires a domain, company, or LinkedIn handle, plus a full name or a first and last name unless the LinkedIn handle is enough. Same Hunter API key as the other Hunter tools.",25),
+        tool!("hunter_email_verifier","Hunter email verifier","Enrichment","Deliverability status and score for one email address, when a claim depends on deliverability.",["email"],"https://hunter.io/api-documentation/v2#email-verifier","GET https://api.hunter.io/v2/email-verifier. The check can take about 20 seconds; a 202 is retried. Same Hunter API key as the other Hunter tools.",40),
+        tool!("hunter_email_insight","Hunter email insight","Enrichment","Whether an email is webmail, disposable, or gibberish, plus its MX records. Free.",["email"],"https://hunter.io/api-documentation/v2#email-insight","GET https://api.hunter.io/v2/email-insight. Free. Runs before enrichment: webmail and disposable addresses go to person enrichment only, company addresses to combined enrichment.",20),
+        tool!("hunter_person_enrichment","Hunter person enrichment","Enrichment","Person profile for an email or LinkedIn handle: name, employer, location, social handles.",["email|linkedin_handle"],"https://hunter.io/api-documentation/v2#email-enrichment","GET https://api.hunter.io/v2/people/find. 1 credit. 404 means no match. A 451 claimed_email response is stored without the person payload and yields no bindings.",25),
+        tool!("hunter_combined_enrichment","Hunter combined enrichment","Enrichment","Person and company profile for one company email address in a single call.",["email"],"https://hunter.io/api-documentation/v2#combined-enrichment","GET https://api.hunter.io/v2/combined/find. Company email addresses only; webmail goes to person enrichment. 1 credit. A 451 claimed_email response is stored without the person payload and yields no bindings.",25),
+        tool!("sociavault_profile","SociaVault profile","Social","Public profile stats, biography, outbound links, and account id for one evidence-supported account.",["platform","handle|user_id"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/{platform}/profile (YouTube /youtube/channel; LinkedIn /linkedin/profile or /linkedin/company; Instagram /instagram/basic-profile by user_id). Platforms: twitter, instagram, tiktok, youtube, facebook, linkedin, threads, twitch. Optional endpoint. Enter the API key on a SociaVault tool, or set SOCIAVAULT_API_KEY. The key is sent as X-API-Key and is not stored on the tool input. 1 credit.",40),
+        tool!("sociavault_search","SociaVault search","Social","Search one platform's posts, videos, or hashtags for the subject's name, organization, or a hashtag.",["platform","query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/... Platforms and endpoints: instagram (hashtag), linkedin (posts), pinterest (search), reddit (search, subreddit), threads (search), tiktok (keyword, hashtag, top), twitter (search), youtube (search, hashtag). Optional endpoint and subreddit. 1 credit. Handles found only here stay unverified.",40),
+        tool!("sociavault_search_users","SociaVault account search","Social","Find accounts by name on Instagram, Threads, or TikTok.",["platform","query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/instagram/search, /threads/search-users, or /tiktok/search/users. 1 credit. Accounts found only here stay unverified until a profile call or a Firecrawl page links them to the subject.",40),
+        tool!("sociavault_user_content","SociaVault user content","Social","One account's own posts, videos, reels, highlights, playlists, boards, or schedule. No followers or single posts.",["platform","handle|user_id"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/... Platforms and endpoints: facebook (posts, reels), instagram (posts, highlights, reels), pinterest (boards), threads (posts), tiktok (videos, live), twitch (videos, schedule), twitter (tweets; tweets_all by user_id), youtube (videos, community_posts, lives, playlists, shorts). Optional endpoint. 1 credit. Runs after a profile call when a numeric id is needed.",40),
+        tool!("sociavault_google_search","SociaVault Google search","Web","Google results for the same query when Firecrawl search was weak. Fallback only.",["query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/google/search. Never an opening pick: offered only when Firecrawl search failed, returned fewer than 3 results, returned only filtered hosts, or yielded no binding a later step needs. One page and one call per question; 1 credit.",40),
+        tool!("newsapi_search","NewsAPI article search","News","News articles that name the subject (exact phrase). Free-tier articles arrive 24 hours late and search reaches back one month, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/everything","GET https://newsapi.org/v2/everything with q as an exact phrase, pageSize 10 (at most 10 articles), first page only. Optional from and to (YYYY-MM-DD), language, sort_by (relevancy default, publishedAt, popularity), and domains. Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY; it is sent as X-Api-Key, never in the URL. Developer plan: 100 requests a day, development use only. At most 2 NewsAPI calls per turn.",20),
+        tool!("newsapi_headlines","NewsAPI top headlines","News","Top headlines that name the subject (exact phrase). Free-tier headlines arrive 24 hours late and cover one month at most, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/top-headlines","GET https://newsapi.org/v2/top-headlines with q as an exact phrase, pageSize 10 (at most 10 articles). Optional country (2-letter code) and category (business, entertainment, general, health, science, sports, technology). Same NewsAPI key (NEWSAPI_API_KEY), sent as X-Api-Key, never in the URL. At most 2 NewsAPI calls per turn.",20),
+        tool!("courtlistener_case_search","CourtListener case law","Legal","Court opinions (case law) that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=o with q as an exact phrase. First page only, at most 20 results, no highlighting, never semantic search. Optional court (court ids separated by spaces), filed_after and filed_before (YYYY-MM-DD). Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN; it is sent as Authorization: Token. Free tier 5/min, 50/hour, 125/day: at most 3 CourtListener calls per turn, 12 s apart.",30),
+        tool!("courtlistener_docket_search","CourtListener federal dockets","Legal","Federal (PACER/RECAP) dockets that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=r with q as an exact phrase. First page only, at most 20 results, no highlighting; no RECAP fetch or paid PACER pulls. Optional court and filed_after (YYYY-MM-DD). Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30),
+        tool!("courtlistener_judge_search","CourtListener judges","Legal","Judges whose name matches the subject (exact phrase), with court and position.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=p with q as an exact phrase. First page only, at most 20 results. Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30),
     ]).as_slice()
 }
 pub fn definition(id: &str) -> Option<&'static ToolDefinition> {
@@ -528,11 +583,15 @@ fn number_arg(v: &Value, key: &str, default: u64, max: u64) -> Result<String> {
     );
     Ok(n.to_string())
 }
+/// Main-content markdown kept from one Firecrawl page. Enough for an about,
+/// contact, or team page; a longer page keeps its opening and an ellipsis.
+const PAGE_MARKDOWN_CHARS: usize = 16_000;
+
 fn clip_page(value: &str) -> String {
-    if value.chars().count() <= 4000 {
+    if value.chars().count() <= PAGE_MARKDOWN_CHARS {
         value.to_string()
     } else {
-        let mut clipped: String = value.chars().take(3999).collect();
+        let mut clipped: String = value.chars().take(PAGE_MARKDOWN_CHARS - 1).collect();
         clipped.push('…');
         clipped
     }
@@ -1009,7 +1068,7 @@ fn parse_observations(
         }
         return Ok(match id {
             "firecrawl_map" => (providers::map_observations(&v, ""), false),
-            "firecrawl_extract" => (providers::extract_observations(&v), false),
+            "firecrawl_extract" => providers::extract_observations(&v),
             _ => providers::job_observations(&v, false),
         });
     }
@@ -2568,30 +2627,37 @@ mod tests {
         assert_eq!(custom_user_agent(Some(" ")), None);
     }
 
-    /// Every Firecrawl, SociaVault, and Hunter tool caches for one week; NewsAPI stays at
-    /// one hour and CourtListener at one day.
+    /// Cache lifetime follows the provider's credit reset: a day, a week, or a month.
+    /// A provider that does not restore credits caches for a month.
     #[test]
-    fn primary_provider_tools_cache_for_one_week() {
-        let count = |prefix: &str| {
-            registry()
-                .iter()
-                .filter(|tool| tool.id.starts_with(prefix))
-                .count()
-        };
+    fn cache_follows_the_provider_plan_interval() {
+        assert_eq!(PlanInterval::Daily.cache_seconds(), CACHE_DAY_SECONDS);
+        assert_eq!(PlanInterval::Weekly.cache_seconds(), CACHE_WEEK_SECONDS);
+        assert_eq!(PlanInterval::Monthly.cache_seconds(), CACHE_MONTH_SECONDS);
         assert_eq!(
-            (count("firecrawl_"), count("sociavault_"), count("hunter_")),
-            (6, 5, 9)
+            PlanInterval::Never.cache_seconds(),
+            PlanInterval::Monthly.cache_seconds()
         );
-        assert_eq!(PRIMARY_PROVIDER_CACHE_SECONDS, 604_800);
         for tool in registry() {
-            let ttl = tool.cache_seconds;
-            match tool.id.split('_').next().unwrap_or("") {
-                "firecrawl" | "sociavault" | "hunter" => assert_eq!(ttl, 604_800, "{}", tool.id),
-                "newsapi" => assert_eq!(ttl, 3600, "{}", tool.id),
-                "courtlistener" => assert_eq!(ttl, 86_400, "{}", tool.id),
-                _ => {}
-            }
+            assert_eq!(
+                tool.cache_seconds,
+                cache_seconds(tool.id),
+                "{}",
+                tool.id
+            );
         }
+        assert_eq!(plan_interval("firecrawl_search"), PlanInterval::Monthly);
+        assert_eq!(plan_interval("hunter_domain_search"), PlanInterval::Monthly);
+        assert_eq!(plan_interval("sociavault_profile"), PlanInterval::Never);
+        assert_eq!(plan_interval("newsapi_search"), PlanInterval::Daily);
+        assert_eq!(plan_interval("courtlistener_case_search"), PlanInterval::Daily);
+        assert_eq!(plan_interval("hackertarget_hostsearch"), PlanInterval::Daily);
+        assert_eq!(plan_interval("github_repositories"), PlanInterval::Never);
+        assert_eq!(plan_interval("blockchain_address"), PlanInterval::Never);
+        assert_eq!(cache_seconds("firecrawl_search"), CACHE_MONTH_SECONDS);
+        assert_eq!(cache_seconds("sociavault_profile"), CACHE_MONTH_SECONDS);
+        assert_eq!(cache_seconds("newsapi_headlines"), CACHE_DAY_SECONDS);
+        assert_eq!(cache_seconds("crtsh_certificates"), CACHE_MONTH_SECONDS);
     }
 
     #[test]
@@ -2633,6 +2699,33 @@ mod tests {
             &json!({"url":"http://127.0.0.1/secret"})
         )
         .is_err());
+        let contact = format!(
+            "Jane Example jane@acmerobotics.com {}",
+            "word ".repeat(1_200)
+        );
+        assert!(contact.chars().count() > 4_000);
+        let raw = json!({"success": true, "data": {
+            "markdown": contact,
+            "metadata": {"title": "Contact", "sourceURL": "https://acmerobotics.com/contact"}
+        }})
+        .to_string();
+        let (page_obs, truncated) =
+            parse_observations("firecrawl_scrape", &raw, "application/json", false).unwrap();
+        assert!(!truncated);
+        assert_eq!(page_obs["markdown"], contact);
+        assert_eq!(page_obs["title"], "Contact");
+        assert_eq!(page_obs["evidence_form"], "page");
+        let huge = "x".repeat(super::PAGE_MARKDOWN_CHARS + 40);
+        let raw = json!({"data": {"markdown": huge, "metadata": {"sourceURL": "https://acmerobotics.com/about"}}})
+            .to_string();
+        let (clipped, truncated) =
+            parse_observations("firecrawl_scrape", &raw, "application/json", false).unwrap();
+        assert!(truncated);
+        assert!(clipped["markdown"].as_str().unwrap().ends_with('…'));
+        assert_eq!(
+            clipped["markdown"].as_str().unwrap().chars().count(),
+            super::PAGE_MARKDOWN_CHARS
+        );
         assert_eq!(endpoint_cost("firecrawl_search").unwrap().credits, 2);
         assert_eq!(
             endpoint_cost("firecrawl_scrape").unwrap().provider,

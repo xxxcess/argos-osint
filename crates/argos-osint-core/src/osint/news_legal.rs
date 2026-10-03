@@ -502,6 +502,7 @@ mod tests {
     use super::*;
     use crate::osint::{
         definition, provider_credential, registry, validate, Executor, ProviderKeys,
+        CACHE_DAY_SECONDS,
     };
     use std::sync::Arc;
 
@@ -578,7 +579,7 @@ mod tests {
                     && tool.restrictions.contains("X-Api-Key"),
                 "{id}"
             );
-            assert_eq!(tool.cache_seconds, 3600);
+            assert_eq!(tool.cache_seconds, CACHE_DAY_SECONDS);
         }
         for id in LEGAL_TOOLS {
             let tool = definition(id).unwrap();
@@ -588,7 +589,7 @@ mod tests {
                 "{id}"
             );
             assert!(tool.restrictions.contains("12 s apart"), "{id}");
-            assert_eq!(tool.cache_seconds, 86400);
+            assert_eq!(tool.cache_seconds, CACHE_DAY_SECONDS);
         }
         let optional = |id: &str| {
             definition(id).unwrap().schema()["properties"]

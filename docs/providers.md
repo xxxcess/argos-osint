@@ -19,7 +19,7 @@ The Recon role derives the turn's three questions and extracts input bindings fr
 
 ## OSINT data providers
 
-Firecrawl, SociaVault, and Hunter are the primary OSINT providers. Each has one API key: `FIRECRAWL_API_KEY`, `SOCIAVAULT_API_KEY`, and `HUNTER_API_KEY`, or the key field shown on any of that provider's tools in OSINT. A saved key overrides the environment variable. Keys are sent only to the provider's own API host: a bearer token for Firecrawl, and an `X-API-Key` header for SociaVault and Hunter. Hunter keys never go in the URL. Every Firecrawl, SociaVault, and Hunter tool caches completed results for one week (604800 s, `PRIMARY_PROVIDER_CACHE_SECONDS`); failed results are never cached. Live smoke tests for these providers are `#[ignore]` and need real keys.
+Firecrawl, SociaVault, and Hunter are the primary OSINT providers. Each has one API key: `FIRECRAWL_API_KEY`, `SOCIAVAULT_API_KEY`, and `HUNTER_API_KEY`, or the key field shown on any of that provider's tools in OSINT. A saved key overrides the environment variable. Keys are sent only to the provider's own API host: a bearer token for Firecrawl, and an `X-API-Key` header for SociaVault and Hunter. Hunter keys never go in the URL. A completed result is cached for the provider's credit-reset interval: one day when the plan resets daily, one week when it resets weekly, and 30 days when it resets monthly. Firecrawl and Hunter reset monthly. SociaVault's prepaid credits never reset, and the public tools have no credit plan, so both cache for 30 days. NewsAPI, CourtListener, and HackerTarget reset daily. Failed results are never cached. Live smoke tests for these providers are `#[ignore]` and need real keys.
 
 | Provider | Tools | Notes |
 |---|---|---|
@@ -31,8 +31,8 @@ NewsAPI and CourtListener (issue #29) are keyed context providers, not primary p
 
 | Provider | Tools | Notes |
 |---|---|---|
-| NewsAPI | article search (`/v2/everything`), top headlines (`/v2/top-headlines`) | Exact-phrase `q`, `pageSize` 10 (search and headlines), no pagination. Optional `from`/`to`, `language`, `sort_by`, `domains` (search) and `country`, `category` (headlines). Developer plan: 100 requests a day, articles 24 h late, one month back. Cache 3600 s. `status: error` bodies (`apiKeyInvalid`, `apiKeyMissing`, `rateLimited`, …) become failed results with readable messages. |
-| CourtListener | case law (`type=o`), federal dockets (`type=r`), judges (`type=p`) on `GET /api/rest/v4/search/` | Exact-phrase `q`, first page only, at most 20 results, no `highlight`, never semantic or POST search. Optional `court`, `filed_after`, `filed_before` (case law). Free tier 5/min, 50/hour, 125/day: requests are spaced 12 s apart and 429s are not retried. Cache 86400 s. 401/403 become failed results with readable messages. |
+| NewsAPI | article search (`/v2/everything`), top headlines (`/v2/top-headlines`) | Exact-phrase `q`, `pageSize` 10 (search and headlines), no pagination. Optional `from`/`to`, `language`, `sort_by`, `domains` (search) and `country`, `category` (headlines). Developer plan: 100 requests a day, articles 24 h late, one month back. Cache 86400 s, the daily reset. `status: error` bodies (`apiKeyInvalid`, `apiKeyMissing`, `rateLimited`, …) become failed results with readable messages. |
+| CourtListener | case law (`type=o`), federal dockets (`type=r`), judges (`type=p`) on `GET /api/rest/v4/search/` | Exact-phrase `q`, first page only, at most 20 results, no `highlight`, never semantic or POST search. Optional `court`, `filed_after`, `filed_before` (case law). Free tier 5/min, 50/hour, 125/day: requests are spaced 12 s apart and 429s are not retried. Cache 86400 s, the daily reset. 401/403 become failed results with readable messages. |
 
 Recon limits add `news_calls_per_turn` (default 2) and `legal_calls_per_turn` (default 3). Failed and rate-limited results are never cached.
 

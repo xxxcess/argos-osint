@@ -1,10 +1,11 @@
 //! Directives and grounded tool inputs (spec addendum A to #27).
 //!
-//! Each turn has exactly three directives (`d1`–`d3`): goals that say what to establish,
-//! never which tool to use. Search inputs are built only from directive entities (verbatim
-//! prompt spans, or the thread's subject on a pronoun follow-up), accepted binding values,
-//! and one fixed qualifier per target kind. Search results that do not mention the subject
-//! cannot add domain, org_name, email, or url bindings.
+//! Each turn has one to five directives (`d1` onward). The Recon model infers how many
+//! and what each one should establish from the user's prompt. A goal says what to
+//! establish, never which tool to use. Search inputs are built only from directive
+//! entities (verbatim prompt spans, or the thread's subject on a pronoun follow-up),
+//! accepted binding values, and one fixed qualifier per target kind. Search results that
+//! do not mention the subject cannot add domain, org_name, email, or url bindings.
 
 use serde_json::Value;
 
@@ -13,6 +14,19 @@ use super::{display_name, emails_in, names_subject, question_bindings};
 
 /// Longest directive goal, in words.
 pub const MAX_GOAL_WORDS: usize = 15;
+/// Fewest directives a turn may derive. An empty set cannot drive a turn.
+pub const MIN_DIRECTIVES: usize = 1;
+/// Most directives a turn may derive. The model infers the count from the prompt.
+pub const MAX_DIRECTIVES: usize = 5;
+
+/// `d1` through `d5`: the ids a turn may assign, in order.
+pub fn known_directive_id(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix('d') else {
+        return false;
+    };
+    rest.parse::<usize>()
+        .is_ok_and(|n| (1..=MAX_DIRECTIVES).contains(&n))
+}
 /// Search query shape: at most this many words and characters.
 pub const MAX_QUERY_WORDS: usize = 6;
 pub const MAX_QUERY_CHARS: usize = 80;
@@ -773,9 +787,10 @@ fn directive(
     }
 }
 
-/// Three fixed directives when the Recon model is unavailable or its reply fails twice:
+/// Fixed directives when the Recon model is unavailable or its reply fails twice:
 /// identity and roles, official accounts and sites, affiliated organizations and contact
-/// domains. A prompt identifier (IP, CVE, wallet, …) joins d1's targets.
+/// domains. A successful derivation does not use this set; the model infers the goals
+/// from the prompt. A prompt identifier (IP, CVE, wallet, …) joins d1's targets.
 pub fn fallback_directives(question: &str, thread: &[String]) -> Vec<Directive> {
     let entities = directive_entities(question, thread);
     let mut first = directive(
@@ -858,10 +873,11 @@ fn pronoun_only(entity: &str) -> bool {
     tokens.is_empty() || tokens.iter().all(|word| PRONOUNS.contains(&word.as_str()))
 }
 
-/// Validates a Recon reply: exactly three directives `d1`–`d3`, tool-free imperative goals
-/// of at most 15 words, entities that are verbatim prompt spans (or the thread subject on
-/// a follow-up), and targets from the binding vocabulary. A Recon-written `query` that
-/// breaks the grounded-query rules is dropped (the deterministic query is used).
+/// Validates a Recon reply: 1 to 5 directives `d1` onward, in order, tool-free imperative
+/// goals of at most 15 words, entities that are verbatim prompt spans (or the thread
+/// subject on a follow-up), and targets from the binding vocabulary. A Recon-written
+/// `query` that breaks the grounded-query rules is dropped (the deterministic query is
+/// used).
 #[cfg(test)]
 pub fn parse_directives(
     value: &Value,
@@ -884,8 +900,11 @@ pub fn parse_directives_with(
         .get("directives")
         .and_then(Value::as_array)
         .ok_or("the reply has no directives array")?;
-    if list.len() != 3 {
-        return Err(format!("expected exactly 3 directives, got {}", list.len()));
+    if !(MIN_DIRECTIVES..=MAX_DIRECTIVES).contains(&list.len()) {
+        return Err(format!(
+            "expected {MIN_DIRECTIVES} to {MAX_DIRECTIVES} directives, got {}",
+            list.len()
+        ));
     }
     let lower_question = question.to_ascii_lowercase();
     let fallback_entities = directive_entities(question, thread);

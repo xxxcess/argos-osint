@@ -905,9 +905,9 @@ pub fn tool_result_log(call: &recon::Call) -> Option<ToolLog> {
     if let Some(error) = result.error.as_deref().filter(|text| !text.is_empty()) {
         detail.push(format!("Error: {error}"));
     }
-    let observations = serde_json::to_string_pretty(&result.observations).unwrap_or_default();
+    let observations = observation_log(&result.observations);
     if !observations.is_empty() && observations != "null" {
-        detail.push(clip_chars(&observations, 4_000));
+        detail.push(observations);
     }
     Some(ToolLog {
         level,
@@ -1033,6 +1033,114 @@ fn plan_reason(app: &App, call: &recon::Call) -> Option<String> {
         .find(|step| step.tool_id == call.tool_id && step.arguments == call.inputs)
         .map(|step| step.reason)
         .filter(|reason| !reason.is_empty())
+}
+
+/// System log text for one observation. Page and extract bodies stay in the
+/// synthesis packet; the log keeps the title, URL, and a field count.
+fn observation_log(observations: &serde_json::Value) -> String {
+    match observations.get("evidence_form").and_then(|value| value.as_str()) {
+        Some("page") => page_log(observations),
+        Some("extract") => extract_log(observations),
+        _ => {
+            let rendered = serde_json::to_string_pretty(observations).unwrap_or_default();
+            clip_chars(&rendered, 4_000)
+        }
+    }
+}
+
+fn page_label(page: &serde_json::Value) -> String {
+    let title = page
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    let url = page
+        .get("url")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    match (title.is_empty(), url.is_empty()) {
+        (false, false) => format!("{title} · {url}"),
+        (false, true) => title.to_string(),
+        (true, false) => url.to_string(),
+        (true, true) => "page".into(),
+    }
+}
+
+fn page_log(observations: &serde_json::Value) -> String {
+    let Some(pages) = observations.get("pages").and_then(|value| value.as_array()) else {
+        return page_label(observations);
+    };
+    let mut lines = vec![format!(
+        "{} page{}",
+        pages.len(),
+        if pages.len() == 1 { "" } else { "s" }
+    )];
+    lines.extend(pages.iter().map(page_label));
+    lines.join("\n")
+}
+
+fn extract_log(observations: &serde_json::Value) -> String {
+    let mut parts = Vec::new();
+    for key in ["org_name", "domain"] {
+        if let Some(text) = observations
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            parts.push(text.to_string());
+        }
+    }
+    let count = |key: &str| {
+        observations
+            .get(key)
+            .and_then(|value| value.as_array())
+            .map(|items| items.len())
+            .unwrap_or(0)
+    };
+    let emails = count("emails");
+    let profiles = count("social_profiles");
+    let people = count("people");
+    if emails > 0 {
+        parts.push(format!(
+            "{emails} email{}",
+            if emails == 1 { "" } else { "s" }
+        ));
+    }
+    if profiles > 0 {
+        parts.push(format!(
+            "{profiles} profile{}",
+            if profiles == 1 { "" } else { "s" }
+        ));
+    }
+    if people > 0 {
+        parts.push(if people == 1 {
+            "1 person".into()
+        } else {
+            format!("{people} people")
+        });
+    }
+    if observations
+        .get("address")
+        .and_then(|value| value.as_str())
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        parts.push("address".into());
+    }
+    if let Some(url) = observations
+        .get("url")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        parts.push(url.to_string());
+    }
+    if parts.is_empty() {
+        "extract".into()
+    } else {
+        parts.join(" · ")
+    }
 }
 
 fn clip_chars(value: &str, max: usize) -> String {
@@ -4143,5 +4251,46 @@ mod tests {
         );
         assert!(logged.detail.contains("Jane Roe role"));
         assert!(logged.detail.contains("https://example.test/jane"));
+        let markdown = "Jane Example jane@acmerobotics.com ".repeat(80);
+        let mut page = calls[0].clone();
+        page.tool_id = "firecrawl_scrape".into();
+        page.result.as_mut().unwrap().tool_id = "firecrawl_scrape".into();
+        page.result.as_mut().unwrap().observations = serde_json::json!({
+            "title": "Contact",
+            "url": "https://acmerobotics.com/contact",
+            "markdown": markdown,
+            "evidence_form": "page",
+        });
+        let logged = tool_result_log(&page).unwrap();
+        assert!(logged.detail.contains("Contact · https://acmerobotics.com/contact"));
+        assert!(!logged.detail.contains("jane@acmerobotics.com"));
+        let mut job = page.clone();
+        job.tool_id = "firecrawl_crawl".into();
+        job.result.as_mut().unwrap().observations = serde_json::json!({
+            "pages": [
+                {"title": "About", "url": "https://acmerobotics.com/about", "markdown": markdown},
+                {"title": "Contact", "url": "https://acmerobotics.com/contact", "markdown": markdown}
+            ],
+            "evidence_form": "page",
+        });
+        let logged = tool_result_log(&job).unwrap();
+        assert!(logged.detail.contains("2 pages"));
+        assert!(logged.detail.contains("About · https://acmerobotics.com/about"));
+        assert!(!logged.detail.contains("jane@acmerobotics.com"));
+        let mut extract = page.clone();
+        extract.tool_id = "firecrawl_extract".into();
+        extract.result.as_mut().unwrap().observations = serde_json::json!({
+            "org_name": "Acme Robotics",
+            "domain": "acmerobotics.com",
+            "emails": ["jane@acmerobotics.com"],
+            "people": [{"name": "Jane Example", "title": "CEO"}],
+            "address": "100 Market Street\nSan Francisco",
+            "url": "https://acmerobotics.com/about",
+            "evidence_form": "extract",
+        });
+        let logged = tool_result_log(&extract).unwrap();
+        assert!(logged.detail.contains("Acme Robotics · acmerobotics.com · 1 email · 1 person · address"));
+        assert!(!logged.detail.contains("100 Market Street"));
+        assert!(!logged.detail.contains("Jane Example"));
     }
 }

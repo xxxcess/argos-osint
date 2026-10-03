@@ -1096,6 +1096,7 @@ impl App {
             "This thread already has a running turn"
         );
         self.input.clear();
+        self.cursor = 0;
         self.store
             .save_draft(&tid, "", i64::from(self.scrolls.chat))?;
         self.live_answers.remove(&tid);
@@ -2503,6 +2504,10 @@ impl App {
         if is_picker_field(field) {
             return;
         }
+        let len = self.field(field).chars().count();
+        if self.cursor > len {
+            self.cursor = len;
+        }
         let cursor = self.cursor;
         let value = self.field_mut(field);
         let byte = value
@@ -2520,6 +2525,10 @@ impl App {
         };
         if is_picker_field(field) {
             return;
+        }
+        let len = self.field(field).chars().count();
+        if self.cursor > len {
+            self.cursor = len;
         }
         if self.cursor == 0 {
             return;
@@ -2545,6 +2554,11 @@ impl App {
             return;
         };
         if is_picker_field(field) {
+            return;
+        }
+        let len = self.field(field).chars().count();
+        if self.cursor >= len {
+            self.cursor = len;
             return;
         }
         let cursor = self.cursor;
@@ -3610,6 +3624,24 @@ mod tests {
         for character in text.chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
+    }
+
+    #[test]
+    fn backspace_after_a_sent_question_deletes_one_character() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.set_focus(Target::Field(FieldId::Composer));
+        type_text(&mut app, "who is jane roe");
+        app.input.clear();
+        type_text(&mut app, "next");
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.input, "nex");
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.input, "nex");
+        app.cursor = 0;
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.input, "ex");
     }
 
     #[test]

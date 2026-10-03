@@ -3256,7 +3256,8 @@ pub(crate) mod directives;
 pub use directives::parse_directives;
 pub use directives::{
     context_gate, directive_entities, directive_for_target, directive_query, fallback_directives,
-    grounded_query, parse_directives_with, refers_back, relevance_gate, GroundedQuery, QUALIFIERS,
+    grounded_query, known_directive_id, parse_directives_with, refers_back, relevance_gate,
+    GroundedQuery, QUALIFIERS,
 };
 mod tool_io;
 #[cfg(test)]

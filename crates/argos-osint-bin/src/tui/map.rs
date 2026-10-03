@@ -26,6 +26,7 @@ const LABEL: Color = Color::Rgb(236, 246, 240);
 const BRAILLE_MAP: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
 /// Glyph and color for one land sample. Heat is drawn only at world zoom.
+#[cfg(test)]
 pub fn land_style(zoom: u8, code: &str, heat: &[(&str, f64)]) -> (char, Color) {
     if zoom == 0 {
         if let Some((_, temp)) = heat.iter().find(|(country, _)| *country == code) {
@@ -66,6 +67,96 @@ fn world_scale(zoom: u8, width: usize) -> f64 {
     width as f64 * f64::from(1_u16 << zoom.min(4))
 }
 
+/// Center and scale that place the country's outline in the middle of the view.
+/// Large countries such as the United States stay fully on screen.
+fn country_fit(code: &str, width: f64, height: f64) -> Option<(f64, f64, f64)> {
+    let index = land_index(code)?;
+    let id = index as u8;
+    let mut best_area = 0.0_f64;
+    let mut lons = Vec::new();
+    let mut lats = Vec::new();
+    for part in land::PARTS {
+        if part.code != id {
+            continue;
+        }
+        let Some(exterior) = part.rings.first() else {
+            continue;
+        };
+        let mut ring_lons = Vec::new();
+        let mut ring_lats = Vec::new();
+        for &(lon, lat) in *exterior {
+            ring_lons.push(f64::from(lon) / 10.0);
+            ring_lats.push(f64::from(lat) / 10.0);
+        }
+        if ring_lons.len() < 3 {
+            continue;
+        }
+        let (_, span) = lon_focus(&ring_lons);
+        let min_lat = ring_lats.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_lat = ring_lats.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let area = span * (max_lat - min_lat).abs();
+        if area > best_area {
+            best_area = area;
+            lons = ring_lons;
+            lats = ring_lats;
+        }
+    }
+    if lons.is_empty() {
+        let (lon, lat) = pin(code)?;
+        lons.push(f64::from(lon) / 10.0);
+        lats.push(f64::from(lat) / 10.0);
+    }
+    let (center_lon, lon_span) = lon_focus(&lons);
+    let min_lat = lats.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_lat = lats.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let center_lat = ((min_lat + max_lat) / 2.0).clamp(-MAX_LAT, MAX_LAT);
+    let lon_span = lon_span.max(8.0);
+    let merc_span = (mercator_y(max_lat) - mercator_y(min_lat)).abs().max(0.04);
+    // Large countries keep their whole outline in the middle, with room around it.
+    // Smaller ones may come in closer so the shape is still readable.
+    let large = lon_span >= 18.0 || (max_lat - min_lat) >= 12.0;
+    let margin = if large { 0.42 } else { 0.5 };
+    let scale_x = width * margin / (lon_span / 360.0);
+    let scale_y = height * margin / merc_span;
+    let closest = if large { width * 2.2 } else { width * 4.0 };
+    let scale = scale_x.min(scale_y).clamp(width, closest);
+    Some((center_lon, center_lat, scale))
+}
+
+/// (center longitude, span in degrees), taking the short arc so a country that
+/// crosses the date line is not measured the long way around the world.
+fn lon_focus(lons: &[f64]) -> (f64, f64) {
+    let mut lons: Vec<f64> = lons
+        .iter()
+        .map(|lon| (lon + 180.0).rem_euclid(360.0) - 180.0)
+        .collect();
+    lons.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    lons.dedup_by(|left, right| (*left - *right).abs() < 0.05);
+    if lons.len() <= 1 {
+        return (lons.first().copied().unwrap_or(0.0), 8.0);
+    }
+    let mut max_gap = (lons[0] + 360.0) - lons[lons.len() - 1];
+    let mut gap_at = lons.len() - 1;
+    for index in 0..lons.len() - 1 {
+        let gap = lons[index + 1] - lons[index];
+        if gap > max_gap {
+            max_gap = gap;
+            gap_at = index;
+        }
+    }
+    let start = lons[(gap_at + 1) % lons.len()];
+    let end = lons[gap_at];
+    let mut span = end - start;
+    if span <= 0.0 {
+        span += 360.0;
+    }
+    let mut center = start + span / 2.0;
+    if center > 180.0 {
+        center -= 360.0;
+    }
+    (center, span)
+}
+
 fn project(
     lon: f64,
     lat: f64,
@@ -85,6 +176,7 @@ fn project(
     (width / 2.0 + dx * scale, height / 2.0 + dy * scale)
 }
 
+#[cfg(test)]
 fn contains(ring: &[(i16, i16)], x: f64, y: f64) -> bool {
     let mut inside = false;
     let n = ring.len();
@@ -104,6 +196,7 @@ fn contains(ring: &[(i16, i16)], x: f64, y: f64) -> bool {
 }
 
 /// Country covering this latitude and longitude, if the point falls on land.
+#[cfg(test)]
 pub fn country_at(lat: f64, lon: f64) -> Option<&'static str> {
     let x = lon * 10.0;
     let y = lat * 10.0;
@@ -182,6 +275,39 @@ fn ring_pixels(
     out
 }
 
+/// Drop edges that wrap across the map. Those spans tear a large country's fill.
+fn paint_ring(
+    grid: &mut [u8],
+    ring: &[(i16, i16)],
+    center_lon: f64,
+    center_lat: f64,
+    scale: f64,
+    width_f: f64,
+    height_f: f64,
+    width_i: i32,
+    height_i: i32,
+    id: u8,
+) {
+    let points = ring_pixels(ring, center_lon, center_lat, scale, width_f, height_f);
+    let jump = (width_f * 0.45) as i32;
+    let mut chunk: Vec<(i32, i32)> = Vec::new();
+    let paint = |grid: &mut [u8], chunk: &[(i32, i32)]| {
+        if chunk.len() >= 3 && on_screen(chunk, width_i, height_i) {
+            fill(grid, width_i, height_i, chunk, id);
+        }
+    };
+    for point in points {
+        if let Some(prev) = chunk.last().copied() {
+            if (point.0 - prev.0).abs() > jump {
+                paint(grid, &chunk);
+                chunk.clear();
+            }
+        }
+        chunk.push(point);
+    }
+    paint(grid, &chunk);
+}
+
 fn on_screen(poly: &[(i32, i32)], width: i32, height: i32) -> bool {
     let min_x = poly.iter().map(|p| p.0).min().unwrap_or(0);
     let max_x = poly.iter().map(|p| p.0).max().unwrap_or(-1);
@@ -247,7 +373,10 @@ fn country_pixel(grid: &[u8], width: usize, height: usize, id: u8) -> Option<(i3
             }
         }
     }
-    (count > 0).then_some(((sum_x / count) as i32, (sum_y / count) as i32))
+    if count == 0 {
+        return None;
+    }
+    Some(((sum_x / count) as i32, (sum_y / count) as i32))
 }
 
 /// Reserve a cell for `name`. Nearby rows are tried before overlapping a name
@@ -263,7 +392,8 @@ fn claim_label(
     if width <= 0 || width > cols || rows <= 0 {
         return None;
     }
-    let col = col.clamp(0, cols - width);
+    let max_col = (cols - width).max(0);
+    let col = col.clamp(0, max_col);
     let free = |placed: &[Placed], row: i32| {
         (0..rows).contains(&row) && label_fits(placed, col, row, width, 1)
     };
@@ -282,7 +412,8 @@ fn claim_label(
             }
         }
     }
-    let row = chosen.unwrap_or_else(|| row.clamp(0, rows - 1));
+    let max_row = (rows - 1).max(0);
+    let row = chosen.unwrap_or_else(|| row.clamp(0, max_row));
     placed.push(Placed {
         x: col,
         y: row,
@@ -293,16 +424,16 @@ fn claim_label(
 }
 
 pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
-    let zoom = 0_u8;
+    let focused = app.atlas_focus.is_some();
     let stats = app
         .atlas_runs
         .get(app.atlas_run_sel)
         .and_then(|run| serde_json::from_str::<RunStats>(&run.stats_json).ok());
     let heat = scored_heat(stats.as_ref());
-    let title = if zoom == 0 {
-        format!(" world · {} hot ", heat.len())
+    let title = if let Some(code) = app.atlas_focus.as_deref() {
+        format!(" {} ", code.to_ascii_uppercase())
     } else {
-        " world ".to_string()
+        format!(" world · {} hot ", heat.len())
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -324,7 +455,13 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     let rows = inner.height as usize;
     let width = cols * 2;
     let height = rows * 4;
-    let scale = world_scale(zoom, width);
+    let width_f = width as f64;
+    let height_f = height as f64;
+    let (center_lon, center_lat, scale) = app
+        .atlas_focus
+        .as_deref()
+        .and_then(|code| country_fit(code, width_f, height_f))
+        .unwrap_or((0.0, 15.0, world_scale(0, width)));
     let mut temps = vec![None; land::CODES.len()];
     for (country, _, temp) in &heat {
         if let Some(index) = land_index(country) {
@@ -334,27 +471,27 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     let mut grid = vec![0_u8; width * height];
     let width_i = width as i32;
     let height_i = height as i32;
-    let width_f = width as f64;
-    let height_f = height as f64;
     for part in land::PARTS {
         let Some(exterior) = part.rings.first() else {
             continue;
         };
-        let outer = ring_pixels(exterior, 0.0, 15.0, scale, width_f, height_f);
-        if outer.len() >= 3 && on_screen(&outer, width_i, height_i) {
-            fill(
-                &mut grid,
-                width_i,
-                height_i,
-                &outer,
-                part.code.saturating_add(1),
-            );
-        }
+        paint_ring(
+            &mut grid,
+            exterior,
+            center_lon,
+            center_lat,
+            scale,
+            width_f,
+            height_f,
+            width_i,
+            height_i,
+            part.code.saturating_add(1),
+        );
         for hole in &part.rings[1..] {
-            let inner_ring = ring_pixels(hole, 0.0, 15.0, scale, width_f, height_f);
-            if inner_ring.len() >= 3 && on_screen(&inner_ring, width_i, height_i) {
-                fill(&mut grid, width_i, height_i, &inner_ring, 0);
-            }
+            paint_ring(
+                &mut grid, hole, center_lon, center_lat, scale, width_f, height_f, width_i,
+                height_i, 0,
+            );
         }
     }
 
@@ -395,7 +532,7 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
             let code_index = best.saturating_sub(1) as usize;
             let color = temps
                 .get(code_index)
-                .and_then(|temp| temp.filter(|_| zoom == 0).map(heat_color))
+                .and_then(|temp| temp.map(heat_color))
                 .unwrap_or(LAND);
             glyphs[index] = char::from_u32(0x2800 + u32::from(mask)).unwrap_or(' ');
             colors[index] = color;
@@ -403,15 +540,23 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     }
 
     let mut placed = Vec::new();
-    let mut ranked = heat;
-    ranked.sort_by(|left, right| {
-        right
-            .2
-            .partial_cmp(&left.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for (country, tier, _) in ranked {
-        let index = land_index(country);
+    let ranked: Vec<(String, u8)> = if let Some(code) = app.atlas_focus.as_deref() {
+        vec![(canonical(code), 1)]
+    } else {
+        let mut ranked = heat;
+        ranked.sort_by(|left, right| {
+            right
+                .2
+                .partial_cmp(&left.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        ranked
+            .into_iter()
+            .map(|(country, tier, _)| (country.to_string(), tier))
+            .collect()
+    };
+    for (country, tier) in ranked {
+        let index = land_index(&country);
         let id = index.map(|index| (index as u8).saturating_add(1));
         let Some((px, py)) = id
             .and_then(|id| country_pixel(&grid, width, height, id))
@@ -420,12 +565,12 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
                 let (lon, lat) = index
                     .and_then(|index| land::LABELS.get(index).copied())
                     .filter(|(lon, lat)| !(*lon == 0 && *lat == 0))
-                    .or_else(|| pin(country))?;
+                    .or_else(|| pin(&country))?;
                 Some(project(
                     f64::from(lon) / 10.0,
                     f64::from(lat) / 10.0,
-                    0.0,
-                    15.0,
+                    center_lon,
+                    center_lat,
                     scale,
                     width_f,
                     height_f,
@@ -436,10 +581,14 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         };
         let code = index
             .map(|index| land::CODES[index].to_string())
-            .unwrap_or_else(|| canonical(country));
+            .unwrap_or_else(|| canonical(&country));
         let code_label = code.to_ascii_uppercase();
         let name = argos_osint_core::atlas::country_name(&code).unwrap_or(code.as_str());
-        let label = if tier <= 2 { name } else { code_label.as_str() };
+        let label = if focused || tier <= 2 {
+            name
+        } else {
+            code_label.as_str()
+        };
         let w = label.chars().count() as i32;
         let Some((col, row)) = claim_label(
             &mut placed,
@@ -451,8 +600,14 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         ) else {
             continue;
         };
+        if col < 0 || row < 0 {
+            continue;
+        }
         for (offset, ch) in label.chars().enumerate() {
-            let at = (col as usize + offset) + cols * row as usize;
+            let at = col as usize + offset + cols * row as usize;
+            if at >= glyphs.len() {
+                break;
+            }
             glyphs[at] = ch;
             colors[at] = LABEL;
         }
@@ -518,6 +673,41 @@ mod tests {
         };
         let heat = scored_heat(Some(&stats));
         assert_eq!(heat, vec![("us", 1, 1.0)]);
+    }
+
+    #[test]
+    fn the_united_states_fits_in_the_country_view() {
+        let width = 240.0;
+        let height = 80.0;
+        let (lon, lat, scale) = country_fit("us", width, height).unwrap();
+        assert!(scale < world_scale(2, width as usize));
+        assert!(lon < -60.0 && lon > -170.0);
+        assert!(lat > 20.0 && lat < 70.0);
+        for (plon, plat) in [(-124.0, 47.0), (-68.0, 44.0), (-98.0, 28.0), (-80.0, 35.0)] {
+            let (x, y) = project(plon, plat, lon, lat, scale, width, height);
+            assert!(
+                (0.0..width).contains(&x) && (0.0..height).contains(&y),
+                "{plon},{plat} landed at {x},{y}"
+            );
+        }
+        let (_, _, britain) = country_fit("gb", width, height).unwrap();
+        assert!(britain > scale);
+        let (alon, alat, australia) = country_fit("au", width, height).unwrap();
+        assert!(australia <= width * 2.2, "australia scale {australia}");
+        assert!(alon > 110.0 && alon < 155.0, "{alon}");
+        assert!(alat < -10.0 && alat > -45.0, "{alat}");
+        for (plon, plat) in [
+            (113.0, -22.0),
+            (153.0, -28.0),
+            (130.0, -13.0),
+            (138.0, -35.0),
+        ] {
+            let (x, y) = project(plon, plat, alon, alat, australia, width, height);
+            assert!(
+                (0.0..width).contains(&x) && (0.0..height).contains(&y),
+                "australia {plon},{plat} landed at {x},{y}"
+            );
+        }
     }
 
     #[test]

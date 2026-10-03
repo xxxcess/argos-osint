@@ -4,6 +4,7 @@ pub mod atlas;
 pub mod brain;
 pub mod grok_oauth;
 pub mod hardware;
+pub mod iso3166;
 pub mod osint;
 pub mod paths;
 pub mod provider;

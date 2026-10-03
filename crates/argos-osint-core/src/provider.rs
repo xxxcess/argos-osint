@@ -302,6 +302,9 @@ pub struct RoleDefaults {
     /// Orders catalog tools for the Recon questions. Seeded to OpenRouter Jev.
     #[serde(default)]
     pub tool_picker: ModelAssignment,
+    /// Tags Atlas articles with an OSINT category. Seeded to OpenRouter Jev.
+    #[serde(default)]
+    pub classifier: ModelAssignment,
 }
 
 /// Pinned default for the tool picker. The `~typesafe/jev-latest` alias is accepted
@@ -332,6 +335,7 @@ pub fn role_name(role: &str) -> Option<&'static str> {
         "recon" => Some("recon"),
         "synthesis" => Some("synthesis"),
         "tool-picker" | "tool_picker" | "toolpicker" | "picker" => Some("tool_picker"),
+        "classifier" => Some("classifier"),
         _ => None,
     }
 }
@@ -341,6 +345,7 @@ impl RoleDefaults {
         match role_name(role)? {
             "recon" => Some(&self.recon),
             "synthesis" => Some(&self.synthesis),
+            "classifier" => Some(&self.classifier),
             _ => Some(&self.tool_picker),
         }
     }
@@ -349,6 +354,7 @@ impl RoleDefaults {
         match role_name(role)? {
             "recon" => Some(&mut self.recon),
             "synthesis" => Some(&mut self.synthesis),
+            "classifier" => Some(&mut self.classifier),
             _ => Some(&mut self.tool_picker),
         }
     }
@@ -358,6 +364,18 @@ impl RoleDefaults {
     pub fn seed_tool_picker(&mut self) -> bool {
         if self.tool_picker.provider.trim().is_empty() && self.tool_picker.model.trim().is_empty() {
             self.tool_picker = ModelAssignment {
+                provider: TOOL_PICKER_PROVIDER.into(),
+                model: TOOL_PICKER_MODEL.into(),
+            };
+            return true;
+        }
+        false
+    }
+
+    /// Seeds the classifier only when both of its fields are empty.
+    pub fn seed_classifier(&mut self) -> bool {
+        if self.classifier.provider.trim().is_empty() && self.classifier.model.trim().is_empty() {
+            self.classifier = ModelAssignment {
                 provider: TOOL_PICKER_PROVIDER.into(),
                 model: TOOL_PICKER_MODEL.into(),
             };
@@ -598,7 +616,7 @@ pub fn role_secret(
     let assignment = settings
         .defaults
         .role(role)
-        .ok_or_else(|| anyhow!("role must be recon, tool-picker, or synthesis"))?;
+        .ok_or_else(|| anyhow!("role must be recon, tool-picker, synthesis, or classifier"))?;
     let legacy = writer_secret(auth, settings);
     let mut secret = if assignment.provider.is_empty() {
         legacy
@@ -1371,6 +1389,7 @@ impl SettingsFile {
         let seeded = || {
             let mut settings = Self::default();
             settings.defaults.seed_tool_picker();
+            settings.defaults.seed_classifier();
             settings
         };
         if !path.exists() {
@@ -1405,6 +1424,9 @@ impl SettingsFile {
         }
         // The tool picker is seeded on its own and never from the legacy writer.
         if settings.defaults.seed_tool_picker() {
+            migrated = true;
+        }
+        if settings.defaults.seed_classifier() {
             migrated = true;
         }
         let old_keys = toml::from_str::<toml::Value>(&raw)?
@@ -1579,6 +1601,8 @@ mod tests {
         let missing = SettingsFile::load_from(&dir.path().join("none.toml")).unwrap();
         assert_eq!(missing.defaults.tool_picker.provider, TOOL_PICKER_PROVIDER);
         assert_eq!(missing.defaults.tool_picker.model, TOOL_PICKER_MODEL);
+        assert_eq!(missing.defaults.classifier.provider, TOOL_PICKER_PROVIDER);
+        assert_eq!(missing.defaults.classifier.model, TOOL_PICKER_MODEL);
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,

@@ -1,7 +1,8 @@
 //! Atlas collects regional headlines in two phases and stores the run's statistics.
 //!
-//! Article text stays in the session that streamed it. The database keeps the run,
-//! its cursor, the country table, and the daily request counts.
+//! Phase 1 reads the latest headlines. Phase 2 headlines are saved on the run and
+//! tagged by the classifier model. The database keeps the run, its cursor, the
+//! country table, the articles, and the daily request counts.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -16,9 +17,14 @@ use url::Url;
 
 use crate::osint::atlas_news::{self, Hit};
 use crate::osint::ProviderKeys;
-use crate::store::{AtlasRunRow, Store};
+use crate::provider::{self, DecisionsResponse};
+use crate::secrets::ProviderSecret;
+use crate::store::{AtlasArticleRow, AtlasRunRow, Store};
 
-const QUERY_LIMIT: usize = atlas_news::NEWSDATA_QUERY_LIMIT;
+/// Country-coded headlines collected from each phase-1 source.
+const PHASE1_TARGET: u32 = 25;
+/// Pages per source. Ten articles a page, so four pages cover the target with spare.
+const PHASE1_MAX_PAGES: usize = 4;
 
 const CLUSTERS: &[(&str, &[&str])] = &[
     (
@@ -160,6 +166,94 @@ const CLUSTERS: &[(&str, &[&str])] = &[
     ),
 ];
 
+pub const CATEGORY_IDS: &[&str] = &[
+    "geopolitical",
+    "economic",
+    "military",
+    "information",
+    "stability",
+    "technology",
+    "unk",
+];
+
+/// Short tag stored on the article and shown in the news list.
+pub fn category_tag(id: &str) -> &'static str {
+    match id {
+        "geopolitical" => "geopolitical",
+        "economic" => "economic",
+        "military" => "military",
+        "information" => "information",
+        "stability" => "stability",
+        "technology" => "technology",
+        _ => "unk",
+    }
+}
+
+/// Full OSINT category name for the article card.
+pub fn category_name(id: &str) -> &'static str {
+    match id {
+        "geopolitical" => "Geopolitical & Diplomatic",
+        "economic" => "Economic & Resource",
+        "military" => "Military Posture",
+        "information" => "Information Operations",
+        "stability" => "Domestic Stability",
+        "technology" => "Technological Vectors",
+        _ => "unk",
+    }
+}
+
+/// One Decisions choice. The criteria are the category phrases. `unk` is the miss.
+pub fn classification_request(article: &FeedArticle) -> (serde_json::Value, serde_json::Value) {
+    let mut criteria = serde_json::Map::new();
+    for (id, phrases) in CLUSTERS {
+        criteria.insert(
+            (*id).to_string(),
+            serde_json::json!(format!(
+                "{} Signals include: {}.",
+                category_name(id),
+                phrases.join(", ")
+            )),
+        );
+    }
+    criteria.insert(
+        "unk".into(),
+        serde_json::json!("The article does not fit any of the other categories."),
+    );
+    let questions = serde_json::json!({
+        "category": {
+            "type": "choice",
+            "instructions": "Choose the single OSINT category this article belongs to from its title and description. Choose unk when none of the categories fit.",
+            "criteria": criteria
+        }
+    });
+    let state = serde_json::json!({
+        "title": article.title,
+        "description": article.description,
+        "source": article.source_name,
+        "country": article.country,
+    });
+    (state, questions)
+}
+
+pub fn category_from_decisions(response: &DecisionsResponse) -> String {
+    response
+        .answers
+        .get("category")
+        .and_then(|answer| answer.choice.as_deref())
+        .map(normalize_category)
+        .unwrap_or_else(|| "unk".into())
+}
+
+pub fn normalize_category(raw: &str) -> String {
+    let id = raw.trim().to_ascii_lowercase();
+    let id = id.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
+    if CATEGORY_IDS.contains(&id) {
+        id.to_string()
+    } else {
+        "unk".into()
+    }
+}
+
 const DOMAIN_RANK: &[(&str, i32)] = &[
     ("reuters.com", 100),
     ("apnews.com", 96),
@@ -187,40 +281,6 @@ pub fn daily_cap(provider: &str) -> u32 {
         "currents" => 250,
         _ => 0,
     }
-}
-
-/// Pack quoted phrases into OR queries. Discovery uses NewsData's 100-character cap so the
-/// same chunk is accepted by GNews (200) and NewsData (100).
-pub fn pack_queries(phrases: &[&str]) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for phrase in phrases {
-        let piece = format!("\"{phrase}\"");
-        let next = if current.is_empty() {
-            piece.clone()
-        } else {
-            format!("{current} OR {piece}")
-        };
-        if next.len() <= QUERY_LIMIT {
-            current = next;
-        } else {
-            if !current.is_empty() {
-                chunks.push(current);
-            }
-            current = piece;
-        }
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
-}
-
-pub fn discovery_queries() -> Vec<String> {
-    CLUSTERS
-        .iter()
-        .flat_map(|(_, phrases)| pack_queries(phrases))
-        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -448,6 +508,12 @@ pub struct Cursor {
     pub leg: String,
     pub country: usize,
     pub from: String,
+    /// NewsData `nextPage` token for the request this cursor points at.
+    #[serde(default)]
+    pub page_token: String,
+    /// Country-coded hits already kept for the current phase-1 source.
+    #[serde(default)]
+    pub kept: u32,
 }
 
 impl Default for Cursor {
@@ -458,6 +524,8 @@ impl Default for Cursor {
             leg: "gnews".into(),
             country: 0,
             from: String::new(),
+            page_token: String::new(),
+            kept: 0,
         }
     }
 }
@@ -471,10 +539,14 @@ pub struct FeedArticle {
     pub country: String,
     pub source_name: String,
     pub source_domain: String,
+    pub author: String,
+    pub image_url: String,
     pub published_at: String,
     pub provider: String,
     pub temperature: f64,
     pub seen_at: String,
+    /// OSINT category id, or `unk` until the classifier tags it.
+    pub category: String,
 }
 
 #[derive(Clone, Debug)]
@@ -503,6 +575,7 @@ pub enum AtlasEvent {
     Stats(RunStats),
     Article(FeedArticle),
     Replaced { id: String, article: FeedArticle },
+    Classified { id: String, category: String },
     Note(String),
     Fault(ProviderFault),
 }
@@ -551,6 +624,8 @@ fn cursor_at(job: &Job, from: &str) -> Cursor {
         leg: job.leg.into(),
         country: job.country,
         from: from.into(),
+        page_token: String::new(),
+        kept: 0,
     }
 }
 
@@ -562,95 +637,184 @@ pub fn country_label(code: &str) -> String {
 }
 
 pub fn country_name(code: &str) -> Option<&'static str> {
-    COUNTRIES
-        .iter()
-        .find(|(known, _)| *known == code)
-        .map(|(_, name)| *name)
+    crate::iso3166::name(code)
 }
 
-const COUNTRIES: &[(&str, &str)] = &[
-    ("ae", "United Arab Emirates"),
-    ("ar", "Argentina"),
-    ("at", "Austria"),
-    ("au", "Australia"),
-    ("bd", "Bangladesh"),
-    ("be", "Belgium"),
-    ("bg", "Bulgaria"),
-    ("br", "Brazil"),
-    ("bw", "Botswana"),
-    ("ca", "Canada"),
-    ("ch", "Switzerland"),
-    ("cl", "Chile"),
-    ("cn", "China"),
-    ("co", "Colombia"),
-    ("cu", "Cuba"),
-    ("cz", "Czechia"),
-    ("de", "Germany"),
-    ("ee", "Estonia"),
-    ("eg", "Egypt"),
-    ("es", "Spain"),
-    ("et", "Ethiopia"),
-    ("fi", "Finland"),
-    ("fr", "France"),
-    ("gb", "United Kingdom"),
-    ("gh", "Ghana"),
-    ("gr", "Greece"),
-    ("hk", "Hong Kong"),
-    ("hu", "Hungary"),
-    ("id", "Indonesia"),
-    ("ie", "Ireland"),
-    ("il", "Israel"),
-    ("in", "India"),
-    ("it", "Italy"),
-    ("jp", "Japan"),
-    ("ke", "Kenya"),
-    ("kr", "South Korea"),
-    ("lb", "Lebanon"),
-    ("lt", "Lithuania"),
-    ("lv", "Latvia"),
-    ("ma", "Morocco"),
-    ("mx", "Mexico"),
-    ("my", "Malaysia"),
-    ("na", "Namibia"),
-    ("ng", "Nigeria"),
-    ("nl", "Netherlands"),
-    ("no", "Norway"),
-    ("nz", "New Zealand"),
-    ("pe", "Peru"),
-    ("ph", "Philippines"),
-    ("pk", "Pakistan"),
-    ("pl", "Poland"),
-    ("pt", "Portugal"),
-    ("ro", "Romania"),
-    ("rs", "Serbia"),
-    ("ru", "Russia"),
-    ("sa", "Saudi Arabia"),
-    ("se", "Sweden"),
-    ("sg", "Singapore"),
-    ("si", "Slovenia"),
-    ("sk", "Slovakia"),
-    ("sn", "Senegal"),
-    ("th", "Thailand"),
-    ("tr", "Turkey"),
-    ("tw", "Taiwan"),
-    ("tz", "Tanzania"),
-    ("ua", "Ukraine"),
-    ("ug", "Uganda"),
-    ("us", "United States"),
-    ("ve", "Venezuela"),
-    ("vn", "Vietnam"),
-    ("za", "South Africa"),
-    ("zw", "Zimbabwe"),
-];
+/// Headline card. Category is the OSINT classification. Published is the article time.
+pub fn format_article_card(
+    title: &str,
+    source_name: &str,
+    source_domain: &str,
+    author: &str,
+    country: &str,
+    category: &str,
+    published_at: &str,
+    temperature: f64,
+    description: &str,
+    image_url: &str,
+    url: &str,
+) -> String {
+    let (publisher, author) = publisher_and_author(source_name, source_domain, author);
+    let published = friendly_date(published_at);
+    let image = if image_url.trim().is_empty() {
+        "none"
+    } else {
+        image_url.trim()
+    };
+    let mut lines = vec![
+        format!("Title: {title}"),
+        format!("Publisher: {publisher}"),
+        format!("Author: {author}"),
+        format!("Country: {}", country_label(country)),
+        format!("Category: {}", category_name(category)),
+        format!("Published: {published}"),
+        format!("Temperature: {temperature:.2}"),
+    ];
+    if !description.trim().is_empty() {
+        lines.push(String::new());
+        lines.push(description.trim().to_string());
+    }
+    lines.push(String::new());
+    lines.push(format!("Image: {image}"));
+    lines.push(format!("Article: {url}"));
+    lines.join("\n")
+}
+
+/// Publisher is the outlet. A personal name, or a semicolon byline left in
+/// `source_name` by older Currents rows, is the author. The article host fills
+/// the publisher when the outlet name is missing. When only one of the two
+/// values is present, both fields use it.
+pub fn publisher_and_author(source_name: &str, domain: &str, author: &str) -> (String, String) {
+    let source_name = source_name.trim();
+    let domain = domain.trim();
+    let mut author = author.trim().to_string();
+    let mut publisher = source_name.to_string();
+    if author.is_empty() && publisher.contains(';') {
+        author = publisher.clone();
+        publisher = domain.to_string();
+    } else if personal_name(&publisher) && !domain.is_empty() {
+        if author.is_empty() {
+            author = publisher.clone();
+        }
+        publisher = domain.to_string();
+    }
+    if publisher.is_empty() {
+        publisher = if !domain.is_empty() {
+            domain.to_string()
+        } else {
+            author.clone()
+        };
+    }
+    if author.is_empty() {
+        author = publisher.clone();
+    }
+    if publisher.is_empty() {
+        publisher = "unknown".into();
+    }
+    if author.is_empty() {
+        author = publisher.clone();
+    }
+    (publisher, author)
+}
+
+/// Two or three capitalized words, with no outlet token, is a byline.
+fn personal_name(value: &str) -> bool {
+    let words: Vec<&str> = value.split_whitespace().collect();
+    if !(2..=3).contains(&words.len()) {
+        return false;
+    }
+    const STOP: &[&str] = &[
+        "the",
+        "of",
+        "and",
+        "for",
+        "news",
+        "times",
+        "post",
+        "press",
+        "herald",
+        "tribune",
+        "gazette",
+        "journal",
+        "daily",
+        "review",
+        "wire",
+        "media",
+        "radio",
+        "reuters",
+        "agency",
+        "associated",
+        "guardian",
+        "bloomberg",
+    ];
+    words.iter().all(|word| {
+        let bare = word.trim_matches(|c: char| matches!(c, ',' | '.' | '\'' | '’'));
+        if bare.is_empty() || STOP.contains(&bare.to_ascii_lowercase().as_str()) {
+            return false;
+        }
+        let mut chars = bare.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        first.is_uppercase() && chars.all(|c| c.is_alphabetic() || c == '-' || c == '\'')
+    })
+}
+
+/// Local calendar day, plus a 12-hour clock when the value has a time.
+/// A bare date stays a date. Unparsed text is returned as stored.
+pub fn friendly_date(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return "unknown".into();
+    }
+    if !raw.contains(':') {
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+            return loosen_date(&date.format("%b %d, %Y").to_string());
+        }
+    }
+    parse_timestamp(raw)
+        .map(|stamp| {
+            loosen_date(
+                &stamp
+                    .with_timezone(&chrono::Local)
+                    .format("%b %d, %Y, %I:%M %p")
+                    .to_string(),
+            )
+        })
+        .unwrap_or_else(|| raw.to_string())
+}
+
+/// Drops the leading zero on the day and on a 12-hour clock.
+fn loosen_date(value: &str) -> String {
+    value.replace(" 0", " ")
+}
+
+fn parse_timestamp(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(stamp) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(stamp.with_timezone(&chrono::Utc));
+    }
+    if let Ok(stamp) = chrono::DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S %z") {
+        return Some(stamp.with_timezone(&chrono::Utc));
+    }
+    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(stamp) = chrono::NaiveDateTime::parse_from_str(raw, format) {
+            return Some(stamp.and_utc());
+        }
+    }
+    chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|stamp| stamp.and_utc())
+}
 
 pub fn format_run_card(run: &AtlasRunRow) -> String {
     let stats = parse_stats(&run.stats_json);
     let mut lines = vec![
         format!("State: {}", run.state),
-        format!("Started: {}", run.started_at),
+        format!("Started: {}", friendly_date(&run.started_at)),
     ];
     if !run.finished_at.is_empty() {
-        lines.push(format!("Finished: {}", run.finished_at));
+        lines.push(format!("Finished: {}", friendly_date(&run.finished_at)));
     }
     if !run.note.is_empty() {
         lines.push(run.note.clone());
@@ -702,23 +866,22 @@ fn new_run_id() -> String {
 
 fn article_from(hit: &Hit, provider: &str, temperature: f64) -> FeedArticle {
     let domain = host_of(&hit.url);
-    let source = if hit.source_name.is_empty() {
-        domain.clone()
-    } else {
-        hit.source_name.clone()
-    };
+    let (publisher, author) = publisher_and_author(&hit.source_name, &domain, &hit.author);
     FeedArticle {
         id: format!("art-{}", url_hash(&hit.url)),
         title: hit.title.clone(),
         description: hit.description.clone(),
         url: hit.url.clone(),
         country: hit.country.clone(),
-        source_name: source,
+        source_name: publisher,
         source_domain: domain,
+        author,
+        image_url: hit.image_url.clone(),
         published_at: hit.published_at.clone(),
         provider: provider.into(),
         temperature,
         seen_at: chrono::Utc::now().to_rfc3339(),
+        category: "unk".into(),
     }
 }
 
@@ -748,13 +911,18 @@ struct CallSpec {
     headers: Vec<(String, String)>,
 }
 
-fn phase1_call(provider: &str, query: &str, from: &str, keys: &ProviderKeys) -> Result<CallSpec> {
+fn phase1_call(
+    provider: &str,
+    page: usize,
+    page_token: &str,
+    keys: &ProviderKeys,
+) -> Result<CallSpec> {
     let key = if provider == "gnews" {
         &keys.gnews
     } else {
         &keys.newsdata
     };
-    let prepared = atlas_news::prepare_discovery(provider, query, from, key)?;
+    let prepared = atlas_news::prepare_latest(provider, page, page_token, key)?;
     Ok(CallSpec {
         provider: if provider == "gnews" {
             "gnews"
@@ -790,7 +958,9 @@ fn apply_hits(
     stats: &mut RunStats,
     seen: &mut Vec<Seen>,
     emit: &mut impl FnMut(AtlasEvent),
-) {
+    store: &Store,
+    run_id: &str,
+) -> Result<()> {
     if provider == "gnews" || provider == "newsdata" {
         for hit in hits {
             *stats.counts.entry(hit.country.clone()).or_default() += 1;
@@ -808,7 +978,7 @@ fn apply_hits(
                 })
                 .collect();
         }
-        return;
+        return Ok(());
     }
     for hit in hits {
         let temperature = stats
@@ -829,13 +999,56 @@ fn apply_hits(
                     row.articles += 1;
                 }
                 remember(seen, &article, None);
+                store.atlas_upsert_article(&article_row(run_id, &article))?;
                 emit(AtlasEvent::Article(article));
             }
             Verdict::Replace(id) => {
+                store.atlas_delete_article(run_id, &id)?;
                 remember(seen, &article, Some(&id));
+                store.atlas_upsert_article(&article_row(run_id, &article))?;
                 emit(AtlasEvent::Replaced { id, article });
             }
         }
+    }
+    Ok(())
+}
+
+fn article_row(run_id: &str, article: &FeedArticle) -> AtlasArticleRow {
+    AtlasArticleRow {
+        run_id: run_id.into(),
+        id: article.id.clone(),
+        title: article.title.clone(),
+        description: article.description.clone(),
+        url: article.url.clone(),
+        country: article.country.clone(),
+        source_name: article.source_name.clone(),
+        source_domain: article.source_domain.clone(),
+        author: article.author.clone(),
+        image_url: article.image_url.clone(),
+        published_at: article.published_at.clone(),
+        provider: article.provider.clone(),
+        temperature: article.temperature,
+        category: category_tag(&article.category).into(),
+        seen_at: article.seen_at.clone(),
+    }
+}
+
+fn article_from_row(row: &AtlasArticleRow) -> FeedArticle {
+    FeedArticle {
+        id: row.id.clone(),
+        title: row.title.clone(),
+        description: row.description.clone(),
+        url: row.url.clone(),
+        country: row.country.clone(),
+        source_name: row.source_name.clone(),
+        source_domain: row.source_domain.clone(),
+        author: row.author.clone(),
+        image_url: row.image_url.clone(),
+        published_at: row.published_at.clone(),
+        provider: row.provider.clone(),
+        temperature: row.temperature,
+        seen_at: row.seen_at.clone(),
+        category: row.category.clone(),
     }
 }
 
@@ -859,6 +1072,8 @@ pub struct RunInput<'a> {
     pub pace: bool,
     pub resume: bool,
     pub feed: &'a [FeedArticle],
+    /// Classifier account. Empty means every saved article stays `unk`.
+    pub classifier: Option<ProviderSecret>,
 }
 
 pub async fn run_atlas<F>(
@@ -877,9 +1092,9 @@ where
         pace,
         resume,
         feed,
+        classifier,
     } = input;
     let store = Store::open(db_path)?;
-    let queries = discovery_queries();
     let (run_id, mut cursor, mut stats) = if resume {
         let Some(run) = store.atlas_latest_run()? else {
             return Ok(Stop::Failed("No Atlas run to resume".into()));
@@ -915,6 +1130,12 @@ where
         require_key(&keys.newsdata, "NewsData API key")?;
     }
     let mut seen: Vec<Seen> = feed.iter().map(seen_of).collect();
+    for row in store.atlas_list_articles(&run_id)? {
+        let article = article_from_row(&row);
+        if seen.iter().all(|item| item.id != article.id) {
+            seen.push(seen_of(&article));
+        }
+    }
     let mut last_gnews: Option<std::time::Instant> = None;
     let user_agent = if user_agent.trim().is_empty() {
         crate::osint::DEFAULT_USER_AGENT.to_string()
@@ -922,84 +1143,108 @@ where
         user_agent.to_string()
     };
 
-    let phase1: Vec<Job> = queries
-        .iter()
-        .enumerate()
-        .flat_map(|(chunk, _)| {
-            [
-                Job {
-                    phase: 1,
-                    chunk,
-                    leg: "gnews",
-                    country: 0,
-                    provider: "gnews",
-                },
-                Job {
-                    phase: 1,
-                    chunk,
-                    leg: "newsdata",
-                    country: 0,
-                    provider: "newsdata",
-                },
-            ]
-        })
-        .collect();
-
     if cursor.phase <= 1 {
-        for job in &phase1 {
-            if job_is_before(job, &cursor) {
-                continue;
-            }
-            if pause.load(Ordering::Relaxed) {
-                return park(
-                    &store,
-                    &run_id,
-                    &cursor_at(job, &cursor.from),
-                    &stats,
-                    &mut emit,
-                );
-            }
-            let query = &queries[job.chunk];
-            let spec = phase1_call(job.provider, query, &cursor.from, keys)?;
-            if !quota_open(&store, spec.provider)? {
-                emit(AtlasEvent::Note(format!(
-                    "{} daily quota is spent",
-                    spec.provider
-                )));
-                continue;
-            }
-            if pace && spec.provider == "gnews" {
-                if let Some(last) = last_gnews {
-                    let wait = std::time::Duration::from_secs(1).saturating_sub(last.elapsed());
-                    if !wait.is_zero() {
-                        tokio::time::sleep(wait).await;
-                    }
+        let providers = ["gnews", "newsdata"];
+        let start = providers
+            .iter()
+            .position(|provider| *provider == cursor.leg)
+            .unwrap_or(0);
+        for provider in providers.into_iter().skip(start) {
+            let continuing = provider == cursor.leg.as_str();
+            let mut page = if continuing { cursor.chunk } else { 0 };
+            let mut token = if continuing {
+                cursor.page_token.clone()
+            } else {
+                String::new()
+            };
+            let mut kept = if continuing { cursor.kept } else { 0 };
+            while kept < PHASE1_TARGET && page < PHASE1_MAX_PAGES {
+                let here = Cursor {
+                    phase: 1,
+                    chunk: page,
+                    leg: provider.into(),
+                    country: 0,
+                    from: cursor.from.clone(),
+                    page_token: token.clone(),
+                    kept,
+                };
+                if pause.load(Ordering::Relaxed) {
+                    return park(&store, &run_id, &here, &stats, &mut emit);
                 }
-            }
-            emit(AtlasEvent::Status(format!(
-                "Discovery {}/{} · {}",
-                job.chunk + 1,
-                queries.len(),
-                spec.provider
-            )));
-            match dispatch(&mut fetch, spec, &user_agent).await {
-                Ok(body) => {
-                    if job.provider == "gnews" {
-                        last_gnews = Some(std::time::Instant::now());
-                    }
-                    match atlas_news::discovery_hits(job.provider, &body) {
-                        Ok(hits) => {
-                            apply_hits(&hits, job.provider, &mut stats, &mut seen, &mut emit)
+                if !quota_open(&store, provider)? {
+                    emit(AtlasEvent::Note(format!("{provider} daily quota is spent")));
+                    break;
+                }
+                let spec = phase1_call(provider, page, &token, keys)?;
+                if pace && provider == "gnews" {
+                    if let Some(last) = last_gnews {
+                        let wait = std::time::Duration::from_secs(1).saturating_sub(last.elapsed());
+                        if !wait.is_zero() {
+                            tokio::time::sleep(wait).await;
                         }
-                        Err(err) => emit(parse_fault(job.provider, err.to_string(), &body)),
                     }
                 }
-                Err(fault) => emit(AtlasEvent::Fault(fault)),
+                emit(AtlasEvent::Status(format!(
+                    "Latest {provider} page {} · {kept}/{PHASE1_TARGET}",
+                    page + 1
+                )));
+                let mut stop_provider = false;
+                match dispatch(&mut fetch, spec, &user_agent).await {
+                    Ok(body) => {
+                        if provider == "gnews" {
+                            last_gnews = Some(std::time::Instant::now());
+                        }
+                        let more = atlas_news::next_page(provider, &body);
+                        match atlas_news::discovery_hits(provider, &body) {
+                            Ok(mut hits) => {
+                                hits.retain(|hit| {
+                                    published_in_window(&hit.published_at, &cursor.from)
+                                });
+                                let room = (PHASE1_TARGET - kept) as usize;
+                                hits.truncate(room);
+                                kept += hits.len() as u32;
+                                apply_hits(
+                                    &hits, provider, &mut stats, &mut seen, &mut emit, &store,
+                                    &run_id,
+                                )?;
+                                token = if provider == "newsdata" {
+                                    more.clone().unwrap_or_default()
+                                } else {
+                                    String::new()
+                                };
+                                if more.is_none() {
+                                    stop_provider = true;
+                                }
+                            }
+                            Err(err) => {
+                                emit(parse_fault(provider, err.to_string(), &body));
+                                stop_provider = true;
+                            }
+                        }
+                    }
+                    Err(fault) => {
+                        emit(AtlasEvent::Fault(fault));
+                        stop_provider = true;
+                    }
+                }
+                let _ = store.atlas_quota_bump(provider, &utc_day())?;
+                page += 1;
+                emit(AtlasEvent::Stats(stats.clone()));
+                if stop_provider || kept >= PHASE1_TARGET || page >= PHASE1_MAX_PAGES {
+                    break;
+                }
+                let next = Cursor {
+                    phase: 1,
+                    chunk: page,
+                    leg: provider.into(),
+                    country: 0,
+                    from: cursor.from.clone(),
+                    page_token: token.clone(),
+                    kept,
+                };
+                save(&store, &run_id, &next, &stats)?;
+                cursor = next;
             }
-            let _ = store.atlas_quota_bump(job.provider, &utc_day())?;
-            let next = next_after_phase1(job, &queries);
-            save(&store, &run_id, &cursor_at(&next, &cursor.from), &stats)?;
-            emit(AtlasEvent::Stats(stats.clone()));
         }
         let bands = score_counts(&stats.counts);
         let previous: HashMap<String, u32> = stats
@@ -1024,133 +1269,181 @@ where
             leg: "newsapi".into(),
             country: 0,
             from: cursor.from.clone(),
+            page_token: String::new(),
+            kept: 0,
         };
         save(&store, &run_id, &cursor, &stats)?;
         emit(AtlasEvent::Stats(stats.clone()));
     }
 
-    require_key(&keys.newsapi, "NewsAPI key")?;
-    require_key(&keys.currents, "Currents API key")?;
-    if stats.origins.is_empty() {
-        store.atlas_set_state(
-            &run_id,
-            "completed",
-            "No flashpoints in the 48-hour window",
-            true,
-        )?;
-        emit(AtlasEvent::Status(
-            "No flashpoints in the 48-hour window".into(),
-        ));
-        return Ok(Stop::Finished);
-    }
-    let countries: Vec<String> = stats
-        .origins
-        .iter()
-        .map(|row| row.country.clone())
-        .collect();
-    let phase2: Vec<Job> = countries
-        .iter()
-        .enumerate()
-        .flat_map(|(index, _)| {
-            [
-                Job {
-                    phase: 2,
-                    chunk: 0,
-                    leg: "newsapi",
-                    country: index,
-                    provider: "newsapi",
-                },
-                Job {
-                    phase: 2,
-                    chunk: 0,
-                    leg: "currents",
-                    country: index,
-                    provider: "currents",
-                },
-            ]
-        })
-        .collect();
-    let mut newsapi_skipped: Vec<String> = Vec::new();
-    for job in &phase2 {
-        if job_is_before(job, &cursor) {
-            continue;
-        }
-        if pause.load(Ordering::Relaxed) {
-            return park(
-                &store,
+    if cursor.phase == 2 {
+        require_key(&keys.newsapi, "NewsAPI key")?;
+        require_key(&keys.currents, "Currents API key")?;
+        if stats.origins.is_empty() {
+            store.atlas_set_state(
                 &run_id,
-                &cursor_at(job, &cursor.from),
-                &stats,
-                &mut emit,
-            );
+                "completed",
+                "No flashpoints in the 48-hour window",
+                true,
+            )?;
+            emit(AtlasEvent::Status(
+                "No flashpoints in the 48-hour window".into(),
+            ));
+            return Ok(Stop::Finished);
         }
-        let country = &countries[job.country];
-        if job.provider == "newsapi" && !atlas_news::newsapi_country_supported(country) {
-            newsapi_skipped.push(country.clone());
-            continue;
-        }
-        if !quota_open(&store, job.provider)? {
-            emit(AtlasEvent::Note(format!(
-                "{} daily quota is spent",
-                job.provider
-            )));
-            continue;
-        }
-        let spec = phase2_call(job.provider, country, keys)?;
-        emit(AtlasEvent::Status(format!(
-            "Headlines {} · {}",
-            country.to_ascii_uppercase(),
-            spec.provider
-        )));
-        match dispatch(&mut fetch, spec, &user_agent).await {
-            Ok(body) => match atlas_news::headline_hits(job.provider, country, &body) {
-                Ok(hits) => apply_hits(&hits, job.provider, &mut stats, &mut seen, &mut emit),
-                Err(err) => emit(parse_fault(job.provider, err.to_string(), &body)),
-            },
-            Err(fault) => emit(AtlasEvent::Fault(fault)),
-        }
-        let _ = store.atlas_quota_bump(job.provider, &utc_day())?;
-        let next = next_after_phase2(job, countries.len());
-        save(&store, &run_id, &cursor_at(&next, &cursor.from), &stats)?;
-        emit(AtlasEvent::Stats(stats.clone()));
-    }
-    if !newsapi_skipped.is_empty() {
-        let names = newsapi_skipped
+        let countries: Vec<String> = stats
+            .origins
             .iter()
-            .map(|code| country_label(code))
-            .collect::<Vec<_>>()
-            .join(", ");
-        emit(AtlasEvent::Note(format!(
+            .map(|row| row.country.clone())
+            .collect();
+        let phase2: Vec<Job> = countries
+            .iter()
+            .enumerate()
+            .flat_map(|(index, _)| {
+                [
+                    Job {
+                        phase: 2,
+                        chunk: 0,
+                        leg: "newsapi",
+                        country: index,
+                        provider: "newsapi",
+                    },
+                    Job {
+                        phase: 2,
+                        chunk: 0,
+                        leg: "currents",
+                        country: index,
+                        provider: "currents",
+                    },
+                ]
+            })
+            .collect();
+        let mut newsapi_skipped: Vec<String> = Vec::new();
+        for job in &phase2 {
+            if job_is_before(job, &cursor) {
+                continue;
+            }
+            if pause.load(Ordering::Relaxed) {
+                return park(
+                    &store,
+                    &run_id,
+                    &cursor_at(job, &cursor.from),
+                    &stats,
+                    &mut emit,
+                );
+            }
+            let country = &countries[job.country];
+            if job.provider == "newsapi" && !atlas_news::newsapi_country_supported(country) {
+                newsapi_skipped.push(country.clone());
+                continue;
+            }
+            if !quota_open(&store, job.provider)? {
+                emit(AtlasEvent::Note(format!(
+                    "{} daily quota is spent",
+                    job.provider
+                )));
+                continue;
+            }
+            let spec = phase2_call(job.provider, country, keys)?;
+            emit(AtlasEvent::Status(format!(
+                "Headlines {} · {}",
+                country.to_ascii_uppercase(),
+                spec.provider
+            )));
+            match dispatch(&mut fetch, spec, &user_agent).await {
+                Ok(body) => match atlas_news::headline_hits(job.provider, country, &body) {
+                    Ok(hits) => apply_hits(
+                        &hits,
+                        job.provider,
+                        &mut stats,
+                        &mut seen,
+                        &mut emit,
+                        &store,
+                        &run_id,
+                    )?,
+                    Err(err) => emit(parse_fault(job.provider, err.to_string(), &body)),
+                },
+                Err(fault) => emit(AtlasEvent::Fault(fault)),
+            }
+            let _ = store.atlas_quota_bump(job.provider, &utc_day())?;
+            let next = next_after_phase2(job, countries.len());
+            save(&store, &run_id, &cursor_at(&next, &cursor.from), &stats)?;
+            emit(AtlasEvent::Stats(stats.clone()));
+        }
+        if !newsapi_skipped.is_empty() {
+            let names = newsapi_skipped
+                .iter()
+                .map(|code| country_label(code))
+                .collect::<Vec<_>>()
+                .join(", ");
+            emit(AtlasEvent::Note(format!(
             "NewsAPI was not queried for {names}. Top headlines has no feed for those countries."
         )));
+        }
+        cursor = Cursor {
+            phase: 3,
+            chunk: 0,
+            leg: "classify".into(),
+            country: 0,
+            from: cursor.from.clone(),
+            page_token: String::new(),
+            kept: 0,
+        };
+        save(&store, &run_id, &cursor, &stats)?;
     }
+
+    if cursor.phase == 3 {
+        let articles = store.atlas_list_articles(&run_id)?;
+        if !articles.is_empty() && classifier.is_none() {
+            emit(AtlasEvent::Note(
+                "Classifier is not configured. Articles stay tagged unk.".into(),
+            ));
+        }
+        if let Some(secret) = classifier.as_ref().filter(|_| !articles.is_empty()) {
+            let mut noted = false;
+            let total = articles.len();
+            for (index, row) in articles.iter().enumerate().skip(cursor.country) {
+                if pause.load(Ordering::Relaxed) {
+                    cursor.country = index;
+                    cursor.phase = 3;
+                    cursor.leg = "classify".into();
+                    return park(&store, &run_id, &cursor, &stats, &mut emit);
+                }
+                emit(AtlasEvent::Status(format!(
+                    "Classifying {}/{total}",
+                    index + 1
+                )));
+                let article = article_from_row(row);
+                let category = match tag_article(secret, &article).await {
+                    Ok(category) => category,
+                    Err(err) => {
+                        if !noted {
+                            emit(AtlasEvent::Note(format!(
+                                "Classifier could not tag an article ({err}). Untagged articles stay unk."
+                            )));
+                            noted = true;
+                        }
+                        "unk".into()
+                    }
+                };
+                let category = category_tag(&category).to_string();
+                store.atlas_set_category(&run_id, &row.id, &category)?;
+                emit(AtlasEvent::Classified {
+                    id: row.id.clone(),
+                    category,
+                });
+                cursor.country = index + 1;
+                cursor.phase = 3;
+                cursor.leg = "classify".into();
+                save(&store, &run_id, &cursor, &stats)?;
+            }
+        }
+    }
+
     store.atlas_set_state(&run_id, "completed", "", true)?;
     emit(AtlasEvent::Status("Pipeline complete".into()));
     emit(AtlasEvent::Stats(stats));
     Ok(Stop::Finished)
-}
-
-fn next_after_phase1(job: &Job, queries: &[String]) -> Job {
-    if job.leg == "gnews" {
-        Job {
-            leg: "newsdata",
-            ..job.clone()
-        }
-    } else if job.chunk + 1 < queries.len() {
-        Job {
-            chunk: job.chunk + 1,
-            leg: "gnews",
-            ..job.clone()
-        }
-    } else {
-        Job {
-            phase: 2,
-            chunk: 0,
-            leg: "newsapi",
-            country: 0,
-            provider: "newsapi",
-        }
-    }
 }
 
 fn next_after_phase2(job: &Job, countries: usize) -> Job {
@@ -1170,6 +1463,46 @@ fn next_after_phase2(job: &Job, countries: usize) -> Job {
     } else {
         job.clone()
     }
+}
+
+async fn tag_article(secret: &ProviderSecret, article: &FeedArticle) -> Result<String> {
+    if provider::is_decisions_model(&secret.model) {
+        let (state, questions) = classification_request(article);
+        let response = provider::decide(secret, &state, &questions).await?;
+        return Ok(category_from_decisions(&response));
+    }
+    let messages = [
+        provider::ChatMessage {
+            role: "system".into(),
+            content: "Reply with one category id only: geopolitical, economic, military, information, stability, technology, or unk.".into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+        provider::ChatMessage {
+            role: "user".into(),
+            content: format!("{}\n\n{}", article.title, article.description),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+    ];
+    let done = provider::complete(secret, &messages, &[], |_| {}).await?;
+    Ok(normalize_category(&done.content))
+}
+
+fn published_in_window(published: &str, from: &str) -> bool {
+    let Ok(from) = chrono::DateTime::parse_from_rfc3339(from) else {
+        return true;
+    };
+    let published = published.trim();
+    if published.is_empty() {
+        return true;
+    }
+    if let Ok(stamp) = chrono::DateTime::parse_from_rfc3339(published) {
+        return stamp >= from;
+    }
+    chrono::NaiveDateTime::parse_from_str(published, "%Y-%m-%d %H:%M:%S")
+        .map(|naive| naive.and_utc() >= from)
+        .unwrap_or(true)
 }
 
 fn quota_open(store: &Store, provider: &str) -> Result<bool> {
@@ -1295,6 +1628,7 @@ pub async fn run_live(
     user_agent: &str,
     resume: bool,
     feed: &[FeedArticle],
+    classifier: Option<ProviderSecret>,
     emit: impl FnMut(AtlasEvent) + Send,
 ) -> Result<Stop> {
     let client = reqwest::Client::builder()
@@ -1310,6 +1644,7 @@ pub async fn run_live(
             pace: true,
             resume,
             feed,
+            classifier,
         },
         emit,
         move |call: HttpCall| {
@@ -1339,31 +1674,45 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn chunks_cover_every_phrase_and_stay_within_100_characters() {
-        let queries = discovery_queries();
-        assert!(
-            queries.len() > CLUSTERS.len(),
-            "clusters must be split so every phrase still fits"
-        );
-        for query in &queries {
-            assert!(
-                query.len() <= QUERY_LIMIT,
-                "{} ({} chars)",
-                query,
-                query.len()
-            );
-            assert!(query.starts_with('"'), "{query}");
-        }
-        for (_, phrases) in CLUSTERS {
-            for phrase in *phrases {
-                assert!(
-                    queries
-                        .iter()
-                        .any(|query| query.contains(&format!("\"{phrase}\""))),
-                    "{phrase}"
-                );
-            }
-        }
+    fn the_classifier_keeps_a_known_choice_and_maps_anything_else_to_unk() {
+        let response = DecisionsResponse {
+            answers: [(
+                "category".into(),
+                provider::DecisionAnswer {
+                    choice: Some("military".into()),
+                    ..provider::DecisionAnswer::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..DecisionsResponse::default()
+        };
+        assert_eq!(category_from_decisions(&response), "military");
+        assert_eq!(normalize_category("  UNK "), "unk");
+        assert_eq!(normalize_category("sports"), "unk");
+        let article = FeedArticle {
+            id: "art".into(),
+            title: "Joint military exercise begins".into(),
+            description: "A live-fire drill followed the troop deployment.".into(),
+            url: "https://example.com/drill".into(),
+            country: "us".into(),
+            source_name: "Wire".into(),
+            source_domain: "example.com".into(),
+            author: String::new(),
+            image_url: String::new(),
+            published_at: String::new(),
+            provider: "newsapi".into(),
+            temperature: 1.0,
+            seen_at: String::new(),
+            category: "unk".into(),
+        };
+        let (state, questions) = classification_request(&article);
+        assert_eq!(state["title"], "Joint military exercise begins");
+        assert!(questions["category"]["criteria"]["unk"].is_string());
+        assert!(questions["category"]["criteria"]["military"]
+            .as_str()
+            .unwrap()
+            .contains("live-fire drill"));
     }
 
     #[test]
@@ -1401,10 +1750,13 @@ mod tests {
             country: "us".into(),
             source_name: "Reuters".into(),
             source_domain: "reuters.com".into(),
+            author: String::new(),
+            image_url: String::new(),
             published_at: "2026-10-01T00:00:00Z".into(),
             provider: "newsapi".into(),
             temperature: 1.0,
             seen_at: String::new(),
+            category: "unk".into(),
         };
         let mut seen = vec![seen_of(&reuters)];
         let copy = FeedArticle {
@@ -1477,6 +1829,7 @@ mod tests {
                 pace: false,
                 resume: false,
                 feed: &[],
+                classifier: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -1511,6 +1864,7 @@ mod tests {
                 pace: false,
                 resume: true,
                 feed: &[],
+                classifier: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -1591,6 +1945,7 @@ mod tests {
                 pace: false,
                 resume: true,
                 feed: &[],
+                classifier: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -1621,9 +1976,59 @@ mod tests {
     }
 
     #[test]
+    fn article_card_labels_title_publisher_author_and_classification() {
+        let card = format_article_card(
+            "Opinion: International flavour",
+            "Joel Schlesinger; Laurie",
+            "winnipegfreepress.com",
+            "",
+            "ca",
+            "economic",
+            "2026-10-03 07:01:24 +0000",
+            0.69,
+            "",
+            "https://cdn.example/photo.jpg",
+            "https://www.winnipegfreepress.com/story",
+        );
+        assert!(card.contains("Title: Opinion: International flavour"));
+        assert!(card.contains("Publisher: winnipegfreepress.com"));
+        assert!(card.contains("Author: Joel Schlesinger; Laurie"));
+        assert!(card.contains("Category: Economic & Resource"));
+        assert!(card.contains(&format!(
+            "Published: {}",
+            friendly_date("2026-10-03 07:01:24 +0000")
+        )));
+        assert!(card.contains("Temperature: 0.69"));
+        assert!(card.contains("Image: https://cdn.example/photo.jpg"));
+        assert!(card.contains("Article: https://www.winnipegfreepress.com/story"));
+        assert!(!card.contains("Provider:"));
+        let (publisher, author) =
+            publisher_and_author("Jane Reporter", "reuters.com", "Jane Reporter");
+        assert_eq!(publisher, "reuters.com");
+        assert_eq!(author, "Jane Reporter");
+        let (publisher, author) = publisher_and_author("Reuters", "reuters.com", "");
+        assert_eq!(publisher, "Reuters");
+        assert_eq!(author, "Reuters");
+        let (publisher, author) = publisher_and_author("", "", "Jane Reporter");
+        assert_eq!(publisher, "Jane Reporter");
+        assert_eq!(author, "Jane Reporter");
+        assert_eq!(friendly_date("2026-10-01"), "Oct 1, 2026");
+        let stamp = chrono::DateTime::parse_from_rfc3339("2026-10-01T15:04:00Z").unwrap();
+        let expected = loosen_date(
+            &stamp
+                .with_timezone(&chrono::Local)
+                .format("%b %d, %Y, %I:%M %p")
+                .to_string(),
+        );
+        assert_eq!(friendly_date("2026-10-01T15:04:00Z"), expected);
+        assert!(expected.contains("AM") || expected.contains("PM"));
+    }
+
+    #[test]
     fn country_labels_show_the_name_and_the_code() {
         assert_eq!(country_label("us"), "United States (US)");
         assert_eq!(country_label("CN"), "China (CN)");
+        assert_eq!(country_label("qa"), "Qatar (QA)");
         assert!(format_run_card(&crate::store::AtlasRunRow {
             id: "atlas-1".into(),
             state: "completed".into(),
@@ -1705,6 +2110,7 @@ mod tests {
                 pace: false,
                 resume: true,
                 feed: &[],
+                classifier: None,
             },
             move |event| {
                 if let AtlasEvent::Note(text) = event {
@@ -1732,6 +2138,120 @@ mod tests {
             .any(|note| note.contains("Spain (ES)") && note.contains("not queried")));
     }
 
+    #[tokio::test]
+    async fn phase1_reads_latest_headlines_and_phase2_articles_stay_on_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atlas.db");
+        let pause = AtomicBool::new(false);
+        let keys = keys();
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let log = urls.clone();
+        let stop = run_atlas(
+            RunInput {
+                db_path: &path,
+                pause: &pause,
+                keys: &keys,
+                user_agent: "Argos test",
+                pace: false,
+                resume: false,
+                feed: &[],
+                classifier: None,
+            },
+            |_| {},
+            move |call: HttpCall| {
+                let log = log.clone();
+                Box::pin(async move {
+                    log.lock().unwrap().push(call.url.clone());
+                    Ok(reply_for(&call))
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stop, Stop::Finished);
+        let urls = urls.lock().unwrap();
+        assert!(urls
+            .iter()
+            .any(|url| url.contains("/top-headlines") && !url.contains("q=")));
+        assert!(urls.iter().any(|url| {
+            url.contains("newsdata.io") && url.contains("/latest") && !url.contains("q=")
+        }));
+        assert!(
+            urls.iter()
+                .any(|url| url.contains("newsapi.org") && url.contains("country=")),
+            "phase 2 still requests NewsAPI headlines for each scored country"
+        );
+        assert!(
+            urls.iter()
+                .any(|url| url.contains("currentsapi") && url.contains("country=")),
+            "phase 2 still requests Currents headlines for each scored country"
+        );
+        drop(urls);
+        let store = Store::open(&path).unwrap();
+        let run = store.atlas_latest_run().unwrap().unwrap();
+        let articles = store.atlas_list_articles(&run.id).unwrap();
+        assert!(!articles.is_empty());
+        assert!(articles
+            .iter()
+            .all(|row| row.run_id == run.id && row.category == "unk"));
+    }
+
+    #[tokio::test]
+    async fn phase2_still_collects_regional_headlines_when_phase1_has_no_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atlas.db");
+        let pause = AtomicBool::new(false);
+        let keys = keys();
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let log = urls.clone();
+        let stop = run_atlas(
+            RunInput {
+                db_path: &path,
+                pause: &pause,
+                keys: &keys,
+                user_agent: "Argos test",
+                pace: false,
+                resume: false,
+                feed: &[],
+                classifier: None,
+            },
+            |_| {},
+            move |call: HttpCall| {
+                let log = log.clone();
+                Box::pin(async move {
+                    log.lock().unwrap().push(call.url.clone());
+                    Ok(regional_reply(&call))
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stop, Stop::Finished);
+        let urls = urls.lock().unwrap();
+        for country in ["gb", "de"] {
+            assert!(
+                urls.iter().any(|url| {
+                    url.contains("newsapi.org") && url.contains(&format!("country={country}"))
+                }),
+                "NewsAPI missing {country}: {urls:?}"
+            );
+            let upper = country.to_ascii_uppercase();
+            assert!(
+                urls.iter().any(|url| {
+                    url.contains("currentsapi") && url.contains(&format!("country={upper}"))
+                }),
+                "Currents missing {upper}: {urls:?}"
+            );
+        }
+        drop(urls);
+        let store = Store::open(&path).unwrap();
+        let run = store.atlas_latest_run().unwrap().unwrap();
+        let articles = store.atlas_list_articles(&run.id).unwrap();
+        let countries: Vec<_> = articles.iter().map(|row| row.country.as_str()).collect();
+        assert!(countries.contains(&"gb"), "{countries:?}");
+        assert!(countries.contains(&"de"), "{countries:?}");
+    }
+
     fn keys() -> ProviderKeys {
         ProviderKeys {
             gnews: "gnews-key".into(),
@@ -1744,7 +2264,7 @@ mod tests {
 
     fn reply_for(call: &HttpCall) -> HttpReply {
         let body = if call.provider == "gnews" || call.provider == "newsdata" {
-            let code = format!("c{}", call.url.len() % 7);
+            let code = ["us", "cn", "de", "fr", "gb", "in", "jp"][call.url.len() % 7];
             if call.provider == "gnews" {
                 serde_json::json!({"articles":[{"title":"Story","url":"https://example.com/a","source":{"name":"Wire","country": code}}]}).to_string()
             } else {
@@ -1754,6 +2274,53 @@ mod tests {
             serde_json::json!({"status":"ok","articles":[{"title":"Local","url":"https://www.reuters.com/local","source":{"name":"Reuters"},"publishedAt":"2026-10-01T00:00:00Z"}]}).to_string()
         } else {
             serde_json::json!({"status":"ok","news":[{"title":"Local wire","url":"https://example.com/local","author":"Desk","published":"2026-10-01T01:00:00Z"}]}).to_string()
+        };
+        HttpReply { status: 200, body }
+    }
+
+    /// Top headlines with no `source.country`, and a NewsData row named Germany.
+    fn regional_reply(call: &HttpCall) -> HttpReply {
+        let body = if call.provider == "gnews" {
+            serde_json::json!({"articles":[{
+                "title":"Cabinet meets",
+                "url":"https://www.reuters.com/world/story",
+                "source":{"name":"Reuters","url":"https://www.reuters.com"}
+            }]})
+            .to_string()
+        } else if call.provider == "newsdata" {
+            serde_json::json!({"status":"success","results":[{
+                "title":"Berlin wire",
+                "link":"https://example.com/berlin",
+                "country":["Germany"],
+                "source_name":"Wire"
+            }]})
+            .to_string()
+        } else {
+            let code = url::Url::parse(&call.url)
+                .ok()
+                .and_then(|url| {
+                    url.query_pairs()
+                        .find(|(key, _)| key == "country")
+                        .map(|(_, value)| value.to_ascii_lowercase())
+                })
+                .unwrap_or_else(|| "xx".into());
+            if call.provider == "newsapi" {
+                serde_json::json!({"status":"ok","articles":[{
+                    "title": format!("Local {code}"),
+                    "url": format!("https://www.reuters.com/{code}"),
+                    "source":{"name":"Reuters"},
+                    "publishedAt":"2026-10-01T00:00:00Z"
+                }]})
+                .to_string()
+            } else {
+                serde_json::json!({"status":"ok","news":[{
+                    "title": format!("Desk {code}"),
+                    "url": format!("https://example.com/{code}"),
+                    "author":"Desk",
+                    "published":"2026-10-01T01:00:00Z"
+                }]})
+                .to_string()
+            }
         };
         HttpReply { status: 200, body }
     }

@@ -53,7 +53,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 11,
+                version <= 13,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -212,6 +212,47 @@ impl Store {
                      );",
                 )?;
                 self.conn.pragma_update(None, "user_version", 11)?;
+            }
+            if version < 12 {
+                self.conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS atlas_articles (
+                       run_id TEXT NOT NULL,
+                       article_id TEXT NOT NULL,
+                       title TEXT NOT NULL,
+                       description TEXT NOT NULL,
+                       url TEXT NOT NULL,
+                       country TEXT NOT NULL,
+                       source_name TEXT NOT NULL,
+                       source_domain TEXT NOT NULL,
+                       published_at TEXT NOT NULL,
+                       provider TEXT NOT NULL,
+                       temperature REAL NOT NULL,
+                       category TEXT NOT NULL DEFAULT 'unk',
+                       seen_at TEXT NOT NULL,
+                       PRIMARY KEY (run_id, article_id)
+                     );",
+                )?;
+                self.conn.pragma_update(None, "user_version", 12)?;
+            }
+            if version < 13 {
+                let columns: Vec<String> = {
+                    let mut stmt = self.conn.prepare("PRAGMA table_info(atlas_articles)")?;
+                    let columns = stmt
+                        .query_map([], |row| row.get(1))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    columns
+                };
+                if !columns.iter().any(|name| name == "author") {
+                    self.conn.execute_batch(
+                        "ALTER TABLE atlas_articles ADD COLUMN author TEXT NOT NULL DEFAULT ''",
+                    )?;
+                }
+                if !columns.iter().any(|name| name == "image_url") {
+                    self.conn.execute_batch(
+                        "ALTER TABLE atlas_articles ADD COLUMN image_url TEXT NOT NULL DEFAULT ''",
+                    )?;
+                }
+                self.conn.pragma_update(None, "user_version", 13)?;
             }
             Ok(())
         })();
@@ -434,10 +475,97 @@ impl Store {
     }
 
     pub fn atlas_delete_run(&self, id: &str) -> Result<bool> {
+        self.conn
+            .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
         Ok(self
             .conn
             .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?
             > 0)
+    }
+
+    pub fn atlas_upsert_article(&self, row: &AtlasArticleRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO atlas_articles (
+                run_id, article_id, title, description, url, country, source_name, source_domain,
+                published_at, provider, temperature, category, seen_at, author, image_url
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+             ON CONFLICT(run_id, article_id) DO UPDATE SET
+                title=excluded.title,
+                description=excluded.description,
+                url=excluded.url,
+                country=excluded.country,
+                source_name=excluded.source_name,
+                source_domain=excluded.source_domain,
+                published_at=excluded.published_at,
+                provider=excluded.provider,
+                temperature=excluded.temperature,
+                category=excluded.category,
+                seen_at=excluded.seen_at,
+                author=excluded.author,
+                image_url=excluded.image_url",
+            params![
+                row.run_id,
+                row.id,
+                row.title,
+                row.description,
+                row.url,
+                row.country,
+                row.source_name,
+                row.source_domain,
+                row.published_at,
+                row.provider,
+                row.temperature,
+                row.category,
+                row.seen_at,
+                row.author,
+                row.image_url,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn atlas_delete_article(&self, run_id: &str, article_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
+            params![run_id, article_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn atlas_set_category(&self, run_id: &str, article_id: &str, category: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE atlas_articles SET category=?3 WHERE run_id=?1 AND article_id=?2",
+            params![run_id, article_id, category],
+        )?;
+        Ok(())
+    }
+
+    pub fn atlas_list_articles(&self, run_id: &str) -> Result<Vec<AtlasArticleRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run_id, article_id, title, description, url, country, source_name, source_domain,
+                    published_at, provider, temperature, category, seen_at, author, image_url
+             FROM atlas_articles WHERE run_id=?1 ORDER BY seen_at, article_id",
+        )?;
+        let rows = stmt.query_map([run_id], |row| {
+            Ok(AtlasArticleRow {
+                run_id: row.get(0)?,
+                id: row.get(1)?,
+                title: row.get(2)?,
+                description: row.get(3)?,
+                url: row.get(4)?,
+                country: row.get(5)?,
+                source_name: row.get(6)?,
+                source_domain: row.get(7)?,
+                published_at: row.get(8)?,
+                provider: row.get(9)?,
+                temperature: row.get(10)?,
+                category: row.get(11)?,
+                seen_at: row.get(12)?,
+                author: row.get(13)?,
+                image_url: row.get(14)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// A run left `running` by a closed process can be resumed.
@@ -471,7 +599,7 @@ impl Store {
     }
 }
 
-/// One Atlas pipeline run. Statistics live in `stats_json`. Articles are not stored.
+/// One Atlas pipeline run. Statistics live in `stats_json`.
 #[derive(Clone, Debug)]
 pub struct AtlasRunRow {
     pub id: String,
@@ -482,6 +610,26 @@ pub struct AtlasRunRow {
     pub note: String,
     pub started_at: String,
     pub finished_at: String,
+}
+
+/// One headline saved for an Atlas run. `category` is an OSINT tag or `unk`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AtlasArticleRow {
+    pub run_id: String,
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub url: String,
+    pub country: String,
+    pub source_name: String,
+    pub source_domain: String,
+    pub published_at: String,
+    pub provider: String,
+    pub temperature: f64,
+    pub category: String,
+    pub seen_at: String,
+    pub author: String,
+    pub image_url: String,
 }
 
 #[cfg(test)]

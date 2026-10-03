@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
@@ -60,10 +60,11 @@ fn composer_height(app: &App) -> u16 {
 
 fn chrome(area: Rect, app: &App) -> Chrome {
     let composer_h = composer_height(app);
+    let header_h = if app.module.is_none() { 0 } else { TAB_H };
     let rows = split_vertical(
         area,
         [
-            Constraint::Length(TAB_H),
+            Constraint::Length(header_h),
             Constraint::Min(0),
             Constraint::Length(composer_h),
             Constraint::Length(1),
@@ -81,15 +82,12 @@ fn chrome(area: Rect, app: &App) -> Chrome {
 }
 
 fn header_tabs(area: Rect) -> Vec<(Option<ModuleId>, Rect)> {
-    let labels = [
-        "argos",
-        "Recon",
-        "Brain",
-        "Atlas",
-        "OSINT",
-        "Providers",
-        "System",
-    ];
+    let mut labels = vec!["argos".to_string()];
+    labels.extend(
+        ModuleId::ALL
+            .iter()
+            .map(|module| module.title().to_string()),
+    );
     let mut x = area.x;
     let mut out = Vec::new();
     for (index, label) in labels.iter().enumerate() {
@@ -108,7 +106,7 @@ fn header_tabs(area: Rect) -> Vec<(Option<ModuleId>, Rect)> {
                 x,
                 y: area.y,
                 width,
-                height: 1,
+                height: area.height.min(1),
             },
         ));
         x = x.saturating_add(width);
@@ -360,8 +358,8 @@ fn auth_areas(area: Rect) -> Vec<Rect> {
     split_vertical(
         area,
         [
-            Constraint::Length(2),
-            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(3),
             Constraint::Length(ACTION_H),
             Constraint::Min(0),
         ],
@@ -393,33 +391,18 @@ fn popup_area(area: Rect) -> Rect {
     }
 }
 
-fn home_rows(errors: usize) -> Vec<(Option<usize>, String, bool)> {
-    vec![
-        (None, "ARGOS".into(), true),
-        (None, "terminal investigation workspace".into(), false),
-        (None, String::new(), false),
-        (None, "Applications".into(), true),
-        (Some(0), app_label(ModuleId::Recon, errors), false),
-        (Some(1), app_label(ModuleId::Brain, errors), false),
-        (Some(2), app_label(ModuleId::Atlas, errors), false),
-        (None, String::new(), false),
-        (None, "System".into(), true),
-        (Some(3), app_label(ModuleId::Osint, errors), false),
-        (Some(4), app_label(ModuleId::Providers, errors), false),
-        (Some(5), app_label(ModuleId::System, errors), false),
-        (None, String::new(), false),
-        (
-            None,
-            "System apps change how Argos gathers and stores intelligence. They do not chat."
-                .into(),
-            false,
-        ),
-        (
-            None,
-            "Ctrl+K commands  ·  /help in Recon  ·  ? shortcuts".into(),
-            false,
-        ),
-    ]
+struct HomeRow {
+    y: u16,
+    target: Option<usize>,
+    center: bool,
+    kind: HomeKind,
+}
+
+enum HomeKind {
+    Logo(Line<'static>),
+    Heading(&'static str),
+    Item { title: String, detail: String },
+    Gap,
 }
 
 fn home_line(app: &App, x: u16, y: u16) -> Option<usize> {
@@ -427,11 +410,171 @@ fn home_line(app: &App, x: u16, y: u16) -> Option<usize> {
     if !contains(body, x, y) {
         return None;
     }
-    let line = (y.saturating_sub(body.y.saturating_add(1))) as usize;
-    home_rows(0)
+    home_rows(body, 0)
         .into_iter()
-        .nth(line)
-        .and_then(|(target, _, _)| target)
+        .find(|row| row.y == y)
+        .and_then(|row| row.target)
+}
+
+fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
+    let mut rows = if area.width as usize >= logo_width() {
+        logo_rows()
+    } else {
+        vec![center_row(HomeKind::Heading("ARGOS OSINT"))]
+    };
+    let menu_at = rows.len();
+    home_group(
+        &mut rows,
+        "Applications",
+        &[ModuleId::Atlas, ModuleId::Recon, ModuleId::Brain],
+        errors,
+    );
+    rows.push(gap_row());
+    home_group(
+        &mut rows,
+        "System",
+        &[ModuleId::Osint, ModuleId::Providers, ModuleId::System],
+        errors,
+    );
+    let spare = (area.height as usize)
+        .saturating_sub(rows.len())
+        .min(HOME_LOGO_GAP);
+    let above = spare / 2;
+    let below = spare - above;
+    for _ in 0..below {
+        rows.insert(menu_at, gap_row());
+    }
+    for _ in 0..above {
+        rows.insert(0, gap_row());
+    }
+    let limit = area.height as usize;
+    if rows.len() > limit {
+        rows.truncate(limit);
+    }
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.y = area.y.saturating_add(index as u16);
+    }
+    rows
+}
+
+fn home_group(rows: &mut Vec<HomeRow>, title: &'static str, modules: &[ModuleId], errors: usize) {
+    rows.push(center_row(HomeKind::Heading(title)));
+    for module in modules {
+        rows.push(HomeRow {
+            y: 0,
+            target: Some(module.index()),
+            center: false,
+            kind: HomeKind::Item {
+                title: module.title().to_string(),
+                detail: module_detail(*module, errors),
+            },
+        });
+    }
+}
+
+fn center_row(kind: HomeKind) -> HomeRow {
+    HomeRow {
+        y: 0,
+        target: None,
+        center: true,
+        kind,
+    }
+}
+
+fn gap_row() -> HomeRow {
+    HomeRow {
+        y: 0,
+        target: None,
+        center: false,
+        kind: HomeKind::Gap,
+    }
+}
+
+fn module_detail(module: ModuleId, errors: usize) -> String {
+    if module == ModuleId::System && errors > 0 {
+        format!("{} · {errors} errors", module.blurb())
+    } else {
+        module.blurb().to_string()
+    }
+}
+
+fn home_row_width(row: &HomeRow) -> usize {
+    match &row.kind {
+        HomeKind::Logo(line) => line_width(line),
+        HomeKind::Heading(title) => title.chars().count(),
+        HomeKind::Item { detail, .. } => 2 + 12 + detail.chars().count(),
+        HomeKind::Gap => 0,
+    }
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum()
+}
+
+/// Blank rows around the wordmark, split evenly above and below it.
+const HOME_LOGO_GAP: usize = 28;
+
+/// ANSI Shadow wordmark. The right-edge and baseline strokes are the shade.
+const LOGO: [&str; 6] = [
+    " █████╗  ██████╗   ██████╗   ██████╗  ███████╗    ██████╗  ███████╗ ██╗ ███╗   ██╗ ████████╗",
+    "██╔══██╗ ██╔══██╗ ██╔════╝  ██╔═══██╗ ██╔════╝   ██╔═══██╗ ██╔════╝ ██║ ████╗  ██║ ╚══██╔══╝",
+    "███████║ ██████╔╝ ██║  ███╗ ██║   ██║ ███████╗   ██║   ██║ ███████╗ ██║ ██╔██╗ ██║    ██║",
+    "██╔══██║ ██╔══██╗ ██║   ██║ ██║   ██║ ╚════██║   ██║   ██║ ╚════██║ ██║ ██║╚██╗██║    ██║",
+    "██║  ██║ ██║  ██║ ╚██████╔╝ ╚██████╔╝ ███████║   ╚██████╔╝ ███████║ ██║ ██║ ╚████║    ██║",
+    "╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝   ╚═════╝  ╚══════╝    ╚═════╝  ╚══════╝ ╚═╝ ╚═╝  ╚═══╝    ╚═╝",
+];
+const LOGO_SPLIT: [usize; 6] = [50, 49, 49, 49, 49, 50];
+
+fn logo_width() -> usize {
+    LOGO.iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+fn logo_rows() -> Vec<HomeRow> {
+    let width = logo_width();
+    LOGO.iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let mut padded: String = (*line).to_string();
+            while padded.chars().count() < width {
+                padded.push(' ');
+            }
+            let bottom = index + 1 == LOGO.len();
+            center_row(HomeKind::Logo(Line::from(paint_logo(
+                &padded,
+                LOGO_SPLIT[index],
+                bottom,
+            ))))
+        })
+        .collect()
+}
+
+fn paint_logo(pattern: &str, split: usize, bottom: bool) -> Vec<Span<'static>> {
+    pattern
+        .chars()
+        .enumerate()
+        .map(|(index, ch)| {
+            let bright = index >= split;
+            let (face, shade) = if bright {
+                (theme::TEXT, Color::Rgb(78, 108, 120))
+            } else {
+                (theme::DIM, Color::Rgb(42, 64, 76))
+            };
+            let shade_stroke = bottom && ch != ' ' || matches!(ch, '╗' | '║' | '╝');
+            if ch == ' ' {
+                Span::styled(" ", Style::default().bg(theme::BG))
+            } else if shade_stroke {
+                Span::styled(ch.to_string(), Style::default().fg(shade).bg(theme::BG))
+            } else {
+                Span::styled(ch.to_string(), Style::default().fg(face).bg(theme::BG))
+            }
+        })
+        .collect()
 }
 
 fn visible_tools(app: &App) -> Vec<(usize, &'static osint::ToolDefinition)> {
@@ -916,7 +1059,10 @@ pub fn tool_result_log(call: &recon::Call) -> Option<ToolLog> {
         detail.push(format!("Source: {}", result.source_url));
     }
     if !result.retrieved_at.is_empty() {
-        detail.push(format!("Retrieved: {}", result.retrieved_at));
+        detail.push(format!(
+            "Retrieved: {}",
+            atlas::friendly_date(&result.retrieved_at)
+        ));
     }
     if let Some(error) = result.error.as_deref().filter(|text| !text.is_empty()) {
         detail.push(format!("Error: {error}"));
@@ -1770,6 +1916,7 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         }
         Region::AtlasFeed => shift_atlas_feed(app, delta * 3),
         Region::AtlasRuns => shift_atlas_runs(app, delta * 3),
+        Region::AtlasNews => shift_atlas_articles(app, delta * 3),
         Region::None => {}
     }
 }
@@ -1825,6 +1972,10 @@ pub fn page(app: &mut App, direction: i32) {
                 .max(1) as i32;
             move_system_log(app, direction * room);
         }
+        Some(ModuleId::Atlas) if app.atlas_page == AtlasPage::Runs && app.atlas_news => {
+            let room = atlas_news_room(app).max(1) as i32;
+            shift_atlas_articles(app, direction * room);
+        }
         Some(ModuleId::Atlas) if app.atlas_page == AtlasPage::Runs => {
             let room = atlas_runs_room(app).max(1) as i32;
             shift_atlas_runs(app, direction * room);
@@ -1867,6 +2018,7 @@ enum Region {
     Log,
     AtlasFeed,
     AtlasRuns,
+    AtlasNews,
     Path,
     Summary,
     None,
@@ -1948,11 +2100,20 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
         }
         Some(ModuleId::Atlas) => {
             if app.atlas_page == AtlasPage::Runs {
-                let (_, _map, list) = atlas_runs_areas(body);
-                if contains(list, x, y) {
-                    Region::AtlasRuns
+                if app.atlas_news {
+                    let (_, _map, _tabs, list) = atlas_news_areas(body);
+                    if contains(list, x, y) {
+                        Region::AtlasNews
+                    } else {
+                        Region::None
+                    }
                 } else {
-                    Region::None
+                    let (_, _map, list) = atlas_runs_areas(body);
+                    if contains(list, x, y) {
+                        Region::AtlasRuns
+                    } else {
+                        Region::None
+                    }
                 }
             } else {
                 let (_, table, feed) = atlas_live_areas(body);
@@ -2114,6 +2275,12 @@ fn atlas_runs_room(app: &App) -> usize {
         .max(1) as usize
 }
 
+fn atlas_news_room(app: &App) -> usize {
+    inset(atlas_news_areas(chrome(app.screen, app).body).3)
+        .height
+        .max(1) as usize
+}
+
 pub fn shift_atlas_feed(app: &mut App, delta: i32) {
     if app.atlas_feed.is_empty() || delta == 0 {
         return;
@@ -2137,6 +2304,20 @@ pub fn reveal_atlas_feed(app: &mut App) {
     let max = app.atlas_feed.len().saturating_sub(room) as u16;
     if app.scrolls.atlas_feed > max {
         app.scrolls.atlas_feed = max;
+    }
+}
+
+pub fn shift_atlas_articles(app: &mut App, delta: i32) {
+    if app.atlas_articles.is_empty() || delta == 0 {
+        return;
+    }
+    let last = app.atlas_articles.len() as i32 - 1;
+    app.atlas_article_sel = (app.atlas_article_sel as i32 + delta).clamp(0, last) as usize;
+    let room = atlas_news_room(app);
+    reveal_index(&mut app.scrolls.atlas_news, app.atlas_article_sel, room);
+    let max = app.atlas_articles.len().saturating_sub(room) as u16;
+    if app.scrolls.atlas_news > max {
+        app.scrolls.atlas_news = max;
     }
 }
 
@@ -2166,6 +2347,7 @@ pub fn reveal_index(scroll: &mut u16, index: usize, room: usize) {
     }
 }
 
+#[cfg(test)]
 pub fn atlas_feed_room_for(app: &App) -> usize {
     atlas_feed_room(app)
 }
@@ -2186,6 +2368,19 @@ pub fn atlas_run_card(app: &App) -> bool {
     matches!(&app.overlay, Overlay::Block { title, .. } if title.starts_with("Run "))
 }
 
+/// Centered control under the statistics table, inside the card border.
+fn run_news_rect(popup: Rect) -> Rect {
+    let inner = inset(popup);
+    let width = 18.min(inner.width);
+    let height = 3.min(inner.height);
+    Rect {
+        x: inner.x + inner.width.saturating_sub(width) / 2,
+        y: inner.y + inner.height.saturating_sub(height),
+        width,
+        height,
+    }
+}
+
 fn run_delete_rect(popup: Rect) -> Rect {
     let width = 8.min(popup.width.saturating_sub(8));
     Rect {
@@ -2199,7 +2394,11 @@ fn run_delete_rect(popup: Rect) -> Rect {
 pub fn focus_order(app: &App) -> Vec<Target> {
     if app.overlay != Overlay::None {
         if atlas_run_card(app) {
-            return vec![Target::Button(ButtonId::AtlasDelete), Target::CloseOverlay];
+            return vec![
+                Target::Button(ButtonId::AtlasNewsFeed),
+                Target::Button(ButtonId::AtlasDelete),
+                Target::CloseOverlay,
+            ];
         }
         return vec![Target::CloseOverlay];
     }
@@ -2354,7 +2553,13 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             order.extend((0..ModuleId::ALL.len()).map(Target::App));
             if app.atlas_page == AtlasPage::Runs {
                 order.push(Target::Button(ButtonId::AtlasLive));
-                if !app.atlas_runs.is_empty() {
+                if app.atlas_news {
+                    order.push(Target::Button(ButtonId::AtlasWorld));
+                    order.push(Target::Button(ButtonId::AtlasNews));
+                    if !app.atlas_articles.is_empty() {
+                        order.push(Target::AtlasArticle(app.atlas_article_sel));
+                    }
+                } else if !app.atlas_runs.is_empty() {
                     order.push(Target::AtlasHistory(app.atlas_run_sel));
                 }
             } else {
@@ -2439,6 +2644,9 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
             width: 8.min(popup.width),
             height: 1,
         };
+        if atlas_run_card(app) && contains(run_news_rect(popup), x, y) {
+            return Some(Target::Button(ButtonId::AtlasNewsFeed));
+        }
         if atlas_run_card(app) && contains(run_delete_rect(popup), x, y) {
             return Some(Target::Button(ButtonId::AtlasDelete));
         }
@@ -2802,14 +3010,17 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
         | FieldId::PickerModel
         | FieldId::SynthesisProvider
         | FieldId::SynthesisModel
+        | FieldId::ClassifierProvider
+        | FieldId::ClassifierModel
             if app.module == Some(ModuleId::Providers)
                 && app.provider_page == ProviderPage::Defaults =>
         {
             let rows = model_areas(provider_areas(layout.body)[1]);
             Some(match field {
-                FieldId::ReconProvider | FieldId::PickerProvider | FieldId::SynthesisProvider => {
-                    rows[1]
-                }
+                FieldId::ReconProvider
+                | FieldId::PickerProvider
+                | FieldId::SynthesisProvider
+                | FieldId::ClassifierProvider => rows[1],
                 _ => rows[2],
             })
         }
@@ -3012,10 +3223,21 @@ fn value_area_or_composer(area: Rect, field: FieldId) -> Rect {
 }
 
 fn draw_button(frame: &mut Frame, app: &App, button: ButtonId, label: &str, area: Rect) {
+    draw_button_state(frame, app, button, label, area, false);
+}
+
+fn draw_button_state(
+    frame: &mut Frame,
+    app: &App,
+    button: ButtonId,
+    label: &str,
+    area: Rect,
+    active: bool,
+) {
     if area.width < 2 || area.height < 2 {
         return;
     }
-    let selected = app.focus == Target::Button(button);
+    let selected = active || app.focus == Target::Button(button);
     let border = if selected {
         theme::accent()
     } else {
@@ -3093,7 +3315,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     frame.render_widget(Paragraph::new("").style(theme::text()), area);
     let layout = chrome(area, app);
-    draw_header(frame, app, &layout);
+    if app.module.is_some() {
+        draw_header(frame, app, &layout);
+    }
     match app.module {
         None => draw_home(frame, app, layout.body),
         Some(ModuleId::Recon) => draw_recon(frame, app, layout.body),
@@ -3221,6 +3445,9 @@ fn footer_line(app: &App) -> Paragraph<'static> {
             (Some(ModuleId::Brain), _) if app.brain_list_mode == BrainListMode::Graph => {
                 "↑↓ summary · Esc memories · Ctrl+K"
             }
+            (Some(ModuleId::Atlas), _) if app.atlas_news || app.atlas_page == AtlasPage::Live => {
+                "Tab next · Enter · Ctrl+K · Esc history"
+            }
             (Some(ModuleId::System), _) => "↑↓ log · Enter fold · Ctrl+K · Esc home",
             _ => "Tab next · Enter · Ctrl+K commands · Esc home",
         }
@@ -3344,38 +3571,73 @@ const SLASH: &[(&str, &str)] = &[
     ("palette", "command palette"),
 ];
 
-fn app_label(module: ModuleId, errors: usize) -> String {
-    let detail = if module == ModuleId::System && errors > 0 {
-        format!("{} · {errors} errors", module.blurb())
-    } else {
-        module.blurb().to_string()
-    };
-    format!("{:<10}{detail}", module.title())
+fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = home_rows(area, app.error_count());
+    let column = rows
+        .iter()
+        .filter(|row| !row.center)
+        .map(home_row_width)
+        .max()
+        .unwrap_or(0) as u16;
+    let column = column.min(area.width);
+    let left = area.x + area.width.saturating_sub(column) / 2;
+    for row in rows {
+        if row.y >= area.y.saturating_add(area.height) {
+            break;
+        }
+        let line = home_line_text(&row, app.launcher_sel);
+        if line.is_none() {
+            continue;
+        }
+        let rect = if row.center {
+            Rect {
+                x: area.x,
+                y: row.y,
+                width: area.width,
+                height: 1,
+            }
+        } else {
+            Rect {
+                x: left,
+                y: row.y,
+                width: column,
+                height: 1,
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(line.unwrap()).alignment(if row.center {
+                Alignment::Center
+            } else {
+                Alignment::Left
+            }),
+            rect,
+        );
+    }
 }
 
-fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
-    let errors = app.error_count();
-    let mut lines = vec![Line::from("")];
-    for (target, label, heading) in home_rows(errors) {
-        let selected = target.is_some_and(|slot| slot == app.launcher_sel);
-        let style = if selected {
-            theme::selected()
-        } else if target.is_some() {
-            theme::text()
-        } else if heading {
-            theme::accent()
-        } else {
-            theme::dim()
-        };
-        let prefix = if selected { "▸ " } else { "  " };
-        lines.push(Line::from(Span::styled(format!("{prefix}{label}"), style)));
+fn home_line_text(row: &HomeRow, selected: usize) -> Option<Line<'static>> {
+    let accent = theme::accent().add_modifier(Modifier::BOLD);
+    match &row.kind {
+        HomeKind::Gap => None,
+        HomeKind::Logo(line) => Some(line.clone()),
+        HomeKind::Heading(title) => Some(Line::from(Span::styled((*title).to_string(), accent))),
+        HomeKind::Item { title, detail } => {
+            let on = row.target == Some(selected);
+            let mark = if on { "▸ " } else { "  " };
+            let text = format!("{mark}{title:<12}{detail}");
+            if on {
+                Some(Line::from(Span::styled(text, theme::selected())))
+            } else {
+                Some(Line::from(vec![
+                    Span::styled(
+                        format!("{mark}{title:<12}"),
+                        theme::text().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(detail.clone(), theme::dim()),
+                ]))
+            }
+        }
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(theme::text())
-            .wrap(Wrap { trim: false }),
-        area,
-    );
 }
 
 fn draw_recon(frame: &mut Frame, app: &App, area: Rect) {
@@ -3412,7 +3674,7 @@ fn draw_recon_dashboard(frame: &mut Frame, app: &App, area: Rect) {
                 .map(String::as_str)
                 .filter(|state| !state.is_empty())
                 .unwrap_or("new");
-            let when: String = thread.updated_at.chars().take(10).collect();
+            let when = atlas::friendly_date(&thread.updated_at);
             let suffix = format!(" · {state} · {when}");
             let title_room = width.saturating_sub(suffix.chars().count() + 2).max(8);
             ListItem::new(format!("{mark} {}{suffix}", fit(&thread.title, title_room))).style(
@@ -3588,7 +3850,9 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
                     .unwrap_or_default();
                 format!(
                     "\n\nManual run {id}: {} · {}\nSource: {}{error}\n{body}",
-                    result.status, result.retrieved_at, result.source_url
+                    result.status,
+                    atlas::friendly_date(&result.retrieved_at),
+                    result.source_url
                 )
             })
             .unwrap_or_default();
@@ -3896,11 +4160,11 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
                     _ => "this account",
                 }
             };
-            let transport = if role == DefaultsRole::ToolPicker && !app.picker_model.is_empty() {
-                format!(
-                    " Transport: {}.",
-                    provider::picker_transport(&app.picker_model)
-                )
+            let model = app.field(role.model_field());
+            let transport = if !model.is_empty()
+                && matches!(role, DefaultsRole::ToolPicker | DefaultsRole::Classifier)
+            {
+                format!(" Transport: {}.", provider::picker_transport(model))
             } else {
                 String::new()
             };
@@ -3975,11 +4239,107 @@ fn atlas_live_areas(area: Rect) -> (Rect, Rect, Rect) {
 }
 
 fn atlas_runs_areas(area: Rect) -> (Rect, Rect, Rect) {
-    let rows = split_vertical(area, [Constraint::Min(0), Constraint::Length(ACTION_H)]);
-    // The map takes most of the space above the history list. Live sits
-    // under that list.
-    let panes = split_vertical(rows[0], [Constraint::Ratio(3, 4), Constraint::Ratio(1, 4)]);
-    (rows[1], panes[0], panes[1])
+    let action_h = ACTION_H.min(area.height);
+    let rest = area.height.saturating_sub(action_h);
+    let map_h = ((u32::from(rest) * 3 / 4) as u16).min(rest);
+    let list_h = rest.saturating_sub(map_h);
+    let map = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: map_h,
+    };
+    let actions = Rect {
+        x: area.x,
+        y: area.y.saturating_add(map_h),
+        width: area.width,
+        height: action_h,
+    };
+    let list = Rect {
+        x: area.x,
+        y: actions.y.saturating_add(action_h),
+        width: area.width,
+        height: list_h,
+    };
+    (actions, map, list)
+}
+
+/// Map shortened by a quarter, then the world/news tabs, then the news list.
+fn atlas_news_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
+    let action_h = ACTION_H.min(area.height);
+    let body_h = area.height.saturating_sub(action_h);
+    let actions = Rect {
+        x: area.x,
+        y: area.y.saturating_add(body_h),
+        width: area.width,
+        height: action_h,
+    };
+    let body = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: body_h,
+    };
+    let tabs_h = 3.min(body.height);
+    let remaining = body.height.saturating_sub(tabs_h);
+    let map_h = ((u32::from(body.height) * 9 / 16) as u16).min(remaining);
+    let list_h = remaining.saturating_sub(map_h);
+    let map = Rect {
+        x: body.x,
+        y: body.y,
+        width: body.width,
+        height: map_h,
+    };
+    let tabs = Rect {
+        x: body.x,
+        y: body.y.saturating_add(map_h),
+        width: body.width,
+        height: tabs_h,
+    };
+    let list = Rect {
+        x: body.x,
+        y: tabs.y.saturating_add(tabs_h),
+        width: body.width,
+        height: list_h,
+    };
+    (actions, map, tabs, list)
+}
+
+/// Title on the left. Publisher, country code, and category sit on the right.
+fn news_feed_line(
+    article: &argos_osint_core::store::AtlasArticleRow,
+    width: usize,
+    selected: bool,
+) -> Line<'static> {
+    let text_style = if selected {
+        theme::selected()
+    } else {
+        theme::text()
+    };
+    let country = format!(" {} ", article.country.trim().to_ascii_uppercase());
+    let (outlet, _) = atlas::publisher_and_author(
+        &article.source_name,
+        &article.source_domain,
+        &article.author,
+    );
+    let publisher = format!(" {} ", fit(outlet.trim(), 16));
+    let category = format!(" {} ", atlas::category_tag(&article.category));
+    let tags_width =
+        publisher.chars().count() + 1 + country.chars().count() + 1 + category.chars().count();
+    let title = fit(
+        &article.title,
+        width.saturating_sub(tags_width).saturating_sub(1),
+    );
+    let gap = width.saturating_sub(title.chars().count() + tags_width);
+    Line::from(vec![
+        Span::styled(title, text_style),
+        Span::styled(" ".repeat(gap), text_style),
+        Span::styled(publisher, theme::accent()),
+        Span::styled(" ", text_style),
+        Span::styled(country, theme::accent()),
+        Span::styled(" ", text_style),
+        Span::styled(category, theme::accent()),
+    ])
 }
 
 fn atlas_run_label(app: &App) -> &'static str {
@@ -4071,7 +4431,12 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
                         &format!(
                             "{}  {}  {}",
                             atlas::country_label(&article.country),
-                            article.source_name,
+                            atlas::publisher_and_author(
+                                &article.source_name,
+                                &article.source_domain,
+                                &article.author,
+                            )
+                            .0,
                             article.title
                         ),
                         feed_width,
@@ -4085,8 +4450,12 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
+    if app.atlas_news {
+        draw_atlas_news(frame, app, area);
+        return;
+    }
     let (actions, map, list) = atlas_runs_areas(area);
-    super::map::draw_world_map(frame, app, map);
+    draw_map_or_hold(frame, app, map);
     let width = inset(list).width as usize;
     let lines = if app.atlas_runs.is_empty() {
         vec![Line::from(Span::styled(
@@ -4111,7 +4480,7 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
                     fit(
                         &format!(
                             "{}  {}  {} countries  {} articles",
-                            run.started_at,
+                            atlas::friendly_date(&run.started_at),
                             run.state,
                             stats.origins.len(),
                             articles
@@ -4124,6 +4493,65 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
     frame.render_widget(Paragraph::new(lines).block(pane(" history ")), list);
+    let buttons = button_areas(actions, 1);
+    draw_button(frame, app, ButtonId::AtlasLive, "Live", buttons[0]);
+}
+
+fn draw_map_or_hold(frame: &mut Frame, app: &App, area: Rect) {
+    if app.atlas_map_hold {
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new("Loading country")
+                .alignment(Alignment::Center)
+                .style(theme::dim())
+                .block(pane(" map ")),
+            area,
+        );
+        return;
+    }
+    super::map::draw_world_map(frame, app, area);
+}
+
+fn news_tab_label(app: &App) -> String {
+    let when = app
+        .atlas_runs
+        .iter()
+        .find(|run| run.id == app.atlas_news_run)
+        .map(|run| atlas::friendly_date(&run.started_at))
+        .unwrap_or_else(|| "unknown".into());
+    format!("news: {when} - {} articles", app.atlas_articles.len())
+}
+
+fn draw_atlas_news(frame: &mut Frame, app: &App, area: Rect) {
+    let (actions, map, tabs, list) = atlas_news_areas(area);
+    draw_map_or_hold(frame, app, map);
+    let tab_slots = button_areas(tabs, 2);
+    if let (Some(world), Some(news)) = (tab_slots.first(), tab_slots.get(1)) {
+        draw_button(frame, app, ButtonId::AtlasWorld, "world map", *world);
+        draw_button_state(
+            frame,
+            app,
+            ButtonId::AtlasNews,
+            &news_tab_label(app),
+            *news,
+            true,
+        );
+    }
+    let width = inset(list).width as usize;
+    let lines = if app.atlas_articles.is_empty() {
+        vec![Line::from(Span::styled(
+            "No saved articles for this run.",
+            theme::dim(),
+        ))]
+    } else {
+        app.atlas_articles
+            .iter()
+            .enumerate()
+            .skip(app.scrolls.atlas_news as usize)
+            .map(|(index, article)| news_feed_line(article, width, index == app.atlas_article_sel))
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(lines).block(pane(" news ")), list);
     let buttons = button_areas(actions, 1);
     draw_button(frame, app, ButtonId::AtlasLive, "Live", buttons[0]);
 }
@@ -4141,6 +4569,25 @@ fn atlas_row_at(area: Rect, scroll: u16, y: u16) -> Option<usize> {
 
 fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     if app.atlas_page == AtlasPage::Runs {
+        if app.atlas_news {
+            let (actions, _map, tabs, list) = atlas_news_areas(body);
+            if contains(actions, x, y) {
+                return Some(Target::Button(ButtonId::AtlasLive));
+            }
+            if contains(tabs, x, y) {
+                let slots = button_areas(tabs, 2);
+                return Some(Target::Button(if contains(slots[0], x, y) {
+                    ButtonId::AtlasWorld
+                } else {
+                    ButtonId::AtlasNews
+                }));
+            }
+            if contains(list, x, y) {
+                let index = atlas_row_at(list, app.scrolls.atlas_news, y)?;
+                return (index < app.atlas_articles.len()).then_some(Target::AtlasArticle(index));
+            }
+            return None;
+        }
         let (actions, _map, list) = atlas_runs_areas(body);
         if contains(actions, x, y) {
             return Some(Target::Button(ButtonId::AtlasLive));
@@ -4260,7 +4707,10 @@ fn memory_popup(app: &App, message_id: &str) -> String {
         ));
         if let Some(created) = memory.created_at.chars().next() {
             if created != '\0' && !memory.created_at.is_empty() {
-                lines.push(format!("Recorded: {}", memory.created_at));
+                lines.push(format!(
+                    "Recorded: {}",
+                    atlas::friendly_date(&memory.created_at)
+                ));
             }
         }
         if let Some(summary) = app.insight_summary(&memory.id) {
@@ -4272,8 +4722,8 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 
 fn help_text(app: &App) -> &'static str {
     match app.module {
-        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Recon · 2 Brain · 3 Atlas · 4 OSINT · 5 Providers · 6 System\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
-        Some(ModuleId::Atlas) => "Atlas\n\nHistory is the view that opens. Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to the System event log\nEnter on a ▸ error there opens the full API response\nHistory lists saved runs. Enter or click opens that run's statistics\nThe world map sits above that list and takes most of the pane\nIt follows the selected history row. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother history row recolours the map and replaces those names\nDelete on the run card removes that run. Backspace does the same\nHeadlines are not saved. Statistics are\nEsc returns home",
+        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Atlas · 2 Recon · 3 Brain · 4 OSINT · 5 Providers · 6 System\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
+        Some(ModuleId::Atlas) => "Atlas\n\nHistory is the view that opens. Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to the System event log\nEnter on a ▸ error there opens the full API response\nHistory lists saved runs. Enter or click opens that run's statistics\nThe world map sits above that list and takes most of the pane\nLive sits between the map and the history list\nIt follows the selected history row. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother history row recolours the map and replaces those names\nNews on the run card opens that run's saved articles\nThe list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the history list and zooms back out\nDelete on the run card removes that run. Backspace does the same\nEsc on the news feed or on Live returns to history\nEsc on history returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors, run stages, and tool results for 24 hours\n↑↓ select a line · Enter or click the arrow folds a tool result\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",
@@ -4327,14 +4777,26 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         Overlay::Block { .. } => " Detail ",
         Overlay::Choice(_) | Overlay::Palette | Overlay::None => " ",
     };
-    let inner_width = inset(area).width as usize;
+    let run_card = atlas_run_card(app);
+    let body = if run_card {
+        let button = run_news_rect(area);
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: button.y.saturating_sub(area.y).max(3),
+        }
+    } else {
+        area
+    };
+    let inner_width = inset(body).width as usize;
     frame.render_widget(
         Paragraph::new(popup_lines(app, inner_width))
             .style(theme::card_text())
             .block(theme::card(title))
             .scroll((app.scrolls.popup, 0))
             .wrap(Wrap { trim: false }),
-        area,
+        body,
     );
     let close = Rect {
         x: area.x + area.width.saturating_sub(8),
@@ -4342,7 +4804,9 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         width: 8.min(area.width),
         height: 1,
     };
-    if atlas_run_card(app) {
+    if run_card {
+        let button = run_news_rect(area).intersection(frame.area());
+        draw_button(frame, app, ButtonId::AtlasNewsFeed, "News feed", button);
         frame.render_widget(
             Paragraph::new(" delete ").style(theme::card_accent()),
             run_delete_rect(area),

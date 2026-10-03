@@ -6,8 +6,8 @@ use argos_osint_core::hardware::{self, HardwareProfile};
 use argos_osint_core::paths;
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
-use argos_osint_core::store::AtlasRunRow;
 use argos_osint_core::store::Store;
+use argos_osint_core::store::{AtlasArticleRow, AtlasRunRow};
 use argos_osint_core::{atlas, osint, recon};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -38,13 +38,16 @@ pub enum ModuleId {
 }
 impl ModuleId {
     pub const ALL: [Self; 6] = [
+        Self::Atlas,
         Self::Recon,
         Self::Brain,
-        Self::Atlas,
         Self::Osint,
         Self::Providers,
         Self::System,
     ];
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|item| *item == self).unwrap_or(0)
+    }
     pub fn title(self) -> &'static str {
         match self {
             Self::Recon => "Recon",
@@ -84,6 +87,7 @@ pub struct Scrolls {
     pub log: u16,
     pub atlas_feed: u16,
     pub atlas_runs: u16,
+    pub atlas_news: u16,
     pub popup: u16,
     pub recall: u16,
     pub path: u16,
@@ -179,6 +183,8 @@ pub enum FieldId {
     PickerModel,
     SynthesisProvider,
     SynthesisModel,
+    ClassifierProvider,
+    ClassifierModel,
     RouterKey,
     RouterEndpoint,
     Composer,
@@ -190,13 +196,15 @@ pub enum DefaultsRole {
     Recon,
     ToolPicker,
     Synthesis,
+    Classifier,
 }
 
 impl DefaultsRole {
-    pub const ALL: [DefaultsRole; 3] = [
+    pub const ALL: [DefaultsRole; 4] = [
         DefaultsRole::Recon,
         DefaultsRole::ToolPicker,
         DefaultsRole::Synthesis,
+        DefaultsRole::Classifier,
     ];
 
     pub fn label(self) -> &'static str {
@@ -204,6 +212,7 @@ impl DefaultsRole {
             DefaultsRole::Recon => "Recon",
             DefaultsRole::ToolPicker => "Tool picker",
             DefaultsRole::Synthesis => "Synthesis",
+            DefaultsRole::Classifier => "Classifier",
         }
     }
 
@@ -213,6 +222,7 @@ impl DefaultsRole {
             DefaultsRole::Recon => "defaults.recon",
             DefaultsRole::ToolPicker => "defaults.tool_picker",
             DefaultsRole::Synthesis => "defaults.synthesis",
+            DefaultsRole::Classifier => "defaults.classifier",
         }
     }
 
@@ -221,6 +231,7 @@ impl DefaultsRole {
             DefaultsRole::Recon => FieldId::ReconProvider,
             DefaultsRole::ToolPicker => FieldId::PickerProvider,
             DefaultsRole::Synthesis => FieldId::SynthesisProvider,
+            DefaultsRole::Classifier => FieldId::ClassifierProvider,
         }
     }
 
@@ -229,6 +240,7 @@ impl DefaultsRole {
             DefaultsRole::Recon => FieldId::ReconModel,
             DefaultsRole::ToolPicker => FieldId::PickerModel,
             DefaultsRole::Synthesis => FieldId::SynthesisModel,
+            DefaultsRole::Classifier => FieldId::ClassifierModel,
         }
     }
 
@@ -237,6 +249,7 @@ impl DefaultsRole {
             DefaultsRole::Recon => ButtonId::SaveRecon,
             DefaultsRole::ToolPicker => ButtonId::SavePicker,
             DefaultsRole::Synthesis => ButtonId::SaveSynthesis,
+            DefaultsRole::Classifier => ButtonId::SaveClassifier,
         }
     }
 
@@ -245,6 +258,9 @@ impl DefaultsRole {
             FieldId::ReconProvider | FieldId::ReconModel => Some(DefaultsRole::Recon),
             FieldId::PickerProvider | FieldId::PickerModel => Some(DefaultsRole::ToolPicker),
             FieldId::SynthesisProvider | FieldId::SynthesisModel => Some(DefaultsRole::Synthesis),
+            FieldId::ClassifierProvider | FieldId::ClassifierModel => {
+                Some(DefaultsRole::Classifier)
+            }
             _ => None,
         }
     }
@@ -260,6 +276,7 @@ pub enum ButtonId {
     SaveRecon,
     SavePicker,
     SaveSynthesis,
+    SaveClassifier,
     DefaultRole(DefaultsRole),
     RefreshModels,
     NewThread,
@@ -287,6 +304,9 @@ pub enum ButtonId {
     AtlasRuns,
     AtlasLive,
     AtlasDelete,
+    AtlasNewsFeed,
+    AtlasWorld,
+    AtlasNews,
     OpenSource,
     CreateMemory,
     BrainBack,
@@ -321,6 +341,8 @@ pub enum Target {
     AtlasFeed(usize),
     /// One past Atlas run in the history list.
     AtlasHistory(usize),
+    /// One saved article in the history news feed.
+    AtlasArticle(usize),
     Choice(usize),
     CloseOverlay,
 }
@@ -460,6 +482,8 @@ pub struct App {
     pub picker_model: String,
     pub synthesis_provider: String,
     pub synthesis_model: String,
+    pub classifier_provider: String,
+    pub classifier_model: String,
     pub defaults_role: DefaultsRole,
     pub model_catalog: Vec<ListedModel>,
     pub catalog_for: String,
@@ -497,6 +521,15 @@ pub struct App {
     pub atlas_feed_follow: bool,
     pub atlas_runs: Vec<AtlasRunRow>,
     pub atlas_run_sel: usize,
+    /// History news list for the run opened from the statistics card.
+    pub atlas_news: bool,
+    pub atlas_news_run: String,
+    pub atlas_articles: Vec<AtlasArticleRow>,
+    pub atlas_article_sel: usize,
+    /// Country the map is zoomed to. Empty means the world view.
+    pub atlas_focus: Option<String>,
+    /// The next frame shows a loading note. The frame after that paints the map.
+    pub atlas_map_hold: bool,
     pub atlas_status: String,
     pub atlas_state: String,
     pub atlas_pause: Option<Arc<AtomicBool>>,
@@ -587,6 +620,7 @@ impl App {
         let recon_default = provider::role_secret(&auth, &settings, "recon")?;
         let picker_default = provider::role_secret(&auth, &settings, "tool-picker")?;
         let synthesis_default = provider::role_secret(&auth, &settings, "synthesis")?;
+        let classifier_default = provider::role_secret(&auth, &settings, "classifier")?;
         let router = provider::account_secret(&auth, "openrouter");
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
@@ -662,6 +696,8 @@ impl App {
             picker_model: picker_default.model,
             synthesis_provider: provider::effective_kind(&synthesis_default),
             synthesis_model: synthesis_default.model,
+            classifier_provider: provider::effective_kind(&classifier_default),
+            classifier_model: classifier_default.model,
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),
@@ -698,6 +734,12 @@ impl App {
             atlas_feed_follow: true,
             atlas_runs: Vec::new(),
             atlas_run_sel: 0,
+            atlas_news: false,
+            atlas_news_run: String::new(),
+            atlas_articles: Vec::new(),
+            atlas_article_sel: 0,
+            atlas_focus: None,
+            atlas_map_hold: false,
             atlas_status: "Ready".into(),
             atlas_state: "idle".into(),
             atlas_pause: None,
@@ -852,17 +894,17 @@ impl App {
         self.overlay = Overlay::None;
         match id {
             "home" => self.go_home(),
-            "recon" => self.select(0),
-            "brain" => self.select(1),
-            "atlas" => self.select(2),
-            "osint" => self.select(3),
-            "providers" => self.select(4),
-            "system" => self.select(5),
+            "recon" => self.select(ModuleId::Recon.index()),
+            "brain" => self.select(ModuleId::Brain.index()),
+            "atlas" => self.select(ModuleId::Atlas.index()),
+            "osint" => self.select(ModuleId::Osint.index()),
+            "providers" => self.select(ModuleId::Providers.index()),
+            "system" => self.select(ModuleId::System.index()),
             "new" => {
                 let created = self.new_thread().map(|_| "New investigation".into());
                 self.report(created);
                 self.module = Some(ModuleId::Recon);
-                self.launcher_sel = 0;
+                self.launcher_sel = ModuleId::Recon.index();
             }
             "sessions" => {
                 self.module = Some(ModuleId::Recon);
@@ -877,7 +919,7 @@ impl App {
             "resume" => self.activate_button(ButtonId::ResumeRun),
             "insights" => self.activate_button(ButtonId::RetryInsights),
             "create-memory" => {
-                self.select(1);
+                self.select(ModuleId::Brain.index());
                 self.activate_button(ButtonId::CreateMemory);
             }
             "clear-log" => self.activate_button(ButtonId::ClearLog),
@@ -1006,6 +1048,8 @@ impl App {
             FieldId::PickerModel => &self.picker_model,
             FieldId::SynthesisProvider => &self.synthesis_provider,
             FieldId::SynthesisModel => &self.synthesis_model,
+            FieldId::ClassifierProvider => &self.classifier_provider,
+            FieldId::ClassifierModel => &self.classifier_model,
             FieldId::RouterKey => &self.router_key,
             FieldId::RouterEndpoint => &self.router_endpoint,
             FieldId::Composer => &self.input,
@@ -1035,6 +1079,8 @@ impl App {
             FieldId::PickerModel => &mut self.picker_model,
             FieldId::SynthesisProvider => &mut self.synthesis_provider,
             FieldId::SynthesisModel => &mut self.synthesis_model,
+            FieldId::ClassifierProvider => &mut self.classifier_provider,
+            FieldId::ClassifierModel => &mut self.classifier_model,
             FieldId::RouterKey => &mut self.router_key,
             FieldId::RouterEndpoint => &mut self.router_endpoint,
             FieldId::Composer => &mut self.input,
@@ -1350,6 +1396,14 @@ impl App {
 
     fn move_atlas(&mut self, delta: i32) {
         if self.atlas_page == AtlasPage::Runs {
+            if self.atlas_news {
+                super::ui::shift_atlas_articles(self, delta);
+                if !self.atlas_articles.is_empty() {
+                    self.set_focus(Target::AtlasArticle(self.atlas_article_sel));
+                    self.focus_highlighted_country();
+                }
+                return;
+            }
             super::ui::shift_atlas_runs(self, delta);
             if !self.atlas_runs.is_empty() {
                 self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
@@ -1367,27 +1421,21 @@ impl App {
             self.status = "No headline selected".into();
             return;
         };
-        let body = format!(
-            "{}\n{}\nCountry: {}\nPublished: {}\nProvider: {}\nTemperature: {:.2}\n\n{}\n\n{}",
-            article.source_name,
-            article.source_domain,
-            atlas::country_label(&article.country),
-            if article.published_at.is_empty() {
-                "unknown"
-            } else {
-                article.published_at.as_str()
-            },
-            article.provider,
+        let body = atlas::format_article_card(
+            &article.title,
+            &article.source_name,
+            &article.source_domain,
+            &article.author,
+            &article.country,
+            &article.category,
+            &article.published_at,
             article.temperature,
-            if article.description.is_empty() {
-                "No description."
-            } else {
-                article.description.as_str()
-            },
-            article.url
+            &article.description,
+            &article.image_url,
+            &article.url,
         );
         self.overlay = Overlay::Block {
-            title: article.title.clone(),
+            title: "Article".into(),
             body,
         };
         self.scrolls.popup = 0;
@@ -1401,6 +1449,12 @@ impl App {
             anyhow::bail!("Pause the pipeline before deleting this run");
         }
         self.store.atlas_delete_run(&run.id)?;
+        if self.atlas_news_run == run.id {
+            self.atlas_news = false;
+            self.atlas_focus = None;
+            self.atlas_articles.clear();
+            self.atlas_news_run.clear();
+        }
         if matches!(self.overlay, Overlay::Block { .. }) {
             self.overlay = Overlay::None;
         }
@@ -1420,8 +1474,84 @@ impl App {
             return;
         };
         self.overlay = Overlay::Block {
-            title: format!("Run {}", run.started_at),
+            title: format!("Run {}", atlas::friendly_date(&run.started_at)),
             body: atlas::format_run_card(&run),
+        };
+        self.scrolls.popup = 0;
+    }
+
+    fn open_atlas_news(&mut self) {
+        let Some(run) = self.atlas_runs.get(self.atlas_run_sel) else {
+            self.status = "No run selected".into();
+            return;
+        };
+        let id = run.id.clone();
+        self.atlas_articles = self.store.atlas_list_articles(&id).unwrap_or_default();
+        self.atlas_news_run = id;
+        self.atlas_news = true;
+        self.atlas_article_sel = 0;
+        self.scrolls.atlas_news = 0;
+        self.focus_highlighted_country();
+        self.overlay = Overlay::None;
+        if self.atlas_articles.is_empty() {
+            self.status = "No saved articles for this run".into();
+            return;
+        }
+        self.set_focus(Target::AtlasArticle(0));
+        self.status = format!("{} articles", self.atlas_articles.len());
+    }
+
+    fn focus_highlighted_country(&mut self) {
+        let Some(country) = self
+            .atlas_articles
+            .get(self.atlas_article_sel)
+            .map(|article| article.country.clone())
+        else {
+            if self.atlas_focus.is_some() {
+                self.atlas_focus = None;
+                self.atlas_map_hold = true;
+            }
+            return;
+        };
+        if self.atlas_focus.as_deref() == Some(country.as_str()) {
+            return;
+        }
+        self.atlas_focus = Some(country);
+        self.atlas_map_hold = true;
+    }
+
+    fn show_atlas_world(&mut self) {
+        self.atlas_news = false;
+        self.atlas_focus = None;
+        self.atlas_map_hold = true;
+        self.overlay = Overlay::None;
+        if !self.atlas_runs.is_empty() {
+            self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
+        }
+        self.status = "World map".into();
+    }
+
+    fn open_saved_article(&mut self) {
+        let Some(article) = self.atlas_articles.get(self.atlas_article_sel).cloned() else {
+            self.status = "No article selected".into();
+            return;
+        };
+        self.focus_highlighted_country();
+        self.overlay = Overlay::Block {
+            title: "Article".into(),
+            body: atlas::format_article_card(
+                &article.title,
+                &article.source_name,
+                &article.source_domain,
+                &article.author,
+                &article.country,
+                &article.category,
+                &article.published_at,
+                article.temperature,
+                &article.description,
+                &article.image_url,
+                &article.url,
+            ),
         };
         self.scrolls.popup = 0;
     }
@@ -1468,6 +1598,9 @@ impl App {
             ..osint::ProviderKeys::default()
         };
         let feed = self.atlas_feed.clone();
+        let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
+            .ok()
+            .filter(|secret| provider::resolved_key(secret).is_some());
         let tx = self.work_tx.clone();
         let user_agent =
             osint::effective_user_agent(Some(&self.settings.osint_user_agent)).to_string();
@@ -1480,6 +1613,7 @@ impl App {
                 &user_agent,
                 resume,
                 &feed,
+                classifier,
                 move |event| {
                     let _ = emit_tx.send(WorkEvent::Atlas(event));
                 },
@@ -1530,6 +1664,14 @@ impl App {
                     super::ui::reveal_atlas_feed(self);
                 } else if self.atlas_feed_sel >= self.atlas_feed.len() {
                     self.atlas_feed_sel = self.atlas_feed.len().saturating_sub(1);
+                }
+            }
+            atlas::AtlasEvent::Classified { id, category } => {
+                if let Some(article) = self.atlas_feed.iter_mut().find(|item| item.id == id) {
+                    article.category = category.clone();
+                }
+                if let Some(article) = self.atlas_articles.iter_mut().find(|item| item.id == id) {
+                    article.category = category;
                 }
             }
         }
@@ -1851,7 +1993,10 @@ impl App {
 
     pub fn field_display(&self, field: FieldId) -> String {
         match field {
-            FieldId::ReconProvider | FieldId::PickerProvider | FieldId::SynthesisProvider => {
+            FieldId::ReconProvider
+            | FieldId::PickerProvider
+            | FieldId::SynthesisProvider
+            | FieldId::ClassifierProvider => {
                 let kind = self.field(field);
                 if kind.is_empty() {
                     String::new()
@@ -2450,6 +2595,22 @@ impl App {
             ButtonId::SaveRecon => self.save_role(DefaultsRole::Recon),
             ButtonId::SavePicker => self.save_role(DefaultsRole::ToolPicker),
             ButtonId::SaveSynthesis => self.save_role(DefaultsRole::Synthesis),
+            ButtonId::SaveClassifier => self.save_role(DefaultsRole::Classifier),
+            ButtonId::AtlasNewsFeed => {
+                self.open_atlas_news();
+                return;
+            }
+            ButtonId::AtlasWorld => {
+                self.show_atlas_world();
+                return;
+            }
+            ButtonId::AtlasNews => {
+                if !self.atlas_news_run.is_empty() {
+                    self.atlas_news = true;
+                    self.atlas_focus = None;
+                }
+                Ok("News".into())
+            }
             ButtonId::DefaultRole(role) => {
                 if self.defaults_role != role {
                     self.defaults_role = role;
@@ -2529,6 +2690,7 @@ impl App {
                 DefaultsRole::Recon => "recon",
                 DefaultsRole::ToolPicker => "tool-picker",
                 DefaultsRole::Synthesis => "synthesis",
+                DefaultsRole::Classifier => "classifier",
             })
             .ok_or_else(|| anyhow::anyhow!("unknown role"))?;
         let before = format!("{} / {}", assignment.provider, assignment.model);
@@ -2549,6 +2711,10 @@ impl App {
                 provider::picker_transport(&model)
             ),
             DefaultsRole::Synthesis => "Synthesis default saved".into(),
+            DefaultsRole::Classifier => format!(
+                "Classifier: {after} ({})",
+                provider::picker_transport(&model)
+            ),
         })
     }
 
@@ -2849,6 +3015,14 @@ impl App {
                 self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
                 self.open_atlas_run();
             }
+            Target::AtlasArticle(index) => {
+                if self.atlas_articles.is_empty() {
+                    return;
+                }
+                self.atlas_article_sel = index.min(self.atlas_articles.len() - 1);
+                self.set_focus(Target::AtlasArticle(self.atlas_article_sel));
+                self.open_saved_article();
+            }
             Target::LogLine(index) => {
                 if self.log.is_empty() {
                     return;
@@ -3141,7 +3315,7 @@ impl App {
             let created = self.new_thread().map(|_| "New investigation".into());
             self.report(created);
             self.module = Some(ModuleId::Recon);
-            self.launcher_sel = 0;
+            self.launcher_sel = ModuleId::Recon.index();
             return true;
         }
         if ctrl && key.code == KeyCode::Char('o') && self.module == Some(ModuleId::Brain) {
@@ -3355,6 +3529,23 @@ impl App {
             self.leave_brain_detail();
             return;
         }
+        if self.module == Some(ModuleId::Atlas) && self.atlas_news {
+            self.show_atlas_world();
+            return;
+        }
+        if self.module == Some(ModuleId::Atlas) && self.atlas_page == AtlasPage::Live {
+            self.atlas_page = AtlasPage::Runs;
+            self.atlas_news = false;
+            self.atlas_focus = None;
+            self.load_atlas();
+            if !self.atlas_runs.is_empty() {
+                self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
+            } else {
+                self.set_focus(Target::Button(ButtonId::AtlasLive));
+            }
+            self.status = "History".into();
+            return;
+        }
         if self.module == Some(ModuleId::Recon) && self.recon_chat {
             self.recon_chat = false;
             self.set_focus(if self.threads.is_empty() {
@@ -3397,6 +3588,7 @@ impl App {
             Target::Memory(_) => self.open_memory_graph(),
             Target::AtlasFeed(_) => self.open_atlas_article(),
             Target::AtlasHistory(_) => self.open_atlas_run(),
+            Target::AtlasArticle(_) => self.open_saved_article(),
             target => self.activate_target(target),
         }
     }
@@ -3637,6 +3829,8 @@ pub fn is_picker_field(field: FieldId) -> bool {
             | FieldId::PickerModel
             | FieldId::SynthesisProvider
             | FieldId::SynthesisModel
+            | FieldId::ClassifierProvider
+            | FieldId::ClassifierModel
     )
 }
 
@@ -3658,7 +3852,8 @@ fn role_model_items(
     catalog: &[ListedModel],
 ) -> Vec<ChoiceItem> {
     let mut items = Vec::new();
-    let picker = role == DefaultsRole::ToolPicker && provider == "openrouter";
+    let picker = matches!(role, DefaultsRole::ToolPicker | DefaultsRole::Classifier)
+        && provider == "openrouter";
     if picker {
         for (id, label) in provider::DECISIONS_MODELS {
             items.push(ChoiceItem {
@@ -3760,11 +3955,22 @@ pub async fn run(mut app: App) -> Result<()> {
                 app.screen = frame.area();
                 super::ui::draw(frame, &app)
             })?;
-            dirty = false;
+            if app.atlas_map_hold {
+                app.atlas_map_hold = false;
+                dirty = true;
+            } else {
+                dirty = false;
+            }
         }
         let busy =
             !app.running.is_empty() || app.osint_cancel.is_some() || app.provider_pending.is_some();
-        let wait = Duration::from_millis(if busy { 80 } else { 400 });
+        let wait = Duration::from_millis(if dirty {
+            90
+        } else if busy {
+            80
+        } else {
+            400
+        });
         if !event::poll(wait)? {
             if app.draft_dirty {
                 app.flush_draft();
@@ -3949,6 +4155,8 @@ mod tests {
             picker_model: String::new(),
             synthesis_provider: String::new(),
             synthesis_model: String::new(),
+            classifier_provider: String::new(),
+            classifier_model: String::new(),
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),
@@ -3985,6 +4193,12 @@ mod tests {
             atlas_feed_follow: true,
             atlas_runs: Vec::new(),
             atlas_run_sel: 0,
+            atlas_news: false,
+            atlas_news_run: String::new(),
+            atlas_articles: Vec::new(),
+            atlas_article_sel: 0,
+            atlas_focus: None,
+            atlas_map_hold: false,
             atlas_status: "Ready".into(),
             atlas_state: "idle".into(),
             atlas_pause: None,
@@ -4406,7 +4620,7 @@ mod tests {
         app.screen = Rect::new(0, 0, 80, 24);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-        app.select(0);
+        app.select(ModuleId::Recon.index());
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
             Target::Field(FieldId::ReconSearch),
@@ -4469,13 +4683,13 @@ mod tests {
             assert!(hit(&app, target), "home is missing {target:?}");
         }
         assert!(!hit(&app, Target::Field(FieldId::Composer)));
-        app.select(1);
+        app.select(ModuleId::Brain.index());
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
         assert!(!hit(&app, Target::Field(FieldId::Composer)));
         assert!(!super::super::ui::focus_order(&app).contains(&Target::Field(FieldId::Composer)));
-        app.select(0);
+        app.select(ModuleId::Recon.index());
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
@@ -4754,7 +4968,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert!(app.module.is_none());
-        app.select(1);
+        app.select(ModuleId::Brain.index());
         app.set_focus(Target::Field(FieldId::BrainInsight));
         app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
         app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
@@ -5194,11 +5408,16 @@ mod tests {
     fn atlas_live_feed_and_past_runs_open_cards() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 100, 36);
-        app.select(2);
+        app.select(ModuleId::Atlas.index());
         assert_eq!(app.module, Some(ModuleId::Atlas));
         assert_eq!(app.atlas_page, AtlasPage::Runs);
         assert!(hit(&app, Target::Button(ButtonId::AtlasLive)));
         assert!(!hit(&app, Target::Button(ButtonId::AtlasDelete)));
+        click(&mut app, Target::Button(ButtonId::AtlasLive));
+        assert_eq!(app.atlas_page, AtlasPage::Live);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Atlas));
+        assert_eq!(app.atlas_page, AtlasPage::Runs);
         click(&mut app, Target::Button(ButtonId::AtlasLive));
         assert_eq!(app.atlas_page, AtlasPage::Live);
         assert!(hit(&app, Target::Button(ButtonId::AtlasRun)));
@@ -5211,18 +5430,21 @@ mod tests {
             country: "cn".into(),
             source_name: "Reuters".into(),
             source_domain: "reuters.com".into(),
+            author: "Wire Desk".into(),
+            image_url: "https://www.reuters.com/image.jpg".into(),
             published_at: "2026-10-01T00:00:00Z".into(),
             provider: "newsapi".into(),
             temperature: 1.0,
             seen_at: "2026-10-01T00:01:00Z".into(),
+            category: "stability".into(),
         });
         app.atlas_feed_sel = 0;
         app.set_focus(Target::AtlasFeed(0));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let Overlay::Block { title, body } = &app.overlay else {
+        let Overlay::Block { body, .. } = &app.overlay else {
             panic!("article card");
         };
-        assert!(title.contains("Cabinet reshuffle"));
+        assert!(body.contains("Title: Cabinet reshuffle"));
         assert!(body.contains("China (CN)"));
         assert!(body.contains("https://www.reuters.com/world/china"));
         app.overlay = Overlay::None;
@@ -5267,6 +5489,176 @@ mod tests {
     }
 
     #[test]
+    fn atlas_news_feed_tags_the_country_code() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 120, 42);
+        app.store.atlas_insert_run("atlas-de", "{}", "{}").unwrap();
+        app.store
+            .atlas_set_state("atlas-de", "completed", "", true)
+            .unwrap();
+        app.store
+            .atlas_upsert_article(&AtlasArticleRow {
+                run_id: "atlas-de".into(),
+                id: "art-1".into(),
+                title: "Cabinet reshuffle in Berlin".into(),
+                description: "Ministers left the cabinet.".into(),
+                url: "https://www.reuters.com/world/europe".into(),
+                country: "de".into(),
+                source_name: "Reuters".into(),
+                source_domain: "reuters.com".into(),
+                author: "Desk".into(),
+                image_url: String::new(),
+                published_at: "2026-10-01T00:00:00Z".into(),
+                provider: "newsapi".into(),
+                temperature: 1.0,
+                category: "stability".into(),
+                seen_at: "2026-10-01T00:01:00Z".into(),
+            })
+            .unwrap();
+        app.select(ModuleId::Atlas.index());
+        click(&mut app, Target::AtlasHistory(0));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 42)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("News feed"), "{painted}");
+        let news_hit = (0..42).any(|y| {
+            (0..120).any(|x| {
+                super::super::ui::hit_test(&app, x, y)
+                    == Some(Target::Button(ButtonId::AtlasNewsFeed))
+                    && y > 2
+            })
+        });
+        assert!(news_hit, "news feed button is below the card title");
+        click(&mut app, Target::Button(ButtonId::AtlasNewsFeed));
+        assert!(app.atlas_news);
+        assert!(matches!(app.overlay, Overlay::None));
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("Loading country"), "{painted}");
+        app.atlas_map_hold = false;
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("Cabinet reshuffle"), "{painted}");
+        assert!(painted.contains("Reuters"), "{painted}");
+        assert!(painted.contains("DE"), "{painted}");
+        assert!(painted.contains("stability"), "{painted}");
+        assert!(painted.contains("news:"), "{painted}");
+        assert!(painted.contains("articles"), "{painted}");
+        click(&mut app, Target::AtlasArticle(0));
+        assert_eq!(app.atlas_focus.as_deref(), Some("de"));
+        let Overlay::Block { body, .. } = &app.overlay else {
+            panic!("article card");
+        };
+        assert!(body.contains("Ministers left the cabinet."));
+        assert!(body.contains("Germany (DE)"));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.atlas_news);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.atlas_news);
+        assert_eq!(app.module, Some(ModuleId::Atlas));
+        assert_eq!(app.atlas_page, AtlasPage::Runs);
+    }
+
+    #[test]
+    fn news_feed_button_draws_with_several_hot_countries() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 180, 55);
+        let stats = serde_json::to_string(&atlas::RunStats {
+            scored: true,
+            origins: ["us", "gb", "ng", "ca", "au"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, country)| atlas::OriginStat {
+                    country: country.into(),
+                    tier: if index < 2 { 1 } else { 3 },
+                    temperature: 1.0 - index as f64 * 0.1,
+                    volume: 4,
+                    articles: 2,
+                })
+                .collect(),
+            ..atlas::RunStats::default()
+        })
+        .unwrap();
+        app.store
+            .atlas_insert_run("atlas-hot", "{}", &stats)
+            .unwrap();
+        app.store
+            .atlas_set_state("atlas-hot", "completed", "", true)
+            .unwrap();
+        for index in 0..30 {
+            app.store
+                .atlas_upsert_article(&AtlasArticleRow {
+                    run_id: "atlas-hot".into(),
+                    id: format!("art-{index}"),
+                    title: format!("Headline {index} about a long regional story"),
+                    description: String::new(),
+                    url: format!("https://example.com/{index}"),
+                    country: "us".into(),
+                    source_name: "Reuters".into(),
+                    source_domain: "reuters.com".into(),
+                    author: "Desk".into(),
+                    image_url: String::new(),
+                    published_at: "2026-10-01T00:00:00Z".into(),
+                    provider: "newsapi".into(),
+                    temperature: 1.0,
+                    category: "economic".into(),
+                    seen_at: format!("2026-10-01T00:{index:02}:00Z"),
+                })
+                .unwrap();
+        }
+        app.select(ModuleId::Atlas.index());
+        click(&mut app, Target::AtlasHistory(0));
+        click(&mut app, Target::Button(ButtonId::AtlasNewsFeed));
+        assert!(app.atlas_news);
+        for (width, height) in [(180, 55), (80, 24), (60, 18)] {
+            app.screen = Rect::new(0, 0, width, height);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| super::super::ui::draw(frame, &app))
+                .unwrap();
+            if app.atlas_map_hold {
+                let painted = screen_text(&terminal);
+                assert!(painted.contains("Loading country"), "{painted}");
+                app.atlas_map_hold = false;
+                terminal
+                    .draw(|frame| super::super::ui::draw(frame, &app))
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn grok_and_openai_account_panes_show_their_text() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 100, 36);
+        app.select(4);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("Grok subscription"), "{painted}");
+        assert!(painted.contains("Not checked"), "{painted}");
+        app.provider_page = ProviderPage::OpenAI;
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("ChatGPT subscription"), "{painted}");
+        assert!(painted.contains("Not checked"), "{painted}");
+    }
+
+    #[test]
     fn atlas_world_map_follows_the_selected_run_until_zoomed_in() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 120, 42);
@@ -5296,7 +5688,7 @@ mod tests {
         app.store
             .atlas_set_state("atlas-cn", "completed", "", true)
             .unwrap();
-        app.select(2);
+        app.select(ModuleId::Atlas.index());
         assert_eq!(app.atlas_runs[app.atlas_run_sel].id, "atlas-cn");
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 42)).unwrap();
@@ -5395,7 +5787,7 @@ mod tests {
         app.store
             .atlas_set_state("atlas-many", "completed", "", true)
             .unwrap();
-        app.select(2);
+        app.select(ModuleId::Atlas.index());
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 48)).unwrap();
         terminal
@@ -5428,10 +5820,13 @@ mod tests {
             country: "us".into(),
             source_name: "Wire".into(),
             source_domain: "example.com".into(),
+            author: String::new(),
+            image_url: String::new(),
             published_at: String::new(),
             provider: "newsapi".into(),
             temperature: 1.0,
             seen_at: String::new(),
+            category: "unk".into(),
         }
     }
 

@@ -48,6 +48,7 @@ pub fn eligible_catalog(enabled: &HashSet<String>, unkeyed: &HashSet<String>) ->
     crate::osint::registry()
         .iter()
         .filter(|tool| enabled.contains(tool.id) && investigation::pickable(tool.id))
+        .filter(|tool| !crate::osint::atlas_pipeline_tool(tool.id))
         .filter(|tool| !(investigation::context_of(tool.id).is_some() && unkeyed.contains(tool.id)))
         .map(|tool| CatalogEntry {
             id: tool.id.into(),

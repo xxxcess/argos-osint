@@ -6,8 +6,9 @@ use argos_osint_core::hardware::{self, HardwareProfile};
 use argos_osint_core::paths;
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
+use argos_osint_core::store::AtlasRunRow;
 use argos_osint_core::store::Store;
-use argos_osint_core::{osint, recon};
+use argos_osint_core::{atlas, osint, recon};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -30,14 +31,16 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 pub enum ModuleId {
     Recon,
     Brain,
+    Atlas,
     Osint,
     Providers,
     System,
 }
 impl ModuleId {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Recon,
         Self::Brain,
+        Self::Atlas,
         Self::Osint,
         Self::Providers,
         Self::System,
@@ -46,6 +49,7 @@ impl ModuleId {
         match self {
             Self::Recon => "Recon",
             Self::Brain => "Brain",
+            Self::Atlas => "Atlas",
             Self::Osint => "OSINT",
             Self::Providers => "Providers",
             Self::System => "System",
@@ -55,11 +59,19 @@ impl ModuleId {
         match self {
             Self::Recon => "Investigate with evidence",
             Self::Brain => "Recall and manage insights",
+            Self::Atlas => "Regional news pipeline",
             Self::Osint => "Configure public lookup tools",
             Self::Providers => "Accounts and model defaults",
             Self::System => "Hardware, paths, and event log",
         }
     }
+}
+
+/// Live pipeline, or the list of past runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtlasPage {
+    Live,
+    Runs,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -70,6 +82,8 @@ pub struct Scrolls {
     pub tools: u16,
     pub detail: u16,
     pub log: u16,
+    pub atlas_feed: u16,
+    pub atlas_runs: u16,
     pub popup: u16,
     pub recall: u16,
     pub path: u16,
@@ -156,6 +170,9 @@ pub enum FieldId {
     SociaVaultKey,
     NewsApiKey,
     CourtListenerKey,
+    GnewsKey,
+    NewsDataKey,
+    CurrentsKey,
     ReconProvider,
     ReconModel,
     PickerProvider,
@@ -263,6 +280,13 @@ pub enum ButtonId {
     SaveSociaVaultKey,
     SaveNewsApiKey,
     SaveCourtListenerKey,
+    SaveGnewsKey,
+    SaveNewsDataKey,
+    SaveCurrentsKey,
+    AtlasRun,
+    AtlasRuns,
+    AtlasLive,
+    AtlasDelete,
     OpenSource,
     CreateMemory,
     BrainBack,
@@ -293,6 +317,10 @@ pub enum Target {
     BrainMark(usize),
     /// One System event-log row. Clicking it folds the entry when it has a detail.
     LogLine(usize),
+    /// One Atlas headline in the live feed.
+    AtlasFeed(usize),
+    /// One past Atlas run in the history list.
+    AtlasHistory(usize),
     Choice(usize),
     CloseOverlay,
 }
@@ -350,6 +378,10 @@ enum WorkEvent {
     GraphSummary {
         memory_id: String,
         outcome: std::result::Result<String, String>,
+    },
+    Atlas(atlas::AtlasEvent),
+    AtlasDone {
+        outcome: std::result::Result<atlas::Stop, String>,
     },
 }
 
@@ -457,6 +489,20 @@ pub struct App {
     pub selected_insight: Option<recon::InsightView>,
     pub memory_sel: usize,
     pub brain_list_mode: BrainListMode,
+    pub atlas_page: AtlasPage,
+    pub atlas_stats: atlas::RunStats,
+    pub atlas_feed: Vec<atlas::FeedArticle>,
+    pub atlas_feed_sel: usize,
+    /// True while the selection is on the newest headline, so the list follows arrivals.
+    pub atlas_feed_follow: bool,
+    pub atlas_runs: Vec<AtlasRunRow>,
+    pub atlas_run_sel: usize,
+    pub atlas_status: String,
+    pub atlas_state: String,
+    pub atlas_pause: Option<Arc<AtomicBool>>,
+    pub gnews_key: String,
+    pub newsdata_key: String,
+    pub currents_key: String,
     pub brain_graph: recon::MemoryGraph,
     brain_graph_for: Option<String>,
     pub graph_summary: String,
@@ -472,6 +518,20 @@ pub struct App {
     provider_rx: UnboundedReceiver<ProviderEvent>,
     work_tx: UnboundedSender<WorkEvent>,
     work_rx: UnboundedReceiver<WorkEvent>,
+}
+
+fn atlas_log_level(text: &str) -> &'static str {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("rate limit")
+        || lower.contains("http")
+        || lower.contains("rejected")
+        || lower.contains("malformed")
+        || lower.contains("failed")
+    {
+        "error"
+    } else {
+        "info"
+    }
 }
 
 impl App {
@@ -551,6 +611,9 @@ impl App {
             sociavault_key: settings.sociavault_api_key.clone(),
             newsapi_key: settings.newsapi_api_key.clone(),
             courtlistener_key: settings.courtlistener_api_token.clone(),
+            gnews_key: settings.gnews_api_key.clone(),
+            newsdata_key: settings.newsdata_api_key.clone(),
+            currents_key: settings.currents_api_key.clone(),
             selected_thread,
             threads,
             thread_states,
@@ -628,6 +691,16 @@ impl App {
             selected_insight: None,
             memory_sel: 0,
             brain_list_mode: BrainListMode::List,
+            atlas_page: AtlasPage::Runs,
+            atlas_stats: atlas::RunStats::default(),
+            atlas_feed: Vec::new(),
+            atlas_feed_sel: 0,
+            atlas_feed_follow: true,
+            atlas_runs: Vec::new(),
+            atlas_run_sel: 0,
+            atlas_status: "Ready".into(),
+            atlas_state: "idle".into(),
+            atlas_pause: None,
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
             graph_summary: String::new(),
@@ -644,6 +717,8 @@ impl App {
             work_tx,
             work_rx,
         };
+        let _ = app.store.atlas_park_running();
+        app.load_atlas();
         app.push_log("info", "Argos ready");
         if app.selected_thread.is_some() {
             let _ = app.refresh_selected();
@@ -737,6 +812,7 @@ impl App {
             ("home", "Home"),
             ("recon", "Open Recon"),
             ("brain", "Open Brain"),
+            ("atlas", "Open Atlas"),
             ("osint", "Open OSINT"),
             ("providers", "Open Providers"),
             ("system", "Open System"),
@@ -778,9 +854,10 @@ impl App {
             "home" => self.go_home(),
             "recon" => self.select(0),
             "brain" => self.select(1),
-            "osint" => self.select(2),
-            "providers" => self.select(3),
-            "system" => self.select(4),
+            "atlas" => self.select(2),
+            "osint" => self.select(3),
+            "providers" => self.select(4),
+            "system" => self.select(5),
             "new" => {
                 let created = self.new_thread().map(|_| "New investigation".into());
                 self.report(created);
@@ -847,13 +924,14 @@ impl App {
                 self.go_home();
                 Ok("Home".into())
             }
-            "brain" | "osint" | "providers" | "system" | "recon" => {
+            "brain" | "atlas" | "osint" | "providers" | "system" | "recon" => {
                 let index = match name.as_str() {
                     "recon" => 0,
                     "brain" => 1,
-                    "osint" => 2,
-                    "providers" => 3,
-                    _ => 4,
+                    "atlas" => 2,
+                    "osint" => 3,
+                    "providers" => 4,
+                    _ => 5,
                 };
                 self.select(index);
                 Ok(format!("{} open", ModuleId::ALL[index].title()))
@@ -886,11 +964,19 @@ impl App {
             self.input.clear();
         }
         self.hits.clear();
+        if self.module == Some(ModuleId::Atlas) {
+            self.atlas_page = AtlasPage::Runs;
+            self.load_atlas();
+        }
         self.status = format!("{} open", ModuleId::ALL[index].title());
         self.set_focus(match self.module {
             Some(ModuleId::Recon) if self.threads.is_empty() => Target::Field(FieldId::ReconSearch),
             Some(ModuleId::Recon) => Target::Thread(self.thread_sel),
             Some(ModuleId::Brain) => Target::Button(ButtonId::CreateMemory),
+            Some(ModuleId::Atlas) if !self.atlas_runs.is_empty() => {
+                Target::AtlasHistory(self.atlas_run_sel)
+            }
+            Some(ModuleId::Atlas) => Target::Button(ButtonId::AtlasLive),
             Some(ModuleId::Osint) => Target::Field(FieldId::OsintSearch),
             Some(ModuleId::Providers) => Target::ProviderTab(self.provider_page),
             _ => Target::Button(ButtonId::RefreshHardware),
@@ -911,6 +997,9 @@ impl App {
             FieldId::SociaVaultKey => &self.sociavault_key,
             FieldId::NewsApiKey => &self.newsapi_key,
             FieldId::CourtListenerKey => &self.courtlistener_key,
+            FieldId::GnewsKey => &self.gnews_key,
+            FieldId::NewsDataKey => &self.newsdata_key,
+            FieldId::CurrentsKey => &self.currents_key,
             FieldId::ReconProvider => &self.recon_provider,
             FieldId::ReconModel => &self.recon_model,
             FieldId::PickerProvider => &self.picker_provider,
@@ -937,6 +1026,9 @@ impl App {
             FieldId::SociaVaultKey => &mut self.sociavault_key,
             FieldId::NewsApiKey => &mut self.newsapi_key,
             FieldId::CourtListenerKey => &mut self.courtlistener_key,
+            FieldId::GnewsKey => &mut self.gnews_key,
+            FieldId::NewsDataKey => &mut self.newsdata_key,
+            FieldId::CurrentsKey => &mut self.currents_key,
             FieldId::ReconProvider => &mut self.recon_provider,
             FieldId::ReconModel => &mut self.recon_model,
             FieldId::PickerProvider => &mut self.picker_provider,
@@ -1219,6 +1311,230 @@ impl App {
         Ok("NewsAPI key saved".into())
     }
 
+    fn remember_gnews_key(&mut self) -> Result<String> {
+        let key = self.gnews_key.trim().to_string();
+        anyhow::ensure!(!key.is_empty(), "Enter a GNews API key");
+        self.settings.gnews_api_key = key;
+        self.save_settings()?;
+        Ok("GNews API key saved".into())
+    }
+
+    fn remember_newsdata_key(&mut self) -> Result<String> {
+        let key = self.newsdata_key.trim().to_string();
+        anyhow::ensure!(!key.is_empty(), "Enter a NewsData API key");
+        self.settings.newsdata_api_key = key;
+        self.save_settings()?;
+        Ok("NewsData API key saved".into())
+    }
+
+    fn remember_currents_key(&mut self) -> Result<String> {
+        let key = self.currents_key.trim().to_string();
+        anyhow::ensure!(!key.is_empty(), "Enter a Currents API key");
+        self.settings.currents_api_key = key;
+        self.save_settings()?;
+        Ok("Currents API key saved".into())
+    }
+
+    fn load_atlas(&mut self) {
+        self.atlas_runs = self.store.atlas_list_runs().unwrap_or_default();
+        if self.atlas_run_sel >= self.atlas_runs.len() {
+            self.atlas_run_sel = self.atlas_runs.len().saturating_sub(1);
+        }
+        if let Some(run) = self.atlas_runs.first() {
+            self.atlas_stats = serde_json::from_str(&run.stats_json).unwrap_or_default();
+            if self.atlas_pause.is_none() {
+                self.atlas_state = run.state.clone();
+            }
+        }
+    }
+
+    fn move_atlas(&mut self, delta: i32) {
+        if self.atlas_page == AtlasPage::Runs {
+            super::ui::shift_atlas_runs(self, delta);
+            if !self.atlas_runs.is_empty() {
+                self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
+            }
+            return;
+        }
+        super::ui::shift_atlas_feed(self, delta);
+        if !self.atlas_feed.is_empty() {
+            self.set_focus(Target::AtlasFeed(self.atlas_feed_sel));
+        }
+    }
+
+    fn open_atlas_article(&mut self) {
+        let Some(article) = self.atlas_feed.get(self.atlas_feed_sel) else {
+            self.status = "No headline selected".into();
+            return;
+        };
+        let body = format!(
+            "{}\n{}\nCountry: {}\nPublished: {}\nProvider: {}\nTemperature: {:.2}\n\n{}\n\n{}",
+            article.source_name,
+            article.source_domain,
+            atlas::country_label(&article.country),
+            if article.published_at.is_empty() {
+                "unknown"
+            } else {
+                article.published_at.as_str()
+            },
+            article.provider,
+            article.temperature,
+            if article.description.is_empty() {
+                "No description."
+            } else {
+                article.description.as_str()
+            },
+            article.url
+        );
+        self.overlay = Overlay::Block {
+            title: article.title.clone(),
+            body,
+        };
+        self.scrolls.popup = 0;
+    }
+
+    fn delete_atlas_run(&mut self) -> Result<String> {
+        let Some(run) = self.atlas_runs.get(self.atlas_run_sel).cloned() else {
+            anyhow::bail!("No run selected");
+        };
+        if run.state == "running" {
+            anyhow::bail!("Pause the pipeline before deleting this run");
+        }
+        self.store.atlas_delete_run(&run.id)?;
+        if matches!(self.overlay, Overlay::Block { .. }) {
+            self.overlay = Overlay::None;
+        }
+        self.load_atlas();
+        if self.atlas_runs.is_empty() {
+            self.atlas_stats = atlas::RunStats::default();
+            if self.atlas_pause.is_none() {
+                self.atlas_state = "idle".into();
+            }
+        }
+        Ok("Run deleted".into())
+    }
+
+    fn open_atlas_run(&mut self) {
+        let Some(run) = self.atlas_runs.get(self.atlas_run_sel).cloned() else {
+            self.status = "No run selected".into();
+            return;
+        };
+        self.overlay = Overlay::Block {
+            title: format!("Run {}", run.started_at),
+            body: atlas::format_run_card(&run),
+        };
+        self.scrolls.popup = 0;
+    }
+
+    fn atlas_control(&mut self) -> Result<String> {
+        if self.atlas_pause.is_some() {
+            if let Some(flag) = &self.atlas_pause {
+                flag.store(true, Ordering::Relaxed);
+            }
+            self.atlas_status = "Pausing".into();
+            return Ok(self.atlas_status.clone());
+        }
+        let resume = self.atlas_state == "paused";
+        if !resume {
+            self.atlas_feed.clear();
+            self.atlas_feed_sel = 0;
+            self.atlas_feed_follow = true;
+            self.scrolls.atlas_feed = 0;
+        }
+        self.spawn_atlas(resume)?;
+        Ok(if resume {
+            "Resuming pipeline".into()
+        } else {
+            "Pipeline started".into()
+        })
+    }
+
+    fn spawn_atlas(&mut self, resume: bool) -> Result<()> {
+        anyhow::ensure!(self.atlas_pause.is_none(), "Atlas is already running");
+        let pause = Arc::new(AtomicBool::new(false));
+        self.atlas_pause = Some(pause.clone());
+        self.atlas_state = "running".into();
+        self.atlas_status = if resume {
+            "Resuming".into()
+        } else {
+            "Starting".into()
+        };
+        let db = paths::db_path();
+        let keys = osint::ProviderKeys {
+            gnews: self.settings.provider_key("gnews"),
+            newsdata: self.settings.provider_key("newsdata"),
+            currents: self.settings.provider_key("currents"),
+            newsapi: self.settings.provider_key("newsapi"),
+            ..osint::ProviderKeys::default()
+        };
+        let feed = self.atlas_feed.clone();
+        let tx = self.work_tx.clone();
+        let user_agent =
+            osint::effective_user_agent(Some(&self.settings.osint_user_agent)).to_string();
+        tokio::spawn(async move {
+            let emit_tx = tx.clone();
+            let outcome = atlas::run_live(
+                &db,
+                &pause,
+                &keys,
+                &user_agent,
+                resume,
+                &feed,
+                move |event| {
+                    let _ = emit_tx.send(WorkEvent::Atlas(event));
+                },
+            )
+            .await
+            .map_err(|err| err.to_string());
+            let _ = tx.send(WorkEvent::AtlasDone { outcome });
+        });
+        Ok(())
+    }
+
+    fn on_atlas(&mut self, event: atlas::AtlasEvent) {
+        match event {
+            atlas::AtlasEvent::Status(text) => {
+                self.atlas_status = text;
+                self.status = self.atlas_status.clone();
+            }
+            atlas::AtlasEvent::Note(text) => {
+                let level = atlas_log_level(&text);
+                self.push_log(level, format!("Atlas: {text}"));
+                self.atlas_status = text;
+                self.status = self.atlas_status.clone();
+            }
+            atlas::AtlasEvent::Fault(fault) => {
+                self.push_log_detail(
+                    "error",
+                    format!("Atlas: {}", fault.summary),
+                    fault.body.clone(),
+                );
+                self.atlas_status = fault.summary.clone();
+                self.status = format!("Atlas: {}", fault.summary);
+            }
+            atlas::AtlasEvent::Stats(stats) => self.atlas_stats = stats,
+            atlas::AtlasEvent::Article(article) => {
+                let follow = self.atlas_feed_follow || self.atlas_feed.is_empty();
+                self.atlas_feed.push(article);
+                if follow {
+                    self.atlas_feed_sel = self.atlas_feed.len().saturating_sub(1);
+                    self.atlas_feed_follow = true;
+                    super::ui::reveal_atlas_feed(self);
+                }
+            }
+            atlas::AtlasEvent::Replaced { id, article } => {
+                self.atlas_feed.retain(|item| item.id != id);
+                self.atlas_feed.push(article);
+                if self.atlas_feed_follow {
+                    self.atlas_feed_sel = self.atlas_feed.len().saturating_sub(1);
+                    super::ui::reveal_atlas_feed(self);
+                } else if self.atlas_feed_sel >= self.atlas_feed.len() {
+                    self.atlas_feed_sel = self.atlas_feed.len().saturating_sub(1);
+                }
+            }
+        }
+    }
+
     fn remember_courtlistener_key(&mut self) -> Result<String> {
         let key = self.courtlistener_key.trim().to_string();
         anyhow::ensure!(!key.is_empty(), "Enter a CourtListener API token");
@@ -1440,6 +1756,31 @@ impl App {
                     }
                 }
                 viewing
+            }
+            WorkEvent::Atlas(event) => {
+                self.on_atlas(event);
+                self.module == Some(ModuleId::Atlas)
+            }
+            WorkEvent::AtlasDone { outcome } => {
+                self.atlas_pause = None;
+                match outcome {
+                    Ok(atlas::Stop::Paused) => {
+                        self.atlas_state = "paused".into();
+                        self.atlas_status = "Paused".into();
+                    }
+                    Ok(atlas::Stop::Finished) => {
+                        self.atlas_state = "completed".into();
+                        self.atlas_status = "Pipeline complete".into();
+                    }
+                    Ok(atlas::Stop::Failed(message)) | Err(message) => {
+                        self.push_log("error", format!("Atlas: {message}"));
+                        self.atlas_state = "failed".into();
+                        self.atlas_status = message;
+                    }
+                }
+                self.status = self.atlas_status.clone();
+                self.load_atlas();
+                true
             }
         }
     }
@@ -2054,6 +2395,22 @@ impl App {
             ButtonId::SaveSociaVaultKey => self.remember_sociavault_key(),
             ButtonId::SaveNewsApiKey => self.remember_newsapi_key(),
             ButtonId::SaveCourtListenerKey => self.remember_courtlistener_key(),
+            ButtonId::SaveGnewsKey => self.remember_gnews_key(),
+            ButtonId::SaveNewsDataKey => self.remember_newsdata_key(),
+            ButtonId::SaveCurrentsKey => self.remember_currents_key(),
+            ButtonId::AtlasRun => self.atlas_control(),
+            ButtonId::AtlasRuns => {
+                self.atlas_page = AtlasPage::Runs;
+                self.load_atlas();
+                self.set_focus(Target::Button(ButtonId::AtlasLive));
+                Ok("History".into())
+            }
+            ButtonId::AtlasLive => {
+                self.atlas_page = AtlasPage::Live;
+                self.set_focus(Target::Button(ButtonId::AtlasRun));
+                Ok("Atlas".into())
+            }
+            ButtonId::AtlasDelete => self.delete_atlas_run(),
             ButtonId::OpenSource => self
                 .open_insight_source()
                 .map(|_| "Source thread opened".into()),
@@ -2476,6 +2833,22 @@ impl App {
                 self.set_focus(Target::Transcript);
                 super::ui::open_memory(self, index);
             }
+            Target::AtlasFeed(index) => {
+                if self.atlas_feed.is_empty() {
+                    return;
+                }
+                self.atlas_feed_sel = index.min(self.atlas_feed.len() - 1);
+                self.set_focus(Target::AtlasFeed(self.atlas_feed_sel));
+                self.open_atlas_article();
+            }
+            Target::AtlasHistory(index) => {
+                if self.atlas_runs.is_empty() {
+                    return;
+                }
+                self.atlas_run_sel = index.min(self.atlas_runs.len() - 1);
+                self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
+                self.open_atlas_run();
+            }
             Target::LogLine(index) => {
                 if self.log.is_empty() {
                     return;
@@ -2716,6 +3089,13 @@ impl App {
             return true;
         }
         if self.overlay != Overlay::None {
+            if super::ui::atlas_run_card(self)
+                && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+            {
+                let deleted = self.delete_atlas_run();
+                self.report(deleted);
+                return true;
+            }
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => self.activate_target(Target::CloseOverlay),
                 KeyCode::Up => {
@@ -2854,7 +3234,7 @@ impl App {
             KeyCode::Char(c)
                 if self.module.is_none()
                     && key.modifiers.is_empty()
-                    && matches!(c, '1' | '2' | '3' | '4' | '5') =>
+                    && matches!(c, '1' | '2' | '3' | '4' | '5' | '6') =>
             {
                 self.select((c as u8 - b'1') as usize);
             }
@@ -2918,6 +3298,14 @@ impl App {
                 self.persist_draft();
                 return true;
             }
+        }
+        if self.module == Some(ModuleId::Atlas) && self.atlas_pause.is_some() {
+            if let Some(flag) = &self.atlas_pause {
+                flag.store(true, Ordering::Relaxed);
+            }
+            self.atlas_status = "Pausing".into();
+            self.status = self.atlas_status.clone();
+            return true;
         }
         if self.module == Some(ModuleId::Recon) {
             if let Some(id) = self.selected_thread.clone() {
@@ -3007,6 +3395,8 @@ impl App {
             Target::Field(_) => self.focus_next(false),
             Target::Transcript => self.enter_chat(),
             Target::Memory(_) => self.open_memory_graph(),
+            Target::AtlasFeed(_) => self.open_atlas_article(),
+            Target::AtlasHistory(_) => self.open_atlas_run(),
             target => self.activate_target(target),
         }
     }
@@ -3054,6 +3444,7 @@ impl App {
                 Some(ModuleId::Brain) if self.brain_list_mode == BrainListMode::Create => {}
                 Some(ModuleId::Brain) => self.move_memory(delta),
                 Some(ModuleId::Osint) => self.move_tool(delta),
+                Some(ModuleId::Atlas) => self.move_atlas(delta),
                 Some(ModuleId::System) => {
                     super::ui::move_system_log(self, delta);
                 }
@@ -3510,6 +3901,9 @@ mod tests {
             sociavault_key: String::new(),
             newsapi_key: String::new(),
             courtlistener_key: String::new(),
+            gnews_key: String::new(),
+            newsdata_key: String::new(),
+            currents_key: String::new(),
             selected_thread: None,
             threads: Vec::new(),
             thread_states: HashMap::new(),
@@ -3584,6 +3978,16 @@ mod tests {
             selected_insight: None,
             memory_sel: 0,
             brain_list_mode: BrainListMode::List,
+            atlas_page: AtlasPage::Runs,
+            atlas_stats: atlas::RunStats::default(),
+            atlas_feed: Vec::new(),
+            atlas_feed_sel: 0,
+            atlas_feed_follow: true,
+            atlas_runs: Vec::new(),
+            atlas_run_sel: 0,
+            atlas_status: "Ready".into(),
+            atlas_state: "idle".into(),
+            atlas_pause: None,
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
             graph_summary: String::new(),
@@ -3695,7 +4099,7 @@ mod tests {
     #[test]
     fn provider_auth_tabs_and_router_form_are_clickable() {
         let mut app = app();
-        click(&mut app, Target::App(3));
+        click(&mut app, Target::App(4));
         for page in ProviderPage::ALL {
             click(&mut app, Target::ProviderTab(page));
             assert_eq!(app.provider_page, page);
@@ -3723,7 +4127,7 @@ mod tests {
         other.api_key = Some("other-secret".into());
         app.auth.set_account(other);
         app.settings.defaults.recon.provider = "grok".into();
-        click(&mut app, Target::App(3));
+        click(&mut app, Target::App(4));
         click(&mut app, Target::ProviderTab(ProviderPage::OpenRouter));
         click(&mut app, Target::Field(FieldId::RouterKey));
         type_text(&mut app, "router-secret");
@@ -3760,7 +4164,7 @@ mod tests {
         app.synthesis_model = "openrouter/free".into();
         let auth_before = serde_json::to_string(&app.auth).unwrap();
 
-        click(&mut app, Target::App(3));
+        click(&mut app, Target::App(4));
         click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
         click(
             &mut app,
@@ -3841,7 +4245,7 @@ mod tests {
         app.screen = Rect::new(0, 0, 80, 24);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-        app.select(3);
+        app.select(4);
         for (page, target) in [
             (ProviderPage::Grok, Target::Button(ButtonId::GrokSignIn)),
             (ProviderPage::OpenAI, Target::Button(ButtonId::OpenAISignIn)),
@@ -3878,7 +4282,7 @@ mod tests {
         let mut router = provider::account_secret(&app.auth, "openrouter");
         router.api_key = Some("router-key".into());
         app.auth.set_account(router);
-        click(&mut app, Target::App(3));
+        click(&mut app, Target::App(4));
         click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
         click(&mut app, Target::Field(FieldId::ReconProvider));
         assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)));
@@ -4033,7 +4437,7 @@ mod tests {
             );
         }
         assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
-        app.select(2);
+        app.select(3);
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
             Target::Button(ButtonId::OsintRun),
@@ -4217,7 +4621,7 @@ mod tests {
         for index in 0..40 {
             app.push_log("error", format!("lookup failed {index}"));
         }
-        app.select(4);
+        app.select(5);
         assert_eq!(app.error_count(), 40);
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(app.scrolls.log > 0);
@@ -4283,7 +4687,7 @@ mod tests {
             .expect("tool row")
             .title;
         assert!(title.contains("query=Jane Roe"), "{title}");
-        app.select(4);
+        app.select(5);
         let index = app
             .log
             .iter()
@@ -4308,7 +4712,7 @@ mod tests {
         app.prune_log();
         assert_eq!(app.log.len(), 1);
         assert!(app.log[0].text.contains("fresh"));
-        app.select(4);
+        app.select(5);
         click(&mut app, Target::LogLine(0));
         assert!(app.log_open.contains(&app.log[0].id));
         click(&mut app, Target::LogLine(0));
@@ -4361,7 +4765,7 @@ mod tests {
     fn firecrawl_key_field_is_on_the_osint_tool() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 100, 36);
-        app.select(2);
+        app.select(3);
         app.tool_sel = osint::registry()
             .iter()
             .position(|tool| tool.id == "firecrawl_search")
@@ -4408,7 +4812,7 @@ mod tests {
         let mut app = app();
         app.settings_path = dir.path().join("config.toml");
         app.screen = Rect::new(0, 0, 100, 36);
-        app.select(2);
+        app.select(3);
         let select = |app: &mut App, id: &str| {
             app.tool_sel = osint::registry()
                 .iter()
@@ -4720,9 +5124,9 @@ mod tests {
         assert_eq!(stream.key, "stream:run-1");
         assert_eq!(stream.body, "Shivon Zilis is a Neuralink executive.");
         assert!(blocks.iter().any(|block| block.key == "tool:call-late"));
-        assert!(blocks
-            .iter()
-            .any(|block| block.body.contains("Run error: answer is missing evidence citations")));
+        assert!(blocks.iter().any(|block| block
+            .body
+            .contains("Run error: answer is missing evidence citations")));
     }
 
     #[test]
@@ -4784,6 +5188,319 @@ mod tests {
             .unwrap();
         assert_eq!(stream.body, "Shivon Zilis is a Neuralink executive.");
         assert_eq!(stream.title, "Recon · stopped");
+    }
+
+    #[test]
+    fn atlas_live_feed_and_past_runs_open_cards() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 100, 36);
+        app.select(2);
+        assert_eq!(app.module, Some(ModuleId::Atlas));
+        assert_eq!(app.atlas_page, AtlasPage::Runs);
+        assert!(hit(&app, Target::Button(ButtonId::AtlasLive)));
+        assert!(!hit(&app, Target::Button(ButtonId::AtlasDelete)));
+        click(&mut app, Target::Button(ButtonId::AtlasLive));
+        assert_eq!(app.atlas_page, AtlasPage::Live);
+        assert!(hit(&app, Target::Button(ButtonId::AtlasRun)));
+        assert!(hit(&app, Target::Button(ButtonId::AtlasRuns)));
+        app.atlas_feed.push(atlas::FeedArticle {
+            id: "art-1".into(),
+            title: "Cabinet reshuffle in Beijing".into(),
+            description: "A short wire note.".into(),
+            url: "https://www.reuters.com/world/china".into(),
+            country: "cn".into(),
+            source_name: "Reuters".into(),
+            source_domain: "reuters.com".into(),
+            published_at: "2026-10-01T00:00:00Z".into(),
+            provider: "newsapi".into(),
+            temperature: 1.0,
+            seen_at: "2026-10-01T00:01:00Z".into(),
+        });
+        app.atlas_feed_sel = 0;
+        app.set_focus(Target::AtlasFeed(0));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Overlay::Block { title, body } = &app.overlay else {
+            panic!("article card");
+        };
+        assert!(title.contains("Cabinet reshuffle"));
+        assert!(body.contains("China (CN)"));
+        assert!(body.contains("https://www.reuters.com/world/china"));
+        app.overlay = Overlay::None;
+        let stats = serde_json::to_string(&atlas::RunStats {
+            scored: true,
+            origins: vec![atlas::OriginStat {
+                country: "us".into(),
+                tier: 1,
+                temperature: 1.0,
+                volume: 8,
+                articles: 3,
+            }],
+            ..atlas::RunStats::default()
+        })
+        .unwrap();
+        app.store.atlas_insert_run("atlas-1", "{}", &stats).unwrap();
+        app.store
+            .atlas_set_state("atlas-1", "completed", "", true)
+            .unwrap();
+        click(&mut app, Target::Button(ButtonId::AtlasRuns));
+        assert_eq!(app.atlas_page, AtlasPage::Runs);
+        click(&mut app, Target::AtlasHistory(0));
+        let Overlay::Block { body, .. } = &app.overlay else {
+            panic!("run card");
+        };
+        assert!(body.contains("United States (US)"));
+        assert!(body.contains("completed"));
+        assert!(hit(&app, Target::Button(ButtonId::AtlasDelete)));
+        click(&mut app, Target::Button(ButtonId::AtlasDelete));
+        assert!(app.atlas_runs.is_empty());
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.store.atlas_latest_run().unwrap().is_none());
+        app.store
+            .atlas_insert_run("atlas-live", "{}", &stats)
+            .unwrap();
+        click(&mut app, Target::Button(ButtonId::AtlasLive));
+        click(&mut app, Target::Button(ButtonId::AtlasRuns));
+        click(&mut app, Target::AtlasHistory(0));
+        click(&mut app, Target::Button(ButtonId::AtlasDelete));
+        assert_eq!(app.atlas_runs.len(), 1);
+        assert!(app.status.contains("Pause"));
+    }
+
+    #[test]
+    fn atlas_world_map_follows_the_selected_run_until_zoomed_in() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 120, 42);
+        let stats = |country: &str| {
+            serde_json::to_string(&atlas::RunStats {
+                scored: true,
+                origins: vec![atlas::OriginStat {
+                    country: country.into(),
+                    tier: 1,
+                    temperature: 1.0,
+                    volume: 8,
+                    articles: 3,
+                }],
+                ..atlas::RunStats::default()
+            })
+            .unwrap()
+        };
+        app.store
+            .atlas_insert_run("atlas-us", "{}", &stats("us"))
+            .unwrap();
+        app.store
+            .atlas_set_state("atlas-us", "completed", "", true)
+            .unwrap();
+        app.store
+            .atlas_insert_run("atlas-cn", "{}", &stats("cn"))
+            .unwrap();
+        app.store
+            .atlas_set_state("atlas-cn", "completed", "", true)
+            .unwrap();
+        app.select(2);
+        assert_eq!(app.atlas_runs[app.atlas_run_sel].id, "atlas-cn");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 42)).unwrap();
+        let hot_sides = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            let width = buffer.area.width;
+            let mut west = false;
+            let mut east = false;
+            for (index, cell) in buffer.content().iter().enumerate() {
+                let braille = cell
+                    .symbol()
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ('\u{2800}'..='\u{28FF}').contains(&ch));
+                let hot =
+                    braille && matches!(cell.fg, ratatui::style::Color::Rgb(r, _, _) if r >= 200);
+                if !hot {
+                    continue;
+                }
+                if (index as u16) % width < width / 2 {
+                    west = true;
+                } else {
+                    east = true;
+                }
+            }
+            (west, east)
+        };
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("China"));
+        assert!(!painted.contains("United States"));
+        assert_eq!(hot_sides(&terminal), (false, true));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.atlas_runs[app.atlas_run_sel].id, "atlas-us");
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("United States"));
+        assert!(!painted.contains("China"));
+        assert_eq!(hot_sides(&terminal), (true, false));
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.atlas_runs[app.atlas_run_sel].id, "atlas-cn");
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("China"));
+        assert!(!painted.contains("United States"));
+        app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        assert_eq!(hot_sides(&terminal), (false, true));
+    }
+
+    #[test]
+    fn atlas_map_names_every_highlighted_country() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 48);
+        let origins = [
+            ("us", 1_u8),
+            ("cn", 1),
+            ("uk", 2),
+            ("fr", 2),
+            ("de", 2),
+            ("es", 3),
+            ("jp", 3),
+            ("br", 3),
+            ("au", 3),
+            ("in", 3),
+            ("sg", 3),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (country, tier))| atlas::OriginStat {
+            country: country.into(),
+            tier,
+            temperature: 1.0 - index as f64 * 0.08,
+            volume: 4,
+            articles: 2,
+        })
+        .collect();
+        let stats = serde_json::to_string(&atlas::RunStats {
+            scored: true,
+            origins,
+            ..atlas::RunStats::default()
+        })
+        .unwrap();
+        app.store
+            .atlas_insert_run("atlas-many", "{}", &stats)
+            .unwrap();
+        app.store
+            .atlas_set_state("atlas-many", "completed", "", true)
+            .unwrap();
+        app.select(2);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 48)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        for name in [
+            "United States",
+            "China",
+            "United Kingdom",
+            "France",
+            "Germany",
+        ] {
+            assert!(painted.contains(name), "missing {name}");
+        }
+        for code in ["ES", "JP", "BR", "AU", "IN", "SG"] {
+            assert!(painted.contains(code), "missing {code}");
+        }
+        for name in ["Spain", "Japan", "Brazil", "Australia", "India"] {
+            assert!(!painted.contains(name), "{name} is tier 3");
+        }
+    }
+
+    fn sample_headline(index: usize) -> atlas::FeedArticle {
+        atlas::FeedArticle {
+            id: format!("art-{index}"),
+            title: format!("Headline {index}"),
+            description: String::new(),
+            url: format!("https://example.com/{index}"),
+            country: "us".into(),
+            source_name: "Wire".into(),
+            source_domain: "example.com".into(),
+            published_at: String::new(),
+            provider: "newsapi".into(),
+            temperature: 1.0,
+            seen_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn atlas_headlines_scroll_and_request_failures_reach_the_system_log() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 80, 24);
+        app.module = Some(ModuleId::Atlas);
+        app.atlas_page = AtlasPage::Live;
+        for index in 0..40 {
+            app.atlas_feed.push(sample_headline(index));
+        }
+        app.atlas_feed_sel = 0;
+        app.atlas_feed_follow = false;
+        for _ in 0..20 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(app.atlas_feed_sel, 20);
+        assert!(app.scrolls.atlas_feed > 0);
+        assert!(app.atlas_feed_sel >= app.scrolls.atlas_feed as usize);
+        let visible_until =
+            app.scrolls.atlas_feed as usize + super::super::ui::atlas_feed_room_for(&app);
+        assert!(app.atlas_feed_sel < visible_until);
+
+        app.on_work_event(WorkEvent::Atlas(atlas::AtlasEvent::Note(
+            "GNews rate limit reached (HTTP 429). The free tier allows 100 requests a day.".into(),
+        )));
+        assert!(app
+            .log
+            .iter()
+            .any(|line| { line.level == "error" && line.text.contains("rate limit") }));
+        app.on_work_event(WorkEvent::Atlas(atlas::AtlasEvent::Note(
+            "newsapi daily quota is spent".into(),
+        )));
+        assert!(app
+            .log
+            .iter()
+            .any(|line| { line.level == "info" && line.text.contains("quota") }));
+        let body = "{\n  \"status\": \"error\",\n  \"results\": {\n    \"message\": \"Access Denied! To use the latest endpoint you must upgrade.\"\n  }\n}";
+        app.on_work_event(WorkEvent::Atlas(atlas::AtlasEvent::Fault(
+            atlas::ProviderFault {
+                summary:
+                    "newsdata HTTP 422: Access Denied! To use the latest endpoint you must upgrade."
+                        .into(),
+                body: body.into(),
+            },
+        )));
+        let logged = app
+            .log
+            .iter()
+            .find(|line| line.text.contains("HTTP 422"))
+            .expect("fault line");
+        assert!(logged.detail.contains("you must upgrade"));
+        assert!(!logged.detail.is_empty());
+        app.module = Some(ModuleId::System);
+        app.log_sel = app
+            .log
+            .iter()
+            .position(|line| line.text.contains("HTTP 422"))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.log_sel = app
+            .log
+            .iter()
+            .position(|line| line.text.contains("HTTP 422"))
+            .unwrap();
+        let id = app.log[app.log_sel].id;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.log_open.contains(&id));
     }
 
     fn hit(app: &App, target: Target) -> bool {

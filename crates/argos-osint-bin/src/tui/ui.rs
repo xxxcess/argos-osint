@@ -11,10 +11,11 @@ use ratatui::Frame;
 use super::markdown::{self, Piece, Tone};
 
 use super::app::{
-    is_picker_field, App, BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId, ModuleId,
-    Overlay, ProviderPage, Target,
+    is_picker_field, App, AtlasPage, BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId,
+    LogLine, ModuleId, Overlay, ProviderPage, Target,
 };
 use super::theme;
+use argos_osint_core::atlas;
 use argos_osint_core::osint;
 use argos_osint_core::provider;
 use argos_osint_core::recon::{self, Plan};
@@ -80,7 +81,15 @@ fn chrome(area: Rect, app: &App) -> Chrome {
 }
 
 fn header_tabs(area: Rect) -> Vec<(Option<ModuleId>, Rect)> {
-    let labels = ["argos", "Recon", "Brain", "OSINT", "Providers", "System"];
+    let labels = [
+        "argos",
+        "Recon",
+        "Brain",
+        "Atlas",
+        "OSINT",
+        "Providers",
+        "System",
+    ];
     let mut x = area.x;
     let mut out = Vec::new();
     for (index, label) in labels.iter().enumerate() {
@@ -270,6 +279,12 @@ fn api_key_slot(app: &App) -> Option<ApiKeySlot> {
         (FieldId::HunterKey, ButtonId::SaveHunterKey)
     } else if id.starts_with("newsapi_") {
         (FieldId::NewsApiKey, ButtonId::SaveNewsApiKey)
+    } else if id.starts_with("gnews_") {
+        (FieldId::GnewsKey, ButtonId::SaveGnewsKey)
+    } else if id.starts_with("newsdata_") {
+        (FieldId::NewsDataKey, ButtonId::SaveNewsDataKey)
+    } else if id.starts_with("currents_") {
+        (FieldId::CurrentsKey, ButtonId::SaveCurrentsKey)
     } else if id.starts_with("courtlistener_") {
         (FieldId::CourtListenerKey, ButtonId::SaveCourtListenerKey)
     } else {
@@ -386,11 +401,12 @@ fn home_rows(errors: usize) -> Vec<(Option<usize>, String, bool)> {
         (None, "Applications".into(), true),
         (Some(0), app_label(ModuleId::Recon, errors), false),
         (Some(1), app_label(ModuleId::Brain, errors), false),
+        (Some(2), app_label(ModuleId::Atlas, errors), false),
         (None, String::new(), false),
         (None, "System".into(), true),
-        (Some(2), app_label(ModuleId::Osint, errors), false),
-        (Some(3), app_label(ModuleId::Providers, errors), false),
-        (Some(4), app_label(ModuleId::System, errors), false),
+        (Some(3), app_label(ModuleId::Osint, errors), false),
+        (Some(4), app_label(ModuleId::Providers, errors), false),
+        (Some(5), app_label(ModuleId::System, errors), false),
         (None, String::new(), false),
         (
             None,
@@ -1038,7 +1054,10 @@ fn plan_reason(app: &App, call: &recon::Call) -> Option<String> {
 /// System log text for one observation. Page and extract bodies stay in the
 /// synthesis packet; the log keeps the title, URL, and a field count.
 fn observation_log(observations: &serde_json::Value) -> String {
-    match observations.get("evidence_form").and_then(|value| value.as_str()) {
+    match observations
+        .get("evidence_form")
+        .and_then(|value| value.as_str())
+    {
         Some("page") => page_log(observations),
         Some("extract") => extract_log(observations),
         _ => {
@@ -1151,6 +1170,12 @@ fn clip_chars(value: &str, max: usize) -> String {
         clipped.push('…');
         clipped
     }
+}
+
+fn center_text(value: &str, width: usize) -> String {
+    let shown = fit(value, width);
+    let pad = width.saturating_sub(shown.chars().count()) / 2;
+    format!("{:pad$}{shown}", "", pad = pad)
 }
 
 fn fit(value: &str, width: usize) -> String {
@@ -1743,6 +1768,8 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
             let max = log_max(app);
             nudge(&mut app.scrolls.log, delta * 3, max);
         }
+        Region::AtlasFeed => shift_atlas_feed(app, delta * 3),
+        Region::AtlasRuns => shift_atlas_runs(app, delta * 3),
         Region::None => {}
     }
 }
@@ -1798,6 +1825,14 @@ pub fn page(app: &mut App, direction: i32) {
                 .max(1) as i32;
             move_system_log(app, direction * room);
         }
+        Some(ModuleId::Atlas) if app.atlas_page == AtlasPage::Runs => {
+            let room = atlas_runs_room(app).max(1) as i32;
+            shift_atlas_runs(app, direction * room);
+        }
+        Some(ModuleId::Atlas) => {
+            let room = atlas_feed_room(app).max(1) as i32;
+            shift_atlas_feed(app, direction * room);
+        }
         None => {}
     }
 }
@@ -1830,6 +1865,8 @@ enum Region {
     Detail,
     Recall,
     Log,
+    AtlasFeed,
+    AtlasRuns,
     Path,
     Summary,
     None,
@@ -1909,6 +1946,25 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
                 Region::None
             }
         }
+        Some(ModuleId::Atlas) => {
+            if app.atlas_page == AtlasPage::Runs {
+                let (_, _map, list) = atlas_runs_areas(body);
+                if contains(list, x, y) {
+                    Region::AtlasRuns
+                } else {
+                    Region::None
+                }
+            } else {
+                let (_, table, feed) = atlas_live_areas(body);
+                if contains(feed, x, y) {
+                    Region::AtlasFeed
+                } else if contains(table, x, y) {
+                    Region::None
+                } else {
+                    Region::None
+                }
+            }
+        }
         None => Region::None,
     }
 }
@@ -1950,6 +2006,43 @@ fn tool_max(app: &App) -> u16 {
         .saturating_sub(tool_room(app).max(1)) as u16
 }
 
+fn log_pane_width(app: &App) -> usize {
+    inset(system_areas(chrome(app.screen, app).body).2)
+        .width
+        .max(1) as usize
+}
+
+fn detail_rows(detail: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for line in detail.lines() {
+        let text = format!("  {line}");
+        let mut rest = text.as_str();
+        if rest.is_empty() {
+            rows.push(String::new());
+            continue;
+        }
+        while !rest.is_empty() {
+            let end = rest
+                .char_indices()
+                .nth(width)
+                .map(|(index, _)| index)
+                .unwrap_or(rest.len());
+            rows.push(rest[..end].to_string());
+            rest = &rest[end..];
+        }
+    }
+    rows
+}
+
+fn open_detail_rows(app: &App, entry: &LogLine) -> usize {
+    if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
+        detail_rows(&entry.detail, log_pane_width(app)).len()
+    } else {
+        0
+    }
+}
+
 fn log_max(app: &App) -> u16 {
     let room = list_room(system_areas(chrome(app.screen, app).body).2.height) as u16;
     log_line_count(app).saturating_sub(room as usize) as u16
@@ -1959,11 +2052,7 @@ fn log_line_count(app: &App) -> usize {
     app.log
         .iter()
         .map(|entry| {
-            let extra = if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
-                entry.detail.lines().count()
-            } else {
-                0
-            };
+            let extra = open_detail_rows(app, entry);
             1 + extra
         })
         .sum()
@@ -1973,14 +2062,7 @@ fn log_entry_start(app: &App, index: usize) -> usize {
     app.log
         .iter()
         .take(index)
-        .map(|entry| {
-            let extra = if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
-                entry.detail.lines().count()
-            } else {
-                0
-            };
-            1 + extra
-        })
+        .map(|entry| 1 + open_detail_rows(app, entry))
         .sum()
 }
 
@@ -2020,6 +2102,58 @@ fn popup_max(app: &App) -> u16 {
     popup_text(app).lines().count().saturating_sub(room) as u16
 }
 
+fn atlas_feed_room(app: &App) -> usize {
+    inset(atlas_live_areas(chrome(app.screen, app).body).2)
+        .height
+        .max(1) as usize
+}
+
+fn atlas_runs_room(app: &App) -> usize {
+    inset(atlas_runs_areas(chrome(app.screen, app).body).2)
+        .height
+        .max(1) as usize
+}
+
+pub fn shift_atlas_feed(app: &mut App, delta: i32) {
+    if app.atlas_feed.is_empty() || delta == 0 {
+        return;
+    }
+    let last = app.atlas_feed.len() as i32 - 1;
+    app.atlas_feed_sel = (app.atlas_feed_sel as i32 + delta).clamp(0, last) as usize;
+    app.atlas_feed_follow = app.atlas_feed_sel + 1 == app.atlas_feed.len();
+    reveal_atlas_feed(app);
+}
+
+pub fn reveal_atlas_feed(app: &mut App) {
+    if app.atlas_feed.is_empty() {
+        app.scrolls.atlas_feed = 0;
+        return;
+    }
+    if app.atlas_feed_sel >= app.atlas_feed.len() {
+        app.atlas_feed_sel = app.atlas_feed.len() - 1;
+    }
+    let room = atlas_feed_room(app);
+    reveal_index(&mut app.scrolls.atlas_feed, app.atlas_feed_sel, room);
+    let max = app.atlas_feed.len().saturating_sub(room) as u16;
+    if app.scrolls.atlas_feed > max {
+        app.scrolls.atlas_feed = max;
+    }
+}
+
+pub fn shift_atlas_runs(app: &mut App, delta: i32) {
+    if app.atlas_runs.is_empty() || delta == 0 {
+        return;
+    }
+    let last = app.atlas_runs.len() as i32 - 1;
+    app.atlas_run_sel = (app.atlas_run_sel as i32 + delta).clamp(0, last) as usize;
+    let room = atlas_runs_room(app);
+    reveal_index(&mut app.scrolls.atlas_runs, app.atlas_run_sel, room);
+    let max = app.atlas_runs.len().saturating_sub(room) as u16;
+    if app.scrolls.atlas_runs > max {
+        app.scrolls.atlas_runs = max;
+    }
+}
+
 pub fn reveal_index(scroll: &mut u16, index: usize, room: usize) {
     if room == 0 {
         return;
@@ -2030,6 +2164,10 @@ pub fn reveal_index(scroll: &mut u16, index: usize, room: usize) {
     } else if index >= start + room {
         *scroll = (index + 1 - room) as u16;
     }
+}
+
+pub fn atlas_feed_room_for(app: &App) -> usize {
+    atlas_feed_room(app)
 }
 
 pub fn thread_room_for(app: &App) -> usize {
@@ -2044,8 +2182,25 @@ pub fn tool_room_for(app: &App) -> usize {
     tool_room(app)
 }
 
+pub fn atlas_run_card(app: &App) -> bool {
+    matches!(&app.overlay, Overlay::Block { title, .. } if title.starts_with("Run "))
+}
+
+fn run_delete_rect(popup: Rect) -> Rect {
+    let width = 8.min(popup.width.saturating_sub(8));
+    Rect {
+        x: popup.x + popup.width.saturating_sub(8 + width),
+        y: popup.y,
+        width,
+        height: 1,
+    }
+}
+
 pub fn focus_order(app: &App) -> Vec<Target> {
     if app.overlay != Overlay::None {
+        if atlas_run_card(app) {
+            return vec![Target::Button(ButtonId::AtlasDelete), Target::CloseOverlay];
+        }
         return vec![Target::CloseOverlay];
     }
     match app.module {
@@ -2194,6 +2349,25 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             ]);
             order
         }
+        Some(ModuleId::Atlas) => {
+            let mut order = vec![Target::Home];
+            order.extend((0..ModuleId::ALL.len()).map(Target::App));
+            if app.atlas_page == AtlasPage::Runs {
+                order.push(Target::Button(ButtonId::AtlasLive));
+                if !app.atlas_runs.is_empty() {
+                    order.push(Target::AtlasHistory(app.atlas_run_sel));
+                }
+            } else {
+                order.extend([
+                    Target::Button(ButtonId::AtlasRuns),
+                    Target::Button(ButtonId::AtlasRun),
+                ]);
+                if !app.atlas_feed.is_empty() {
+                    order.push(Target::AtlasFeed(app.atlas_feed_sel));
+                }
+            }
+            order
+        }
     }
 }
 
@@ -2265,6 +2439,9 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
             width: 8.min(popup.width),
             height: 1,
         };
+        if atlas_run_card(app) && contains(run_delete_rect(popup), x, y) {
+            return Some(Target::Button(ButtonId::AtlasDelete));
+        }
         if contains(close, x, y) || !contains(popup, x, y) {
             return Some(Target::CloseOverlay);
         }
@@ -2310,6 +2487,7 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
         Some(ModuleId::Recon) => recon_hit(app, layout.body, x, y),
         Some(ModuleId::Brain) => brain_hit(app, layout.body, x, y),
         Some(ModuleId::Osint) => osint_hit(app, layout.body, x, y),
+        Some(ModuleId::Atlas) => atlas_hit(app, layout.body, x, y),
         Some(ModuleId::Providers) => provider_hit(app, layout.body, x, y),
         Some(ModuleId::System) => system_hit(app, layout.body, x, y),
         None => None,
@@ -2561,7 +2739,7 @@ fn log_index_at(app: &App, log: Rect, x: u16, y: u16) -> Option<usize> {
     let mut cursor = 0usize;
     for (index, entry) in app.log.iter().enumerate() {
         let extra = if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
-            entry.detail.lines().count()
+            detail_rows(&entry.detail, inner.width as usize).len()
         } else {
             0
         };
@@ -2592,6 +2770,9 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
         | FieldId::SociaVaultKey
         | FieldId::NewsApiKey
         | FieldId::CourtListenerKey
+        | FieldId::GnewsKey
+        | FieldId::NewsDataKey
+        | FieldId::CurrentsKey
             if app.module == Some(ModuleId::Osint)
                 && api_key_slot(app).is_some_and(|slot| slot.field == field) =>
         {
@@ -2734,6 +2915,9 @@ fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &str, area: R
             | FieldId::SociaVaultKey
             | FieldId::NewsApiKey
             | FieldId::CourtListenerKey
+            | FieldId::GnewsKey
+            | FieldId::NewsDataKey
+            | FieldId::CurrentsKey
     );
     let display = if secret {
         "•".repeat(value.chars().count())
@@ -2915,6 +3099,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Some(ModuleId::Recon) => draw_recon(frame, app, layout.body),
         Some(ModuleId::Brain) => draw_brain(frame, app, layout.body),
         Some(ModuleId::Osint) => draw_osint(frame, app, layout.body),
+        Some(ModuleId::Atlas) => draw_atlas(frame, app, layout.body),
         Some(ModuleId::Providers) => draw_providers(frame, app, layout.body),
         Some(ModuleId::System) => draw_system(frame, app, layout.body),
     }
@@ -2997,6 +3182,8 @@ fn header_detail(app: &App) -> String {
             BrainListMode::Create => "new memory".into(),
             BrainListMode::Graph => "recon path".into(),
         },
+        Some(ModuleId::Atlas) if app.atlas_page == AtlasPage::Runs => "history".into(),
+        Some(ModuleId::Atlas) => app.atlas_status.clone(),
         Some(ModuleId::Osint) => "lookup tools".into(),
         Some(ModuleId::Providers) => app.provider_page.title().to_string(),
         Some(ModuleId::System) => {
@@ -3019,7 +3206,7 @@ fn footer_line(app: &App) -> Paragraph<'static> {
         "Esc close · Ctrl+U/D scroll"
     } else {
         match (app.module, app.focus) {
-            (None, _) => "↑↓ open · 1–5 · Ctrl+K commands · ? help",
+            (None, _) => "↑↓ open · 1–6 · Ctrl+K commands · ? help",
             (Some(ModuleId::Recon), Target::Field(FieldId::Composer)) => {
                 "Enter send · /commands · Tab transcript · Esc list"
             }
@@ -3767,15 +3954,217 @@ fn log_rows(app: &App, width: usize) -> Vec<Line<'static>> {
             style,
         )));
         if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
-            for line in entry.detail.lines() {
-                rows.push(Line::from(Span::styled(
-                    fit(&format!("  {line}"), width),
-                    theme::text(),
-                )));
+            for line in detail_rows(&entry.detail, width) {
+                rows.push(Line::from(Span::styled(line, theme::text())));
             }
         }
     }
     rows
+}
+
+fn atlas_live_areas(area: Rect) -> (Rect, Rect, Rect) {
+    let rows = split_vertical(
+        area,
+        [
+            Constraint::Length(ACTION_H),
+            Constraint::Percentage(40),
+            Constraint::Min(0),
+        ],
+    );
+    (rows[0], rows[1], rows[2])
+}
+
+fn atlas_runs_areas(area: Rect) -> (Rect, Rect, Rect) {
+    let rows = split_vertical(area, [Constraint::Min(0), Constraint::Length(ACTION_H)]);
+    // The map takes most of the space above the history list. Live sits
+    // under that list.
+    let panes = split_vertical(rows[0], [Constraint::Ratio(3, 4), Constraint::Ratio(1, 4)]);
+    (rows[1], panes[0], panes[1])
+}
+
+fn atlas_run_label(app: &App) -> &'static str {
+    if app.atlas_pause.is_some() {
+        "Pause"
+    } else if app.atlas_state == "paused" {
+        "Resume"
+    } else {
+        "Run"
+    }
+}
+
+fn draw_atlas(frame: &mut Frame, app: &App, area: Rect) {
+    if app.atlas_page == AtlasPage::Runs {
+        draw_atlas_runs(frame, app, area);
+    } else {
+        draw_atlas_live(frame, app, area);
+    }
+}
+
+fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
+    let (actions, table, feed) = atlas_live_areas(area);
+    let buttons = button_areas(actions, 2);
+    draw_button(frame, app, ButtonId::AtlasRuns, "History", buttons[0]);
+    draw_button(
+        frame,
+        app,
+        ButtonId::AtlasRun,
+        atlas_run_label(app),
+        buttons[1],
+    );
+    let width = inset(table).width as usize;
+    let header = "Country                         Tier   Temp   Volume  Articles  Share";
+    let mut lines = vec![Line::from(Span::styled(
+        center_text(header, width),
+        theme::dim(),
+    ))];
+    if app.atlas_stats.origins.is_empty() {
+        lines.push(Line::from(Span::styled(
+            center_text("No country statistics yet.", width),
+            theme::dim(),
+        )));
+    } else {
+        for row in &app.atlas_stats.origins {
+            let tier = if row.tier == 0 {
+                "-".into()
+            } else {
+                row.tier.to_string()
+            };
+            lines.push(Line::from(center_text(
+                &format!(
+                    "{:<32} {:<6} {:<6.2} {:<7} {:<9} {:.0}%",
+                    atlas::country_label(&row.country),
+                    tier,
+                    row.temperature,
+                    row.volume,
+                    row.articles,
+                    app.atlas_stats.share(row.articles) * 100.0
+                ),
+                width,
+            )));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(pane(" origins "))
+            .wrap(Wrap { trim: false }),
+        table,
+    );
+    let feed_width = inset(feed).width as usize;
+    let feed_lines = if app.atlas_feed.is_empty() {
+        vec![Line::from(Span::styled(
+            "Headlines from this session appear here. They are not saved.",
+            theme::dim(),
+        ))]
+    } else {
+        app.atlas_feed
+            .iter()
+            .enumerate()
+            .skip(app.scrolls.atlas_feed as usize)
+            .map(|(index, article)| {
+                let style = if index == app.atlas_feed_sel {
+                    theme::selected()
+                } else {
+                    theme::text()
+                };
+                Line::from(Span::styled(
+                    fit(
+                        &format!(
+                            "{}  {}  {}",
+                            atlas::country_label(&article.country),
+                            article.source_name,
+                            article.title
+                        ),
+                        feed_width,
+                    ),
+                    style,
+                ))
+            })
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(feed_lines).block(pane(" headlines ")), feed);
+}
+
+fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
+    let (actions, map, list) = atlas_runs_areas(area);
+    super::map::draw_world_map(frame, app, map);
+    let width = inset(list).width as usize;
+    let lines = if app.atlas_runs.is_empty() {
+        vec![Line::from(Span::styled(
+            "No pipeline runs yet.",
+            theme::dim(),
+        ))]
+    } else {
+        app.atlas_runs
+            .iter()
+            .enumerate()
+            .skip(app.scrolls.atlas_runs as usize)
+            .map(|(index, run)| {
+                let stats =
+                    serde_json::from_str::<atlas::RunStats>(&run.stats_json).unwrap_or_default();
+                let articles: u32 = stats.origins.iter().map(|row| row.articles).sum();
+                let style = if index == app.atlas_run_sel {
+                    theme::selected()
+                } else {
+                    theme::text()
+                };
+                Line::from(Span::styled(
+                    fit(
+                        &format!(
+                            "{}  {}  {} countries  {} articles",
+                            run.started_at,
+                            run.state,
+                            stats.origins.len(),
+                            articles
+                        ),
+                        width,
+                    ),
+                    style,
+                ))
+            })
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(lines).block(pane(" history ")), list);
+    let buttons = button_areas(actions, 1);
+    draw_button(frame, app, ButtonId::AtlasLive, "Live", buttons[0]);
+}
+
+fn atlas_row_at(area: Rect, scroll: u16, y: u16) -> Option<usize> {
+    let inner = inset(area);
+    if !contains(inner, inner.x, y) && y < inner.y {
+        return None;
+    }
+    if y < inner.y || y >= inner.y + inner.height {
+        return None;
+    }
+    Some(scroll as usize + (y - inner.y) as usize)
+}
+
+fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
+    if app.atlas_page == AtlasPage::Runs {
+        let (actions, _map, list) = atlas_runs_areas(body);
+        if contains(actions, x, y) {
+            return Some(Target::Button(ButtonId::AtlasLive));
+        }
+        if contains(list, x, y) {
+            let index = atlas_row_at(list, app.scrolls.atlas_runs, y)?;
+            return (index < app.atlas_runs.len()).then_some(Target::AtlasHistory(index));
+        }
+        return None;
+    }
+    let (actions, _table, feed) = atlas_live_areas(body);
+    if contains(actions, x, y) {
+        let buttons = button_areas(actions, 2);
+        return Some(Target::Button(if contains(buttons[0], x, y) {
+            ButtonId::AtlasRuns
+        } else {
+            ButtonId::AtlasRun
+        }));
+    }
+    if contains(feed, x, y) {
+        let index = atlas_row_at(feed, app.scrolls.atlas_feed, y)?;
+        return (index < app.atlas_feed.len()).then_some(Target::AtlasFeed(index));
+    }
+    None
 }
 
 fn draw_system(frame: &mut Frame, app: &App, area: Rect) {
@@ -3883,7 +4272,8 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 
 fn help_text(app: &App) -> &'static str {
     match app.module {
-        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Recon · 2 Brain · 3 OSINT · 4 Providers · 5 System\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
+        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Recon · 2 Brain · 3 Atlas · 4 OSINT · 5 Providers · 6 System\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
+        Some(ModuleId::Atlas) => "Atlas\n\nHistory is the view that opens. Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to the System event log\nEnter on a ▸ error there opens the full API response\nHistory lists saved runs. Enter or click opens that run's statistics\nThe world map sits above that list and takes most of the pane\nIt follows the selected history row. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother history row recolours the map and replaces those names\nDelete on the run card removes that run. Backspace does the same\nHeadlines are not saved. Statistics are\nEsc returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors, run stages, and tool results for 24 hours\n↑↓ select a line · Enter or click the arrow folds a tool result\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",
@@ -3903,6 +4293,23 @@ fn cover(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+fn popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let center_table =
+        matches!(&app.overlay, Overlay::Block { title, .. } if title.starts_with("Run "));
+    let mut in_table = false;
+    popup_text(app)
+        .lines()
+        .map(|line| {
+            if center_table && (in_table || line.starts_with("Country")) {
+                in_table = !line.is_empty();
+                Line::from(center_text(line, width))
+            } else {
+                Line::from(line.to_string())
+            }
+        })
+        .collect()
+}
+
 fn draw_overlay(frame: &mut Frame, app: &App) {
     if matches!(app.overlay, Overlay::Palette) {
         draw_palette(frame, app);
@@ -3920,8 +4327,9 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         Overlay::Block { .. } => " Detail ",
         Overlay::Choice(_) | Overlay::Palette | Overlay::None => " ",
     };
+    let inner_width = inset(area).width as usize;
     frame.render_widget(
-        Paragraph::new(popup_text(app))
+        Paragraph::new(popup_lines(app, inner_width))
             .style(theme::card_text())
             .block(theme::card(title))
             .scroll((app.scrolls.popup, 0))
@@ -3934,6 +4342,12 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         width: 8.min(area.width),
         height: 1,
     };
+    if atlas_run_card(app) {
+        frame.render_widget(
+            Paragraph::new(" delete ").style(theme::card_accent()),
+            run_delete_rect(area),
+        );
+    }
     frame.render_widget(Paragraph::new(" close ").style(theme::card_accent()), close);
 }
 
@@ -4262,7 +4676,9 @@ mod tests {
             "evidence_form": "page",
         });
         let logged = tool_result_log(&page).unwrap();
-        assert!(logged.detail.contains("Contact · https://acmerobotics.com/contact"));
+        assert!(logged
+            .detail
+            .contains("Contact · https://acmerobotics.com/contact"));
         assert!(!logged.detail.contains("jane@acmerobotics.com"));
         let mut job = page.clone();
         job.tool_id = "firecrawl_crawl".into();
@@ -4275,7 +4691,9 @@ mod tests {
         });
         let logged = tool_result_log(&job).unwrap();
         assert!(logged.detail.contains("2 pages"));
-        assert!(logged.detail.contains("About · https://acmerobotics.com/about"));
+        assert!(logged
+            .detail
+            .contains("About · https://acmerobotics.com/about"));
         assert!(!logged.detail.contains("jane@acmerobotics.com"));
         let mut extract = page.clone();
         extract.tool_id = "firecrawl_extract".into();
@@ -4289,7 +4707,9 @@ mod tests {
             "evidence_form": "extract",
         });
         let logged = tool_result_log(&extract).unwrap();
-        assert!(logged.detail.contains("Acme Robotics · acmerobotics.com · 1 email · 1 person · address"));
+        assert!(logged
+            .detail
+            .contains("Acme Robotics · acmerobotics.com · 1 email · 1 person · address"));
         assert!(!logged.detail.contains("100 Market Street"));
         assert!(!logged.detail.contains("Jane Example"));
     }

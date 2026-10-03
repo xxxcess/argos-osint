@@ -2453,14 +2453,21 @@ fn shrink_page_markdown(value: &mut Value, limit: usize) {
     if let Some(pages) = value.get_mut("pages").and_then(Value::as_array_mut) {
         let each = (limit / pages.len().max(1)).max(200);
         for page in pages.iter_mut() {
-            if let Some(markdown) = page.get("markdown").and_then(Value::as_str).map(str::to_string)
+            if let Some(markdown) = page
+                .get("markdown")
+                .and_then(Value::as_str)
+                .map(str::to_string)
             {
                 page["markdown"] = json!(clip_chars_ellipsis(&markdown, each));
             }
         }
         return;
     }
-    if let Some(markdown) = value.get("markdown").and_then(Value::as_str).map(str::to_string) {
+    if let Some(markdown) = value
+        .get("markdown")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
         value["markdown"] = json!(clip_chars_ellipsis(&markdown, limit));
     }
 }
@@ -2540,15 +2547,7 @@ async fn compact_page(
         ),
     ];
     match await_completion(
-        secret,
-        &messages,
-        cancel,
-        clock,
-        progress,
-        false,
-        limit,
-        1,
-        run_id,
+        secret, &messages, cancel, clock, progress, false, limit, 1, run_id,
     )
     .await
     {
@@ -2776,6 +2775,9 @@ impl Service {
             sociavault: key("sociavault"),
             newsapi: key("newsapi"),
             courtlistener: key("courtlistener"),
+            gnews: key("gnews"),
+            newsdata: key("newsdata"),
+            currents: key("currents"),
         }
     }
     async fn execute(&self, tool_id: &str, inputs: Value, refresh: bool) -> Result<ToolResult> {
@@ -2801,6 +2803,11 @@ impl Service {
             .await?;
         if cacheable(&result) {
             Store::open(&self.db_path)?.cache_put(&key, &result, def.cache_seconds)?;
+        }
+        if !result.cached && osint::canonical_tool_id(tool_id).starts_with("newsapi_") {
+            if let Ok(store) = Store::open(&self.db_path) {
+                crate::atlas::charge_newsapi(&store);
+            }
         }
         Ok(result)
     }
@@ -4069,11 +4076,7 @@ fn settle_citations(
 }
 /// When the answer cites no completed evidence, fill claims that name none of the
 /// gathered results with those result ids and mark them inferences.
-fn infer_uncited_evidence(
-    answer: &str,
-    evidence: &[(String, ToolResult)],
-    claims: &mut [Value],
-) {
+fn infer_uncited_evidence(answer: &str, evidence: &[(String, ToolResult)], claims: &mut [Value]) {
     let gathered: Vec<String> = evidence
         .iter()
         .filter(|(_, result)| result.status == "completed")
@@ -4083,9 +4086,10 @@ fn infer_uncited_evidence(
         return;
     }
     let cited = citation_ids(answer);
-    if evidence.iter().any(|(id, result)| {
-        result.status == "completed" && cited.iter().any(|known| known == id)
-    }) {
+    if evidence
+        .iter()
+        .any(|(id, result)| result.status == "completed" && cited.iter().any(|known| known == id))
+    {
         return;
     }
     for claim in claims {

@@ -2161,7 +2161,7 @@ pub(crate) async fn derive_directives(
                 directives,
                 mode: "recon".into(),
                 note,
-            })
+            });
         }
         Err(error) => error,
     };
@@ -3532,11 +3532,9 @@ mod tests {
         );
         assert!(investigation::parse_directives(&json!({"directives": []}), PERSON, &[]).is_err());
         let skipped = json!({"directives": [directive("d1"), directive("d3")]});
-        assert!(
-            investigation::parse_directives(&skipped, PERSON, &[])
-                .unwrap_err()
-                .contains("must have id d2")
-        );
+        assert!(investigation::parse_directives(&skipped, PERSON, &[])
+            .unwrap_err()
+            .contains("must have id d2"));
         let bad_kind = json!({"directives": [directive("d1"), directive("d2"), {"id": "d3", "goal": "Find contact details", "entities": ["Jane Example"], "targets": ["phone"]}]});
         assert!(investigation::parse_directives(&bad_kind, PERSON, &[]).is_err());
 
@@ -6308,6 +6306,7 @@ mod tests {
             sociavault: "k".into(),
             newsapi: newsapi.into(),
             courtlistener: courtlistener.into(),
+            ..crate::osint::ProviderKeys::default()
         }
     }
 

@@ -1297,6 +1297,15 @@ pub struct SettingsFile {
     /// CourtListener API token. A non-empty value overrides `COURTLISTENER_API_TOKEN`.
     #[serde(default)]
     pub courtlistener_api_token: String,
+    /// GNews API key. A non-empty value overrides `GNEWS_API_KEY`.
+    #[serde(default)]
+    pub gnews_api_key: String,
+    /// NewsData.io API key. A non-empty value overrides `NEWSDATA_API_KEY`.
+    #[serde(default)]
+    pub newsdata_api_key: String,
+    /// Currents API key. A non-empty value overrides `CURRENTS_API_KEY`.
+    #[serde(default)]
+    pub currents_api_key: String,
     #[serde(default)]
     pub recon_limits: ReconLimits,
 }
@@ -1308,6 +1317,9 @@ pub const KEY_ENV: &[(&str, &str)] = &[
     ("sociavault", "SOCIAVAULT_API_KEY"),
     ("newsapi", "NEWSAPI_API_KEY"),
     ("courtlistener", "COURTLISTENER_API_TOKEN"),
+    ("gnews", "GNEWS_API_KEY"),
+    ("newsdata", "NEWSDATA_API_KEY"),
+    ("currents", "CURRENTS_API_KEY"),
 ];
 
 impl SettingsFile {
@@ -1319,6 +1331,9 @@ impl SettingsFile {
             "sociavault" => &self.sociavault_api_key,
             "newsapi" => &self.newsapi_api_key,
             "courtlistener" => &self.courtlistener_api_token,
+            "gnews" => &self.gnews_api_key,
+            "newsdata" => &self.newsdata_api_key,
+            "currents" => &self.currents_api_key,
             _ => "",
         }
     }

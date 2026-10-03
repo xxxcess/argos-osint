@@ -1,6 +1,6 @@
 # Argos OSINT
 
-Argos is a terminal investigation workspace. It opens on **Home**. **Recon** and **Brain** are the two applications. **OSINT**, **Providers**, and **System** are system apps: they configure gathering, accounts, and host state. Only Recon has a chat. The last surviving Recon thread is restored when Recon opens.
+Argos is a terminal investigation workspace. It opens on **Home**. **Recon**, **Brain**, and **Atlas** are the applications. **OSINT**, **Providers**, and **System** are system apps: they configure gathering, accounts, and host state. Only Recon has a chat. The last surviving Recon thread is restored when Recon opens.
 
 ## Run and navigate
 
@@ -8,13 +8,15 @@ Argos is a terminal investigation workspace. It opens on **Home**. **Recon** and
 cargo run -p argos-osint-bin
 ```
 
-From Home, ↑↓ select and Enter opens. `1` opens Recon, `2` Brain, `3` OSINT, `4` Providers, and `5` System. Esc or the Home control leaves an app. `?` opens the shortcut card for the current screen.
+From Home, ↑↓ select and Enter opens. `1` opens Recon, `2` Brain, `3` Atlas, `4` OSINT, `5` Providers, and `6` System. Esc or the Home control leaves an app. `?` opens the shortcut card for the current screen.
 
 Recon opens on a full-screen list of recent investigations. ↑↓ moves through that list and Enter opens the selected investigation as its own full-screen transcript. Esc from the transcript returns to the list; Esc from the list returns Home. In the transcript, Tab moves between the log and the prompt. Enter sends; Shift+Enter adds a line. While the transcript is focused, ↑↓ select a message, decision, or tool, and ←→ fold a decision or tool log. Enter toggles the selected fold. `f` opens the full text. Ctrl+U and Ctrl+D scroll the focused pane, and the mouse wheel scrolls the pane under the pointer. Ctrl+N starts an investigation and opens its transcript. In the transcript, when the cursor is not in a text field, Alt+Left and Alt+Right move through recently opened investigations. A click counts on release, so dragging across Home does not launch an app. Ctrl+C cancels a running turn, or clears a draft first. Press Ctrl+C or Ctrl+Q again within a second to quit when nothing else is pending.
 
 The transcript follows the Grok Build chat. Your question sits on a raised band with a prompt arrow. The answer is rendered Markdown: headings, lists, bold, code, quotes, and links. Decisions and lookups stay on collapsed disclosure rows. A `◉ brain` mark on an answer opens the memories that were in its prompt. A new investigation stays untitled until the Recon model names it from the first question. `:rename` replaces that title.
 
-Brain, OSINT, Providers, and System use fields and buttons only. OSINT keeps previous and next controls for saved manual runs. System shows hardware, paths, and a scrollable event log of run stages and failures.
+Brain, Atlas, OSINT, Providers, and System use fields and buttons only. OSINT keeps previous and next controls for saved manual runs. System shows hardware, paths, and a scrollable event log of run stages and failures.
+
+Atlas is a two-phase news pipeline. **Run** scans a 48-hour window with GNews and NewsData keyword clusters, scores countries into four heat bands, and drops the bottom 20%. It then pulls country headlines from NewsAPI and Currents for the kept bands, Group 1 first. **Pause** finishes the request in flight and stores a cursor. **Resume** continues that run. Ctrl+C on the Atlas screen pauses. The origins table names each country as `United States (US)` with its tier, temperature, discovery volume, and headline count. The feed below lists headlines from the current session only; article text is not stored. Enter or a click opens the headline. Atlas opens on **History**, the list of saved runs. Enter or a click opens that run's statistics. A world map sits above the history list and takes most of that pane. It is a Web Mercator coastline drawn as Braille. Tier 1 and 2 countries are named in full. Tier 3 shows the country code. The map does not take keys or clicks. Fully zoomed out, countries from the selected run are colored by temperature, and choosing another history row recolours the map. `+` and `-` zoom, and the arrow keys pan once the map is focused. Daily free-tier caps are GNews 100, NewsData 200, NewsAPI 100, and Currents 250.
 
 Recon keeps threads, drafts, messages, run stages, plans, tool calls, evidence, and the memories supplied to each synthesis answer. Use Cancel to stop a run; interrupted runs can be resumed. The composer accepts `:rename <title>`, `:delete`, and `:delete-with-insights`. Both delete commands remove the investigation and the Brain memories that belong to it.
 
@@ -22,7 +24,7 @@ Each turn checks Brain first. Recon then turns the prompt into one to five direc
 
 All nine Hunter tools share one key. Enter it on any Hunter tool, or export `HUNTER_API_KEY`. A saved key overrides the environment variable. The SociaVault tools work the same way with `SOCIAVAULT_API_KEY`, and the Firecrawl tools with `FIRECRAWL_API_KEY`. The old `hunter_tech_lookup` id still runs as `hunter_company_enrichment`. Handles and company domains found in earlier results feed SociaVault profiles and Hunter domain lookups in the same turn when the picker orders them. Social-network hosts such as `x.com` stay on the profile lookup and are never sent to Hunter.
 
-OSINT lists 55 HTTP lookup tools in fifteen categories. Of these, 20 belong to the primary providers:
+OSINT lists 58 HTTP lookup tools in fifteen categories. Of these, 20 belong to the primary providers:
 
 | Provider | Tools | Routes |
 |---|---|---|
@@ -36,6 +38,9 @@ Five more are keyed context tools (issue #29):
 |---|---|---|
 | NewsAPI (News) | `newsapi_search` (`/v2/everything`), `newsapi_headlines` (`/v2/top-headlines`) | `NEWSAPI_API_KEY` or the key field on a News tool; sent as `X-Api-Key` |
 | CourtListener (Legal) | `courtlistener_case_search` (opinions), `courtlistener_docket_search` (federal dockets), `courtlistener_judge_search` | `COURTLISTENER_API_TOKEN` or the key field on a Legal tool; sent as `Authorization: Token …` |
+| GNews | `gnews_search` (`/api/v4/search`) | `GNEWS_API_KEY` or the key field; sent as `X-Api-Key`. Atlas discovery only. Free tier 100/day, 10 articles. |
+| NewsData.io | `newsdata_latest` (`/api/1/latest`) | `NEWSDATA_API_KEY` or the key field; sent as the `apikey` query parameter and redacted from the stored URL. Atlas discovery only. Free tier 200/day, 10 articles. |
+| Currents | `currents_latest` (`/v1/latest-news`) | `CURRENTS_API_KEY` or the key field; sent as `Authorization: Bearer`. Atlas regional headlines only. Free tier 250/day, 20 articles. |
 
 Recon uses them only when the prompt asks about news, current events, recent activity, or controversies (`news`), or about lawsuits, court cases, litigation, rulings, judges, or legal trouble (`legal`); a plain "who is X?" uses neither. They search the bare subject as an exact phrase (`"Elon Musk"`), take dates only when the prompt writes one ("since March 2026"), read one page (at most 10 NewsAPI articles or 20 CourtListener results), and keep only results whose title or snippet names the subject. At most 2 NewsAPI and 3 CourtListener calls run per turn (`recon limits --news-calls-per-turn`, `--legal-calls-per-turn`), CourtListener requests are spaced 12 s apart, and a CourtListener 429 skips the rest of that turn's CourtListener steps. Free-tier NewsAPI articles are 24 hours old and reach back one month. A tool without its key shows "needs key" and is never picked. Their results are evidence and citations only; they feed no other tool.
 

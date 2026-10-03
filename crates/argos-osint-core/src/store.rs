@@ -53,7 +53,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 10,
+                version <= 11,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -191,6 +191,27 @@ impl Store {
                     )?;
                 }
                 self.conn.pragma_update(None, "user_version", 10)?;
+            }
+            if version < 11 {
+                self.conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS atlas_runs (
+                       id TEXT PRIMARY KEY,
+                       state TEXT NOT NULL,
+                       phase INTEGER NOT NULL DEFAULT 1,
+                       cursor_json TEXT NOT NULL DEFAULT '',
+                       stats_json TEXT NOT NULL DEFAULT '',
+                       note TEXT NOT NULL DEFAULT '',
+                       started_at TEXT NOT NULL,
+                       finished_at TEXT NOT NULL DEFAULT ''
+                     );
+                     CREATE TABLE IF NOT EXISTS atlas_quota (
+                       provider TEXT NOT NULL,
+                       day TEXT NOT NULL,
+                       used INTEGER NOT NULL,
+                       PRIMARY KEY (provider, day)
+                     );",
+                )?;
+                self.conn.pragma_update(None, "user_version", 11)?;
             }
             Ok(())
         })();
@@ -353,6 +374,114 @@ impl Store {
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
         Ok(self.list_memories()?.into_iter().find(|m| m.id == id))
     }
+
+    pub fn atlas_insert_run(&self, id: &str, cursor_json: &str, stats_json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO atlas_runs (id, state, phase, cursor_json, stats_json, note, started_at, finished_at)
+             VALUES (?1, 'running', 1, ?2, ?3, '', ?4, '')",
+            params![id, cursor_json, stats_json, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn atlas_save(&self, id: &str, cursor_json: &str, stats_json: &str) -> Result<()> {
+        let phase = serde_json::from_str::<serde_json::Value>(cursor_json)
+            .ok()
+            .and_then(|value| value.get("phase").and_then(|phase| phase.as_i64()))
+            .unwrap_or(1);
+        self.conn.execute(
+            "UPDATE atlas_runs SET phase=?2, cursor_json=?3, stats_json=?4 WHERE id=?1",
+            params![id, phase, cursor_json, stats_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn atlas_set_state(&self, id: &str, state: &str, note: &str, finished: bool) -> Result<()> {
+        let finished_at = if finished {
+            chrono::Utc::now().to_rfc3339()
+        } else {
+            String::new()
+        };
+        self.conn.execute(
+            "UPDATE atlas_runs SET state=?2, note=?3, finished_at=CASE WHEN ?4 = '' THEN finished_at ELSE ?4 END WHERE id=?1",
+            params![id, state, note, finished_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn atlas_latest_run(&self) -> Result<Option<AtlasRunRow>> {
+        Ok(self.atlas_list_runs()?.into_iter().next())
+    }
+
+    pub fn atlas_list_runs(&self) -> Result<Vec<AtlasRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, state, phase, cursor_json, stats_json, note, started_at, finished_at
+             FROM atlas_runs ORDER BY started_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AtlasRunRow {
+                id: row.get(0)?,
+                state: row.get(1)?,
+                phase: row.get(2)?,
+                cursor_json: row.get(3)?,
+                stats_json: row.get(4)?,
+                note: row.get(5)?,
+                started_at: row.get(6)?,
+                finished_at: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn atlas_delete_run(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?
+            > 0)
+    }
+
+    /// A run left `running` by a closed process can be resumed.
+    pub fn atlas_park_running(&self) -> Result<()> {
+        self.conn.execute(
+            "UPDATE atlas_runs SET state='paused', note='Paused' WHERE state='running'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn atlas_quota_used(&self, provider: &str, day: &str) -> Result<u32> {
+        let used: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT used FROM atlas_quota WHERE provider=?1 AND day=?2",
+                params![provider, day],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(used.unwrap_or(0) as u32)
+    }
+
+    pub fn atlas_quota_bump(&self, provider: &str, day: &str) -> Result<u32> {
+        self.conn.execute(
+            "INSERT INTO atlas_quota (provider, day, used) VALUES (?1, ?2, 1)
+             ON CONFLICT(provider, day) DO UPDATE SET used = used + 1",
+            params![provider, day],
+        )?;
+        self.atlas_quota_used(provider, day)
+    }
+}
+
+/// One Atlas pipeline run. Statistics live in `stats_json`. Articles are not stored.
+#[derive(Clone, Debug)]
+pub struct AtlasRunRow {
+    pub id: String,
+    pub state: String,
+    pub phase: i64,
+    pub cursor_json: String,
+    pub stats_json: String,
+    pub note: String,
+    pub started_at: String,
+    pub finished_at: String,
 }
 
 #[cfg(test)]
@@ -426,7 +555,11 @@ mod tests {
             )
             .unwrap();
         assert!(store
-            .save_graph_summary(&memory.id, "The recon path ends at the launch window.", "d1")
+            .save_graph_summary(
+                &memory.id,
+                "The recon path ends at the launch window.",
+                "d1"
+            )
             .unwrap());
         assert!(store
             .graph_summary(&memory.id)
@@ -477,7 +610,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         // A version-7 database without the column gains it, keeping existing runs.
         let file = tempfile::NamedTempFile::new().unwrap();
         let store = Store::open(file.path()).unwrap();

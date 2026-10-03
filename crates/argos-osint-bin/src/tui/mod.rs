@@ -1,5 +1,7 @@
 mod app;
 mod graph;
+mod land;
+mod map;
 mod markdown;
 mod theme;
 mod ui;

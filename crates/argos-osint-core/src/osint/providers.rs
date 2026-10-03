@@ -4,8 +4,7 @@
 //! adapters in `osint.rs`.
 use super::{
     bounded, clip_page, clip_text, domain, email_address, get, https_on_host, linkedin_handle,
-    number_arg,
-    profile_path_token, push_link, social_token, str_arg, url, url_arg, Request,
+    number_arg, profile_path_token, push_link, social_token, str_arg, url, url_arg, Request,
 };
 use anyhow::{anyhow, ensure, Result};
 use serde_json::{json, Value};
@@ -1135,7 +1134,7 @@ pub fn locked_host(id: &str) -> Option<&'static str> {
     } else if id.starts_with("hunter_") {
         Some("api.hunter.io")
     } else {
-        super::news_legal::locked_host(id)
+        super::news_legal::locked_host(id).or_else(|| super::atlas_news::locked_host(id))
     }
 }
 
@@ -1535,6 +1534,9 @@ mod tests {
             hunter: TEST_KEY.into(),
             sociavault: TEST_KEY.into(),
             newsapi: TEST_KEY.into(),
+            gnews: TEST_KEY.into(),
+            newsdata: TEST_KEY.into(),
+            currents: TEST_KEY.into(),
             courtlistener: TEST_KEY.into(),
         }
     }
@@ -2167,7 +2169,10 @@ mod tests {
             false,
         );
         assert_eq!(done["status"], "completed");
-        let contact = format!("Jane Example jane@acmerobotics.com {}", "word ".repeat(1_200));
+        let contact = format!(
+            "Jane Example jane@acmerobotics.com {}",
+            "word ".repeat(1_200)
+        );
         assert!(contact.chars().count() > 2_500);
         let (kept, truncated) = job_observations(
             &json!({"status": "completed", "data": [

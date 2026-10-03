@@ -906,6 +906,17 @@ pub const TOOLS: &[ToolIo] = &[
         context: NEWS_KIND,
         ..row("newsapi_headlines", &[ENTITY_PHRASE], &[])
     },
+    // Atlas pipeline tools. They stay in the catalog for manual runs and are left out of
+    // the picker so an investigation does not spend their free-tier quotas.
+    row("gnews_search", &[ENTITY_PHRASE], &[]),
+    row("newsdata_latest", &[ENTITY_PHRASE], &[]),
+    row(
+        "currents_latest",
+        &[Slot {
+            fills: &[fill_how(QUERY_KIND, "country", How::Plain)],
+        }],
+        &[],
+    ),
     ToolIo {
         context: LEGAL_KIND,
         optional: &[

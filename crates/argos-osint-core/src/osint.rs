@@ -14,6 +14,7 @@ use std::{
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
+pub(crate) mod atlas_news;
 mod news_legal;
 #[cfg(test)]
 pub(crate) use news_legal::fixture;
@@ -83,7 +84,7 @@ pub fn plan_interval(id: &str) -> PlanInterval {
             _ => PlanInterval::Never,
         };
     }
-    if news_legal::provider(id).is_some() {
+    if news_legal::provider(id).is_some() || atlas_news::provider(id).is_some() {
         return PlanInterval::Daily;
     }
     match id {
@@ -153,6 +154,9 @@ pub fn registry() -> &'static [ToolDefinition] {
         tool!("sociavault_google_search","SociaVault Google search","Web","Google results for the same query when Firecrawl search was weak. Fallback only.",["query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/google/search. Never an opening pick: offered only when Firecrawl search failed, returned fewer than 3 results, returned only filtered hosts, or yielded no binding a later step needs. One page and one call per question; 1 credit.",40),
         tool!("newsapi_search","NewsAPI article search","News","News articles that name the subject (exact phrase). Free-tier articles arrive 24 hours late and search reaches back one month, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/everything","GET https://newsapi.org/v2/everything with q as an exact phrase, pageSize 10 (at most 10 articles), first page only. Optional from and to (YYYY-MM-DD), language, sort_by (relevancy default, publishedAt, popularity), and domains. Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY; it is sent as X-Api-Key, never in the URL. Developer plan: 100 requests a day, development use only. At most 2 NewsAPI calls per turn.",20),
         tool!("newsapi_headlines","NewsAPI top headlines","News","Top headlines that name the subject (exact phrase). Free-tier headlines arrive 24 hours late and cover one month at most, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/top-headlines","GET https://newsapi.org/v2/top-headlines with q as an exact phrase, pageSize 10 (at most 10 articles). Optional country (2-letter code) and category (business, entertainment, general, health, science, sports, technology). Same NewsAPI key (NEWSAPI_API_KEY), sent as X-Api-Key, never in the URL. At most 2 NewsAPI calls per turn.",20),
+        tool!("gnews_search","GNews search","News","Keyword search across recent articles. Atlas uses this for 48-hour flashpoint discovery because the payload includes the source country.",["query"],"https://docs.gnews.io/endpoints/search-endpoint","GET https://gnews.io/api/v4/search with q (at most 200 characters), lang, max 10, and optional from (ISO 8601). Enter the GNews key on a GNews tool, or set GNEWS_API_KEY. The key is sent as X-Api-Key, never in the URL. Free tier: 100 requests a day, 10 articles, about a 12-hour delay. Atlas calls this; Recon does not.",20),
+        tool!("newsdata_latest","NewsData latest","News","Latest articles for a keyword query. The endpoint is the past 48 hours. Atlas reads country codes from each result.",["query"],"https://newsdata.io/documentation","GET https://newsdata.io/api/1/latest with q (at most 100 characters), language, and size 10. The latest endpoint is already the past 48 hours. Optional timeframe (1 to 48 hours) is a paid parameter; the free plan returns HTTP 422 if it is sent. A query longer than 100 characters is also HTTP 422. Enter the NewsData key on a NewsData tool, or set NEWSDATA_API_KEY. The key is the apikey query parameter and is redacted from the stored URL. Free tier: 200 credits a day, 10 articles. Atlas calls this; Recon does not.",20),
+        tool!("currents_latest","Currents latest news","News","Latest headlines for one country. Atlas uses this in the regional extraction phase.",["country"],"https://currentsapi.services/en/docs/endpoint","GET https://api.currentsapi.services/v1/latest-news with language, country, and page_size 20. Enter the Currents key on a Currents tool, or set CURRENTS_API_KEY. The key is sent as Authorization: Bearer. Free tier: 250 requests a day, 20 articles. Atlas calls this; Recon does not.",20),
         tool!("courtlistener_case_search","CourtListener case law","Legal","Court opinions (case law) that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=o with q as an exact phrase. First page only, at most 20 results, no highlighting, never semantic search. Optional court (court ids separated by spaces), filed_after and filed_before (YYYY-MM-DD). Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN; it is sent as Authorization: Token. Free tier 5/min, 50/hour, 125/day: at most 3 CourtListener calls per turn, 12 s apart.",30),
         tool!("courtlistener_docket_search","CourtListener federal dockets","Legal","Federal (PACER/RECAP) dockets that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=r with q as an exact phrase. First page only, at most 20 results, no highlighting; no RECAP fetch or paid PACER pulls. Optional court and filed_after (YYYY-MM-DD). Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30),
         tool!("courtlistener_judge_search","CourtListener judges","Legal","Judges whose name matches the subject (exact phrase), with court and position.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=p with q as an exact phrase. First page only, at most 20 results. Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30),
@@ -234,6 +238,9 @@ pub fn endpoint_cost(id: &str) -> Option<EndpointCost> {
         id if news_legal::provider(id).is_some() => {
             news_legal::provider(id).map(|provider| cost(provider, 0))
         }
+        id if atlas_news::provider(id).is_some() => {
+            atlas_news::provider(id).map(|provider| cost(provider, 0))
+        }
         _ => None,
     }
 }
@@ -302,6 +309,9 @@ fn optional_keys(id: &str) -> &'static [&'static str] {
         "overpass_places" => &["feature"],
         "newsapi_search" => &["from", "to", "language", "sort_by", "domains"],
         "newsapi_headlines" => &["country", "category"],
+        "gnews_search" => &["from", "lang"],
+        "newsdata_latest" => &["timeframe", "language"],
+        "currents_latest" => &["language"],
         "courtlistener_case_search" => &["court", "filed_after", "filed_before"],
         "courtlistener_docket_search" => &["court", "filed_after"],
         _ => &[],
@@ -378,6 +388,7 @@ impl ToolDefinition {
                 "full_name" => json!("Ada Lovelace"),
                 "linkedin_handle" => json!("ada-lovelace"),
                 "company" => json!("Example Inc"),
+                "country" => json!("us"),
                 "urls" => json!(["https://example.org/about"]),
                 _ => json!("example"),
             };
@@ -962,6 +973,9 @@ fn parse_observations(
     if news_legal::provider(id).is_some() {
         return news_legal::observations(id, &v);
     }
+    if atlas_news::provider(id).is_some() {
+        return atlas_news::observations(id, &v);
+    }
     if let Some(error) = v.get("error").or_else(|| v.get("errors")) {
         if !error.is_null() {
             return Err(anyhow!(
@@ -1168,7 +1182,9 @@ fn no_results(id: &str, value: &Value) -> bool {
                 || value.get("person").is_none() && value.get("company").is_none()
         }
         "sociavault_google_search" => return empty("results"),
-        id if news_legal::provider(id).is_some() => return empty("results"),
+        id if news_legal::provider(id).is_some() || atlas_news::provider(id).is_some() => {
+            return empty("results")
+        }
         "sociavault_search" | "sociavault_search_users" | "sociavault_user_content" => {
             return empty("accounts") && empty("links") && empty("texts");
         }
@@ -1293,6 +1309,9 @@ fn request(id: &str, v: &Value) -> Result<Request> {
     }
     if news_legal::provider(id).is_some() {
         return news_legal::request(id, v);
+    }
+    if atlas_news::is_atlas_tool(id) {
+        return atlas_news::request(id, v);
     }
     if matches!(
         id,
@@ -1751,6 +1770,14 @@ pub struct ProviderKeys {
     pub sociavault: String,
     pub newsapi: String,
     pub courtlistener: String,
+    pub gnews: String,
+    pub newsdata: String,
+    pub currents: String,
+}
+
+/// Atlas pipeline tools are manual and Atlas-only. Recon's picker never offers them.
+pub fn atlas_pipeline_tool(id: &str) -> bool {
+    atlas_news::is_atlas_tool(id)
 }
 fn provider_credential(
     id: &str,
@@ -1784,6 +1811,39 @@ fn provider_credential(
             reqwest::header::HeaderName::from_static("x-api-key"),
             key,
         )));
+    }
+    match atlas_news::provider(id) {
+        Some("gnews") => {
+            let key = keyed(
+                &keys.gnews,
+                "Enter the GNews API key on a GNews tool, or set GNEWS_API_KEY",
+            )?;
+            return Ok(Some((
+                reqwest::header::HeaderName::from_static("x-api-key"),
+                key,
+            )));
+        }
+        Some("newsdata") => {
+            let key = keyed(
+                &keys.newsdata,
+                "Enter the NewsData API key on a NewsData tool, or set NEWSDATA_API_KEY",
+            )?;
+            return Ok(Some((
+                reqwest::header::HeaderName::from_static("x-api-key"),
+                key,
+            )));
+        }
+        Some("currents") => {
+            let key = keyed(
+                &keys.currents,
+                "Enter the Currents API key on a Currents tool, or set CURRENTS_API_KEY",
+            )?;
+            return Ok(Some((
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {key}"),
+            )));
+        }
+        _ => {}
     }
     match news_legal::provider(id) {
         Some("newsapi") => {
@@ -1905,7 +1965,9 @@ pub fn host_interval(id: &str) -> Duration {
     match id {
         "nominatim_geocode" | "urlscan_search" => Duration::from_secs(1),
         _ if news_legal::provider(id) == Some("courtlistener") => news_legal::COURTLISTENER_SPACING,
-        _ if news_legal::provider(id) == Some("newsapi") => Duration::from_secs(1),
+        _ if news_legal::provider(id) == Some("newsapi") || atlas_news::provider(id).is_some() => {
+            Duration::from_secs(1)
+        }
         // Hunter allows 15 requests per second; Firecrawl and SociaVault keep 1/s.
         _ if id.starts_with("hunter_") => Duration::from_millis(67),
         _ if id.starts_with("firecrawl_") || id.starts_with("sociavault_") => {
@@ -1934,6 +1996,21 @@ fn redact(raw: String, credential: &Option<(reqwest::header::HeaderName, String)
         Some(key) if raw.contains(key) => raw.replace(key, "[redacted]"),
         _ => raw,
     }
+}
+
+/// Stored source URLs never keep an API key query parameter.
+fn public_source_url(url: &Url) -> String {
+    let mut clean = url.clone();
+    let pairs: Vec<(String, String)> = clean
+        .query_pairs()
+        .filter(|(key, _)| key != "apikey" && key != "apiKey")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    clean.set_query(None);
+    if !pairs.is_empty() {
+        clean.query_pairs_mut().extend_pairs(pairs);
+    }
+    clean.to_string()
 }
 
 fn redact_key(result: &mut ToolResult, credential: &Option<(reqwest::header::HeaderName, String)>) {
@@ -2186,12 +2263,19 @@ impl Executor {
         if let Some(base) = url_override {
             url = rebase(&url, &base)?;
         }
+        let mut send_credential = credential.clone();
+        if atlas_news::provider(id) == Some("newsdata") {
+            if let Some((_, key)) = &credential {
+                url.query_pairs_mut().append_pair("apikey", key);
+            }
+            send_credential = None;
+        }
         let mut attempts = 0;
         let mut redirects = 0;
         let mut verifying = 0;
         let headers = request_headers(id, user_agent);
         // NewsAPI and CourtListener 429s are not retried: their daily quotas are tiny.
-        let retry_429 = news_legal::provider(id).is_none();
+        let retry_429 = news_legal::provider(id).is_none() && atlas_news::provider(id).is_none();
         loop {
             attempts += 1;
             let mut builder = if let Some(body) = &req.body {
@@ -2205,7 +2289,7 @@ impl Executor {
                 builder = builder.header(name, value);
             }
             builder = builder.timeout(Duration::from_secs(def.timeout_seconds));
-            if let Some((name, value)) = &credential {
+            if let Some((name, value)) = &send_credential {
                 builder = builder.header(name, value);
             }
             let response =
@@ -2274,7 +2358,7 @@ impl Executor {
                 tool_id: id.into(),
                 inputs: inputs.clone(),
                 status: "completed".into(),
-                source_url: url.to_string(),
+                source_url: public_source_url(&url),
                 retrieved_at: Utc::now().to_rfc3339(),
                 observations: Value::Null,
                 raw,
@@ -2300,9 +2384,11 @@ impl Executor {
                 }
                 .into();
                 result.error = Some(
-                    news_legal::http_error(id, status.as_u16(), &result.raw).unwrap_or_else(|| {
-                        format!("HTTP {status}: {}", error_summary(&result.raw))
-                    }),
+                    news_legal::http_error(id, status.as_u16(), &result.raw)
+                        .or_else(|| atlas_news::http_error(id, status.as_u16(), &result.raw))
+                        .unwrap_or_else(|| {
+                            format!("HTTP {status}: {}", error_summary(&result.raw))
+                        }),
                 );
                 redact_key(&mut result, &credential);
                 return Ok(result);
@@ -2600,7 +2686,7 @@ mod tests {
         };
         let mut ids: Vec<&str> = registry().iter().map(|tool| tool.id).collect();
         ids.push("hunter_tech_lookup");
-        assert_eq!(ids.len(), 56);
+        assert_eq!(ids.len(), 59);
         for id in ids {
             for blank in [None, Some(""), Some("   "), Some(" \t\n ")] {
                 let sent = agent(&request_headers(
@@ -2639,19 +2725,20 @@ mod tests {
             PlanInterval::Monthly.cache_seconds()
         );
         for tool in registry() {
-            assert_eq!(
-                tool.cache_seconds,
-                cache_seconds(tool.id),
-                "{}",
-                tool.id
-            );
+            assert_eq!(tool.cache_seconds, cache_seconds(tool.id), "{}", tool.id);
         }
         assert_eq!(plan_interval("firecrawl_search"), PlanInterval::Monthly);
         assert_eq!(plan_interval("hunter_domain_search"), PlanInterval::Monthly);
         assert_eq!(plan_interval("sociavault_profile"), PlanInterval::Never);
         assert_eq!(plan_interval("newsapi_search"), PlanInterval::Daily);
-        assert_eq!(plan_interval("courtlistener_case_search"), PlanInterval::Daily);
-        assert_eq!(plan_interval("hackertarget_hostsearch"), PlanInterval::Daily);
+        assert_eq!(
+            plan_interval("courtlistener_case_search"),
+            PlanInterval::Daily
+        );
+        assert_eq!(
+            plan_interval("hackertarget_hostsearch"),
+            PlanInterval::Daily
+        );
         assert_eq!(plan_interval("github_repositories"), PlanInterval::Never);
         assert_eq!(plan_interval("blockchain_address"), PlanInterval::Never);
         assert_eq!(cache_seconds("firecrawl_search"), CACHE_MONTH_SECONDS);
@@ -2662,9 +2749,9 @@ mod tests {
 
     #[test]
     fn registry_and_validation() {
-        assert_eq!(registry().len(), 55);
+        assert_eq!(registry().len(), 58);
         let ids: std::collections::HashSet<_> = registry().iter().map(|t| t.id).collect();
-        assert_eq!(ids.len(), 55);
+        assert_eq!(ids.len(), 58);
         assert_eq!(
             registry()
                 .iter()

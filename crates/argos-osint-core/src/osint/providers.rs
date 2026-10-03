@@ -1538,6 +1538,7 @@ mod tests {
             newsdata: TEST_KEY.into(),
             currents: TEST_KEY.into(),
             courtlistener: TEST_KEY.into(),
+            ..ProviderKeys::default()
         }
     }
 

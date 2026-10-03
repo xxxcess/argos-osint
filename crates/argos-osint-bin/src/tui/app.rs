@@ -170,13 +170,21 @@ pub enum FieldId {
     OsintSearch,
     OsintInput,
     FirecrawlKey,
+    FirecrawlFallback,
     HunterKey,
+    HunterFallback,
     SociaVaultKey,
+    SociaVaultFallback,
     NewsApiKey,
+    NewsApiFallback,
     CourtListenerKey,
+    CourtListenerFallback,
     GnewsKey,
+    GnewsFallback,
     NewsDataKey,
+    NewsDataFallback,
     CurrentsKey,
+    CurrentsFallback,
     ReconProvider,
     ReconModel,
     PickerProvider,
@@ -301,6 +309,7 @@ pub enum ButtonId {
     SaveNewsDataKey,
     SaveCurrentsKey,
     AtlasRun,
+    AtlasAuto,
     AtlasRuns,
     AtlasLive,
     AtlasDelete,
@@ -430,10 +439,15 @@ pub struct App {
     pub osint_search: String,
     pub osint_input: String,
     pub firecrawl_key: String,
+    pub firecrawl_fallback: String,
     pub hunter_key: String,
+    pub hunter_fallback: String,
     pub sociavault_key: String,
+    pub sociavault_fallback: String,
     pub newsapi_key: String,
+    pub newsapi_fallback: String,
     pub courtlistener_key: String,
+    pub courtlistener_fallback: String,
     osint_inputs: HashMap<String, String>,
     pub selected_thread: Option<String>,
     pub threads: Vec<recon::Thread>,
@@ -533,9 +547,16 @@ pub struct App {
     pub atlas_status: String,
     pub atlas_state: String,
     pub atlas_pause: Option<Arc<AtomicBool>>,
+    /// Unix time of the next automatic pipeline run. `None` means auto run is off.
+    pub atlas_auto_next: Option<u64>,
+    /// The pipeline now running was started by auto run, not the Run button.
+    atlas_auto_started: bool,
     pub gnews_key: String,
+    pub gnews_fallback: String,
     pub newsdata_key: String,
+    pub newsdata_fallback: String,
     pub currents_key: String,
+    pub currents_fallback: String,
     pub brain_graph: recon::MemoryGraph,
     brain_graph_for: Option<String>,
     pub graph_summary: String,
@@ -641,13 +662,21 @@ impl App {
                 .unwrap_or_else(|| "{}".into()),
             osint_inputs: HashMap::new(),
             firecrawl_key: settings.firecrawl_api_key.clone(),
+            firecrawl_fallback: settings.firecrawl_api_key_fallback.clone(),
             hunter_key: settings.hunter_api_key.clone(),
+            hunter_fallback: settings.hunter_api_key_fallback.clone(),
             sociavault_key: settings.sociavault_api_key.clone(),
+            sociavault_fallback: settings.sociavault_api_key_fallback.clone(),
             newsapi_key: settings.newsapi_api_key.clone(),
+            newsapi_fallback: settings.newsapi_api_key_fallback.clone(),
             courtlistener_key: settings.courtlistener_api_token.clone(),
+            courtlistener_fallback: settings.courtlistener_api_token_fallback.clone(),
             gnews_key: settings.gnews_api_key.clone(),
+            gnews_fallback: settings.gnews_api_key_fallback.clone(),
             newsdata_key: settings.newsdata_api_key.clone(),
+            newsdata_fallback: settings.newsdata_api_key_fallback.clone(),
             currents_key: settings.currents_api_key.clone(),
+            currents_fallback: settings.currents_api_key_fallback.clone(),
             selected_thread,
             threads,
             thread_states,
@@ -743,6 +772,8 @@ impl App {
             atlas_status: "Ready".into(),
             atlas_state: "idle".into(),
             atlas_pause: None,
+            atlas_auto_next: None,
+            atlas_auto_started: false,
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
             graph_summary: String::new(),
@@ -761,6 +792,7 @@ impl App {
         };
         let _ = app.store.atlas_park_running();
         app.load_atlas();
+        app.atlas_auto_next = app.store.atlas_auto_next().ok().flatten();
         app.push_log("info", "Argos ready");
         if app.selected_thread.is_some() {
             let _ = app.refresh_selected();
@@ -1035,13 +1067,21 @@ impl App {
             FieldId::OsintSearch => &self.osint_search,
             FieldId::OsintInput => &self.osint_input,
             FieldId::FirecrawlKey => &self.firecrawl_key,
+            FieldId::FirecrawlFallback => &self.firecrawl_fallback,
             FieldId::HunterKey => &self.hunter_key,
+            FieldId::HunterFallback => &self.hunter_fallback,
             FieldId::SociaVaultKey => &self.sociavault_key,
+            FieldId::SociaVaultFallback => &self.sociavault_fallback,
             FieldId::NewsApiKey => &self.newsapi_key,
+            FieldId::NewsApiFallback => &self.newsapi_fallback,
             FieldId::CourtListenerKey => &self.courtlistener_key,
+            FieldId::CourtListenerFallback => &self.courtlistener_fallback,
             FieldId::GnewsKey => &self.gnews_key,
+            FieldId::GnewsFallback => &self.gnews_fallback,
             FieldId::NewsDataKey => &self.newsdata_key,
+            FieldId::NewsDataFallback => &self.newsdata_fallback,
             FieldId::CurrentsKey => &self.currents_key,
+            FieldId::CurrentsFallback => &self.currents_fallback,
             FieldId::ReconProvider => &self.recon_provider,
             FieldId::ReconModel => &self.recon_model,
             FieldId::PickerProvider => &self.picker_provider,
@@ -1066,13 +1106,21 @@ impl App {
             FieldId::OsintSearch => &mut self.osint_search,
             FieldId::OsintInput => &mut self.osint_input,
             FieldId::FirecrawlKey => &mut self.firecrawl_key,
+            FieldId::FirecrawlFallback => &mut self.firecrawl_fallback,
             FieldId::HunterKey => &mut self.hunter_key,
+            FieldId::HunterFallback => &mut self.hunter_fallback,
             FieldId::SociaVaultKey => &mut self.sociavault_key,
+            FieldId::SociaVaultFallback => &mut self.sociavault_fallback,
             FieldId::NewsApiKey => &mut self.newsapi_key,
+            FieldId::NewsApiFallback => &mut self.newsapi_fallback,
             FieldId::CourtListenerKey => &mut self.courtlistener_key,
+            FieldId::CourtListenerFallback => &mut self.courtlistener_fallback,
             FieldId::GnewsKey => &mut self.gnews_key,
+            FieldId::GnewsFallback => &mut self.gnews_fallback,
             FieldId::NewsDataKey => &mut self.newsdata_key,
+            FieldId::NewsDataFallback => &mut self.newsdata_fallback,
             FieldId::CurrentsKey => &mut self.currents_key,
+            FieldId::CurrentsFallback => &mut self.currents_fallback,
             FieldId::ReconProvider => &mut self.recon_provider,
             FieldId::ReconModel => &mut self.recon_model,
             FieldId::PickerProvider => &mut self.picker_provider,
@@ -1326,62 +1374,138 @@ impl App {
     }
 
     fn remember_firecrawl_key(&mut self) -> Result<String> {
-        let key = self.firecrawl_key.trim().to_string();
-        anyhow::ensure!(!key.is_empty(), "Enter a Firecrawl API key");
-        self.settings.firecrawl_api_key = key;
-        self.save_settings()?;
-        Ok("Firecrawl API key saved".into())
+        let key = self.firecrawl_key.clone();
+        let fallback = self.firecrawl_fallback.clone();
+        self.remember_keyed(
+            &key,
+            &fallback,
+            "Enter a Firecrawl API key",
+            "Firecrawl API key saved",
+            |settings, key, fallback| {
+                settings.firecrawl_api_key = key;
+                settings.firecrawl_api_key_fallback = fallback;
+            },
+        )
     }
 
     fn remember_hunter_key(&mut self) -> Result<String> {
-        let key = self.hunter_key.trim().to_string();
-        anyhow::ensure!(!key.is_empty(), "Enter a Hunter API key");
-        self.settings.hunter_api_key = key;
-        self.save_settings()?;
-        Ok("Hunter API key saved".into())
+        let key = self.hunter_key.clone();
+        let fallback = self.hunter_fallback.clone();
+        self.remember_keyed(
+            &key,
+            &fallback,
+            "Enter a Hunter API key",
+            "Hunter API key saved",
+            |settings, key, fallback| {
+                settings.hunter_api_key = key;
+                settings.hunter_api_key_fallback = fallback;
+            },
+        )
     }
 
     fn remember_sociavault_key(&mut self) -> Result<String> {
-        let key = self.sociavault_key.trim().to_string();
-        anyhow::ensure!(!key.is_empty(), "Enter a SociaVault API key");
-        self.settings.sociavault_api_key = key;
-        self.save_settings()?;
-        Ok("SociaVault API key saved".into())
+        let key = self.sociavault_key.clone();
+        let fallback = self.sociavault_fallback.clone();
+        self.remember_keyed(
+            &key,
+            &fallback,
+            "Enter a SociaVault API key",
+            "SociaVault API key saved",
+            |settings, key, fallback| {
+                settings.sociavault_api_key = key;
+                settings.sociavault_api_key_fallback = fallback;
+            },
+        )
     }
 
     fn remember_newsapi_key(&mut self) -> Result<String> {
-        let key = self.newsapi_key.trim().to_string();
-        anyhow::ensure!(!key.is_empty(), "Enter a NewsAPI key");
-        self.settings.newsapi_api_key = key;
-        self.save_settings()?;
-        Ok("NewsAPI key saved".into())
+        let key = self.newsapi_key.clone();
+        let fallback = self.newsapi_fallback.clone();
+        self.remember_keyed(
+            &key,
+            &fallback,
+            "Enter a NewsAPI key",
+            "NewsAPI key saved",
+            |settings, key, fallback| {
+                settings.newsapi_api_key = key;
+                settings.newsapi_api_key_fallback = fallback;
+            },
+        )
     }
 
     fn remember_gnews_key(&mut self) -> Result<String> {
-        let key = self.gnews_key.trim().to_string();
-        anyhow::ensure!(!key.is_empty(), "Enter a GNews API key");
-        self.settings.gnews_api_key = key;
-        self.save_settings()?;
-        Ok("GNews API key saved".into())
+        let key = self.gnews_key.clone();
+        let fallback = self.gnews_fallback.clone();
+        self.remember_keyed(
+            &key,
+            &fallback,
+            "Enter a GNews API key",
+            "GNews API key saved",
+            |settings, key, fallback| {
+                settings.gnews_api_key = key;
+                settings.gnews_api_key_fallback = fallback;
+            },
+        )
     }
 
     fn remember_newsdata_key(&mut self) -> Result<String> {
-        let key = self.newsdata_key.trim().to_string();
-        anyhow::ensure!(!key.is_empty(), "Enter a NewsData API key");
-        self.settings.newsdata_api_key = key;
-        self.save_settings()?;
-        Ok("NewsData API key saved".into())
+        let key = self.newsdata_key.clone();
+        let fallback = self.newsdata_fallback.clone();
+        self.remember_keyed(
+            &key,
+            &fallback,
+            "Enter a NewsData API key",
+            "NewsData API key saved",
+            |settings, key, fallback| {
+                settings.newsdata_api_key = key;
+                settings.newsdata_api_key_fallback = fallback;
+            },
+        )
     }
 
     fn remember_currents_key(&mut self) -> Result<String> {
-        let key = self.currents_key.trim().to_string();
-        anyhow::ensure!(!key.is_empty(), "Enter a Currents API key");
-        self.settings.currents_api_key = key;
+        let key = self.currents_key.clone();
+        let fallback = self.currents_fallback.clone();
+        self.remember_keyed(
+            &key,
+            &fallback,
+            "Enter a Currents API key",
+            "Currents API key saved",
+            |settings, key, fallback| {
+                settings.currents_api_key = key;
+                settings.currents_api_key_fallback = fallback;
+            },
+        )
+    }
+
+    /// Saves the primary key and the optional second account. A blank fallback clears it.
+    /// A blank primary is allowed when a fallback is set, so an environment key can stay
+    /// the first account.
+    fn remember_keyed(
+        &mut self,
+        primary: &str,
+        fallback: &str,
+        missing: &str,
+        saved: &str,
+        write: impl FnOnce(&mut SettingsFile, String, String),
+    ) -> Result<String> {
+        let key = primary.trim().to_string();
+        let fallback = fallback.trim().to_string();
+        if key.is_empty() && fallback.is_empty() {
+            anyhow::bail!("{missing}");
+        }
+        write(&mut self.settings, key, fallback);
         self.save_settings()?;
-        Ok("Currents API key saved".into())
+        Ok(saved.into())
     }
 
     fn load_atlas(&mut self) {
+        let selected = self
+            .atlas_runs
+            .get(self.atlas_run_sel)
+            .map(|run| run.id.clone());
+        let news_run = self.atlas_news_run.clone();
+        let removed = self.store.atlas_prune_expired().unwrap_or_default();
         self.atlas_runs = self.store.atlas_list_runs().unwrap_or_default();
         if self.atlas_run_sel >= self.atlas_runs.len() {
             self.atlas_run_sel = self.atlas_runs.len().saturating_sub(1);
@@ -1391,6 +1515,52 @@ impl App {
             if self.atlas_pause.is_none() {
                 self.atlas_state = run.state.clone();
             }
+        } else if !removed.is_empty() && self.atlas_pause.is_none() {
+            self.atlas_stats = atlas::RunStats::default();
+            self.atlas_state = "idle".into();
+        }
+        self.dismiss_pruned_atlas(&removed, selected.as_deref(), &news_run);
+    }
+
+    fn on_atlas_history(&self) -> bool {
+        self.module == Some(ModuleId::Atlas)
+            && self.atlas_page == AtlasPage::Runs
+            && !self.atlas_news
+    }
+
+    /// History is newest first. Selecting the top row recolours the world map.
+    fn select_latest_atlas_run(&mut self) {
+        if self.atlas_runs.is_empty() {
+            return;
+        }
+        self.atlas_run_sel = 0;
+        self.scrolls.atlas_runs = 0;
+        self.atlas_focus = None;
+        if matches!(&self.overlay, Overlay::Block { title, .. } if title.starts_with("Run ")) {
+            self.overlay = Overlay::None;
+        }
+        self.set_focus(Target::AtlasHistory(0));
+    }
+
+    fn dismiss_pruned_atlas(&mut self, removed: &[String], selected: Option<&str>, news_run: &str) {
+        if removed.is_empty() {
+            return;
+        }
+        let news_removed = !news_run.is_empty() && removed.iter().any(|id| id == news_run);
+        let selected_removed = selected.is_some_and(|id| removed.iter().any(|gone| gone == id));
+        if news_removed {
+            self.atlas_news = false;
+            self.atlas_focus = None;
+            self.atlas_articles.clear();
+            self.atlas_news_run.clear();
+            if matches!(&self.overlay, Overlay::Block { title, .. } if title == "Article") {
+                self.overlay = Overlay::None;
+            }
+        }
+        if selected_removed
+            && matches!(&self.overlay, Overlay::Block { title, .. } if title.starts_with("Run "))
+        {
+            self.overlay = Overlay::None;
         }
     }
 
@@ -1572,11 +1742,21 @@ impl App {
             self.scrolls.atlas_feed = 0;
         }
         self.spawn_atlas(resume)?;
+        if !resume {
+            self.shift_atlas_auto_after_manual();
+        }
         Ok(if resume {
             "Resuming pipeline".into()
         } else {
             "Pipeline started".into()
         })
+    }
+
+    /// A manual start moves the next automatic run to 90 minutes from now.
+    fn shift_atlas_auto_after_manual(&mut self) {
+        if self.atlas_auto_next.is_some() {
+            self.persist_atlas_auto(Some(unix_now().saturating_add(ATLAS_AUTO_SECS)));
+        }
     }
 
     fn spawn_atlas(&mut self, resume: bool) -> Result<()> {
@@ -1592,9 +1772,13 @@ impl App {
         let db = paths::db_path();
         let keys = osint::ProviderKeys {
             gnews: self.settings.provider_key("gnews"),
+            gnews_fallback: self.settings.provider_fallback_key("gnews"),
             newsdata: self.settings.provider_key("newsdata"),
+            newsdata_fallback: self.settings.provider_fallback_key("newsdata"),
             currents: self.settings.provider_key("currents"),
+            currents_fallback: self.settings.provider_fallback_key("currents"),
             newsapi: self.settings.provider_key("newsapi"),
+            newsapi_fallback: self.settings.provider_fallback_key("newsapi"),
             ..osint::ProviderKeys::default()
         };
         let feed = self.atlas_feed.clone();
@@ -1623,6 +1807,55 @@ impl App {
             let _ = tx.send(WorkEvent::AtlasDone { outcome });
         });
         Ok(())
+    }
+
+    fn toggle_atlas_auto(&mut self) -> Result<String> {
+        if self.atlas_auto_next.is_some() {
+            self.persist_atlas_auto(None);
+            return Ok("Auto run off".into());
+        }
+        let now = unix_now();
+        self.persist_atlas_auto(Some(now.saturating_add(ATLAS_AUTO_SECS)));
+        if self.atlas_pause.is_some() {
+            return Ok("Auto run on. Next pipeline in 90 minutes".into());
+        }
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.spawn_atlas(false)?;
+            self.atlas_auto_started = true;
+        }
+        Ok("Auto run on. Pipeline started".into())
+    }
+
+    fn persist_atlas_auto(&mut self, when: Option<u64>) {
+        self.atlas_auto_next = when;
+        let _ = self.store.set_atlas_auto_next(when);
+    }
+
+    /// When the saved trigger is due, move it forward by 90 minutes.
+    /// Returns whether a pipeline should start.
+    fn take_atlas_auto_tick(&mut self, now: u64) -> bool {
+        if !self.atlas_auto_next.is_some_and(|next| now >= next) {
+            return false;
+        }
+        self.persist_atlas_auto(Some(now.saturating_add(ATLAS_AUTO_SECS)));
+        self.atlas_pause.is_none()
+    }
+
+    fn poll_atlas_auto(&mut self) -> bool {
+        let now = unix_now();
+        if !self.atlas_auto_next.is_some_and(|next| now >= next) {
+            return false;
+        }
+        let start = self.take_atlas_auto_tick(now);
+        if start {
+            if tokio::runtime::Handle::try_current().is_ok() && self.spawn_atlas(false).is_ok() {
+                self.atlas_auto_started = true;
+            }
+        } else {
+            self.atlas_status = "Auto run waiting for the current pipeline".into();
+            self.status = self.atlas_status.clone();
+        }
+        true
     }
 
     fn on_atlas(&mut self, event: atlas::AtlasEvent) {
@@ -1678,11 +1911,18 @@ impl App {
     }
 
     fn remember_courtlistener_key(&mut self) -> Result<String> {
-        let key = self.courtlistener_key.trim().to_string();
-        anyhow::ensure!(!key.is_empty(), "Enter a CourtListener API token");
-        self.settings.courtlistener_api_token = key;
-        self.save_settings()?;
-        Ok("CourtListener API token saved".into())
+        let key = self.courtlistener_key.clone();
+        let fallback = self.courtlistener_fallback.clone();
+        self.remember_keyed(
+            &key,
+            &fallback,
+            "Enter a CourtListener API token",
+            "CourtListener API token saved",
+            |settings, key, fallback| {
+                settings.courtlistener_api_token = key;
+                settings.courtlistener_api_token_fallback = fallback;
+            },
+        )
     }
 
     /// The tool's provider has no key saved and none in its environment variable.
@@ -1693,8 +1933,12 @@ impl App {
     pub fn tool_needs_key_with(&self, id: &str, env: impl Fn(&str) -> Option<String>) -> bool {
         osint::endpoint_cost(id).is_some_and(|cost| {
             self.settings
-                .provider_key_with(cost.provider, env)
+                .provider_key_with(cost.provider, &env)
                 .is_empty()
+                && self
+                    .settings
+                    .provider_fallback_key_with(cost.provider, &env)
+                    .is_empty()
         })
     }
 
@@ -1714,10 +1958,14 @@ impl App {
             self.remember_hunter_key()?;
         } else if tool.id.starts_with("sociavault_") {
             self.remember_sociavault_key()?;
-        } else if tool.id.starts_with("newsapi_") && !self.newsapi_key.trim().is_empty() {
-            // An empty field falls back to NEWSAPI_API_KEY.
+        } else if tool.id.starts_with("newsapi_")
+            && (!self.newsapi_key.trim().is_empty() || !self.newsapi_fallback.trim().is_empty())
+        {
+            // An empty primary field falls back to NEWSAPI_API_KEY.
             self.remember_newsapi_key()?;
-        } else if tool.id.starts_with("courtlistener_") && !self.courtlistener_key.trim().is_empty()
+        } else if tool.id.starts_with("courtlistener_")
+            && (!self.courtlistener_key.trim().is_empty()
+                || !self.courtlistener_fallback.trim().is_empty())
         {
             self.remember_courtlistener_key()?;
         }
@@ -1905,6 +2153,8 @@ impl App {
             }
             WorkEvent::AtlasDone { outcome } => {
                 self.atlas_pause = None;
+                let finished = matches!(outcome, Ok(atlas::Stop::Finished));
+                let paused = matches!(outcome, Ok(atlas::Stop::Paused));
                 match outcome {
                     Ok(atlas::Stop::Paused) => {
                         self.atlas_state = "paused".into();
@@ -1922,6 +2172,13 @@ impl App {
                 }
                 self.status = self.atlas_status.clone();
                 self.load_atlas();
+                let automatic = self.atlas_auto_started;
+                if !paused {
+                    self.atlas_auto_started = false;
+                }
+                if automatic && finished && self.on_atlas_history() {
+                    self.select_latest_atlas_run();
+                }
                 true
             }
         }
@@ -2544,6 +2801,7 @@ impl App {
             ButtonId::SaveNewsDataKey => self.remember_newsdata_key(),
             ButtonId::SaveCurrentsKey => self.remember_currents_key(),
             ButtonId::AtlasRun => self.atlas_control(),
+            ButtonId::AtlasAuto => self.toggle_atlas_auto(),
             ButtonId::AtlasRuns => {
                 self.atlas_page = AtlasPage::Runs;
                 self.load_atlas();
@@ -3909,7 +4167,7 @@ fn log_stamp() -> String {
     )
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -3917,6 +4175,38 @@ fn unix_now() -> u64 {
 }
 
 const LOG_TTL_SECS: u64 = 24 * 60 * 60;
+const ATLAS_AUTO_SECS: u64 = 90 * 60;
+
+fn atlas_countdown_visible(app: &App) -> bool {
+    app.atlas_auto_next.is_some()
+        && app.module == Some(ModuleId::Atlas)
+        && app.atlas_page == AtlasPage::Runs
+        && !app.atlas_news
+        && matches!(app.overlay, Overlay::None)
+}
+
+fn until_next_second() -> Duration {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|now| {
+            let left = 1_000_000_000u32.saturating_sub(now.subsec_nanos());
+            Duration::from_nanos(u64::from(left).max(1)).max(Duration::from_millis(50))
+        })
+        .unwrap_or(Duration::from_millis(200))
+}
+
+fn atlas_poll_wait(app: &App, fallback: Duration) -> Duration {
+    let Some(next) = app.atlas_auto_next else {
+        return fallback;
+    };
+    let now = unix_now();
+    if now >= next {
+        return Duration::from_millis(1);
+    }
+    Duration::from_secs(next - now)
+        .min(fallback)
+        .max(Duration::from_millis(1))
+}
 
 pub async fn run(mut app: App) -> Result<()> {
     use crossterm::{
@@ -3964,16 +4254,25 @@ pub async fn run(mut app: App) -> Result<()> {
         }
         let busy =
             !app.running.is_empty() || app.osint_cancel.is_some() || app.provider_pending.is_some();
-        let wait = Duration::from_millis(if dirty {
-            90
-        } else if busy {
-            80
-        } else {
-            400
-        });
+        let mut wait = atlas_poll_wait(
+            &app,
+            Duration::from_millis(if dirty {
+                90
+            } else if busy {
+                80
+            } else {
+                400
+            }),
+        );
+        if atlas_countdown_visible(&app) {
+            wait = wait.min(until_next_second());
+        }
         if !event::poll(wait)? {
             if app.draft_dirty {
                 app.flush_draft();
+            }
+            if atlas_countdown_visible(&app) {
+                dirty = true;
             }
             continue;
         }
@@ -4044,6 +4343,7 @@ fn pump(app: &mut App) -> bool {
         dirty |= app.on_work_event(message);
     }
     dirty |= flush_streams(app);
+    dirty |= app.poll_atlas_auto();
     dirty
 }
 
@@ -4103,13 +4403,21 @@ mod tests {
             osint_input: osint::registry()[0].example_input().to_string(),
             osint_inputs: HashMap::new(),
             firecrawl_key: String::new(),
+            firecrawl_fallback: String::new(),
             hunter_key: String::new(),
+            hunter_fallback: String::new(),
             sociavault_key: String::new(),
+            sociavault_fallback: String::new(),
             newsapi_key: String::new(),
+            newsapi_fallback: String::new(),
             courtlistener_key: String::new(),
+            courtlistener_fallback: String::new(),
             gnews_key: String::new(),
+            gnews_fallback: String::new(),
             newsdata_key: String::new(),
+            newsdata_fallback: String::new(),
             currents_key: String::new(),
+            currents_fallback: String::new(),
             selected_thread: None,
             threads: Vec::new(),
             thread_states: HashMap::new(),
@@ -4202,6 +4510,8 @@ mod tests {
             atlas_status: "Ready".into(),
             atlas_state: "idle".into(),
             atlas_pause: None,
+            atlas_auto_next: None,
+            atlas_auto_started: false,
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
             graph_summary: String::new(),
@@ -5069,8 +5379,10 @@ mod tests {
         // Saving from the key row stores it for the provider.
         select(&mut app, "newsapi_headlines");
         app.newsapi_key = "news-secret-29".into();
+        app.newsapi_fallback = "news-spare-29".into();
         click(&mut app, Target::Button(ButtonId::SaveNewsApiKey));
         assert_eq!(app.status, "NewsAPI key saved");
+        assert!(hit(&app, Target::Field(FieldId::NewsApiFallback)));
         select(&mut app, "courtlistener_case_search");
         app.courtlistener_key = "court-secret-29".into();
         click(&mut app, Target::Button(ButtonId::SaveCourtListenerKey));
@@ -5078,9 +5390,10 @@ mod tests {
         assert_eq!(
             (
                 app.settings.newsapi_api_key.as_str(),
+                app.settings.newsapi_api_key_fallback.as_str(),
                 app.settings.courtlistener_api_token.as_str()
             ),
-            ("news-secret-29", "court-secret-29")
+            ("news-secret-29", "news-spare-29", "court-secret-29")
         );
         for id in osint::NEWS_TOOLS.iter().chain(osint::LEGAL_TOOLS) {
             assert!(
@@ -5090,12 +5403,27 @@ mod tests {
         }
         let saved = std::fs::read_to_string(&app.settings_path).unwrap();
         assert!(
-            saved.contains("newsapi_api_key") && saved.contains("courtlistener_api_token"),
+            saved.contains("newsapi_api_key")
+                && saved.contains("newsapi_api_key_fallback")
+                && saved.contains("courtlistener_api_token"),
             "{saved}"
         );
-        // The key field is masked on screen and "needs key" shows on unkeyed tools.
+        // The key fields are masked on screen and "needs key" shows on unkeyed tools.
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        select(&mut app, "newsapi_headlines");
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let news = screen_text(&terminal);
+        assert!(
+            news.contains("Fallback")
+                && !news.contains("news-secret-29")
+                && !news.contains("news-spare-29")
+                && news.contains("•••••"),
+            "masked fallback field"
+        );
+        select(&mut app, "courtlistener_case_search");
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
@@ -5421,6 +5749,7 @@ mod tests {
         click(&mut app, Target::Button(ButtonId::AtlasLive));
         assert_eq!(app.atlas_page, AtlasPage::Live);
         assert!(hit(&app, Target::Button(ButtonId::AtlasRun)));
+        assert!(hit(&app, Target::Button(ButtonId::AtlasAuto)));
         assert!(hit(&app, Target::Button(ButtonId::AtlasRuns)));
         app.atlas_feed.push(atlas::FeedArticle {
             id: "art-1".into(),
@@ -5896,6 +6225,220 @@ mod tests {
         let id = app.log[app.log_sel].id;
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.log_open.contains(&id));
+    }
+
+    #[test]
+    fn atlas_auto_toggle_persists_the_next_trigger() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 120, 40);
+        app.select(ModuleId::Atlas.index());
+        click(&mut app, Target::Button(ButtonId::AtlasLive));
+        assert_eq!(
+            super::super::ui::atlas_auto_label(&app),
+            "Auto Run: Disabled"
+        );
+        assert!(hit(&app, Target::Button(ButtonId::AtlasAuto)));
+        let before = unix_now();
+        click(&mut app, Target::Button(ButtonId::AtlasAuto));
+        let next = app.atlas_auto_next.expect("armed");
+        assert!(next >= before + ATLAS_AUTO_SECS);
+        assert!(next <= unix_now() + ATLAS_AUTO_SECS);
+        assert_eq!(app.store.atlas_auto_next().unwrap(), Some(next));
+        assert_eq!(
+            super::super::ui::atlas_auto_label(&app),
+            format!("Auto Run: {}", atlas::friendly_unix(next))
+        );
+        assert!(app.atlas_pause.is_none());
+        click(&mut app, Target::Button(ButtonId::AtlasAuto));
+        assert!(app.atlas_auto_next.is_none());
+        assert!(app.store.atlas_auto_next().unwrap().is_none());
+        assert_eq!(
+            super::super::ui::atlas_auto_label(&app),
+            "Auto Run: Disabled"
+        );
+    }
+
+    #[test]
+    fn auto_run_completion_selects_the_latest_history_row() {
+        let mut app = app();
+        app.select(ModuleId::Atlas.index());
+        assert!(app.on_atlas_history());
+        let older = serde_json::to_string(&atlas::RunStats {
+            scored: true,
+            origins: vec![atlas::OriginStat {
+                country: "de".into(),
+                tier: 1,
+                temperature: 0.4,
+                volume: 2,
+                articles: 1,
+            }],
+            ..atlas::RunStats::default()
+        })
+        .unwrap();
+        let newer = serde_json::to_string(&atlas::RunStats {
+            scored: true,
+            origins: vec![atlas::OriginStat {
+                country: "us".into(),
+                tier: 1,
+                temperature: 1.0,
+                volume: 9,
+                articles: 4,
+            }],
+            ..atlas::RunStats::default()
+        })
+        .unwrap();
+        app.store.atlas_insert_run("older", "{}", &older).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        app.store.atlas_insert_run("newer", "{}", &newer).unwrap();
+        app.load_atlas();
+        app.atlas_run_sel = 1;
+        app.scrolls.atlas_runs = 4;
+        app.atlas_focus = Some("de".into());
+        app.overlay = Overlay::Block {
+            title: "Run old".into(),
+            body: String::new(),
+        };
+        app.atlas_auto_started = true;
+        app.on_work_event(WorkEvent::AtlasDone {
+            outcome: Ok(atlas::Stop::Finished),
+        });
+        assert_eq!(app.atlas_run_sel, 0);
+        assert_eq!(app.atlas_runs[0].id, "newer");
+        assert_eq!(app.scrolls.atlas_runs, 0);
+        assert!(app.atlas_focus.is_none());
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(!app.atlas_auto_started);
+        let shown = serde_json::from_str::<atlas::RunStats>(&app.atlas_runs[0].stats_json).unwrap();
+        assert_eq!(shown.origins[0].country, "us");
+
+        app.atlas_run_sel = 1;
+        app.atlas_auto_started = false;
+        app.on_work_event(WorkEvent::AtlasDone {
+            outcome: Ok(atlas::Stop::Finished),
+        });
+        assert_eq!(app.atlas_run_sel, 1);
+
+        app.atlas_page = AtlasPage::Live;
+        app.atlas_run_sel = 1;
+        app.atlas_auto_started = true;
+        app.on_work_event(WorkEvent::AtlasDone {
+            outcome: Ok(atlas::Stop::Finished),
+        });
+        assert_eq!(app.atlas_run_sel, 1);
+    }
+
+    #[test]
+    fn atlas_history_button_counts_down_while_auto_run_is_on() {
+        assert_eq!(super::super::ui::atlas_countdown(5_400, 0), "1:30:00");
+        assert_eq!(super::super::ui::atlas_countdown(3_661, 0), "1:01:01");
+        assert_eq!(super::super::ui::atlas_countdown(59, 0), "0:00:59");
+        assert_eq!(super::super::ui::atlas_countdown(10, 10), "0:00:00");
+        let mut app = app();
+        assert_eq!(super::super::ui::atlas_history_live_label(&app), "Go Live");
+        app.atlas_auto_next = Some(unix_now() + 90 * 60);
+        let label = super::super::ui::atlas_history_live_label(&app);
+        assert!(label == "1:30:00" || label == "1:29:59", "{label}");
+    }
+
+    #[test]
+    fn manual_run_moves_the_next_auto_trigger_out_by_90_minutes() {
+        let mut app = app();
+        app.atlas_auto_next = Some(unix_now() + 30);
+        let before = unix_now();
+        app.shift_atlas_auto_after_manual();
+        let next = app.atlas_auto_next.expect("still armed");
+        assert!(next >= before + ATLAS_AUTO_SECS);
+        assert!(next <= unix_now() + ATLAS_AUTO_SECS);
+        assert_eq!(app.store.atlas_auto_next().unwrap(), Some(next));
+        app.persist_atlas_auto(None);
+        app.shift_atlas_auto_after_manual();
+        assert!(app.atlas_auto_next.is_none());
+        assert!(app.store.atlas_auto_next().unwrap().is_none());
+    }
+
+    #[test]
+    fn atlas_auto_while_running_only_arms_the_next_slot() {
+        let mut app = app();
+        let flag = Arc::new(AtomicBool::new(false));
+        app.atlas_pause = Some(flag.clone());
+        app.toggle_atlas_auto().unwrap();
+        assert!(Arc::ptr_eq(app.atlas_pause.as_ref().unwrap(), &flag));
+        let next = app.atlas_auto_next.expect("armed");
+        assert!(next >= unix_now() + ATLAS_AUTO_SECS - 1);
+        assert!(next <= unix_now() + ATLAS_AUTO_SECS);
+    }
+
+    #[test]
+    fn atlas_auto_future_tick_waits_and_past_tick_reschedules() {
+        let mut app = app();
+        let now = unix_now();
+        app.atlas_auto_next = Some(now + 3_600);
+        assert!(!app.poll_atlas_auto());
+        assert_eq!(app.atlas_auto_next, Some(now + 3_600));
+
+        app.atlas_auto_next = Some(now.saturating_sub(5));
+        assert!(app.poll_atlas_auto());
+        let next = app.atlas_auto_next.expect("rescheduled");
+        assert!(next + 1 >= now + ATLAS_AUTO_SECS);
+        assert!(next <= unix_now() + ATLAS_AUTO_SECS);
+        assert_eq!(app.store.atlas_auto_next().unwrap(), Some(next));
+        assert!(app.atlas_pause.is_none());
+
+        app.atlas_auto_next = Some(unix_now() + 2);
+        let wait = atlas_poll_wait(&app, Duration::from_secs(5));
+        assert!(wait >= Duration::from_secs(1));
+        assert!(wait <= Duration::from_secs(2));
+        app.atlas_auto_next = Some(unix_now());
+        assert_eq!(
+            atlas_poll_wait(&app, Duration::from_millis(400)),
+            Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn atlas_auto_tick_skips_a_pipeline_already_running() {
+        let mut app = app();
+        app.atlas_pause = Some(Arc::new(AtomicBool::new(false)));
+        app.atlas_auto_next = Some(1);
+        assert!(app.poll_atlas_auto());
+        assert!(app.atlas_pause.is_some());
+        assert!(app.atlas_auto_next.unwrap() + 1 >= unix_now() + ATLAS_AUTO_SECS);
+        assert_eq!(app.status, "Auto run waiting for the current pipeline");
+    }
+
+    #[test]
+    fn pruned_history_closes_the_open_run() {
+        let mut app = app();
+        app.atlas_news = true;
+        app.atlas_news_run = "old".into();
+        app.atlas_focus = Some("us".into());
+        app.atlas_articles.push(AtlasArticleRow {
+            run_id: "old".into(),
+            id: "a1".into(),
+            title: "Old wire".into(),
+            description: String::new(),
+            url: "https://example.com".into(),
+            country: "us".into(),
+            source_name: "Wire".into(),
+            source_domain: "example.com".into(),
+            published_at: String::new(),
+            provider: "newsapi".into(),
+            temperature: 1.0,
+            category: "unk".into(),
+            seen_at: String::new(),
+            author: String::new(),
+            image_url: String::new(),
+        });
+        app.overlay = Overlay::Block {
+            title: "Run 1 Jan".into(),
+            body: String::new(),
+        };
+        app.dismiss_pruned_atlas(&["old".into()], Some("old"), "old");
+        assert!(!app.atlas_news);
+        assert!(app.atlas_news_run.is_empty());
+        assert!(app.atlas_articles.is_empty());
+        assert!(app.atlas_focus.is_none());
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     fn hit(app: &App, target: Target) -> bool {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::IpAddr,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -1766,13 +1766,102 @@ type SharedHttp = (reqwest::Client, Arc<Semaphore>, HostSchedule);
 #[derive(Clone, Debug, Default)]
 pub struct ProviderKeys {
     pub firecrawl: String,
+    pub firecrawl_fallback: String,
     pub hunter: String,
+    pub hunter_fallback: String,
     pub sociavault: String,
+    pub sociavault_fallback: String,
     pub newsapi: String,
+    pub newsapi_fallback: String,
     pub courtlistener: String,
+    pub courtlistener_fallback: String,
     pub gnews: String,
+    pub gnews_fallback: String,
     pub newsdata: String,
+    pub newsdata_fallback: String,
     pub currents: String,
+    pub currents_fallback: String,
+}
+
+impl ProviderKeys {
+    /// Primary key and second-account key for a keyed provider.
+    pub fn pair(&self, provider: &str) -> (&str, &str) {
+        match provider {
+            "firecrawl" => (&self.firecrawl, &self.firecrawl_fallback),
+            "hunter" => (&self.hunter, &self.hunter_fallback),
+            "sociavault" => (&self.sociavault, &self.sociavault_fallback),
+            "newsapi" => (&self.newsapi, &self.newsapi_fallback),
+            "courtlistener" => (&self.courtlistener, &self.courtlistener_fallback),
+            "gnews" => (&self.gnews, &self.gnews_fallback),
+            "newsdata" => (&self.newsdata, &self.newsdata_fallback),
+            "currents" => (&self.currents, &self.currents_fallback),
+            _ => ("", ""),
+        }
+    }
+}
+
+fn exhausted_keys() -> &'static std::sync::Mutex<HashSet<String>> {
+    static KEYS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+    KEYS.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+/// Remember that this key hit a rate or quota limit, for the rest of the process.
+pub fn note_key_exhausted(key: &str) {
+    let key = key.trim();
+    if key.is_empty() {
+        return;
+    }
+    if let Ok(mut keys) = exhausted_keys().lock() {
+        keys.insert(key.to_string());
+    }
+}
+
+/// True after [`note_key_exhausted`] for this exact key.
+pub fn key_exhausted(key: &str) -> bool {
+    exhausted_keys()
+        .lock()
+        .map(|keys| keys.contains(key.trim()))
+        .unwrap_or(false)
+}
+
+/// The key to send: the fallback once the primary is empty or exhausted.
+fn select_key<'a>(primary: &'a str, fallback: &'a str) -> &'a str {
+    let primary = primary.trim();
+    let fallback = fallback.trim();
+    if !fallback.is_empty() && (primary.is_empty() || key_exhausted(primary)) {
+        fallback
+    } else {
+        primary
+    }
+}
+
+/// A provider response that means the account's rate limit or quota is spent.
+pub fn quota_limited(status: &str, error: Option<&str>) -> bool {
+    if status == "rate_limited" {
+        return true;
+    }
+    let Some(error) = error else {
+        return false;
+    };
+    let lower = error.to_ascii_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("ratelimited")
+        || lower.contains("quota")
+        || lower.contains("exhausted")
+        || lower.contains("too many requests")
+        || lower.contains("insufficient credit")
+        || lower.contains("payment required")
+        || lower.contains("http 402")
+        || lower.contains("http 429")
+        || lower.contains("apikeyexhausted")
+        || lower.contains("apikeydisabled")
+}
+
+fn keyed_provider(id: &str) -> Option<&'static str> {
+    let id = canonical_tool_id(id);
+    primary_provider(id)
+        .or_else(|| news_legal::provider(id))
+        .or_else(|| atlas_news::provider(id))
 }
 
 /// Atlas pipeline tools are manual and Atlas-only. Recon's picker never offers them.
@@ -1783,7 +1872,17 @@ fn provider_credential(
     id: &str,
     keys: &ProviderKeys,
 ) -> Result<Option<(reqwest::header::HeaderName, String)>> {
-    let keyed = |raw: &str, missing: &str| -> Result<String> {
+    let Some(provider) = keyed_provider(id) else {
+        return Ok(None);
+    };
+    let (primary, fallback) = keys.pair(provider);
+    header_for(id, select_key(primary, fallback))
+}
+
+/// Header for an explicit key. NewsData's value is the raw key; the caller copies it
+/// into the `apikey` query and does not send the header.
+fn header_for(id: &str, raw: &str) -> Result<Option<(reqwest::header::HeaderName, String)>> {
+    let keyed = |missing: &str| -> Result<String> {
         let key = raw.trim();
         ensure!(
             !key.is_empty() && key.len() <= 400 && !key.chars().any(char::is_control),
@@ -1793,20 +1892,15 @@ fn provider_credential(
     };
     let id = canonical_tool_id(id);
     if id.starts_with("firecrawl_") {
-        let key = keyed(
-            &keys.firecrawl,
-            "Enter the Firecrawl API key on a Firecrawl tool, or set FIRECRAWL_API_KEY",
-        )?;
+        let key =
+            keyed("Enter the Firecrawl API key on a Firecrawl tool, or set FIRECRAWL_API_KEY")?;
         return Ok(Some((
             reqwest::header::AUTHORIZATION,
             format!("Bearer {key}"),
         )));
     }
     if id.starts_with("hunter_") {
-        let key = keyed(
-            &keys.hunter,
-            "Enter the Hunter API key on a Hunter tool, or set HUNTER_API_KEY",
-        )?;
+        let key = keyed("Enter the Hunter API key on a Hunter tool, or set HUNTER_API_KEY")?;
         return Ok(Some((
             reqwest::header::HeaderName::from_static("x-api-key"),
             key,
@@ -1814,30 +1908,23 @@ fn provider_credential(
     }
     match atlas_news::provider(id) {
         Some("gnews") => {
-            let key = keyed(
-                &keys.gnews,
-                "Enter the GNews API key on a GNews tool, or set GNEWS_API_KEY",
-            )?;
+            let key = keyed("Enter the GNews API key on a GNews tool, or set GNEWS_API_KEY")?;
             return Ok(Some((
                 reqwest::header::HeaderName::from_static("x-api-key"),
                 key,
             )));
         }
         Some("newsdata") => {
-            let key = keyed(
-                &keys.newsdata,
-                "Enter the NewsData API key on a NewsData tool, or set NEWSDATA_API_KEY",
-            )?;
+            let key =
+                keyed("Enter the NewsData API key on a NewsData tool, or set NEWSDATA_API_KEY")?;
             return Ok(Some((
                 reqwest::header::HeaderName::from_static("x-api-key"),
                 key,
             )));
         }
         Some("currents") => {
-            let key = keyed(
-                &keys.currents,
-                "Enter the Currents API key on a Currents tool, or set CURRENTS_API_KEY",
-            )?;
+            let key =
+                keyed("Enter the Currents API key on a Currents tool, or set CURRENTS_API_KEY")?;
             return Ok(Some((
                 reqwest::header::AUTHORIZATION,
                 format!("Bearer {key}"),
@@ -1847,10 +1934,7 @@ fn provider_credential(
     }
     match news_legal::provider(id) {
         Some("newsapi") => {
-            let key = keyed(
-                &keys.newsapi,
-                "Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY",
-            )?;
+            let key = keyed("Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY")?;
             return Ok(Some((
                 reqwest::header::HeaderName::from_static("x-api-key"),
                 key,
@@ -1858,7 +1942,6 @@ fn provider_credential(
         }
         Some(_) => {
             let key = keyed(
-                &keys.courtlistener,
                 "Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN",
             )?;
             return Ok(Some((
@@ -1869,16 +1952,40 @@ fn provider_credential(
         None => {}
     }
     if id.starts_with("sociavault_") {
-        let key = keyed(
-            &keys.sociavault,
-            "Enter the SociaVault API key on a SociaVault tool, or set SOCIAVAULT_API_KEY",
-        )?;
+        let key =
+            keyed("Enter the SociaVault API key on a SociaVault tool, or set SOCIAVAULT_API_KEY")?;
         return Ok(Some((
             reqwest::header::HeaderName::from_static("x-api-key"),
             key,
         )));
     }
     Ok(None)
+}
+
+/// URL and headers for one account. NewsData carries the key in `apikey`, not a header.
+fn bind_request(
+    id: &str,
+    req_url: &Url,
+    key: &str,
+) -> Result<(
+    Url,
+    Option<(reqwest::header::HeaderName, String)>,
+    Option<(reqwest::header::HeaderName, String)>,
+)> {
+    let credential = header_for(id, key)?;
+    let mut url = req_url.clone();
+    #[cfg(test)]
+    if let Some(base) = test_base(req_url.host_str().unwrap_or("")) {
+        url = rebase(&url, &base)?;
+    }
+    let mut send = credential.clone();
+    if atlas_news::provider(id) == Some("newsdata") {
+        if let Some((_, value)) = &credential {
+            url.query_pairs_mut().append_pair("apikey", value);
+        }
+        send = None;
+    }
+    Ok((url, credential, send))
 }
 /// A short reason from an error body. An HTML error page (a CDN block page such as
 /// Stack Exchange's "This IP address ... has been blocked") becomes its title and the
@@ -2241,7 +2348,15 @@ impl Executor {
                 .ok_or_else(|| anyhow!("Common Crawl index discovery returned no index"))?;
             inputs["index"] = json!(index);
         }
-        let credential = provider_credential(id, keys)?;
+        let (primary_key, fallback_key) = match keyed_provider(id) {
+            Some(provider) => {
+                let (primary, fallback) = keys.pair(provider);
+                (primary.trim().to_string(), fallback.trim().to_string())
+            }
+            None => (String::new(), String::new()),
+        };
+        // A keyed tool with neither account fails here, before any provider request.
+        provider_credential(id, keys)?;
         let req = request(id, &inputs)?;
         let host = req.url.host_str().unwrap_or("").to_string();
         if let Some(locked) = providers::locked_host(id) {
@@ -2258,18 +2373,22 @@ impl Executor {
             None => (None, interval),
         };
         self.pace_host(&host, interval).await;
-        let mut url = req.url.clone();
-        #[cfg(test)]
-        if let Some(base) = url_override {
-            url = rebase(&url, &base)?;
-        }
-        let mut send_credential = credential.clone();
-        if atlas_news::provider(id) == Some("newsdata") {
-            if let Some((_, key)) = &credential {
-                url.query_pairs_mut().append_pair("apikey", key);
-            }
-            send_credential = None;
-        }
+        let chosen = select_key(&primary_key, &fallback_key);
+        let mut using_primary = !primary_key.is_empty() && chosen == primary_key;
+        let mut switched = false;
+        let (mut url, mut credential, mut send_credential) = if keyed_provider(id).is_some() {
+            bind_request(id, &req.url, chosen)?
+        } else {
+            #[cfg(test)]
+            let url = if let Some(base) = url_override.as_ref() {
+                rebase(&req.url, base)?
+            } else {
+                req.url.clone()
+            };
+            #[cfg(not(test))]
+            let url = req.url.clone();
+            (url, None, None)
+        };
         let mut attempts = 0;
         let mut redirects = 0;
         let mut verifying = 0;
@@ -2391,6 +2510,19 @@ impl Executor {
                         }),
                 );
                 redact_key(&mut result, &credential);
+                if using_primary
+                    && !switched
+                    && !fallback_key.is_empty()
+                    && fallback_key != primary_key
+                    && quota_limited(&result.status, result.error.as_deref())
+                {
+                    switched = true;
+                    using_primary = false;
+                    note_key_exhausted(&primary_key);
+                    (url, credential, send_credential) = bind_request(id, &req.url, &fallback_key)?;
+                    attempts = 0;
+                    continue;
+                }
                 return Ok(result);
             }
             let mut partial = false;
@@ -2427,6 +2559,20 @@ impl Executor {
                     .into();
                     result.error = Some(e.to_string());
                     redact_key(&mut result, &credential);
+                    if using_primary
+                        && !switched
+                        && !fallback_key.is_empty()
+                        && fallback_key != primary_key
+                        && quota_limited(&result.status, result.error.as_deref())
+                    {
+                        switched = true;
+                        using_primary = false;
+                        note_key_exhausted(&primary_key);
+                        (url, credential, send_credential) =
+                            bind_request(id, &req.url, &fallback_key)?;
+                        attempts = 0;
+                        continue;
+                    }
                     return Ok(result);
                 }
             }

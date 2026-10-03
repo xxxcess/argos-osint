@@ -1303,27 +1303,51 @@ pub struct SettingsFile {
     /// Firecrawl API key. A non-empty value overrides `FIRECRAWL_API_KEY`.
     #[serde(default)]
     pub firecrawl_api_key: String,
+    /// Second Firecrawl account. Used after the primary key hits a rate or quota limit.
+    #[serde(default)]
+    pub firecrawl_api_key_fallback: String,
     /// Hunter API key. A non-empty value overrides `HUNTER_API_KEY`.
     #[serde(default)]
     pub hunter_api_key: String,
+    /// Second Hunter account. Used after the primary key hits a rate or quota limit.
+    #[serde(default)]
+    pub hunter_api_key_fallback: String,
     /// SociaVault API key. A non-empty value overrides `SOCIAVAULT_API_KEY`.
     #[serde(default)]
     pub sociavault_api_key: String,
+    /// Second SociaVault account. Used after the primary key hits a rate or quota limit.
+    #[serde(default)]
+    pub sociavault_api_key_fallback: String,
     /// NewsAPI key. A non-empty value overrides `NEWSAPI_API_KEY`.
     #[serde(default)]
     pub newsapi_api_key: String,
+    /// Second NewsAPI account. Used after the primary key hits a rate or quota limit.
+    #[serde(default)]
+    pub newsapi_api_key_fallback: String,
     /// CourtListener API token. A non-empty value overrides `COURTLISTENER_API_TOKEN`.
     #[serde(default)]
     pub courtlistener_api_token: String,
+    /// Second CourtListener account. Used after the primary token hits a rate or quota limit.
+    #[serde(default)]
+    pub courtlistener_api_token_fallback: String,
     /// GNews API key. A non-empty value overrides `GNEWS_API_KEY`.
     #[serde(default)]
     pub gnews_api_key: String,
+    /// Second GNews account. Used after the primary key hits a rate or quota limit.
+    #[serde(default)]
+    pub gnews_api_key_fallback: String,
     /// NewsData.io API key. A non-empty value overrides `NEWSDATA_API_KEY`.
     #[serde(default)]
     pub newsdata_api_key: String,
+    /// Second NewsData account. Used after the primary key hits a rate or quota limit.
+    #[serde(default)]
+    pub newsdata_api_key_fallback: String,
     /// Currents API key. A non-empty value overrides `CURRENTS_API_KEY`.
     #[serde(default)]
     pub currents_api_key: String,
+    /// Second Currents account. Used after the primary key hits a rate or quota limit.
+    #[serde(default)]
+    pub currents_api_key_fallback: String,
     #[serde(default)]
     pub recon_limits: ReconLimits,
 }
@@ -1338,6 +1362,18 @@ pub const KEY_ENV: &[(&str, &str)] = &[
     ("gnews", "GNEWS_API_KEY"),
     ("newsdata", "NEWSDATA_API_KEY"),
     ("currents", "CURRENTS_API_KEY"),
+];
+
+/// Environment fallbacks for each keyed provider's second account.
+pub const KEY_FALLBACK_ENV: &[(&str, &str)] = &[
+    ("firecrawl", "FIRECRAWL_API_KEY_FALLBACK"),
+    ("hunter", "HUNTER_API_KEY_FALLBACK"),
+    ("sociavault", "SOCIAVAULT_API_KEY_FALLBACK"),
+    ("newsapi", "NEWSAPI_API_KEY_FALLBACK"),
+    ("courtlistener", "COURTLISTENER_API_TOKEN_FALLBACK"),
+    ("gnews", "GNEWS_API_KEY_FALLBACK"),
+    ("newsdata", "NEWSDATA_API_KEY_FALLBACK"),
+    ("currents", "CURRENTS_API_KEY_FALLBACK"),
 ];
 
 impl SettingsFile {
@@ -1356,9 +1392,29 @@ impl SettingsFile {
         }
     }
 
+    /// The saved second key for a provider, if any (never the environment).
+    pub fn saved_fallback_key(&self, provider: &str) -> &str {
+        match provider {
+            "firecrawl" => &self.firecrawl_api_key_fallback,
+            "hunter" => &self.hunter_api_key_fallback,
+            "sociavault" => &self.sociavault_api_key_fallback,
+            "newsapi" => &self.newsapi_api_key_fallback,
+            "courtlistener" => &self.courtlistener_api_token_fallback,
+            "gnews" => &self.gnews_api_key_fallback,
+            "newsdata" => &self.newsdata_api_key_fallback,
+            "currents" => &self.currents_api_key_fallback,
+            _ => "",
+        }
+    }
+
     /// The key a provider's tools use: a non-empty setting, else its environment variable.
     pub fn provider_key(&self, provider: &str) -> String {
         self.provider_key_with(provider, |name| std::env::var(name).ok())
+    }
+
+    /// The second account for a provider: a non-empty setting, else its fallback environment variable.
+    pub fn provider_fallback_key(&self, provider: &str) -> String {
+        self.provider_fallback_key_with(provider, |name| std::env::var(name).ok())
     }
 
     /// [`Self::provider_key`] with an injected environment (tests).
@@ -1372,6 +1428,25 @@ impl SettingsFile {
             return saved.to_string();
         }
         KEY_ENV
+            .iter()
+            .find(|(known, _)| *known == provider)
+            .and_then(|(_, name)| env(name))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    /// [`Self::provider_fallback_key`] with an injected environment (tests).
+    pub fn provider_fallback_key_with(
+        &self,
+        provider: &str,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> String {
+        let saved = self.saved_fallback_key(provider).trim();
+        if !saved.is_empty() {
+            return saved.to_string();
+        }
+        KEY_FALLBACK_ENV
             .iter()
             .find(|(known, _)| *known == provider)
             .and_then(|(_, name)| env(name))
@@ -1446,6 +1521,17 @@ impl SettingsFile {
                             | "sociavault_api_key"
                             | "newsapi_api_key"
                             | "courtlistener_api_token"
+                            | "gnews_api_key"
+                            | "newsdata_api_key"
+                            | "currents_api_key"
+                            | "firecrawl_api_key_fallback"
+                            | "hunter_api_key_fallback"
+                            | "sociavault_api_key_fallback"
+                            | "newsapi_api_key_fallback"
+                            | "courtlistener_api_token_fallback"
+                            | "gnews_api_key_fallback"
+                            | "newsdata_api_key_fallback"
+                            | "currents_api_key_fallback"
                             | "recon_limits"
                     )
                 })
@@ -1515,6 +1601,50 @@ mod tests {
             ),
             (2, 3)
         );
+    }
+
+    /// A second account is a saved fallback key, else its own environment variable.
+    /// The primary key is unchanged.
+    #[test]
+    fn fallback_keys_come_from_settings_then_env() {
+        let env = |name: &str| match name {
+            "NEWSAPI_API_KEY" => Some("env-news".to_string()),
+            "NEWSAPI_API_KEY_FALLBACK" => Some(" env-spare ".to_string()),
+            "COURTLISTENER_API_TOKEN_FALLBACK" => Some("env-court-spare".to_string()),
+            _ => None,
+        };
+        let mut settings = SettingsFile::default();
+        assert_eq!(settings.provider_key_with("newsapi", env), "env-news");
+        assert_eq!(
+            settings.provider_fallback_key_with("newsapi", env),
+            "env-spare"
+        );
+        assert_eq!(
+            settings.provider_fallback_key_with("courtlistener", env),
+            "env-court-spare"
+        );
+        assert_eq!(settings.provider_fallback_key_with("gnews", |_| None), "");
+        settings.newsapi_api_key_fallback = "saved-spare".into();
+        settings.courtlistener_api_token_fallback = "saved-court-spare".into();
+        assert_eq!(
+            settings.provider_fallback_key_with("newsapi", env),
+            "saved-spare"
+        );
+        assert_eq!(settings.provider_key_with("newsapi", env), "env-news");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        settings.save_to(&path).unwrap();
+        let loaded = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(
+            (
+                loaded.newsapi_api_key_fallback.as_str(),
+                loaded.courtlistener_api_token_fallback.as_str()
+            ),
+            ("saved-spare", "saved-court-spare")
+        );
+        let before = std::fs::read_to_string(&path).unwrap();
+        SettingsFile::load_from(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]

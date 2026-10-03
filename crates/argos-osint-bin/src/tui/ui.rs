@@ -11,8 +11,8 @@ use ratatui::Frame;
 use super::markdown::{self, Piece, Tone};
 
 use super::app::{
-    is_picker_field, App, AtlasPage, BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId,
-    LogLine, ModuleId, Overlay, ProviderPage, Target,
+    is_picker_field, unix_now, App, AtlasPage, BrainListMode, ButtonId, ChoiceKind, DefaultsRole,
+    FieldId, LogLine, ModuleId, Overlay, ProviderPage, Target,
 };
 use super::theme;
 use argos_osint_core::atlas;
@@ -256,39 +256,77 @@ struct OsintLayout {
     list: Rect,
     detail: Rect,
     key: Rect,
+    fallback: Rect,
     input: Rect,
     actions: Rect,
 }
 
 struct ApiKeySlot {
     field: FieldId,
+    fallback: FieldId,
     button: ButtonId,
 }
 
-/// Key row for the selected keyed tool. Firecrawl, SociaVault, Hunter, NewsAPI, and
-/// CourtListener tools each share one key per provider.
+/// Key rows for the selected keyed tool. Each provider shares one primary key and one
+/// fallback key, used after the primary account hits a rate or quota limit.
 fn api_key_slot(app: &App) -> Option<ApiKeySlot> {
     let id = osint::registry().get(app.tool_sel)?.id;
-    let (field, button) = if id.starts_with("firecrawl_") {
-        (FieldId::FirecrawlKey, ButtonId::SaveFirecrawlKey)
+    let (field, fallback, button) = if id.starts_with("firecrawl_") {
+        (
+            FieldId::FirecrawlKey,
+            FieldId::FirecrawlFallback,
+            ButtonId::SaveFirecrawlKey,
+        )
     } else if id.starts_with("sociavault_") {
-        (FieldId::SociaVaultKey, ButtonId::SaveSociaVaultKey)
+        (
+            FieldId::SociaVaultKey,
+            FieldId::SociaVaultFallback,
+            ButtonId::SaveSociaVaultKey,
+        )
     } else if id.starts_with("hunter_") {
-        (FieldId::HunterKey, ButtonId::SaveHunterKey)
+        (
+            FieldId::HunterKey,
+            FieldId::HunterFallback,
+            ButtonId::SaveHunterKey,
+        )
     } else if id.starts_with("newsapi_") {
-        (FieldId::NewsApiKey, ButtonId::SaveNewsApiKey)
+        (
+            FieldId::NewsApiKey,
+            FieldId::NewsApiFallback,
+            ButtonId::SaveNewsApiKey,
+        )
     } else if id.starts_with("gnews_") {
-        (FieldId::GnewsKey, ButtonId::SaveGnewsKey)
+        (
+            FieldId::GnewsKey,
+            FieldId::GnewsFallback,
+            ButtonId::SaveGnewsKey,
+        )
     } else if id.starts_with("newsdata_") {
-        (FieldId::NewsDataKey, ButtonId::SaveNewsDataKey)
+        (
+            FieldId::NewsDataKey,
+            FieldId::NewsDataFallback,
+            ButtonId::SaveNewsDataKey,
+        )
     } else if id.starts_with("currents_") {
-        (FieldId::CurrentsKey, ButtonId::SaveCurrentsKey)
+        (
+            FieldId::CurrentsKey,
+            FieldId::CurrentsFallback,
+            ButtonId::SaveCurrentsKey,
+        )
     } else if id.starts_with("courtlistener_") {
-        (FieldId::CourtListenerKey, ButtonId::SaveCourtListenerKey)
+        (
+            FieldId::CourtListenerKey,
+            FieldId::CourtListenerFallback,
+            ButtonId::SaveCourtListenerKey,
+        )
     } else {
         return None;
     };
-    Some(ApiKeySlot { field, button })
+    Some(ApiKeySlot {
+        field,
+        fallback,
+        button,
+    })
 }
 
 fn osint_areas(area: Rect, with_key: bool) -> OsintLayout {
@@ -306,6 +344,7 @@ fn osint_areas(area: Rect, with_key: bool) -> OsintLayout {
             columns[1],
             [
                 Constraint::Min(4),
+                Constraint::Length(FIELD_H),
                 Constraint::Length(FIELD_H),
                 Constraint::Length(FIELD_H),
                 Constraint::Length(ACTION_H),
@@ -327,8 +366,9 @@ fn osint_areas(area: Rect, with_key: bool) -> OsintLayout {
             list: columns[0],
             detail: right[0],
             key: right[1],
-            input: right[2],
-            actions: right[3],
+            fallback: right[2],
+            input: right[3],
+            actions: right[4],
         }
     } else {
         OsintLayout {
@@ -336,6 +376,7 @@ fn osint_areas(area: Rect, with_key: bool) -> OsintLayout {
             list: columns[0],
             detail: right[0],
             key: Rect::default(),
+            fallback: Rect::default(),
             input: right[1],
             actions: right[2],
         }
@@ -2101,7 +2142,7 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
         Some(ModuleId::Atlas) => {
             if app.atlas_page == AtlasPage::Runs {
                 if app.atlas_news {
-                    let (_, _map, _tabs, list) = atlas_news_areas(body);
+                    let (_map, _tabs, list) = atlas_news_areas(body);
                     if contains(list, x, y) {
                         Region::AtlasNews
                     } else {
@@ -2276,7 +2317,7 @@ fn atlas_runs_room(app: &App) -> usize {
 }
 
 fn atlas_news_room(app: &App) -> usize {
-    inset(atlas_news_areas(chrome(app.screen, app).body).3)
+    inset(atlas_news_areas(chrome(app.screen, app).body).2)
         .height
         .max(1) as usize
 }
@@ -2479,6 +2520,7 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             }
             if let Some(slot) = api_key_slot(app) {
                 order.push(Target::Field(slot.field));
+                order.push(Target::Field(slot.fallback));
                 order.push(Target::Button(slot.button));
             }
             order.push(Target::Field(FieldId::OsintInput));
@@ -2552,19 +2594,22 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             let mut order = vec![Target::Home];
             order.extend((0..ModuleId::ALL.len()).map(Target::App));
             if app.atlas_page == AtlasPage::Runs {
-                order.push(Target::Button(ButtonId::AtlasLive));
                 if app.atlas_news {
                     order.push(Target::Button(ButtonId::AtlasWorld));
                     order.push(Target::Button(ButtonId::AtlasNews));
                     if !app.atlas_articles.is_empty() {
                         order.push(Target::AtlasArticle(app.atlas_article_sel));
                     }
-                } else if !app.atlas_runs.is_empty() {
-                    order.push(Target::AtlasHistory(app.atlas_run_sel));
+                } else {
+                    order.push(Target::Button(ButtonId::AtlasLive));
+                    if !app.atlas_runs.is_empty() {
+                        order.push(Target::AtlasHistory(app.atlas_run_sel));
+                    }
                 }
             } else {
                 order.extend([
                     Target::Button(ButtonId::AtlasRuns),
+                    Target::Button(ButtonId::AtlasAuto),
                     Target::Button(ButtonId::AtlasRun),
                 ]);
                 if !app.atlas_feed.is_empty() {
@@ -2811,6 +2856,9 @@ fn osint_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         return Some(Target::Field(FieldId::OsintSearch));
     }
     if let Some(slot) = slot {
+        if contains(layout.fallback, x, y) {
+            return Some(Target::Field(slot.fallback));
+        }
         if contains(layout.key, x, y) {
             let parts = split_horizontal(layout.key, [Constraint::Min(8), Constraint::Length(16)]);
             return Some(if contains(parts[1], x, y) {
@@ -2987,6 +3035,19 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
             let key = osint_areas(layout.body, true).key;
             Some(split_horizontal(key, [Constraint::Min(8), Constraint::Length(16)])[0])
         }
+        FieldId::FirecrawlFallback
+        | FieldId::HunterFallback
+        | FieldId::SociaVaultFallback
+        | FieldId::NewsApiFallback
+        | FieldId::CourtListenerFallback
+        | FieldId::GnewsFallback
+        | FieldId::NewsDataFallback
+        | FieldId::CurrentsFallback
+            if app.module == Some(ModuleId::Osint)
+                && api_key_slot(app).is_some_and(|slot| slot.fallback == field) =>
+        {
+            Some(osint_areas(layout.body, true).fallback)
+        }
         FieldId::BrainQuery
             if app.module == Some(ModuleId::Brain)
                 && app.brain_list_mode == BrainListMode::List =>
@@ -3122,13 +3183,21 @@ fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &str, area: R
         field,
         FieldId::RouterKey
             | FieldId::FirecrawlKey
+            | FieldId::FirecrawlFallback
             | FieldId::HunterKey
+            | FieldId::HunterFallback
             | FieldId::SociaVaultKey
+            | FieldId::SociaVaultFallback
             | FieldId::NewsApiKey
+            | FieldId::NewsApiFallback
             | FieldId::CourtListenerKey
+            | FieldId::CourtListenerFallback
             | FieldId::GnewsKey
+            | FieldId::GnewsFallback
             | FieldId::NewsDataKey
+            | FieldId::NewsDataFallback
             | FieldId::CurrentsKey
+            | FieldId::CurrentsFallback
     );
     let display = if secret {
         "•".repeat(value.chars().count())
@@ -3892,7 +3961,8 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(slot) = slot {
         let parts = split_horizontal(layout.key, [Constraint::Min(8), Constraint::Length(16)]);
         draw_field(frame, app, slot.field, " API key ", parts[0]);
-        draw_button(frame, app, slot.button, "Save key", parts[1]);
+        draw_button(frame, app, slot.button, "Save keys", parts[1]);
+        draw_field(frame, app, slot.fallback, " Fallback ", layout.fallback);
     }
     draw_field(frame, app, FieldId::OsintInput, " Input JSON ", input);
     let buttons = button_areas(actions, 8);
@@ -4264,45 +4334,31 @@ fn atlas_runs_areas(area: Rect) -> (Rect, Rect, Rect) {
     (actions, map, list)
 }
 
-/// Map shortened by a quarter, then the world/news tabs, then the news list.
-fn atlas_news_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
-    let action_h = ACTION_H.min(area.height);
-    let body_h = area.height.saturating_sub(action_h);
-    let actions = Rect {
-        x: area.x,
-        y: area.y.saturating_add(body_h),
-        width: area.width,
-        height: action_h,
-    };
-    let body = Rect {
+/// Map, then the world/news tabs, then the news list.
+fn atlas_news_areas(area: Rect) -> (Rect, Rect, Rect) {
+    let tabs_h = 3.min(area.height);
+    let remaining = area.height.saturating_sub(tabs_h);
+    let map_h = ((u32::from(area.height) * 9 / 16) as u16).min(remaining);
+    let list_h = remaining.saturating_sub(map_h);
+    let map = Rect {
         x: area.x,
         y: area.y,
         width: area.width,
-        height: body_h,
-    };
-    let tabs_h = 3.min(body.height);
-    let remaining = body.height.saturating_sub(tabs_h);
-    let map_h = ((u32::from(body.height) * 9 / 16) as u16).min(remaining);
-    let list_h = remaining.saturating_sub(map_h);
-    let map = Rect {
-        x: body.x,
-        y: body.y,
-        width: body.width,
         height: map_h,
     };
     let tabs = Rect {
-        x: body.x,
-        y: body.y.saturating_add(map_h),
-        width: body.width,
+        x: area.x,
+        y: area.y.saturating_add(map_h),
+        width: area.width,
         height: tabs_h,
     };
     let list = Rect {
-        x: body.x,
+        x: area.x,
         y: tabs.y.saturating_add(tabs_h),
-        width: body.width,
+        width: area.width,
         height: list_h,
     };
-    (actions, map, tabs, list)
+    (map, tabs, list)
 }
 
 /// Title on the left. Publisher, country code, and category sit on the right.
@@ -4342,6 +4398,26 @@ fn news_feed_line(
     ])
 }
 
+pub(crate) fn atlas_auto_label(app: &App) -> String {
+    match app.atlas_auto_next {
+        Some(next) => format!("Auto Run: {}", atlas::friendly_unix(next)),
+        None => "Auto Run: Disabled".into(),
+    }
+}
+
+pub(crate) fn atlas_countdown(next: u64, now: u64) -> String {
+    let left = next.saturating_sub(now);
+    format!("{}:{:02}:{:02}", left / 3600, (left % 3600) / 60, left % 60)
+}
+
+/// History button under the map. Go Live, or the time left until the next automatic run.
+pub(crate) fn atlas_history_live_label(app: &App) -> String {
+    match app.atlas_auto_next {
+        Some(next) => atlas_countdown(next, unix_now()),
+        None => "Go Live".into(),
+    }
+}
+
 fn atlas_run_label(app: &App) -> &'static str {
     if app.atlas_pause.is_some() {
         "Pause"
@@ -4362,14 +4438,16 @@ fn draw_atlas(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
     let (actions, table, feed) = atlas_live_areas(area);
-    let buttons = button_areas(actions, 2);
+    let buttons = button_areas(actions, 3);
+    let auto = atlas_auto_label(app);
     draw_button(frame, app, ButtonId::AtlasRuns, "History", buttons[0]);
+    draw_button(frame, app, ButtonId::AtlasAuto, &auto, buttons[1]);
     draw_button(
         frame,
         app,
         ButtonId::AtlasRun,
         atlas_run_label(app),
-        buttons[1],
+        buttons[2],
     );
     let width = inset(table).width as usize;
     let header = "Country                         Tier   Temp   Volume  Articles  Share";
@@ -4494,7 +4572,8 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
     };
     frame.render_widget(Paragraph::new(lines).block(pane(" history ")), list);
     let buttons = button_areas(actions, 1);
-    draw_button(frame, app, ButtonId::AtlasLive, "Live", buttons[0]);
+    let live = atlas_history_live_label(app);
+    draw_button(frame, app, ButtonId::AtlasLive, &live, buttons[0]);
 }
 
 fn draw_map_or_hold(frame: &mut Frame, app: &App, area: Rect) {
@@ -4523,7 +4602,7 @@ fn news_tab_label(app: &App) -> String {
 }
 
 fn draw_atlas_news(frame: &mut Frame, app: &App, area: Rect) {
-    let (actions, map, tabs, list) = atlas_news_areas(area);
+    let (map, tabs, list) = atlas_news_areas(area);
     draw_map_or_hold(frame, app, map);
     let tab_slots = button_areas(tabs, 2);
     if let (Some(world), Some(news)) = (tab_slots.first(), tab_slots.get(1)) {
@@ -4552,8 +4631,6 @@ fn draw_atlas_news(frame: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
     frame.render_widget(Paragraph::new(lines).block(pane(" news ")), list);
-    let buttons = button_areas(actions, 1);
-    draw_button(frame, app, ButtonId::AtlasLive, "Live", buttons[0]);
 }
 
 fn atlas_row_at(area: Rect, scroll: u16, y: u16) -> Option<usize> {
@@ -4570,10 +4647,7 @@ fn atlas_row_at(area: Rect, scroll: u16, y: u16) -> Option<usize> {
 fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     if app.atlas_page == AtlasPage::Runs {
         if app.atlas_news {
-            let (actions, _map, tabs, list) = atlas_news_areas(body);
-            if contains(actions, x, y) {
-                return Some(Target::Button(ButtonId::AtlasLive));
-            }
+            let (_map, tabs, list) = atlas_news_areas(body);
             if contains(tabs, x, y) {
                 let slots = button_areas(tabs, 2);
                 return Some(Target::Button(if contains(slots[0], x, y) {
@@ -4600,9 +4674,11 @@ fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     }
     let (actions, _table, feed) = atlas_live_areas(body);
     if contains(actions, x, y) {
-        let buttons = button_areas(actions, 2);
+        let buttons = button_areas(actions, 3);
         return Some(Target::Button(if contains(buttons[0], x, y) {
             ButtonId::AtlasRuns
+        } else if contains(buttons[1], x, y) {
+            ButtonId::AtlasAuto
         } else {
             ButtonId::AtlasRun
         }));
@@ -4723,7 +4799,7 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Atlas · 2 Recon · 3 Brain · 4 OSINT · 5 Providers · 6 System\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
-        Some(ModuleId::Atlas) => "Atlas\n\nHistory is the view that opens. Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to the System event log\nEnter on a ▸ error there opens the full API response\nHistory lists saved runs. Enter or click opens that run's statistics\nThe world map sits above that list and takes most of the pane\nLive sits between the map and the history list\nIt follows the selected history row. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother history row recolours the map and replaces those names\nNews on the run card opens that run's saved articles\nThe list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the history list and zooms back out\nDelete on the run card removes that run. Backspace does the same\nEsc on the news feed or on Live returns to history\nEsc on history returns home",
+        Some(ModuleId::Atlas) => "Atlas\n\nHistory is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to the System event log\nEnter on a ▸ error there opens the full API response\nHistory lists saved runs. Enter or click opens that run's statistics\nThe world map sits above that list and takes most of the pane\nGo Live sits between the map and the history list. When auto run is on, it counts down to the next run\nThe map follows the selected history row. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother history row recolours the map and replaces those names\nNews on the run card opens that run's saved articles\nThe list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the history list and zooms back out\nDelete on the run card removes that run. Backspace does the same\nEsc on the news feed or on Live returns to history\nEsc on history returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors, run stages, and tool results for 24 hours\n↑↓ select a line · Enter or click the arrow folds a tool result\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",

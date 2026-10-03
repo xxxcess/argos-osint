@@ -55,7 +55,23 @@ pub fn locked_host(id: &str) -> Option<&'static str> {
 }
 
 pub fn newsapi_country_supported(country: &str) -> bool {
-    NEWSAPI_COUNTRIES.contains(&country)
+    let country = country.to_ascii_lowercase();
+    NEWSAPI_COUNTRIES.contains(&country.as_str())
+}
+
+/// Currents `latest-news` countries. Anything else is HTTP 400 `Invalid parameters`.
+/// Region tags such as `EU` are not ISO codes Atlas queries, so they are left out.
+pub const CURRENTS_COUNTRIES: &[&str] = &[
+    "ae", "af", "ar", "at", "au", "bd", "be", "bg", "bo", "br", "ca", "cd", "ch", "cl", "cn", "cz",
+    "de", "dk", "ee", "es", "fi", "fr", "gb", "gh", "gr", "hk", "id", "ie", "il", "in", "ir", "it",
+    "jp", "ke", "kh", "kr", "lb", "lu", "mm", "mx", "my", "ng", "nl", "no", "np", "nz", "pa", "ph",
+    "pl", "pm", "ps", "pt", "py", "qa", "rs", "ru", "sa", "se", "sg", "si", "th", "tr", "tw", "us",
+    "uy", "ve", "vn", "za", "zw",
+];
+
+pub fn currents_country_supported(country: &str) -> bool {
+    let country = country.to_ascii_lowercase();
+    CURRENTS_COUNTRIES.contains(&country.as_str())
 }
 
 fn query_arg(v: &Value, limit: usize) -> Result<String> {
@@ -246,6 +262,10 @@ pub(super) fn request(id: &str, v: &Value) -> Result<Request> {
         }
         "currents_latest" => {
             let country = country_arg(v)?.to_ascii_uppercase();
+            ensure!(
+                currents_country_supported(&country),
+                "Currents has no headline feed for {country}"
+            );
             let language = optional_text(v, "language")?.unwrap_or_else(|| "en".into());
             let page = PHASE2_PAGE.to_string();
             Ok(get(url(
@@ -674,5 +694,18 @@ mod tests {
         assert!(!newsapi_country_supported("es"));
         assert!(newsapi_country_headlines("es").is_err());
         assert!(newsapi_country_headlines("us").is_ok());
+    }
+
+    #[test]
+    fn headlines_skip_countries_the_feed_does_not_cover() {
+        for country in ["bm", "mv", "pk"] {
+            assert!(!newsapi_country_supported(country), "{country}");
+            assert!(!currents_country_supported(country), "{country}");
+        }
+        assert!(currents_country_supported("es"));
+        assert!(currents_country_supported("US"));
+        assert!(request("currents_latest", &json!({"country": "us"})).is_ok());
+        assert!(request("currents_latest", &json!({"country": "pk"})).is_err());
+        assert!(request("currents_latest", &json!({"country": "BM"})).is_err());
     }
 }

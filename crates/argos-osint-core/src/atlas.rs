@@ -22,9 +22,9 @@ use crate::secrets::ProviderSecret;
 use crate::store::{AtlasArticleRow, AtlasRunRow, Store};
 
 /// Country-coded headlines collected from each phase-1 source.
-const PHASE1_TARGET: u32 = 25;
-/// Pages per source. Ten articles a page, so four pages cover the target with spare.
-const PHASE1_MAX_PAGES: usize = 4;
+const PHASE1_TARGET: u32 = 50;
+/// Pages per source. Ten articles a page, so five pages cover the target.
+const PHASE1_MAX_PAGES: usize = 5;
 
 const CLUSTERS: &[(&str, &[&str])] = &[
     (
@@ -274,6 +274,7 @@ const DOMAIN_RANK: &[(&str, i32)] = &[
 ];
 
 pub fn daily_cap(provider: &str) -> u32 {
+    let provider = provider.split(':').next().unwrap_or(provider);
     match provider {
         "gnews" => 100,
         "newsdata" => 200,
@@ -760,6 +761,14 @@ fn personal_name(value: &str) -> bool {
     })
 }
 
+/// Same clock as `friendly_date`, from a unix timestamp.
+pub fn friendly_unix(secs: u64) -> String {
+    match chrono::DateTime::from_timestamp(secs as i64, 0) {
+        Some(stamp) => friendly_date(&stamp.to_rfc3339()),
+        None => "unknown".into(),
+    }
+}
+
 /// Local calendar day, plus a 12-hour clock when the value has a time.
 /// A bare date stays a date. Unparsed text is returned as stored.
 pub fn friendly_date(raw: &str) -> String {
@@ -911,17 +920,7 @@ struct CallSpec {
     headers: Vec<(String, String)>,
 }
 
-fn phase1_call(
-    provider: &str,
-    page: usize,
-    page_token: &str,
-    keys: &ProviderKeys,
-) -> Result<CallSpec> {
-    let key = if provider == "gnews" {
-        &keys.gnews
-    } else {
-        &keys.newsdata
-    };
+fn phase1_call(provider: &str, page: usize, page_token: &str, key: &str) -> Result<CallSpec> {
     let prepared = atlas_news::prepare_latest(provider, page, page_token, key)?;
     Ok(CallSpec {
         provider: if provider == "gnews" {
@@ -934,12 +933,7 @@ fn phase1_call(
     })
 }
 
-fn phase2_call(provider: &str, country: &str, keys: &ProviderKeys) -> Result<CallSpec> {
-    let key = if provider == "newsapi" {
-        &keys.newsapi
-    } else {
-        &keys.currents
-    };
+fn phase2_call(provider: &str, country: &str, key: &str) -> Result<CallSpec> {
     let prepared = atlas_news::prepare_headlines(provider, country, key)?;
     Ok(CallSpec {
         provider: if provider == "newsapi" {
@@ -950,6 +944,104 @@ fn phase2_call(provider: &str, country: &str, keys: &ProviderKeys) -> Result<Cal
         url: prepared.url,
         headers: prepared.headers,
     })
+}
+
+/// Primary account while its local daily cap is open and the key is not exhausted.
+/// Otherwise the fallback account, when that cap is still open.
+fn open_key<'a>(
+    store: &Store,
+    provider: &str,
+    primary: &'a str,
+    fallback: &'a str,
+) -> Result<Option<&'a str>> {
+    let primary = primary.trim();
+    let fallback = fallback.trim();
+    if !primary.is_empty() && !crate::osint::key_exhausted(primary) && quota_open(store, provider)?
+    {
+        return Ok(Some(primary));
+    }
+    if !fallback.is_empty()
+        && fallback != primary
+        && !crate::osint::key_exhausted(fallback)
+        && quota_open(store, &format!("{provider}:fallback"))?
+    {
+        return Ok(Some(fallback));
+    }
+    Ok(None)
+}
+
+fn quota_bucket(provider: &str, active: &str, primary: &str) -> String {
+    if active.trim() == primary.trim() {
+        provider.to_string()
+    } else {
+        format!("{provider}:fallback")
+    }
+}
+
+fn quota_fault(fault: &ProviderFault) -> bool {
+    crate::osint::quota_limited("failed", Some(&fault.summary))
+}
+
+struct SpareFetch {
+    body: Option<serde_json::Value>,
+    fault: Option<ProviderFault>,
+    bucket: String,
+}
+
+/// One provider call. A rate or quota fault retries once with `spare` when it differs.
+async fn fetch_with_spare_key<F>(
+    fetch: &mut F,
+    user_agent: &str,
+    provider: &str,
+    primary: &str,
+    key: &str,
+    spare: &str,
+    mut spec_for: impl FnMut(&str) -> Result<CallSpec>,
+) -> SpareFetch
+where
+    F: FnMut(HttpCall) -> FetchFut,
+{
+    let mut active = key.to_string();
+    let mut tried_spare = false;
+    loop {
+        let spec = match spec_for(&active) {
+            Ok(spec) => spec,
+            Err(err) => {
+                return SpareFetch {
+                    body: None,
+                    fault: Some(ProviderFault {
+                        summary: one_line(&err.to_string()),
+                        body: String::new(),
+                    }),
+                    bucket: quota_bucket(provider, &active, primary),
+                };
+            }
+        };
+        match dispatch(fetch, spec, user_agent).await {
+            Ok(body) => {
+                return SpareFetch {
+                    body: Some(body),
+                    fault: None,
+                    bucket: quota_bucket(provider, &active, primary),
+                };
+            }
+            Err(fault)
+                if !tried_spare && quota_fault(&fault) && !spare.is_empty() && spare != active =>
+            {
+                crate::osint::note_key_exhausted(&active);
+                active = spare.to_string();
+                tried_spare = true;
+                continue;
+            }
+            Err(fault) => {
+                return SpareFetch {
+                    body: None,
+                    fault: Some(fault),
+                    bucket: quota_bucket(provider, &active, primary),
+                };
+            }
+        }
+    }
 }
 
 fn apply_hits(
@@ -1062,6 +1154,14 @@ fn require_key(value: &str, name: &str) -> Result<()> {
     }
 }
 
+fn require_either(primary: &str, fallback: &str, name: &str) -> Result<()> {
+    if primary.trim().is_empty() && fallback.trim().is_empty() {
+        require_key("", name)
+    } else {
+        Ok(())
+    }
+}
+
 /// Run or resume Atlas. `resume` continues the newest paused run. Articles already
 /// on `feed` are the dedup set for this process; they are not read back from disk.
 pub struct RunInput<'a> {
@@ -1126,8 +1226,8 @@ where
         cursor.from = lookback_from();
     }
     if cursor.phase <= 1 {
-        require_key(&keys.gnews, "GNews API key")?;
-        require_key(&keys.newsdata, "NewsData API key")?;
+        require_either(&keys.gnews, &keys.gnews_fallback, "GNews API key")?;
+        require_either(&keys.newsdata, &keys.newsdata_fallback, "NewsData API key")?;
     }
     let mut seen: Vec<Seen> = feed.iter().map(seen_of).collect();
     for row in store.atlas_list_articles(&run_id)? {
@@ -1171,11 +1271,16 @@ where
                 if pause.load(Ordering::Relaxed) {
                     return park(&store, &run_id, &here, &stats, &mut emit);
                 }
-                if !quota_open(&store, provider)? {
+                let (primary, fallback) = keys.pair(provider);
+                let Some(key) = open_key(&store, provider, primary, fallback)? else {
                     emit(AtlasEvent::Note(format!("{provider} daily quota is spent")));
                     break;
-                }
-                let spec = phase1_call(provider, page, &token, keys)?;
+                };
+                let spare = if key == primary.trim() {
+                    fallback.trim()
+                } else {
+                    ""
+                };
                 if pace && provider == "gnews" {
                     if let Some(last) = last_gnews {
                         let wait = std::time::Duration::from_secs(1).saturating_sub(last.elapsed());
@@ -1189,8 +1294,19 @@ where
                     page + 1
                 )));
                 let mut stop_provider = false;
-                match dispatch(&mut fetch, spec, &user_agent).await {
-                    Ok(body) => {
+                let fetched = fetch_with_spare_key(
+                    &mut fetch,
+                    &user_agent,
+                    provider,
+                    primary,
+                    key,
+                    spare,
+                    |active| phase1_call(provider, page, &token, active),
+                )
+                .await;
+                let bucket = fetched.bucket;
+                match fetched.body {
+                    Some(body) => {
                         if provider == "gnews" {
                             last_gnews = Some(std::time::Instant::now());
                         }
@@ -1222,12 +1338,14 @@ where
                             }
                         }
                     }
-                    Err(fault) => {
-                        emit(AtlasEvent::Fault(fault));
+                    None => {
+                        if let Some(fault) = fetched.fault {
+                            emit(AtlasEvent::Fault(fault));
+                        }
                         stop_provider = true;
                     }
                 }
-                let _ = store.atlas_quota_bump(provider, &utc_day())?;
+                let _ = store.atlas_quota_bump(&bucket, &utc_day())?;
                 page += 1;
                 emit(AtlasEvent::Stats(stats.clone()));
                 if stop_provider || kept >= PHASE1_TARGET || page >= PHASE1_MAX_PAGES {
@@ -1277,8 +1395,8 @@ where
     }
 
     if cursor.phase == 2 {
-        require_key(&keys.newsapi, "NewsAPI key")?;
-        require_key(&keys.currents, "Currents API key")?;
+        require_either(&keys.newsapi, &keys.newsapi_fallback, "NewsAPI key")?;
+        require_either(&keys.currents, &keys.currents_fallback, "Currents API key")?;
         if stats.origins.is_empty() {
             store.atlas_set_state(
                 &run_id,
@@ -1319,6 +1437,7 @@ where
             })
             .collect();
         let mut newsapi_skipped: Vec<String> = Vec::new();
+        let mut currents_skipped: Vec<String> = Vec::new();
         for job in &phase2 {
             if job_is_before(job, &cursor) {
                 continue;
@@ -1333,25 +1452,50 @@ where
                 );
             }
             let country = &countries[job.country];
-            if job.provider == "newsapi" && !atlas_news::newsapi_country_supported(country) {
-                newsapi_skipped.push(country.clone());
+            let supported = match job.provider {
+                "newsapi" => atlas_news::newsapi_country_supported(country),
+                "currents" => atlas_news::currents_country_supported(country),
+                _ => true,
+            };
+            if !supported {
+                match job.provider {
+                    "newsapi" => newsapi_skipped.push(country.clone()),
+                    "currents" => currents_skipped.push(country.clone()),
+                    _ => {}
+                }
                 continue;
             }
-            if !quota_open(&store, job.provider)? {
+            let (primary, fallback) = keys.pair(job.provider);
+            let Some(key) = open_key(&store, job.provider, primary, fallback)? else {
                 emit(AtlasEvent::Note(format!(
                     "{} daily quota is spent",
                     job.provider
                 )));
                 continue;
-            }
-            let spec = phase2_call(job.provider, country, keys)?;
+            };
+            let spare = if key == primary.trim() {
+                fallback.trim()
+            } else {
+                ""
+            };
             emit(AtlasEvent::Status(format!(
                 "Headlines {} · {}",
                 country.to_ascii_uppercase(),
-                spec.provider
+                job.provider
             )));
-            match dispatch(&mut fetch, spec, &user_agent).await {
-                Ok(body) => match atlas_news::headline_hits(job.provider, country, &body) {
+            let fetched = fetch_with_spare_key(
+                &mut fetch,
+                &user_agent,
+                job.provider,
+                primary,
+                key,
+                spare,
+                |active| phase2_call(job.provider, country, active),
+            )
+            .await;
+            let bucket = fetched.bucket;
+            match fetched.body {
+                Some(body) => match atlas_news::headline_hits(job.provider, country, &body) {
                     Ok(hits) => apply_hits(
                         &hits,
                         job.provider,
@@ -1363,9 +1507,13 @@ where
                     )?,
                     Err(err) => emit(parse_fault(job.provider, err.to_string(), &body)),
                 },
-                Err(fault) => emit(AtlasEvent::Fault(fault)),
+                None => {
+                    if let Some(fault) = fetched.fault {
+                        emit(AtlasEvent::Fault(fault));
+                    }
+                }
             }
-            let _ = store.atlas_quota_bump(job.provider, &utc_day())?;
+            let _ = store.atlas_quota_bump(&bucket, &utc_day())?;
             let next = next_after_phase2(job, countries.len());
             save(&store, &run_id, &cursor_at(&next, &cursor.from), &stats)?;
             emit(AtlasEvent::Stats(stats.clone()));
@@ -1377,8 +1525,18 @@ where
                 .collect::<Vec<_>>()
                 .join(", ");
             emit(AtlasEvent::Note(format!(
-            "NewsAPI was not queried for {names}. Top headlines has no feed for those countries."
-        )));
+                "NewsAPI was not queried for {names}. Top headlines has no feed for those countries."
+            )));
+        }
+        if !currents_skipped.is_empty() {
+            let names = currents_skipped
+                .iter()
+                .map(|code| country_label(code))
+                .collect::<Vec<_>>()
+                .join(", ");
+            emit(AtlasEvent::Note(format!(
+                "Currents was not queried for {names}. Latest news has no feed for those countries."
+            )));
         }
         cursor = Cursor {
             phase: 3,
@@ -1665,7 +1823,11 @@ pub async fn run_live(
 }
 
 pub fn charge_newsapi(store: &Store) {
-    let _ = store.atlas_quota_bump("newsapi", &utc_day());
+    charge_quota(store, "newsapi");
+}
+
+pub fn charge_quota(store: &Store, bucket: &str) {
+    let _ = store.atlas_quota_bump(bucket, &utc_day());
 }
 
 #[cfg(test)]
@@ -1975,6 +2137,95 @@ mod tests {
         assert!(currents[0].contains("country=US"));
     }
 
+    /// A spent primary daily cap uses the fallback account instead of stopping.
+    #[tokio::test]
+    async fn a_spent_primary_quota_uses_the_fallback_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atlas.db");
+        let store = Store::open(&path).unwrap();
+        let stats = RunStats {
+            scored: true,
+            origins: vec![OriginStat {
+                country: "us".into(),
+                tier: 1,
+                temperature: 1.0,
+                volume: 10,
+                articles: 0,
+            }],
+            ..RunStats::default()
+        };
+        let cursor = Cursor {
+            phase: 2,
+            leg: "newsapi".into(),
+            from: "2026-09-30T00:00:00Z".into(),
+            ..Cursor::default()
+        };
+        store
+            .atlas_insert_run(
+                "atlas-fallback",
+                &serde_json::to_string(&cursor).unwrap(),
+                &serde_json::to_string(&stats).unwrap(),
+            )
+            .unwrap();
+        store
+            .atlas_set_state("atlas-fallback", "paused", "", false)
+            .unwrap();
+        let day = utc_day();
+        for _ in 0..daily_cap("newsapi") {
+            store.atlas_quota_bump("newsapi", &day).unwrap();
+        }
+        drop(store);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let log = calls.clone();
+        let pause = AtomicBool::new(false);
+        let keys = ProviderKeys {
+            newsapi: "newsapi-primary-quota".into(),
+            newsapi_fallback: "newsapi-spare-quota".into(),
+            currents: "currents-key".into(),
+            ..ProviderKeys::default()
+        };
+        run_atlas(
+            RunInput {
+                db_path: &path,
+                pause: &pause,
+                keys: &keys,
+                user_agent: "Argos test",
+                pace: false,
+                resume: true,
+                feed: &[],
+                classifier: None,
+            },
+            |_| {},
+            move |call: HttpCall| {
+                let log = log.clone();
+                Box::pin(async move {
+                    let key = call
+                        .headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("x-api-key"))
+                        .map(|(_, value)| value.clone())
+                        .unwrap_or_default();
+                    log.lock().unwrap().push(format!("{} {key}", call.provider));
+                    Ok(reply_for(&call))
+                })
+            },
+        )
+        .await
+        .unwrap();
+        let calls = calls.lock().unwrap();
+        let newsapi: Vec<_> = calls
+            .iter()
+            .filter(|line| line.starts_with("newsapi "))
+            .collect();
+        assert!(!newsapi.is_empty(), "{calls:?}");
+        assert!(
+            newsapi
+                .iter()
+                .all(|line| line.ends_with("newsapi-spare-quota")),
+            "{newsapi:?}"
+        );
+    }
+
     #[test]
     fn article_card_labels_title_publisher_author_and_classification() {
         let card = format_article_card(
@@ -2136,6 +2387,128 @@ mod tests {
         assert!(notes
             .iter()
             .any(|note| note.contains("Spain (ES)") && note.contains("not queried")));
+    }
+
+    #[tokio::test]
+    async fn phase2_skips_countries_without_a_provider_feed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atlas.db");
+        let store = Store::open(&path).unwrap();
+        let origins = ["us", "es", "pk", "bm", "mv"]
+            .into_iter()
+            .map(|country| OriginStat {
+                country: country.into(),
+                tier: 2,
+                temperature: 1.0,
+                volume: 1,
+                articles: 0,
+            })
+            .collect();
+        let stats = RunStats {
+            scored: true,
+            origins,
+            ..RunStats::default()
+        };
+        let cursor = Cursor {
+            phase: 2,
+            leg: "newsapi".into(),
+            from: "2026-09-30T00:00:00Z".into(),
+            ..Cursor::default()
+        };
+        store
+            .atlas_insert_run(
+                "atlas-feeds",
+                &serde_json::to_string(&cursor).unwrap(),
+                &serde_json::to_string(&stats).unwrap(),
+            )
+            .unwrap();
+        store
+            .atlas_set_state("atlas-feeds", "paused", "", false)
+            .unwrap();
+        drop(store);
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let notes = Arc::new(Mutex::new(Vec::new()));
+        let log = urls.clone();
+        let noted = notes.clone();
+        let pause = AtomicBool::new(false);
+        let keys = keys();
+        run_atlas(
+            RunInput {
+                db_path: &path,
+                pause: &pause,
+                keys: &keys,
+                user_agent: "Argos test",
+                pace: false,
+                resume: true,
+                feed: &[],
+                classifier: None,
+            },
+            move |event| {
+                if let AtlasEvent::Note(text) = event {
+                    noted.lock().unwrap().push(text);
+                }
+            },
+            move |call: HttpCall| {
+                let log = log.clone();
+                Box::pin(async move {
+                    if call.provider == "newsapi" || call.provider == "currents" {
+                        log.lock().unwrap().push(call.url.clone());
+                    }
+                    Ok(reply_for(&call))
+                })
+            },
+        )
+        .await
+        .unwrap();
+        let urls = urls.lock().unwrap();
+        let newsapi: Vec<_> = urls
+            .iter()
+            .filter(|url| url.contains("newsapi.org"))
+            .collect();
+        let currents: Vec<_> = urls
+            .iter()
+            .filter(|url| url.contains("currentsapi"))
+            .collect();
+        assert!(newsapi.iter().any(|url| url.contains("country=us")));
+        assert!(currents.iter().any(|url| url.contains("country=US")));
+        assert!(currents.iter().any(|url| url.contains("country=ES")));
+        for country in ["es", "pk", "bm", "mv"] {
+            assert!(
+                newsapi
+                    .iter()
+                    .all(|url| !url.contains(&format!("country={country}"))),
+                "NewsAPI queried {country}"
+            );
+        }
+        for country in ["PK", "BM", "MV"] {
+            assert!(
+                currents
+                    .iter()
+                    .all(|url| !url.contains(&format!("country={country}"))),
+                "Currents queried {country}"
+            );
+        }
+        let notes = notes.lock().unwrap();
+        let newsapi_note = notes
+            .iter()
+            .find(|note| note.starts_with("NewsAPI was not queried"))
+            .expect("newsapi skip note");
+        for name in [
+            "Spain (ES)",
+            "Pakistan (PK)",
+            "Bermuda (BM)",
+            "Maldives (MV)",
+        ] {
+            assert!(newsapi_note.contains(name), "{newsapi_note}");
+        }
+        let currents_note = notes
+            .iter()
+            .find(|note| note.starts_with("Currents was not queried"))
+            .expect("currents skip note");
+        for name in ["Pakistan (PK)", "Bermuda (BM)", "Maldives (MV)"] {
+            assert!(currents_note.contains(name), "{currents_note}");
+        }
+        assert!(!currents_note.contains("Spain"));
     }
 
     #[tokio::test]

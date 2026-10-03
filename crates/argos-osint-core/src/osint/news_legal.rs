@@ -971,6 +971,97 @@ mod tests {
         assert!(COURTLISTENER_SPACING >= Duration::from_secs(12));
     }
 
+    /// A rate limit on the primary key is retried once with the fallback account.
+    /// Later calls in the process start on that fallback. A rejected key is not switched.
+    #[tokio::test]
+    async fn a_rate_limit_switches_to_the_fallback_key_and_a_rejection_does_not() {
+        const PRIMARY: &str = "primary-key-fallback-test-29";
+        const SPARE: &str = "spare-key-fallback-test-29";
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = hits.clone();
+        let fixture = serve(std::sync::Arc::new(move |line: &str| {
+            if !line.contains("/v2/") {
+                return (404, "{}".into());
+            }
+            let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                (
+                    429,
+                    json!({"status": "error", "code": "rateLimited", "message": "slow down"})
+                        .to_string(),
+                )
+            } else {
+                (
+                    200,
+                    articles(&[article(
+                        "Elon Musk at Tesla",
+                        "Elon Musk spoke.",
+                        "https://www.reuters.com/a",
+                    )]),
+                )
+            }
+        }))
+        .await;
+        let keys = ProviderKeys {
+            newsapi: PRIMARY.into(),
+            newsapi_fallback: SPARE.into(),
+            ..ProviderKeys::default()
+        };
+        let executor = Executor::new().unwrap();
+        let first = executor
+            .run_configured("newsapi_search", json!({"query": "Elon Musk"}), None, &keys)
+            .await
+            .unwrap();
+        assert_eq!(first.status, "completed", "{:?}", first.error);
+        let again = executor
+            .run_configured("newsapi_search", json!({"query": "Elon Musk"}), None, &keys)
+            .await
+            .unwrap();
+        assert_eq!(again.status, "completed", "{:?}", again.error);
+        let requests = fixture.requests();
+        assert_eq!(
+            requests.len(),
+            3,
+            "primary once, then fallback, then fallback"
+        );
+        let lower: Vec<String> = requests
+            .iter()
+            .map(|raw| raw.to_ascii_lowercase())
+            .collect();
+        assert!(lower[0].contains(&format!("x-api-key: {PRIMARY}")));
+        assert!(lower[1].contains(&format!("x-api-key: {SPARE}")));
+        assert!(lower[2].contains(&format!("x-api-key: {SPARE}")));
+        assert!(crate::osint::key_exhausted(PRIMARY));
+        drop(fixture);
+
+        const REJECTED: &str = "rejected-primary-no-switch-29";
+        const UNUSED: &str = "unused-spare-no-switch-29";
+        let fixture = serve(std::sync::Arc::new(|_: &str| {
+            (
+                401,
+                json!({"status": "error", "code": "apiKeyInvalid", "message": "nope"}).to_string(),
+            )
+        }))
+        .await;
+        let keys = ProviderKeys {
+            newsapi: REJECTED.into(),
+            newsapi_fallback: UNUSED.into(),
+            ..ProviderKeys::default()
+        };
+        let rejected = Executor::new()
+            .unwrap()
+            .run_configured("newsapi_search", json!({"query": "Elon Musk"}), None, &keys)
+            .await
+            .unwrap();
+        assert_eq!(rejected.status, "failed");
+        assert_eq!(
+            fixture.requests().len(),
+            1,
+            "an invalid key is not switched"
+        );
+        assert!(!crate::osint::key_exhausted(REJECTED));
+    }
+
     /// A provider body that echoes the key is stored redacted.
     #[tokio::test]
     async fn an_echoed_key_is_redacted_from_the_stored_body_and_error() {

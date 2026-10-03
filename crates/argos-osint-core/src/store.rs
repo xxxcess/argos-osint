@@ -597,6 +597,70 @@ impl Store {
         )?;
         self.atlas_quota_used(provider, day)
     }
+
+    /// Unix time of the next automatic Atlas run. Absent means auto run is off.
+    pub fn atlas_auto_next(&self) -> Result<Option<u64>> {
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_state WHERE key='atlas_auto_next'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.and_then(|text| text.parse().ok()))
+    }
+
+    pub fn set_atlas_auto_next(&self, when: Option<u64>) -> Result<()> {
+        match when {
+            Some(secs) => {
+                self.conn.execute(
+                    "INSERT INTO app_state(key,value) VALUES ('atlas_auto_next',?1)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [secs.to_string()],
+                )?;
+            }
+            None => {
+                self.conn
+                    .execute("DELETE FROM app_state WHERE key='atlas_auto_next'", [])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops finished runs that started more than 36 hours ago, including their
+    /// statistics and articles. Runs that are still running or paused stay so they can resume.
+    pub fn atlas_prune_expired(&self) -> Result<Vec<String>> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(36)).to_rfc3339();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<Vec<String>> {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM atlas_runs
+                 WHERE started_at < ?1 AND state NOT IN ('running', 'paused')",
+            )?;
+            let ids = stmt
+                .query_map([cutoff.as_str()], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            drop(stmt);
+            for id in &ids {
+                self.conn
+                    .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
+                self.conn
+                    .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?;
+            }
+            Ok(ids)
+        })();
+        match result {
+            Ok(ids) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(ids)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
 }
 
 /// One Atlas pipeline run. Statistics live in `stats_json`.
@@ -780,5 +844,96 @@ mod tests {
             )
             .unwrap();
         assert_eq!(snapshot, "");
+    }
+
+    fn article(run_id: &str, id: &str) -> AtlasArticleRow {
+        AtlasArticleRow {
+            run_id: run_id.into(),
+            id: id.into(),
+            title: "Headline".into(),
+            description: String::new(),
+            url: "https://example.com".into(),
+            country: "us".into(),
+            source_name: "Wire".into(),
+            source_domain: "example.com".into(),
+            published_at: "2000-01-01T00:00:00+00:00".into(),
+            provider: "newsapi".into(),
+            temperature: 1.0,
+            category: "unk".into(),
+            seen_at: "2000-01-01T00:00:00+00:00".into(),
+            author: String::new(),
+            image_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn atlas_auto_next_round_trips_through_app_state() {
+        let store = Store::memory().unwrap();
+        assert!(store.atlas_auto_next().unwrap().is_none());
+        store.set_atlas_auto_next(Some(1_700_000_000)).unwrap();
+        assert_eq!(store.atlas_auto_next().unwrap(), Some(1_700_000_000));
+        store.set_atlas_auto_next(None).unwrap();
+        assert!(store.atlas_auto_next().unwrap().is_none());
+    }
+
+    #[test]
+    fn atlas_prune_drops_finished_runs_older_than_the_cutoff() {
+        let store = Store::memory().unwrap();
+        store
+            .atlas_insert_run("old", "{}", r#"{"scored":true}"#)
+            .unwrap();
+        store.atlas_insert_run("fresh", "{}", "{}").unwrap();
+        store.atlas_insert_run("held", "{}", "{}").unwrap();
+        store.atlas_insert_run("active", "{}", "{}").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET state='completed', started_at=?1 WHERE id='old'",
+                ["2000-01-01T00:00:00+00:00"],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET state='completed' WHERE id='fresh'",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET state='paused', started_at=?1 WHERE id='held'",
+                ["2000-01-01T00:00:00+00:00"],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET started_at=?1 WHERE id='active'",
+                ["2000-01-01T00:00:00+00:00"],
+            )
+            .unwrap();
+        store.atlas_upsert_article(&article("old", "a1")).unwrap();
+        store.atlas_upsert_article(&article("fresh", "a2")).unwrap();
+        store.atlas_upsert_article(&article("held", "a3")).unwrap();
+        store.atlas_quota_bump("newsapi", "2000-01-01").unwrap();
+        let mut removed = store.atlas_prune_expired().unwrap();
+        removed.sort();
+        assert_eq!(removed, vec!["old".to_string()]);
+        assert!(store.atlas_list_articles("old").unwrap().is_empty());
+        assert_eq!(store.atlas_list_articles("fresh").unwrap().len(), 1);
+        assert_eq!(store.atlas_list_articles("held").unwrap().len(), 1);
+        let mut ids: Vec<_> = store
+            .atlas_list_runs()
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["active".to_string(), "fresh".into(), "held".into()]
+        );
+        assert_eq!(store.atlas_quota_used("newsapi", "2000-01-01").unwrap(), 1);
     }
 }

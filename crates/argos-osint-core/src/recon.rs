@@ -2769,15 +2769,24 @@ impl Service {
     }
     pub(crate) fn provider_keys(&self) -> osint::ProviderKeys {
         let key = |provider: &str| self.settings.provider_key(provider);
+        let spare = |provider: &str| self.settings.provider_fallback_key(provider);
         osint::ProviderKeys {
             firecrawl: key("firecrawl"),
+            firecrawl_fallback: spare("firecrawl"),
             hunter: key("hunter"),
+            hunter_fallback: spare("hunter"),
             sociavault: key("sociavault"),
+            sociavault_fallback: spare("sociavault"),
             newsapi: key("newsapi"),
+            newsapi_fallback: spare("newsapi"),
             courtlistener: key("courtlistener"),
+            courtlistener_fallback: spare("courtlistener"),
             gnews: key("gnews"),
+            gnews_fallback: spare("gnews"),
             newsdata: key("newsdata"),
+            newsdata_fallback: spare("newsdata"),
             currents: key("currents"),
+            currents_fallback: spare("currents"),
         }
     }
     async fn execute(&self, tool_id: &str, inputs: Value, refresh: bool) -> Result<ToolResult> {
@@ -2806,7 +2815,14 @@ impl Service {
         }
         if !result.cached && osint::canonical_tool_id(tool_id).starts_with("newsapi_") {
             if let Ok(store) = Store::open(&self.db_path) {
-                crate::atlas::charge_newsapi(&store);
+                let bucket = if osint::key_exhausted(&keys.newsapi)
+                    && !keys.newsapi_fallback.trim().is_empty()
+                {
+                    "newsapi:fallback"
+                } else {
+                    "newsapi"
+                };
+                crate::atlas::charge_quota(&store, bucket);
             }
         }
         Ok(result)

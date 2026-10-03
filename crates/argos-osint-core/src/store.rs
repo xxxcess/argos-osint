@@ -661,6 +661,256 @@ impl Store {
             }
         }
     }
+
+    /// True when this Atlas run already wrote insight sources. A resume skips the model.
+    pub fn atlas_has_insights(&self, run_id: &str) -> Result<bool> {
+        let answer_id = atlas_answer_id(run_id);
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM insight_sources WHERE run_id=?1 AND answer_id=?2",
+            params![run_id, answer_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Claims whose sources point at this Atlas run.
+    pub fn atlas_stored_claims(&self, run_id: &str) -> Result<Vec<AtlasStoredClaim>> {
+        let answer_id = atlas_answer_id(run_id);
+        let mut stmt = self.conn.prepare(
+            "SELECT c.fingerprint, c.entity_id, c.predicate, c.object_value, c.topic, c.classification
+             FROM insight_claims c
+             JOIN insight_sources s ON s.fingerprint = c.fingerprint
+             WHERE s.run_id=?1 AND s.answer_id=?2
+             GROUP BY c.fingerprint
+             ORDER BY c.created_at",
+        )?;
+        let rows = stmt.query_map(params![run_id, answer_id], |row| {
+            Ok(AtlasStoredClaim {
+                fingerprint: row.get(0)?,
+                entity: row.get(1)?,
+                predicate: row.get(2)?,
+                object: row.get(3)?,
+                topic: row.get(4)?,
+                classification: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Relations whose endpoints are both in `fingerprints`.
+    pub fn insight_relations_among(
+        &self,
+        fingerprints: &[String],
+    ) -> Result<Vec<(String, String, String)>> {
+        if fingerprints.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT left_fingerprint, right_fingerprint, relation FROM insight_relations",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let known: std::collections::HashSet<&str> =
+            fingerprints.iter().map(String::as_str).collect();
+        let mut kept = Vec::new();
+        for row in rows {
+            let (left, right, relation) = row?;
+            if known.contains(left.as_str()) && known.contains(right.as_str()) {
+                kept.push((left, right, relation));
+            }
+        }
+        Ok(kept)
+    }
+
+    /// Writes Atlas claims into the same Brain tables Recon reads.
+    /// `answer_id` is `atlas-{run_id}` and is not a Recon message.
+    pub fn persist_atlas_insights(
+        &self,
+        run_id: &str,
+        claims: &[AtlasInsightClaim],
+        relations: &[(String, String, String)],
+        brief: &str,
+        entity_path: &str,
+    ) -> Result<()> {
+        if claims.is_empty() {
+            return Ok(());
+        }
+        let answer_id = atlas_answer_id(run_id);
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            for claim in claims {
+                let entity = claim.entity.trim().to_ascii_lowercase();
+                let namespace = claim.namespace.trim().to_ascii_lowercase();
+                let predicate = claim.predicate.trim().to_ascii_lowercase();
+                let object = claim.object.trim().to_ascii_lowercase();
+                let sentence = claim.claim.trim();
+                if entity.is_empty()
+                    || namespace.is_empty()
+                    || predicate.is_empty()
+                    || object.is_empty()
+                    || sentence.is_empty()
+                    || claim.article_id.trim().is_empty()
+                {
+                    continue;
+                }
+                let fingerprint = insight_fingerprint(&namespace, &entity, &predicate, &object);
+                let existing: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
+                        [&fingerprint],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if existing.is_none() {
+                    let memory_id = new_id();
+                    let source = MemorySource {
+                        app: "atlas".into(),
+                        conversation_id: run_id.into(),
+                        message_id: None,
+                        reference: Some(run_id.into()),
+                    };
+                    self.conn.execute(
+                        "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
+                        params![memory_id, sentence, now, serde_json::to_string(&source)?],
+                    )?;
+                    self.conn.execute(
+                        "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9)",
+                        params![
+                            fingerprint,
+                            memory_id,
+                            entity,
+                            predicate,
+                            object,
+                            claim.topic.trim(),
+                            claim.classification.trim(),
+                            claim.confidence,
+                            now,
+                        ],
+                    )?;
+                    let mut stmt = self.conn.prepare(
+                        "SELECT fingerprint FROM insight_claims WHERE entity_id=?1 AND predicate=?2 AND fingerprint<>?3",
+                    )?;
+                    let others: Vec<String> = stmt
+                        .query_map(params![entity, predicate, fingerprint], |row| row.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    drop(stmt);
+                    for old in others {
+                        self.conn.execute(
+                            "INSERT OR IGNORE INTO insight_relations(left_fingerprint,right_fingerprint,relation) VALUES (?1,?2,'conflict_or_revision')",
+                            params![old, fingerprint],
+                        )?;
+                    }
+                }
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url) VALUES (?1,NULL,?2,?3,?4,?5)",
+                    params![
+                        fingerprint,
+                        run_id,
+                        answer_id,
+                        claim.article_id.trim(),
+                        claim.source_url.trim(),
+                    ],
+                )?;
+                self.conn.execute(
+                    "UPDATE insight_claims SET updated_at=?1 WHERE fingerprint=?2",
+                    params![now, fingerprint],
+                )?;
+            }
+            for (left, right, relation) in relations {
+                if left.is_empty() || right.is_empty() || relation.is_empty() || left == right {
+                    continue;
+                }
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO insight_relations(left_fingerprint,right_fingerprint,relation) VALUES (?1,?2,?3)",
+                    params![left, right, relation],
+                )?;
+            }
+            let brief = brief.trim();
+            if !brief.is_empty() {
+                let path = if entity_path.trim().is_empty() {
+                    brief.to_string()
+                } else {
+                    entity_path.trim().to_string()
+                };
+                if let Some(memory_id) = atlas_brief_id(&self.conn, run_id)? {
+                    self.conn.execute(
+                        "UPDATE memories SET text=?1 WHERE id=?2",
+                        params![brief, memory_id],
+                    )?;
+                    self.conn.execute(
+                        "INSERT INTO memory_graph_summaries(memory_id,summary,created_at,focus) VALUES (?1,?2,?3,?4)
+                         ON CONFLICT(memory_id) DO UPDATE SET summary=excluded.summary, created_at=excluded.created_at, focus=excluded.focus",
+                        params![memory_id, path, now, run_id],
+                    )?;
+                } else {
+                    let memory_id = new_id();
+                    let source = MemorySource {
+                        app: "atlas".into(),
+                        conversation_id: run_id.into(),
+                        message_id: None,
+                        reference: Some(run_id.into()),
+                    };
+                    self.conn.execute(
+                        "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
+                        params![memory_id, brief, now, serde_json::to_string(&source)?],
+                    )?;
+                    self.conn.execute(
+                        "INSERT INTO memory_graph_summaries(memory_id,summary,created_at,focus) VALUES (?1,?2,?3,?4)",
+                        params![memory_id, path, now, run_id],
+                    )?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+}
+
+fn atlas_answer_id(run_id: &str) -> String {
+    format!("atlas-{run_id}")
+}
+
+/// Fingerprint Recon uses: the JSON array of namespace, entity, predicate, and object.
+pub fn insight_fingerprint(namespace: &str, entity: &str, predicate: &str, object: &str) -> String {
+    serde_json::to_string(&(namespace, entity, predicate, object)).unwrap_or_default()
+}
+
+fn atlas_brief_id(conn: &Connection, run_id: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.source_json FROM memories m
+         JOIN memory_graph_summaries g ON g.memory_id = m.id
+         WHERE g.focus=?1",
+    )?;
+    let rows = stmt.query_map([run_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, source_json) = row?;
+        let source: MemorySource = match serde_json::from_str(&source_json) {
+            Ok(source) => source,
+            Err(_) => continue,
+        };
+        if source.app == "atlas" && source.conversation_id == run_id {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
 /// One Atlas pipeline run. Statistics live in `stats_json`.
@@ -694,6 +944,33 @@ pub struct AtlasArticleRow {
     pub seen_at: String,
     pub author: String,
     pub image_url: String,
+}
+
+/// One span-checked claim the Atlas cycle writes into Brain.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AtlasInsightClaim {
+    pub fingerprint: String,
+    pub entity: String,
+    pub namespace: String,
+    pub predicate: String,
+    pub object: String,
+    pub topic: String,
+    pub claim: String,
+    pub classification: String,
+    pub confidence: f64,
+    pub article_id: String,
+    pub source_url: String,
+}
+
+/// A claim already stored for an Atlas run, used when a resume skips the model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AtlasStoredClaim {
+    pub fingerprint: String,
+    pub entity: String,
+    pub predicate: String,
+    pub object: String,
+    pub topic: String,
+    pub classification: String,
 }
 
 #[cfg(test)]

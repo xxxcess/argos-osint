@@ -50,7 +50,8 @@ pub fn scored_heat(stats: Option<&RunStats>) -> Vec<(&str, u8, f64)> {
         .collect()
 }
 
-fn heat_color(temp: f64) -> Color {
+/// Temperature → heat color used by the world map and Intel bulletin dots.
+pub fn heat_color(temp: f64) -> Color {
     let t = ((temp - 0.10) / 0.90).clamp(0.0, 1.0);
     let r = (90.0 + 150.0 * t) as u8;
     let g = (48.0 + 90.0 * (1.0 - t)) as u8;
@@ -616,6 +617,162 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
             }
             glyphs[at] = ch;
             colors[at] = LABEL;
+        }
+    }
+
+    let mut lines = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let mut spans = Vec::with_capacity(cols);
+        for col in 0..cols {
+            let index = col + cols * row;
+            spans.push(Span::styled(
+                glyphs[index].to_string(),
+                Style::default().fg(colors[index]).bg(WATER),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    Paragraph::new(lines).render(inner, frame.buffer_mut());
+}
+
+/// Small country-focused Braille map for the Intel briefing pane.
+pub fn draw_country_mini_map(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    country: &str,
+    temperature: f64,
+) {
+    let code = canonical(country.trim());
+    let name = argos_osint_core::atlas::country_name(&code)
+        .unwrap_or(code.as_str())
+        .to_string();
+    let title = if code.is_empty() {
+        " map ".into()
+    } else {
+        format!(" {name} ")
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER).bg(BG))
+        .title(title)
+        .title_style(theme::dim())
+        .style(theme::text());
+    frame.render_widget(block, area);
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    if inner.width < 2 || inner.height < 1 || code.is_empty() {
+        return;
+    }
+    let cols = inner.width as usize;
+    let rows = inner.height as usize;
+    let width = cols * 2;
+    let height = rows * 4;
+    let width_f = width as f64;
+    let height_f = height as f64;
+    let (center_lon, center_lat, scale) =
+        country_fit(&code, width_f, height_f).unwrap_or((0.0, 15.0, world_view_scale(width)));
+    let focus_id = land_index(&code).map(|index| (index as u8).saturating_add(1));
+    let mut grid = vec![0_u8; width * height];
+    let width_i = width as i32;
+    let height_i = height as i32;
+    for part in land::PARTS {
+        let Some(exterior) = part.rings.first() else {
+            continue;
+        };
+        paint_ring(
+            &mut grid,
+            exterior,
+            center_lon,
+            center_lat,
+            scale,
+            width_f,
+            height_f,
+            width_i,
+            height_i,
+            part.code.saturating_add(1),
+        );
+        for hole in &part.rings[1..] {
+            paint_ring(
+                &mut grid, hole, center_lon, center_lat, scale, width_f, height_f, width_i,
+                height_i, 0,
+            );
+        }
+    }
+    let hot = heat_color(temperature.max(0.10));
+    let mut glyphs = vec![' '; cols * rows];
+    let mut colors = vec![WATER; cols * rows];
+    for row in 0..rows {
+        for col in 0..cols {
+            let mut mask = 0_u8;
+            let mut hit = false;
+            for sy in 0..4 {
+                for sx in 0..2 {
+                    let id = grid[(row * 4 + sy) * width + col * 2 + sx];
+                    if id == 0 {
+                        continue;
+                    }
+                    mask |= BRAILLE_MAP[sy][sx];
+                    if focus_id == Some(id) {
+                        hit = true;
+                    }
+                }
+            }
+            let index = col + cols * row;
+            if mask == 0 {
+                continue;
+            }
+            glyphs[index] = char::from_u32(0x2800 + u32::from(mask)).unwrap_or(' ');
+            colors[index] = if hit { hot } else { LAND };
+        }
+    }
+
+    // Stamp the full country name on the focused land mass.
+    let index = land_index(&code);
+    let id = index.map(|index| (index as u8).saturating_add(1));
+    if let Some((px, py)) = id
+        .and_then(|id| country_pixel(&grid, width, height, id))
+        .map(|(x, y)| (f64::from(x), f64::from(y)))
+        .or_else(|| {
+            let (lon, lat) = index
+                .and_then(|index| land::LABELS.get(index).copied())
+                .filter(|(lon, lat)| !(*lon == 0 && *lat == 0))
+                .or_else(|| pin(&code))?;
+            Some(project(
+                f64::from(lon) / 10.0,
+                f64::from(lat) / 10.0,
+                center_lon,
+                center_lat,
+                scale,
+                width_f,
+                height_f,
+            ))
+        })
+    {
+        let label = name.as_str();
+        let w = label.chars().count() as i32;
+        let mut placed = Vec::new();
+        if let Some((col, row)) = claim_label(
+            &mut placed,
+            (px / 2.0).round() as i32 - w / 2,
+            (py / 4.0).round() as i32,
+            w,
+            cols as i32,
+            rows as i32,
+        ) {
+            if col >= 0 && row >= 0 {
+                for (offset, ch) in label.chars().enumerate() {
+                    let at = col as usize + offset + cols * row as usize;
+                    if at >= glyphs.len() {
+                        break;
+                    }
+                    glyphs[at] = ch;
+                    colors[at] = LABEL;
+                }
+            }
         }
     }
 

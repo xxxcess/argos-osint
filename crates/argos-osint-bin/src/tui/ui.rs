@@ -11,8 +11,9 @@ use ratatui::Frame;
 use super::markdown::{self, Piece, Tone};
 
 use super::app::{
-    is_picker_field, unix_now, App, AtlasPage, BrainListMode, ButtonId, ChoiceKind, DefaultsRole,
-    FieldId, LogLine, ModuleId, Overlay, ProviderPage, Target,
+    intel_category_short, intel_day_button_label, is_picker_field, unix_now, App, AtlasPage,
+    BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId, IntelPage, LogLine, ModuleId,
+    Overlay, ProviderPage, Target, INTEL_CATEGORIES,
 };
 use super::theme;
 use argos_osint_core::atlas;
@@ -427,14 +428,14 @@ fn popup_area(area: Rect) -> Rect {
     }
 }
 
-struct HomeRow {
-    y: u16,
-    target: Option<usize>,
-    center: bool,
-    kind: HomeKind,
+pub(crate) struct HomeRow {
+    pub(crate) y: u16,
+    pub(crate) target: Option<usize>,
+    pub(crate) center: bool,
+    pub(crate) kind: HomeKind,
 }
 
-enum HomeKind {
+pub(crate) enum HomeKind {
     Logo(Line<'static>),
     Heading(&'static str),
     Item { title: String, detail: String },
@@ -452,7 +453,7 @@ fn home_line(app: &App, x: u16, y: u16) -> Option<usize> {
         .and_then(|row| row.target)
 }
 
-fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
+pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
     let mut rows = if area.width as usize >= logo_width() {
         logo_rows()
     } else {
@@ -462,7 +463,12 @@ fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
     home_group(
         &mut rows,
         "Applications",
-        &[ModuleId::Atlas, ModuleId::Recon, ModuleId::Brain],
+        &[
+            ModuleId::Intel,
+            ModuleId::Atlas,
+            ModuleId::Brain,
+            ModuleId::Recon,
+        ],
         errors,
     );
     rows.push(gap_row());
@@ -475,8 +481,9 @@ fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
     let spare = (area.height as usize)
         .saturating_sub(rows.len())
         .min(HOME_LOGO_GAP);
-    let above = spare / 2;
-    let below = spare - above;
+    // Top pad is half the old even split; mid gap stays; leftover spare is bottom room.
+    let above = spare / 4;
+    let below = spare / 2;
     for _ in 0..below {
         rows.insert(menu_at, gap_row());
     }
@@ -494,7 +501,12 @@ fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
 }
 
 fn home_group(rows: &mut Vec<HomeRow>, title: &'static str, modules: &[ModuleId], errors: usize) {
-    rows.push(center_row(HomeKind::Heading(title)));
+    rows.push(HomeRow {
+        y: 0,
+        target: None,
+        center: false,
+        kind: HomeKind::Heading(title),
+    });
     for module in modules {
         rows.push(HomeRow {
             y: 0,
@@ -550,7 +562,7 @@ fn line_width(line: &Line<'_>) -> usize {
         .sum()
 }
 
-/// Blank rows around the wordmark, split evenly above and below it.
+/// Cap on spare blank rows around the wordmark (top / mid / unused bottom).
 const HOME_LOGO_GAP: usize = 28;
 
 /// ANSI Shadow wordmark. The right-edge and baseline strokes are the shade.
@@ -1827,6 +1839,29 @@ pub fn normalize(app: &mut App) {
     if app.chat_follow || app.scrolls.chat > max {
         app.scrolls.chat = max;
     }
+    normalize_memories(app);
+}
+
+fn normalize_memories(app: &mut App) {
+    if app.module != Some(ModuleId::Brain) || app.brain_list_mode != BrainListMode::List {
+        return;
+    }
+    if app.memories.is_empty() {
+        app.memory_sel = 0;
+        app.scrolls.memories = 0;
+        return;
+    }
+    if app.memory_sel >= app.memories.len() {
+        app.memory_sel = app.memories.len() - 1;
+    }
+    let room = memory_room(app).max(1);
+    let max = app.memories.len().saturating_sub(room) as u16;
+    if app.scrolls.memories > max {
+        app.scrolls.memories = max;
+    }
+    if matches!(app.focus, Target::Memory(_)) {
+        reveal_index(&mut app.scrolls.memories, app.memory_sel, room);
+    }
 }
 
 pub fn move_chat(app: &mut App, delta: i32) {
@@ -1939,8 +1974,7 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
             nudge_list(&mut app.scrolls.threads, delta, max);
         }
         Region::Memories => {
-            let max = memory_max(app);
-            nudge_list(&mut app.scrolls.memories, delta, max);
+            app.move_memory(delta);
         }
         Region::Tools => {
             let max = tool_max(app);
@@ -1999,9 +2033,8 @@ pub fn page(app: &mut App, direction: i32) {
             if app.brain_list_mode == BrainListMode::List
                 && matches!(app.focus, Target::Memory(_)) =>
         {
-            let room = (memory_room(app) / 2).max(1) as i32;
-            let max = memory_max(app);
-            nudge_list(&mut app.scrolls.memories, direction * room, max);
+            let room = memory_room(app).max(1) as i32;
+            app.move_memory(direction * room);
         }
         Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::List => {
             nudge(&mut app.scrolls.recall, direction * 6, 10_000);
@@ -2062,6 +2095,13 @@ pub fn page(app: &mut App, direction: i32) {
             }
             let room = atlas_feed_room(app).max(1) as i32;
             shift_atlas_feed(app, direction * room);
+        }
+        Some(ModuleId::Intel) if app.intel_page == IntelPage::Briefing => {
+            nudge(&mut app.scrolls.intel_brief, direction * 6, 10_000);
+        }
+        Some(ModuleId::Intel) => {
+            let room = intel_list_room(app).max(1) as i32;
+            app.move_intel(direction * room);
         }
         None => {}
     }
@@ -2211,6 +2251,7 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
                 }
             }
         }
+        Some(ModuleId::Intel) => Region::None,
         None => Region::None,
     }
 }
@@ -2240,10 +2281,6 @@ fn tool_room(app: &App) -> usize {
 
 fn thread_max(app: &App) -> u16 {
     app.threads.len().saturating_sub(thread_room(app).max(1)) as u16
-}
-
-fn memory_max(app: &App) -> u16 {
-    app.memories.len().saturating_sub(memory_room(app).max(1)) as u16
 }
 
 fn tool_max(app: &App) -> u16 {
@@ -2730,6 +2767,21 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             }
             order
         }
+        Some(ModuleId::Intel) => {
+            let mut order = vec![Target::Home];
+            order.extend((0..ModuleId::ALL.len()).map(Target::App));
+            if app.intel_page == IntelPage::Briefing {
+                order.push(Target::Button(ButtonId::IntelRecon));
+            } else {
+                order.extend((0..INTEL_CATEGORIES.len()).map(Target::IntelTab));
+                order.push(Target::Button(ButtonId::IntelDay));
+                order.push(Target::Field(FieldId::IntelSearch));
+                if !app.intel_articles.is_empty() {
+                    order.push(Target::IntelArticle(app.intel_sel));
+                }
+            }
+            order
+        }
     }
 }
 
@@ -2849,6 +2901,7 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
         return None;
     }
     match app.module {
+        Some(ModuleId::Intel) => intel_hit(app, layout.body, x, y),
         Some(ModuleId::Recon) => recon_hit(app, layout.body, x, y),
         Some(ModuleId::Brain) => brain_hit(app, layout.body, x, y),
         Some(ModuleId::Osint) => osint_hit(app, layout.body, x, y),
@@ -3322,19 +3375,33 @@ fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &str, area: R
     let width = value_area.width.saturating_sub(1) as usize;
     let empty = if display.is_empty() {
         if picker {
-            "Choose"
+            "Choose".to_string()
         } else if focused {
-            ""
+            String::new()
+        } else if field == FieldId::BrainQuery {
+            format!("{} memories", app.memories.len())
+        } else if field == FieldId::IntelSearch {
+            let n = app.intel_articles.len();
+            if n == 1 {
+                "1 article".into()
+            } else {
+                format!("{n} articles")
+            }
         } else {
-            "type to edit"
+            "type to edit".to_string()
         }
     } else {
-        ""
+        String::new()
     };
-    let visible: String = if empty.is_empty() {
+    let showing_placeholder = !empty.is_empty();
+    let center_empty =
+        matches!(field, FieldId::BrainQuery | FieldId::IntelSearch) && showing_placeholder;
+    let visible: String = if !showing_placeholder {
         display.chars().skip(scroll).take(width).collect()
+    } else if center_empty {
+        center_text(&empty, width)
     } else {
-        empty.to_string()
+        empty
     };
     if area.height >= 2 {
         frame.render_widget(
@@ -3353,12 +3420,16 @@ fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &str, area: R
     }
     let style = if focused {
         theme::user_message()
-    } else if empty.is_empty() {
-        theme::text()
-    } else {
+    } else if showing_placeholder {
         theme::muted()
+    } else {
+        theme::text()
     };
-    let line = format!("{gutter}{visible}");
+    let line = if center_empty {
+        format!(" {visible}")
+    } else {
+        format!("{gutter}{visible}")
+    };
     let rows = if field == FieldId::Composer {
         display
             .split('\n')
@@ -3496,6 +3567,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     match app.module {
         None => draw_home(frame, app, layout.body),
+        Some(ModuleId::Intel) => draw_intel(frame, app, layout.body),
         Some(ModuleId::Recon) => draw_recon(frame, app, layout.body),
         Some(ModuleId::Brain) => draw_brain(frame, app, layout.body),
         Some(ModuleId::Osint) => draw_osint(frame, app, layout.body),
@@ -3595,6 +3667,8 @@ fn header_detail(app: &App) -> String {
         },
         Some(ModuleId::Atlas) if app.atlas_page == AtlasPage::Runs => "history".into(),
         Some(ModuleId::Atlas) => app.atlas_status.clone(),
+        Some(ModuleId::Intel) if app.intel_page == IntelPage::Briefing => "briefing focus".into(),
+        Some(ModuleId::Intel) => "bulletin board".into(),
         Some(ModuleId::Osint) => "lookup tools".into(),
         Some(ModuleId::Providers) => app.provider_page.title().to_string(),
         Some(ModuleId::System) => {
@@ -3617,7 +3691,13 @@ fn footer_line(app: &App) -> Paragraph<'static> {
         "Esc close · Ctrl+U/D scroll"
     } else {
         match (app.module, app.focus) {
-            (None, _) => "↑↓ open · 1–6 · Ctrl+K commands · ? help",
+            (None, _) => "↑↓ open · 1–7 · Ctrl+K commands · ? help",
+            (Some(ModuleId::Intel), _) if app.intel_page == IntelPage::Briefing => {
+                "↑↓ scroll · Recon stub · Esc bulletin"
+            }
+            (Some(ModuleId::Intel), _) => {
+                "←→ tabs · ↑↓ articles · Enter brief · / search · Esc home"
+            }
             (Some(ModuleId::Recon), Target::Field(FieldId::Composer)) => {
                 "Enter send · /commands · Tab transcript · Esc list"
             }
@@ -3630,7 +3710,7 @@ fn footer_line(app: &App) -> Paragraph<'static> {
             }
             (Some(ModuleId::Recon), _) => "Tab next · Enter · Ctrl+K · Esc list",
             (Some(ModuleId::Brain), _) if app.brain_list_mode == BrainListMode::Graph => {
-                "↑↓ summary · Esc memories · Ctrl+K"
+                "Esc memories · Ctrl+K"
             }
             (Some(ModuleId::Atlas), _) if app.atlas_news || app.atlas_page == AtlasPage::Live => {
                 "Tab next · Enter · Ctrl+K · Esc history"
@@ -4127,6 +4207,8 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     draw_button(frame, app, ButtonId::Delete, "Delete", actions[2]);
     draw_field(frame, app, FieldId::BrainQuery, " Find ", layout.query);
     let room = list_room(layout.list.height) / 2;
+    // Keep each row exactly two lines so room/reveal math matches what is painted.
+    let inner_w = layout.list.width.saturating_sub(2) as usize;
     let items = app
         .memories
         .iter()
@@ -4134,17 +4216,25 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
         .skip(app.scrolls.memories as usize)
         .take(room)
         .map(|(index, memory)| {
-            let title = format!(
-                "{} [{}] {}",
-                if memory.pinned { "◆" } else { "·" },
-                memory.category,
-                memory.text
+            let title = fit(
+                &format!(
+                    "{} [{}] {}",
+                    if memory.pinned { "◆" } else { "·" },
+                    memory.category,
+                    memory.text
+                ),
+                inner_w,
             );
-            let source = format!(
-                "  {} / {}",
-                memory.source.app, memory.source.conversation_id
+            let source = fit(
+                &format!(
+                    "  {} / {}",
+                    memory.source.app, memory.source.conversation_id
+                ),
+                inner_w,
             );
-            ListItem::new(format!("{title}\n{source}")).style(if index == app.memory_sel {
+            let selected =
+                matches!(app.focus, Target::Memory(_)) && index == app.memory_sel;
+            ListItem::new(format!("{title}\n{source}")).style(if selected {
                 theme::selected()
             } else {
                 theme::text()
@@ -4152,24 +4242,12 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(List::new(items).block(pane(" memories ")), layout.list);
-    let recalled = if let Some(insight) = &app.selected_insight {
-        let origins = insight
-            .sources
-            .iter()
-            .map(|source| source.thread_id.as_deref().unwrap_or("deleted origin"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "{} · {} → {} · {} · {:.0}%\n{} evidence links · threads: {} · related: {}",
-            insight.entity,
-            insight.predicate,
-            insight.object_value,
-            insight.classification,
-            insight.confidence * 100.0,
-            insight.sources.len(),
-            origins,
-            insight.related.len()
-        )
+    let recalled = if matches!(app.focus, Target::Memory(_)) {
+        if let Some(insight) = &app.selected_insight {
+            memory_anchors_text(insight)
+        } else {
+            "Find filters saved memory. Select an investigation insight to read its anchors.".into()
+        }
     } else {
         "Find filters saved memory. Select an investigation insight to read its anchors.".into()
     };
@@ -4181,6 +4259,58 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: true }),
         layout.recall,
     );
+}
+
+pub(crate) fn memory_anchors_text(insight: &argos_osint_core::recon::InsightView) -> String {
+    let mut lines = vec![format!(
+        "{} · {} → {} · {} · {:.0}%",
+        insight.entity,
+        insight.predicate,
+        insight.object_value,
+        insight.classification,
+        insight.confidence * 100.0
+    )];
+    let topic = insight.topic.trim();
+    if !topic.is_empty() {
+        lines.push(format!("topic: {topic}"));
+    }
+    if insight.sources.is_empty() {
+        lines.push("no evidence links".into());
+    } else {
+        lines.push(format!(
+            "{} evidence link{}",
+            insight.sources.len(),
+            if insight.sources.len() == 1 { "" } else { "s" }
+        ));
+        for source in &insight.sources {
+            lines.push(format!("  {}", source_anchor_label(source)));
+        }
+    }
+    lines.join("\n")
+}
+
+fn source_anchor_label(source: &argos_osint_core::recon::InsightSource) -> String {
+    if let Some(thread) = source.thread_id.as_deref().filter(|id| !id.is_empty()) {
+        if source.deleted_origin {
+            format!("deleted origin ({thread})")
+        } else {
+            format!("thread {thread}")
+        }
+    } else if let Some(url) = source.source_url.as_deref().filter(|url| !url.trim().is_empty()) {
+        url.to_string()
+    } else if let Some(run) = source.run_id.as_deref().filter(|id| !id.is_empty()) {
+        if source.call_id.is_empty() {
+            format!("article run {run}")
+        } else {
+            format!("article {} · run {run}", source.call_id)
+        }
+    } else if source.deleted_origin {
+        "deleted origin".into()
+    } else if !source.call_id.is_empty() {
+        format!("source {}", source.call_id)
+    } else {
+        "source".into()
+    }
 }
 
 fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
@@ -4561,6 +4691,538 @@ fn atlas_run_label(app: &App) -> &'static str {
     } else {
         "Run"
     }
+}
+
+pub fn intel_list_room(app: &App) -> usize {
+    if app.intel_page != IntelPage::Bulletin {
+        return 1;
+    }
+    list_room(intel_bulletin_areas(chrome(app.screen, app).body).4.height).max(1)
+}
+
+fn intel_bulletin_areas(area: Rect) -> (Rect, Rect, Rect, Rect, Rect) {
+    let rows = split_vertical(
+        area,
+        [
+            Constraint::Length(PAGE_TAB_H),
+            Constraint::Length(ACTION_H),
+            Constraint::Percentage(34),
+            Constraint::Length(FIELD_H),
+            Constraint::Min(4),
+        ],
+    );
+    (rows[0], rows[1], rows[2], rows[3], rows[4])
+}
+
+fn intel_briefing_areas(area: Rect) -> (Rect, Rect, Rect) {
+    let cols = split_horizontal(
+        area,
+        [
+            Constraint::Percentage(24),
+            Constraint::Percentage(48),
+            Constraint::Percentage(28),
+        ],
+    );
+    (cols[0], cols[1], cols[2])
+}
+
+fn draw_intel(frame: &mut Frame, app: &App, area: Rect) {
+    match app.intel_page {
+        IntelPage::Bulletin => draw_intel_bulletin(frame, app, area),
+        IntelPage::Briefing => draw_intel_briefing(frame, app, area),
+    }
+}
+
+fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
+    let (tabs, title_row, hero, search, list) = intel_bulletin_areas(area);
+    let active = INTEL_CATEGORIES
+        .iter()
+        .position(|id| *id == app.intel_category.as_str())
+        .unwrap_or(0);
+    draw_tabs(
+        frame,
+        tabs,
+        INTEL_CATEGORIES.iter().enumerate().map(|(index, id)| {
+            (
+                index,
+                intel_category_short(id).to_string(),
+                index == active,
+                app.focus == Target::IntelTab(index),
+            )
+        }),
+    );
+    let day_label = if app.intel_day.is_empty() {
+        "No day".into()
+    } else {
+        intel_day_button_label(&app.intel_day)
+    };
+    draw_button(frame, app, ButtonId::IntelDay, &day_label, title_row);
+
+    let category_title = format!(" {} ", atlas::category_name(&app.intel_category));
+    let story_block = pane(&category_title);
+    let story_inner = story_block.inner(hero);
+    frame.render_widget(story_block, hero);
+    let story_lines = intel_hero_lines(app, story_inner.width as usize);
+    frame.render_widget(
+        Paragraph::new(story_lines).wrap(Wrap { trim: false }),
+        story_inner,
+    );
+
+    draw_field(frame, app, FieldId::IntelSearch, "filter", search);
+
+    let list_block = pane(" secondary stories ");
+    let list_inner = list_block.inner(list);
+    frame.render_widget(list_block, list);
+    if app.intel_articles.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" No classified articles for this day. Run Atlas, or pick another day. ")
+                .style(theme::dim()),
+            list_inner,
+        );
+        return;
+    }
+    let room = list_room(list.height).max(1);
+    let start = app.scrolls.intel_list as usize;
+    let end = (start + room).min(app.intel_articles.len());
+    let items: Vec<ListItem> = app.intel_articles[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, article)| {
+            let index = start + offset;
+            let selected = index == app.intel_sel;
+            let style = if selected {
+                theme::selected()
+            } else {
+                theme::text()
+            };
+            let when = atlas::relative_ago(&article.published_at);
+            let width = list_inner.width.max(1) as usize;
+            let title = fit(
+                &article.title,
+                width.saturating_sub(when.chars().count() + 1),
+            );
+            let gap = width.saturating_sub(title.chars().count() + when.chars().count());
+            let when_style = if selected {
+                theme::selected()
+            } else {
+                theme::dim()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(title, style),
+                Span::styled(" ".repeat(gap), style),
+                Span::styled(when, when_style),
+            ]))
+        })
+        .collect();
+    frame.render_widget(List::new(items), list_inner);
+}
+
+fn intel_hero_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let Some(article) = app.intel_articles.get(app.intel_sel) else {
+        return vec![Line::from(Span::styled(
+            "Select a story from the list below.",
+            theme::dim(),
+        ))];
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "● ".to_string(),
+                Style::default().fg(super::map::heat_color(article.temperature)),
+            ),
+            Span::styled(
+                fit(&article.title, width.saturating_sub(2)),
+                theme::text().add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "{} · {} · {}",
+                article.source_name,
+                article.country.to_ascii_uppercase(),
+                atlas::friendly_date(&article.published_at)
+            ),
+            theme::dim(),
+        )),
+        Line::from(""),
+    ];
+    let body = if article.description.trim().is_empty() {
+        "No summary stored for this headline.".to_string()
+    } else {
+        article.description.clone()
+    };
+    for chunk in wrap_text(&body, width.max(1)) {
+        lines.push(Line::from(Span::styled(chunk, theme::text())));
+    }
+    lines
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            if line.is_empty() {
+                line.push_str(word);
+            } else if line.chars().count() + 1 + word.chars().count() <= width {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                out.push(line);
+                line = word.to_string();
+            }
+        }
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    out
+}
+
+fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(article) = app.intel_articles.get(app.intel_sel) else {
+        frame.render_widget(
+            Paragraph::new(" No article selected. ").style(theme::dim()),
+            area,
+        );
+        return;
+    };
+    let (left, center, right) = intel_briefing_areas(area);
+    let actors = intel_key_actors(app);
+    let locations = intel_locations(app, article);
+    let timelines = intel_timelines(app, article);
+    draw_intel_side_pane(frame, left, " extracted ", &actors, &locations, &timelines);
+
+    let center_block = pane(&format!(" {} ", fit(&article.title, 40)));
+    let center_inner = center_block.inner(center);
+    frame.render_widget(center_block, center);
+    let body = intel_brief_body(app, article, center_inner.width as usize);
+    let scroll = app.scrolls.intel_brief.min(body.len().saturating_sub(1) as u16);
+    let visible: Vec<Line> = body
+        .into_iter()
+        .skip(scroll as usize)
+        .take(center_inner.height as usize)
+        .collect();
+    frame.render_widget(Paragraph::new(visible), center_inner);
+
+    let right_rows = split_vertical(
+        right,
+        [
+            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Min(6),
+            Constraint::Length(ACTION_H),
+        ],
+    );
+    draw_intel_confidence(frame, app, right_rows[0]);
+    draw_intel_tags(frame, article, right_rows[1]);
+    super::map::draw_country_mini_map(
+        frame,
+        right_rows[2],
+        &article.country,
+        article.temperature,
+    );
+    draw_button(frame, app, ButtonId::IntelRecon, "Recon", right_rows[3]);
+}
+
+fn draw_intel_side_pane(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    actors: &[String],
+    locations: &[String],
+    timelines: &[String],
+) {
+    let block = pane(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "KEY ACTORS",
+        theme::accent().add_modifier(Modifier::BOLD),
+    )));
+    if actors.is_empty() {
+        lines.push(Line::from(Span::styled("· none extracted", theme::dim())));
+    } else {
+        for item in actors {
+            lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "LOCATIONS",
+        theme::accent().add_modifier(Modifier::BOLD),
+    )));
+    if locations.is_empty() {
+        lines.push(Line::from(Span::styled("· none extracted", theme::dim())));
+    } else {
+        for item in locations {
+            lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "TIMELINES",
+        theme::accent().add_modifier(Modifier::BOLD),
+    )));
+    if timelines.is_empty() {
+        lines.push(Line::from(Span::styled("· none extracted", theme::dim())));
+    } else {
+        for item in timelines {
+            lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn draw_intel_confidence(frame: &mut Frame, app: &App, area: Rect) {
+    let block = pane(" confidence ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (high, mean) = intel_confidence_scores(app);
+    let width = inner.width.max(1) as usize;
+    let mut lines = Vec::new();
+    lines.push(meter_line("HIGH", high, width));
+    lines.push(meter_line("MEAN", mean, width));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn meter_line(label: &str, value: f64, width: usize) -> Line<'static> {
+    let bar_w = width.saturating_sub(label.len() + 8).max(4);
+    let filled = ((value.clamp(0.0, 1.0) * bar_w as f64).round() as usize).min(bar_w);
+    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
+    Line::from(vec![
+        Span::styled(format!("{label} "), theme::dim()),
+        Span::styled(bar, theme::accent()),
+        Span::styled(format!(" {value:.2}"), theme::dim()),
+    ])
+}
+
+fn draw_intel_tags(frame: &mut Frame, article: &argos_osint_core::store::AtlasArticleRow, area: Rect) {
+    let block = pane(" tags ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" {} ", atlas::category_name(&article.category)),
+            theme::accent(),
+        )),
+        Line::from(Span::styled(
+            format!(" {} ", atlas::category_tag(&article.category)),
+            theme::dim(),
+        )),
+        Line::from(Span::styled(
+            format!(" {} ", article.provider),
+            theme::dim(),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn intel_key_actors(app: &App) -> Vec<String> {
+    let mut out = Vec::new();
+    for claim in &app.intel_claims {
+        let entity = claim.entity.trim();
+        if entity.is_empty() || out.iter().any(|item| item == entity) {
+            continue;
+        }
+        out.push(entity.to_string());
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
+fn intel_locations(
+    app: &App,
+    article: &argos_osint_core::store::AtlasArticleRow,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if !article.country.trim().is_empty() {
+        out.push(atlas::country_label(&article.country));
+    }
+    for claim in &app.intel_claims {
+        for value in [&claim.object, &claim.entity] {
+            let value = value.trim();
+            if value.len() == 2 && value.chars().all(|c| c.is_ascii_alphabetic()) {
+                let label = atlas::country_label(value);
+                if !out.iter().any(|item| item == &label) {
+                    out.push(label);
+                }
+            }
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
+fn intel_timelines(
+    app: &App,
+    article: &argos_osint_core::store::AtlasArticleRow,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if !article.published_at.trim().is_empty() {
+        out.push(atlas::friendly_date(&article.published_at));
+    }
+    for claim in &app.intel_claims {
+        let stamp = claim.published_at.trim();
+        if stamp.is_empty() {
+            continue;
+        }
+        let label = atlas::friendly_date(stamp);
+        if !out.iter().any(|item| item == &label) {
+            out.push(label);
+        }
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
+}
+
+fn intel_confidence_scores(app: &App) -> (f64, f64) {
+    if app.intel_claims.is_empty() {
+        return (0.0, 0.0);
+    }
+    let high = app
+        .intel_claims
+        .iter()
+        .map(|claim| claim.confidence)
+        .fold(0.0_f64, f64::max);
+    let mean = app
+        .intel_claims
+        .iter()
+        .map(|claim| claim.confidence)
+        .sum::<f64>()
+        / app.intel_claims.len() as f64;
+    (high, mean)
+}
+
+fn intel_brief_body(
+    app: &App,
+    article: &argos_osint_core::store::AtlasArticleRow,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        article.title.clone(),
+        theme::text().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{} · {} · {}",
+            article.source_name,
+            article.country.to_ascii_uppercase(),
+            atlas::friendly_date(&article.published_at)
+        ),
+        theme::dim(),
+    )));
+    lines.push(Line::from(""));
+    let summary = if article.description.trim().is_empty() {
+        "No article summary stored.".to_string()
+    } else {
+        article.description.clone()
+    };
+    for chunk in wrap_text(&summary, width.max(1)) {
+        lines.push(Line::from(Span::styled(chunk, theme::text())));
+    }
+    if !app.intel_claims.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "CLAIMS",
+            theme::accent().add_modifier(Modifier::BOLD),
+        )));
+        for claim in &app.intel_claims {
+            lines.push(Line::from(Span::styled(
+                format!("[{}] {:.2}", claim.classification, claim.confidence),
+                theme::dim(),
+            )));
+            for chunk in wrap_text(&claim.claim, width.max(1)) {
+                lines.push(Line::from(Span::styled(chunk, theme::text())));
+            }
+            lines.push(Line::from(""));
+        }
+    }
+    if !app.intel_relations.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "LINKS",
+            theme::accent().add_modifier(Modifier::BOLD),
+        )));
+        for (left, right, relation) in &app.intel_relations {
+            let left_label = app
+                .intel_claims
+                .iter()
+                .find(|claim| &claim.fingerprint == left)
+                .map(|claim| claim.entity.as_str())
+                .unwrap_or(left.as_str());
+            let right_label = app
+                .intel_claims
+                .iter()
+                .find(|claim| &claim.fingerprint == right)
+                .map(|claim| claim.entity.as_str())
+                .unwrap_or(right.as_str());
+            lines.push(Line::from(Span::styled(
+                format!("{left_label} — {relation} — {right_label}"),
+                theme::dim(),
+            )));
+        }
+    }
+    if app.intel_claims.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "No Atlas insights extracted for this article yet.",
+            theme::dim(),
+        )));
+    }
+    lines
+}
+
+fn intel_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
+    if app.intel_page == IntelPage::Briefing {
+        let (_left, _center, right) = intel_briefing_areas(body);
+        let rows = split_vertical(
+            right,
+            [
+                Constraint::Length(6),
+                Constraint::Length(5),
+                Constraint::Min(6),
+                Constraint::Length(ACTION_H),
+            ],
+        );
+        if contains(rows[3], x, y) {
+            return Some(Target::Button(ButtonId::IntelRecon));
+        }
+        return None;
+    }
+    let (tabs, title_row, _hero, search, list) = intel_bulletin_areas(body);
+    let tab_slots = button_areas(tabs, INTEL_CATEGORIES.len());
+    for (index, rect) in tab_slots.into_iter().enumerate() {
+        if contains(rect, x, y) {
+            return Some(Target::IntelTab(index));
+        }
+    }
+    if contains(title_row, x, y) {
+        return Some(Target::Button(ButtonId::IntelDay));
+    }
+    if contains(search, x, y) {
+        return Some(Target::Field(FieldId::IntelSearch));
+    }
+    if in_pane(list, x, y) {
+        let index = app.scrolls.intel_list as usize + (y - list.y - 1) as usize;
+        if index < app.intel_articles.len() {
+            return Some(Target::IntelArticle(index));
+        }
+    }
+    None
 }
 
 fn draw_atlas(frame: &mut Frame, app: &App, area: Rect) {
@@ -5106,7 +5768,8 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 
 fn help_text(app: &App) -> &'static str {
     match app.module {
-        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Atlas · 2 Recon · 3 Brain · 4 OSINT · 5 Providers · 6 System\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
+        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 OSINT · 6 Providers · 7 System\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
+        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows extracted claims, tags, links, and a country mini-map\nRecon is a stub for a later handoff\nEsc returns from briefing to bulletin, or from bulletin to home",
         Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to the System event log\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live and Delete sit between the map and those panes. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
@@ -5251,6 +5914,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
     let title = match kind {
         ChoiceKind::Provider => format!(" {} provider ", app.defaults_role.label()),
         ChoiceKind::Model => format!(" {} model ", app.defaults_role.label()),
+        ChoiceKind::IntelDay => " news cycle day ".into(),
     };
     frame.render_widget(Paragraph::new("").block(theme::card(&title)), area);
     let inner = inset(area);
@@ -5274,10 +5938,10 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
         height = height.saturating_sub(1);
     }
     if app.choice_items.is_empty() && height > 0 {
-        let empty = if matches!(kind, ChoiceKind::Model) {
-            "No models for this account yet."
-        } else {
-            "No connected account yet. Local is always listed."
+        let empty = match kind {
+            ChoiceKind::Model => "No models for this account yet.",
+            ChoiceKind::IntelDay => "No Atlas news-cycle days yet.",
+            ChoiceKind::Provider => "No connected account yet. Local is always listed.",
         };
         frame.render_widget(
             Paragraph::new(empty).style(theme::card_dim()),
@@ -5560,5 +6224,66 @@ mod tests {
             .contains("Acme Robotics · acmerobotics.com · 1 email · 1 person · address"));
         assert!(!logged.detail.contains("100 Market Street"));
         assert!(!logged.detail.contains("Jane Example"));
+    }
+
+    #[test]
+    fn home_pads_titles_and_application_order() {
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = home_rows(area, 0);
+        let logo_at = rows
+            .iter()
+            .position(|row| matches!(row.kind, HomeKind::Logo(_) | HomeKind::Heading("ARGOS OSINT")))
+            .unwrap();
+        assert!(logo_at <= 7, "top pad should be half the old even split, got {logo_at}");
+        let headings: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row.kind {
+                HomeKind::Heading(title) if !row.center => Some(title),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings, ["Applications", "System"]);
+        let apps: Vec<_> = rows
+            .iter()
+            .filter_map(|row| row.target.map(|index| ModuleId::ALL[index]))
+            .take(3)
+            .collect();
+        assert_eq!(
+            apps,
+            [ModuleId::Intel, ModuleId::Atlas, ModuleId::Brain]
+        );
+        assert!(rows.iter().any(|row| {
+            matches!(&row.kind, HomeKind::Logo(_)) && row.center
+                || matches!(row.kind, HomeKind::Heading("ARGOS OSINT")) && row.center
+        }));
+    }
+
+    #[test]
+    fn atlas_source_anchors_are_not_labeled_deleted_origin() {
+        let insight = recon::InsightView {
+            memory_id: "m1".into(),
+            entity: "delhi police".into(),
+            predicate: "received".into(),
+            object_value: "complaints".into(),
+            topic: "crime".into(),
+            classification: "fact".into(),
+            confidence: 0.95,
+            sources: vec![recon::InsightSource {
+                thread_id: None,
+                run_id: Some("atlas-1".into()),
+                answer_id: "a1".into(),
+                call_id: "art-1".into(),
+                source_url: Some("https://example.com/story".into()),
+                deleted_origin: false,
+                published_at: String::new(),
+            }],
+            related: vec!["other".into()],
+        };
+        let text = memory_anchors_text(&insight);
+        assert!(text.contains("delhi police"));
+        assert!(text.contains("topic: crime"));
+        assert!(text.contains("https://example.com/story"));
+        assert!(!text.contains("deleted origin"));
+        assert!(!text.contains("related"));
     }
 }

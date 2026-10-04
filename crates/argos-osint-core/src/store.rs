@@ -666,25 +666,20 @@ impl Store {
                     published_at, provider, temperature, category, seen_at, author, image_url
              FROM atlas_articles WHERE run_id=?1 ORDER BY seen_at, article_id",
         )?;
-        let rows = stmt.query_map([run_id], |row| {
-            Ok(AtlasArticleRow {
-                run_id: row.get(0)?,
-                id: row.get(1)?,
-                title: row.get(2)?,
-                description: row.get(3)?,
-                url: row.get(4)?,
-                country: row.get(5)?,
-                source_name: row.get(6)?,
-                source_domain: row.get(7)?,
-                published_at: row.get(8)?,
-                provider: row.get(9)?,
-                temperature: row.get(10)?,
-                category: row.get(11)?,
-                seen_at: row.get(12)?,
-                author: row.get(13)?,
-                image_url: row.get(14)?,
-            })
-        })?;
+        let rows = stmt.query_map([run_id], |row| atlas_article_from_row(row))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every stored article still within the retention window (prune drops older runs).
+    /// Used to seed Atlas dedup so a new cycle skips headlines already processed.
+    pub fn atlas_recent_articles(&self) -> Result<Vec<AtlasArticleRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run_id, article_id, title, description, url, country, source_name, source_domain,
+                    published_at, provider, temperature, category, seen_at, author, image_url
+             FROM atlas_articles
+             ORDER BY seen_at DESC, article_id",
+        )?;
+        let rows = stmt.query_map([], |row| atlas_article_from_row(row))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -693,6 +688,102 @@ impl Store {
             .atlas_list_articles(run_id)?
             .into_iter()
             .find(|row| row.id == article_id))
+    }
+
+    /// Distinct UTC calendar days (`YYYY-MM-DD`) that have an Atlas run, newest first.
+    pub fn atlas_run_days(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT substr(started_at, 1, 10) AS day
+             FROM atlas_runs
+             WHERE length(started_at) >= 10
+             ORDER BY day DESC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Articles for the Intel bulletin: one OSINT category, one run day, optional search.
+    pub fn atlas_articles_for_intel(
+        &self,
+        category: &str,
+        day: &str,
+        query: &str,
+    ) -> Result<Vec<AtlasArticleRow>> {
+        let q = query.trim();
+        let like = if q.is_empty() {
+            String::new()
+        } else {
+            format!("%{}%", q.to_ascii_lowercase())
+        };
+        let sql = if like.is_empty() {
+            "SELECT a.run_id, a.article_id, a.title, a.description, a.url, a.country,
+                    a.source_name, a.source_domain, a.published_at, a.provider, a.temperature,
+                    a.category, a.seen_at, a.author, a.image_url
+             FROM atlas_articles a
+             JOIN atlas_runs r ON r.id = a.run_id
+             WHERE a.category = ?1 AND substr(r.started_at, 1, 10) = ?2
+             ORDER BY a.published_at DESC, a.seen_at DESC, a.article_id"
+        } else {
+            "SELECT a.run_id, a.article_id, a.title, a.description, a.url, a.country,
+                    a.source_name, a.source_domain, a.published_at, a.provider, a.temperature,
+                    a.category, a.seen_at, a.author, a.image_url
+             FROM atlas_articles a
+             JOIN atlas_runs r ON r.id = a.run_id
+             WHERE a.category = ?1 AND substr(r.started_at, 1, 10) = ?2
+               AND (
+                 lower(a.title) LIKE ?3 OR
+                 lower(a.description) LIKE ?3 OR
+                 lower(a.source_name) LIKE ?3 OR
+                 lower(a.source_domain) LIKE ?3 OR
+                 lower(a.url) LIKE ?3
+               )
+             ORDER BY a.published_at DESC, a.seen_at DESC, a.article_id"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = if like.is_empty() {
+            stmt.query_map(params![category, day], atlas_article_from_row)?
+        } else {
+            stmt.query_map(params![category, day, like], atlas_article_from_row)?
+        };
+        // Same URL (article_id) can appear in multiple runs on one day; keep the newest.
+        Ok(dedupe_articles_by_id(
+            rows.collect::<rusqlite::Result<_>>()?,
+        ))
+    }
+
+    /// Claims linked to one Atlas article (`insight_sources.call_id` stores article_id).
+    pub fn atlas_claims_for_article(
+        &self,
+        run_id: &str,
+        article_id: &str,
+    ) -> Result<Vec<AtlasArticleClaim>> {
+        let answer_id = atlas_answer_id(run_id);
+        let mut stmt = self.conn.prepare(
+            "SELECT c.fingerprint, c.entity_id, c.predicate, c.object_value, c.topic,
+                    c.classification, c.confidence, m.text, s.source_url, s.published_at, s.call_id
+             FROM insight_claims c
+             JOIN insight_sources s ON s.fingerprint = c.fingerprint
+             JOIN memories m ON m.id = c.memory_id
+             WHERE s.run_id=?1 AND s.answer_id=?2 AND s.call_id=?3
+             GROUP BY c.fingerprint
+             ORDER BY c.created_at",
+        )?;
+        let rows = stmt.query_map(params![run_id, answer_id, article_id], |row| {
+            Ok(AtlasArticleClaim {
+                fingerprint: row.get(0)?,
+                entity: row.get(1)?,
+                predicate: row.get(2)?,
+                object: row.get(3)?,
+                topic: row.get(4)?,
+                classification: row.get(5)?,
+                confidence: row.get(6)?,
+                claim: row.get(7)?,
+                source_url: row.get(8)?,
+                published_at: row.get(9)?,
+                article_id: row.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// A run left `running` by a closed process can be resumed.
@@ -1061,6 +1152,34 @@ fn atlas_brief_id(conn: &Connection, run_id: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+fn atlas_article_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AtlasArticleRow> {
+    Ok(AtlasArticleRow {
+        run_id: row.get(0)?,
+        id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        url: row.get(4)?,
+        country: row.get(5)?,
+        source_name: row.get(6)?,
+        source_domain: row.get(7)?,
+        published_at: row.get(8)?,
+        provider: row.get(9)?,
+        temperature: row.get(10)?,
+        category: row.get(11)?,
+        seen_at: row.get(12)?,
+        author: row.get(13)?,
+        image_url: row.get(14)?,
+    })
+}
+
+/// Keep the first row for each `article_id` (caller orders newest first).
+fn dedupe_articles_by_id(rows: Vec<AtlasArticleRow>) -> Vec<AtlasArticleRow> {
+    let mut seen = std::collections::HashSet::new();
+    rows.into_iter()
+        .filter(|row| seen.insert(row.id.clone()))
+        .collect()
+}
+
 /// One Atlas pipeline run. Statistics live in `stats_json`.
 #[derive(Clone, Debug)]
 pub struct AtlasRunRow {
@@ -1120,6 +1239,22 @@ pub struct AtlasStoredClaim {
     pub object: String,
     pub topic: String,
     pub classification: String,
+}
+
+/// One Atlas claim scoped to a single article, for the Intel briefing view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AtlasArticleClaim {
+    pub fingerprint: String,
+    pub entity: String,
+    pub predicate: String,
+    pub object: String,
+    pub topic: String,
+    pub classification: String,
+    pub confidence: f64,
+    pub claim: String,
+    pub source_url: String,
+    pub published_at: String,
+    pub article_id: String,
 }
 
 #[cfg(test)]
@@ -1361,5 +1496,165 @@ mod tests {
             vec!["active".to_string(), "fresh".into(), "held".into()]
         );
         assert_eq!(store.atlas_quota_used("newsapi", "2000-01-01").unwrap(), 1);
+    }
+
+    #[test]
+    fn atlas_run_days_lists_distinct_days_newest_first() {
+        let store = Store::memory().unwrap();
+        store.atlas_insert_run("r1", "{}", "{}").unwrap();
+        store.atlas_insert_run("r2", "{}", "{}").unwrap();
+        store.atlas_insert_run("r3", "{}", "{}").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET started_at=?1 WHERE id='r1'",
+                ["2026-10-01T12:00:00+00:00"],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET started_at=?1 WHERE id='r2'",
+                ["2026-10-03T08:00:00+00:00"],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET started_at=?1 WHERE id='r3'",
+                ["2026-10-03T18:00:00+00:00"],
+            )
+            .unwrap();
+        assert_eq!(
+            store.atlas_run_days().unwrap(),
+            vec!["2026-10-03".to_string(), "2026-10-01".into()]
+        );
+    }
+
+    #[test]
+    fn atlas_recent_articles_lists_retained_rows() {
+        let store = Store::memory().unwrap();
+        store.atlas_insert_run("r1", "{}", "{}").unwrap();
+        store.atlas_upsert_article(&article("r1", "a1")).unwrap();
+        let rows = store.atlas_recent_articles().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "a1");
+    }
+
+    #[test]
+    fn atlas_articles_for_intel_dedupes_same_article_id_across_runs() {
+        let store = Store::memory().unwrap();
+        store.atlas_insert_run("day-a", "{}", "{}").unwrap();
+        store.atlas_insert_run("day-a2", "{}", "{}").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET started_at=?1 WHERE id IN ('day-a','day-a2')",
+                ["2026-10-04T10:00:00+00:00"],
+            )
+            .unwrap();
+        let mut first = article("day-a", "shared");
+        first.category = "geopolitical".into();
+        first.title = "Border talks stall".into();
+        first.published_at = "2026-10-04T11:00:00+00:00".into();
+        let mut second = article("day-a2", "shared");
+        second.category = "geopolitical".into();
+        second.title = "Border talks stall".into();
+        second.published_at = "2026-10-04T12:00:00+00:00".into();
+        second.description = "newer copy".into();
+        store.atlas_upsert_article(&first).unwrap();
+        store.atlas_upsert_article(&second).unwrap();
+        let rows = store
+            .atlas_articles_for_intel("geopolitical", "2026-10-04", "")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].run_id, "day-a2");
+        assert_eq!(rows[0].description, "newer copy");
+    }
+
+    #[test]
+    fn atlas_articles_for_intel_filters_category_day_and_query() {
+        let store = Store::memory().unwrap();
+        store.atlas_insert_run("day-a", "{}", "{}").unwrap();
+        store.atlas_insert_run("day-b", "{}", "{}").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET started_at=?1 WHERE id='day-a'",
+                ["2026-10-04T10:00:00+00:00"],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE atlas_runs SET started_at=?1 WHERE id='day-b'",
+                ["2026-10-03T10:00:00+00:00"],
+            )
+            .unwrap();
+        let mut geo = article("day-a", "g1");
+        geo.category = "geopolitical".into();
+        geo.title = "Border talks stall".into();
+        geo.description = "Diplomats meet in Geneva".into();
+        geo.published_at = "2026-10-04T12:00:00+00:00".into();
+        let mut econ = article("day-a", "e1");
+        econ.category = "economic".into();
+        econ.title = "Oil markets jump".into();
+        econ.published_at = "2026-10-04T13:00:00+00:00".into();
+        let mut older = article("day-b", "g2");
+        older.category = "geopolitical".into();
+        older.title = "Border talks resume".into();
+        older.published_at = "2026-10-03T12:00:00+00:00".into();
+        store.atlas_upsert_article(&geo).unwrap();
+        store.atlas_upsert_article(&econ).unwrap();
+        store.atlas_upsert_article(&older).unwrap();
+
+        let day_a = store
+            .atlas_articles_for_intel("geopolitical", "2026-10-04", "")
+            .unwrap();
+        assert_eq!(day_a.len(), 1);
+        assert_eq!(day_a[0].id, "g1");
+
+        let searched = store
+            .atlas_articles_for_intel("geopolitical", "2026-10-04", "geneva")
+            .unwrap();
+        assert_eq!(searched.len(), 1);
+        assert_eq!(searched[0].id, "g1");
+
+        let miss = store
+            .atlas_articles_for_intel("geopolitical", "2026-10-04", "oil")
+            .unwrap();
+        assert!(miss.is_empty());
+    }
+
+    #[test]
+    fn atlas_claims_for_article_returns_linked_claims() {
+        let store = Store::memory().unwrap();
+        store.atlas_insert_run("run-1", "{}", "{}").unwrap();
+        let claim = AtlasInsightClaim {
+            fingerprint: String::new(),
+            entity: "geneva".into(),
+            namespace: "place".into(),
+            predicate: "hosts".into(),
+            object: "talks".into(),
+            topic: "geopolitical".into(),
+            claim: "Geneva hosts border talks.".into(),
+            classification: "fact".into(),
+            confidence: 0.91,
+            article_id: "art-1".into(),
+            source_url: "https://example.com/a".into(),
+            published_at: "2026-10-04T12:00:00+00:00".into(),
+        };
+        store
+            .persist_atlas_insights("run-1", &[claim], &[], "brief", "")
+            .unwrap();
+        let rows = store.atlas_claims_for_article("run-1", "art-1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entity, "geneva");
+        assert!((rows[0].confidence - 0.91).abs() < f64::EPSILON);
+        assert_eq!(rows[0].claim, "Geneva hosts border talks.");
+        assert!(store
+            .atlas_claims_for_article("run-1", "missing")
+            .unwrap()
+            .is_empty());
     }
 }

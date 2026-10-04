@@ -7,7 +7,7 @@ use argos_osint_core::paths;
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
-use argos_osint_core::store::{AtlasArticleRow, AtlasRunRow};
+use argos_osint_core::store::{AtlasArticleClaim, AtlasArticleRow, AtlasRunRow};
 use argos_osint_core::{atlas, osint, recon};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -29,6 +29,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModuleId {
+    Intel,
     Recon,
     Brain,
     Atlas,
@@ -37,10 +38,11 @@ pub enum ModuleId {
     System,
 }
 impl ModuleId {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
+        Self::Intel,
         Self::Atlas,
-        Self::Recon,
         Self::Brain,
+        Self::Recon,
         Self::Osint,
         Self::Providers,
         Self::System,
@@ -50,6 +52,7 @@ impl ModuleId {
     }
     pub fn title(self) -> &'static str {
         match self {
+            Self::Intel => "Intel",
             Self::Recon => "Recon",
             Self::Brain => "Brain",
             Self::Atlas => "Atlas",
@@ -60,9 +63,10 @@ impl ModuleId {
     }
     pub fn blurb(self) -> &'static str {
         match self {
-            Self::Recon => "Investigate with evidence",
-            Self::Brain => "Recall and manage insights",
-            Self::Atlas => "Regional news pipeline",
+            Self::Intel => "View and Manage Intel Reconnaissance",
+            Self::Recon => "View and Manage Investigations",
+            Self::Brain => "View and Manage Memories",
+            Self::Atlas => "Global News Cycles",
             Self::Osint => "Configure public lookup tools",
             Self::Providers => "Accounts and model defaults",
             Self::System => "Hardware, paths, and event log",
@@ -75,6 +79,36 @@ impl ModuleId {
 pub enum AtlasPage {
     Live,
     Runs,
+}
+
+/// Bulletin board or the article briefing view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntelPage {
+    Bulletin,
+    Briefing,
+}
+
+/// Six OSINT classification tabs shown in Intel (excludes `unk`).
+pub const INTEL_CATEGORIES: &[&str] = &[
+    "geopolitical",
+    "economic",
+    "military",
+    "information",
+    "stability",
+    "technology",
+];
+
+/// Short tab label for an Intel classification id.
+pub fn intel_category_short(id: &str) -> &'static str {
+    match id {
+        "geopolitical" => "Geopolitical",
+        "economic" => "Economic",
+        "military" => "Military",
+        "information" => "Information",
+        "stability" => "Stability",
+        "technology" => "Tech",
+        _ => "Unk",
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -94,12 +128,15 @@ pub struct Scrolls {
     pub recall: u16,
     pub path: u16,
     pub summary: u16,
+    pub intel_list: u16,
+    pub intel_brief: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChoiceKind {
     Provider,
     Model,
+    IntelDay,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,6 +206,7 @@ pub enum FieldId {
     BrainInsight,
     BrainQuery,
     ReconSearch,
+    IntelSearch,
     OsintSearch,
     OsintInput,
     FirecrawlKey,
@@ -317,6 +355,8 @@ pub enum ButtonId {
     AtlasNewsFeed,
     AtlasWorld,
     AtlasNews,
+    IntelDay,
+    IntelRecon,
     CreateMemory,
     BrainBack,
     ClearLog,
@@ -354,6 +394,10 @@ pub enum Target {
     AtlasCycleStats,
     /// One saved article in the history news feed.
     AtlasArticle(usize),
+    /// One Intel category tab.
+    IntelTab(usize),
+    /// One Intel bulletin article row.
+    IntelArticle(usize),
     /// One line of the open recon or claim path.
     PathLine(usize),
     Choice(usize),
@@ -440,6 +484,7 @@ pub struct App {
     pub brain_insight: String,
     pub brain_query: String,
     pub recon_search: String,
+    pub intel_search: String,
     pub osint_search: String,
     pub osint_input: String,
     pub firecrawl_key: String,
@@ -561,6 +606,14 @@ pub struct App {
     pub atlas_auto_next: Option<u64>,
     /// The pipeline now running was started by auto run, not the Run button.
     atlas_auto_started: bool,
+    pub intel_page: IntelPage,
+    pub intel_category: String,
+    pub intel_day: String,
+    pub intel_days: Vec<String>,
+    pub intel_articles: Vec<AtlasArticleRow>,
+    pub intel_sel: usize,
+    pub intel_claims: Vec<AtlasArticleClaim>,
+    pub intel_relations: Vec<(String, String, String)>,
     pub gnews_key: String,
     pub gnews_fallback: String,
     pub newsdata_key: String,
@@ -665,6 +718,7 @@ impl App {
             brain_insight: String::new(),
             brain_query: String::new(),
             recon_search: String::new(),
+            intel_search: String::new(),
             osint_search: String::new(),
             osint_input: osint::registry()
                 .first()
@@ -787,6 +841,14 @@ impl App {
             atlas_pause: None,
             atlas_auto_next: None,
             atlas_auto_started: false,
+            intel_page: IntelPage::Bulletin,
+            intel_category: INTEL_CATEGORIES[0].into(),
+            intel_day: String::new(),
+            intel_days: Vec::new(),
+            intel_articles: Vec::new(),
+            intel_sel: 0,
+            intel_claims: Vec::new(),
+            intel_relations: Vec::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
             graph_summary: String::new(),
@@ -897,6 +959,7 @@ impl App {
         let query = self.palette_query.trim().to_ascii_lowercase();
         let mut items = vec![
             ("home", "Home"),
+            ("intel", "Open Intel"),
             ("recon", "Open Recon"),
             ("brain", "Open Brain"),
             ("atlas", "Open Atlas"),
@@ -939,6 +1002,7 @@ impl App {
         self.overlay = Overlay::None;
         match id {
             "home" => self.go_home(),
+            "intel" => self.select(ModuleId::Intel.index()),
             "recon" => self.select(ModuleId::Recon.index()),
             "brain" => self.select(ModuleId::Brain.index()),
             "atlas" => self.select(ModuleId::Atlas.index()),
@@ -1011,14 +1075,15 @@ impl App {
                 self.go_home();
                 Ok("Home".into())
             }
-            "brain" | "atlas" | "osint" | "providers" | "system" | "recon" => {
+            "brain" | "atlas" | "osint" | "providers" | "system" | "recon" | "intel" => {
                 let index = match name.as_str() {
-                    "recon" => 0,
-                    "brain" => 1,
-                    "atlas" => 2,
-                    "osint" => 3,
-                    "providers" => 4,
-                    _ => 5,
+                    "intel" => ModuleId::Intel.index(),
+                    "atlas" => ModuleId::Atlas.index(),
+                    "brain" => ModuleId::Brain.index(),
+                    "recon" => ModuleId::Recon.index(),
+                    "osint" => ModuleId::Osint.index(),
+                    "providers" => ModuleId::Providers.index(),
+                    _ => ModuleId::System.index(),
                 };
                 self.select(index);
                 Ok(format!("{} open", ModuleId::ALL[index].title()))
@@ -1055,8 +1120,16 @@ impl App {
             self.atlas_page = AtlasPage::Runs;
             self.load_atlas();
         }
+        if self.module == Some(ModuleId::Intel) {
+            self.intel_page = IntelPage::Bulletin;
+            self.load_intel();
+        }
         self.status = format!("{} open", ModuleId::ALL[index].title());
         self.set_focus(match self.module {
+            Some(ModuleId::Intel) if !self.intel_articles.is_empty() => {
+                Target::IntelArticle(self.intel_sel)
+            }
+            Some(ModuleId::Intel) => Target::Field(FieldId::IntelSearch),
             Some(ModuleId::Recon) if self.threads.is_empty() => Target::Field(FieldId::ReconSearch),
             Some(ModuleId::Recon) => Target::Thread(self.thread_sel),
             Some(ModuleId::Brain) => Target::Button(ButtonId::CreateMemory),
@@ -1077,6 +1150,7 @@ impl App {
             FieldId::BrainInsight => &self.brain_insight,
             FieldId::BrainQuery => &self.brain_query,
             FieldId::ReconSearch => &self.recon_search,
+            FieldId::IntelSearch => &self.intel_search,
             FieldId::OsintSearch => &self.osint_search,
             FieldId::OsintInput => &self.osint_input,
             FieldId::FirecrawlKey => &self.firecrawl_key,
@@ -1116,6 +1190,7 @@ impl App {
             FieldId::BrainInsight => &mut self.brain_insight,
             FieldId::BrainQuery => &mut self.brain_query,
             FieldId::ReconSearch => &mut self.recon_search,
+            FieldId::IntelSearch => &mut self.intel_search,
             FieldId::OsintSearch => &mut self.osint_search,
             FieldId::OsintInput => &mut self.osint_input,
             FieldId::FirecrawlKey => &mut self.firecrawl_key,
@@ -1160,6 +1235,21 @@ impl App {
             Target::Field(field) => self.field(field).chars().count(),
             _ => 0,
         };
+        self.sync_selected_insight();
+    }
+
+    fn sync_selected_insight(&mut self) {
+        if self.module != Some(ModuleId::Brain) || self.brain_list_mode != BrainListMode::List {
+            return;
+        }
+        if !matches!(self.focus, Target::Memory(_)) {
+            self.selected_insight = None;
+            return;
+        }
+        self.selected_insight = self
+            .memories
+            .get(self.memory_sel)
+            .and_then(|memory| self.store.insight_for_memory(&memory.id).ok().flatten());
     }
 
     fn refresh_threads(&mut self) -> Result<()> {
@@ -1532,6 +1622,148 @@ impl App {
         write(&mut self.settings, key, fallback);
         self.save_settings()?;
         Ok(saved.into())
+    }
+
+    /// Load Intel bulletin articles for the active category, run day, and search.
+    pub fn load_intel(&mut self) {
+        self.intel_days = self.store.atlas_run_days().unwrap_or_default();
+        if self.intel_day.is_empty() || !self.intel_days.iter().any(|day| day == &self.intel_day) {
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            self.intel_day = if self.intel_days.iter().any(|day| day == &today) {
+                today
+            } else {
+                self.intel_days.first().cloned().unwrap_or_default()
+            };
+        }
+        if !INTEL_CATEGORIES.contains(&self.intel_category.as_str()) {
+            self.intel_category = INTEL_CATEGORIES[0].into();
+        }
+        let kept_id = self
+            .intel_articles
+            .get(self.intel_sel)
+            .map(|row| row.id.clone());
+        self.intel_articles = if self.intel_day.is_empty() {
+            Vec::new()
+        } else {
+            self.store
+                .atlas_articles_for_intel(
+                    &self.intel_category,
+                    &self.intel_day,
+                    &self.intel_search,
+                )
+                .unwrap_or_default()
+        };
+        self.intel_sel = kept_id
+            .and_then(|id| self.intel_articles.iter().position(|row| row.id == id))
+            .unwrap_or(0);
+        if self.intel_sel >= self.intel_articles.len() {
+            self.intel_sel = self.intel_articles.len().saturating_sub(1);
+        }
+        self.scrolls.intel_list = 0;
+        if self.intel_page == IntelPage::Briefing {
+            self.refresh_intel_briefing();
+        }
+    }
+
+    fn set_intel_category(&mut self, index: usize) {
+        let Some(category) = INTEL_CATEGORIES.get(index).copied() else {
+            return;
+        };
+        if self.intel_category == category {
+            self.set_focus(Target::IntelTab(index));
+            return;
+        }
+        self.intel_category = category.into();
+        self.intel_page = IntelPage::Bulletin;
+        self.intel_sel = 0;
+        self.load_intel();
+        self.set_focus(if self.intel_articles.is_empty() {
+            Target::Field(FieldId::IntelSearch)
+        } else {
+            Target::IntelArticle(self.intel_sel)
+        });
+        self.status = atlas::category_name(&self.intel_category).into();
+    }
+
+    fn open_intel_day_picker(&mut self) {
+        self.intel_days = self.store.atlas_run_days().unwrap_or_default();
+        if self.intel_days.is_empty() {
+            self.status = "No Atlas news-cycle days yet".into();
+            return;
+        }
+        self.choice_items = self
+            .intel_days
+            .iter()
+            .map(|day| ChoiceItem {
+                id: day.clone(),
+                label: intel_day_button_label(day),
+            })
+            .collect();
+        self.choice_sel = self
+            .choice_items
+            .iter()
+            .position(|item| item.id == self.intel_day)
+            .unwrap_or(0);
+        self.choice_note = "Select news cycle day".into();
+        self.overlay = Overlay::Choice(ChoiceKind::IntelDay);
+        self.scrolls.popup = 0;
+        self.set_focus(Target::Choice(self.choice_sel));
+    }
+
+    fn open_intel_briefing(&mut self) {
+        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
+            self.status = "No article selected".into();
+            return;
+        };
+        self.intel_page = IntelPage::Briefing;
+        self.refresh_intel_briefing();
+        self.scrolls.intel_brief = 0;
+        self.set_focus(Target::Button(ButtonId::IntelRecon));
+        self.status = format!("Brief · {}", article.title);
+    }
+
+    fn refresh_intel_briefing(&mut self) {
+        let Some(article) = self.intel_articles.get(self.intel_sel) else {
+            self.intel_claims.clear();
+            self.intel_relations.clear();
+            return;
+        };
+        self.intel_claims = self
+            .store
+            .atlas_claims_for_article(&article.run_id, &article.id)
+            .unwrap_or_default();
+        let fingerprints: Vec<String> = self
+            .intel_claims
+            .iter()
+            .map(|claim| claim.fingerprint.clone())
+            .collect();
+        self.intel_relations = self
+            .store
+            .insight_relations_among(&fingerprints)
+            .unwrap_or_default();
+    }
+
+    fn leave_intel_briefing(&mut self) {
+        self.intel_page = IntelPage::Bulletin;
+        self.intel_claims.clear();
+        self.intel_relations.clear();
+        self.set_focus(if self.intel_articles.is_empty() {
+            Target::Field(FieldId::IntelSearch)
+        } else {
+            Target::IntelArticle(self.intel_sel)
+        });
+        self.status = "Bulletin".into();
+    }
+
+    pub fn move_intel(&mut self, delta: i32) {
+        if self.intel_page != IntelPage::Bulletin || self.intel_articles.is_empty() {
+            return;
+        }
+        let last = self.intel_articles.len() as i32 - 1;
+        self.intel_sel = (self.intel_sel as i32 + delta).clamp(0, last) as usize;
+        self.set_focus(Target::IntelArticle(self.intel_sel));
+        let room = super::ui::intel_list_room(self).max(1);
+        super::ui::reveal_index(&mut self.scrolls.intel_list, self.intel_sel, room);
     }
 
     fn load_atlas(&mut self) {
@@ -2511,6 +2743,18 @@ impl App {
                 self.set_role_model(&item.id);
                 self.status = format!("Model {}", item.id);
             }
+            Overlay::Choice(ChoiceKind::IntelDay) => {
+                self.intel_day = item.id;
+                self.intel_page = IntelPage::Bulletin;
+                self.intel_sel = 0;
+                self.load_intel();
+                self.status = format!("Day {}", intel_day_button_label(&self.intel_day));
+                self.set_focus(if self.intel_articles.is_empty() {
+                    Target::Field(FieldId::IntelSearch)
+                } else {
+                    Target::IntelArticle(self.intel_sel)
+                });
+            }
             _ => return,
         }
         self.overlay = Overlay::None;
@@ -2579,7 +2823,6 @@ impl App {
             .iter()
             .position(|item| item.id == memory.id)
             .unwrap_or(0);
-        self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
         self.brain_insight.clear();
         self.brain_list_mode = BrainListMode::List;
         self.brain_graph_for = None;
@@ -2632,6 +2875,7 @@ impl App {
         }
         self.brain_graph_for = None;
         self.sync_graph();
+        self.sync_selected_insight();
     }
 
     fn leave_brain_detail(&mut self) {
@@ -2652,10 +2896,11 @@ impl App {
         self.brain_list_mode = BrainListMode::Graph;
         self.scrolls.path = 0;
         self.scrolls.summary = 0;
-        self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
+        self.selected_insight = None;
         self.brain_graph_for = None;
         self.sync_graph();
         self.load_or_request_summary(&memory);
+        self.set_focus(Target::Home);
     }
 
     fn load_or_request_summary(&mut self, memory: &Memory) {
@@ -2965,6 +3210,14 @@ impl App {
                 }
                 .into())
             }
+            ButtonId::IntelDay => {
+                self.open_intel_day_picker();
+                return;
+            }
+            ButtonId::IntelRecon => {
+                self.status = "Recon — not wired yet".into();
+                return;
+            }
             ButtonId::RefreshHardware => {
                 self.hardware = hardware::profile_cached(true);
                 Ok("Hardware refreshed".into())
@@ -3269,10 +3522,6 @@ impl App {
             }
             Target::Memory(index) => {
                 self.memory_sel = index;
-                self.selected_insight = self
-                    .memories
-                    .get(index)
-                    .and_then(|m| self.store.insight_for_memory(&m.id).ok().flatten());
                 self.sync_graph();
                 self.set_focus(target);
             }
@@ -3339,6 +3588,15 @@ impl App {
                 self.atlas_article_sel = index.min(self.atlas_articles.len() - 1);
                 self.set_focus(Target::AtlasArticle(self.atlas_article_sel));
                 self.open_saved_article();
+            }
+            Target::IntelTab(index) => self.set_intel_category(index),
+            Target::IntelArticle(index) => {
+                if self.intel_articles.is_empty() {
+                    return;
+                }
+                self.intel_sel = index.min(self.intel_articles.len() - 1);
+                self.set_focus(Target::IntelArticle(self.intel_sel));
+                self.open_intel_briefing();
             }
             Target::LogLine(index) => {
                 if self.log.is_empty() {
@@ -3449,14 +3707,10 @@ impl App {
             && self.brain_list_mode == BrainListMode::List
         {
             self.reload_memories();
-            if !self.memories.is_empty() {
-                self.selected_insight = self
-                    .memories
-                    .get(self.memory_sel)
-                    .and_then(|memory| self.store.insight_for_memory(&memory.id).ok().flatten());
-            } else {
-                self.selected_insight = None;
-            }
+        }
+        if self.focus == Target::Field(FieldId::IntelSearch) && self.module == Some(ModuleId::Intel)
+        {
+            self.load_intel();
         }
     }
 
@@ -3775,6 +4029,28 @@ impl App {
                     self.cursor = (self.cursor + 1).min(self.field(field).chars().count());
                 }
             }
+            KeyCode::Left | KeyCode::Char('h')
+                if self.module == Some(ModuleId::Intel)
+                    && self.intel_page == IntelPage::Bulletin
+                    && !self.field_focused() =>
+            {
+                let index = INTEL_CATEGORIES
+                    .iter()
+                    .position(|id| *id == self.intel_category.as_str())
+                    .unwrap_or(0);
+                self.set_intel_category(index.saturating_sub(1));
+            }
+            KeyCode::Right | KeyCode::Char('l')
+                if self.module == Some(ModuleId::Intel)
+                    && self.intel_page == IntelPage::Bulletin
+                    && !self.field_focused() =>
+            {
+                let index = INTEL_CATEGORIES
+                    .iter()
+                    .position(|id| *id == self.intel_category.as_str())
+                    .unwrap_or(0);
+                self.set_intel_category((index + 1).min(INTEL_CATEGORIES.len() - 1));
+            }
             KeyCode::Left | KeyCode::Char('h') if self.transcript_focused() => {
                 super::ui::fold_chat(self, false);
             }
@@ -3803,7 +4079,7 @@ impl App {
             KeyCode::Char(c)
                 if self.module.is_none()
                     && key.modifiers.is_empty()
-                    && matches!(c, '1' | '2' | '3' | '4' | '5' | '6') =>
+                    && matches!(c, '1' | '2' | '3' | '4' | '5' | '6' | '7') =>
             {
                 self.select((c as u8 - b'1') as usize);
             }
@@ -3951,6 +4227,10 @@ impl App {
             self.status = "Investigations".into();
             return;
         }
+        if self.module == Some(ModuleId::Intel) && self.intel_page == IntelPage::Briefing {
+            self.leave_intel_briefing();
+            return;
+        }
         if self.module.is_some() {
             self.go_home();
         }
@@ -3984,6 +4264,8 @@ impl App {
             Target::AtlasFeed(_) => self.open_atlas_article(),
             Target::AtlasHistory(_) => self.open_atlas_news(),
             Target::AtlasArticle(_) => self.open_saved_article(),
+            Target::IntelArticle(_) => self.open_intel_briefing(),
+            Target::IntelTab(index) => self.set_intel_category(index),
             target => self.activate_target(target),
         }
     }
@@ -4014,9 +4296,15 @@ impl App {
     }
 
     fn move_vertical(&mut self, delta: i32) {
+        if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Graph {
+            return;
+        }
         match self.focus {
             Target::Field(FieldId::Composer) => self.move_composer_line(delta),
             Target::Field(FieldId::ReconSearch) | Target::Thread(_) => self.move_thread(delta),
+            Target::Field(FieldId::IntelSearch) | Target::IntelArticle(_) | Target::IntelTab(_) => {
+                self.move_intel(delta);
+            }
             Target::Field(_) => {}
             Target::Transcript | Target::ChatHeader(_) | Target::ChatBody(_) => {
                 super::ui::move_chat(self, delta);
@@ -4025,13 +4313,14 @@ impl App {
             Target::Tool(_) => self.move_tool(delta),
             _ => match self.module {
                 None => self.move_home(delta),
-                Some(ModuleId::Brain) if self.brain_list_mode == BrainListMode::Graph => {
-                    self.scrolls.summary = add_scroll(self.scrolls.summary, delta);
-                }
                 Some(ModuleId::Brain) if self.brain_list_mode == BrainListMode::Create => {}
                 Some(ModuleId::Brain) => self.move_memory(delta),
                 Some(ModuleId::Osint) => self.move_tool(delta),
                 Some(ModuleId::Atlas) => self.move_atlas(delta),
+                Some(ModuleId::Intel) if self.intel_page == IntelPage::Briefing => {
+                    self.scrolls.intel_brief = add_scroll(self.scrolls.intel_brief, delta * 3);
+                }
+                Some(ModuleId::Intel) => self.move_intel(delta),
                 Some(ModuleId::System) => {
                     super::ui::move_system_log(self, delta);
                 }
@@ -4062,17 +4351,16 @@ impl App {
         self.set_focus(Target::Thread(next));
     }
 
-    fn move_memory(&mut self, delta: i32) {
+    pub(crate) fn move_memory(&mut self, delta: i32) {
         if self.memories.is_empty() {
             return;
         }
         let next =
             (self.memory_sel as i32 + delta).clamp(0, self.memories.len() as i32 - 1) as usize;
+        if next == self.memory_sel && matches!(self.focus, Target::Memory(_)) {
+            return;
+        }
         self.memory_sel = next;
-        self.selected_insight = self
-            .memories
-            .get(next)
-            .and_then(|memory| self.store.insight_for_memory(&memory.id).ok().flatten());
         let room = super::ui::memory_room_for(self);
         super::ui::reveal_index(&mut self.scrolls.memories, next, room);
         self.sync_graph();
@@ -4230,6 +4518,18 @@ pub fn is_picker_field(field: FieldId) -> bool {
     )
 }
 
+/// Date button / picker label like `04 OCT 2026`.
+pub fn intel_day_button_label(day: &str) -> String {
+    let Ok(date) = chrono::NaiveDate::parse_from_str(day.trim(), "%Y-%m-%d") else {
+        return if day.trim().is_empty() {
+            "No day".into()
+        } else {
+            day.trim().to_string()
+        };
+    };
+    date.format("%d %b %Y").to_string().to_ascii_uppercase()
+}
+
 fn provider_label(kind: &str) -> &'static str {
     match provider::normalize_kind(kind).as_str() {
         "grok" | "grok-subscription" => "Grok",
@@ -4385,6 +4685,9 @@ pub async fn run(mut app: App) -> Result<()> {
             dirty = true;
         }
         if dirty {
+            if let Ok(size) = terminal.size() {
+                app.screen = Rect::new(0, 0, size.width, size.height);
+            }
             super::ui::normalize(&mut app);
             terminal.draw(|frame| {
                 app.screen = frame.area();
@@ -4555,6 +4858,7 @@ mod tests {
             brain_insight: String::new(),
             brain_query: String::new(),
             recon_search: String::new(),
+            intel_search: String::new(),
             osint_search: String::new(),
             osint_input: osint::registry()[0].example_input().to_string(),
             osint_inputs: HashMap::new(),
@@ -4671,6 +4975,14 @@ mod tests {
             atlas_pause: None,
             atlas_auto_next: None,
             atlas_auto_started: false,
+            intel_page: IntelPage::Bulletin,
+            intel_category: INTEL_CATEGORIES[0].into(),
+            intel_day: String::new(),
+            intel_days: Vec::new(),
+            intel_articles: Vec::new(),
+            intel_sel: 0,
+            intel_claims: Vec::new(),
+            intel_relations: Vec::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
             graph_summary: String::new(),
@@ -4768,21 +5080,162 @@ mod tests {
             .any(|target| matches!(target, Target::Field(FieldId::BrainInsight))));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.brain_list_mode, BrainListMode::Graph);
+        assert_eq!(app.focus, Target::Home);
         assert!(app.brain_graph.is_empty());
         assert!(app.graph_summary.contains("no investigation graph"));
         assert!(app.graph_summary_pending.is_none());
+        let sel = app.memory_sel;
+        let graph_for = app.brain_graph_for.clone();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.memory_sel, sel);
+        assert_eq!(app.brain_graph_for, graph_for);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.brain_list_mode, BrainListMode::List);
         click(&mut app, Target::Field(FieldId::BrainQuery));
+        assert!(app.selected_insight.is_none());
         type_text(&mut app, "Atlas");
         assert_eq!(app.memories.len(), 1);
         assert!(app.memories[0].text.contains("Atlas"));
     }
 
     #[test]
+    fn application_order_is_intel_atlas_brain_recon_with_updated_blurbs() {
+        assert_eq!(
+            ModuleId::ALL[0..=3],
+            [
+                ModuleId::Intel,
+                ModuleId::Atlas,
+                ModuleId::Brain,
+                ModuleId::Recon
+            ]
+        );
+        assert_eq!(
+            ModuleId::Intel.blurb(),
+            "View and Manage Intel Reconnaissance"
+        );
+        assert_eq!(ModuleId::Atlas.blurb(), "Global News Cycles");
+        assert_eq!(ModuleId::Brain.blurb(), "View and Manage Memories");
+        assert_eq!(ModuleId::Recon.blurb(), "View and Manage Investigations");
+    }
+
+    fn seed_intel_articles(app: &mut App) {
+        app.store.atlas_insert_run("run-intel", "{}", "{}").unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, title) in [
+            ("a1", "Border talks stall"),
+            ("a2", "Geneva summit delayed"),
+        ] {
+            app.store
+                .atlas_upsert_article(&AtlasArticleRow {
+                    run_id: "run-intel".into(),
+                    id: id.into(),
+                    title: title.into(),
+                    description: format!("{title} body"),
+                    url: format!("https://example.com/{id}"),
+                    country: "us".into(),
+                    source_name: "Wire".into(),
+                    source_domain: "example.com".into(),
+                    published_at: now.clone(),
+                    provider: "newsapi".into(),
+                    temperature: 0.88,
+                    category: "geopolitical".into(),
+                    seen_at: now.clone(),
+                    author: String::new(),
+                    image_url: String::new(),
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn intel_opens_bulletin_filters_and_opens_briefing() {
+        let mut app = app();
+        seed_intel_articles(&mut app);
+        click(&mut app, Target::App(ModuleId::Intel.index()));
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        assert_eq!(app.intel_page, IntelPage::Bulletin);
+        assert_eq!(app.intel_articles.len(), 2);
+        assert_eq!(app.intel_sel, 0);
+
+        click(&mut app, Target::Button(ButtonId::IntelDay));
+        assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::IntelDay)));
+        app.apply_choice(0);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(!app.intel_day.is_empty());
+
+        click(&mut app, Target::Field(FieldId::IntelSearch));
+        type_text(&mut app, "geneva");
+        assert_eq!(app.intel_articles.len(), 1);
+        assert_eq!(app.intel_articles[0].id, "a2");
+
+        click(&mut app, Target::IntelArticle(0));
+        assert_eq!(app.intel_page, IntelPage::Briefing);
+        click(&mut app, Target::Button(ButtonId::IntelRecon));
+        assert_eq!(app.status, "Recon — not wired yet");
+        assert_eq!(app.intel_page, IntelPage::Briefing);
+        app.on_esc();
+        assert_eq!(app.intel_page, IntelPage::Bulletin);
+    }
+
+    #[test]
+    fn brain_anchors_follow_memory_focus_and_scroll_stops_at_ends() {
+        let mut app = app();
+        click(&mut app, Target::App(ModuleId::Brain.index()));
+        for (app_name, conversation, text) in [
+            ("chat", "t1", "alpha memory"),
+            ("chat", "t2", "beta memory"),
+            ("chat", "t3", "gamma memory"),
+        ] {
+            click(&mut app, Target::Button(ButtonId::CreateMemory));
+            click(&mut app, Target::Field(FieldId::BrainApp));
+            app.brain_app.clear();
+            type_text(&mut app, app_name);
+            click(&mut app, Target::Field(FieldId::BrainConversation));
+            app.brain_conversation.clear();
+            type_text(&mut app, conversation);
+            click(&mut app, Target::Field(FieldId::BrainInsight));
+            app.brain_insight.clear();
+            type_text(&mut app, text);
+            click(&mut app, Target::Button(ButtonId::Add));
+        }
+        assert_eq!(app.memories.len(), 3);
+        click(&mut app, Target::Memory(1));
+        assert!(matches!(app.focus, Target::Memory(1)));
+        // Manual memories have no insight claims.
+        assert!(app.selected_insight.is_none());
+        click(&mut app, Target::Field(FieldId::BrainQuery));
+        assert!(app.selected_insight.is_none());
+        click(&mut app, Target::Memory(0));
+        app.scrolls.memories = 0;
+        app.move_memory(-1);
+        assert_eq!(app.memory_sel, 0);
+        assert_eq!(app.scrolls.memories, 0);
+        click(&mut app, Target::Memory(2));
+        let bottom = app.scrolls.memories;
+        app.move_memory(1);
+        assert_eq!(app.memory_sel, 2);
+        assert_eq!(app.scrolls.memories, bottom);
+        // Selection past the visible window is pulled back into view.
+        app.screen = Rect::new(0, 0, 80, 24);
+        app.scrolls.memories = 0;
+        app.memory_sel = 2;
+        app.set_focus(Target::Memory(2));
+        super::super::ui::normalize(&mut app);
+        let room = super::super::ui::memory_room_for(&app);
+        assert!(
+            app.memory_sel >= app.scrolls.memories as usize
+                && app.memory_sel < app.scrolls.memories as usize + room.max(1),
+            "sel {} scroll {} room {}",
+            app.memory_sel,
+            app.scrolls.memories,
+            room
+        );
+    }
+
+    #[test]
     fn provider_auth_tabs_and_router_form_are_clickable() {
         let mut app = app();
-        click(&mut app, Target::App(4));
+        click(&mut app, Target::App(ModuleId::Providers.index()));
         for page in ProviderPage::ALL {
             click(&mut app, Target::ProviderTab(page));
             assert_eq!(app.provider_page, page);
@@ -4810,7 +5263,7 @@ mod tests {
         other.api_key = Some("other-secret".into());
         app.auth.set_account(other);
         app.settings.defaults.recon.provider = "grok".into();
-        click(&mut app, Target::App(4));
+        click(&mut app, Target::App(ModuleId::Providers.index()));
         click(&mut app, Target::ProviderTab(ProviderPage::OpenRouter));
         click(&mut app, Target::Field(FieldId::RouterKey));
         type_text(&mut app, "router-secret");
@@ -4847,7 +5300,7 @@ mod tests {
         app.synthesis_model = "openrouter/free".into();
         let auth_before = serde_json::to_string(&app.auth).unwrap();
 
-        click(&mut app, Target::App(4));
+        click(&mut app, Target::App(ModuleId::Providers.index()));
         click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
         click(
             &mut app,
@@ -4928,7 +5381,7 @@ mod tests {
         app.screen = Rect::new(0, 0, 80, 24);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-        app.select(4);
+        app.select(ModuleId::Providers.index());
         for (page, target) in [
             (ProviderPage::Grok, Target::Button(ButtonId::GrokSignIn)),
             (ProviderPage::OpenAI, Target::Button(ButtonId::OpenAISignIn)),
@@ -4965,7 +5418,7 @@ mod tests {
         let mut router = provider::account_secret(&app.auth, "openrouter");
         router.api_key = Some("router-key".into());
         app.auth.set_account(router);
-        click(&mut app, Target::App(4));
+        click(&mut app, Target::App(ModuleId::Providers.index()));
         click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
         click(&mut app, Target::Field(FieldId::ReconProvider));
         assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)));
@@ -5120,7 +5573,7 @@ mod tests {
             );
         }
         assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
-        app.select(3);
+        app.select(ModuleId::Osint.index());
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
             Target::Button(ButtonId::OsintRun),
@@ -5148,7 +5601,12 @@ mod tests {
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
-        for target in [Target::App(0), Target::App(1), Target::App(4)] {
+        for target in [
+            Target::App(ModuleId::Intel.index()),
+            Target::App(ModuleId::Atlas.index()),
+            Target::App(ModuleId::Recon.index()),
+            Target::App(ModuleId::Providers.index()),
+        ] {
             assert!(hit(&app, target), "home is missing {target:?}");
         }
         assert!(!hit(&app, Target::Field(FieldId::Composer)));
@@ -5304,7 +5762,7 @@ mod tests {
         for index in 0..40 {
             app.push_log("error", format!("lookup failed {index}"));
         }
-        app.select(5);
+        app.select(ModuleId::System.index());
         assert_eq!(app.error_count(), 40);
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(app.scrolls.log > 0);
@@ -5370,7 +5828,7 @@ mod tests {
             .expect("tool row")
             .title;
         assert!(title.contains("query=Jane Roe"), "{title}");
-        app.select(5);
+        app.select(ModuleId::System.index());
         let index = app
             .log
             .iter()
@@ -5395,7 +5853,7 @@ mod tests {
         app.prune_log();
         assert_eq!(app.log.len(), 1);
         assert!(app.log[0].text.contains("fresh"));
-        app.select(5);
+        app.select(ModuleId::System.index());
         click(&mut app, Target::LogLine(0));
         assert!(app.log_open.contains(&app.log[0].id));
         click(&mut app, Target::LogLine(0));
@@ -5448,7 +5906,7 @@ mod tests {
     fn firecrawl_key_field_is_on_the_osint_tool() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 100, 36);
-        app.select(3);
+        app.select(ModuleId::Osint.index());
         app.tool_sel = osint::registry()
             .iter()
             .position(|tool| tool.id == "firecrawl_search")
@@ -5495,7 +5953,7 @@ mod tests {
         let mut app = app();
         app.settings_path = dir.path().join("config.toml");
         app.screen = Rect::new(0, 0, 100, 36);
-        app.select(3);
+        app.select(ModuleId::Osint.index());
         let select = |app: &mut App, id: &str| {
             app.tool_sel = osint::registry()
                 .iter()
@@ -6106,7 +6564,7 @@ mod tests {
     fn grok_and_openai_account_panes_show_their_text() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 100, 36);
-        app.select(4);
+        app.select(ModuleId::Providers.index());
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
         terminal

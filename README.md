@@ -1,6 +1,6 @@
 # Argos OSINT
 
-Argos is a terminal investigation workspace. It opens on **Home**. **Recon**, **Brain**, and **Atlas** are the applications. **OSINT**, **Providers**, and **System** are system apps: they configure gathering, accounts, and host state. Only Recon has a chat. The last surviving Recon thread is restored when Recon opens.
+Argos is a terminal investigation workspace. It opens on **Home**. **Intel**, **Atlas**, **Brain**, and **Recon** are the applications. **OSINT**, **Providers**, and **System** are system apps: they configure gathering, accounts, and host state. Only Recon has a chat. The last surviving Recon thread is restored when Recon opens.
 
 ## Run and navigate
 
@@ -8,11 +8,13 @@ Argos is a terminal investigation workspace. It opens on **Home**. **Recon**, **
 cargo run -p argos-osint-bin
 ```
 
-From Home, ↑↓ select and Enter opens. `1` opens Recon, `2` Brain, `3` Atlas, `4` OSINT, `5` Providers, and `6` System. Esc or the Home control leaves an app. `?` opens the shortcut card for the current screen.
+From Home, ↑↓ select and Enter opens. `1` opens Intel, `2` Atlas, `3` Brain, `4` Recon, `5` OSINT, `6` Providers, and `7` System. Esc or the Home control leaves an app. `?` opens the shortcut card for the current screen.
 
 Recon opens on a full-screen list of recent investigations. ↑↓ moves through that list and Enter opens the selected investigation as its own full-screen transcript. Esc from the transcript returns to the list; Esc from the list returns Home. In the transcript, Tab moves between the log and the prompt. Enter sends; Shift+Enter adds a line. While the transcript is focused, ↑↓ select a message, decision, or tool, and ←→ fold a decision or tool log. Enter toggles the selected fold. `f` opens the full text. Ctrl+U and Ctrl+D scroll the focused pane, and the mouse wheel scrolls the pane under the pointer. Ctrl+N starts an investigation and opens its transcript. In the transcript, when the cursor is not in a text field, Alt+Left and Alt+Right move through recently opened investigations. A click counts on release, so dragging across Home does not launch an app. Ctrl+C cancels a running turn, or clears a draft first. Press Ctrl+C or Ctrl+Q again within a second to quit when nothing else is pending.
 
 The transcript follows the Grok Build chat. Your question sits on a raised band with a prompt arrow. The answer is rendered Markdown: headings, lists, bold, code, quotes, and links. Decisions and lookups stay on collapsed disclosure rows. A `◉ brain` mark on an answer opens the memories that were in its prompt. A new investigation stays untitled until the Recon model names it from the first question. `:rename` replaces that title.
+
+Intel browses Atlas-stored headlines on a bulletin board: six classification tabs, a news-cycle day filter, search, and a hero story. Enter opens Briefing Focus with extracted claims, tags, links, and a country mini-map. Recon on that screen is a stub for a later handoff.
 
 Brain, Atlas, OSINT, Providers, and System use fields and buttons only. OSINT keeps previous and next controls for saved manual runs. System shows hardware, paths, and a scrollable event log of run stages and failures.
 

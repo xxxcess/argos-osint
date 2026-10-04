@@ -781,6 +781,27 @@ pub fn friendly_unix(secs: u64) -> String {
     }
 }
 
+/// Compact relative age from a stored timestamp (`3h ago`, `45m ago`, `2d ago`).
+pub fn relative_ago(raw: &str) -> String {
+    let Some(stamp) = parse_timestamp(raw.trim()) else {
+        return "—".into();
+    };
+    let secs = (chrono::Utc::now() - stamp).num_seconds().max(0);
+    if secs < 60 {
+        return "just now".into();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    if hours < 48 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    format!("{days}d ago")
+}
+
 /// Local calendar day, plus a 12-hour clock when the value has a time.
 /// A bare date stays a date. Unparsed text is returned as stored.
 pub fn friendly_date(raw: &str) -> String {
@@ -1120,6 +1141,11 @@ fn apply_hits(
                 emit(AtlasEvent::Article(article));
             }
             Verdict::Replace(id) => {
+                // Only replace inside this run. A hit already stored in another
+                // retained run is ignored so TTL history is not reprocessed.
+                if store.atlas_article(run_id, &id)?.is_none() {
+                    continue;
+                }
                 store.atlas_delete_article(run_id, &id)?;
                 remember(seen, &article, Some(&id));
                 store.atlas_upsert_article(&article_row(run_id, &article))?;
@@ -1187,8 +1213,9 @@ fn require_either(primary: &str, fallback: &str, name: &str) -> Result<()> {
     }
 }
 
-/// Run or resume Atlas. `resume` continues the newest paused run. Articles already
-/// on `feed` are the dedup set for this process; they are not read back from disk.
+/// Run or resume Atlas. `resume` continues the newest paused run. Dedup seeds from
+/// the in-memory `feed`, the current run's saved rows, and every article still inside
+/// the retention window so a new cycle skips headlines already processed.
 pub struct RunInput<'a> {
     pub db_path: &'a Path,
     pub pause: &'a AtomicBool,
@@ -1259,6 +1286,14 @@ where
         require_either(&keys.newsdata, &keys.newsdata_fallback, "NewsData API key")?;
     }
     let mut seen: Vec<Seen> = feed.iter().map(seen_of).collect();
+    // Seed from every retained article (36h prune window), then this run's rows.
+    // URL/title matches against that history are dropped so cycles stay efficient.
+    for row in store.atlas_recent_articles()? {
+        let article = article_from_row(&row);
+        if seen.iter().all(|item| item.id != article.id) {
+            seen.push(seen_of(&article));
+        }
+    }
     for row in store.atlas_list_articles(&run_id)? {
         let article = article_from_row(&row);
         if seen.iter().all(|item| item.id != article.id) {
@@ -2133,6 +2168,38 @@ mod tests {
         prune_empty_origins(&mut stats);
         assert_eq!(stats.origins.len(), 1);
         assert_eq!(stats.origins[0].country, "us");
+    }
+
+    #[test]
+    fn dedup_ignores_a_better_source_when_the_prior_hit_is_outside_this_run() {
+        // Simulate TTL history: a near-duplicate already stored under another run.
+        let prior = FeedArticle {
+            id: "prior".into(),
+            title: "Export restriction widens now".into(),
+            description: String::new(),
+            url: "https://example.com/near".into(),
+            country: "us".into(),
+            source_name: "Example".into(),
+            source_domain: "example.com".into(),
+            author: String::new(),
+            image_url: String::new(),
+            published_at: "2026-10-02T00:00:00Z".into(),
+            provider: "newsapi".into(),
+            temperature: 0.5,
+            seen_at: String::new(),
+            category: "unk".into(),
+        };
+        let seen = vec![seen_of(&prior)];
+        let better = FeedArticle {
+            id: "d".into(),
+            title: "Export restriction widens nows".into(),
+            url: "https://www.reuters.com/world/other".into(),
+            source_domain: "reuters.com".into(),
+            source_name: "Reuters".into(),
+            ..prior.clone()
+        };
+        // Judge still says Replace; ingest refuses when that id is not in this run.
+        assert_eq!(judge(&better, &seen), Verdict::Replace("prior".into()));
     }
 
     #[test]

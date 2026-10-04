@@ -1100,6 +1100,22 @@ impl App {
         }
     }
 
+    /// Cycle header app tabs. From home, forward opens Intel and reverse opens System.
+    fn cycle_module(&mut self, reverse: bool) {
+        let len = ModuleId::ALL.len();
+        let current = match self.module {
+            Some(module) => module.index(),
+            None if reverse => 0,
+            None => len - 1,
+        };
+        let next = if reverse {
+            (current + len - 1) % len
+        } else {
+            (current + 1) % len
+        };
+        self.select(next);
+    }
+
     fn select(&mut self, index: usize) {
         self.flush_draft();
         self.launcher_sel = index;
@@ -3970,6 +3986,12 @@ impl App {
             self.go_home();
             return true;
         }
+        if ctrl && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            let reverse =
+                key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::BackTab;
+            self.cycle_module(reverse);
+            return true;
+        }
         if ctrl && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N')) {
             let created = self.new_thread().map(|_| "New investigation".into());
             self.report(created);
@@ -5126,6 +5148,25 @@ mod tests {
         assert_eq!(ModuleId::Atlas.blurb(), "Global News Cycles");
         assert_eq!(ModuleId::Brain.blurb(), "View and Manage Memories");
         assert_eq!(ModuleId::Recon.blurb(), "View and Manage Investigations");
+    }
+
+    #[test]
+    fn ctrl_tab_cycles_app_tabs_forward_and_back() {
+        let mut app = app();
+        assert_eq!(app.module, None);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL));
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL));
+        assert_eq!(app.module, Some(ModuleId::Atlas));
+        app.handle_key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::CONTROL));
+        assert_eq!(app.module, Some(ModuleId::System));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL));
+        assert_eq!(app.module, Some(ModuleId::Intel));
     }
 
     fn seed_intel_articles(app: &mut App) {

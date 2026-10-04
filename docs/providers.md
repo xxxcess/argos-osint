@@ -36,6 +36,7 @@ NewsAPI and CourtListener (issue #29) are keyed context providers, not primary p
 | GNews | `gnews_search` on `GET /api/v4/search` | Keyword `q` of at most 200 characters, `lang`, `max` 10, optional `from`. Key `GNEWS_API_KEY` as `X-Api-Key`. Free tier 100 requests/day. Atlas uses Search because `source.country` is not on top headlines. Recon does not pick it. |
 | NewsData.io | `newsdata_latest` on `GET /api/1/latest` | Keyword `q`, `language`, and `size` 10. The latest endpoint is the past 48 hours. `timeframe` is optional and paid; the free plan returns HTTP 422 if it is sent. Key `NEWSDATA_API_KEY` as `apikey`, redacted from the stored URL. Free tier 200 credits/day. Atlas only. |
 | Currents | `currents_latest` on `GET /v1/latest-news` | `language`, uppercase `country`, `page_size` 20. Key `CURRENTS_API_KEY` as `Authorization: Bearer`. Free tier 250 requests/day. Atlas regional headlines only. |
+| Wikipedia (public) | `wikipedia_source_reliability` | MediaWiki `action=parse` on English WP:RSP letter subpages. No API key. Maps perennial-source status to Admiralty Source Reliability A–F (`gr`→B, `nc`→C, `gu`→D, deprecated/blacklist→E, unlisted→F). Identifying `osint_user_agent` required. Index cached 30 days. News-context companion; Atlas insights scale claim confidence with the same index. |
 
 Recon limits add `news_calls_per_turn` (default 2) and `legal_calls_per_turn` (default 3). Failed and rate-limited results are never cached.
 

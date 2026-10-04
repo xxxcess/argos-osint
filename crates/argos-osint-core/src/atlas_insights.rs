@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::atlas::{category_tag, OriginStat};
+use crate::osint::{
+    best_credibility, information_credibility, scale_confidence, wikipedia_rsp, AdmiraltyCode,
+    CredibilityInputs, InformationCredibility, SourceReliability,
+};
 use crate::provider::{self, ChatMessage};
 use crate::secrets::ProviderSecret;
 use crate::store::{
@@ -82,6 +86,12 @@ pub struct InsightRow {
     pub object: String,
     pub topic: String,
     pub classification: String,
+    #[serde(default)]
+    pub admiralty: String,
+    #[serde(default)]
+    pub reliability: String,
+    #[serde(default)]
+    pub info_credibility: u8,
 }
 
 /// Model output before the span gate.
@@ -116,6 +126,18 @@ pub struct KeptClaim {
     /// Publisher country of the cited article. Never written onto the entity.
     pub country: String,
     pub context: bool,
+    /// Independent peers with title-level support (set by [`apply_peer_support`]).
+    pub title_peers: u32,
+    /// Independent peers with body-level support only.
+    pub body_peers: u32,
+    /// Admiralty Source Reliability letter (A–F).
+    pub reliability: String,
+    /// Information Credibility digit (1–6).
+    pub info_credibility: u8,
+    /// Combined code such as `B2`.
+    pub admiralty: String,
+    /// WP:RSP status code when listed (`gr`, `gu`, …).
+    pub rsp_status: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,6 +364,7 @@ pub fn finish_insights(
     let mut claims = lead;
     claims.extend(context);
     let relations = link_claims(&claims);
+    apply_admiralty_evaluation(&mut claims, &articles, &relations);
     let lead_claims: Vec<&KeptClaim> = claims.iter().filter(|claim| !claim.context).collect();
     let context_claims: Vec<&KeptClaim> = claims.iter().filter(|claim| claim.context).collect();
     let mut stats = InsightStats {
@@ -421,6 +444,9 @@ pub fn stats_from_stored(
                 object: claim.object.clone(),
                 topic: claim.topic.clone(),
                 classification: claim.classification.clone(),
+                admiralty: claim.admiralty.clone(),
+                reliability: claim.reliability.clone(),
+                info_credibility: claim.info_credibility,
             })
             .collect(),
         ..InsightStats::default()
@@ -719,6 +745,8 @@ pub fn apply_peer_support(
                 body_support += 1;
             }
         }
+        claim.title_peers = title_support;
+        claim.body_peers = body_support;
         if title_support > 0 {
             claim.classification = "fact".into();
             claim.confidence = (claim.confidence + 0.15 * f64::from(title_support)).min(1.0);
@@ -729,6 +757,59 @@ pub fn apply_peer_support(
             claim.confidence = (claim.confidence + 0.08 * f64::from(body_support)).min(1.0);
         }
     }
+}
+
+/// Assign Admiralty A–F / 1–6 from WP:RSP + peer support, then scale confidence.
+pub fn apply_admiralty_evaluation(
+    claims: &mut [KeptClaim],
+    articles: &[AtlasArticleRow],
+    relations: &[(String, String, String)],
+) {
+    let index = wikipedia_rsp::cached_index();
+    let conflicted: std::collections::HashSet<String> = relations
+        .iter()
+        .filter(|(_, _, relation)| relation == "conflict_or_revision")
+        .flat_map(|(left, right, _)| [left.clone(), right.clone()])
+        .collect();
+    for claim in claims.iter_mut() {
+        let article = articles.iter().find(|row| row.id == claim.article_id);
+        let domain = article
+            .map(|row| row.source_domain.as_str())
+            .unwrap_or("");
+        let (reliability, entry) = match index.as_ref() {
+            Some(index) => index.reliability_for_domain(domain),
+            None => (SourceReliability::F, None),
+        };
+        let description_empty = article
+            .map(|row| row.description.trim().is_empty())
+            .unwrap_or(true);
+        let fp = fingerprint(claim);
+        let has_conflict = conflicted.contains(&fp);
+        let credibility = information_credibility(CredibilityInputs {
+            classification: &claim.classification,
+            confidence: claim.confidence,
+            title_peers: claim.title_peers,
+            body_peers: claim.body_peers,
+            description_empty,
+            reliability,
+            has_conflict,
+        });
+        let code = AdmiraltyCode::new(reliability, credibility);
+        claim.confidence = scale_confidence(claim.confidence, code);
+        claim.reliability = reliability.as_str().into();
+        claim.info_credibility = credibility.as_u8();
+        claim.admiralty = code.display();
+        claim.rsp_status = entry.map(|item| item.status.as_str().to_string()).unwrap_or_default();
+    }
+}
+
+/// Article-level Information Credibility: best (lowest digit) among its claims.
+pub fn article_information_credibility(claims: &[KeptClaim]) -> InformationCredibility {
+    let values: Vec<InformationCredibility> = claims
+        .iter()
+        .filter_map(|claim| InformationCredibility::from_u8(claim.info_credibility))
+        .collect();
+    best_credibility(&values)
 }
 
 /// Ask the classifier which cycle articles best support each extracted element.
@@ -1074,6 +1155,12 @@ fn accept_one(evidence: &[AtlasArticleRow], raw: &RawClaim, mode: AcceptMode) ->
         published_at: article.published_at.clone(),
         country: article.country.clone(),
         context: mode == AcceptMode::Context,
+        title_peers: 0,
+        body_peers: 0,
+        reliability: String::new(),
+        info_credibility: 0,
+        admiralty: String::new(),
+        rsp_status: String::new(),
     })
 }
 
@@ -1189,6 +1276,9 @@ fn insight_row(claim: &KeptClaim) -> InsightRow {
         object: claim.object.clone(),
         topic: claim.topic.clone(),
         classification: claim.classification.clone(),
+        admiralty: claim.admiralty.clone(),
+        reliability: claim.reliability.clone(),
+        info_credibility: claim.info_credibility,
     }
 }
 
@@ -1206,6 +1296,10 @@ fn stored_claim(claim: &KeptClaim) -> AtlasInsightClaim {
         article_id: claim.article_id.clone(),
         source_url: claim.source_url.clone(),
         published_at: claim.published_at.clone(),
+        reliability: claim.reliability.clone(),
+        info_credibility: claim.info_credibility,
+        admiralty: claim.admiralty.clone(),
+        rsp_status: claim.rsp_status.clone(),
     }
 }
 
@@ -1221,7 +1315,17 @@ fn brief_text(claims: &[&KeptClaim]) -> String {
         .join(". ");
     let mut lines = vec![format!("{lead}.")];
     for claim in claims {
-        lines.push(format!("- {} ({})", claim.claim.trim(), claim.article_id));
+        let code = if claim.admiralty.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", claim.admiralty)
+        };
+        lines.push(format!(
+            "- {}{} ({})",
+            claim.claim.trim(),
+            code,
+            claim.article_id
+        ));
     }
     lines.join("\n")
 }
@@ -1478,7 +1582,59 @@ mod tests {
             published_at: String::new(),
             country: country.into(),
             context,
+            title_peers: 0,
+            body_peers: 0,
+            reliability: String::new(),
+            info_credibility: 0,
+            admiralty: String::new(),
+            rsp_status: String::new(),
         }
+    }
+
+    #[test]
+    fn admiralty_scales_claim_confidence_from_rsp_and_peers() {
+        use crate::osint::wikipedia_rsp::{
+            install_index, parse_rsp_wikitext, RspIndex, RspStatus,
+        };
+        let sample = r#"
+|- class="s-gr" id="Wire"
+| [[Wire]]
+| {{WP:RSPSTATUS|gr}}
+| [[WP:x|1]]
+| {{WP:RSPLAST|2022}}
+| Wire is generally reliable for news reporting according to community consensus discussions.
+| {{WP:RSPUSES|wire.example}}
+"#;
+        install_index(RspIndex::build(parse_rsp_wikitext(sample), "t".into()));
+        let mut art = article(
+            "a1",
+            "military",
+            "us",
+            "Alpha met Beta today",
+            "Alpha met Beta in Geneva",
+            1.0,
+        );
+        art.source_domain = "wire.example".into();
+        let peer = article(
+            "a2",
+            "military",
+            "us",
+            "Alpha met Beta today",
+            "More on Alpha and Beta",
+            0.9,
+        );
+        let mut claims = vec![kept("alpha", "met", "beta", "military", "a1", "us", false)];
+        claims[0].classification = "fact".into();
+        claims[0].confidence = 0.70;
+        apply_peer_support(&mut claims, &[art.clone(), peer], &[]);
+        assert!(claims[0].title_peers >= 1);
+        let before = claims[0].confidence;
+        apply_admiralty_evaluation(&mut claims, &[art], &[]);
+        assert_eq!(claims[0].reliability, "B");
+        assert_eq!(claims[0].info_credibility, 1);
+        assert_eq!(claims[0].admiralty, "B1");
+        assert_eq!(claims[0].rsp_status, RspStatus::GenerallyReliable.as_str());
+        assert!(claims[0].confidence > before);
     }
 
     #[test]

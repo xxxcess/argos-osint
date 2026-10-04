@@ -4985,12 +4985,106 @@ fn draw_intel_confidence(frame: &mut Frame, app: &App, area: Rect) {
     let block = pane(" confidence ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let eval = intel_source_evaluation(app);
     let (high, mean) = intel_confidence_scores(app);
     let width = inner.width.max(1) as usize;
     let mut lines = Vec::new();
+    lines.push(meter_line(
+        &format!("REL {}", eval.reliability_letter),
+        eval.reliability_meter,
+        width,
+    ));
+    lines.push(meter_line(
+        &format!("CRD {}", eval.credibility_digit),
+        eval.credibility_meter,
+        width,
+    ));
     lines.push(meter_line("HIGH", high, width));
     lines.push(meter_line("MEAN", mean, width));
+    if !eval.footnote.is_empty() {
+        lines.push(Line::from(Span::styled(
+            fit(&eval.footnote, width),
+            theme::dim(),
+        )));
+    }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+struct IntelSourceEval {
+    reliability_letter: String,
+    reliability_meter: f64,
+    credibility_digit: String,
+    credibility_meter: f64,
+    footnote: String,
+}
+
+fn intel_source_evaluation(app: &App) -> IntelSourceEval {
+    use argos_osint_core::osint::{
+        best_credibility, wikipedia_rsp, InformationCredibility, SourceReliability,
+    };
+    let article = app.intel_articles.get(app.intel_sel);
+    let domain = article
+        .map(|row| row.source_domain.as_str())
+        .unwrap_or("");
+    let (reliability, entry) = match wikipedia_rsp::cached_index() {
+        Some(index) => match index.lookup_domain(domain) {
+            Some(entry) => (entry.status.reliability(), Some(entry.clone())),
+            None => (SourceReliability::F, None),
+        },
+        None => {
+            // Prefer a persisted letter from claims when the process cache is cold.
+            let from_claim = app
+                .intel_claims
+                .iter()
+                .find_map(|claim| SourceReliability::parse(&claim.reliability));
+            (from_claim.unwrap_or(SourceReliability::F), None)
+        }
+    };
+    let cred_values: Vec<InformationCredibility> = app
+        .intel_claims
+        .iter()
+        .filter_map(|claim| InformationCredibility::from_u8(claim.info_credibility))
+        .collect();
+    let credibility = if cred_values.is_empty() {
+        InformationCredibility::CannotBeJudged
+    } else {
+        best_credibility(&cred_values)
+    };
+    let code = format!("{}{}", reliability.as_str(), credibility.as_u8());
+    let rsp = entry
+        .as_ref()
+        .map(|item| item.status.label())
+        .or_else(|| {
+            app.intel_claims
+                .iter()
+                .find(|claim| !claim.rsp_status.is_empty())
+                .map(|claim| match claim.rsp_status.as_str() {
+                    "gr" => "generally reliable",
+                    "nc" | "m" => "no consensus",
+                    "gu" => "generally unreliable",
+                    "d" => "deprecated",
+                    "b" => "blacklisted",
+                    _ => "not in RSP",
+                })
+        })
+        .unwrap_or("not in RSP");
+    let year = entry
+        .as_ref()
+        .map(|item| item.last_year.as_str())
+        .filter(|year| !year.is_empty())
+        .unwrap_or("");
+    let footnote = if year.is_empty() {
+        format!("{code} · {domain} · {rsp}")
+    } else {
+        format!("{code} · {domain} · {rsp} · {year}")
+    };
+    IntelSourceEval {
+        reliability_letter: reliability.as_str().into(),
+        reliability_meter: reliability.meter(),
+        credibility_digit: credibility.as_u8().to_string(),
+        credibility_meter: credibility.meter(),
+        footnote,
+    }
 }
 
 fn meter_line(label: &str, value: f64, width: usize) -> Line<'static> {
@@ -5142,8 +5236,13 @@ fn intel_brief_body(
             theme::accent().add_modifier(Modifier::BOLD),
         )));
         for claim in &app.intel_claims {
+            let code = if claim.admiralty.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", claim.admiralty)
+            };
             lines.push(Line::from(Span::styled(
-                format!("[{}] {:.2}", claim.classification, claim.confidence),
+                format!("[{}]{code} {:.2}", claim.classification, claim.confidence),
                 theme::dim(),
             )));
             for chunk in wrap_text(&claim.claim, width.max(1)) {

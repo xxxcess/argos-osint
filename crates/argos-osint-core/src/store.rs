@@ -53,7 +53,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 14,
+                version <= 15,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -280,6 +280,24 @@ impl Store {
                     )?;
                 }
                 self.conn.pragma_update(None, "user_version", 14)?;
+            }
+            if version < 15 {
+                let claim_columns: Vec<String> = {
+                    let mut stmt = self.conn.prepare("PRAGMA table_info(insight_claims)")?;
+                    let columns = stmt
+                        .query_map([], |row| row.get(1))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    columns
+                };
+                if !claim_columns.iter().any(|name| name == "source_reliability") {
+                    self.conn.execute_batch(
+                        "ALTER TABLE insight_claims ADD COLUMN source_reliability TEXT NOT NULL DEFAULT '';
+                         ALTER TABLE insight_claims ADD COLUMN info_credibility INTEGER NOT NULL DEFAULT 0;
+                         ALTER TABLE insight_claims ADD COLUMN admiralty TEXT NOT NULL DEFAULT '';
+                         ALTER TABLE insight_claims ADD COLUMN rsp_status TEXT NOT NULL DEFAULT '';",
+                    )?;
+                }
+                self.conn.pragma_update(None, "user_version", 15)?;
             }
             Ok(())
         })();
@@ -760,7 +778,8 @@ impl Store {
         let answer_id = atlas_answer_id(run_id);
         let mut stmt = self.conn.prepare(
             "SELECT c.fingerprint, c.entity_id, c.predicate, c.object_value, c.topic,
-                    c.classification, c.confidence, m.text, s.source_url, s.published_at, s.call_id
+                    c.classification, c.confidence, m.text, s.source_url, s.published_at, s.call_id,
+                    c.source_reliability, c.info_credibility, c.admiralty, c.rsp_status
              FROM insight_claims c
              JOIN insight_sources s ON s.fingerprint = c.fingerprint
              JOIN memories m ON m.id = c.memory_id
@@ -781,6 +800,10 @@ impl Store {
                 source_url: row.get(8)?,
                 published_at: row.get(9)?,
                 article_id: row.get(10)?,
+                reliability: row.get(11)?,
+                info_credibility: row.get::<_, i64>(12)? as u8,
+                admiralty: row.get(13)?,
+                rsp_status: row.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -814,6 +837,27 @@ impl Store {
             params![provider, day],
         )?;
         self.atlas_quota_used(provider, day)
+    }
+
+    pub fn app_state_get(&self, key: &str) -> Result<Option<String>> {
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_state WHERE key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+
+    pub fn app_state_set(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_state(key,value) VALUES (?1,?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     /// Unix time of the next automatic Atlas run. Absent means auto run is off.
@@ -896,7 +940,8 @@ impl Store {
     pub fn atlas_stored_claims(&self, run_id: &str) -> Result<Vec<AtlasStoredClaim>> {
         let answer_id = atlas_answer_id(run_id);
         let mut stmt = self.conn.prepare(
-            "SELECT c.fingerprint, c.entity_id, c.predicate, c.object_value, c.topic, c.classification
+            "SELECT c.fingerprint, c.entity_id, c.predicate, c.object_value, c.topic, c.classification,
+                    c.source_reliability, c.info_credibility, c.admiralty
              FROM insight_claims c
              JOIN insight_sources s ON s.fingerprint = c.fingerprint
              WHERE s.run_id=?1 AND s.answer_id=?2
@@ -911,6 +956,9 @@ impl Store {
                 object: row.get(3)?,
                 topic: row.get(4)?,
                 classification: row.get(5)?,
+                reliability: row.get(6)?,
+                info_credibility: row.get::<_, i64>(7)? as u8,
+                admiralty: row.get(8)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1000,7 +1048,7 @@ impl Store {
                         params![memory_id, sentence, now, serde_json::to_string(&source)?],
                     )?;
                     self.conn.execute(
-                        "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9)",
+                        "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at,source_reliability,info_credibility,admiralty,rsp_status) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10,?11,?12,?13)",
                         params![
                             fingerprint,
                             memory_id,
@@ -1011,6 +1059,10 @@ impl Store {
                             claim.classification.trim(),
                             claim.confidence,
                             now,
+                            claim.reliability.trim(),
+                            claim.info_credibility as i64,
+                            claim.admiralty.trim(),
+                            claim.rsp_status.trim(),
                         ],
                     )?;
                     let mut stmt = self.conn.prepare(
@@ -1048,8 +1100,16 @@ impl Store {
                     ],
                 )?;
                 self.conn.execute(
-                    "UPDATE insight_claims SET updated_at=?1 WHERE fingerprint=?2",
-                    params![now, fingerprint],
+                    "UPDATE insight_claims SET confidence=?1, source_reliability=?2, info_credibility=?3, admiralty=?4, rsp_status=?5, updated_at=?6 WHERE fingerprint=?7",
+                    params![
+                        claim.confidence,
+                        claim.reliability.trim(),
+                        claim.info_credibility as i64,
+                        claim.admiralty.trim(),
+                        claim.rsp_status.trim(),
+                        now,
+                        fingerprint,
+                    ],
                 )?;
             }
             for (left, right, relation) in relations {
@@ -1228,6 +1288,10 @@ pub struct AtlasInsightClaim {
     pub article_id: String,
     pub source_url: String,
     pub published_at: String,
+    pub reliability: String,
+    pub info_credibility: u8,
+    pub admiralty: String,
+    pub rsp_status: String,
 }
 
 /// A claim already stored for an Atlas run, used when a resume skips the model.
@@ -1239,6 +1303,9 @@ pub struct AtlasStoredClaim {
     pub object: String,
     pub topic: String,
     pub classification: String,
+    pub reliability: String,
+    pub info_credibility: u8,
+    pub admiralty: String,
 }
 
 /// One Atlas claim scoped to a single article, for the Intel briefing view.
@@ -1255,6 +1322,10 @@ pub struct AtlasArticleClaim {
     pub source_url: String,
     pub published_at: String,
     pub article_id: String,
+    pub reliability: String,
+    pub info_credibility: u8,
+    pub admiralty: String,
+    pub rsp_status: String,
 }
 
 #[cfg(test)]
@@ -1383,7 +1454,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         // A version-7 database without the column gains it, keeping existing runs.
         let file = tempfile::NamedTempFile::new().unwrap();
         let store = Store::open(file.path()).unwrap();
@@ -1643,6 +1714,10 @@ mod tests {
             article_id: "art-1".into(),
             source_url: "https://example.com/a".into(),
             published_at: "2026-10-04T12:00:00+00:00".into(),
+            reliability: "B".into(),
+            info_credibility: 2,
+            admiralty: "B2".into(),
+            rsp_status: "gr".into(),
         };
         store
             .persist_atlas_insights("run-1", &[claim], &[], "brief", "")
@@ -1652,6 +1727,9 @@ mod tests {
         assert_eq!(rows[0].entity, "geneva");
         assert!((rows[0].confidence - 0.91).abs() < f64::EPSILON);
         assert_eq!(rows[0].claim, "Geneva hosts border talks.");
+        assert_eq!(rows[0].admiralty, "B2");
+        assert_eq!(rows[0].reliability, "B");
+        assert_eq!(rows[0].info_credibility, 2);
         assert!(store
             .atlas_claims_for_article("run-1", "missing")
             .unwrap()

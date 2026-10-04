@@ -906,6 +906,23 @@ pub const TOOLS: &[ToolIo] = &[
         context: NEWS_KIND,
         ..row("newsapi_headlines", &[ENTITY_PHRASE], &[])
     },
+    // WP:RSP Admiralty Source Reliability (A–F). Evidence only; no bindings.
+    // Domain or URL from evidence (not the news entity phrase), so a news turn without
+    // a publisher host skips the step instead of guessing a name.
+    ToolIo {
+        context: NEWS_KIND,
+        ..row(
+            "wikipedia_source_reliability",
+            &[Slot {
+                fills: &[
+                    fill("domain", "domain"),
+                    fill_how("url", "url", How::Plain),
+                    fill_how("org_name", "publisher", How::Plain),
+                ],
+            }],
+            &[],
+        )
+    },
     // Atlas pipeline tools. They stay in the catalog for manual runs and are left out of
     // the picker so an investigation does not spend their free-tier quotas.
     row("gnews_search", &[ENTITY_PHRASE], &[]),

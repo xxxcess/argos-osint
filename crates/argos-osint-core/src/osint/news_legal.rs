@@ -527,7 +527,7 @@ mod tests {
     /// policy text that names the key, its header, and the limits.
     #[test]
     fn ac1_catalog_has_55_tools_and_the_news_and_legal_entries() {
-        assert_eq!(registry().len(), 58);
+        assert_eq!(registry().len(), 59);
         let news: Vec<&str> = registry()
             .iter()
             .filter(|tool| tool.category == "News")
@@ -540,7 +540,11 @@ mod tests {
             .collect();
         assert_eq!(&news[..NEWS_TOOLS.len()], NEWS_TOOLS);
         assert_eq!(
-            &news[NEWS_TOOLS.len()..],
+            news[NEWS_TOOLS.len()],
+            "wikipedia_source_reliability"
+        );
+        assert_eq!(
+            &news[NEWS_TOOLS.len() + 1..],
             super::super::atlas_news::ATLAS_TOOLS
         );
         assert_eq!(legal, LEGAL_TOOLS);

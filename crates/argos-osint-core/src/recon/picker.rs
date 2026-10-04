@@ -688,6 +688,7 @@ pub fn context_tools(
             if investigation::directives::asks_for_headlines(question, &entities) {
                 wanted.push("newsapi_headlines");
             }
+            wanted.push("wikipedia_source_reliability");
         } else {
             if investigation::directives::asks_about_judge(question, &entities) {
                 wanted.push("courtlistener_judge_search");

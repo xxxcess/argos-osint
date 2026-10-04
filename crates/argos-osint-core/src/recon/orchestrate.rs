@@ -6583,7 +6583,18 @@ mod tests {
             .into_iter()
             .map(|entry| entry.id)
             .collect();
-        assert!(!catalog.iter().any(|id| is_context(id)), "{catalog:?}");
+        // Keyed News/Legal tools drop out without keys. Public WP:RSP reliability stays.
+        assert!(
+            !catalog.iter().any(|id| {
+                is_context(id)
+                    && id.as_str() != "wikipedia_source_reliability"
+            }),
+            "{catalog:?}"
+        );
+        assert!(
+            catalog.contains(&"wikipedia_source_reliability".to_string()),
+            "WP:RSP reliability needs no key"
+        );
         assert!(
             catalog.contains(&"firecrawl_search".to_string()),
             "other keyed tools keep their entries"
@@ -6595,11 +6606,16 @@ mod tests {
         ] {
             let (plan, ran, _) = context_turn(question, &context_keys("", ""), generic).await;
             assert!(
-                !plan.calls.iter().any(|call| is_context(&call.tool_id)),
+                !plan.calls.iter().any(|call| {
+                    is_context(&call.tool_id)
+                        && call.tool_id != "wikipedia_source_reliability"
+                }),
                 "{question}: {:?}",
                 plan.calls
             );
-            assert!(!ran.iter().any(|(_, tool, _)| is_context(tool)));
+            assert!(!ran.iter().any(|(_, tool, _)| {
+                is_context(tool) && tool != "wikipedia_source_reliability"
+            }));
         }
         let keyed = unkeyed_for(&missing_providers(&context_keys("news-key", "court-key")));
         assert!(!keyed.iter().any(|id| is_context(id)));

@@ -1626,6 +1626,16 @@ impl App {
 
     /// Load Intel bulletin articles for the active category, run day, and search.
     pub fn load_intel(&mut self) {
+        if argos_osint_core::osint::wikipedia_rsp::cached_index().is_none() {
+            if let Ok(Some(raw)) = self
+                .store
+                .app_state_get(argos_osint_core::osint::wikipedia_rsp::APP_STATE_KEY)
+            {
+                if let Ok(index) = argos_osint_core::osint::wikipedia_rsp::index_from_json(&raw) {
+                    argos_osint_core::osint::wikipedia_rsp::install_index(index);
+                }
+            }
+        }
         self.intel_days = self.store.atlas_run_days().unwrap_or_default();
         if self.intel_day.is_empty() || !self.intel_days.iter().any(|day| day == &self.intel_day) {
             let today = chrono::Utc::now().format("%Y-%m-%d").to_string();

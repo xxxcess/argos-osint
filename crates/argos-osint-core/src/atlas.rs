@@ -1697,6 +1697,32 @@ where
                 }
             } else {
                 emit(AtlasEvent::Status("Extracting insights".into()));
+                let stored_rsp = store
+                    .app_state_get(crate::osint::wikipedia_rsp::APP_STATE_KEY)
+                    .ok()
+                    .flatten();
+                match crate::osint::wikipedia_rsp::warm_with_store_json(
+                    stored_rsp.as_deref(),
+                    &user_agent,
+                )
+                .await
+                {
+                    Ok((index, fetched)) => {
+                        if fetched {
+                            if let Ok(json) = crate::osint::wikipedia_rsp::index_to_json(&index) {
+                                let _ = store.app_state_set(
+                                    crate::osint::wikipedia_rsp::APP_STATE_KEY,
+                                    &json,
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        emit(AtlasEvent::Note(format!(
+                            "WP:RSP source reliability index was not refreshed ({err})."
+                        )));
+                    }
+                }
                 match atlas_insights::extract(
                     secret,
                     classifier.as_ref(),

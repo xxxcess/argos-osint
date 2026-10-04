@@ -19,6 +19,8 @@ mod news_legal;
 #[cfg(test)]
 pub(crate) use news_legal::fixture;
 mod providers;
+pub mod source_eval;
+pub mod wikipedia_rsp;
 pub use news_legal::{
     context_kind, COURTLISTENER_RATE_LIMIT, COURTLISTENER_SPACING, LEGAL_TOOLS, NEWS_TOOLS,
 };
@@ -27,6 +29,11 @@ pub use providers::{
     sociavault_platforms, sociavault_routes, webmail_host, RouteInput, SociaVaultRoute,
     BATCH_SCRAPE_DEFAULT_URLS, BATCH_SCRAPE_MAX_URLS, SOCIAVAULT_ROUTES, SOCIAVAULT_TOOLS,
 };
+pub use source_eval::{
+    best_credibility, information_credibility, scale_confidence, AdmiraltyCode,
+    CredibilityInputs, InformationCredibility, SourceReliability,
+};
+pub use wikipedia_rsp::{RspEntry, RspIndex, RspStatus, SourceReliabilityObservation};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ToolDefinition {
@@ -89,6 +96,8 @@ pub fn plan_interval(id: &str) -> PlanInterval {
     }
     match id {
         "hackertarget_hostsearch" => PlanInterval::Daily,
+        // WP:RSP changes slowly; keep the built index for a month.
+        "wikipedia_source_reliability" => PlanInterval::Monthly,
         _ => PlanInterval::Never,
     }
 }
@@ -154,6 +163,7 @@ pub fn registry() -> &'static [ToolDefinition] {
         tool!("sociavault_google_search","SociaVault Google search","Web","Google results for the same query when Firecrawl search was weak. Fallback only.",["query"],"https://docs.sociavault.com/api-reference/introduction","GET https://api.sociavault.com/v1/scrape/google/search. Never an opening pick: offered only when Firecrawl search failed, returned fewer than 3 results, returned only filtered hosts, or yielded no binding a later step needs. One page and one call per question; 1 credit.",40),
         tool!("newsapi_search","NewsAPI article search","News","News articles that name the subject (exact phrase). Free-tier articles arrive 24 hours late and search reaches back one month, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/everything","GET https://newsapi.org/v2/everything with q as an exact phrase, pageSize 10 (at most 10 articles), first page only. Optional from and to (YYYY-MM-DD), language, sort_by (relevancy default, publishedAt, popularity), and domains. Enter the NewsAPI key on a News tool, or set NEWSAPI_API_KEY; it is sent as X-Api-Key, never in the URL. Developer plan: 100 requests a day, development use only. At most 2 NewsAPI calls per turn.",20),
         tool!("newsapi_headlines","NewsAPI top headlines","News","Top headlines that name the subject (exact phrase). Free-tier headlines arrive 24 hours late and cover one month at most, so this is never breaking news.",["query"],"https://newsapi.org/docs/endpoints/top-headlines","GET https://newsapi.org/v2/top-headlines with q as an exact phrase, pageSize 10 (at most 10 articles). Optional country (2-letter code) and category (business, entertainment, general, health, science, sports, technology). Same NewsAPI key (NEWSAPI_API_KEY), sent as X-Api-Key, never in the URL. At most 2 NewsAPI calls per turn.",20),
+        tool!("wikipedia_source_reliability","Wikipedia source reliability","News","Admiralty Source Reliability (A–F) for a publisher domain from English Wikipedia WP:RSP.",["domain|url|publisher"],"https://www.mediawiki.org/wiki/API:Parsing_wikitext","Maps WP:RSP consensus to A–F. Unlisted sources are F (cannot be judged). Context-dependent; not exhaustive. Uses MediaWiki action=parse on Perennial sources subpages; identifying User-Agent required. Cache 30 days.",45),
         tool!("gnews_search","GNews search","News","Keyword search across recent articles. Atlas uses this for 48-hour flashpoint discovery because the payload includes the source country.",["query"],"https://docs.gnews.io/endpoints/search-endpoint","GET https://gnews.io/api/v4/search with q (at most 200 characters), lang, max 10, and optional from (ISO 8601). Enter the GNews key on a GNews tool, or set GNEWS_API_KEY. The key is sent as X-Api-Key, never in the URL. Free tier: 100 requests a day, 10 articles, about a 12-hour delay. Atlas calls this; Recon does not.",20),
         tool!("newsdata_latest","NewsData latest","News","Latest articles for a keyword query. The endpoint is the past 48 hours. Atlas reads country codes from each result.",["query"],"https://newsdata.io/documentation","GET https://newsdata.io/api/1/latest with q (at most 100 characters), language, and size 10. The latest endpoint is already the past 48 hours. Optional timeframe (1 to 48 hours) is a paid parameter; the free plan returns HTTP 422 if it is sent. A query longer than 100 characters is also HTTP 422. Enter the NewsData key on a NewsData tool, or set NEWSDATA_API_KEY. The key is the apikey query parameter and is redacted from the stored URL. Free tier: 200 credits a day, 10 articles. Atlas calls this; Recon does not.",20),
         tool!("currents_latest","Currents latest news","News","Latest headlines for one country. Atlas uses this in the regional extraction phase.",["country"],"https://currentsapi.services/en/docs/endpoint","GET https://api.currentsapi.services/v1/latest-news with language, country, and page_size 20. Enter the Currents key on a Currents tool, or set CURRENTS_API_KEY. The key is sent as Authorization: Bearer. Free tier: 250 requests a day, 20 articles. Atlas calls this; Recon does not.",20),
@@ -1540,6 +1550,28 @@ fn request(id: &str, v: &Value) -> Result<Request> {
                 ],
             )
         }
+        "wikipedia_source_reliability" => {
+            let (domain, publisher) = wikipedia_rsp::resolve_lookup_inputs(v)?;
+            let page = if !publisher.is_empty() {
+                "Wikipedia:Reliable_sources/Perennial_sources"
+            } else {
+                // Letter page is selected at runtime when the index is built; the
+                // request URL documents the MediaWiki parse endpoint for fixtures.
+                "Wikipedia:Reliable_sources/Perennial_sources/1"
+            };
+            let _ = domain;
+            q(
+                "https://en.wikipedia.org/w/api.php",
+                &[],
+                &[
+                    ("action", "parse"),
+                    ("page", page),
+                    ("prop", "wikitext"),
+                    ("formatversion", "2"),
+                    ("format", "json"),
+                ],
+            )
+        }
         "nominatim_geocode" => {
             let x = bounded(str_arg(v, "address_or_place")?)?;
             q(
@@ -2280,11 +2312,36 @@ impl Executor {
         let def = definition(id).ok_or_else(|| anyhow!("unknown tool {id}"))?;
         // A blank osint_user_agent is unset: requests fall back to DEFAULT_USER_AGENT.
         let user_agent = custom_user_agent(user_agent);
-        if ["nominatim_geocode", "sec_submissions"].contains(&id) {
+        if ["nominatim_geocode", "sec_submissions", wikipedia_rsp::TOOL_ID].contains(&id) {
             ensure!(
                 user_agent.is_some_and(|s| s.contains('@') || s.contains("http")),
                 "configure identifying osint_user_agent for {id}"
             );
+        }
+        if id == wikipedia_rsp::TOOL_ID {
+            let (domain, publisher) = wikipedia_rsp::resolve_lookup_inputs(&inputs)?;
+            let agent = effective_user_agent(user_agent);
+            let index = wikipedia_rsp::ensure_index(agent).await?;
+            let observation = wikipedia_rsp::observation_for(&index, &domain, &publisher);
+            let status = if observation.listed {
+                "completed"
+            } else {
+                "completed"
+            };
+            return Ok(ToolResult {
+                tool_id: id.into(),
+                inputs,
+                status: status.into(),
+                source_url: observation.rsp_url.clone(),
+                retrieved_at: Utc::now().to_rfc3339(),
+                observations: serde_json::to_value(&observation)?,
+                raw: String::new(),
+                error: None,
+                cached: false,
+                truncated: false,
+                credits_charged: 0,
+                credits_reported: None,
+            });
         }
         if id == "sec_submissions" && inputs.get("cik").is_none() {
             let (kind, needle) = one_of(&inputs, &["ticker", "name"])?;
@@ -2832,7 +2889,7 @@ mod tests {
         };
         let mut ids: Vec<&str> = registry().iter().map(|tool| tool.id).collect();
         ids.push("hunter_tech_lookup");
-        assert_eq!(ids.len(), 59);
+        assert_eq!(ids.len(), 60);
         for id in ids {
             for blank in [None, Some(""), Some("   "), Some(" \t\n ")] {
                 let sent = agent(&request_headers(
@@ -2895,9 +2952,9 @@ mod tests {
 
     #[test]
     fn registry_and_validation() {
-        assert_eq!(registry().len(), 58);
+        assert_eq!(registry().len(), 59);
         let ids: std::collections::HashSet<_> = registry().iter().map(|t| t.id).collect();
-        assert_eq!(ids.len(), 58);
+        assert_eq!(ids.len(), 59);
         assert_eq!(
             registry()
                 .iter()
@@ -2914,6 +2971,14 @@ mod tests {
         }
         assert!(request("overpass_places", &json!({"latitude":95,"longitude":0})).is_err());
         assert!(request("shodan_internetdb", &json!({"ip":"127.0.0.1"})).is_ok());
+        let rsp = request(
+            "wikipedia_source_reliability",
+            &json!({"domain": "reuters.com"}),
+        )
+        .unwrap();
+        assert_eq!(rsp.url.host_str(), Some("en.wikipedia.org"));
+        assert!(rsp.url.query().unwrap_or("").contains("action=parse"));
+        assert!(rsp.url.query().unwrap_or("").contains("prop=wikitext"));
         let search = request("firecrawl_search", &json!({"query":"who is example"})).unwrap();
         assert_eq!(search.url.as_str(), "https://api.firecrawl.dev/v2/search");
         assert_eq!(

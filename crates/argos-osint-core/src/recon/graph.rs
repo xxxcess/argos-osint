@@ -367,11 +367,12 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
             run_id: String::new(),
             published_at: String::new(),
         });
+        let domain = crate::atlas::host_of(&source_label);
         let source_id = graph.node(GraphNode {
             id: format!("source:{}", source_label.to_lowercase()),
             kind: GraphNodeKind::Source,
             label: source_label.clone(),
-            detail: format!("Source {source_label}"),
+            detail: source_reliability_detail(&source_label, &domain),
             tags: Vec::new(),
             article_id: String::new(),
             run_id: String::new(),
@@ -523,6 +524,10 @@ pub fn build_claim_graph(insight: &InsightView, articles: &[crate::store::AtlasA
                     .filter(|url| !url.trim().is_empty())
             })
             .unwrap_or_else(|| "source".into());
+        let domain = article
+            .map(|article| article.source_domain.as_str())
+            .unwrap_or("");
+        let source_detail = source_reliability_detail(&publisher, domain);
         let evidence = graph.node(GraphNode {
             id: format!("evidence:{}:{run_id}", source.call_id),
             kind: GraphNodeKind::Evidence,
@@ -539,7 +544,7 @@ pub fn build_claim_graph(insight: &InsightView, articles: &[crate::store::AtlasA
             id: format!("source:{}", publisher.to_lowercase()),
             kind: GraphNodeKind::Source,
             label: publisher.clone(),
-            detail: format!("Source {publisher}"),
+            detail: source_detail,
             tags: Vec::new(),
             article_id: String::new(),
             run_id: String::new(),
@@ -823,6 +828,41 @@ pub fn graph_brief(graph: &MemoryGraph) -> String {
         lines.push(format!("{from} {} {to}", edge.kind.verb()));
     }
     lines.join("\n")
+}
+
+fn source_reliability_detail(publisher: &str, domain: &str) -> String {
+    use crate::osint::wikipedia_rsp;
+    let host = if domain.trim().is_empty() {
+        crate::atlas::host_of(publisher)
+    } else {
+        wikipedia_rsp::normalize_host(domain)
+    };
+    match wikipedia_rsp::cached_index().and_then(|index| {
+        let entry = index.lookup_domain(&host)?;
+        Some(entry.clone())
+    }) {
+        Some(entry) => {
+            let letter = entry.status.reliability();
+            format!(
+                "Source {publisher} · {} {} · RSP {} ({})",
+                letter.as_str(),
+                letter.label().to_ascii_lowercase(),
+                entry.status.label(),
+                if entry.last_year.is_empty() {
+                    "n.d."
+                } else {
+                    entry.last_year.as_str()
+                }
+            )
+        }
+        None => {
+            if host.is_empty() {
+                format!("Source {publisher}")
+            } else {
+                format!("Source {publisher} · F cannot be judged · {host} not in RSP")
+            }
+        }
+    }
 }
 
 fn ordered_serves(call: &PlanCall, directives: &[Directive]) -> Vec<String> {

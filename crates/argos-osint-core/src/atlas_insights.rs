@@ -461,6 +461,12 @@ pub async fn extract(
     articles: &[AtlasArticleRow],
     origins: &[OriginStat],
 ) -> Result<Extraction> {
+    if provider::is_decisions_model(&secret.model) {
+        return Err(anyhow!(
+            "{} is a decisions model and cannot extract claims. Use the synthesis chat model.",
+            secret.model
+        ));
+    }
     let (packet, gated) = insight_packet(articles, origins);
     if packet.is_empty() {
         return Ok(Extraction {
@@ -1416,5 +1422,23 @@ mod tests {
             .iter()
             .any(|hit| hit.memory.text.contains("Putin sanctioned Acme")));
         assert!(store.atlas_has_insights(run_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_decisions_model_does_not_extract_claims() {
+        let secret = crate::secrets::ProviderSecret {
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "typesafe/jev-1.3".into(),
+            api_key: Some("test".into()),
+            stt_model: None,
+            device: None,
+        };
+        let err = match extract(&secret, &[], &[]).await {
+            Ok(_) => panic!("a decisions model extracted claims"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("decisions model"));
+        assert!(err.to_string().contains("synthesis"));
     }
 }

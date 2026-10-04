@@ -1785,6 +1785,9 @@ impl App {
         let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
             .ok()
             .filter(|secret| provider::resolved_key(secret).is_some());
+        let synthesizer = provider::role_secret(&self.auth, &self.settings, "synthesis")
+            .ok()
+            .filter(|secret| provider::resolved_key(secret).is_some());
         let tx = self.work_tx.clone();
         let user_agent =
             osint::effective_user_agent(Some(&self.settings.osint_user_agent)).to_string();
@@ -1798,6 +1801,7 @@ impl App {
                 resume,
                 &feed,
                 classifier,
+                synthesizer,
                 move |event| {
                     let _ = emit_tx.send(WorkEvent::Atlas(event));
                 },

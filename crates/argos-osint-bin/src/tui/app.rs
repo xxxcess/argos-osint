@@ -8,6 +8,9 @@ use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
 use argos_osint_core::store::{AtlasArticleClaim, AtlasArticleRow, AtlasRunRow};
+use argos_osint_core::intel_recon::{
+    self, ArticleBodyRow, IntelReportJobRow, IntelReportSectionRow, ReportMode, ReportScope,
+};
 use argos_osint_core::{atlas, osint, recon};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -129,7 +132,11 @@ pub struct Scrolls {
     pub path: u16,
     pub summary: u16,
     pub intel_list: u16,
+    /// Vertical offset of the Briefing Focus center stack (side panes stay fixed).
     pub intel_brief: u16,
+    /// Line offset inside the fixed-height full-article pane.
+    pub intel_full: u16,
+    pub intel_jobs: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +144,13 @@ pub enum ChoiceKind {
     Provider,
     Model,
     IntelDay,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntelReconFocus {
+    Tab(usize),
+    Section(usize),
+    Start,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +166,7 @@ pub enum Overlay {
     Memories { message_id: String },
     Block { title: String, body: String },
     Choice(ChoiceKind),
+    IntelRecon,
     Palette,
 }
 
@@ -357,6 +372,14 @@ pub enum ButtonId {
     AtlasNews,
     IntelDay,
     IntelRecon,
+    IntelReconStart,
+    IntelBodyRetry,
+    IntelBodyRefresh,
+    IntelJobOpen,
+    IntelJobPause,
+    IntelJobResume,
+    IntelJobCancel,
+    IntelJobRetry,
     CreateMemory,
     BrainBack,
     ClearLog,
@@ -398,6 +421,10 @@ pub enum Target {
     IntelTab(usize),
     /// One Intel bulletin article row.
     IntelArticle(usize),
+    /// Recon mode tab inside the Recon configuration popup.
+    IntelReconTab(usize),
+    /// One report-section toggle inside the Recon configuration popup.
+    IntelReconSection(usize),
     /// One line of the open recon or claim path.
     PathLine(usize),
     Choice(usize),
@@ -462,6 +489,8 @@ enum WorkEvent {
     AtlasDone {
         outcome: std::result::Result<atlas::Stop, String>,
     },
+    IntelBody(intel_recon::BodyFetchEvent),
+    IntelReport(intel_recon::IntelReportEvent),
 }
 
 /// Synthesis text for a thread that is still streaming. Deltas for a thread that is not
@@ -614,6 +643,21 @@ pub struct App {
     pub intel_sel: usize,
     pub intel_claims: Vec<AtlasArticleClaim>,
     pub intel_relations: Vec<(String, String, String)>,
+    pub intel_body: Option<ArticleBodyRow>,
+    pub intel_body_message: String,
+    pub intel_full_collapsed: bool,
+    pub intel_jobs: Vec<IntelReportJobRow>,
+    pub intel_sections: Vec<IntelReportSectionRow>,
+    pub intel_job_sel: usize,
+    pub intel_collapsed_sections: HashSet<String>,
+    /// Active mode tab in the Recon configuration popup.
+    pub intel_recon_tab: usize,
+    /// Enabled section keys per mode (`verify`, `explain`, …).
+    pub intel_recon_enabled: HashMap<String, HashSet<String>>,
+    /// Keyboard/mouse focus inside the Recon configuration popup.
+    pub intel_recon_focus: IntelReconFocus,
+    pub(crate) intel_body_running: HashSet<String>,
+    intel_report_running: HashMap<String, Arc<AtomicBool>>,
     pub gnews_key: String,
     pub gnews_fallback: String,
     pub newsdata_key: String,
@@ -849,6 +893,18 @@ impl App {
             intel_sel: 0,
             intel_claims: Vec::new(),
             intel_relations: Vec::new(),
+            intel_body: None,
+            intel_body_message: String::new(),
+            intel_full_collapsed: false,
+            intel_jobs: Vec::new(),
+            intel_sections: Vec::new(),
+            intel_job_sel: 0,
+            intel_collapsed_sections: HashSet::new(),
+            intel_recon_tab: 0,
+            intel_recon_enabled: HashMap::new(),
+            intel_recon_focus: IntelReconFocus::Tab(0),
+            intel_body_running: HashSet::new(),
+            intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
             graph_summary: String::new(),
@@ -1742,8 +1798,12 @@ impl App {
             return;
         };
         self.intel_page = IntelPage::Briefing;
-        self.refresh_intel_briefing();
+        self.intel_full_collapsed = false;
         self.scrolls.intel_brief = 0;
+        self.scrolls.intel_full = 0;
+        self.scrolls.intel_jobs = 0;
+        self.refresh_intel_briefing();
+        self.ensure_article_body_fetch(false);
         self.set_focus(Target::Button(ButtonId::IntelRecon));
         self.status = format!("Brief · {}", article.title);
     }
@@ -1752,6 +1812,9 @@ impl App {
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
             self.intel_claims.clear();
             self.intel_relations.clear();
+            self.intel_body = None;
+            self.intel_jobs.clear();
+            self.intel_sections.clear();
             return;
         };
         self.intel_claims = self
@@ -1767,18 +1830,346 @@ impl App {
             .store
             .insight_relations_among(&fingerprints)
             .unwrap_or_default();
+        self.intel_body = self
+            .store
+            .article_body_for_article(&article.id)
+            .ok()
+            .flatten();
+        self.intel_jobs = self
+            .store
+            .intel_jobs_for_article(&article.id)
+            .unwrap_or_default();
+        if self.intel_job_sel >= self.intel_jobs.len() {
+            self.intel_job_sel = self.intel_jobs.len().saturating_sub(1);
+        }
+        self.intel_sections = self
+            .intel_jobs
+            .get(self.intel_job_sel)
+            .and_then(|job| self.store.intel_report_sections(&job.id).ok())
+            .unwrap_or_default();
     }
 
     fn leave_intel_briefing(&mut self) {
         self.intel_page = IntelPage::Bulletin;
         self.intel_claims.clear();
         self.intel_relations.clear();
+        self.intel_body = None;
+        self.intel_body_message.clear();
+        self.intel_jobs.clear();
+        self.intel_sections.clear();
         self.set_focus(if self.intel_articles.is_empty() {
             Target::Field(FieldId::IntelSearch)
         } else {
             Target::IntelArticle(self.intel_sel)
         });
         self.status = "Bulletin".into();
+    }
+
+    fn osint_provider_keys(&self) -> osint::ProviderKeys {
+        osint::ProviderKeys {
+            firecrawl: self.settings.provider_key("firecrawl"),
+            firecrawl_fallback: self.settings.provider_fallback_key("firecrawl"),
+            hunter: self.settings.provider_key("hunter"),
+            hunter_fallback: self.settings.provider_fallback_key("hunter"),
+            sociavault: self.settings.provider_key("sociavault"),
+            sociavault_fallback: self.settings.provider_fallback_key("sociavault"),
+            newsapi: self.settings.provider_key("newsapi"),
+            newsapi_fallback: self.settings.provider_fallback_key("newsapi"),
+            courtlistener: self.settings.provider_key("courtlistener"),
+            courtlistener_fallback: self.settings.provider_fallback_key("courtlistener"),
+            gnews: self.settings.provider_key("gnews"),
+            gnews_fallback: self.settings.provider_fallback_key("gnews"),
+            newsdata: self.settings.provider_key("newsdata"),
+            newsdata_fallback: self.settings.provider_fallback_key("newsdata"),
+            currents: self.settings.provider_key("currents"),
+            currents_fallback: self.settings.provider_fallback_key("currents"),
+        }
+    }
+
+    fn ensure_article_body_fetch(&mut self, force_refresh: bool) {
+        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
+            return;
+        };
+        if self.intel_body_running.contains(&article.id) && !force_refresh {
+            return;
+        }
+        let outcome = match intel_recon::enqueue_article_body(&self.store, &article, force_refresh) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                self.intel_body_message = err.to_string();
+                return;
+            }
+        };
+        match outcome {
+            intel_recon::EnqueueOutcome::Cached(_) => {
+                self.intel_body = self
+                    .store
+                    .article_body_for_article(&article.id)
+                    .ok()
+                    .flatten();
+                self.intel_body_message.clear();
+            }
+            intel_recon::EnqueueOutcome::AlreadyRunning { .. } => {
+                self.intel_body_message = "Retrieving full article…".into();
+            }
+            intel_recon::EnqueueOutcome::Cooldown {
+                retry_after,
+                reason,
+                ..
+            } => {
+                self.intel_body_message = format!("Unavailable · retry after {retry_after}. {reason}");
+                self.intel_body = self
+                    .store
+                    .article_body_for_article(&article.id)
+                    .ok()
+                    .flatten();
+            }
+            intel_recon::EnqueueOutcome::Start {
+                body_id,
+                force_refresh,
+                ..
+            } => {
+                if tokio::runtime::Handle::try_current().is_err() {
+                    self.intel_body_message = "Full article fetch queued (no runtime)".into();
+                    return;
+                }
+                self.intel_body_running.insert(article.id.clone());
+                self.intel_body_message = "Retrieving full article…".into();
+                self.scrolls.intel_full = 0;
+                // Clear the full-article pane immediately so Reload never leaves stale prose.
+                if force_refresh {
+                    if let Some(body) = self.intel_body.as_mut() {
+                        body.body_markdown.clear();
+                        body.quality = "unavailable".into();
+                        body.quality_rationale.clear();
+                        body.state = "running".into();
+                    } else {
+                        self.intel_body = None;
+                    }
+                }
+                let db = paths::db_path();
+                let keys = self.osint_provider_keys();
+                let synthesis = provider::role_secret(&self.auth, &self.settings, "synthesis")
+                    .ok()
+                    .filter(|secret| provider::resolved_key(secret).is_some());
+                let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
+                    .ok()
+                    .filter(|secret| provider::resolved_key(secret).is_some());
+                let ua = self.settings.osint_user_agent.clone();
+                let title = article.title.clone();
+                let brief = article.description.clone();
+                let article_id = article.id.clone();
+                let tx = self.work_tx.clone();
+                let cancel = Arc::new(AtomicBool::new(false));
+                tokio::spawn(async move {
+                    let _ = intel_recon::fetch_article_body(
+                        &db,
+                        &body_id,
+                        &title,
+                        &brief,
+                        keys,
+                        synthesis,
+                        classifier,
+                        if ua.trim().is_empty() {
+                            None
+                        } else {
+                            Some(ua)
+                        },
+                        force_refresh,
+                        cancel,
+                        |event| {
+                            let _ = tx.send(WorkEvent::IntelBody(event));
+                        },
+                    )
+                    .await;
+                    let _ = article_id;
+                });
+            }
+        }
+    }
+
+    fn open_intel_recon_popup(&mut self) {
+        self.intel_recon_tab = 0;
+        self.intel_recon_focus = IntelReconFocus::Tab(0);
+        self.intel_recon_enabled.clear();
+        for mode in ReportMode::all() {
+            let keys = intel_recon::section_plan(mode)
+                .into_iter()
+                .map(|section| section.key.to_string())
+                .collect();
+            self.intel_recon_enabled
+                .insert(mode.as_str().to_string(), keys);
+        }
+        self.scrolls.popup = 0;
+        self.overlay = Overlay::IntelRecon;
+        self.set_focus(Target::IntelReconTab(0));
+        self.status = "Configure Recon report".into();
+    }
+
+pub(crate) fn intel_recon_mode(&self) -> ReportMode {
+        ReportMode::all()
+            .get(self.intel_recon_tab)
+            .copied()
+            .unwrap_or(ReportMode::Verify)
+    }
+
+pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) -> bool {
+        self.intel_recon_enabled
+            .get(mode.as_str())
+            .map(|set| set.contains(key))
+            .unwrap_or(true)
+    }
+
+    fn toggle_intel_recon_section(&mut self, index: usize) {
+        let mode = self.intel_recon_mode();
+        let plan = intel_recon::section_plan(mode);
+        let Some(section) = plan.get(index) else {
+            return;
+        };
+        let entry = self
+            .intel_recon_enabled
+            .entry(mode.as_str().to_string())
+            .or_default();
+        if entry.contains(section.key) {
+            if entry.len() <= 1 {
+                self.status = "Keep at least one section enabled".into();
+                return;
+            }
+            entry.remove(section.key);
+        } else {
+            entry.insert(section.key.to_string());
+        }
+        self.intel_recon_focus = IntelReconFocus::Section(index);
+        self.set_focus(Target::IntelReconSection(index));
+    }
+
+    fn select_intel_recon_tab(&mut self, index: usize) {
+        let modes = ReportMode::all();
+        if index >= modes.len() {
+            return;
+        }
+        self.intel_recon_tab = index;
+        self.intel_recon_focus = IntelReconFocus::Tab(index);
+        self.scrolls.popup = 0;
+        self.set_focus(Target::IntelReconTab(index));
+        self.status = format!("{} — {}", modes[index].title(), modes[index].description());
+    }
+
+    fn move_intel_recon_focus(&mut self, delta: i32, horizontal: bool) {
+        let modes = ReportMode::all();
+        let sections = intel_recon::section_plan(self.intel_recon_mode()).len();
+        if horizontal {
+            match self.intel_recon_focus {
+                IntelReconFocus::Tab(index) => {
+                    let next = (index as i32 + delta).clamp(0, modes.len() as i32 - 1) as usize;
+                    self.select_intel_recon_tab(next);
+                }
+                IntelReconFocus::Section(_) | IntelReconFocus::Start => {}
+            }
+            return;
+        }
+        let order_len = modes.len() + sections + 1; // tabs + sections + start
+        let current = match self.intel_recon_focus {
+            IntelReconFocus::Tab(index) => index,
+            IntelReconFocus::Section(index) => modes.len() + index,
+            IntelReconFocus::Start => modes.len() + sections,
+        };
+        let next = (current as i32 + delta).clamp(0, order_len as i32 - 1) as usize;
+        if next < modes.len() {
+            self.select_intel_recon_tab(next);
+        } else if next < modes.len() + sections {
+            let index = next - modes.len();
+            self.intel_recon_focus = IntelReconFocus::Section(index);
+            self.set_focus(Target::IntelReconSection(index));
+            let room = super::ui::intel_recon_section_room(self).max(1);
+            super::ui::reveal_index(&mut self.scrolls.popup, index, room);
+        } else {
+            self.intel_recon_focus = IntelReconFocus::Start;
+            self.set_focus(Target::Button(ButtonId::IntelReconStart));
+        }
+    }
+
+    fn start_intel_report_from_popup(&mut self) {
+        let mode = self.intel_recon_mode();
+        let enabled = self
+            .intel_recon_enabled
+            .get(mode.as_str())
+            .cloned()
+            .unwrap_or_default();
+        if enabled.is_empty() {
+            self.status = "Enable at least one section".into();
+            return;
+        }
+        let mut scope = ReportScope::default();
+        scope.sections = intel_recon::section_plan(mode)
+            .into_iter()
+            .filter(|section| enabled.contains(section.key))
+            .map(|section| section.key.to_string())
+            .collect();
+        self.overlay = Overlay::None;
+        self.scrolls.popup = 0;
+        self.start_intel_report(mode, scope);
+        self.set_focus(Target::Button(ButtonId::IntelRecon));
+    }
+
+    fn start_intel_report(&mut self, mode: ReportMode, scope: ReportScope) {
+        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
+            self.status = "No article selected".into();
+            return;
+        };
+        let job = match intel_recon::create_report_job(&self.store, &article, mode, &scope, false)
+        {
+            Ok(job) => job,
+            Err(err) => {
+                self.status = format!("Recon failed: {err}");
+                return;
+            }
+        };
+        if matches!(job.state.as_str(), "queued" | "running" | "waiting")
+            && !self.intel_report_running.contains_key(&job.id)
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.intel_report_running
+                .insert(job.id.clone(), cancel.clone());
+            let db = paths::db_path();
+            let keys = self.osint_provider_keys();
+            let synthesis = provider::role_secret(&self.auth, &self.settings, "synthesis")
+                .ok()
+                .filter(|secret| provider::resolved_key(secret).is_some());
+            let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
+                .ok()
+                .filter(|secret| provider::resolved_key(secret).is_some());
+            let settings = self.settings.clone();
+            let tx = self.work_tx.clone();
+            let job_id = job.id.clone();
+            intel_recon::start_report_worker(
+                &db,
+                job_id,
+                article.title.clone(),
+                article.url.clone(),
+                article.description.clone(),
+                article.published_at.clone(),
+                article.source_domain.clone(),
+                article.run_id.clone(),
+                keys,
+                synthesis,
+                classifier,
+                settings,
+                cancel,
+                move |event| {
+                    let _ = tx.send(WorkEvent::IntelReport(event));
+                },
+            );
+        }
+        self.refresh_intel_briefing();
+        self.status = format!("{} r{} · {}", mode.title(), job.revision, job.state);
+    }
+
+    fn selected_intel_job_id(&self) -> Option<String> {
+        self.intel_jobs
+            .get(self.intel_job_sel)
+            .map(|job| job.id.clone())
     }
 
     pub fn move_intel(&mut self, delta: i32) {
@@ -2487,6 +2878,117 @@ impl App {
                     self.select_latest_atlas_run();
                 }
                 true
+            }
+            WorkEvent::IntelBody(event) => {
+                let article_id = match &event {
+                    intel_recon::BodyFetchEvent::Started { article_id, .. }
+                    | intel_recon::BodyFetchEvent::Attempt { article_id, .. }
+                    | intel_recon::BodyFetchEvent::Progress { article_id, .. }
+                    | intel_recon::BodyFetchEvent::Ready { article_id, .. }
+                    | intel_recon::BodyFetchEvent::Failed { article_id, .. } => article_id.clone(),
+                };
+                match event {
+                    intel_recon::BodyFetchEvent::Progress { message, .. } => {
+                        self.intel_body_message = message;
+                    }
+                    intel_recon::BodyFetchEvent::Attempt {
+                        tool_id, state, reason, ..
+                    } => {
+                        self.intel_body_message = if reason.is_empty() {
+                            format!("{tool_id} · {state}")
+                        } else {
+                            format!("{tool_id} · {state} · {reason}")
+                        };
+                    }
+                    intel_recon::BodyFetchEvent::Ready { quality, .. } => {
+                        self.intel_body_running.remove(&article_id);
+                        self.intel_body_message = format!("Full article · {quality}");
+                    }
+                    intel_recon::BodyFetchEvent::Failed { reason, .. } => {
+                        self.intel_body_running.remove(&article_id);
+                        self.intel_body_message = reason;
+                    }
+                    intel_recon::BodyFetchEvent::Started { .. } => {
+                        self.intel_body_message = "Retrieving full article…".into();
+                    }
+                }
+                let focused = self
+                    .intel_articles
+                    .get(self.intel_sel)
+                    .is_some_and(|a| a.id == article_id);
+                if focused && self.intel_page == IntelPage::Briefing {
+                    self.intel_body = self
+                        .store
+                        .article_body_for_article(&article_id)
+                        .ok()
+                        .flatten();
+                }
+                focused && self.module == Some(ModuleId::Intel)
+            }
+            WorkEvent::IntelReport(event) => {
+                let (article_id, job_id) = match &event {
+                    intel_recon::IntelReportEvent::JobCreated {
+                        article_id, job_id, ..
+                    }
+                    | intel_recon::IntelReportEvent::Stage {
+                        article_id, job_id, ..
+                    }
+                    | intel_recon::IntelReportEvent::Section {
+                        article_id, job_id, ..
+                    }
+                    | intel_recon::IntelReportEvent::InsightsUpdated {
+                        article_id, job_id, ..
+                    }
+                    | intel_recon::IntelReportEvent::JobDone {
+                        article_id, job_id, ..
+                    } => (article_id.clone(), job_id.clone()),
+                };
+                match &event {
+                    intel_recon::IntelReportEvent::InsightsUpdated { .. } => {
+                        let focused = self
+                            .intel_articles
+                            .get(self.intel_sel)
+                            .is_some_and(|a| a.id == article_id);
+                        if focused && self.intel_page == IntelPage::Briefing {
+                            self.refresh_intel_briefing();
+                        }
+                    }
+                    intel_recon::IntelReportEvent::JobDone { state, .. } => {
+                        self.intel_report_running.remove(&job_id);
+                        self.status = format!("Recon job {state}");
+                        let focused = self
+                            .intel_articles
+                            .get(self.intel_sel)
+                            .is_some_and(|a| a.id == article_id);
+                        if focused && self.intel_page == IntelPage::Briefing {
+                            self.refresh_intel_briefing();
+                        }
+                    }
+                    intel_recon::IntelReportEvent::Section { .. }
+                    | intel_recon::IntelReportEvent::Stage { .. }
+                    | intel_recon::IntelReportEvent::JobCreated { .. } => {
+                        let focused = self
+                            .intel_articles
+                            .get(self.intel_sel)
+                            .is_some_and(|a| a.id == article_id);
+                        if focused && self.intel_page == IntelPage::Briefing {
+                            self.intel_jobs = self
+                                .store
+                                .intel_jobs_for_article(&article_id)
+                                .unwrap_or_default();
+                            self.intel_sections = self
+                                .store
+                                .intel_report_sections(&job_id)
+                                .unwrap_or_default();
+                        }
+                    }
+                }
+                self.module == Some(ModuleId::Intel)
+                    && self.intel_page == IntelPage::Briefing
+                    && self
+                        .intel_articles
+                        .get(self.intel_sel)
+                        .is_some_and(|a| a.id == article_id)
             }
         }
     }
@@ -3241,7 +3743,74 @@ impl App {
                 return;
             }
             ButtonId::IntelRecon => {
-                self.status = "Recon — not wired yet".into();
+                self.open_intel_recon_popup();
+                return;
+            }
+            ButtonId::IntelReconStart => {
+                self.start_intel_report_from_popup();
+                return;
+            }
+            ButtonId::IntelBodyRetry | ButtonId::IntelBodyRefresh => {
+                self.ensure_article_body_fetch(true);
+                return;
+            }
+            ButtonId::IntelJobOpen => {
+                if let Some(job) = self.intel_jobs.get(self.intel_job_sel).cloned() {
+                    self.intel_sections = self
+                        .store
+                        .intel_report_sections(&job.id)
+                        .unwrap_or_default();
+                    self.status = format!("Opened {} r{}", job.mode, job.revision);
+                }
+                return;
+            }
+            ButtonId::IntelJobPause => {
+                if let Some(id) = self.selected_intel_job_id() {
+                    let _ = intel_recon::pause_job(&self.store, &id);
+                    if let Some(cancel) = self.intel_report_running.get(&id) {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                    self.refresh_intel_briefing();
+                    self.status = "Job paused".into();
+                }
+                return;
+            }
+            ButtonId::IntelJobResume => {
+                if let Some(id) = self.selected_intel_job_id() {
+                    let _ = intel_recon::resume_job(&self.store, &id);
+                    if let Some(job) = self.store.intel_report_job(&id).ok().flatten() {
+                        if let Some(mode) = ReportMode::parse(&job.mode) {
+                            // Restart worker for resumed job.
+                            self.intel_report_running.remove(&id);
+                            self.start_intel_report(mode, ReportScope::default());
+                        }
+                    }
+                    self.status = "Job resumed".into();
+                }
+                return;
+            }
+            ButtonId::IntelJobCancel => {
+                if let Some(id) = self.selected_intel_job_id() {
+                    let _ = intel_recon::cancel_job(&self.store, &id);
+                    if let Some(cancel) = self.intel_report_running.remove(&id) {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                    self.refresh_intel_briefing();
+                    self.status = "Job cancelled".into();
+                }
+                return;
+            }
+            ButtonId::IntelJobRetry => {
+                if let Some(id) = self.selected_intel_job_id() {
+                    let _ = intel_recon::retry_failed_tasks(&self.store, &id);
+                    if let Some(job) = self.store.intel_report_job(&id).ok().flatten() {
+                        if let Some(mode) = ReportMode::parse(&job.mode) {
+                            self.intel_report_running.remove(&id);
+                            self.start_intel_report(mode, ReportScope::default());
+                        }
+                    }
+                    self.status = "Retrying failed work".into();
+                }
                 return;
             }
             ButtonId::RefreshHardware => {
@@ -3638,6 +4207,8 @@ impl App {
                 }
             }
             Target::Choice(index) => self.apply_choice(index),
+            Target::IntelReconTab(index) => self.select_intel_recon_tab(index),
+            Target::IntelReconSection(index) => self.toggle_intel_recon_section(index),
             Target::CloseOverlay => {
                 self.overlay = Overlay::None;
                 self.scrolls.popup = 0;
@@ -3929,6 +4500,29 @@ impl App {
             }
             return true;
         }
+        if self.overlay == Overlay::IntelRecon {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.activate_target(Target::CloseOverlay),
+                KeyCode::Left | KeyCode::Char('h') => self.move_intel_recon_focus(-1, true),
+                KeyCode::Right | KeyCode::Char('l') => self.move_intel_recon_focus(1, true),
+                KeyCode::Up | KeyCode::Char('k') => self.move_intel_recon_focus(-1, false),
+                KeyCode::Down | KeyCode::Char('j') => self.move_intel_recon_focus(1, false),
+                KeyCode::Tab => self.move_intel_recon_focus(1, false),
+                KeyCode::BackTab => self.move_intel_recon_focus(-1, false),
+                KeyCode::Char(' ') => match self.intel_recon_focus {
+                    IntelReconFocus::Section(index) => self.toggle_intel_recon_section(index),
+                    IntelReconFocus::Tab(index) => self.select_intel_recon_tab(index),
+                    IntelReconFocus::Start => self.start_intel_report_from_popup(),
+                },
+                KeyCode::Enter => match self.intel_recon_focus {
+                    IntelReconFocus::Section(index) => self.toggle_intel_recon_section(index),
+                    IntelReconFocus::Tab(index) => self.select_intel_recon_tab(index),
+                    IntelReconFocus::Start => self.start_intel_report_from_popup(),
+                },
+                _ => {}
+            }
+            return true;
+        }
         if self.overlay != Overlay::None {
             if super::ui::atlas_run_card(self)
                 && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
@@ -4211,6 +4805,10 @@ impl App {
     }
 
     fn on_esc(&mut self) {
+        if self.overlay != Overlay::None {
+            self.activate_target(Target::CloseOverlay);
+            return;
+        }
         if self.focus == Target::Field(FieldId::Composer) && !self.input.trim().is_empty() {
             let now = Instant::now();
             if self
@@ -4350,7 +4948,9 @@ impl App {
                 Some(ModuleId::Osint) => self.move_tool(delta),
                 Some(ModuleId::Atlas) => self.move_atlas(delta),
                 Some(ModuleId::Intel) if self.intel_page == IntelPage::Briefing => {
-                    self.scrolls.intel_brief = add_scroll(self.scrolls.intel_brief, delta * 3);
+                    let max = super::ui::intel_brief_scroll_max(self);
+                    self.scrolls.intel_brief = add_scroll(self.scrolls.intel_brief, delta * 3)
+                        .min(max);
                 }
                 Some(ModuleId::Intel) => self.move_intel(delta),
                 Some(ModuleId::System) => {
@@ -4662,6 +5262,13 @@ fn atlas_extracting_visible(app: &App) -> bool {
         && super::ui::atlas_extracting(app)
 }
 
+fn intel_body_loading_visible(app: &App) -> bool {
+    app.module == Some(ModuleId::Intel)
+        && app.intel_page == IntelPage::Briefing
+        && matches!(app.overlay, Overlay::None)
+        && super::ui::intel_body_loading(app)
+}
+
 fn until_next_second() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4747,14 +5354,17 @@ pub async fn run(mut app: App) -> Result<()> {
         if atlas_countdown_visible(&app) {
             wait = wait.min(until_next_second());
         }
-        if atlas_extracting_visible(&app) {
+        if atlas_extracting_visible(&app) || intel_body_loading_visible(&app) {
             wait = wait.min(Duration::from_millis(80));
         }
         if !event::poll(wait)? {
             if app.draft_dirty {
                 app.flush_draft();
             }
-            if atlas_countdown_visible(&app) || atlas_extracting_visible(&app) {
+            if atlas_countdown_visible(&app)
+                || atlas_extracting_visible(&app)
+                || intel_body_loading_visible(&app)
+            {
                 dirty = true;
             }
             continue;
@@ -5015,6 +5625,18 @@ mod tests {
             intel_sel: 0,
             intel_claims: Vec::new(),
             intel_relations: Vec::new(),
+            intel_body: None,
+            intel_body_message: String::new(),
+            intel_full_collapsed: false,
+            intel_jobs: Vec::new(),
+            intel_sections: Vec::new(),
+            intel_job_sel: 0,
+            intel_collapsed_sections: HashSet::new(),
+            intel_recon_tab: 0,
+            intel_recon_enabled: HashMap::new(),
+            intel_recon_focus: IntelReconFocus::Tab(0),
+            intel_body_running: HashSet::new(),
+            intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
             graph_summary: String::new(),
@@ -5222,8 +5844,15 @@ mod tests {
         click(&mut app, Target::IntelArticle(0));
         assert_eq!(app.intel_page, IntelPage::Briefing);
         click(&mut app, Target::Button(ButtonId::IntelRecon));
-        assert_eq!(app.status, "Recon — not wired yet");
+        assert_eq!(app.overlay, Overlay::IntelRecon);
+        assert_eq!(app.intel_recon_tab, 0);
+        assert!(app
+            .intel_recon_enabled
+            .get("verify")
+            .is_some_and(|set| set.len() >= 4));
         assert_eq!(app.intel_page, IntelPage::Briefing);
+        app.on_esc();
+        assert_eq!(app.overlay, Overlay::None);
         app.on_esc();
         assert_eq!(app.intel_page, IntelPage::Bulletin);
     }

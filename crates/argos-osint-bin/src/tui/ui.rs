@@ -12,12 +12,13 @@ use super::markdown::{self, Piece, Tone};
 
 use super::app::{
     intel_category_short, intel_day_button_label, is_picker_field, unix_now, App, AtlasPage,
-    BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId, IntelPage, LogLine, ModuleId,
-    Overlay, ProviderPage, Target, INTEL_CATEGORIES,
+    BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId, IntelPage, IntelReconFocus,
+    LogLine, ModuleId, Overlay, ProviderPage, Target, INTEL_CATEGORIES,
 };
 use super::theme;
 use argos_osint_core::atlas;
 use argos_osint_core::atlas_insights;
+use argos_osint_core::intel_recon::{self, ReportMode};
 use argos_osint_core::osint;
 use argos_osint_core::provider;
 use argos_osint_core::recon::{self, Plan};
@@ -420,6 +421,17 @@ fn router_areas(area: Rect) -> Vec<Rect> {
 fn popup_area(area: Rect) -> Rect {
     let width = area.width.clamp(24, 76).min(area.width);
     let height = area.height.saturating_sub(2).clamp(8, 28).min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn intel_recon_popup_area(area: Rect) -> Rect {
+    let width = area.width.clamp(40, 88).min(area.width);
+    let height = area.height.saturating_sub(2).clamp(16, 36).min(area.height);
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -2003,6 +2015,19 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         }
         Region::AtlasRuns => shift_atlas_runs(app, delta * 3),
         Region::AtlasNews => shift_atlas_articles(app, delta * 3),
+        Region::IntelFull => {
+            let max = intel_full_scroll_max(app);
+            let before = app.scrolls.intel_full;
+            nudge(&mut app.scrolls.intel_full, delta * 3, max);
+            if app.scrolls.intel_full == before {
+                let stack_max = intel_brief_scroll_max(app);
+                nudge(&mut app.scrolls.intel_brief, delta * 3, stack_max);
+            }
+        }
+        Region::IntelBrief => {
+            let max = intel_brief_scroll_max(app);
+            nudge(&mut app.scrolls.intel_brief, delta * 3, max);
+        }
         Region::None => {}
     }
 }
@@ -2097,7 +2122,8 @@ pub fn page(app: &mut App, direction: i32) {
             shift_atlas_feed(app, direction * room);
         }
         Some(ModuleId::Intel) if app.intel_page == IntelPage::Briefing => {
-            nudge(&mut app.scrolls.intel_brief, direction * 6, 10_000);
+            let max = intel_brief_scroll_max(app);
+            nudge(&mut app.scrolls.intel_brief, direction * 6, max);
         }
         Some(ModuleId::Intel) => {
             let room = intel_list_room(app).max(1) as i32;
@@ -2142,6 +2168,8 @@ enum Region {
     AtlasNews,
     Path,
     Summary,
+    IntelBrief,
+    IntelFull,
     None,
 }
 
@@ -2249,6 +2277,20 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
                 } else {
                     Region::None
                 }
+            }
+        }
+        Some(ModuleId::Intel) if app.intel_page == IntelPage::Briefing => {
+            let (_left, center, _right) = intel_briefing_areas(body);
+            if !contains(center, x, y) {
+                Region::None
+            } else if let Some(layout) = intel_center_layout(app, center) {
+                if abs_contains(layout.full, x, y) {
+                    Region::IntelFull
+                } else {
+                    Region::IntelBrief
+                }
+            } else {
+                Region::IntelBrief
             }
         }
         Some(ModuleId::Intel) => Region::None,
@@ -2596,6 +2638,18 @@ pub fn focus_order(app: &App) -> Vec<Target> {
                 Target::CloseOverlay,
             ];
         }
+        if app.overlay == Overlay::IntelRecon {
+            let mut order: Vec<Target> = ReportMode::all()
+                .into_iter()
+                .enumerate()
+                .map(|(index, _)| Target::IntelReconTab(index))
+                .collect();
+            let sections = argos_osint_core::intel_recon::section_plan(app.intel_recon_mode());
+            order.extend((0..sections.len()).map(Target::IntelReconSection));
+            order.push(Target::Button(ButtonId::IntelReconStart));
+            order.push(Target::CloseOverlay);
+            return order;
+        }
         return vec![Target::CloseOverlay];
     }
     match app.module {
@@ -2771,7 +2825,14 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             let mut order = vec![Target::Home];
             order.extend((0..ModuleId::ALL.len()).map(Target::App));
             if app.intel_page == IntelPage::Briefing {
+                order.push(Target::Button(ButtonId::IntelBodyRefresh));
                 order.push(Target::Button(ButtonId::IntelRecon));
+                order.push(Target::Button(ButtonId::IntelJobOpen));
+                order.push(Target::Button(ButtonId::IntelJobPause));
+                order.push(Target::Button(ButtonId::IntelJobResume));
+                order.push(Target::Button(ButtonId::IntelJobCancel));
+                order.push(Target::Button(ButtonId::IntelJobRetry));
+                order.push(Target::Button(ButtonId::IntelBodyRetry));
             } else {
                 order.extend((0..INTEL_CATEGORIES.len()).map(Target::IntelTab));
                 order.push(Target::Button(ButtonId::IntelDay));
@@ -2846,6 +2907,33 @@ pub fn choice_hits(app: &App) -> Vec<(usize, Rect)> {
 
 pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
     if app.overlay != Overlay::None {
+        if app.overlay == Overlay::IntelRecon {
+            let popup = intel_recon_popup_area(app.screen);
+            let close = Rect {
+                x: popup.x + popup.width.saturating_sub(8),
+                y: popup.y,
+                width: 8.min(popup.width),
+                height: 1,
+            };
+            if contains(close, x, y) || !contains(popup, x, y) {
+                return Some(Target::CloseOverlay);
+            }
+            let layout = intel_recon_popup_layout(popup, app);
+            for (index, rect) in layout.tabs.into_iter().enumerate() {
+                if contains(rect, x, y) {
+                    return Some(Target::IntelReconTab(index));
+                }
+            }
+            for (index, rect) in layout.sections.into_iter().enumerate() {
+                if contains(rect, x, y) {
+                    return Some(Target::IntelReconSection(index));
+                }
+            }
+            if contains(layout.start, x, y) {
+                return Some(Target::Button(ButtonId::IntelReconStart));
+            }
+            return None;
+        }
         let popup = popup_area(app.screen);
         let close = Rect {
             x: popup.x + popup.width.saturating_sub(8),
@@ -3687,13 +3775,15 @@ fn footer_line(app: &App) -> Paragraph<'static> {
         "type to filter · ↑↓ · Enter run · Esc close"
     } else if let Overlay::Choice(_) = app.overlay {
         "↑↓ choose · Enter select · Esc close"
+    } else if app.overlay == Overlay::IntelRecon {
+        "←→ modes · ↑↓ sections · Space toggle · Enter start · Esc close"
     } else if app.overlay != Overlay::None {
         "Esc close · Ctrl+U/D scroll"
     } else {
         match (app.module, app.focus) {
             (None, _) => "↑↓ open · 1–7 · Ctrl+Tab apps · Ctrl+K · ? help",
             (Some(ModuleId::Intel), _) if app.intel_page == IntelPage::Briefing => {
-                "↑↓ scroll · Recon stub · Esc bulletin"
+                "↑↓ scroll · Recon modes · Esc bulletin"
             }
             (Some(ModuleId::Intel), _) => {
                 "←→ tabs · ↑↓ articles · Enter brief · / search · Esc home"
@@ -4899,27 +4989,49 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     let timelines = intel_timelines(app, article);
     draw_intel_side_pane(frame, left, " extracted ", &actors, &locations, &timelines);
 
-    let center_block = pane(&format!(" {} ", fit(&article.title, 40)));
-    let center_inner = center_block.inner(center);
-    frame.render_widget(center_block, center);
-    let body = intel_brief_body(app, article, center_inner.width as usize);
-    let scroll = app.scrolls.intel_brief.min(body.len().saturating_sub(1) as u16);
-    let visible: Vec<Line> = body
-        .into_iter()
-        .skip(scroll as usize)
-        .take(center_inner.height as usize)
-        .collect();
-    frame.render_widget(Paragraph::new(visible), center_inner);
+    // Side panes stay fixed; only the center stack scrolls.
+    frame.render_widget(Block::default().style(theme::text()), center);
+    if let Some(layout) = intel_center_layout(app, center) {
+        draw_clipped_md_pane(
+            frame,
+            center,
+            layout.brief,
+            " brief article ",
+            &layout.brief_lines,
+            0,
+        );
+        draw_clipped_button(
+            frame,
+            app,
+            center,
+            layout.reload,
+            ButtonId::IntelBodyRefresh,
+            "Reload",
+        );
+        if intel_body_loading(app) {
+            draw_intel_body_loading(frame, center, layout.full, app);
+        } else {
+            draw_clipped_md_pane(
+                frame,
+                center,
+                layout.full,
+                " full article ",
+                &layout.full_lines,
+                app.scrolls.intel_full.min(layout.full_scroll_max),
+            );
+        }
+        draw_clipped_divider(frame, center, layout.reports_btn, "Reports");
+        draw_clipped_md_pane(
+            frame,
+            center,
+            layout.reports,
+            " recon reports ",
+            &layout.reports_lines,
+            0,
+        );
+    }
 
-    let right_rows = split_vertical(
-        right,
-        [
-            Constraint::Length(6),
-            Constraint::Length(5),
-            Constraint::Min(6),
-            Constraint::Length(ACTION_H),
-        ],
-    );
+    let right_rows = intel_briefing_right_rows(app, right);
     draw_intel_confidence(frame, app, right_rows[0]);
     draw_intel_tags(frame, article, right_rows[1]);
     super::map::draw_country_mini_map(
@@ -4927,8 +5039,334 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
         right_rows[2],
         &article.country,
         article.temperature,
+        "Country",
     );
     draw_button(frame, app, ButtonId::IntelRecon, "Recon", right_rows[3]);
+    draw_intel_jobs_pane(frame, app, right_rows[4]);
+}
+
+#[derive(Clone, Copy)]
+struct AbsRect {
+    x: u16,
+    y: i32,
+    width: u16,
+    height: u16,
+}
+
+struct IntelCenterLayout {
+    brief: AbsRect,
+    reload: AbsRect,
+    full: AbsRect,
+    reports_btn: AbsRect,
+    reports: AbsRect,
+    brief_lines: Vec<Line<'static>>,
+    full_lines: Vec<Line<'static>>,
+    reports_lines: Vec<Line<'static>>,
+    full_scroll_max: u16,
+    stack_scroll_max: u16,
+}
+
+fn term_pct_height(app: &App, pct: f32, floor: u16) -> u16 {
+    ((f32::from(app.screen.height) * pct).ceil() as u16).max(floor)
+}
+
+fn abs_rect(x: u16, y: i32, width: u16, height: u16) -> AbsRect {
+    AbsRect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn abs_contains(area: AbsRect, x: u16, y: u16) -> bool {
+    let y = y as i32;
+    x >= area.x
+        && x < area.x.saturating_add(area.width)
+        && y >= area.y
+        && y < area.y + i32::from(area.height)
+}
+
+fn intersect_abs(viewport: Rect, area: AbsRect) -> Option<(Rect, u16)> {
+    if area.width == 0 || area.height == 0 || viewport.width == 0 || viewport.height == 0 {
+        return None;
+    }
+    let view_y0 = i32::from(viewport.y);
+    let view_y1 = view_y0 + i32::from(viewport.height);
+    let area_y1 = area.y + i32::from(area.height);
+    let y0 = area.y.max(view_y0);
+    let y1 = area_y1.min(view_y1);
+    if y1 <= y0 {
+        return None;
+    }
+    let x0 = area.x.max(viewport.x);
+    let x1 = area
+        .x
+        .saturating_add(area.width)
+        .min(viewport.x.saturating_add(viewport.width));
+    if x1 <= x0 {
+        return None;
+    }
+    Some((
+        Rect {
+            x: x0,
+            y: y0 as u16,
+            width: x1 - x0,
+            height: (y1 - y0) as u16,
+        },
+        (y0 - area.y) as u16,
+    ))
+}
+
+fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
+    let article = app.intel_articles.get(app.intel_sel)?;
+    if viewport.width < 4 || viewport.height < 4 {
+        return None;
+    }
+    let inner_w = viewport.width.saturating_sub(2).max(1) as usize;
+    let min_section = term_pct_height(app, 0.15, 5);
+    let full_h = term_pct_height(app, 0.50, 8);
+
+    let brief_lines = intel_brief_preview_lines(article, inner_w);
+    let brief_h = (brief_lines.len() as u16)
+        .saturating_add(2)
+        .max(min_section);
+
+    let full_lines = intel_brief_full_lines(app, inner_w);
+    let full_inner = full_h.saturating_sub(2).max(1);
+    let full_scroll_max = full_lines.len().saturating_sub(full_inner as usize) as u16;
+
+    let reports_lines = intel_brief_reports_lines(app, inner_w);
+    let reports_h = (reports_lines.len() as u16)
+        .saturating_add(2)
+        .max(min_section);
+
+    let total = brief_h
+        .saturating_add(ACTION_H)
+        .saturating_add(full_h)
+        .saturating_add(ACTION_H)
+        .saturating_add(reports_h);
+    let stack_scroll_max = total.saturating_sub(viewport.height);
+    let scroll = app.scrolls.intel_brief.min(stack_scroll_max) as i32;
+
+    let mut y = i32::from(viewport.y) - scroll;
+    let brief = abs_rect(viewport.x, y, viewport.width, brief_h);
+    y += i32::from(brief_h);
+    let reload = abs_rect(viewport.x, y, viewport.width, ACTION_H);
+    y += i32::from(ACTION_H);
+    let full = abs_rect(viewport.x, y, viewport.width, full_h);
+    y += i32::from(full_h);
+    let reports_btn = abs_rect(viewport.x, y, viewport.width, ACTION_H);
+    y += i32::from(ACTION_H);
+    let reports = abs_rect(viewport.x, y, viewport.width, reports_h);
+
+    Some(IntelCenterLayout {
+        brief,
+        reload,
+        full,
+        reports_btn,
+        reports,
+        brief_lines,
+        full_lines,
+        reports_lines,
+        full_scroll_max,
+        stack_scroll_max,
+    })
+}
+
+pub fn intel_brief_scroll_max(app: &App) -> u16 {
+    let body = chrome(app.screen, app).body;
+    let (_left, center, _right) = intel_briefing_areas(body);
+    intel_center_layout(app, center)
+        .map(|layout| layout.stack_scroll_max)
+        .unwrap_or(0)
+}
+
+fn intel_full_scroll_max(app: &App) -> u16 {
+    let body = chrome(app.screen, app).body;
+    let (_left, center, _right) = intel_briefing_areas(body);
+    intel_center_layout(app, center)
+        .map(|layout| layout.full_scroll_max)
+        .unwrap_or(0)
+}
+
+fn draw_clipped_md_pane(
+    frame: &mut Frame,
+    viewport: Rect,
+    area: AbsRect,
+    title: &str,
+    lines: &[Line<'static>],
+    scroll: u16,
+) {
+    let Some((vis, top_clip)) = intersect_abs(viewport, area) else {
+        return;
+    };
+    frame.render_widget(Block::default().style(theme::text()), vis);
+    stroke_clipped_box(frame, viewport, area, title);
+
+    let inner = AbsRect {
+        x: area.x.saturating_add(1),
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let Some((inner_vis, inner_top)) = intersect_abs(viewport, inner) else {
+        return;
+    };
+    let _ = top_clip;
+    let skip = scroll as usize + inner_top as usize;
+    let visible: Vec<Line> = lines
+        .iter()
+        .skip(skip)
+        .take(inner_vis.height as usize)
+        .cloned()
+        .collect();
+    frame.render_widget(Paragraph::new(visible), inner_vis);
+}
+
+fn stroke_clipped_box(frame: &mut Frame, viewport: Rect, area: AbsRect, title: &str) {
+    let Some((vis, top_clip)) = intersect_abs(viewport, area) else {
+        return;
+    };
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let border = Style::default().fg(theme::BORDER).bg(theme::BG);
+    let title_style = theme::dim();
+    let buf = frame.buffer_mut();
+    let left = area.x;
+    let right = area.x.saturating_add(area.width.saturating_sub(1));
+    let top = area.y;
+    let bottom = area.y + i32::from(area.height) - 1;
+
+    for row in vis.y..vis.y.saturating_add(vis.height) {
+        if left >= vis.x && left < vis.x.saturating_add(vis.width) {
+            buf[(left, row)].set_char('│').set_style(border);
+        }
+        if right >= vis.x && right < vis.x.saturating_add(vis.width) {
+            buf[(right, row)].set_char('│').set_style(border);
+        }
+    }
+
+    if top_clip == 0 {
+        let row = top as u16;
+        if row >= viewport.y && row < viewport.y.saturating_add(viewport.height) {
+            for x in vis.x..vis.x.saturating_add(vis.width) {
+                let ch = if x == left {
+                    '┌'
+                } else if x == right {
+                    '┐'
+                } else {
+                    '─'
+                };
+                buf[(x, row)].set_char(ch).set_style(border);
+            }
+            let label = title.chars().take(area.width.saturating_sub(2) as usize);
+            let mut x = area.x.saturating_add(1);
+            for ch in label {
+                if x >= right {
+                    break;
+                }
+                if x >= vis.x && x < vis.x.saturating_add(vis.width) {
+                    buf[(x, row)]
+                        .set_char(ch)
+                        .set_style(title_style);
+                }
+                x = x.saturating_add(1);
+            }
+        }
+    }
+
+    let bottom_visible = top_clip.saturating_add(vis.height) >= area.height;
+    if bottom_visible {
+        let row = bottom as u16;
+        if bottom >= 0
+            && row >= viewport.y
+            && row < viewport.y.saturating_add(viewport.height)
+        {
+            for x in vis.x..vis.x.saturating_add(vis.width) {
+                let ch = if x == left {
+                    '└'
+                } else if x == right {
+                    '┘'
+                } else {
+                    '─'
+                };
+                buf[(x, row)].set_char(ch).set_style(border);
+            }
+        }
+    }
+}
+
+fn draw_clipped_button(
+    frame: &mut Frame,
+    app: &App,
+    viewport: Rect,
+    area: AbsRect,
+    button: ButtonId,
+    label: &str,
+) {
+    let Some((vis, top_clip)) = intersect_abs(viewport, area) else {
+        return;
+    };
+    if top_clip > 0 || vis.height < area.height || vis.width < area.width {
+        // Only activate when the full control is on-screen.
+        if vis.height < 2 || vis.width < 4 {
+            return;
+        }
+        frame.render_widget(
+            Paragraph::new(label)
+                .alignment(Alignment::Center)
+                .style(theme::dim())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
+                        .style(theme::dim()),
+                ),
+            vis,
+        );
+        return;
+    }
+    draw_button(frame, app, button, label, vis);
+}
+
+fn draw_clipped_divider(frame: &mut Frame, viewport: Rect, area: AbsRect, label: &str) {
+    let Some((vis, _)) = intersect_abs(viewport, area) else {
+        return;
+    };
+    if vis.height < 2 || vis.width < 2 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(label)
+            .alignment(Alignment::Center)
+            .style(theme::dim())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
+                    .style(theme::dim()),
+            ),
+        vis,
+    );
+}
+
+fn intel_briefing_right_rows(app: &App, right: Rect) -> Vec<Rect> {
+    // Map must be at least 30% of total terminal height.
+    let map_floor = term_pct_height(app, 0.30, 8);
+    let reserved = 8u16.saturating_add(3).saturating_add(ACTION_H).saturating_add(4);
+    let map_h = map_floor.min(right.height.saturating_sub(reserved)).max(8);
+    split_vertical(
+        right,
+        [
+            Constraint::Length(8),
+            Constraint::Length(3),
+            Constraint::Length(map_h),
+            Constraint::Length(ACTION_H),
+            Constraint::Min(4),
+        ],
+    )
 }
 
 fn draw_intel_side_pane(
@@ -4956,11 +5394,11 @@ fn draw_intel_side_pane(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "LOCATIONS",
+        "EVENT LOCATIONS",
         theme::accent().add_modifier(Modifier::BOLD),
     )));
     if locations.is_empty() {
-        lines.push(Line::from(Span::styled("· none extracted", theme::dim())));
+        lines.push(Line::from(Span::styled("· unknown", theme::dim())));
     } else {
         for item in locations {
             lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
@@ -4968,11 +5406,11 @@ fn draw_intel_side_pane(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "TIMELINES",
+        "EVENT DATES",
         theme::accent().add_modifier(Modifier::BOLD),
     )));
     if timelines.is_empty() {
-        lines.push(Line::from(Span::styled("· none extracted", theme::dim())));
+        lines.push(Line::from(Span::styled("· unknown", theme::dim())));
     } else {
         for item in timelines {
             lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
@@ -4981,39 +5419,313 @@ fn draw_intel_side_pane(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn draw_intel_confidence(frame: &mut Frame, app: &App, area: Rect) {
-    let block = pane(" confidence ");
+fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
+    let block = pane(" recon jobs ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let eval = intel_source_evaluation(app);
-    let (high, mean) = intel_confidence_scores(app);
-    let width = inner.width.max(1) as usize;
+    if app.intel_jobs.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No Recon jobs yet.")
+                .style(theme::dim())
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
     let mut lines = Vec::new();
-    lines.push(meter_line(
-        &format!("REL {}", eval.reliability_letter),
-        eval.reliability_meter,
-        width,
-    ));
-    lines.push(meter_line(
-        &format!("CRD {}", eval.credibility_digit),
-        eval.credibility_meter,
-        width,
-    ));
-    lines.push(meter_line("HIGH", high, width));
-    lines.push(meter_line("MEAN", mean, width));
-    if !eval.footnote.is_empty() {
+    let start = app.scrolls.intel_jobs as usize;
+    for (offset, job) in app.intel_jobs.iter().enumerate().skip(start) {
+        let selected = offset == app.intel_job_sel;
+        let style = if selected {
+            theme::selected()
+        } else {
+            theme::text()
+        };
+        let mode = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
+            .map(|m| m.title())
+            .unwrap_or(job.mode.as_str());
         lines.push(Line::from(Span::styled(
-            fit(&eval.footnote, width),
+            format!("{mode} r{} · {}", job.revision, job.state),
+            style.add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {} · sec {}/{} · el {}/{} · tools {}/{}",
+                job.stage,
+                job.sections_done,
+                job.sections_total,
+                job.elements_done,
+                job.elements_total,
+                job.tool_calls_done,
+                job.tool_calls_allowance
+            ),
             theme::dim(),
         )));
+        if !job.current_tool.is_empty() || !job.warning.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {}{}",
+                    job.current_tool,
+                    if job.warning.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", job.warning)
+                    }
+                ),
+                theme::dim(),
+            )));
+        }
+        if lines.len() >= inner.height as usize {
+            break;
+        }
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_intel_confidence(frame: &mut Frame, app: &App, area: Rect) {
+    let block = pane(" confidence ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let eval = intel_source_evaluation(app);
+    let (_high, mean) = intel_confidence_scores(app);
+    let grade = format!("{}{}", eval.reliability_letter, eval.credibility_digit);
+    let score = (eval.reliability_meter + eval.credibility_meter) * 0.5;
+    let color = grade_score_color(score);
+    let art = grade_ascii_lines(&grade);
+    let art_w = art
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let cols = split_horizontal(
+        inner,
+        [
+            Constraint::Length(art_w.saturating_add(1).max(12)),
+            Constraint::Min(12),
+        ],
+    );
+    let art_lines: Vec<Line> = art
+        .into_iter()
+        .map(|row| {
+            Line::from(Span::styled(
+                row,
+                Style::default().fg(color).bg(theme::BG).add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(art_lines), cols[0]);
+
+    let text_w = cols[1].width.max(1) as usize;
+    let mut explain = Vec::new();
+    explain.push(Line::from(Span::styled(
+        fit(
+            &format!(
+                "Letter {} — {}",
+                eval.reliability_letter, eval.reliability_label
+            ),
+            text_w,
+        ),
+        theme::text(),
+    )));
+    explain.push(Line::from(Span::styled(
+        fit(
+            &format!(
+                "Digit {} — {}",
+                eval.credibility_digit, eval.credibility_label
+            ),
+            text_w,
+        ),
+        theme::text(),
+    )));
+    explain.push(Line::from(""));
+    explain.push(Line::from(Span::styled(
+        fit(&format!("Brief rating value: {mean:.2}"), text_w),
+        theme::accent().add_modifier(Modifier::BOLD),
+    )));
+    for chunk in wrap_text(
+        "Average confidence across every claim made in the article.",
+        text_w,
+    ) {
+        explain.push(Line::from(Span::styled(chunk, theme::dim())));
+    }
+    if !eval.footnote.is_empty() {
+        explain.push(Line::from(Span::styled(
+            fit(&eval.footnote, text_w),
+            theme::dim(),
+        )));
+    }
+    frame.render_widget(Paragraph::new(explain), cols[1]);
+}
+
+/// Bright green (best) → bright red (worst) by combined Admiralty meter.
+fn grade_score_color(score: f64) -> Color {
+    let t = score.clamp(0.0, 1.0);
+    let r = (255.0 * (1.0 - t) + 20.0 * t).round() as u8;
+    let g = (40.0 * (1.0 - t) + 255.0 * t).round() as u8;
+    let b = (40.0 * (1.0 - t) + 90.0 * t).round() as u8;
+    Color::Rgb(r, g, b)
+}
+
+/// ANSI Shadow glyphs (same family as the ARGOS home wordmark), A–F / 0–9.
+fn grade_ascii_lines(grade: &str) -> Vec<String> {
+    let glyphs: Vec<[&str; 6]> = grade.chars().filter_map(ansi_shadow_glyph).collect();
+    if glyphs.is_empty() {
+        return vec!["?".into(); 6];
+    }
+    (0..6)
+        .map(|row| {
+            glyphs
+                .iter()
+                .map(|g| g[row])
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+fn ansi_shadow_glyph(ch: char) -> Option<[&'static str; 6]> {
+    Some(match ch.to_ascii_uppercase() {
+        'A' => [
+            " █████╗ ",
+            "██╔══██╗",
+            "███████║",
+            "██╔══██║",
+            "██║  ██║",
+            "╚═╝  ╚═╝",
+        ],
+        'B' => [
+            "██████╗ ",
+            "██╔══██╗",
+            "██████╔╝",
+            "██╔══██╗",
+            "██████╔╝",
+            "╚═════╝ ",
+        ],
+        'C' => [
+            " ██████╗",
+            "██╔════╝",
+            "██║     ",
+            "██║     ",
+            "╚██████╗",
+            " ╚═════╝",
+        ],
+        'D' => [
+            "██████╗ ",
+            "██╔══██╗",
+            "██║  ██║",
+            "██║  ██║",
+            "██████╔╝",
+            "╚═════╝ ",
+        ],
+        'E' => [
+            "███████╗",
+            "██╔════╝",
+            "█████╗  ",
+            "██╔══╝  ",
+            "███████╗",
+            "╚══════╝",
+        ],
+        'F' => [
+            "███████╗",
+            "██╔════╝",
+            "█████╗  ",
+            "██╔══╝  ",
+            "██║     ",
+            "╚═╝     ",
+        ],
+        '0' => [
+            " ██████╗ ",
+            "██╔═████╗",
+            "██║██╔██║",
+            "████╔╝██║",
+            "╚██████╔╝",
+            " ╚═════╝ ",
+        ],
+        '1' => [
+            " ██╗",
+            "███║",
+            "╚██║",
+            " ██║",
+            " ██║",
+            " ╚═╝",
+        ],
+        '2' => [
+            "██████╗ ",
+            "╚════██╗",
+            " █████╔╝",
+            "██╔═══╝ ",
+            "███████╗",
+            "╚══════╝",
+        ],
+        '3' => [
+            "██████╗ ",
+            "╚════██╗",
+            " █████╔╝",
+            " ╚═══██╗",
+            "██████╔╝",
+            "╚═════╝ ",
+        ],
+        '4' => [
+            "██╗  ██╗",
+            "██║  ██║",
+            "███████║",
+            "╚════██║",
+            "     ██║",
+            "     ╚═╝",
+        ],
+        '5' => [
+            "███████╗",
+            "██╔════╝",
+            "███████╗",
+            "╚════██║",
+            "███████║",
+            "╚══════╝",
+        ],
+        '6' => [
+            " ██████╗ ",
+            "██╔════╝ ",
+            "███████╗ ",
+            "██╔═══██╗",
+            "╚██████╔╝",
+            " ╚═════╝ ",
+        ],
+        '7' => [
+            "███████╗",
+            "╚════██║",
+            "    ██╔╝",
+            "   ██╔╝ ",
+            "  ██╔╝  ",
+            "  ╚═╝   ",
+        ],
+        '8' => [
+            " █████╗ ",
+            "██╔══██╗",
+            "╚█████╔╝",
+            "██╔══██╗",
+            "╚█████╔╝",
+            " ╚════╝ ",
+        ],
+        '9' => [
+            " █████╗ ",
+            "██╔══██╗",
+            "╚██████║",
+            " ╚═══██║",
+            " █████╔╝",
+            " ╚════╝ ",
+        ],
+        _ => return None,
+    })
+}
+
 struct IntelSourceEval {
     reliability_letter: String,
+    reliability_label: String,
     reliability_meter: f64,
     credibility_digit: String,
+    credibility_label: String,
     credibility_meter: f64,
     footnote: String,
 }
@@ -5080,42 +5792,24 @@ fn intel_source_evaluation(app: &App) -> IntelSourceEval {
     };
     IntelSourceEval {
         reliability_letter: reliability.as_str().into(),
+        reliability_label: reliability.label().into(),
         reliability_meter: reliability.meter(),
         credibility_digit: credibility.as_u8().to_string(),
+        credibility_label: credibility.label().into(),
         credibility_meter: credibility.meter(),
         footnote,
     }
-}
-
-fn meter_line(label: &str, value: f64, width: usize) -> Line<'static> {
-    let bar_w = width.saturating_sub(label.len() + 8).max(4);
-    let filled = ((value.clamp(0.0, 1.0) * bar_w as f64).round() as usize).min(bar_w);
-    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
-    Line::from(vec![
-        Span::styled(format!("{label} "), theme::dim()),
-        Span::styled(bar, theme::accent()),
-        Span::styled(format!(" {value:.2}"), theme::dim()),
-    ])
 }
 
 fn draw_intel_tags(frame: &mut Frame, article: &argos_osint_core::store::AtlasArticleRow, area: Rect) {
     let block = pane(" tags ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let lines = vec![
-        Line::from(Span::styled(
-            format!(" {} ", atlas::category_name(&article.category)),
-            theme::accent(),
-        )),
-        Line::from(Span::styled(
-            format!(" {} ", atlas::category_tag(&article.category)),
-            theme::dim(),
-        )),
-        Line::from(Span::styled(
-            format!(" {} ", article.provider),
-            theme::dim(),
-        )),
-    ];
+    // News classification categories only — never OSINT provider API names.
+    let lines = vec![Line::from(Span::styled(
+        format!(" {} ", atlas::category_name(&article.category)),
+        theme::accent(),
+    ))];
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -5138,10 +5832,10 @@ fn intel_locations(
     app: &App,
     article: &argos_osint_core::store::AtlasArticleRow,
 ) -> Vec<String> {
+    // Event locations from claims only. Publisher country is shown in the preview,
+    // not inferred as event geography.
     let mut out = Vec::new();
-    if !article.country.trim().is_empty() {
-        out.push(atlas::country_label(&article.country));
-    }
+    let _ = article;
     for claim in &app.intel_claims {
         for value in [&claim.object, &claim.entity] {
             let value = value.trim();
@@ -5161,12 +5855,10 @@ fn intel_locations(
 
 fn intel_timelines(
     app: &App,
-    article: &argos_osint_core::store::AtlasArticleRow,
+    _article: &argos_osint_core::store::AtlasArticleRow,
 ) -> Vec<String> {
+    // Event dates from claims. Publication date stays in the original preview.
     let mut out = Vec::new();
-    if !article.published_at.trim().is_empty() {
-        out.push(atlas::friendly_date(&article.published_at));
-    }
     for claim in &app.intel_claims {
         let stamp = claim.published_at.trim();
         if stamp.is_empty() {
@@ -5201,25 +5893,28 @@ fn intel_confidence_scores(app: &App) -> (f64, f64) {
     (high, mean)
 }
 
-fn intel_brief_body(
-    app: &App,
+fn intel_brief_preview_lines(
     article: &argos_osint_core::store::AtlasArticleRow,
     width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    // Original article preview — never rewritten by enrichment.
     lines.push(Line::from(Span::styled(
         article.title.clone(),
         theme::text().add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
         format!(
-            "{} · {} · {}",
+            "Publisher {} · origin {} · published {}",
             article.source_name,
             article.country.to_ascii_uppercase(),
             atlas::friendly_date(&article.published_at)
         ),
         theme::dim(),
     )));
+    if !article.url.trim().is_empty() {
+        lines.push(Line::from(Span::styled(article.url.clone(), theme::dim())));
+    }
     lines.push(Line::from(""));
     let summary = if article.description.trim().is_empty() {
         "No article summary stored.".to_string()
@@ -5229,76 +5924,258 @@ fn intel_brief_body(
     for chunk in wrap_text(&summary, width.max(1)) {
         lines.push(Line::from(Span::styled(chunk, theme::text())));
     }
-    if !app.intel_claims.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "CLAIMS",
-            theme::accent().add_modifier(Modifier::BOLD),
-        )));
-        for claim in &app.intel_claims {
-            let code = if claim.admiralty.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", claim.admiralty)
-            };
-            lines.push(Line::from(Span::styled(
-                format!("[{}]{code} {:.2}", claim.classification, claim.confidence),
-                theme::dim(),
-            )));
-            for chunk in wrap_text(&claim.claim, width.max(1)) {
-                lines.push(Line::from(Span::styled(chunk, theme::text())));
+    lines
+}
+
+fn intel_brief_full_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    // Loading is drawn as a centered Atlas-style spinner overlay, not as text lines.
+    if intel_body_loading(app) {
+        return lines;
+    }
+    match &app.intel_body {
+        Some(body)
+            if matches!(body.quality.as_str(), "complete" | "partial" | "uncertain")
+                && !body.body_markdown.trim().is_empty() =>
+        {
+            if body.quality != "complete" {
+                lines.push(Line::from(Span::styled(
+                    format!("[{}] {}", body.quality, body.quality_rationale),
+                    theme::dim(),
+                )));
             }
-            lines.push(Line::from(""));
+            if app.intel_full_collapsed {
+                lines.push(Line::from(Span::styled(
+                    "[collapsed — press Reload to retrieve again]",
+                    theme::dim(),
+                )));
+            } else {
+                let md = super::markdown::markdown_lines(&body.body_markdown, width.max(1));
+                for line in md {
+                    lines.push(md_line_to_line(line));
+                }
+            }
         }
-    }
-    if !app.intel_relations.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "LINKS",
-            theme::accent().add_modifier(Modifier::BOLD),
-        )));
-        for (left, right, relation) in &app.intel_relations {
-            let left_label = app
-                .intel_claims
-                .iter()
-                .find(|claim| &claim.fingerprint == left)
-                .map(|claim| claim.entity.as_str())
-                .unwrap_or(left.as_str());
-            let right_label = app
-                .intel_claims
-                .iter()
-                .find(|claim| &claim.fingerprint == right)
-                .map(|claim| claim.entity.as_str())
-                .unwrap_or(right.as_str());
+        Some(body) if !app.intel_body_message.is_empty() => {
             lines.push(Line::from(Span::styled(
-                format!("{left_label} — {relation} — {right_label}"),
+                app.intel_body_message.clone(),
                 theme::dim(),
             )));
         }
-    }
-    if app.intel_claims.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "No Atlas insights extracted for this article yet.",
-            theme::dim(),
-        )));
+        Some(body) => {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "Unavailable. {}",
+                    if body.quality_rationale.is_empty() {
+                        app.intel_body_message.as_str()
+                    } else {
+                        body.quality_rationale.as_str()
+                    }
+                ),
+                theme::dim(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "[Press Reload to retry full article retrieval]",
+                theme::dim(),
+            )));
+        }
+        None => {}
     }
     lines
 }
 
+/// True while the focused brief is retrieving or refining the full article body.
+pub(crate) fn intel_body_loading(app: &App) -> bool {
+    let Some(article) = app.intel_articles.get(app.intel_sel) else {
+        return false;
+    };
+    app.intel_body_running.contains(&article.id)
+        || app
+            .intel_body
+            .as_ref()
+            .is_some_and(|body| body.state == "running")
+        || (app.intel_body.is_none() && !app.intel_body_message.is_empty())
+}
+
+/// Same centered spinner treatment as Atlas insights extraction.
+fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app: &App) {
+    let Some((vis, _)) = intersect_abs(viewport, area) else {
+        return;
+    };
+    frame.render_widget(Block::default().style(theme::text()), vis);
+    stroke_clipped_box(frame, viewport, area, " full article ");
+
+    let inner = AbsRect {
+        x: area.x.saturating_add(1),
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let Some((inner_vis, _)) = intersect_abs(viewport, inner) else {
+        return;
+    };
+    let (label, detail) = intel_body_progress_lines(app);
+    let mut lines = vec![Line::from(Span::styled(label, theme::dim()))];
+    if let Some(detail) = detail {
+        lines.push(Line::from(Span::styled(detail, theme::dim())));
+    }
+    let height = lines.len() as u16;
+    let y = inner_vis.y + inner_vis.height.saturating_sub(height) / 2;
+    let centered = Rect {
+        x: inner_vis.x,
+        y,
+        width: inner_vis.width,
+        height: height.min(inner_vis.height),
+    };
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        centered,
+    );
+}
+
+/// Mirror `insights_progress_lines`: braille spinner + phase label, optional detail.
+fn intel_body_progress_lines(app: &App) -> (String, Option<String>) {
+    let message = app.intel_body_message.trim();
+    let lower = message.to_ascii_lowercase();
+    let phase = if lower.contains("classif") || lower.contains("sponsored") {
+        "Classifying article sections"
+    } else if lower.contains("extract")
+        || lower.contains("synthesis")
+        || lower.contains("brief-relevant")
+    {
+        "Extracting article body"
+    } else if lower.contains("saving") {
+        "Saving article body"
+    } else {
+        "Retrieving full article"
+    };
+    let label = format!("{} {phase}", loading_spinner_frame());
+    let detail = if message.is_empty()
+        || message.eq_ignore_ascii_case(phase)
+        || message.eq_ignore_ascii_case(&format!("{phase}…"))
+    {
+        None
+    } else {
+        Some(message.to_string())
+    };
+    (label, detail)
+}
+
+fn loading_spinner_frame() -> &'static str {
+    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let frame = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| (elapsed.as_millis() / 80) as usize % FRAMES.len())
+        .unwrap_or(0);
+    FRAMES[frame]
+}
+
+fn intel_brief_reports_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if app.intel_jobs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No Recon reports yet",
+            theme::dim(),
+        )));
+        return lines;
+    }
+    for job in &app.intel_jobs {
+        let mode = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
+            .map(|m| m.title())
+            .unwrap_or(job.mode.as_str());
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{mode} · r{} · {} · {}",
+                job.revision, job.state, job.updated_at
+            ),
+            theme::text().add_modifier(Modifier::BOLD),
+        )));
+        let sections = if app
+            .intel_sections
+            .first()
+            .is_some_and(|s| s.job_id == job.id)
+        {
+            app.intel_sections.clone()
+        } else {
+            Vec::new()
+        };
+        if sections.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {}/{} sections · stage {}",
+                    job.sections_done, job.sections_total, job.stage
+                ),
+                theme::dim(),
+            )));
+            continue;
+        }
+        for section in &sections {
+            let marker = match section.status.as_str() {
+                "complete" => "✓",
+                "running" => "…",
+                "waiting" | "stale" => "○",
+                "failed" => "!",
+                _ => "·",
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker} {}", section.title),
+                theme::accent(),
+            )));
+            if section.status == "waiting" && !section.waiting_on.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("  waiting for {}", section.waiting_on),
+                    theme::dim(),
+                )));
+            }
+            let collapsed_key = format!("{}:{}", job.id, section.section_key);
+            if app.intel_collapsed_sections.contains(&collapsed_key) {
+                lines.push(Line::from(Span::styled("  [collapsed]", theme::dim())));
+                continue;
+            }
+            if !section.markdown.trim().is_empty() {
+                let md = super::markdown::markdown_lines(&section.markdown, width.max(1));
+                for line in md {
+                    lines.push(md_line_to_line(line));
+                }
+            } else if section.status == "running" {
+                lines.push(Line::from(Span::styled(
+                    "  synthesizing…",
+                    theme::dim(),
+                )));
+            }
+        }
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
+fn md_line_to_line(line: super::markdown::MdLine) -> Line<'static> {
+    if line.pieces.is_empty() {
+        return Line::from("");
+    }
+    Line::from(
+        line.pieces
+            .into_iter()
+            .map(|piece| Span::styled(piece.text, super::markdown::style(piece.tone)))
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn intel_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     if app.intel_page == IntelPage::Briefing {
-        let (_left, _center, right) = intel_briefing_areas(body);
-        let rows = split_vertical(
-            right,
-            [
-                Constraint::Length(6),
-                Constraint::Length(5),
-                Constraint::Min(6),
-                Constraint::Length(ACTION_H),
-            ],
-        );
+        let (_left, center, right) = intel_briefing_areas(body);
+        if let Some(layout) = intel_center_layout(app, center) {
+            if abs_contains(layout.reload, x, y) && contains(center, x, y) {
+                return Some(Target::Button(ButtonId::IntelBodyRefresh));
+            }
+        }
+        let rows = intel_briefing_right_rows(app, right);
         if contains(rows[3], x, y) {
             return Some(Target::Button(ButtonId::IntelRecon));
+        }
+        if contains(rows[4], x, y) {
+            // Clicking the jobs pane focuses Recon for job controls.
+            return Some(Target::Button(ButtonId::IntelJobOpen));
         }
         return None;
     }
@@ -5389,12 +6266,7 @@ pub(crate) fn atlas_extracting(app: &App) -> bool {
 }
 
 fn insights_progress_lines(app: &App) -> (String, Option<String>) {
-    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let frame = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| (elapsed.as_millis() / 80) as usize % FRAMES.len())
-        .unwrap_or(0);
-    let label = format!("{} Extracting insights", FRAMES[frame]);
+    let label = format!("{} Extracting insights", loading_spinner_frame());
     let metric = app
         .atlas_insight_progress
         .filter(|(_, total)| *total > 0)
@@ -5814,6 +6686,24 @@ fn popup_text(app: &App) -> String {
             lines.extend(app.choice_items.iter().map(|item| item.label.clone()));
             lines.join("\n")
         }
+        Overlay::IntelRecon => {
+            let mode = app.intel_recon_mode();
+            let mut lines = vec![
+                mode.title().to_string(),
+                mode.description().to_string(),
+                String::new(),
+                "Sections".into(),
+            ];
+            for section in intel_recon::section_plan(mode) {
+                let mark = if app.intel_recon_section_enabled(mode, section.key) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
+                lines.push(format!("{mark} {}", section.title));
+            }
+            lines.join("\n")
+        }
         Overlay::Palette => app
             .palette_items()
             .into_iter()
@@ -5868,7 +6758,7 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 OSINT · 6 Providers · 7 System\nCtrl+Tab cycles apps · Ctrl+Shift+Tab goes back\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
-        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows extracted claims, tags, links, and a country mini-map\nRecon is a stub for a later handoff\nEsc returns from briefing to bulletin, or from bulletin to home",
+        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, REPORTS, extracted actors, and confidence\nRecon opens Verify / Explain / Assess Outlook / Full Assessment\nJobs pane tracks report progress under the Recon button\nEsc returns from briefing to bulletin, or from bulletin to home",
         Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to the System event log\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live and Delete sit between the map and those panes. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
@@ -5915,13 +6805,17 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         draw_choice(frame, app, kind);
         return;
     }
+    if app.overlay == Overlay::IntelRecon {
+        draw_intel_recon_popup(frame, app);
+        return;
+    }
     let area = popup_area(frame.area());
     cover(frame, area);
     let title = match &app.overlay {
         Overlay::Help => " Shortcuts ",
         Overlay::Memories { .. } => " Memory ",
         Overlay::Block { .. } => " Detail ",
-        Overlay::Choice(_) | Overlay::Palette | Overlay::None => " ",
+        Overlay::Choice(_) | Overlay::IntelRecon | Overlay::Palette | Overlay::None => " ",
     };
     let run_card = atlas_run_card(app);
     let body = if run_card {
@@ -6005,6 +6899,174 @@ fn draw_palette(frame: &mut Frame, app: &App) {
             },
         );
     }
+}
+
+struct IntelReconPopupLayout {
+    tabs: Vec<Rect>,
+    sections: Vec<Rect>,
+    start: Rect,
+    section_room: usize,
+}
+
+fn intel_recon_popup_layout(area: Rect, app: &App) -> IntelReconPopupLayout {
+    let inner = inset(area);
+    let rows = split_vertical(
+        inner,
+        [
+            Constraint::Length(ACTION_H), // mode tabs
+            Constraint::Length(3),       // description
+            Constraint::Min(4),          // section toggles
+            Constraint::Length(ACTION_H), // start
+        ],
+    );
+    let tabs = button_areas(rows[0], ReportMode::all().len());
+    let section_area = rows[2];
+    let room = section_area.height.max(1) as usize;
+    let plan = intel_recon::section_plan(app.intel_recon_mode());
+    let start_scroll = app.scrolls.popup as usize;
+    let mut sections = Vec::new();
+    for visible in 0..room.min(plan.len().saturating_sub(start_scroll)) {
+        sections.push(Rect {
+            x: section_area.x,
+            y: section_area.y + visible as u16,
+            width: section_area.width,
+            height: 1,
+        });
+    }
+    // Map visible rows back to absolute section indices for hit testing.
+    let section_rects: Vec<Rect> = (0..plan.len())
+        .map(|index| {
+            if index < start_scroll || index >= start_scroll + room {
+                Rect::default()
+            } else {
+                Rect {
+                    x: section_area.x,
+                    y: section_area.y + (index - start_scroll) as u16,
+                    width: section_area.width,
+                    height: 1,
+                }
+            }
+        })
+        .collect();
+    let _ = sections;
+    let start_row = rows[3];
+    let start_w = 14u16.min(start_row.width.saturating_sub(2)).max(8);
+    let start = Rect {
+        x: start_row.x + start_row.width.saturating_sub(start_w) / 2,
+        y: start_row.y,
+        width: start_w,
+        height: start_row.height,
+    };
+    IntelReconPopupLayout {
+        tabs,
+        sections: section_rects,
+        start,
+        section_room: room,
+    }
+}
+
+pub fn intel_recon_section_room(app: &App) -> usize {
+    let area = intel_recon_popup_area(app.screen);
+    intel_recon_popup_layout(area, app).section_room
+}
+
+fn draw_intel_recon_popup(frame: &mut Frame, app: &App) {
+    let area = intel_recon_popup_area(frame.area());
+    cover(frame, area);
+    frame.render_widget(Paragraph::new("").block(theme::card(" Recon ")), area);
+    let close = Rect {
+        x: area.x + area.width.saturating_sub(8),
+        y: area.y,
+        width: 8.min(area.width),
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(" close ").style(theme::card_accent()), close);
+
+    let layout = intel_recon_popup_layout(area, app);
+    let modes = ReportMode::all();
+    let mode = app.intel_recon_mode();
+    draw_tabs(
+        frame,
+        Rect {
+            x: layout.tabs.first().map(|r| r.x).unwrap_or(area.x),
+            y: layout.tabs.first().map(|r| r.y).unwrap_or(area.y),
+            width: layout
+                .tabs
+                .last()
+                .map(|r| r.x + r.width)
+                .unwrap_or(area.x)
+                .saturating_sub(layout.tabs.first().map(|r| r.x).unwrap_or(area.x)),
+            height: ACTION_H,
+        },
+        modes.iter().enumerate().map(|(index, item)| {
+            (
+                index,
+                item.title().to_string(),
+                index == app.intel_recon_tab,
+                app.focus == Target::IntelReconTab(index)
+                    || matches!(app.intel_recon_focus, IntelReconFocus::Tab(i) if i == index),
+            )
+        }),
+    );
+
+    let inner = inset(area);
+    let rows = split_vertical(
+        inner,
+        [
+            Constraint::Length(ACTION_H),
+            Constraint::Length(3),
+            Constraint::Min(4),
+            Constraint::Length(ACTION_H),
+        ],
+    );
+    let blurb = format!(
+        "{}\nOutlook horizon default: 30 days · toggle sections to customize the report",
+        mode.description()
+    );
+    frame.render_widget(
+        Paragraph::new(blurb)
+            .style(theme::card_dim())
+            .wrap(Wrap { trim: false }),
+        rows[1],
+    );
+
+    let plan = intel_recon::section_plan(mode);
+    let start = app.scrolls.popup as usize;
+    let room = layout.section_room.max(1);
+    for (offset, section) in plan.iter().enumerate().skip(start).take(room) {
+        let index = offset;
+        let enabled = app.intel_recon_section_enabled(mode, section.key);
+        let focused = app.focus == Target::IntelReconSection(index)
+            || matches!(app.intel_recon_focus, IntelReconFocus::Section(i) if i == index);
+        let mark = if enabled { "[x]" } else { "[ ]" };
+        let text = fit(
+            &format!("{mark} {}", section.title),
+            rows[2].width.max(1) as usize,
+        );
+        frame.render_widget(
+            Paragraph::new(text).style(if focused {
+                theme::selected()
+            } else if enabled {
+                theme::card_text()
+            } else {
+                theme::card_dim()
+            }),
+            Rect {
+                x: rows[2].x,
+                y: rows[2].y + (index - start) as u16,
+                width: rows[2].width,
+                height: 1,
+            },
+        );
+    }
+
+    draw_button(
+        frame,
+        app,
+        ButtonId::IntelReconStart,
+        "Start",
+        layout.start,
+    );
 }
 
 fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {

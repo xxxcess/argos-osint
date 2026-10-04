@@ -636,17 +636,22 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 /// Small country-focused Braille map for the Intel briefing pane.
+/// `pane_title` overrides the border label (e.g. "Country"); when empty, the
+/// country name is used.
 pub fn draw_country_mini_map(
     frame: &mut ratatui::Frame,
     area: Rect,
     country: &str,
     temperature: f64,
+    pane_title: &str,
 ) {
     let code = canonical(country.trim());
     let name = argos_osint_core::atlas::country_name(&code)
         .unwrap_or(code.as_str())
         .to_string();
-    let title = if code.is_empty() {
+    let title = if !pane_title.trim().is_empty() {
+        format!(" {} ", pane_title.trim())
+    } else if code.is_empty() {
         " map ".into()
     } else {
         format!(" {name} ")

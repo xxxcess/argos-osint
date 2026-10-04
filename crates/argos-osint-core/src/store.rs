@@ -53,7 +53,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 15,
+                version <= 16,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -298,6 +298,11 @@ impl Store {
                     )?;
                 }
                 self.conn.pragma_update(None, "user_version", 15)?;
+            }
+            if version < 16 {
+                self.conn
+                    .execute_batch(include_str!("schema_intel_recon.sql"))?;
+                self.conn.pragma_update(None, "user_version", 16)?;
             }
             Ok(())
         })();
@@ -904,12 +909,47 @@ impl Store {
                 .query_map([cutoff.as_str()], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()?;
             drop(stmt);
+            // Retain articles linked to Intel Recon investigations/reports.
+            let protected: std::collections::HashSet<String> = {
+                let mut stmt = self
+                    .conn
+                    .prepare("SELECT DISTINCT article_id FROM intel_investigations")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
             for id in &ids {
                 self.delete_cycle_memories(id)?;
-                self.conn
-                    .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
-                self.conn
-                    .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?;
+                if protected.is_empty() {
+                    self.conn
+                        .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
+                } else {
+                    let mut stmt = self
+                        .conn
+                        .prepare("SELECT article_id FROM atlas_articles WHERE run_id=?1")?;
+                    let article_ids: Vec<String> = stmt
+                        .query_map([id], |row| row.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    drop(stmt);
+                    for article_id in article_ids {
+                        if protected.contains(&article_id) {
+                            continue;
+                        }
+                        self.conn.execute(
+                            "DELETE FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
+                            params![id, article_id],
+                        )?;
+                    }
+                }
+                // Keep the run row only when it still owns protected articles.
+                let remaining: i64 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM atlas_articles WHERE run_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )?;
+                if remaining == 0 {
+                    self.conn
+                        .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?;
+                }
             }
             Ok(ids)
         })();

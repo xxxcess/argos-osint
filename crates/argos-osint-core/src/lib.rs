@@ -5,6 +5,7 @@ pub mod atlas_insights;
 pub mod brain;
 pub mod grok_oauth;
 pub mod hardware;
+pub mod intel_recon;
 pub mod iso3166;
 pub mod osint;
 pub mod paths;

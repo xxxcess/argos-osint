@@ -53,7 +53,7 @@ impl Store {
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
             anyhow::ensure!(
-                version <= 13,
+                version <= 14,
                 "database schema version {version} is newer than this Argos build"
             );
             let tables: Vec<String> = {
@@ -254,6 +254,33 @@ impl Store {
                 }
                 self.conn.pragma_update(None, "user_version", 13)?;
             }
+            if version < 14 {
+                let thread_columns: Vec<String> = {
+                    let mut stmt = self.conn.prepare("PRAGMA table_info(recon_threads)")?;
+                    let columns = stmt
+                        .query_map([], |row| row.get(1))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    columns
+                };
+                if !thread_columns.iter().any(|name| name == "recall_insights") {
+                    self.conn.execute_batch(
+                        "ALTER TABLE recon_threads ADD COLUMN recall_insights INTEGER NOT NULL DEFAULT 0",
+                    )?;
+                }
+                let source_columns: Vec<String> = {
+                    let mut stmt = self.conn.prepare("PRAGMA table_info(insight_sources)")?;
+                    let columns = stmt
+                        .query_map([], |row| row.get(1))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    columns
+                };
+                if !source_columns.iter().any(|name| name == "published_at") {
+                    self.conn.execute_batch(
+                        "ALTER TABLE insight_sources ADD COLUMN published_at TEXT NOT NULL DEFAULT ''",
+                    )?;
+                }
+                self.conn.pragma_update(None, "user_version", 14)?;
+            }
             Ok(())
         })();
         match result {
@@ -288,6 +315,25 @@ impl Store {
                 source,
             })
         })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Substring search across memory text, category, claim fields, and source JSON.
+    pub fn search_memories(&self, query: &str) -> Result<Vec<Memory>> {
+        let needle = like_needle(query);
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT m.id,m.text,m.category,m.pinned,m.created_at,m.source_json
+             FROM memories m
+             LEFT JOIN insight_claims c ON c.memory_id = m.id
+             WHERE m.text LIKE ?1 ESCAPE '\\'
+                OR m.category LIKE ?1 ESCAPE '\\'
+                OR IFNULL(c.entity_id,'') LIKE ?1 ESCAPE '\\'
+                OR IFNULL(c.predicate,'') LIKE ?1 ESCAPE '\\'
+                OR IFNULL(c.object_value,'') LIKE ?1 ESCAPE '\\'
+                OR m.source_json LIKE ?1 ESCAPE '\\'
+             ORDER BY m.pinned DESC, m.created_at DESC",
+        )?;
+        let rows = stmt.query_map([needle], memory_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -475,12 +521,86 @@ impl Store {
     }
 
     pub fn atlas_delete_run(&self, id: &str) -> Result<bool> {
-        self.conn
-            .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
-        Ok(self
-            .conn
-            .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?
-            > 0)
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<bool> {
+            self.delete_cycle_memories(id)?;
+            self.conn
+                .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
+            Ok(self
+                .conn
+                .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?
+                > 0)
+        })();
+        match result {
+            Ok(deleted) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(deleted)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    /// Drops Brain memories written from one Atlas cycle.
+    /// A claim that another cycle also sourced keeps its memory and loses only this cycle's source row.
+    pub fn delete_cycle_memories(&self, run_id: &str) -> Result<()> {
+        let answer_id = atlas_answer_id(run_id);
+        let fingerprints: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT fingerprint FROM insight_sources WHERE run_id=?1 AND answer_id=?2",
+            )?;
+            let rows = stmt.query_map(params![run_id, answer_id], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        self.conn.execute(
+            "DELETE FROM insight_sources WHERE run_id=?1 AND answer_id=?2",
+            params![run_id, answer_id],
+        )?;
+        for fingerprint in fingerprints {
+            let remaining: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM insight_sources WHERE fingerprint=?1",
+                [&fingerprint],
+                |row| row.get(0),
+            )?;
+            if remaining > 0 {
+                continue;
+            }
+            let memory_id: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
+                    [&fingerprint],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            self.conn.execute(
+                "DELETE FROM insight_relations WHERE left_fingerprint=?1 OR right_fingerprint=?1",
+                [&fingerprint],
+            )?;
+            self.conn.execute(
+                "DELETE FROM insight_claims WHERE fingerprint=?1",
+                [&fingerprint],
+            )?;
+            if let Some(memory_id) = memory_id {
+                self.conn.execute(
+                    "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
+                    [&memory_id],
+                )?;
+                self.conn
+                    .execute("DELETE FROM memories WHERE id=?1", [&memory_id])?;
+            }
+        }
+        if let Some(memory_id) = atlas_brief_id(&self.conn, run_id)? {
+            self.conn.execute(
+                "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
+                [&memory_id],
+            )?;
+            self.conn
+                .execute("DELETE FROM memories WHERE id=?1", [&memory_id])?;
+        }
+        Ok(())
     }
 
     pub fn atlas_upsert_article(&self, row: &AtlasArticleRow) -> Result<()> {
@@ -568,6 +688,13 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn atlas_article(&self, run_id: &str, article_id: &str) -> Result<Option<AtlasArticleRow>> {
+        Ok(self
+            .atlas_list_articles(run_id)?
+            .into_iter()
+            .find(|row| row.id == article_id))
+    }
+
     /// A run left `running` by a closed process can be resumed.
     pub fn atlas_park_running(&self) -> Result<()> {
         self.conn.execute(
@@ -643,6 +770,7 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<String>>>()?;
             drop(stmt);
             for id in &ids {
+                self.delete_cycle_memories(id)?;
                 self.conn
                     .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
                 self.conn
@@ -809,13 +937,23 @@ impl Store {
                     }
                 }
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url) VALUES (?1,NULL,?2,?3,?4,?5)",
+                    "INSERT OR IGNORE INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url,published_at) VALUES (?1,NULL,?2,?3,?4,?5,?6)",
                     params![
                         fingerprint,
                         run_id,
                         answer_id,
                         claim.article_id.trim(),
                         claim.source_url.trim(),
+                        claim.published_at.trim(),
+                    ],
+                )?;
+                self.conn.execute(
+                    "UPDATE insight_sources SET published_at=?1 WHERE fingerprint=?2 AND answer_id=?3 AND call_id=?4",
+                    params![
+                        claim.published_at.trim(),
+                        fingerprint,
+                        answer_id,
+                        claim.article_id.trim(),
                     ],
                 )?;
                 self.conn.execute(
@@ -832,22 +970,13 @@ impl Store {
                     params![left, right, relation],
                 )?;
             }
+            let _ = entity_path;
             let brief = brief.trim();
             if !brief.is_empty() {
-                let path = if entity_path.trim().is_empty() {
-                    brief.to_string()
-                } else {
-                    entity_path.trim().to_string()
-                };
                 if let Some(memory_id) = atlas_brief_id(&self.conn, run_id)? {
                     self.conn.execute(
                         "UPDATE memories SET text=?1 WHERE id=?2",
                         params![brief, memory_id],
-                    )?;
-                    self.conn.execute(
-                        "INSERT INTO memory_graph_summaries(memory_id,summary,created_at,focus) VALUES (?1,?2,?3,?4)
-                         ON CONFLICT(memory_id) DO UPDATE SET summary=excluded.summary, created_at=excluded.created_at, focus=excluded.focus",
-                        params![memory_id, path, now, run_id],
                     )?;
                 } else {
                     let memory_id = new_id();
@@ -860,10 +989,6 @@ impl Store {
                     self.conn.execute(
                         "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
                         params![memory_id, brief, now, serde_json::to_string(&source)?],
-                    )?;
-                    self.conn.execute(
-                        "INSERT INTO memory_graph_summaries(memory_id,summary,created_at,focus) VALUES (?1,?2,?3,?4)",
-                        params![memory_id, path, now, run_id],
                     )?;
                 }
             }
@@ -886,6 +1011,30 @@ fn atlas_answer_id(run_id: &str) -> String {
     format!("atlas-{run_id}")
 }
 
+fn like_needle(query: &str) -> String {
+    let escaped = query
+        .trim()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::brain::Memory> {
+    let source: String = row.get(5)?;
+    let source = serde_json::from_str(&source).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    Ok(crate::brain::Memory {
+        id: row.get(0)?,
+        text: row.get(1)?,
+        category: row.get(2)?,
+        pinned: row.get::<_, i64>(3)? != 0,
+        created_at: row.get(4)?,
+        source,
+    })
+}
+
 /// Fingerprint Recon uses: the JSON array of namespace, entity, predicate, and object.
 pub fn insight_fingerprint(namespace: &str, entity: &str, predicate: &str, object: &str) -> String {
     serde_json::to_string(&(namespace, entity, predicate, object)).unwrap_or_default()
@@ -894,10 +1043,9 @@ pub fn insight_fingerprint(namespace: &str, entity: &str, predicate: &str, objec
 fn atlas_brief_id(conn: &Connection, run_id: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.source_json FROM memories m
-         JOIN memory_graph_summaries g ON g.memory_id = m.id
-         WHERE g.focus=?1",
+         WHERE m.id NOT IN (SELECT memory_id FROM insight_claims)",
     )?;
-    let rows = stmt.query_map([run_id], |row| {
+    let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
     for row in rows {
@@ -960,6 +1108,7 @@ pub struct AtlasInsightClaim {
     pub confidence: f64,
     pub article_id: String,
     pub source_url: String,
+    pub published_at: String,
 }
 
 /// A claim already stored for an Atlas run, used when a resume skips the model.
@@ -1099,7 +1248,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 14);
         // A version-7 database without the column gains it, keeping existing runs.
         let file = tempfile::NamedTempFile::new().unwrap();
         let store = Store::open(file.path()).unwrap();

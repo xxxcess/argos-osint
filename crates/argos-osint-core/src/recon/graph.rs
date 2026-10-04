@@ -66,6 +66,10 @@ pub struct GraphNode {
     pub detail: String,
     /// Directive ids this evidence serves. Empty for every other kind.
     pub tags: Vec<String>,
+    /// Atlas article this evidence node opens. Empty for every other kind.
+    pub article_id: String,
+    pub run_id: String,
+    pub published_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +89,11 @@ pub struct MemoryGraph {
 impl MemoryGraph {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Atlas news claims carry the supporting article on each evidence node.
+    pub fn is_claim_path(&self) -> bool {
+        self.nodes.iter().any(|node| !node.article_id.is_empty())
     }
 
     pub fn node(&self, id: &str) -> Option<&GraphNode> {
@@ -129,6 +138,23 @@ impl Store {
         let run_ids: Vec<String> = stmt
             .query_map([memory_id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
+        if insight.sources.iter().any(|source| {
+            source
+                .answer_id
+                .starts_with("atlas-")
+                || (source.thread_id.is_none() && source.run_id.is_some())
+        }) {
+            let mut articles = Vec::new();
+            for source in &insight.sources {
+                let Some(run_id) = source.run_id.as_deref() else {
+                    continue;
+                };
+                if let Some(article) = self.atlas_article(run_id, &source.call_id)? {
+                    articles.push(article);
+                }
+            }
+            return Ok(build_claim_graph(&insight, &articles));
+        }
         let mut plans = Vec::new();
         for run_id in run_ids {
             let Some(run) = self.get_run(&run_id)? else {
@@ -192,6 +218,9 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
             objective
         },
         tags: Vec::new(),
+        article_id: String::new(),
+        run_id: String::new(),
+        published_at: String::new(),
     });
 
     for directive in &directives {
@@ -206,6 +235,9 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
                 directive.targets.join(", ")
             ),
             tags: vec![directive.id.clone()],
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
         });
         for entity in &directive.entities {
             let Some(entity_id) = graph.entity(entity) else {
@@ -231,6 +263,9 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
             label: topic.to_string(),
             detail: format!("Topic {topic}"),
             tags: Vec::new(),
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
         }))
     };
     let finding = graph.node(GraphNode {
@@ -247,6 +282,9 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
             insight.topic
         ),
         tags: Vec::new(),
+        article_id: String::new(),
+        run_id: String::new(),
+        published_at: String::new(),
     });
     graph.edge(GraphEdge {
         from: finding.clone(),
@@ -325,6 +363,9 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
             label: source.call_id.clone(),
             detail: format!("{} · {source_label}", source.call_id),
             tags: served,
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
         });
         let source_id = graph.node(GraphNode {
             id: format!("source:{}", source_label.to_lowercase()),
@@ -332,6 +373,9 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
             label: source_label.clone(),
             detail: format!("Source {source_label}"),
             tags: Vec::new(),
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
         });
         graph.edge(GraphEdge {
             from: evidence.clone(),
@@ -347,6 +391,173 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
         });
     }
 
+    MemoryGraph {
+        nodes: graph.nodes,
+        edges: graph.edges,
+    }
+}
+
+/// News-cycle claim: the concluding relation, with each supporting article as hard evidence.
+pub fn build_claim_graph(insight: &InsightView, articles: &[crate::store::AtlasArticleRow]) -> MemoryGraph {
+    let mut graph = GraphBuilder::default();
+    let relation = format!(
+        "{} {} {}",
+        insight.entity, insight.predicate, insight.object_value
+    );
+    let level = if insight.classification == "fact" {
+        "Level: fact. Both the entity and the object are in an article title."
+    } else {
+        "Level: inference. A span is outside an article title, or the article is context."
+    };
+    graph.node(GraphNode {
+        id: "investigation".into(),
+        kind: GraphNodeKind::Investigation,
+        label: relation.clone(),
+        detail: format!("{relation}\n{level}"),
+        tags: Vec::new(),
+        article_id: String::new(),
+        run_id: String::new(),
+        published_at: String::new(),
+    });
+    let directive = graph.node(GraphNode {
+        id: "directive:articles".into(),
+        kind: GraphNodeKind::Directive,
+        label: "articles".into(),
+        detail: format!(
+            "{}\nSupporting articles are the hard evidence for this claim.",
+            if insight.topic.trim().is_empty() {
+                "articles"
+            } else {
+                insight.topic.trim()
+            }
+        ),
+        tags: vec!["articles".into()],
+        article_id: String::new(),
+        run_id: String::new(),
+        published_at: String::new(),
+    });
+    if let Some(entity_id) = graph.entity(&insight.entity) {
+        graph.edge(GraphEdge {
+            from: directive.clone(),
+            to: entity_id,
+            kind: GraphEdgeKind::Investigates,
+            directive: Some("articles".into()),
+        });
+    }
+    let topic = insight.topic.trim();
+    if !topic.is_empty() {
+        let topic_id = graph.node(GraphNode {
+            id: format!("topic:{}", topic.to_lowercase()),
+            kind: GraphNodeKind::Topic,
+            label: topic.to_string(),
+            detail: format!("Topic {topic}"),
+            tags: Vec::new(),
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
+        });
+        graph.edge(GraphEdge {
+            from: directive.clone(),
+            to: topic_id,
+            kind: GraphEdgeKind::Investigates,
+            directive: Some("articles".into()),
+        });
+    }
+    let finding = graph.node(GraphNode {
+        id: format!("finding:{}", insight.memory_id),
+        kind: GraphNodeKind::Finding,
+        label: format!("{} → {}", insight.predicate, insight.object_value),
+        detail: format!(
+            "{} · {} → {}\n{} · {:.0}%\n{}\n{level}",
+            insight.entity,
+            insight.predicate,
+            insight.object_value,
+            insight.classification,
+            insight.confidence * 100.0,
+            insight.topic
+        ),
+        tags: Vec::new(),
+        article_id: String::new(),
+        run_id: String::new(),
+        published_at: String::new(),
+    });
+    graph.edge(GraphEdge {
+        from: finding.clone(),
+        to: directive.clone(),
+        kind: GraphEdgeKind::Answers,
+        directive: Some("articles".into()),
+    });
+    for source in &insight.sources {
+        let article = source.run_id.as_deref().and_then(|run_id| {
+            articles
+                .iter()
+                .find(|article| article.run_id == run_id && article.id == source.call_id)
+        });
+        let title = article
+            .map(|article| article.title.trim())
+            .filter(|title| !title.is_empty())
+            .unwrap_or(source.call_id.as_str());
+        let published = article
+            .map(|article| article.published_at.as_str())
+            .filter(|stamp| !stamp.is_empty())
+            .unwrap_or(source.published_at.as_str());
+        let when = if published.is_empty() {
+            String::new()
+        } else {
+            crate::atlas::friendly_date(published)
+        };
+        let label = if when.is_empty() {
+            title.to_string()
+        } else {
+            format!("{title} · {when}")
+        };
+        let run_id = source.run_id.clone().unwrap_or_default();
+        let publisher = article
+            .map(|article| article.source_name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                source
+                    .source_url
+                    .clone()
+                    .filter(|url| !url.trim().is_empty())
+            })
+            .unwrap_or_else(|| "source".into());
+        let evidence = graph.node(GraphNode {
+            id: format!("evidence:{}:{run_id}", source.call_id),
+            kind: GraphNodeKind::Evidence,
+            label,
+            detail: format!(
+                "{title}\npublished {published}\n{publisher}\nHard evidence for the concluding claim."
+            ),
+            tags: vec!["articles".into()],
+            article_id: source.call_id.clone(),
+            run_id: run_id.clone(),
+            published_at: published.to_string(),
+        });
+        let source_id = graph.node(GraphNode {
+            id: format!("source:{}", publisher.to_lowercase()),
+            kind: GraphNodeKind::Source,
+            label: publisher.clone(),
+            detail: format!("Source {publisher}"),
+            tags: Vec::new(),
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
+        });
+        graph.edge(GraphEdge {
+            from: evidence.clone(),
+            to: finding.clone(),
+            kind: GraphEdgeKind::Supports,
+            directive: Some("articles".into()),
+        });
+        graph.edge(GraphEdge {
+            from: evidence,
+            to: source_id,
+            kind: GraphEdgeKind::DerivedFrom,
+            directive: None,
+        });
+    }
     MemoryGraph {
         nodes: graph.nodes,
         edges: graph.edges,
@@ -388,6 +599,9 @@ impl GraphBuilder {
             label: trimmed.to_string(),
             detail: format!("Entity {trimmed}"),
             tags: Vec::new(),
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
         });
         self.entities.insert(key, id.clone());
         Some(id)
@@ -563,7 +777,11 @@ pub fn graph_brief(graph: &MemoryGraph) -> String {
         }
     }
     lines.push(String::new());
-    lines.push("Recon path".into());
+    lines.push(if graph.is_claim_path() {
+        "Claim path".into()
+    } else {
+        "Recon path".into()
+    });
     for band in &path.bands {
         let goal = graph
             .nodes
@@ -824,10 +1042,12 @@ mod tests {
             confidence: 0.9,
             sources: vec![InsightSource {
                 thread_id: Some("t".into()),
+                run_id: Some("run".into()),
                 answer_id: "a".into(),
                 call_id: "call-w1".into(),
                 source_url: None,
                 deleted_origin: false,
+                published_at: String::new(),
             }],
             related: vec![],
         };

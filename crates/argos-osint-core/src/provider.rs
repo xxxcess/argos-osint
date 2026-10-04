@@ -784,7 +784,16 @@ pub async fn complete(
     let mut acc = SseAcc::default();
     let mut buf = String::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("read provider stream")?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(err) => {
+                // Mid-stream drops are common on large synthesis replies; finish without streaming.
+                if acc.content.is_empty() && acc.tool_calls.is_empty() {
+                    return complete_once(secret, messages, tools).await;
+                }
+                return Err(err).context("read provider stream");
+            }
+        };
         buf.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(idx) = buf.find('\n') {
             let line = buf[..idx].trim().to_string();

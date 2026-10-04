@@ -88,6 +88,8 @@ pub struct Scrolls {
     pub atlas_feed: u16,
     pub atlas_runs: u16,
     pub atlas_news: u16,
+    pub origins: u16,
+    pub insights: u16,
     pub popup: u16,
     pub recall: u16,
     pub path: u16,
@@ -278,7 +280,6 @@ impl DefaultsRole {
 pub enum ButtonId {
     Send,
     Add,
-    Recall,
     Pin,
     Delete,
     SaveRecon,
@@ -316,7 +317,6 @@ pub enum ButtonId {
     AtlasNewsFeed,
     AtlasWorld,
     AtlasNews,
-    OpenSource,
     CreateMemory,
     BrainBack,
     ClearLog,
@@ -350,8 +350,12 @@ pub enum Target {
     AtlasFeed(usize),
     /// One past Atlas run in the history list.
     AtlasHistory(usize),
+    /// Country stats table for the selected news cycle.
+    AtlasCycleStats,
     /// One saved article in the history news feed.
     AtlasArticle(usize),
+    /// One line of the open recon or claim path.
+    PathLine(usize),
     Choice(usize),
     CloseOverlay,
 }
@@ -540,12 +544,18 @@ pub struct App {
     pub atlas_news_run: String,
     pub atlas_articles: Vec<AtlasArticleRow>,
     pub atlas_article_sel: usize,
+    /// Article marked from a claim-path click. Cleared when the feed is opened any other way.
+    pub claim_mark: Option<String>,
+    /// Last pointer, so Ctrl+U/D can page the table under it.
+    pub pointer: Option<(u16, u16)>,
     /// Country the map is zoomed to. Empty means the world view.
     pub atlas_focus: Option<String>,
     /// The next frame shows a loading note. The frame after that paints the map.
     pub atlas_map_hold: bool,
     pub atlas_status: String,
     pub atlas_state: String,
+    /// Insight extract work units `(done, total)` while the spinner is shown.
+    pub atlas_insight_progress: Option<(u32, u32)>,
     pub atlas_pause: Option<Arc<AtomicBool>>,
     /// Unix time of the next automatic pipeline run. `None` means auto run is off.
     pub atlas_auto_next: Option<u64>,
@@ -767,10 +777,13 @@ impl App {
             atlas_news_run: String::new(),
             atlas_articles: Vec::new(),
             atlas_article_sel: 0,
+            claim_mark: None,
+            pointer: None,
             atlas_focus: None,
             atlas_map_hold: false,
             atlas_status: "Ready".into(),
             atlas_state: "idle".into(),
+            atlas_insight_progress: None,
             atlas_pause: None,
             atlas_auto_next: None,
             atlas_auto_started: false,
@@ -895,7 +908,7 @@ impl App {
             ("help", "Shortcuts"),
             ("cancel", "Cancel running turn"),
             ("resume", "Resume remaining steps"),
-            ("insights", "Retry insight extraction"),
+            ("insights", "Toggle recall"),
             ("create-memory", "Create memory"),
             ("clear-log", "Clear event log"),
         ];
@@ -1348,6 +1361,28 @@ impl App {
         Ok(())
     }
 
+    fn toggle_recall(&mut self) -> Result<String> {
+        let tid = self
+            .selected_thread
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No investigation open"))?;
+        let on = self
+            .threads
+            .iter()
+            .find(|thread| thread.id == tid)
+            .map(|thread| thread.recall_insights)
+            .unwrap_or(false);
+        let next = !on;
+        if !self.store.set_recall_insights(&tid, next)? {
+            anyhow::bail!("Investigation not found");
+        }
+        if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == tid) {
+            thread.recall_insights = next;
+        }
+        Ok(if next { "recall: on" } else { "recall: off" }.into())
+    }
+
+    #[allow(dead_code)]
     fn retry_insights(&mut self) -> Result<()> {
         let tid = self
             .selected_thread
@@ -1574,8 +1609,21 @@ impl App {
                 }
                 return;
             }
+            if matches!(self.focus, Target::AtlasCycleStats)
+                || self
+                    .pointer
+                    .is_some_and(|(x, y)| super::ui::cycle_stats_under_pointer(self, x, y))
+            {
+                super::ui::shift_cycle_stats(self, delta);
+                self.set_focus(Target::AtlasCycleStats);
+                return;
+            }
+            let before = self.atlas_run_sel;
             super::ui::shift_atlas_runs(self, delta);
             if !self.atlas_runs.is_empty() {
+                if self.atlas_run_sel != before {
+                    self.scrolls.origins = 0;
+                }
                 self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
             }
             return;
@@ -1619,6 +1667,7 @@ impl App {
             anyhow::bail!("Pause the pipeline before deleting this run");
         }
         self.store.atlas_delete_run(&run.id)?;
+        self.reload_memories();
         if self.atlas_news_run == run.id {
             self.atlas_news = false;
             self.atlas_focus = None;
@@ -1638,18 +1687,6 @@ impl App {
         Ok("Run deleted".into())
     }
 
-    fn open_atlas_run(&mut self) {
-        let Some(run) = self.atlas_runs.get(self.atlas_run_sel).cloned() else {
-            self.status = "No run selected".into();
-            return;
-        };
-        self.overlay = Overlay::Block {
-            title: format!("Run {}", atlas::friendly_date(&run.started_at)),
-            body: atlas::format_run_card(&run),
-        };
-        self.scrolls.popup = 0;
-    }
-
     fn open_atlas_news(&mut self) {
         let Some(run) = self.atlas_runs.get(self.atlas_run_sel) else {
             self.status = "No run selected".into();
@@ -1659,6 +1696,7 @@ impl App {
         self.atlas_articles = self.store.atlas_list_articles(&id).unwrap_or_default();
         self.atlas_news_run = id;
         self.atlas_news = true;
+        self.claim_mark = None;
         self.atlas_article_sel = 0;
         self.scrolls.atlas_news = 0;
         self.focus_highlighted_country();
@@ -1692,6 +1730,7 @@ impl App {
 
     fn show_atlas_world(&mut self) {
         self.atlas_news = false;
+        self.claim_mark = None;
         self.atlas_focus = None;
         self.atlas_map_hold = true;
         self.overlay = Overlay::None;
@@ -1865,7 +1904,15 @@ impl App {
     fn on_atlas(&mut self, event: atlas::AtlasEvent) {
         match event {
             atlas::AtlasEvent::Status(text) => {
+                if text != "Extracting insights" {
+                    self.atlas_insight_progress = None;
+                }
                 self.atlas_status = text;
+                self.status = self.atlas_status.clone();
+            }
+            atlas::AtlasEvent::InsightProgress { done, total } => {
+                self.atlas_insight_progress = Some((done, total));
+                self.atlas_status = "Extracting insights".into();
                 self.status = self.atlas_status.clone();
             }
             atlas::AtlasEvent::Note(text) => {
@@ -1880,6 +1927,7 @@ impl App {
                     format!("Atlas: {}", fault.summary),
                     fault.body.clone(),
                 );
+                self.atlas_insight_progress = None;
                 self.atlas_status = fault.summary.clone();
                 self.status = format!("Atlas: {}", fault.summary);
             }
@@ -2047,9 +2095,7 @@ impl App {
                     let _ = self.refresh_selected();
                 }
                 let _ = self.refresh_threads();
-                if let Ok(memories) = self.store.list_memories() {
-                    self.memories = memories;
-                }
+                self.memories = self.filtered_memories();
                 true
             }
             WorkEvent::OsintDone { outcome } => {
@@ -2117,9 +2163,7 @@ impl App {
                             text
                         }
                     };
-                    if let Ok(memories) = self.store.list_memories() {
-                        self.memories = memories;
-                    }
+                    self.memories = self.filtered_memories();
                 }
                 true
             }
@@ -2157,6 +2201,7 @@ impl App {
             }
             WorkEvent::AtlasDone { outcome } => {
                 self.atlas_pause = None;
+                self.atlas_insight_progress = None;
                 let finished = matches!(outcome, Ok(atlas::Stop::Finished));
                 let paused = matches!(outcome, Ok(atlas::Stop::Paused));
                 match outcome {
@@ -2528,7 +2573,7 @@ impl App {
                 reference: None,
             },
         )?;
-        self.memories = self.store.list_memories()?;
+        self.memories = self.filtered_memories();
         self.memory_sel = self
             .memories
             .iter()
@@ -2559,11 +2604,19 @@ impl App {
         };
     }
 
+    fn filtered_memories(&self) -> Vec<Memory> {
+        let query = self.brain_query.trim();
+        let loaded = if query.is_empty() {
+            self.store.list_memories()
+        } else {
+            self.store.search_memories(query)
+        };
+        loaded.unwrap_or_default()
+    }
+
     fn reload_memories(&mut self) {
         let shown = self.brain_graph_for.clone();
-        if let Ok(memories) = self.store.list_memories() {
-            self.memories = memories;
-        }
+        self.memories = self.filtered_memories();
         if self.memories.is_empty() {
             self.memory_sel = 0;
         } else if self.memory_sel >= self.memories.len() {
@@ -2599,13 +2652,15 @@ impl App {
         self.brain_list_mode = BrainListMode::Graph;
         self.scrolls.path = 0;
         self.scrolls.summary = 0;
+        self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
         self.brain_graph_for = None;
         self.sync_graph();
-        self.set_focus(Target::Button(ButtonId::BrainBack));
         self.load_or_request_summary(&memory);
     }
 
     fn load_or_request_summary(&mut self, memory: &Memory) {
+        let claim = self.brain_graph.is_claim_path() || memory.source.app == "atlas";
+        let title = if claim { "Claim path" } else { "Recon path" };
         let focus = recon::recon_path(&self.brain_graph)
             .bands
             .first()
@@ -2614,7 +2669,7 @@ impl App {
         match self.store.graph_summary(&memory.id) {
             Ok(Some(saved)) if saved.focus == focus || focus.is_empty() => {
                 self.graph_summary = saved.summary;
-                self.status = "Recon path".into();
+                self.status = title.into();
                 return;
             }
             Ok(Some(_)) | Ok(None) => {}
@@ -2625,8 +2680,12 @@ impl App {
             }
         }
         if self.brain_graph.is_empty() {
-            self.graph_summary = "This memory has no investigation graph.".into();
-            self.status = "Recon path".into();
+            self.graph_summary = if claim {
+                "This memory has no claim path.".into()
+            } else {
+                "This memory has no investigation graph.".into()
+            };
+            self.status = title.into();
             return;
         }
         if self.graph_summary_pending.as_deref() == Some(memory.id.as_str()) {
@@ -2647,6 +2706,7 @@ impl App {
             memory.text,
             recon::graph_brief(&self.brain_graph)
         );
+        let system = summary_system(claim);
         self.graph_summary_pending = Some(memory.id.clone());
         self.graph_summary = "Writing graph summary…".into();
         self.status = self.graph_summary.clone();
@@ -2654,7 +2714,7 @@ impl App {
         let tx = self.work_tx.clone();
         let db = paths::db_path();
         tokio::spawn(async move {
-            let outcome = write_graph_summary(&secret, &prompt)
+            let outcome = write_graph_summary(&secret, &system, &prompt)
                 .await
                 .and_then(|text| {
                     let store = Store::open(&db)?;
@@ -2688,10 +2748,6 @@ impl App {
                 return;
             }
             ButtonId::Add => self.save_insight(),
-            ButtonId::Recall => self.store.recall(&self.brain_query, 8).map(|hits| {
-                self.hits = hits;
-                format!("{} relevant memories", self.hits.len())
-            }),
             ButtonId::Pin => {
                 let Some(memory) = self.memories.get(self.memory_sel) else {
                     self.status = "No memory selected".into();
@@ -2699,9 +2755,8 @@ impl App {
                 };
                 self.store
                     .update_memory(&memory.id, &memory.text, &memory.category, !memory.pinned)
-                    .and_then(|_| self.store.list_memories())
-                    .map(|memories| {
-                        self.memories = memories;
+                    .map(|_| {
+                        self.memories = self.filtered_memories();
                         "Memory pin updated".into()
                     })
             }
@@ -2750,9 +2805,7 @@ impl App {
                 Ok("Cancellation requested".into())
             }
             ButtonId::ResumeRun => self.resume_recon().map(|_| "Resuming run".into()),
-            ButtonId::RetryInsights => self
-                .retry_insights()
-                .map(|_| "Retrying insight extraction".into()),
+            ButtonId::RetryInsights => self.toggle_recall(),
             ButtonId::OsintRun => self.run_osint().map(|_| "Tool started".into()),
             ButtonId::OsintCancel => {
                 if let Some(cancel) = &self.osint_cancel {
@@ -2810,7 +2863,7 @@ impl App {
                 self.atlas_page = AtlasPage::Runs;
                 self.load_atlas();
                 self.set_focus(Target::Button(ButtonId::AtlasLive));
-                Ok("History".into())
+                Ok("News cycle".into())
             }
             ButtonId::AtlasLive => {
                 self.atlas_page = AtlasPage::Live;
@@ -2818,9 +2871,6 @@ impl App {
                 Ok("Atlas".into())
             }
             ButtonId::AtlasDelete => self.delete_atlas_run(),
-            ButtonId::OpenSource => self
-                .open_insight_source()
-                .map(|_| "Source thread opened".into()),
             ButtonId::ClearLog => {
                 self.log.clear();
                 self.log_open.clear();
@@ -3274,9 +3324,14 @@ impl App {
                     return;
                 }
                 self.atlas_run_sel = index.min(self.atlas_runs.len() - 1);
+                self.scrolls.origins = 0;
                 self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
-                self.open_atlas_run();
+                self.open_atlas_news();
             }
+            Target::AtlasCycleStats => {
+                self.set_focus(Target::AtlasCycleStats);
+            }
+            Target::PathLine(index) => self.activate_path_line(index),
             Target::AtlasArticle(index) => {
                 if self.atlas_articles.is_empty() {
                     return;
@@ -3326,6 +3381,7 @@ impl App {
             .unwrap_or(value.len());
         value.insert(byte, character);
         self.cursor += 1;
+        self.after_field_edit();
     }
 
     fn edit_backspace(&mut self) {
@@ -3356,6 +3412,7 @@ impl App {
             .unwrap_or(value.len());
         value.replace_range(start..end, "");
         self.cursor -= 1;
+        self.after_field_edit();
     }
 
     fn edit_delete(&mut self) {
@@ -3383,6 +3440,74 @@ impl App {
             .map(|(byte, _)| byte)
             .unwrap_or(value.len());
         value.replace_range(start..end, "");
+        self.after_field_edit();
+    }
+
+    fn after_field_edit(&mut self) {
+        if self.focus == Target::Field(FieldId::BrainQuery)
+            && self.module == Some(ModuleId::Brain)
+            && self.brain_list_mode == BrainListMode::List
+        {
+            self.reload_memories();
+            if !self.memories.is_empty() {
+                self.selected_insight = self
+                    .memories
+                    .get(self.memory_sel)
+                    .and_then(|memory| self.store.insight_for_memory(&memory.id).ok().flatten());
+            } else {
+                self.selected_insight = None;
+            }
+        }
+    }
+
+    fn activate_path_line(&mut self, index: usize) {
+        let lines = if self.brain_graph.is_empty() {
+            Vec::new()
+        } else {
+            super::graph::path_lines(&self.brain_graph)
+        };
+        let Some(line) = lines.get(index) else {
+            return;
+        };
+        if !line.article_id.is_empty() && !line.run_id.is_empty() {
+            match self.open_claim_article(&line.run_id, &line.article_id) {
+                Ok(status) => self.status = status,
+                Err(err) => self.status = err.to_string(),
+            }
+            return;
+        }
+        match self.open_insight_source() {
+            Ok(()) => self.status = "Source thread opened".into(),
+            Err(err) => self.status = err.to_string(),
+        }
+    }
+
+    fn open_claim_article(&mut self, run_id: &str, article_id: &str) -> Result<String> {
+        self.module = Some(ModuleId::Atlas);
+        self.atlas_page = AtlasPage::Runs;
+        self.load_atlas();
+        let Some(index) = self.atlas_runs.iter().position(|run| run.id == run_id) else {
+            anyhow::bail!("News cycle not found");
+        };
+        self.atlas_run_sel = index;
+        self.atlas_articles = self.store.atlas_list_articles(run_id)?;
+        self.atlas_news_run = run_id.into();
+        self.atlas_news = true;
+        self.claim_mark = Some(article_id.into());
+        self.overlay = Overlay::None;
+        let Some(sel) = self
+            .atlas_articles
+            .iter()
+            .position(|article| article.id == article_id)
+        else {
+            anyhow::bail!("Article not found in that news cycle");
+        };
+        self.atlas_article_sel = sel;
+        let room = super::ui::atlas_news_room_for(self);
+        super::ui::reveal_index(&mut self.scrolls.atlas_news, sel, room);
+        self.set_focus(Target::AtlasArticle(sel));
+        self.focus_highlighted_country();
+        Ok("Claim source opened".into())
     }
 
     fn submit(&mut self) {
@@ -3550,6 +3675,14 @@ impl App {
                     },
                 );
             }
+            return true;
+        }
+        if self.on_atlas_history()
+            && matches!(self.focus, Target::AtlasHistory(_))
+            && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+        {
+            let deleted = self.delete_atlas_run();
+            self.report(deleted);
             return true;
         }
         if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('d')) {
@@ -3849,7 +3982,7 @@ impl App {
             Target::Transcript => self.enter_chat(),
             Target::Memory(_) => self.open_memory_graph(),
             Target::AtlasFeed(_) => self.open_atlas_article(),
-            Target::AtlasHistory(_) => self.open_atlas_run(),
+            Target::AtlasHistory(_) => self.open_atlas_news(),
             Target::AtlasArticle(_) => self.open_saved_article(),
             target => self.activate_target(target),
         }
@@ -4049,6 +4182,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        self.pointer = Some((mouse.column, mouse.row));
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let target = super::ui::hit_test(self, mouse.column, mouse.row);
@@ -4189,6 +4323,13 @@ fn atlas_countdown_visible(app: &App) -> bool {
         && matches!(app.overlay, Overlay::None)
 }
 
+fn atlas_extracting_visible(app: &App) -> bool {
+    app.module == Some(ModuleId::Atlas)
+        && app.atlas_page == AtlasPage::Live
+        && matches!(app.overlay, Overlay::None)
+        && super::ui::atlas_extracting(app)
+}
+
 fn until_next_second() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4271,11 +4412,14 @@ pub async fn run(mut app: App) -> Result<()> {
         if atlas_countdown_visible(&app) {
             wait = wait.min(until_next_second());
         }
+        if atlas_extracting_visible(&app) {
+            wait = wait.min(Duration::from_millis(80));
+        }
         if !event::poll(wait)? {
             if app.draft_dirty {
                 app.flush_draft();
             }
-            if atlas_countdown_visible(&app) {
+            if atlas_countdown_visible(&app) || atlas_extracting_visible(&app) {
                 dirty = true;
             }
             continue;
@@ -4303,11 +4447,19 @@ pub async fn run(mut app: App) -> Result<()> {
     }
 }
 
-async fn write_graph_summary(secret: &ProviderSecret, prompt: &str) -> Result<String> {
+fn summary_system(claim: bool) -> String {
+    if claim {
+        "You explain the conclusion of one news claim. The claim path lists the concluding relation and the articles that support it as hard evidence, each with its published time. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how those articles support the relation and why the concluding insight is a fact or an inference. A fact means both spans are in an article title. An inference means a span is only in the description, or the article is context. Use only the graph and the memory. Do not invent sources, times, or outcomes. No bullet list.".into()
+    } else {
+        "You explain the conclusion of one investigation insight. The recon path already keeps only the directive this insight rests on, with the subjects and evidence that contributed to it. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how that directive and the contributing evidence support the relation, and why the concluding insight is a fact or an inference. A fact rests on a tool result that states the relation. An inference is drawn when the evidence does not state it directly. Use only the graph and the memory. Do not mention directives that are absent from the recon path. Do not invent sources or outcomes. No bullet list.".into()
+    }
+}
+
+async fn write_graph_summary(secret: &ProviderSecret, system: &str, prompt: &str) -> Result<String> {
     let messages = [
         provider::ChatMessage {
             role: "system".into(),
-            content: "You explain the conclusion of one investigation insight. The recon path already keeps only the directive this insight rests on, with the subjects and evidence that contributed to it. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how that directive and the contributing evidence support the relation. Use only the graph and the memory. Do not mention directives that are absent from the recon path. Do not invent sources or outcomes. No bullet list.".into(),
+            content: system.into(),
             tool_call_id: None,
             tool_calls: Vec::new(),
         },
@@ -4509,10 +4661,13 @@ mod tests {
             atlas_news_run: String::new(),
             atlas_articles: Vec::new(),
             atlas_article_sel: 0,
+            claim_mark: None,
+            pointer: None,
             atlas_focus: None,
             atlas_map_hold: false,
             atlas_status: "Ready".into(),
             atlas_state: "idle".into(),
+            atlas_insight_progress: None,
             atlas_pause: None,
             atlas_auto_next: None,
             atlas_auto_started: false,
@@ -4577,9 +4732,9 @@ mod tests {
     }
 
     #[test]
-    fn brain_tab_still_edits_and_recalls_sourced_memories() {
+    fn brain_tab_still_edits_and_finds_sourced_memories() {
         let mut app = app();
-        click(&mut app, Target::App(1));
+        click(&mut app, Target::App(ModuleId::Brain.index()));
         let listed = super::super::ui::focus_order(&app);
         assert!(listed.contains(&Target::Button(ButtonId::CreateMemory)));
         assert!(listed.contains(&Target::Memory(0)) || app.memories.is_empty());
@@ -4616,12 +4771,12 @@ mod tests {
         assert!(app.brain_graph.is_empty());
         assert!(app.graph_summary.contains("no investigation graph"));
         assert!(app.graph_summary_pending.is_none());
-        click(&mut app, Target::Button(ButtonId::BrainBack));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.brain_list_mode, BrainListMode::List);
         click(&mut app, Target::Field(FieldId::BrainQuery));
         type_text(&mut app, "Atlas");
-        click(&mut app, Target::Button(ButtonId::Recall));
-        assert_eq!(app.hits.len(), 1);
+        assert_eq!(app.memories.len(), 1);
+        assert!(app.memories[0].text.contains("Atlas"));
     }
 
     #[test]
@@ -5744,7 +5899,7 @@ mod tests {
         assert_eq!(app.module, Some(ModuleId::Atlas));
         assert_eq!(app.atlas_page, AtlasPage::Runs);
         assert!(hit(&app, Target::Button(ButtonId::AtlasLive)));
-        assert!(!hit(&app, Target::Button(ButtonId::AtlasDelete)));
+        assert!(hit(&app, Target::Button(ButtonId::AtlasDelete)));
         click(&mut app, Target::Button(ButtonId::AtlasLive));
         assert_eq!(app.atlas_page, AtlasPage::Live);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -5799,12 +5954,6 @@ mod tests {
             .unwrap();
         click(&mut app, Target::Button(ButtonId::AtlasRuns));
         assert_eq!(app.atlas_page, AtlasPage::Runs);
-        click(&mut app, Target::AtlasHistory(0));
-        let Overlay::Block { body, .. } = &app.overlay else {
-            panic!("run card");
-        };
-        assert!(body.contains("United States (US)"));
-        assert!(body.contains("completed"));
         assert!(hit(&app, Target::Button(ButtonId::AtlasDelete)));
         click(&mut app, Target::Button(ButtonId::AtlasDelete));
         assert!(app.atlas_runs.is_empty());
@@ -5815,7 +5964,6 @@ mod tests {
             .unwrap();
         click(&mut app, Target::Button(ButtonId::AtlasLive));
         click(&mut app, Target::Button(ButtonId::AtlasRuns));
-        click(&mut app, Target::AtlasHistory(0));
         click(&mut app, Target::Button(ButtonId::AtlasDelete));
         assert_eq!(app.atlas_runs.len(), 1);
         assert!(app.status.contains("Pause"));
@@ -5850,24 +5998,10 @@ mod tests {
             .unwrap();
         app.select(ModuleId::Atlas.index());
         click(&mut app, Target::AtlasHistory(0));
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 42)).unwrap();
-        terminal
-            .draw(|frame| super::super::ui::draw(frame, &app))
-            .unwrap();
-        let painted = screen_text(&terminal);
-        assert!(painted.contains("News feed"), "{painted}");
-        let news_hit = (0..42).any(|y| {
-            (0..120).any(|x| {
-                super::super::ui::hit_test(&app, x, y)
-                    == Some(Target::Button(ButtonId::AtlasNewsFeed))
-                    && y > 2
-            })
-        });
-        assert!(news_hit, "news feed button is below the card title");
-        click(&mut app, Target::Button(ButtonId::AtlasNewsFeed));
         assert!(app.atlas_news);
         assert!(matches!(app.overlay, Overlay::None));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 42)).unwrap();
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
@@ -5949,7 +6083,6 @@ mod tests {
         }
         app.select(ModuleId::Atlas.index());
         click(&mut app, Target::AtlasHistory(0));
-        click(&mut app, Target::Button(ButtonId::AtlasNewsFeed));
         assert!(app.atlas_news);
         for (width, height) in [(180, 55), (80, 24), (60, 18)] {
             app.screen = Rect::new(0, 0, width, height);
@@ -6139,9 +6272,35 @@ mod tests {
         for code in ["ES", "JP", "BR", "AU", "IN", "SG"] {
             assert!(painted.contains(code), "missing {code}");
         }
+        // Stats shows full country labels for every origin, including tier 3.
         for name in ["Spain", "Japan", "Brazil", "Australia", "India"] {
-            assert!(!painted.contains(name), "{name} is tier 3");
+            assert!(painted.contains(name), "stats missing {name}");
         }
+    }
+
+    #[test]
+    fn atlas_live_insights_show_extract_progress() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 120, 42);
+        app.module = Some(ModuleId::Atlas);
+        app.atlas_page = AtlasPage::Live;
+        app.atlas_pause = Some(Arc::new(AtomicBool::new(false)));
+        app.atlas_status = "Extracting insights".into();
+        app.atlas_insight_progress = Some((3, 12));
+        assert!(super::super::ui::atlas_extracting(&app));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 42)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("Extracting insights"), "{painted}");
+        assert!(painted.contains("3 / 12"), "{painted}");
+        assert!(!painted.contains("No insights extracted for this cycle."), "{painted}");
+        app.atlas_status = "Pipeline complete".into();
+        app.atlas_insight_progress = None;
+        app.atlas_pause = None;
+        assert!(!super::super::ui::atlas_extracting(&app));
     }
 
     fn sample_headline(index: usize) -> atlas::FeedArticle {

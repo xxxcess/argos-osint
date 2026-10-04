@@ -200,6 +200,9 @@ pub struct Thread {
     pub updated_at: String,
     pub draft: String,
     pub scroll: i64,
+    /// When set, synthesis writes Brain claims for answers produced from then on.
+    #[serde(default)]
+    pub recall_insights: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
@@ -279,10 +282,14 @@ pub struct Call {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InsightSource {
     pub thread_id: Option<String>,
+    pub run_id: Option<String>,
     pub answer_id: String,
     pub call_id: String,
     pub source_url: Option<String>,
     pub deleted_origin: bool,
+    /// Publisher time of an Atlas article. Empty for recon tool results.
+    #[serde(default)]
+    pub published_at: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InsightView {
@@ -537,13 +544,14 @@ impl Store {
             updated_at: time,
             draft: String::new(),
             scroll: 0,
+            recall_insights: false,
         };
-        self.conn.execute("INSERT INTO recon_threads(id,title,created_at,updated_at,draft,scroll) VALUES (?1,?2,?3,?4,?5,?6)",params![thread.id,thread.title,thread.created_at,thread.updated_at,thread.draft,thread.scroll])?;
+        self.conn.execute("INSERT INTO recon_threads(id,title,created_at,updated_at,draft,scroll,recall_insights) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![thread.id,thread.title,thread.created_at,thread.updated_at,thread.draft,thread.scroll,0i64])?;
         Ok(thread)
     }
     pub fn list_threads(&self, search: &str) -> Result<Vec<Thread>> {
         let needle = format!("%{}%", search.trim());
-        let mut s=self.conn.prepare("SELECT id,title,created_at,updated_at,draft,scroll FROM recon_threads WHERE deleted=0 AND (title LIKE ?1 OR id IN (SELECT thread_id FROM recon_thread_entities e JOIN recon_entities a ON a.id=e.entity_id WHERE a.canonical LIKE ?1)) ORDER BY updated_at DESC")?;
+        let mut s=self.conn.prepare("SELECT id,title,created_at,updated_at,draft,scroll,recall_insights FROM recon_threads WHERE deleted=0 AND (title LIKE ?1 OR id IN (SELECT thread_id FROM recon_thread_entities e JOIN recon_entities a ON a.id=e.entity_id WHERE a.canonical LIKE ?1)) ORDER BY updated_at DESC")?;
         let rows = s
             .query_map([needle], |r| {
                 Ok(Thread {
@@ -553,13 +561,20 @@ impl Store {
                     updated_at: r.get(3)?,
                     draft: r.get(4)?,
                     scroll: r.get(5)?,
+                    recall_insights: r.get::<_, i64>(6)? != 0,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
     }
     pub fn get_thread(&self, tid: &str) -> Result<Option<Thread>> {
-        Ok(self.conn.query_row("SELECT id,title,created_at,updated_at,draft,scroll FROM recon_threads WHERE id=?1 AND deleted=0",[tid],|r|Ok(Thread{id:r.get(0)?,title:r.get(1)?,created_at:r.get(2)?,updated_at:r.get(3)?,draft:r.get(4)?,scroll:r.get(5)?})).optional()?)
+        Ok(self.conn.query_row("SELECT id,title,created_at,updated_at,draft,scroll,recall_insights FROM recon_threads WHERE id=?1 AND deleted=0",[tid],|r|Ok(Thread{id:r.get(0)?,title:r.get(1)?,created_at:r.get(2)?,updated_at:r.get(3)?,draft:r.get(4)?,scroll:r.get(5)?,recall_insights:r.get::<_,i64>(6)?!=0})).optional()?)
+    }
+    pub fn set_recall_insights(&self, tid: &str, on: bool) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE recon_threads SET recall_insights=?1 WHERE id=?2 AND deleted=0",
+            params![i64::from(on), tid],
+        )? > 0)
     }
     pub fn rename_thread(&self, tid: &str, title: &str) -> Result<bool> {
         ensure!(!title.trim().is_empty(), "title is empty");
@@ -1441,15 +1456,17 @@ impl Store {
         else {
             return Ok(None);
         };
-        let mut stmt=self.conn.prepare("SELECT thread_id,answer_id,call_id,source_url,deleted_origin FROM insight_sources WHERE fingerprint=?1")?;
+        let mut stmt=self.conn.prepare("SELECT thread_id,run_id,answer_id,call_id,source_url,deleted_origin,published_at FROM insight_sources WHERE fingerprint=?1")?;
         let sources = stmt
             .query_map([&fingerprint], |r| {
                 Ok(InsightSource {
                     thread_id: r.get(0)?,
-                    answer_id: r.get(1)?,
-                    call_id: r.get(2)?,
-                    source_url: r.get(3)?,
-                    deleted_origin: r.get::<_, i64>(4)? != 0,
+                    run_id: r.get(1)?,
+                    answer_id: r.get(2)?,
+                    call_id: r.get(3)?,
+                    source_url: r.get(4)?,
+                    deleted_origin: r.get::<_, i64>(5)? != 0,
+                    published_at: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -3542,6 +3559,16 @@ impl Service {
         answer_msg: &Message,
         evidence: &[(String, ToolResult)],
     ) -> Result<()> {
+        let recall = Store::open(&self.db_path)?
+            .get_thread(&run.thread_id)?
+            .is_some_and(|thread| thread.recall_insights);
+        if !recall {
+            Store::open(&self.db_path)?.conn.execute(
+                "UPDATE extraction_jobs SET state='skipped',updated_at=?1 WHERE answer_id=?2",
+                params![now(), answer_msg.id],
+            )?;
+            return Ok(());
+        }
         Store::open(&self.db_path)?.set_run(&run.id, "running", "saving insights", None, None)?;
         if let Err(e) = self
             .extract_insights(synthesis_secret, question, answer_msg, evidence)

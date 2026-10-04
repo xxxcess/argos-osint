@@ -10,6 +10,13 @@ use argos_osint_core::recon::{recon_path, GraphNodeKind, MemoryGraph};
 use super::app::App;
 use super::markdown;
 use super::theme::{self, panel};
+use super::ui::{center_line, contains};
+
+pub struct PathLine {
+    pub text: String,
+    pub article_id: String,
+    pub run_id: String,
+}
 
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let rows = split_vertical(
@@ -20,42 +27,117 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     draw_summary(frame, app, rows[1]);
 }
 
+/// Scrollable path lines, above the anchored legend. `None` when the click misses them.
+pub fn path_line_at(area: Rect, x: u16, y: u16, scroll: u16) -> Option<usize> {
+    let content = path_content(area);
+    if !contains(content, x, y) {
+        return None;
+    }
+    Some(scroll as usize + (y - content.y) as usize)
+}
+
+fn path_content(area: Rect) -> Rect {
+    let rows = split_vertical(
+        area,
+        [Constraint::Percentage(55), Constraint::Percentage(45)],
+    );
+    let inner = inset(rows[0]);
+    Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    }
+}
+
+fn inset(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
 fn draw_path(frame: &mut Frame, app: &App, area: Rect) {
+    let claim = claim_path(app);
     let width = area.width.saturating_sub(2) as usize;
     let lines = if app.brain_graph.is_empty() {
-        vec!["This memory has no investigation graph.".to_string()]
+        vec![PathLine {
+            text: if claim {
+                "This memory has no claim path.".into()
+            } else {
+                "This memory has no investigation graph.".into()
+            },
+            article_id: String::new(),
+            run_id: String::new(),
+        }]
     } else {
         path_lines(&app.brain_graph)
     };
     let widest = lines
         .iter()
-        .map(|line| line.chars().count())
+        .map(|line| line.text.chars().count())
         .max()
         .unwrap_or(0)
         .min(width);
     let pad = width.saturating_sub(widest) / 2;
     let painted = lines
         .into_iter()
-        .map(|text| {
+        .map(|line| {
             Line::from(Span::styled(
-                format!("{}{text}", " ".repeat(pad)),
+                format!("{}{}", " ".repeat(pad), line.text),
                 theme::text(),
             ))
         })
         .collect::<Vec<_>>();
+    let inner = inset(area);
+    let legend_area = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(inner.height.saturating_sub(1)),
+        width: inner.width,
+        height: 1.min(inner.height),
+    };
+    let path_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+    let title = if claim { " claim path " } else { " recon path " };
+    frame.render_widget(panel(title), area);
     frame.render_widget(
         Paragraph::new(painted)
             .style(theme::text())
-            .block(panel(" recon path "))
             .scroll((app.scrolls.path, 0))
             .wrap(Wrap { trim: false }),
-        area,
+        path_area,
     );
+    if legend_area.height > 0 {
+        frame.render_widget(
+            Paragraph::new(center_line(&legend_text(app), legend_area.width as usize))
+                .style(theme::dim()),
+            legend_area,
+        );
+    }
+}
+
+fn claim_path(app: &App) -> bool {
+    app.brain_graph.is_claim_path()
+        || app
+            .memories
+            .get(app.memory_sel)
+            .is_some_and(|memory| memory.source.app == "atlas")
 }
 
 fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
+    let claim = claim_path(app);
     let text = if app.graph_summary.is_empty() {
-        "Open a memory to read its recon path."
+        if claim {
+            "Open a memory to read its claim path."
+        } else {
+            "Open a memory to read its recon path."
+        }
     } else {
         app.graph_summary.as_str()
     };
@@ -92,7 +174,46 @@ fn summary_lines(text: &str, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn path_lines(graph: &MemoryGraph) -> Vec<String> {
+fn legend_text(app: &App) -> String {
+    let claim = claim_path(app);
+    let mut parts = Vec::new();
+    let present = |kind: GraphNodeKind| {
+        app.brain_graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == kind)
+    };
+    let push = |parts: &mut Vec<String>, kind: GraphNodeKind, name: &str| {
+        if present(kind) {
+            parts.push(format!("{} {name}", glyph(kind)));
+        }
+    };
+    push(
+        &mut parts,
+        GraphNodeKind::Investigation,
+        if claim { "claim" } else { "investigation" },
+    );
+    push(
+        &mut parts,
+        GraphNodeKind::Directive,
+        if claim { "topic" } else { "directive" },
+    );
+    push(&mut parts, GraphNodeKind::Entity, "entity");
+    push(&mut parts, GraphNodeKind::Topic, "topic");
+    push(
+        &mut parts,
+        GraphNodeKind::Evidence,
+        if claim { "article" } else { "evidence" },
+    );
+    push(&mut parts, GraphNodeKind::Finding, "finding");
+    push(&mut parts, GraphNodeKind::Source, "source");
+    if parts.is_empty() {
+        return String::new();
+    }
+    parts.join("   ")
+}
+
+pub(crate) fn path_lines(graph: &MemoryGraph) -> Vec<PathLine> {
     let path = recon_path(graph);
     let mut lines = Vec::new();
     if let Some(investigation) = graph
@@ -100,11 +221,15 @@ fn path_lines(graph: &MemoryGraph) -> Vec<String> {
         .iter()
         .find(|node| node.kind == GraphNodeKind::Investigation)
     {
-        lines.push(format!(
-            "{}  {}",
-            glyph(investigation.kind),
-            investigation.label
-        ));
+        lines.push(PathLine {
+            text: format!(
+                "{}  {}",
+                glyph(investigation.kind),
+                investigation.label
+            ),
+            article_id: String::new(),
+            run_id: String::new(),
+        });
     }
     for (band_index, band) in path.bands.iter().enumerate() {
         let last_band = band_index + 1 == path.bands.len();
@@ -119,14 +244,22 @@ fn path_lines(graph: &MemoryGraph) -> Vec<String> {
             .and_then(|node| node.detail.lines().next())
             .filter(|line| !line.is_empty())
             .unwrap_or(band.directive_label.as_str());
-        lines.push(format!(
-            "{branch} {}  {caption}",
-            glyph(GraphNodeKind::Directive)
-        ));
+        lines.push(PathLine {
+            text: format!(
+                "{branch} {}  {caption}",
+                glyph(GraphNodeKind::Directive)
+            ),
+            article_id: String::new(),
+            run_id: String::new(),
+        });
         let mut children = Vec::new();
         for subject in &band.subjects {
             if let Some(node) = graph.nodes.iter().find(|node| node.label == *subject) {
-                children.push(format!("{}  {}", glyph(node.kind), node.label));
+                children.push(PathLine {
+                    text: format!("{}  {}", glyph(node.kind), node.label),
+                    article_id: String::new(),
+                    run_id: String::new(),
+                });
             }
         }
         children.extend(
@@ -137,23 +270,43 @@ fn path_lines(graph: &MemoryGraph) -> Vec<String> {
                     node.kind == GraphNodeKind::Evidence
                         && node.tags.iter().any(|tag| tag == &band.directive_id)
                 })
-                .map(|node| format!("{}  {}", glyph(node.kind), node.label)),
+                .map(|node| PathLine {
+                    text: format!("{}  {}", glyph(node.kind), node.label),
+                    article_id: node.article_id.clone(),
+                    run_id: node.run_id.clone(),
+                }),
         );
         if let Some(label) = &band.finding {
-            children.push(format!("{}  {label}", glyph(GraphNodeKind::Finding)));
+            children.push(PathLine {
+                text: format!("{}  {label}", glyph(GraphNodeKind::Finding)),
+                article_id: String::new(),
+                run_id: String::new(),
+            });
         }
         for (child_index, child) in children.iter().enumerate() {
             let last = child_index + 1 == children.len();
             let mark = if last { "└─" } else { "├─" };
-            lines.push(format!("{pad}{mark} {child}"));
+            lines.push(PathLine {
+                text: format!("{pad}{mark} {}", child.text),
+                article_id: child.article_id.clone(),
+                run_id: child.run_id.clone(),
+            });
         }
         if children.is_empty() {
-            lines.push(format!("{pad}└─ no finding"));
+            lines.push(PathLine {
+                text: format!("{pad}└─ no finding"),
+                article_id: String::new(),
+                run_id: String::new(),
+            });
         }
     }
     if lines.is_empty() {
         for node in &graph.nodes {
-            lines.push(format!("{}  {}", glyph(node.kind), node.label));
+            lines.push(PathLine {
+                text: format!("{}  {}", glyph(node.kind), node.label),
+                article_id: node.article_id.clone(),
+                run_id: node.run_id.clone(),
+            });
         }
     }
     lines

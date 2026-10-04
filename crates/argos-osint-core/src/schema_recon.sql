@@ -1,7 +1,8 @@
 CREATE TABLE IF NOT EXISTS recon_threads (
   id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL, draft TEXT NOT NULL DEFAULT '',
-  scroll INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0
+  scroll INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,
+  recall_insights INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS recon_threads_updated ON recon_threads(updated_at DESC);
 CREATE TABLE IF NOT EXISTS recon_messages (
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS insight_sources (
   thread_id TEXT, run_id TEXT, answer_id TEXT NOT NULL,
   call_id TEXT NOT NULL, source_url TEXT,
   deleted_origin INTEGER NOT NULL DEFAULT 0,
+  published_at TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(fingerprint, answer_id, call_id)
 );
 CREATE TABLE IF NOT EXISTS insight_user_edits (memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE);

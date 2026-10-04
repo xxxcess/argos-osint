@@ -1,5 +1,7 @@
-//! Final Atlas step: gate a cycle's fresh articles, extract a handful of claims,
-//! and store them where Brain recall already looks.
+//! Final Atlas step: gate every non-unk article, extract lean claim elements with
+//! synthesis, ask the classifier which cycle articles are most relevant to those
+//! elements, then use that peer set for fact, inference, and link support before
+//! storing them where Brain recall already looks.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -12,18 +14,22 @@ use crate::store::{
     insight_fingerprint, AtlasArticleRow, AtlasInsightClaim, AtlasStoredClaim, Store,
 };
 
-/// Articles sent in one extraction call.
-pub const PACKET_LIMIT: usize = 12;
-/// Lead claims kept from the classified packet.
-pub const CLAIM_LIMIT: usize = 5;
-/// Context claims kept from unk titles that name an extracted entity.
-pub const CONTEXT_LIMIT: usize = 5;
-const DESCRIPTION_CHARS: usize = 500;
+/// Articles sent in one extract call. Kept small so synthesis streams stay short.
+pub const PACKET_LIMIT: usize = 4;
+/// Related peers shown when judging support for one claim.
+pub const RELATED_LIMIT: usize = 5;
+const DESCRIPTION_CHARS: usize = 160;
+const COL_ENTITY: usize = 24;
+const COL_PREDICATE: usize = 16;
+const COL_OBJECT: usize = 23;
+const COL_TOPIC: usize = 16;
+const COL_CLASS: usize = 10;
 
 const NAMESPACES: &[&str] = &["person", "org", "place", "agreement"];
 
-const LEAD_PROMPT: &str = "\
-Extract at most 5 concise atomic news claims. Return a JSON object {\"claims\":[{\"entity\":string,\"namespace\":string,\"predicate\":string,\"object\":string,\"topic\":string,\"claim\":string,\"classification\":\"fact\"|\"inference\",\"confidence\":number,\"evidence_ids\":[string]}]}. \
+fn lead_prompt(limit: usize) -> String {
+    format!(
+        "Extract at most {limit} concise atomic news elements, one per article. Return a JSON object {{\"claims\":[{{\"entity\":string,\"namespace\":string,\"predicate\":string,\"object\":string,\"topic\":string,\"claim\":string,\"classification\":\"fact\"|\"inference\",\"confidence\":number,\"evidence_ids\":[string]}}]}}. \
 entity and object must be verbatim spans copied from the cited article title or description. Do not invent names. \
 namespace is person, org, place, or agreement. \
 predicate is the verb the article supports, such as sanctioned, deployed, or met. \
@@ -31,15 +37,24 @@ topic is the article category. \
 evidence_ids must be ids from the packet. \
 The claim is one sentence that contains the entity and the object. \
 Set classification to fact only when both spans are in the title; otherwise inference. \
-country is the publisher country, not the entity.";
+Do not compare other articles here; peer support is judged later. \
+published_at is the source time. \
+country is the publisher country, not the entity."
+    )
+}
 
-const CONTEXT_PROMPT: &str = "\
-Extract at most 5 context claims from unclassified articles. Return the same JSON object as a lead extraction. \
+fn context_prompt(limit: usize) -> String {
+    format!(
+        "Extract at most {limit} context claims from unclassified articles, one per article. Return a JSON object {{\"claims\":[...]}} with the same claim fields as a lead extraction. \
 Use an entity from the Entities list, and only when that entity is a verbatim span of the article title. \
 object must be a verbatim span of the same article. \
 Set classification to inference. \
 Do not extract an article whose title does not contain one of the entities. \
-country is the publisher country, not the entity.";
+If no article qualifies, return {{\"claims\":[]}}. \
+published_at is the source time. \
+country is the publisher country, not the entity."
+    )
+}
 
 /// Counts and claim rows shown under the country table.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -96,6 +111,8 @@ pub struct KeptClaim {
     pub confidence: f64,
     pub article_id: String,
     pub source_url: String,
+    /// Publisher time of the cited article.
+    pub published_at: String,
     /// Publisher country of the cited article. Never written onto the entity.
     pub country: String,
     pub context: bool,
@@ -107,9 +124,13 @@ pub enum AcceptMode {
     Context,
 }
 
-/// Lead extraction plus an optional context-pass failure that did not drop the lead claims.
+/// Lead extraction plus optional packet failures that did not drop kept claims.
 pub struct Extraction {
     pub settled: Settled,
+    /// Lead packet failures that still left some claims.
+    pub extract_error: Option<String>,
+    /// Classifier peer-matching failure; deterministic overlap was used instead.
+    pub peer_error: Option<String>,
     pub context_error: Option<String>,
 }
 
@@ -305,7 +326,10 @@ pub fn finish_insights(
     merge_aliases(&mut all, &articles);
     let mut lead: Vec<KeptClaim> = all.iter().filter(|claim| !claim.context).cloned().collect();
     let mut context: Vec<KeptClaim> = all.into_iter().filter(|claim| claim.context).collect();
-    lead = cap_claims(dedupe_claims(lead), CLAIM_LIMIT);
+    lead = dedupe_claims(lead);
+    if gated > 0 {
+        lead = cap_claims(lead, gated as usize);
+    }
     let before_match = context.len();
     context.retain(|claim| lead.iter().any(|lead| lead.entity == claim.entity));
     let unmatched = before_match.saturating_sub(context.len()) as u32;
@@ -313,7 +337,7 @@ pub fn finish_insights(
         lead.iter()
             .all(|lead| fingerprint(lead) != fingerprint(claim))
     });
-    context = cap_claims(dedupe_claims(context), CONTEXT_LIMIT);
+    context = dedupe_claims(context);
 
     let mut claims = lead;
     claims.extend(context);
@@ -414,107 +438,549 @@ pub fn stats_from_stored(
     stats
 }
 
-pub fn insight_table_lines(stats: &InsightStats) -> Vec<String> {
+/// The one stats line on a pipeline-run card: gated, claims, fact, inference, context, dropped, links.
+pub fn insight_stats_line(stats: &InsightStats) -> String {
     if stats.gated == 0
         && stats.claims == 0
         && stats.context == 0
         && stats.dropped == 0
         && stats.rows.is_empty()
     {
-        return vec!["No insights extracted for this cycle.".into()];
+        return "No insights extracted for this cycle.".into();
     }
     let links = stats.conflict_or_revision
         + stats.cross_topic
         + stats.cross_country
         + stats.context_for
         + stats.co_mentioned;
-    let mut lines = vec![
-        format!(
-            "Gated {}  Claims {}  Fact {}  Inference {}  Context {}  Dropped {}  Links {}",
-            stats.gated,
-            stats.claims,
-            stats.facts,
-            stats.inferences,
-            stats.context,
-            stats.dropped,
-            links
-        ),
-        "Entity                    Predicate        Object                  Topic            Class"
-            .into(),
-    ];
+    format!(
+        "Gated {}  Claims {}  Fact {}  Inference {}  Context {}  Dropped {}  Links {}",
+        stats.gated, stats.claims, stats.facts, stats.inferences, stats.context, stats.dropped, links
+    )
+}
+
+pub fn insight_table_lines(stats: &InsightStats) -> Vec<String> {
+    let stats_line = insight_stats_line(stats);
+    if stats.rows.is_empty() && !stats_line.starts_with("Gated ") {
+        return vec![stats_line];
+    }
+    let header = insight_header();
+    let mut lines = vec![stats_line, header];
     if stats.rows.is_empty() {
         lines.push("No insights extracted for this cycle.".into());
         return lines;
     }
     for row in &stats.rows {
-        lines.push(format!(
-            "{:<24} {:<16} {:<23} {:<16} {}",
-            row.entity, row.predicate, row.object, row.topic, row.classification
-        ));
+        lines.push(insight_row_line(row));
     }
     lines
 }
 
-/// One lead call over the packet, then one context call over matching unk titles.
+fn insight_header() -> String {
+    format!(
+        "{} {} {} {} {}",
+        fit_cell("Entity", COL_ENTITY),
+        fit_cell("Predicate", COL_PREDICATE),
+        fit_cell("Object", COL_OBJECT),
+        fit_cell("Topic", COL_TOPIC),
+        fit_cell("Class", COL_CLASS),
+    )
+}
+
+fn insight_row_line(row: &InsightRow) -> String {
+    format!(
+        "{} {} {} {} {}",
+        fit_cell(&row.entity, COL_ENTITY),
+        fit_cell(&row.predicate, COL_PREDICATE),
+        fit_cell(&row.object, COL_OBJECT),
+        fit_cell(&row.topic, COL_TOPIC),
+        fit_cell(&row.classification, COL_CLASS),
+    )
+}
+
+fn fit_cell(value: &str, width: usize) -> String {
+    let text: String = value.chars().take(width).collect();
+    format!("{text:<width$}")
+}
+
+/// Extract lean elements from every non-unk article with synthesis, ask the
+/// classifier which cycle articles are most relevant to those elements, then
+/// use that peer set for fact, inference, and link support.
+/// `progress` receives `(done, total)` work units as each extract step finishes.
 pub async fn extract(
-    secret: &ProviderSecret,
+    synthesis: &ProviderSecret,
+    classifier: Option<&ProviderSecret>,
     articles: &[AtlasArticleRow],
     origins: &[OriginStat],
+    mut progress: impl FnMut(u32, u32),
 ) -> Result<Extraction> {
-    if provider::is_decisions_model(&secret.model) {
+    if provider::is_decisions_model(&synthesis.model) {
         return Err(anyhow!(
             "{} is a decisions model and cannot extract claims. Use the synthesis chat model.",
-            secret.model
+            synthesis.model
         ));
     }
-    let (packet, gated) = insight_packet(articles, origins);
-    if packet.is_empty() {
+    let significant = select_significant(articles, origins);
+    let gated = significant.len() as u32;
+    if significant.is_empty() {
+        progress(0, 0);
         return Ok(Extraction {
-            settled: finish_insights(gated, 0, &packet, Vec::new(), &[], &[]),
+            settled: finish_insights(gated, 0, &significant, Vec::new(), &[], &[]),
+            extract_error: None,
+            peer_error: None,
             context_error: None,
         });
     }
-    let lead_raw = ask_claims(secret, LEAD_PROMPT, &packet_json(&packet)?).await?;
-    let (mut lead, lead_dropped) = accept_claims(&packet, &lead_raw, AcceptMode::Lead);
-    merge_aliases(&mut lead, &packet);
-    let lead = cap_claims(dedupe_claims(lead), CLAIM_LIMIT);
+    let lead_packets = significant.chunks(PACKET_LIMIT).len() as u32;
+    let mut total = lead_packets + u32::from(classifier.is_some());
+    let mut done = 0u32;
+    progress(done, total);
+    let mut lead = Vec::new();
+    let mut lead_dropped = 0u32;
+    let mut extract_error = None;
+    for packet in significant.chunks(PACKET_LIMIT) {
+        match ask_claims(synthesis, &lead_prompt(packet.len()), &packet_json(packet)?).await {
+            Ok(raw) => {
+                let (kept, dropped) = accept_claims(packet, &raw, AcceptMode::Lead);
+                lead_dropped += dropped;
+                lead.extend(kept);
+            }
+            Err(err) => {
+                extract_error = Some(err.to_string());
+            }
+        }
+        done += 1;
+        progress(done, total);
+    }
+    if lead.is_empty() {
+        if let Some(err) = extract_error {
+            return Err(anyhow!(err));
+        }
+        return Ok(Extraction {
+            settled: finish_insights(gated, lead_dropped, &significant, lead, &[], &[]),
+            extract_error: None,
+            peer_error: None,
+            context_error: None,
+        });
+    }
+    merge_aliases(&mut lead, &significant);
+    let (peers, peer_error) = match classifier {
+        Some(classifier) => {
+            let result = classify_relevant_articles(classifier, &lead, articles).await;
+            done += 1;
+            progress(done, total);
+            match result {
+                Ok(peers) => (peers, None),
+                Err(err) => (Vec::new(), Some(err.to_string())),
+            }
+        }
+        None => (Vec::new(), None),
+    };
+    apply_peer_support(&mut lead, articles, &peers);
+    let lead = cap_claims(dedupe_claims(lead), significant.len().max(1));
     if lead.is_empty() {
         return Ok(Extraction {
-            settled: finish_insights(gated, lead_dropped, &packet, lead, &[], &[]),
+            settled: finish_insights(gated, lead_dropped, &significant, lead, &[], &[]),
+            extract_error,
+            peer_error,
             context_error: None,
         });
     }
-    let mut context_articles = context_candidates(articles, &lead);
-    context_articles.truncate(PACKET_LIMIT);
+    let context_articles = context_candidates(articles, &lead);
     if context_articles.is_empty() {
         return Ok(Extraction {
-            settled: finish_insights(gated, lead_dropped, &packet, lead, &[], &[]),
+            settled: finish_insights(gated, lead_dropped, &significant, lead, &[], &[]),
+            extract_error,
+            peer_error,
             context_error: None,
         });
     }
+    let context_packets = context_articles.chunks(PACKET_LIMIT).len() as u32;
+    total += context_packets;
+    progress(done, total);
     let entities: Vec<String> = lead.iter().map(|claim| claim.entity.clone()).collect();
-    let user = format!(
-        "Entities:\n{}\nArticles:\n{}",
-        entities.join("\n"),
-        packet_json(&context_articles)?
-    );
-    match ask_claims(secret, CONTEXT_PROMPT, &user).await {
-        Ok(context_raw) => Ok(Extraction {
-            settled: finish_insights(
-                gated,
-                lead_dropped,
-                &packet,
-                lead,
-                &context_articles,
-                &context_raw,
-            ),
-            context_error: None,
-        }),
-        Err(err) => Ok(Extraction {
-            settled: finish_insights(gated, lead_dropped, &packet, lead, &[], &[]),
-            context_error: Some(err.to_string()),
-        }),
+    let mut context_raw = Vec::new();
+    let mut context_error = None;
+    for packet in context_articles.chunks(PACKET_LIMIT) {
+        let user = format!(
+            "Entities:\n{}\nArticles:\n{}",
+            entities.join("\n"),
+            packet_json(packet)?
+        );
+        match ask_claims(synthesis, &context_prompt(packet.len()), &user).await {
+            Ok(raw) => context_raw.extend(raw),
+            Err(err) => {
+                context_error = Some(err.to_string());
+            }
+        }
+        done += 1;
+        progress(done, total);
     }
+    Ok(Extraction {
+        settled: finish_insights(
+            gated,
+            lead_dropped,
+            &significant,
+            lead,
+            &context_articles,
+            &context_raw,
+        ),
+        extract_error,
+        peer_error,
+        context_error,
+    })
+}
+
+/// Classifier output: for each lead claim index, the most relevant peer article ids.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PeerMatch {
+    pub claim_index: usize,
+    pub article_ids: Vec<String>,
+}
+
+/// Other articles that share the claim's entity or enough subject tokens to judge support.
+pub fn related_articles<'a>(
+    claim: &KeptClaim,
+    articles: &'a [AtlasArticleRow],
+) -> Vec<&'a AtlasArticleRow> {
+    let claim_tokens = tokens(&format!(
+        "{} {} {}",
+        claim.entity, claim.predicate, claim.object
+    ));
+    let mut scored: Vec<(usize, &AtlasArticleRow)> = articles
+        .iter()
+        .filter(|article| article.id != claim.article_id)
+        .filter_map(|article| {
+            let blob = format!("{} {}", article.title, article.description);
+            let entity_hit = contains_span(&blob, &claim.entity);
+            let object_hit = contains_span(&blob, &claim.object);
+            let topic_hit = !claim.topic.is_empty()
+                && category_tag(&article.category) == category_tag(&claim.topic);
+            let overlap = tokens(&article.title)
+                .into_iter()
+                .filter(|token| claim_tokens.iter().any(|item| item == token))
+                .count();
+            if !entity_hit && !object_hit && !(topic_hit && overlap >= 2) {
+                return None;
+            }
+            let score = usize::from(entity_hit) * 4
+                + usize::from(object_hit) * 3
+                + usize::from(topic_hit)
+                + overlap;
+            Some((score, article))
+        })
+        .collect();
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.id.cmp(&right.1.id)));
+    scored
+        .into_iter()
+        .take(RELATED_LIMIT)
+        .map(|(_, article)| article)
+        .collect()
+}
+
+/// Raise fact/inference and confidence when related articles carry the same elements.
+/// `classifier_peers` comes from the classifier; when empty, token overlap is used.
+pub fn apply_peer_support(
+    claims: &mut [KeptClaim],
+    articles: &[AtlasArticleRow],
+    classifier_peers: &[PeerMatch],
+) {
+    for (index, claim) in claims.iter_mut().enumerate() {
+        if claim.context {
+            continue;
+        }
+        let peers: Vec<&AtlasArticleRow> = classifier_peers
+            .iter()
+            .find(|item| item.claim_index == index)
+            .map(|item| {
+                item.article_ids
+                    .iter()
+                    .filter_map(|id| {
+                        articles
+                            .iter()
+                            .find(|article| &article.id == id && article.id != claim.article_id)
+                    })
+                    .take(RELATED_LIMIT)
+                    .collect()
+            })
+            .filter(|peers: &Vec<&AtlasArticleRow>| !peers.is_empty())
+            .unwrap_or_else(|| related_articles(claim, articles));
+        let mut title_support = 0u32;
+        let mut body_support = 0u32;
+        for peer in peers {
+            let title_both = contains_span(&peer.title, &claim.entity)
+                && contains_span(&peer.title, &claim.object);
+            let body = format!("{} {}", peer.title, peer.description);
+            let body_both =
+                contains_span(&body, &claim.entity) && contains_span(&body, &claim.object);
+            if title_both {
+                title_support += 1;
+            } else if body_both {
+                body_support += 1;
+            }
+        }
+        if title_support > 0 {
+            claim.classification = "fact".into();
+            claim.confidence = (claim.confidence + 0.15 * f64::from(title_support)).min(1.0);
+        } else if body_support > 0 {
+            if claim.classification != "fact" {
+                claim.classification = "inference".into();
+            }
+            claim.confidence = (claim.confidence + 0.08 * f64::from(body_support)).min(1.0);
+        }
+    }
+}
+
+/// Ask the classifier which cycle articles best support each extracted element.
+pub async fn classify_relevant_articles(
+    classifier: &ProviderSecret,
+    claims: &[KeptClaim],
+    articles: &[AtlasArticleRow],
+) -> Result<Vec<PeerMatch>> {
+    if claims.is_empty() || articles.is_empty() {
+        return Ok(Vec::new());
+    }
+    if provider::is_decisions_model(&classifier.model) {
+        return classify_peers_decisions(classifier, claims, articles).await;
+    }
+    classify_peers_chat(classifier, claims, articles).await
+}
+
+async fn classify_peers_decisions(
+    classifier: &ProviderSecret,
+    claims: &[KeptClaim],
+    articles: &[AtlasArticleRow],
+) -> Result<Vec<PeerMatch>> {
+    let mut matches = Vec::new();
+    for (index, claim) in claims.iter().enumerate() {
+        if claim.context {
+            continue;
+        }
+        let candidates = peer_candidates(claim, articles);
+        if candidates.is_empty() {
+            continue;
+        }
+        let (state, questions) = peer_decisions_request(claim, &candidates);
+        let response = provider::decide(classifier, &state, &questions).await?;
+        let choice = response
+            .answers
+            .get("peer")
+            .and_then(|answer| answer.choice.as_deref())
+            .unwrap_or("none");
+        if choice == "none" || choice.is_empty() {
+            continue;
+        }
+        if candidates.iter().any(|article| article.id == choice) {
+            matches.push(PeerMatch {
+                claim_index: index,
+                article_ids: vec![choice.to_string()],
+            });
+        }
+    }
+    Ok(matches)
+}
+
+async fn classify_peers_chat(
+    classifier: &ProviderSecret,
+    claims: &[KeptClaim],
+    articles: &[AtlasArticleRow],
+) -> Result<Vec<PeerMatch>> {
+    let elements: Vec<Value> = claims
+        .iter()
+        .enumerate()
+        .filter(|(_, claim)| !claim.context)
+        .map(|(index, claim)| {
+            serde_json::json!({
+                "index": index,
+                "entity": claim.entity,
+                "predicate": claim.predicate,
+                "object": claim.object,
+                "topic": claim.topic,
+                "claim": claim.claim,
+                "source_article_id": claim.article_id,
+                "published_at": claim.published_at,
+            })
+        })
+        .collect();
+    if elements.is_empty() {
+        return Ok(Vec::new());
+    }
+    let catalog = catalog_json(articles)?;
+    let system = format!(
+        "You match extracted news elements to the most relevant supporting articles in the same news cycle. \
+Return a JSON object {{\"matches\":[{{\"index\":number,\"article_ids\":[string]}}]}}. \
+Each index is an element index. article_ids are ids from the Articles list, never the element's source_article_id. \
+Pick at most {RELATED_LIMIT} ids per element, ordered by relevance. \
+Choose articles that share the same subject matter or elements and could support a fact, inference, or link. \
+If none apply, return an empty article_ids list for that element."
+    );
+    let user = format!(
+        "Elements:\n{}\nArticles:\n{}",
+        serde_json::to_string(&elements)?,
+        catalog
+    );
+    let messages = [
+        ChatMessage {
+            role: "system".into(),
+            content: system,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+        ChatMessage {
+            role: "user".into(),
+            content: user,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+    ];
+    let done = provider::complete(classifier, &messages, &[], |_| {}).await?;
+    Ok(parse_peer_matches(&done.content, claims, articles))
+}
+
+/// Lean Decisions question: one peer article id, or none.
+pub fn peer_decisions_request(
+    claim: &KeptClaim,
+    candidates: &[&AtlasArticleRow],
+) -> (Value, Value) {
+    let mut criteria = serde_json::Map::new();
+    for article in candidates {
+        criteria.insert(
+            article.id.clone(),
+            serde_json::json!(format!(
+                "{} · {} · {} · {}",
+                article.title,
+                category_tag(&article.category),
+                article.country,
+                article.published_at
+            )),
+        );
+    }
+    criteria.insert(
+        "none".into(),
+        serde_json::json!("No other article in this cycle supports this element."),
+    );
+    let questions = serde_json::json!({
+        "peer": {
+            "type": "choice",
+            "instructions": "Choose the single most relevant supporting article for this extracted element. Choose none when no candidate shares the subject matter.",
+            "criteria": criteria
+        }
+    });
+    let state = serde_json::json!({
+        "entity": claim.entity,
+        "predicate": claim.predicate,
+        "object": claim.object,
+        "topic": claim.topic,
+        "claim": claim.claim,
+        "source_article_id": claim.article_id,
+        "published_at": claim.published_at,
+    });
+    (state, questions)
+}
+
+/// Prefilter peers before the classifier ranks them.
+pub fn peer_candidates<'a>(
+    claim: &KeptClaim,
+    articles: &'a [AtlasArticleRow],
+) -> Vec<&'a AtlasArticleRow> {
+    let mut related = related_articles(claim, articles);
+    if related.len() >= RELATED_LIMIT {
+        return related;
+    }
+    let known: std::collections::HashSet<&str> =
+        related.iter().map(|article| article.id.as_str()).collect();
+    let mut extras: Vec<&AtlasArticleRow> = articles
+        .iter()
+        .filter(|article| article.id != claim.article_id && !known.contains(article.id.as_str()))
+        .filter(|article| {
+            !claim.topic.is_empty()
+                && category_tag(&article.category) == category_tag(&claim.topic)
+                && category_tag(&article.category) != "unk"
+        })
+        .collect();
+    extras.sort_by(|left, right| {
+        right
+            .temperature
+            .total_cmp(&left.temperature)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    for article in extras {
+        if related.len() >= RELATED_LIMIT.max(8) {
+            break;
+        }
+        related.push(article);
+    }
+    if related.is_empty() {
+        articles
+            .iter()
+            .filter(|article| {
+                article.id != claim.article_id && category_tag(&article.category) != "unk"
+            })
+            .take(RELATED_LIMIT.max(8))
+            .collect()
+    } else {
+        related
+    }
+}
+
+pub fn parse_peer_matches(
+    text: &str,
+    claims: &[KeptClaim],
+    articles: &[AtlasArticleRow],
+) -> Vec<PeerMatch> {
+    let Ok(value) = parse_json_value(text) else {
+        return Vec::new();
+    };
+    let Some(rows) = value.get("matches").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let known: std::collections::HashSet<&str> =
+        articles.iter().map(|article| article.id.as_str()).collect();
+    let mut matches = Vec::new();
+    for row in rows {
+        let Some(index) = row.get("index").and_then(Value::as_u64).map(|n| n as usize) else {
+            continue;
+        };
+        let Some(claim) = claims.get(index) else {
+            continue;
+        };
+        if claim.context {
+            continue;
+        }
+        let ids = row
+            .get("article_ids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|id| known.contains(id) && *id != claim.article_id)
+            .take(RELATED_LIMIT)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            matches.push(PeerMatch {
+                claim_index: index,
+                article_ids: ids,
+            });
+        }
+    }
+    matches
+}
+
+fn catalog_json(articles: &[AtlasArticleRow]) -> Result<String> {
+    let rows: Vec<Value> = articles
+        .iter()
+        .map(|article| {
+            serde_json::json!({
+                "id": article.id,
+                "title": article.title,
+                "category": article.category,
+                "country": article.country,
+                "published_at": article.published_at,
+            })
+        })
+        .collect();
+    Ok(serde_json::to_string(&rows)?)
 }
 
 /// Skip the model when this run already has sources, and rebuild the table if the save was interrupted.
@@ -605,6 +1071,7 @@ fn accept_one(evidence: &[AtlasArticleRow], raw: &RawClaim, mode: AcceptMode) ->
         confidence: raw.confidence.clamp(0.0, 1.0),
         article_id: article.id.clone(),
         source_url: article.url.clone(),
+        published_at: article.published_at.clone(),
         country: article.country.clone(),
         context: mode == AcceptMode::Context,
     })
@@ -738,6 +1205,7 @@ fn stored_claim(claim: &KeptClaim) -> AtlasInsightClaim {
         confidence: claim.confidence,
         article_id: claim.article_id.clone(),
         source_url: claim.source_url.clone(),
+        published_at: claim.published_at.clone(),
     }
 }
 
@@ -776,6 +1244,7 @@ fn packet_json(articles: &[AtlasArticleRow]) -> Result<String> {
                 "description": clip_chars(&article.description, DESCRIPTION_CHARS),
                 "category": article.category,
                 "country": article.country,
+                "published_at": article.published_at,
             })
         })
         .collect();
@@ -807,11 +1276,31 @@ async fn ask_claims(secret: &ProviderSecret, system: &str, user: &str) -> Result
 
 fn parse_claims(text: &str) -> Result<Vec<RawClaim>> {
     let value = parse_json_value(text)?;
-    let claims = value
-        .get("claims")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("claims array missing"))?;
-    Ok(claims.iter().map(raw_claim).collect())
+    if let Some(claims) = value.get("claims").and_then(Value::as_array) {
+        return Ok(claims.iter().map(raw_claim).collect());
+    }
+    if value.get("claims").is_some_and(Value::is_null) {
+        return Ok(Vec::new());
+    }
+    if let Some(claims) = value.as_array() {
+        return Ok(claims.iter().map(raw_claim).collect());
+    }
+    if value
+        .get("entity")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty())
+        || value
+            .get("claim")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    {
+        return Ok(vec![raw_claim(&value)]);
+    }
+    // Empty object, missing claims, or a soft "nothing found" reply.
+    if value.get("claims").is_none() {
+        return Ok(Vec::new());
+    }
+    Err(anyhow!("claims array missing"))
 }
 
 fn parse_json_value(text: &str) -> Result<Value> {
@@ -821,19 +1310,28 @@ fn parse_json_value(text: &str) -> Result<Value> {
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::json!({"claims": []}));
+    }
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
         return Ok(value);
     }
-    let start = trimmed
-        .find('{')
-        .ok_or_else(|| anyhow!("claims json missing"))?;
-    let end = trimmed
-        .rfind('}')
-        .ok_or_else(|| anyhow!("claims json missing"))?;
+    let Some(start) = trimmed.find(['{', '[']) else {
+        // Prose with no JSON object — treat as no claims for this packet.
+        return Ok(serde_json::json!({"claims": []}));
+    };
+    let open = trimmed.as_bytes()[start];
+    let close = if open == b'[' { ']' } else { '}' };
+    let Some(end) = trimmed.rfind(close) else {
+        return Ok(serde_json::json!({"claims": []}));
+    };
     if end < start {
-        return Err(anyhow!("claims json missing"));
+        return Ok(serde_json::json!({"claims": []}));
     }
-    Ok(serde_json::from_str(&trimmed[start..=end])?)
+    match serde_json::from_str(&trimmed[start..=end]) {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(serde_json::json!({"claims": []})),
+    }
 }
 
 fn raw_claim(value: &Value) -> RawClaim {
@@ -977,6 +1475,7 @@ mod tests {
             confidence: 0.5,
             article_id: article_id.into(),
             source_url: format!("https://example.com/{article_id}"),
+            published_at: String::new(),
             country: country.into(),
             context,
         }
@@ -1006,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn the_packet_keeps_twelve_and_reports_the_full_gate() {
+    fn the_packet_keeps_four_and_reports_the_full_gate() {
         let origins = vec![origin("us", 1, 1.0)];
         let articles: Vec<_> = (0..13)
             .map(|index| {
@@ -1022,9 +1521,160 @@ mod tests {
             .collect();
         let (packet, gated) = insight_packet(&articles, &origins);
         assert_eq!(gated, 13);
-        assert_eq!(packet.len(), 12);
+        assert_eq!(packet.len(), PACKET_LIMIT);
         assert_eq!(packet[0].id, "a00");
-        assert!(packet.iter().all(|row| row.id != "a12"));
+        assert!(packet.iter().all(|row| row.id != "a04"));
+    }
+
+    #[test]
+    fn peer_articles_raise_a_claim_to_fact_and_boost_confidence() {
+        let articles = vec![
+            article(
+                "a1",
+                "military",
+                "us",
+                "Yemen forces strike houthi targets",
+                "Overnight raids continued",
+                1.0,
+            ),
+            article(
+                "a2",
+                "military",
+                "gb",
+                "Yemen forces strike houthi targets again",
+                "A second outlet confirms the raids",
+                0.8,
+            ),
+            article(
+                "a3",
+                "economic",
+                "de",
+                "Oil prices rise on supply fears",
+                "Markets reacted overnight",
+                0.5,
+            ),
+        ];
+        let mut claims = vec![kept(
+            "yemen forces",
+            "strike",
+            "houthi targets",
+            "military",
+            "a1",
+            "us",
+            false,
+        )];
+        claims[0].classification = "inference".into();
+        claims[0].confidence = 0.5;
+        let related = related_articles(&claims[0], &articles);
+        assert!(related.iter().any(|article| article.id == "a2"));
+        assert!(!related.iter().any(|article| article.id == "a3"));
+        apply_peer_support(&mut claims, &articles, &[]);
+        assert_eq!(claims[0].classification, "fact");
+        assert!(claims[0].confidence > 0.5);
+    }
+
+    #[test]
+    fn classifier_peers_are_preferred_over_token_overlap() {
+        let articles = vec![
+            article(
+                "a1",
+                "military",
+                "us",
+                "Yemen forces strike houthi targets",
+                "Overnight raids continued",
+                1.0,
+            ),
+            article(
+                "a2",
+                "military",
+                "gb",
+                "Yemen forces strike houthi targets again",
+                "A second outlet confirms the raids",
+                0.8,
+            ),
+            article(
+                "a3",
+                "military",
+                "de",
+                "Yemen forces strike houthi targets in Red Sea",
+                "A third desk carries the same elements",
+                0.7,
+            ),
+        ];
+        let mut claims = vec![kept(
+            "yemen forces",
+            "strike",
+            "houthi targets",
+            "military",
+            "a1",
+            "us",
+            false,
+        )];
+        claims[0].classification = "inference".into();
+        claims[0].confidence = 0.5;
+        let peers = vec![PeerMatch {
+            claim_index: 0,
+            article_ids: vec!["a3".into()],
+        }];
+        apply_peer_support(&mut claims, &articles, &peers);
+        assert_eq!(claims[0].classification, "fact");
+        assert!(claims[0].confidence > 0.5);
+    }
+
+    #[test]
+    fn peer_match_json_keeps_valid_cycle_ids() {
+        let articles = vec![
+            article("a1", "military", "us", "One", "", 1.0),
+            article("a2", "military", "gb", "Two", "", 0.8),
+            article("a3", "economic", "de", "Three", "", 0.5),
+        ];
+        let claims = vec![kept(
+            "yemen forces",
+            "strike",
+            "houthi targets",
+            "military",
+            "a1",
+            "us",
+            false,
+        )];
+        let matches = parse_peer_matches(
+            r#"{"matches":[{"index":0,"article_ids":["a1","a2","missing","a3"]}]}"#,
+            &claims,
+            &articles,
+        );
+        assert_eq!(
+            matches,
+            vec![PeerMatch {
+                claim_index: 0,
+                article_ids: vec!["a2".into(), "a3".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn peer_decisions_offer_candidate_ids_or_none() {
+        let claim = kept(
+            "yemen forces",
+            "strike",
+            "houthi targets",
+            "military",
+            "a1",
+            "us",
+            false,
+        );
+        let articles = [
+            article("a2", "military", "gb", "Peer title", "body", 0.8),
+            article("a3", "military", "de", "Other peer", "body", 0.7),
+        ];
+        let candidates: Vec<&AtlasArticleRow> = articles.iter().collect();
+        let (state, questions) = peer_decisions_request(&claim, &candidates);
+        assert_eq!(state["entity"], "yemen forces");
+        assert_eq!(state["source_article_id"], "a1");
+        let criteria = &questions["peer"]["criteria"];
+        assert!(criteria.get("a2").is_some());
+        assert!(criteria.get("a3").is_some());
+        assert!(criteria.get("none").is_some());
+        assert!(criteria.get("a1").is_none());
     }
 
     #[test]
@@ -1116,7 +1766,7 @@ mod tests {
     }
 
     #[test]
-    fn five_claims_is_the_cap_and_extra_spans_are_not_counted_as_dropped() {
+    fn the_highest_confidence_claims_survive_a_budget() {
         let claims: Vec<_> = (0..6)
             .map(|index| {
                 let mut claim = kept(
@@ -1132,9 +1782,66 @@ mod tests {
                 claim
             })
             .collect();
-        let capped = cap_claims(claims, CLAIM_LIMIT);
+        let capped = cap_claims(claims, 5);
         assert_eq!(capped.len(), 5);
         assert!(capped.iter().all(|claim| claim.entity != "person0"));
+    }
+
+    #[test]
+    fn lead_claims_scale_with_the_gate_and_context_is_not_capped_at_five() {
+        let lead: Vec<_> = (0..6)
+            .map(|index| {
+                kept(
+                    &format!("person{index}"),
+                    "met",
+                    "union",
+                    "stability",
+                    "art",
+                    "fr",
+                    false,
+                )
+            })
+            .collect();
+        let settled = finish_insights(6, 0, &[], lead, &[], &[]);
+        assert_eq!(settled.stats.claims, 6);
+        let lead = vec![kept(
+            "putin",
+            "visited",
+            "paris",
+            "geopolitical",
+            "art-lead",
+            "fr",
+            false,
+        )];
+        let unk: Vec<_> = (0..6)
+            .map(|index| {
+                article(
+                    &format!("unk{index}"),
+                    "unk",
+                    "fr",
+                    &format!("Putin visited port{index}"),
+                    "",
+                    0.2,
+                )
+            })
+            .collect();
+        let raw: Vec<_> = (0..6)
+            .map(|index| {
+                raw(
+                    "Putin",
+                    "person",
+                    "visited",
+                    &format!("port{index}"),
+                    "unk",
+                    &format!("Putin visited port{index}."),
+                    "inference",
+                    0.4,
+                    &format!("unk{index}"),
+                )
+            })
+            .collect();
+        let settled = finish_insights(1, 0, &[], lead, &unk, &raw);
+        assert!(settled.stats.context > 5, "{}", settled.stats.context);
     }
 
     #[test]
@@ -1336,7 +2043,7 @@ mod tests {
     fn persisted_claims_use_the_atlas_app_and_recall_hits_the_sentence() {
         let store = Store::memory().unwrap();
         let run_id = "atlas-cycle-1";
-        let packet = vec![article(
+        let mut packet = vec![article(
             "art-9",
             "military",
             "us",
@@ -1344,6 +2051,7 @@ mod tests {
             "over oil",
             1.0,
         )];
+        packet[0].published_at = "2026-10-01T12:00:00Z".into();
         let (lead, dropped) = accept_claims(
             &packet,
             &[raw(
@@ -1393,35 +2101,50 @@ mod tests {
             }
         );
         assert_eq!(memories.len(), 2);
-        let summary = store
-            .graph_summary(
-                memories
-                    .iter()
-                    .find(|memory| memory.text.contains('\n'))
-                    .unwrap()
-                    .id
-                    .as_str(),
-            )
-            .unwrap()
+        let brief = memories
+            .iter()
+            .find(|memory| memory.text.contains('\n'))
             .unwrap();
-        assert_eq!(summary.focus, run_id);
-        assert!(summary.summary.contains("putin → sanctioned → acme"));
-        let source: (String, String, String) = store
+        assert!(store.graph_summary(&brief.id).unwrap().is_none());
+        let source: (String, String, String, String) = store
             .conn
             .query_row(
-                "SELECT call_id, source_url, answer_id FROM insight_sources WHERE run_id=?1",
+                "SELECT call_id, source_url, answer_id, published_at FROM insight_sources WHERE run_id=?1",
                 [run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(source.0, "art-9");
         assert_eq!(source.1, "https://example.com/art-9");
         assert_eq!(source.2, "atlas-atlas-cycle-1");
+        assert_eq!(source.3, "2026-10-01T12:00:00Z");
         let hits = store.recall("Putin sanctioned Acme", 4).unwrap();
         assert!(hits
             .iter()
             .any(|hit| hit.memory.text.contains("Putin sanctioned Acme")));
         assert!(store.atlas_has_insights(run_id).unwrap());
+    }
+
+    #[test]
+    fn claim_json_tolerates_empty_and_alternate_shapes() {
+        assert!(parse_claims("").unwrap().is_empty());
+        assert!(parse_claims("{}").unwrap().is_empty());
+        assert!(parse_claims(r#"{"claims":null}"#).unwrap().is_empty());
+        assert!(parse_claims("no claims this time").unwrap().is_empty());
+        let bare = parse_claims(
+            r#"[{"entity":"Cabinet","namespace":"org","predicate":"met","object":"union","topic":"stability","claim":"Cabinet met the union.","classification":"inference","confidence":0.7,"evidence_ids":["a1"]}]"#,
+        )
+        .unwrap();
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0].entity, "Cabinet");
+        let single = parse_claims(
+            r#"{"entity":"Cabinet","namespace":"org","predicate":"met","object":"union","topic":"stability","claim":"Cabinet met the union.","classification":"inference","confidence":0.7,"evidence_ids":["a1"]}"#,
+        )
+        .unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].object, "union");
+        let err = parse_claims(r#"{"claims":"oops"}"#).unwrap_err();
+        assert!(err.to_string().contains("claims array missing"));
     }
 
     #[tokio::test]
@@ -1434,7 +2157,7 @@ mod tests {
             stt_model: None,
             device: None,
         };
-        let err = match extract(&secret, &[], &[]).await {
+        let err = match extract(&secret, None, &[], &[], |_, _| {}).await {
             Ok(_) => panic!("a decisions model extracted claims"),
             Err(err) => err,
         };

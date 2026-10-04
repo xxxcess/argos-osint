@@ -505,6 +505,11 @@ impl RunStats {
             f64::from(articles) / f64::from(total)
         }
     }
+
+    /// Articles kept for this news cycle across every origin.
+    pub fn article_total(&self) -> u32 {
+        self.origins.iter().map(|row| row.articles).sum()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -578,6 +583,8 @@ pub struct ProviderFault {
 #[derive(Clone, Debug)]
 pub enum AtlasEvent {
     Status(String),
+    /// Insight extraction step progress (`done` of `total` work units).
+    InsightProgress { done: u32, total: u32 },
     Stats(RunStats),
     Article(FeedArticle),
     Replaced { id: String, article: FeedArticle },
@@ -834,11 +841,19 @@ pub fn format_run_card(run: &AtlasRunRow) -> String {
         lines.push(run.note.clone());
     }
     lines.push(String::new());
-    if stats.origins.is_empty() {
+    lines.push(format!("Articles {}", stats.article_total()));
+    lines.push(atlas_insights::insight_stats_line(&stats.insights));
+    lines.push(String::new());
+    let origins: Vec<&OriginStat> = stats
+        .origins
+        .iter()
+        .filter(|row| row.articles > 0)
+        .collect();
+    if origins.is_empty() {
         lines.push("No country statistics for this run.".into());
     } else {
         lines.push("Country                         Tier   Temp   Volume  Articles  Share".into());
-        for row in &stats.origins {
+        for row in origins {
             lines.push(format!(
                 "{:<32} {:<6} {:<6.2} {:<7} {:<9} {:.0}%",
                 country_label(&row.country),
@@ -850,9 +865,12 @@ pub fn format_run_card(run: &AtlasRunRow) -> String {
             ));
         }
     }
-    lines.push(String::new());
-    lines.extend(atlas_insights::insight_table_lines(&stats.insights));
     lines.join("\n")
+}
+
+/// Drop flashpoints that never yielded a kept article after country collection.
+pub fn prune_empty_origins(stats: &mut RunStats) {
+    stats.origins.retain(|row| row.articles > 0);
 }
 
 fn parse_stats(raw: &str) -> RunStats {
@@ -1549,6 +1567,7 @@ where
                 "Currents was not queried for {names}. Latest news has no feed for those countries."
             )));
         }
+        prune_empty_origins(&mut stats);
         cursor = Cursor {
             phase: 3,
             chunk: 0,
@@ -1559,6 +1578,7 @@ where
             kept: 0,
         };
         save(&store, &run_id, &cursor, &stats)?;
+        emit(AtlasEvent::Stats(stats.clone()));
     }
 
     if cursor.phase == 3 {
@@ -1642,7 +1662,17 @@ where
                 }
             } else {
                 emit(AtlasEvent::Status("Extracting insights".into()));
-                match atlas_insights::extract(secret, &articles, &stats.origins).await {
+                match atlas_insights::extract(
+                    secret,
+                    classifier.as_ref(),
+                    &articles,
+                    &stats.origins,
+                    |done, total| {
+                        emit(AtlasEvent::InsightProgress { done, total });
+                    },
+                )
+                .await
+                {
                     Ok(extraction) => {
                         if !extraction.settled.claims.is_empty() {
                             if let Err(err) = store.persist_atlas_insights(
@@ -1658,6 +1688,16 @@ where
                             }
                         }
                         stats.insights = extraction.settled.stats;
+                        if let Some(err) = extraction.extract_error {
+                            emit(AtlasEvent::Note(format!(
+                                "Some insight packets were skipped ({err})."
+                            )));
+                        }
+                        if let Some(err) = extraction.peer_error {
+                            emit(AtlasEvent::Note(format!(
+                                "Classifier peer matching failed; using overlap ({err})."
+                            )));
+                        }
                         if let Some(err) = extraction.context_error {
                             emit(AtlasEvent::Note(format!(
                                 "Context claims were not extracted ({err})."
@@ -2068,6 +2108,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_article_origins_are_pruned_after_collection() {
+        let mut stats = RunStats {
+            scored: true,
+            origins: vec![
+                OriginStat {
+                    country: "us".into(),
+                    tier: 1,
+                    temperature: 1.0,
+                    volume: 9,
+                    articles: 4,
+                },
+                OriginStat {
+                    country: "bd".into(),
+                    tier: 3,
+                    temperature: 0.2,
+                    volume: 3,
+                    articles: 0,
+                },
+            ],
+            ..RunStats::default()
+        };
+        assert_eq!(stats.article_total(), 4);
+        prune_empty_origins(&mut stats);
+        assert_eq!(stats.origins.len(), 1);
+        assert_eq!(stats.origins[0].country, "us");
+    }
+
+    #[test]
     fn dedup_drops_a_url_an_exact_title_and_keeps_the_higher_domain() {
         let reuters = FeedArticle {
             id: "a".into(),
@@ -2472,7 +2540,8 @@ mod tests {
         });
         let country = card.find("Germany (DE)").unwrap();
         let insights = card.find("No insights extracted for this cycle.").unwrap();
-        assert!(country < insights);
+        assert!(card.contains("Articles 2"));
+        assert!(insights < country);
     }
 
     #[tokio::test]

@@ -36,7 +36,8 @@ pub fn land_style(zoom: u8, code: &str, heat: &[(&str, f64)]) -> (char, Color) {
     ('\u{28FF}', LAND)
 }
 
-/// Country, tier, and temperature from one saved run. Unscored rows are left out.
+/// Country, tier, and temperature from one saved run. Unscored rows and
+/// countries with no kept articles are left out.
 pub fn scored_heat(stats: Option<&RunStats>) -> Vec<(&str, u8, f64)> {
     let Some(stats) = stats else {
         return Vec::new();
@@ -44,7 +45,7 @@ pub fn scored_heat(stats: Option<&RunStats>) -> Vec<(&str, u8, f64)> {
     stats
         .origins
         .iter()
-        .filter(|row| row.tier > 0 && row.temperature > 0.0)
+        .filter(|row| row.articles > 0 && row.tier > 0 && row.temperature > 0.0)
         .map(|row| (row.country.as_str(), row.tier, row.temperature))
         .collect()
 }
@@ -65,6 +66,11 @@ fn mercator_y(lat: f64) -> f64 {
 /// Pixels across the whole world. Zoom 0 fits 360° into the canvas width.
 fn world_scale(zoom: u8, width: usize) -> f64 {
     width as f64 * f64::from(1_u16 << zoom.min(4))
+}
+
+/// World view is drawn a little smaller than the canvas so land has room around it.
+fn world_view_scale(width: usize) -> f64 {
+    world_scale(0, width) * 0.82
 }
 
 /// Center and scale that place the country's outline in the middle of the view.
@@ -461,7 +467,7 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         .atlas_focus
         .as_deref()
         .and_then(|code| country_fit(code, width_f, height_f))
-        .unwrap_or((0.0, 15.0, world_scale(0, width)));
+        .unwrap_or((0.0, 15.0, world_view_scale(width)));
     let mut temps = vec![None; land::CODES.len()];
     for (country, _, temp) in &heat {
         if let Some(index) = land_index(country) {
@@ -667,6 +673,13 @@ mod tests {
                     temperature: 0.0,
                     volume: 1,
                     articles: 1,
+                },
+                argos_osint_core::atlas::OriginStat {
+                    country: "bd".into(),
+                    tier: 3,
+                    temperature: 0.2,
+                    volume: 2,
+                    articles: 0,
                 },
             ],
             scored: true,

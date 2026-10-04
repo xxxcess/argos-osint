@@ -566,6 +566,83 @@ impl Store {
         }
     }
 
+    /// Drops insight source rows for one Atlas article and orphans Brain memories that
+    /// no longer have any source. Fingerprints still linked from other articles/cycles keep
+    /// their claim and memory.
+    pub fn delete_article_insights(&self, run_id: &str, article_id: &str) -> Result<usize> {
+        let answer_id = atlas_answer_id(run_id);
+        let fingerprints: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT fingerprint FROM insight_sources \
+                 WHERE run_id=?1 AND answer_id=?2 AND call_id=?3",
+            )?;
+            let rows = stmt.query_map(params![run_id, answer_id, article_id], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        if fingerprints.is_empty() {
+            return Ok(0);
+        }
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<usize> {
+            let removed = self.conn.execute(
+                "DELETE FROM insight_sources WHERE run_id=?1 AND answer_id=?2 AND call_id=?3",
+                params![run_id, answer_id, article_id],
+            )?;
+            let mut orphaned = 0usize;
+            for fingerprint in &fingerprints {
+                let remaining: i64 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM insight_sources WHERE fingerprint=?1",
+                    [fingerprint],
+                    |row| row.get(0),
+                )?;
+                if remaining > 0 {
+                    continue;
+                }
+                let memory_id: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
+                        [fingerprint],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                self.conn.execute(
+                    "DELETE FROM insight_relations WHERE left_fingerprint=?1 OR right_fingerprint=?1",
+                    [fingerprint],
+                )?;
+                self.conn.execute(
+                    "DELETE FROM insight_claims WHERE fingerprint=?1",
+                    [fingerprint],
+                )?;
+                if let Some(memory_id) = memory_id {
+                    self.conn.execute(
+                        "DELETE FROM insight_user_edits WHERE memory_id=?1",
+                        [&memory_id],
+                    )?;
+                    self.conn.execute(
+                        "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
+                        [&memory_id],
+                    )?;
+                    self.conn
+                        .execute("DELETE FROM memories WHERE id=?1", [&memory_id])?;
+                    orphaned += 1;
+                }
+            }
+            let _ = removed;
+            Ok(orphaned)
+        })();
+        match result {
+            Ok(orphaned) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(orphaned)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
     /// Drops Brain memories written from one Atlas cycle.
     /// A claim that another cycle also sourced keeps its memory and loses only this cycle's source row.
     pub fn delete_cycle_memories(&self, run_id: &str) -> Result<()> {
@@ -1774,5 +1851,68 @@ mod tests {
             .atlas_claims_for_article("run-1", "missing")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn delete_article_insights_orphans_brain_and_keeps_shared() {
+        let store = Store::memory().unwrap();
+        store.atlas_insert_run("run-1", "{}", "{}").unwrap();
+        let shared = AtlasInsightClaim {
+            fingerprint: String::new(),
+            entity: "fleet".into(),
+            namespace: "org".into(),
+            predicate: "owned_by".into(),
+            object: "acme".into(),
+            topic: "geopolitical".into(),
+            claim: "Fleet owned by Acme.".into(),
+            classification: "fact".into(),
+            confidence: 0.8,
+            article_id: "art-1".into(),
+            source_url: "https://example.com/a".into(),
+            published_at: "2026-10-04T12:00:00+00:00".into(),
+            reliability: "B".into(),
+            info_credibility: 2,
+            admiralty: "B2".into(),
+            rsp_status: "gr".into(),
+        };
+        let only = AtlasInsightClaim {
+            fingerprint: String::new(),
+            entity: "acme".into(),
+            namespace: "org".into(),
+            predicate: "sanctioned".into(),
+            object: "eu".into(),
+            topic: "geopolitical".into(),
+            claim: "Acme sanctioned by EU.".into(),
+            classification: "fact".into(),
+            confidence: 0.7,
+            article_id: "art-1".into(),
+            source_url: "https://example.com/a".into(),
+            published_at: "2026-10-04T12:00:00+00:00".into(),
+            reliability: "B".into(),
+            info_credibility: 2,
+            admiralty: "B2".into(),
+            rsp_status: "gr".into(),
+        };
+        store
+            .persist_atlas_insights("run-1", &[shared.clone(), only], &[], "", "")
+            .unwrap();
+        // Second article also sources the shared claim fingerprint.
+        let mut shared_peer = shared;
+        shared_peer.article_id = "art-2".into();
+        shared_peer.source_url = "https://example.com/b".into();
+        store
+            .persist_atlas_insights("run-1", &[shared_peer], &[], "", "")
+            .unwrap();
+        let before = store.list_memories().unwrap().len();
+        let orphaned = store.delete_article_insights("run-1", "art-1").unwrap();
+        assert_eq!(orphaned, 1);
+        assert!(store
+            .atlas_claims_for_article("run-1", "art-1")
+            .unwrap()
+            .is_empty());
+        let shared_left = store.atlas_claims_for_article("run-1", "art-2").unwrap();
+        assert_eq!(shared_left.len(), 1);
+        assert_eq!(shared_left[0].entity, "fleet");
+        assert_eq!(store.list_memories().unwrap().len(), before - 1);
     }
 }

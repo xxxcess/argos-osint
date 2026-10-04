@@ -10,6 +10,7 @@ use crate::osint::{self, ProviderKeys};
 use crate::secrets::ProviderSecret;
 use crate::store::{AtlasArticleRow, Store};
 
+use super::replace_insights::replace_article_insights_from_body;
 use super::synthesize::refine_retrieved_article_body;
 use super::validate::{validate_article_body, BodyQuality};
 
@@ -37,10 +38,31 @@ pub enum BodyFetchEvent {
         message: String,
         generation: i64,
     },
+    /// Cleaned body is committed and ready to display; insight replace may still be running.
     Ready {
         article_id: String,
         body_id: String,
         quality: String,
+        generation: i64,
+    },
+    /// Body is on screen; Brain insight re-extract from the cleaned body has started.
+    InsightsRefreshing {
+        article_id: String,
+        body_id: String,
+        generation: i64,
+    },
+    /// Brain insights for the article were replaced from the cleaned body.
+    InsightsReplaced {
+        article_id: String,
+        body_id: String,
+        claim_count: usize,
+        generation: i64,
+    },
+    /// Insight re-extract finished unsuccessfully; clear insight loading overlays.
+    InsightsFailed {
+        article_id: String,
+        body_id: String,
+        reason: String,
         generation: i64,
     },
     Failed {
@@ -430,12 +452,65 @@ async fn commit_refined_body(
         tool,
         force_refresh,
     )?;
+    // Emit Ready first so the cleaned body can paint while insights re-extract.
     on_event(BodyFetchEvent::Ready {
         article_id: article_id.into(),
         body_id: body_id.into(),
         quality: refined.quality.as_str().into(),
         generation,
     });
+    let usable_body = matches!(refined.quality.as_str(), "complete" | "partial" | "uncertain")
+        && !refined.markdown.trim().is_empty();
+    if usable_body {
+        if let Some(synthesis) = synthesis {
+            let article = {
+                let body_row = store
+                    .article_body_by_id(body_id)?
+                    .ok_or_else(|| anyhow!("article body {body_id} missing after commit"))?;
+                store.atlas_article(&body_row.run_id, article_id)?
+            };
+            drop(store);
+            if let Some(article) = article {
+                on_event(BodyFetchEvent::InsightsRefreshing {
+                    article_id: article_id.into(),
+                    body_id: body_id.into(),
+                    generation,
+                });
+                on_event(BodyFetchEvent::Progress {
+                    article_id: article_id.into(),
+                    body_id: body_id.into(),
+                    message: "Re-extracting insights from full article…".into(),
+                    generation,
+                });
+                match replace_article_insights_from_body(
+                    db_path,
+                    &article,
+                    &refined.markdown,
+                    synthesis,
+                    classifier,
+                )
+                .await
+                {
+                    Ok(claim_count) => {
+                        on_event(BodyFetchEvent::InsightsReplaced {
+                            article_id: article_id.into(),
+                            body_id: body_id.into(),
+                            claim_count,
+                            generation,
+                        });
+                    }
+                    Err(err) => {
+                        on_event(BodyFetchEvent::InsightsFailed {
+                            article_id: article_id.into(),
+                            body_id: body_id.into(),
+                            reason: err.to_string(),
+                            generation,
+                        });
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 

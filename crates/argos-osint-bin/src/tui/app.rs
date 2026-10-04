@@ -371,7 +371,8 @@ pub enum ButtonId {
     AtlasWorld,
     AtlasNews,
     IntelDay,
-    IntelRecon,
+    /// Center briefing launcher labeled with the classified recon mode.
+    IntelReports,
     IntelReconStart,
     IntelBodyRetry,
     IntelBodyRefresh,
@@ -491,6 +492,10 @@ enum WorkEvent {
     },
     IntelBody(intel_recon::BodyFetchEvent),
     IntelReport(intel_recon::IntelReportEvent),
+    IntelReconMode {
+        article_id: String,
+        mode: ReportMode,
+    },
 }
 
 /// Synthesis text for a thread that is still streaming. Deltas for a thread that is not
@@ -652,11 +657,19 @@ pub struct App {
     pub intel_collapsed_sections: HashSet<String>,
     /// Active mode tab in the Recon configuration popup.
     pub intel_recon_tab: usize,
+    /// Classifier-recommended recon mode for the focused briefing article.
+    pub intel_recon_recommended: ReportMode,
+    /// Article id the recommended mode applies to (empty when unset).
+    pub intel_recon_recommended_for: String,
+    /// True while the classifier is choosing the default recon mode.
+    pub intel_mode_classifying: bool,
     /// Enabled section keys per mode (`verify`, `explain`, …).
     pub intel_recon_enabled: HashMap<String, HashSet<String>>,
     /// Keyboard/mouse focus inside the Recon configuration popup.
     pub intel_recon_focus: IntelReconFocus,
     pub(crate) intel_body_running: HashSet<String>,
+    /// Article ids whose cleaned-body insight re-extract is still in flight.
+    pub(crate) intel_insights_running: HashSet<String>,
     intel_report_running: HashMap<String, Arc<AtomicBool>>,
     pub gnews_key: String,
     pub gnews_fallback: String,
@@ -901,9 +914,13 @@ impl App {
             intel_job_sel: 0,
             intel_collapsed_sections: HashSet::new(),
             intel_recon_tab: 0,
+            intel_recon_recommended: intel_recon::default_recon_mode(),
+            intel_recon_recommended_for: String::new(),
+            intel_mode_classifying: false,
             intel_recon_enabled: HashMap::new(),
             intel_recon_focus: IntelReconFocus::Tab(0),
             intel_body_running: HashSet::new(),
+            intel_insights_running: HashSet::new(),
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
@@ -1803,8 +1820,13 @@ impl App {
         self.scrolls.intel_full = 0;
         self.scrolls.intel_jobs = 0;
         self.refresh_intel_briefing();
+        self.sync_intel_brief_task_ui();
         self.ensure_article_body_fetch(false);
-        self.set_focus(Target::Button(ButtonId::IntelRecon));
+        // Keep an in-flight classifier result; only re-queue when idle for this article.
+        if !(self.intel_mode_classifying && self.intel_recon_recommended_for == article.id) {
+            self.queue_intel_recon_mode_classify();
+        }
+        self.set_focus(Target::Button(ButtonId::IntelReports));
         self.status = format!("Brief · {}", article.title);
     }
 
@@ -1849,12 +1871,44 @@ impl App {
             .unwrap_or_default();
     }
 
+    /// Reconcile in-memory loading flags/messages with store + background task sets on revisit.
+    fn sync_intel_brief_task_ui(&mut self) {
+        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
+            return;
+        };
+        if self
+            .intel_body
+            .as_ref()
+            .is_some_and(|body| body.state == "running")
+        {
+            self.intel_body_running.insert(article.id.clone());
+        }
+        if self.intel_insights_running.contains(&article.id) {
+            if self.intel_body_message.trim().is_empty()
+                || !self
+                    .intel_body_message
+                    .to_ascii_lowercase()
+                    .contains("insight")
+            {
+                self.intel_body_message =
+                    "Re-extracting insights from full article…".into();
+            }
+            return;
+        }
+        if self.intel_body_running.contains(&article.id) {
+            if self.intel_body_message.trim().is_empty() {
+                self.intel_body_message = "Retrieving full article…".into();
+            }
+        }
+    }
+
     fn leave_intel_briefing(&mut self) {
         self.intel_page = IntelPage::Bulletin;
         self.intel_claims.clear();
         self.intel_relations.clear();
         self.intel_body = None;
-        self.intel_body_message.clear();
+        // Keep body/insight/mode in-flight tracking and status text so revisit restores
+        // the same loading UI instead of empty sections.
         self.intel_jobs.clear();
         self.intel_sections.clear();
         self.set_focus(if self.intel_articles.is_empty() {
@@ -1891,6 +1945,9 @@ impl App {
             return;
         };
         if self.intel_body_running.contains(&article.id) && !force_refresh {
+            if self.intel_body_message.trim().is_empty() {
+                self.intel_body_message = "Retrieving full article…".into();
+            }
             return;
         }
         let outcome = match intel_recon::enqueue_article_body(&self.store, &article, force_refresh) {
@@ -1989,8 +2046,12 @@ impl App {
     }
 
     fn open_intel_recon_popup(&mut self) {
-        self.intel_recon_tab = 0;
-        self.intel_recon_focus = IntelReconFocus::Tab(0);
+        let tab = ReportMode::all()
+            .iter()
+            .position(|mode| *mode == self.intel_recon_recommended)
+            .unwrap_or(0);
+        self.intel_recon_tab = tab;
+        self.intel_recon_focus = IntelReconFocus::Tab(tab);
         self.intel_recon_enabled.clear();
         for mode in ReportMode::all() {
             let keys = intel_recon::section_plan(mode)
@@ -2002,8 +2063,33 @@ impl App {
         }
         self.scrolls.popup = 0;
         self.overlay = Overlay::IntelRecon;
-        self.set_focus(Target::IntelReconTab(0));
-        self.status = "Configure Recon report".into();
+        self.set_focus(Target::IntelReconTab(tab));
+        let mode = self.intel_recon_mode();
+        self.status = format!("Configure {} report", mode.title());
+    }
+
+    fn queue_intel_recon_mode_classify(&mut self) {
+        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
+            return;
+        };
+        self.intel_recon_recommended = intel_recon::default_recon_mode();
+        self.intel_recon_recommended_for = article.id.clone();
+        self.intel_mode_classifying = true;
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.intel_mode_classifying = false;
+            return;
+        }
+        let input = intel_recon::ModeClassifyInput::from_article(&article, &self.intel_claims);
+        let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
+            .ok()
+            .filter(|secret| provider::resolved_key(secret).is_some());
+        let article_id = article.id.clone();
+        let tx = self.work_tx.clone();
+        tokio::spawn(async move {
+            let mode =
+                intel_recon::classify_recon_mode(classifier.as_ref(), &input).await;
+            let _ = tx.send(WorkEvent::IntelReconMode { article_id, mode });
+        });
     }
 
 pub(crate) fn intel_recon_mode(&self) -> ReportMode {
@@ -2109,7 +2195,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         self.overlay = Overlay::None;
         self.scrolls.popup = 0;
         self.start_intel_report(mode, scope);
-        self.set_focus(Target::Button(ButtonId::IntelRecon));
+        self.set_focus(Target::Button(ButtonId::IntelReports));
     }
 
     fn start_intel_report(&mut self, mode: ReportMode, scope: ReportScope) {
@@ -2284,28 +2370,96 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     fn open_atlas_article(&mut self) {
-        let Some(article) = self.atlas_feed.get(self.atlas_feed_sel) else {
+        let Some(feed) = self.atlas_feed.get(self.atlas_feed_sel).cloned() else {
             self.status = "No headline selected".into();
             return;
         };
-        let body = atlas::format_article_card(
-            &article.title,
-            &article.source_name,
-            &article.source_domain,
-            &article.author,
-            &article.country,
-            &article.category,
-            &article.published_at,
-            article.temperature,
-            &article.description,
-            &article.image_url,
-            &article.url,
-        );
-        self.overlay = Overlay::Block {
-            title: "Article".into(),
-            body,
-        };
-        self.scrolls.popup = 0;
+        match self.open_intel_briefing_for(self.feed_to_article_row(&feed)) {
+            Ok(status) => self.status = status,
+            Err(err) => self.status = err.to_string(),
+        }
+    }
+
+    fn feed_to_article_row(&self, feed: &atlas::FeedArticle) -> AtlasArticleRow {
+        if let Ok(rows) = self.store.atlas_recent_articles() {
+            if let Some(mut row) = rows.into_iter().find(|row| row.id == feed.id) {
+                if !feed.category.trim().is_empty() {
+                    row.category = atlas::category_tag(&feed.category).into();
+                }
+                return row;
+            }
+        }
+        let run_id = self
+            .atlas_runs
+            .iter()
+            .find(|run| matches!(run.state.as_str(), "running" | "paused"))
+            .or_else(|| self.atlas_runs.first())
+            .map(|run| run.id.clone())
+            .unwrap_or_default();
+        AtlasArticleRow {
+            run_id,
+            id: feed.id.clone(),
+            title: feed.title.clone(),
+            description: feed.description.clone(),
+            url: feed.url.clone(),
+            country: feed.country.clone(),
+            source_name: feed.source_name.clone(),
+            source_domain: feed.source_domain.clone(),
+            published_at: feed.published_at.clone(),
+            provider: feed.provider.clone(),
+            temperature: feed.temperature,
+            category: atlas::category_tag(&feed.category).into(),
+            seen_at: feed.seen_at.clone(),
+            author: feed.author.clone(),
+            image_url: feed.image_url.clone(),
+        }
+    }
+
+    /// Jump to Intel focus brief for an Atlas article (feed, news list, or Brain claim source).
+    fn open_intel_briefing_for(&mut self, article: AtlasArticleRow) -> Result<String> {
+        self.flush_draft();
+        self.overlay = Overlay::None;
+        self.module = Some(ModuleId::Intel);
+        self.launcher_sel = ModuleId::Intel.index();
+        if INTEL_CATEGORIES.contains(&article.category.as_str()) {
+            self.intel_category = article.category.clone();
+        }
+        if let Some(day) = self.day_for_atlas_run(&article.run_id) {
+            self.intel_day = day;
+        }
+        self.intel_search.clear();
+        self.load_intel();
+        match self
+            .intel_articles
+            .iter()
+            .position(|row| row.id == article.id)
+        {
+            Some(sel) => self.intel_sel = sel,
+            None => {
+                self.intel_articles.insert(0, article);
+                self.intel_sel = 0;
+            }
+        }
+        self.open_intel_briefing();
+        Ok("Intel brief opened".into())
+    }
+
+    fn day_for_atlas_run(&self, run_id: &str) -> Option<String> {
+        if run_id.trim().is_empty() {
+            return None;
+        }
+        if let Some(run) = self.atlas_runs.iter().find(|run| run.id == run_id) {
+            if run.started_at.len() >= 10 {
+                return Some(run.started_at[..10].to_string());
+            }
+        }
+        self.store
+            .atlas_list_runs()
+            .ok()
+            .and_then(|runs| runs.into_iter().find(|run| run.id == run_id))
+            .and_then(|run| {
+                (run.started_at.len() >= 10).then(|| run.started_at[..10].to_string())
+            })
     }
 
     fn delete_atlas_run(&mut self) -> Result<String> {
@@ -2394,24 +2548,10 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.status = "No article selected".into();
             return;
         };
-        self.focus_highlighted_country();
-        self.overlay = Overlay::Block {
-            title: "Article".into(),
-            body: atlas::format_article_card(
-                &article.title,
-                &article.source_name,
-                &article.source_domain,
-                &article.author,
-                &article.country,
-                &article.category,
-                &article.published_at,
-                article.temperature,
-                &article.description,
-                &article.image_url,
-                &article.url,
-            ),
-        };
-        self.scrolls.popup = 0;
+        match self.open_intel_briefing_for(article) {
+            Ok(status) => self.status = status,
+            Err(err) => self.status = err.to_string(),
+        }
     }
 
     fn atlas_control(&mut self) -> Result<String> {
@@ -2885,8 +3025,12 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     | intel_recon::BodyFetchEvent::Attempt { article_id, .. }
                     | intel_recon::BodyFetchEvent::Progress { article_id, .. }
                     | intel_recon::BodyFetchEvent::Ready { article_id, .. }
+                    | intel_recon::BodyFetchEvent::InsightsRefreshing { article_id, .. }
+                    | intel_recon::BodyFetchEvent::InsightsReplaced { article_id, .. }
+                    | intel_recon::BodyFetchEvent::InsightsFailed { article_id, .. }
                     | intel_recon::BodyFetchEvent::Failed { article_id, .. } => article_id.clone(),
                 };
+                let mut insights_done = false;
                 match event {
                     intel_recon::BodyFetchEvent::Progress { message, .. } => {
                         self.intel_body_message = message;
@@ -2904,8 +3048,25 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                         self.intel_body_running.remove(&article_id);
                         self.intel_body_message = format!("Full article · {quality}");
                     }
+                    intel_recon::BodyFetchEvent::InsightsRefreshing { .. } => {
+                        self.intel_insights_running.insert(article_id.clone());
+                        self.intel_body_message =
+                            "Re-extracting insights from full article…".into();
+                    }
+                    intel_recon::BodyFetchEvent::InsightsReplaced { claim_count, .. } => {
+                        self.intel_insights_running.remove(&article_id);
+                        self.intel_body_message =
+                            format!("Insights replaced · {claim_count} claims");
+                        insights_done = true;
+                    }
+                    intel_recon::BodyFetchEvent::InsightsFailed { reason, .. } => {
+                        self.intel_insights_running.remove(&article_id);
+                        self.intel_body_message = format!("Insight re-extract failed: {reason}");
+                        insights_done = true;
+                    }
                     intel_recon::BodyFetchEvent::Failed { reason, .. } => {
                         self.intel_body_running.remove(&article_id);
+                        self.intel_insights_running.remove(&article_id);
                         self.intel_body_message = reason;
                     }
                     intel_recon::BodyFetchEvent::Started { .. } => {
@@ -2922,8 +3083,26 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                         .article_body_for_article(&article_id)
                         .ok()
                         .flatten();
+                    if insights_done {
+                        self.refresh_intel_briefing();
+                        self.queue_intel_recon_mode_classify();
+                    }
                 }
                 focused && self.module == Some(ModuleId::Intel)
+            }
+            WorkEvent::IntelReconMode { article_id, mode } => {
+                let selected = self
+                    .intel_articles
+                    .get(self.intel_sel)
+                    .is_some_and(|a| a.id == article_id);
+                if selected {
+                    self.intel_recon_recommended = mode;
+                    self.intel_recon_recommended_for = article_id;
+                    self.intel_mode_classifying = false;
+                }
+                selected
+                    && self.module == Some(ModuleId::Intel)
+                    && self.intel_page == IntelPage::Briefing
             }
             WorkEvent::IntelReport(event) => {
                 let (article_id, job_id) = match &event {
@@ -3742,7 +3921,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.open_intel_day_picker();
                 return;
             }
-            ButtonId::IntelRecon => {
+            ButtonId::IntelReports => {
                 self.open_intel_recon_popup();
                 return;
             }
@@ -4334,31 +4513,12 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     fn open_claim_article(&mut self, run_id: &str, article_id: &str) -> Result<String> {
-        self.module = Some(ModuleId::Atlas);
-        self.atlas_page = AtlasPage::Runs;
-        self.load_atlas();
-        let Some(index) = self.atlas_runs.iter().position(|run| run.id == run_id) else {
-            anyhow::bail!("News cycle not found");
-        };
-        self.atlas_run_sel = index;
-        self.atlas_articles = self.store.atlas_list_articles(run_id)?;
-        self.atlas_news_run = run_id.into();
-        self.atlas_news = true;
-        self.claim_mark = Some(article_id.into());
-        self.overlay = Overlay::None;
-        let Some(sel) = self
-            .atlas_articles
-            .iter()
-            .position(|article| article.id == article_id)
-        else {
-            anyhow::bail!("Article not found in that news cycle");
-        };
-        self.atlas_article_sel = sel;
-        let room = super::ui::atlas_news_room_for(self);
-        super::ui::reveal_index(&mut self.scrolls.atlas_news, sel, room);
-        self.set_focus(Target::AtlasArticle(sel));
-        self.focus_highlighted_country();
-        Ok("Claim source opened".into())
+        let article = self
+            .store
+            .atlas_article(run_id, article_id)?
+            .ok_or_else(|| anyhow::anyhow!("Article not found in that news cycle"))?;
+        self.open_intel_briefing_for(article)?;
+        Ok("Intel brief opened".into())
     }
 
     fn submit(&mut self) {
@@ -4586,6 +4746,10 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.cycle_module(reverse);
             return true;
         }
+        if ctrl && matches!(key.code, KeyCode::Left | KeyCode::Right) {
+            self.cycle_module(key.code == KeyCode::Left);
+            return true;
+        }
         if ctrl && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N')) {
             let created = self.new_thread().map(|_| "New investigation".into());
             self.report(created);
@@ -4703,10 +4867,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             KeyCode::Char(c) if self.field_focused() => self.edit_char(c),
             KeyCode::Char(c)
-                if self.module.is_none()
+                if !self.field_focused()
                     && key.modifiers.is_empty()
                     && matches!(c, '1' | '2' | '3' | '4' | '5' | '6' | '7') =>
             {
+                // Home-order apps: 1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 OSINT · 6 Providers · 7 System
                 self.select((c as u8 - b'1') as usize);
             }
             KeyCode::Char(c) if self.module.is_none() && matches!(c, 'j' | 'k') => {
@@ -5269,6 +5434,13 @@ fn intel_body_loading_visible(app: &App) -> bool {
         && super::ui::intel_body_loading(app)
 }
 
+fn intel_insights_loading_visible(app: &App) -> bool {
+    app.module == Some(ModuleId::Intel)
+        && app.intel_page == IntelPage::Briefing
+        && matches!(app.overlay, Overlay::None)
+        && (super::ui::intel_insights_loading(app) || app.intel_mode_classifying)
+}
+
 fn until_next_second() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5354,7 +5526,10 @@ pub async fn run(mut app: App) -> Result<()> {
         if atlas_countdown_visible(&app) {
             wait = wait.min(until_next_second());
         }
-        if atlas_extracting_visible(&app) || intel_body_loading_visible(&app) {
+        if atlas_extracting_visible(&app)
+            || intel_body_loading_visible(&app)
+            || intel_insights_loading_visible(&app)
+        {
             wait = wait.min(Duration::from_millis(80));
         }
         if !event::poll(wait)? {
@@ -5364,6 +5539,7 @@ pub async fn run(mut app: App) -> Result<()> {
             if atlas_countdown_visible(&app)
                 || atlas_extracting_visible(&app)
                 || intel_body_loading_visible(&app)
+                || intel_insights_loading_visible(&app)
             {
                 dirty = true;
             }
@@ -5633,9 +5809,13 @@ mod tests {
             intel_job_sel: 0,
             intel_collapsed_sections: HashSet::new(),
             intel_recon_tab: 0,
+            intel_recon_recommended: intel_recon::default_recon_mode(),
+            intel_recon_recommended_for: String::new(),
+            intel_mode_classifying: false,
             intel_recon_enabled: HashMap::new(),
             intel_recon_focus: IntelReconFocus::Tab(0),
             intel_body_running: HashSet::new(),
+            intel_insights_running: HashSet::new(),
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
@@ -5791,6 +5971,35 @@ mod tests {
         assert_eq!(app.module, Some(ModuleId::Intel));
     }
 
+    #[test]
+    fn ctrl_arrows_cycle_app_tabs_forward_and_back() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(app.module, Some(ModuleId::Atlas));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(app.module, Some(ModuleId::System));
+    }
+
+    #[test]
+    fn number_keys_switch_apps_when_not_in_a_field() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Recon));
+        // Recon opens onto a search field; leave it so digits switch apps again.
+        app.set_focus(Target::Button(ButtonId::NewThread));
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Atlas));
+        app.select(ModuleId::Intel.index());
+        app.set_focus(Target::Field(FieldId::IntelSearch));
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        assert!(app.intel_search.contains('3'));
+    }
+
     fn seed_intel_articles(app: &mut App) {
         app.store.atlas_insert_run("run-intel", "{}", "{}").unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -5843,12 +6052,13 @@ mod tests {
 
         click(&mut app, Target::IntelArticle(0));
         assert_eq!(app.intel_page, IntelPage::Briefing);
-        click(&mut app, Target::Button(ButtonId::IntelRecon));
+        app.intel_recon_recommended = ReportMode::Explain;
+        click(&mut app, Target::Button(ButtonId::IntelReports));
         assert_eq!(app.overlay, Overlay::IntelRecon);
-        assert_eq!(app.intel_recon_tab, 0);
+        assert_eq!(app.intel_recon_tab, 1);
         assert!(app
             .intel_recon_enabled
-            .get("verify")
+            .get("explain")
             .is_some_and(|set| set.len() >= 4));
         assert_eq!(app.intel_page, IntelPage::Briefing);
         app.on_esc();
@@ -7030,7 +7240,7 @@ mod tests {
     }
 
     #[test]
-    fn atlas_live_feed_and_past_runs_open_cards() {
+    fn atlas_live_feed_opens_intel_brief_and_past_runs_delete() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 100, 36);
         app.select(ModuleId::Atlas.index());
@@ -7067,13 +7277,14 @@ mod tests {
         app.atlas_feed_sel = 0;
         app.set_focus(Target::AtlasFeed(0));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let Overlay::Block { body, .. } = &app.overlay else {
-            panic!("article card");
-        };
-        assert!(body.contains("Title: Cabinet reshuffle"));
-        assert!(body.contains("China (CN)"));
-        assert!(body.contains("https://www.reuters.com/world/china"));
-        app.overlay = Overlay::None;
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        assert_eq!(app.intel_page, IntelPage::Briefing);
+        assert_eq!(app.intel_articles[app.intel_sel].id, "art-1");
+        assert_eq!(app.intel_category, "stability");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.intel_page, IntelPage::Bulletin);
+        app.select(ModuleId::Atlas.index());
+        click(&mut app, Target::Button(ButtonId::AtlasLive));
         let stats = serde_json::to_string(&atlas::RunStats {
             scored: true,
             origins: vec![atlas::OriginStat {
@@ -7105,6 +7316,81 @@ mod tests {
         click(&mut app, Target::Button(ButtonId::AtlasDelete));
         assert_eq!(app.atlas_runs.len(), 1);
         assert!(app.status.contains("Pause"));
+    }
+
+    #[test]
+    fn brain_article_source_opens_intel_brief() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 120, 42);
+        app.store
+            .atlas_insert_run("run-brain", "{}", "{}")
+            .unwrap();
+        app.store
+            .atlas_upsert_article(&AtlasArticleRow {
+                run_id: "run-brain".into(),
+                id: "art-brain".into(),
+                title: "Claim source article".into(),
+                description: "Body for the claim.".into(),
+                url: "https://example.com/art-brain".into(),
+                country: "us".into(),
+                source_name: "Wire".into(),
+                source_domain: "example.com".into(),
+                author: String::new(),
+                image_url: String::new(),
+                published_at: chrono::Utc::now().to_rfc3339(),
+                provider: "newsapi".into(),
+                temperature: 0.9,
+                category: "military".into(),
+                seen_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .unwrap();
+        app.module = Some(ModuleId::Brain);
+        app.brain_list_mode = BrainListMode::Graph;
+        app.brain_graph = recon::MemoryGraph {
+            nodes: vec![
+                recon::GraphNode {
+                    id: "investigation:1".into(),
+                    kind: recon::GraphNodeKind::Investigation,
+                    label: "Troop movements".into(),
+                    detail: String::new(),
+                    tags: Vec::new(),
+                    article_id: String::new(),
+                    run_id: String::new(),
+                    published_at: String::new(),
+                },
+                recon::GraphNode {
+                    id: "directive:verify".into(),
+                    kind: recon::GraphNodeKind::Directive,
+                    label: "Verify claim".into(),
+                    detail: "Check the report".into(),
+                    tags: Vec::new(),
+                    article_id: String::new(),
+                    run_id: String::new(),
+                    published_at: String::new(),
+                },
+                recon::GraphNode {
+                    id: "evidence:1".into(),
+                    kind: recon::GraphNodeKind::Evidence,
+                    label: "Claim source article".into(),
+                    detail: "Wire report".into(),
+                    tags: vec!["verify".into()],
+                    article_id: "art-brain".into(),
+                    run_id: "run-brain".into(),
+                    published_at: String::new(),
+                },
+            ],
+            edges: Vec::new(),
+        };
+        let lines = super::super::graph::path_lines(&app.brain_graph);
+        let index = lines
+            .iter()
+            .position(|line| line.article_id == "art-brain")
+            .expect("evidence path line");
+        click(&mut app, Target::PathLine(index));
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        assert_eq!(app.intel_page, IntelPage::Briefing);
+        assert_eq!(app.intel_articles[app.intel_sel].id, "art-brain");
+        assert_eq!(app.intel_category, "military");
     }
 
     #[test]
@@ -7157,19 +7443,13 @@ mod tests {
         assert!(painted.contains("news:"), "{painted}");
         assert!(painted.contains("articles"), "{painted}");
         click(&mut app, Target::AtlasArticle(0));
-        assert_eq!(app.atlas_focus.as_deref(), Some("de"));
-        let Overlay::Block { body, .. } = &app.overlay else {
-            panic!("article card");
-        };
-        assert!(body.contains("Ministers left the cabinet."));
-        assert!(body.contains("Germany (DE)"));
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        assert_eq!(app.intel_page, IntelPage::Briefing);
+        assert_eq!(app.intel_articles[app.intel_sel].id, "art-1");
+        assert_eq!(app.intel_category, "stability");
         assert!(matches!(app.overlay, Overlay::None));
-        assert!(app.atlas_news);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.atlas_news);
-        assert_eq!(app.module, Some(ModuleId::Atlas));
-        assert_eq!(app.atlas_page, AtlasPage::Runs);
+        assert_eq!(app.intel_page, IntelPage::Bulletin);
     }
 
     #[test]

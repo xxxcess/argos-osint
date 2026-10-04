@@ -2826,7 +2826,7 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             order.extend((0..ModuleId::ALL.len()).map(Target::App));
             if app.intel_page == IntelPage::Briefing {
                 order.push(Target::Button(ButtonId::IntelBodyRefresh));
-                order.push(Target::Button(ButtonId::IntelRecon));
+                order.push(Target::Button(ButtonId::IntelReports));
                 order.push(Target::Button(ButtonId::IntelJobOpen));
                 order.push(Target::Button(ButtonId::IntelJobPause));
                 order.push(Target::Button(ButtonId::IntelJobResume));
@@ -3781,7 +3781,7 @@ fn footer_line(app: &App) -> Paragraph<'static> {
         "Esc close · Ctrl+U/D scroll"
     } else {
         match (app.module, app.focus) {
-            (None, _) => "↑↓ open · 1–7 · Ctrl+Tab apps · Ctrl+K · ? help",
+            (None, _) => "↑↓ open · 1–7 apps · Ctrl+K · ? help",
             (Some(ModuleId::Intel), _) if app.intel_page == IntelPage::Briefing => {
                 "↑↓ scroll · Recon modes · Esc bulletin"
             }
@@ -3806,7 +3806,7 @@ fn footer_line(app: &App) -> Paragraph<'static> {
                 "Tab next · Enter · Ctrl+K · Esc history"
             }
             (Some(ModuleId::System), _) => "↑↓ log · Enter fold · Ctrl+K · Esc home",
-            _ => "Tab next · Ctrl+Tab apps · Enter · Ctrl+K · Esc home",
+            _ => "Tab next · 1–7 apps · Enter · Ctrl+K · Esc home",
         }
     };
     let status = status_segments(app);
@@ -4984,10 +4984,13 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let (left, center, right) = intel_briefing_areas(area);
-    let actors = intel_key_actors(app);
-    let locations = intel_locations(app, article);
-    let timelines = intel_timelines(app, article);
-    draw_intel_side_pane(frame, left, " extracted ", &actors, &locations, &timelines);
+    let insights_loading = intel_insights_loading(app);
+    if insights_loading {
+        draw_intel_section_loading(frame, left, " extracted ", "Extracting insights", app);
+    } else {
+        let buckets = intel_recon::bucket_extracted(&app.intel_claims, &app.intel_relations);
+        draw_intel_side_pane(frame, left, " extracted ", &buckets);
+    }
 
     // Side panes stay fixed; only the center stack scrolls.
     frame.render_widget(Block::default().style(theme::text()), center);
@@ -5020,7 +5023,14 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 app.scrolls.intel_full.min(layout.full_scroll_max),
             );
         }
-        draw_clipped_divider(frame, center, layout.reports_btn, "Reports");
+        draw_clipped_button(
+            frame,
+            app,
+            center,
+            layout.reports_btn,
+            ButtonId::IntelReports,
+            app.intel_recon_recommended.title(),
+        );
         draw_clipped_md_pane(
             frame,
             center,
@@ -5032,7 +5042,11 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let right_rows = intel_briefing_right_rows(app, right);
-    draw_intel_confidence(frame, app, right_rows[0]);
+    if insights_loading {
+        draw_intel_section_loading(frame, right_rows[0], " confidence ", "Updating confidence", app);
+    } else {
+        draw_intel_confidence(frame, app, right_rows[0]);
+    }
     draw_intel_tags(frame, article, right_rows[1]);
     super::map::draw_country_mini_map(
         frame,
@@ -5041,8 +5055,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
         article.temperature,
         "Country",
     );
-    draw_button(frame, app, ButtonId::IntelRecon, "Recon", right_rows[3]);
-    draw_intel_jobs_pane(frame, app, right_rows[4]);
+    draw_intel_jobs_pane(frame, app, right_rows[3]);
 }
 
 #[derive(Clone, Copy)]
@@ -5331,31 +5344,10 @@ fn draw_clipped_button(
     draw_button(frame, app, button, label, vis);
 }
 
-fn draw_clipped_divider(frame: &mut Frame, viewport: Rect, area: AbsRect, label: &str) {
-    let Some((vis, _)) = intersect_abs(viewport, area) else {
-        return;
-    };
-    if vis.height < 2 || vis.width < 2 {
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(label)
-            .alignment(Alignment::Center)
-            .style(theme::dim())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
-                    .style(theme::dim()),
-            ),
-        vis,
-    );
-}
-
 fn intel_briefing_right_rows(app: &App, right: Rect) -> Vec<Rect> {
     // Map must be at least 30% of total terminal height.
     let map_floor = term_pct_height(app, 0.30, 8);
-    let reserved = 8u16.saturating_add(3).saturating_add(ACTION_H).saturating_add(4);
+    let reserved = 8u16.saturating_add(3).saturating_add(4);
     let map_h = map_floor.min(right.height.saturating_sub(reserved)).max(8);
     split_vertical(
         right,
@@ -5363,7 +5355,6 @@ fn intel_briefing_right_rows(app: &App, right: Rect) -> Vec<Rect> {
             Constraint::Length(8),
             Constraint::Length(3),
             Constraint::Length(map_h),
-            Constraint::Length(ACTION_H),
             Constraint::Min(4),
         ],
     )
@@ -5373,113 +5364,244 @@ fn draw_intel_side_pane(
     frame: &mut Frame,
     area: Rect,
     title: &str,
-    actors: &[String],
-    locations: &[String],
-    timelines: &[String],
+    buckets: &intel_recon::ExtractedBuckets,
 ) {
     let block = pane(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mut lines = Vec::new();
+    push_extracted_section(&mut lines, "CLAIMS / FACTS", &buckets.facts, "· none");
+    push_extracted_section(&mut lines, "INFERENCES", &buckets.inferences, "· none");
+    push_extracted_section(&mut lines, "CONTEXT", &buckets.context, "· none");
     lines.push(Line::from(Span::styled(
-        "KEY ACTORS",
+        "ACTORS",
         theme::accent().add_modifier(Modifier::BOLD),
     )));
-    if actors.is_empty() {
+    if buckets.actors.is_empty() {
         lines.push(Line::from(Span::styled("· none extracted", theme::dim())));
     } else {
-        for item in actors {
+        for item in &buckets.actors {
             lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
         }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "EVENT LOCATIONS",
+        "LINKS",
         theme::accent().add_modifier(Modifier::BOLD),
     )));
-    if locations.is_empty() {
-        lines.push(Line::from(Span::styled("· unknown", theme::dim())));
+    if buckets.links.is_empty() {
+        lines.push(Line::from(Span::styled("· none", theme::dim())));
     } else {
-        for item in locations {
+        for item in &buckets.links {
             lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0)),
+        inner,
+    );
+}
+
+fn push_extracted_section(
+    lines: &mut Vec<Line<'static>>,
+    heading: &str,
+    items: &[intel_recon::ExtractedLine],
+    empty: &str,
+) {
+    lines.push(Line::from(Span::styled(
+        heading.to_string(),
+        theme::accent().add_modifier(Modifier::BOLD),
+    )));
+    if items.is_empty() {
+        lines.push(Line::from(Span::styled(empty.to_string(), theme::dim())));
+    } else {
+        for item in items {
+            let label = match item.confidence {
+                Some(score) => format!("· {} ({score:.2})", item.text),
+                None => format!("· {}", item.text),
+            };
+            lines.push(Line::from(Span::styled(label, theme::text())));
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "EVENT DATES",
-        theme::accent().add_modifier(Modifier::BOLD),
-    )));
-    if timelines.is_empty() {
-        lines.push(Line::from(Span::styled("· unknown", theme::dim())));
-    } else {
-        for item in timelines {
-            lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
-        }
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
-    let block = pane(" recon jobs ");
+    let block = pane(" jobs ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if app.intel_jobs.is_empty() {
+    let mut lines = intel_brief_task_lines(app);
+    if app.intel_jobs.is_empty() && lines.is_empty() {
         frame.render_widget(
-            Paragraph::new("No Recon jobs yet.")
+            Paragraph::new("No background jobs.")
                 .style(theme::dim())
                 .wrap(Wrap { trim: false }),
             inner,
         );
         return;
     }
-    let mut lines = Vec::new();
-    let start = app.scrolls.intel_jobs as usize;
-    for (offset, job) in app.intel_jobs.iter().enumerate().skip(start) {
-        let selected = offset == app.intel_job_sel;
-        let style = if selected {
-            theme::selected()
-        } else {
-            theme::text()
-        };
-        let mode = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
-            .map(|m| m.title())
-            .unwrap_or(job.mode.as_str());
+    if !app.intel_jobs.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
         lines.push(Line::from(Span::styled(
-            format!("{mode} r{} · {}", job.revision, job.state),
-            style.add_modifier(Modifier::BOLD),
+            "RECON REPORTS",
+            theme::accent().add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  {} · sec {}/{} · el {}/{} · tools {}/{}",
-                job.stage,
-                job.sections_done,
-                job.sections_total,
-                job.elements_done,
-                job.elements_total,
-                job.tool_calls_done,
-                job.tool_calls_allowance
-            ),
-            theme::dim(),
-        )));
-        if !job.current_tool.is_empty() || !job.warning.is_empty() {
+        let start = app.scrolls.intel_jobs as usize;
+        for (offset, job) in app.intel_jobs.iter().enumerate().skip(start) {
+            let selected = offset == app.intel_job_sel;
+            let style = if selected {
+                theme::selected()
+            } else {
+                theme::text()
+            };
+            let mode = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
+                .map(|m| m.title())
+                .unwrap_or(job.mode.as_str());
+            lines.push(Line::from(Span::styled(
+                format!("{mode} r{} · {}", job.revision, job.state),
+                style.add_modifier(Modifier::BOLD),
+            )));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  {}{}",
-                    job.current_tool,
-                    if job.warning.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · {}", job.warning)
-                    }
+                    "  {} · sec {}/{} · el {}/{} · tools {}/{}",
+                    job.stage,
+                    job.sections_done,
+                    job.sections_total,
+                    job.elements_done,
+                    job.elements_total,
+                    job.tool_calls_done,
+                    job.tool_calls_allowance
                 ),
                 theme::dim(),
             )));
-        }
-        if lines.len() >= inner.height as usize {
-            break;
+            if !job.current_tool.is_empty() || !job.warning.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {}{}",
+                        job.current_tool,
+                        if job.warning.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", job.warning)
+                        }
+                    ),
+                    theme::dim(),
+                )));
+            }
+            if lines.len() >= inner.height as usize {
+                break;
+            }
         }
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+/// Focus-brief background task rows: full article fetch, insight re-extract, mode classify.
+fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let Some(article) = app.intel_articles.get(app.intel_sel) else {
+        return lines;
+    };
+
+    let body_running = intel_body_loading(app);
+    let insights_running = intel_insights_loading(app);
+    let message = app.intel_body_message.trim();
+
+    lines.push(Line::from(Span::styled(
+        "BACKGROUND",
+        theme::accent().add_modifier(Modifier::BOLD),
+    )));
+
+    // Full article retrieval / refine.
+    let (body_title, body_detail) = if body_running {
+        let (label, detail) = intel_body_progress_lines(app);
+        (label, detail)
+    } else if let Some(body) = app.intel_body.as_ref() {
+        let quality = if body.quality.trim().is_empty() {
+            body.state.as_str()
+        } else {
+            body.quality.as_str()
+        };
+        let title = format!("Full article · {quality}");
+        let detail = if !message.is_empty()
+            && !message.eq_ignore_ascii_case(&title)
+            && !insights_running
+        {
+            Some(message.to_string())
+        } else if !body.quality_rationale.trim().is_empty() && quality != "complete" {
+            Some(body.quality_rationale.clone())
+        } else {
+            None
+        };
+        (title, detail)
+    } else if !message.is_empty() {
+        (message.to_string(), None)
+    } else {
+        ("Full article · idle".into(), None)
+    };
+    let body_style = if body_running {
+        theme::accent()
+    } else {
+        theme::text()
+    };
+    lines.push(Line::from(Span::styled(
+        body_title,
+        body_style.add_modifier(Modifier::BOLD),
+    )));
+    if let Some(detail) = body_detail {
+        lines.push(Line::from(Span::styled(format!("  {detail}"), theme::dim())));
+    }
+
+    // Insight re-extract from cleaned body.
+    let (insights_title, insights_detail) = if insights_running {
+        (
+            format!("{} Extracting insights", loading_spinner_frame()),
+            intel_insights_progress_detail(app),
+        )
+    } else if message.to_ascii_lowercase().contains("insight") {
+        (message.to_string(), None)
+    } else {
+        ("Insights · idle".into(), None)
+    };
+    let insights_style = if insights_running {
+        theme::accent()
+    } else {
+        theme::text()
+    };
+    lines.push(Line::from(Span::styled(
+        insights_title,
+        insights_style.add_modifier(Modifier::BOLD),
+    )));
+    if let Some(detail) = insights_detail {
+        lines.push(Line::from(Span::styled(format!("  {detail}"), theme::dim())));
+    }
+
+    // Classifier-recommended recon mode.
+    let mode_pending = app.intel_mode_classifying
+        && app.intel_recon_recommended_for == article.id;
+    let mode_label = if mode_pending {
+        format!("{} Classifying recon mode", loading_spinner_frame())
+    } else {
+        format!("Mode · {}", app.intel_recon_recommended.title())
+    };
+    lines.push(Line::from(Span::styled(
+        mode_label,
+        if mode_pending {
+            theme::accent().add_modifier(Modifier::BOLD)
+        } else {
+            theme::text().add_modifier(Modifier::BOLD)
+        },
+    )));
+
+    lines
 }
 
 fn draw_intel_confidence(frame: &mut Frame, app: &App, area: Rect) {
@@ -5813,68 +5935,6 @@ fn draw_intel_tags(frame: &mut Frame, article: &argos_osint_core::store::AtlasAr
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn intel_key_actors(app: &App) -> Vec<String> {
-    let mut out = Vec::new();
-    for claim in &app.intel_claims {
-        let entity = claim.entity.trim();
-        if entity.is_empty() || out.iter().any(|item| item == entity) {
-            continue;
-        }
-        out.push(entity.to_string());
-        if out.len() >= 8 {
-            break;
-        }
-    }
-    out
-}
-
-fn intel_locations(
-    app: &App,
-    article: &argos_osint_core::store::AtlasArticleRow,
-) -> Vec<String> {
-    // Event locations from claims only. Publisher country is shown in the preview,
-    // not inferred as event geography.
-    let mut out = Vec::new();
-    let _ = article;
-    for claim in &app.intel_claims {
-        for value in [&claim.object, &claim.entity] {
-            let value = value.trim();
-            if value.len() == 2 && value.chars().all(|c| c.is_ascii_alphabetic()) {
-                let label = atlas::country_label(value);
-                if !out.iter().any(|item| item == &label) {
-                    out.push(label);
-                }
-            }
-        }
-        if out.len() >= 8 {
-            break;
-        }
-    }
-    out
-}
-
-fn intel_timelines(
-    app: &App,
-    _article: &argos_osint_core::store::AtlasArticleRow,
-) -> Vec<String> {
-    // Event dates from claims. Publication date stays in the original preview.
-    let mut out = Vec::new();
-    for claim in &app.intel_claims {
-        let stamp = claim.published_at.trim();
-        if stamp.is_empty() {
-            continue;
-        }
-        let label = atlas::friendly_date(stamp);
-        if !out.iter().any(|item| item == &label) {
-            out.push(label);
-        }
-        if out.len() >= 6 {
-            break;
-        }
-    }
-    out
-}
-
 fn intel_confidence_scores(app: &App) -> (f64, f64) {
     if app.intel_claims.is_empty() {
         return (0.0, 0.0);
@@ -5997,6 +6057,14 @@ pub(crate) fn intel_body_loading(app: &App) -> bool {
         || (app.intel_body.is_none() && !app.intel_body_message.is_empty())
 }
 
+/// True while cleaned-body insight re-extract is resolving extracted/confidence values.
+pub(crate) fn intel_insights_loading(app: &App) -> bool {
+    let Some(article) = app.intel_articles.get(app.intel_sel) else {
+        return false;
+    };
+    app.intel_insights_running.contains(&article.id)
+}
+
 /// Same centered spinner treatment as Atlas insights extraction.
 fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app: &App) {
     let Some((vis, _)) = intersect_abs(viewport, area) else {
@@ -6015,21 +6083,84 @@ fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app
         return;
     };
     let (label, detail) = intel_body_progress_lines(app);
-    let mut lines = vec![Line::from(Span::styled(label, theme::dim()))];
-    if let Some(detail) = detail {
-        lines.push(Line::from(Span::styled(detail, theme::dim())));
+    draw_centered_loading_card(frame, inner_vis, &label, detail.as_deref());
+}
+
+/// Centered loading card over a briefing side pane (extracted / confidence).
+fn draw_intel_section_loading(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    phase: &str,
+    app: &App,
+) {
+    let block = pane(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
     }
-    let height = lines.len() as u16;
-    let y = inner_vis.y + inner_vis.height.saturating_sub(height) / 2;
-    let centered = Rect {
-        x: inner_vis.x,
+    let label = format!("{} {phase}", loading_spinner_frame());
+    let detail = intel_insights_progress_detail(app);
+    draw_centered_loading_card(frame, inner, &label, detail.as_deref());
+}
+
+fn intel_insights_progress_detail(app: &App) -> Option<String> {
+    let message = app.intel_body_message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("re-extract") || lower.contains("insight") {
+        Some(message.to_string())
+    } else {
+        None
+    }
+}
+
+/// Popup card: bordered block horizontally and vertically centered in `area`.
+fn draw_centered_loading_card(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    detail: Option<&str>,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let mut lines = vec![Line::from(Span::styled(label.to_string(), theme::dim()))];
+    if let Some(detail) = detail.filter(|text| !text.is_empty()) {
+        lines.push(Line::from(Span::styled(detail.to_string(), theme::dim())));
+    }
+    let content_h = lines.len() as u16;
+    let text_w = lines
+        .iter()
+        .map(|line| line.width() as u16)
+        .max()
+        .unwrap_or(0)
+        .max(16);
+    let desired_w = text_w.saturating_add(4).max(18);
+    let card_w = desired_w.min(area.width).max(1);
+    let desired_h = content_h.saturating_add(2).max(3);
+    let card_h = desired_h.min(area.height).max(1);
+    let x = area.x + area.width.saturating_sub(card_w) / 2;
+    let y = area.y + area.height.saturating_sub(card_h) / 2;
+    let card = Rect {
+        x,
         y,
-        width: inner_vis.width,
-        height: height.min(inner_vis.height),
+        width: card_w,
+        height: card_h,
     };
     frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        centered,
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
+                    .style(theme::text()),
+            ),
+        card,
     );
 }
 
@@ -6037,7 +6168,10 @@ fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app
 fn intel_body_progress_lines(app: &App) -> (String, Option<String>) {
     let message = app.intel_body_message.trim();
     let lower = message.to_ascii_lowercase();
-    let phase = if lower.contains("classif") || lower.contains("sponsored") {
+    let phase = if lower.contains("re-extract") || lower.contains("insight") {
+        // Body is already painted; insight phase is shown on extracted/confidence cards.
+        "Full article ready"
+    } else if lower.contains("classif") || lower.contains("sponsored") {
         "Classifying article sections"
     } else if lower.contains("extract")
         || lower.contains("synthesis")
@@ -6168,13 +6302,13 @@ fn intel_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             if abs_contains(layout.reload, x, y) && contains(center, x, y) {
                 return Some(Target::Button(ButtonId::IntelBodyRefresh));
             }
+            if abs_contains(layout.reports_btn, x, y) && contains(center, x, y) {
+                return Some(Target::Button(ButtonId::IntelReports));
+            }
         }
         let rows = intel_briefing_right_rows(app, right);
         if contains(rows[3], x, y) {
-            return Some(Target::Button(ButtonId::IntelRecon));
-        }
-        if contains(rows[4], x, y) {
-            // Clicking the jobs pane focuses Recon for job controls.
+            // Clicking the jobs pane focuses job controls.
             return Some(Target::Button(ButtonId::IntelJobOpen));
         }
         return None;
@@ -6757,15 +6891,15 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 
 fn help_text(app: &App) -> &'static str {
     match app.module {
-        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 OSINT · 6 Providers · 7 System\nCtrl+Tab cycles apps · Ctrl+Shift+Tab goes back\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
-        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, REPORTS, extracted actors, and confidence\nRecon opens Verify / Explain / Assess Outlook / Full Assessment\nJobs pane tracks report progress under the Recon button\nEsc returns from briefing to bulletin, or from bulletin to home",
+        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 OSINT · 6 Providers · 7 System\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
+        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nThe mode button under the full article opens Verify / Explain / Assess Outlook / Full Assessment\nJobs pane tracks focus-brief background progress and recon reports\nEsc returns from briefing to bulletin, or from bulletin to home",
         Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to the System event log\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live and Delete sit between the map and those panes. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors, run stages, and tool results for 24 hours\n↑↓ select a line · Enter or click the arrow folds a tool result\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",
         Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe path sits above a summary of the graph\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nEsc returns to memories\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
         Some(ModuleId::Providers) => "Providers\n\nEach account tab stores that provider only\nDefaults sets Recon and Synthesis separately\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
-        _ => "Controls\n\nTab moves between fields and buttons\nCtrl+Tab cycles app tabs · Ctrl+Shift+Tab goes back\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
+        _ => "Controls\n\nTab moves between fields and buttons\n1–7 switch apps when not typing in a field\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }
 }
 

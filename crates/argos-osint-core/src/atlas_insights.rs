@@ -22,7 +22,11 @@ use crate::store::{
 pub const PACKET_LIMIT: usize = 4;
 /// Related peers shown when judging support for one claim.
 pub const RELATED_LIMIT: usize = 5;
+/// Max atomic elements extracted from one full article body.
+pub const BODY_CLAIM_LIMIT: usize = 8;
 const DESCRIPTION_CHARS: usize = 160;
+/// Body text appended into the span-gate blob / model packet for body re-extract.
+const BODY_SPAN_CHARS: usize = 12_000;
 const COL_ENTITY: usize = 24;
 const COL_PREDICATE: usize = 16;
 const COL_OBJECT: usize = 23;
@@ -58,6 +62,37 @@ If no article qualifies, return {{\"claims\":[]}}. \
 published_at is the source time. \
 country is the publisher country, not the entity."
     )
+}
+
+fn body_lead_prompt(limit: usize) -> String {
+    format!(
+        "Extract at most {limit} concise atomic news elements from the full article. Return a JSON object {{\"claims\":[{{\"entity\":string,\"namespace\":string,\"predicate\":string,\"object\":string,\"topic\":string,\"claim\":string,\"classification\":\"fact\"|\"inference\",\"confidence\":number,\"evidence_ids\":[string]}}]}}. \
+entity and object must be verbatim spans copied from the cited article title, description, or body. Do not invent names. \
+namespace is person, org, place, or agreement. \
+predicate is the verb the article supports, such as sanctioned, deployed, or met. \
+topic is the article category. \
+evidence_ids must contain the article id. \
+The claim is one sentence that contains the entity and the object. \
+Set classification to fact only when both spans are in the title; otherwise inference. \
+Include attribution, negation, event dates, and qualifications present in the body but missing from the headline. \
+published_at is the source time. \
+country is the publisher country, not the entity."
+    )
+}
+
+/// Clone an article with body text folded into `description` so the span gate can accept body spans.
+pub fn article_with_body_spans(article: &AtlasArticleRow, body_markdown: &str) -> AtlasArticleRow {
+    let mut clone = article.clone();
+    let body = clip_chars(body_markdown, BODY_SPAN_CHARS);
+    if body.is_empty() {
+        return clone;
+    }
+    if clone.description.trim().is_empty() {
+        clone.description = body;
+    } else {
+        clone.description = format!("{}\n{body}", clone.description.trim());
+    }
+    clone
 }
 
 /// Counts and claim rows shown under the country table.
@@ -655,6 +690,75 @@ pub async fn extract(
         peer_error,
         context_error,
     })
+}
+
+/// Re-extract lean elements from one article using title, description, and cleaned body.
+/// `peer_articles` are other same-cycle articles used for peer support (may be empty).
+pub async fn extract_for_article_body(
+    synthesis: &ProviderSecret,
+    classifier: Option<&ProviderSecret>,
+    article: &AtlasArticleRow,
+    body_markdown: &str,
+    peer_articles: &[AtlasArticleRow],
+) -> Result<Settled> {
+    if provider::is_decisions_model(&synthesis.model) {
+        return Err(anyhow!(
+            "{} is a decisions model and cannot extract claims. Use the synthesis chat model.",
+            synthesis.model
+        ));
+    }
+    if body_markdown.trim().is_empty() {
+        return Ok(finish_insights(1, 0, &[article.clone()], Vec::new(), &[], &[]));
+    }
+    let span_article = article_with_body_spans(article, body_markdown);
+    let packet = [span_article];
+    let user = packet_json_with_body(article, body_markdown)?;
+    let raw = ask_claims(synthesis, &body_lead_prompt(BODY_CLAIM_LIMIT), &user).await?;
+    let (mut lead, lead_dropped) = accept_claims(&packet, &raw, AcceptMode::Lead);
+    if lead.is_empty() {
+        return Ok(finish_insights(
+            1,
+            lead_dropped,
+            &packet,
+            lead,
+            &[],
+            &[],
+        ));
+    }
+    merge_aliases(&mut lead, &packet);
+    let mut catalog = peer_articles.to_vec();
+    if !catalog.iter().any(|row| row.id == article.id) {
+        catalog.push(article.clone());
+    }
+    let peers = match classifier {
+        Some(classifier) => classify_relevant_articles(classifier, &lead, &catalog)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    apply_peer_support(&mut lead, &catalog, &peers);
+    let lead = cap_claims(dedupe_claims(lead), BODY_CLAIM_LIMIT);
+    Ok(finish_insights(
+        1,
+        lead_dropped,
+        &packet,
+        lead,
+        &[],
+        &[],
+    ))
+}
+
+fn packet_json_with_body(article: &AtlasArticleRow, body_markdown: &str) -> Result<String> {
+    let rows = [serde_json::json!({
+        "id": article.id,
+        "title": article.title,
+        "description": clip_chars(&article.description, DESCRIPTION_CHARS),
+        "body": clip_chars(body_markdown, BODY_SPAN_CHARS),
+        "category": article.category,
+        "country": article.country,
+        "published_at": article.published_at,
+    })];
+    Ok(serde_json::to_string(&rows)?)
 }
 
 /// Classifier output: for each lead claim index, the most relevant peer article ids.
@@ -2180,6 +2284,40 @@ mod tests {
             .iter()
             .any(|claim| claim.classification == "inference" && claim.predicate == "visited"));
         assert!(!settled.claims.iter().any(|claim| claim.entity == "macron"));
+    }
+
+    #[test]
+    fn body_spans_accept_entity_and_object_from_full_article() {
+        let headline = article(
+            "art-body",
+            "geopolitical",
+            "us",
+            "Sanctions widen",
+            "New measures announced today.",
+            1.0,
+        );
+        let body = "The Treasury Department sanctioned Acme Shipping over shadow fleet activity.";
+        let enriched = article_with_body_spans(&headline, body);
+        let (kept, dropped) = accept_claims(
+            &[enriched],
+            &[raw(
+                "Acme Shipping",
+                "org",
+                "sanctioned",
+                "shadow fleet",
+                "geopolitical",
+                "Acme Shipping sanctioned shadow fleet activity.",
+                "inference",
+                0.75,
+                "art-body",
+            )],
+            AcceptMode::Lead,
+        );
+        assert_eq!(dropped, 0);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].entity, "acme shipping");
+        assert_eq!(kept[0].object, "shadow fleet");
+        assert_eq!(kept[0].classification, "inference");
     }
 
     #[test]

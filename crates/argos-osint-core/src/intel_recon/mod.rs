@@ -3,10 +3,13 @@
 mod body;
 mod body_filter;
 mod brain;
+mod briefing_view;
+mod classify_mode;
 mod jobs;
 mod ledger;
 mod modes;
 mod persist;
+mod replace_insights;
 mod synthesize;
 #[cfg(test)]
 mod tests_acceptance;
@@ -22,6 +25,11 @@ pub use body_filter::{
     IrrelevantRange,
 };
 pub use brain::{upsert_recon_insights, ReconInsightUpdate};
+pub use briefing_view::{bucket_extracted, ExtractedBuckets, ExtractedLine};
+pub use classify_mode::{
+    classifiable_modes, classify_recon_mode, default_recon_mode, parse_mode_choice,
+    parse_mode_from_chat, ModeClassifyInput,
+};
 pub use jobs::{
     active_job_for_mode, cancel_job, create_report_job, pause_job, resume_job, retry_failed_tasks,
     scoped_section_plan, start_report_worker, IntelReportEvent, ReportScope,
@@ -32,6 +40,7 @@ pub use persist::{
     ArticleBodyRow, IntelAssessmentRow, IntelElementRow, IntelEvidenceRow, IntelInvestigationRow,
     IntelReportJobRow, IntelReportSectionRow, IntelReportTaskRow, RetrievalAttemptRow,
 };
+pub use replace_insights::replace_article_insights_from_body;
 pub use synthesize::{
     refine_retrieved_article_body, save_section, synthesize_section, RefinedArticleBody,
     SectionJudgment, SectionSynthInput, SectionSynthOutput,

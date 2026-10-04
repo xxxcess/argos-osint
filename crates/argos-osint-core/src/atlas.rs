@@ -1,8 +1,9 @@
-//! Atlas collects regional headlines in two phases and stores the run's statistics.
+//! Atlas collects regional headlines, tags them, and stores the run's statistics.
 //!
 //! Phase 1 reads the latest headlines. Phase 2 headlines are saved on the run and
-//! tagged by the classifier model. The database keeps the run, its cursor, the
-//! country table, the articles, and the daily request counts.
+//! tagged by the classifier model. The synthesis model then writes a handful of
+//! span-checked claims into Brain. The database keeps the run, its cursor, the country table,
+//! the articles, and the daily request counts.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use crate::atlas_insights::{self, InsightStats};
 use crate::osint::atlas_news::{self, Hit};
 use crate::osint::ProviderKeys;
 use crate::provider::{self, DecisionsResponse};
@@ -489,6 +491,9 @@ pub struct RunStats {
     pub counts: BTreeMap<String, u32>,
     pub origins: Vec<OriginStat>,
     pub scored: bool,
+    /// Span-checked claims written for this cycle. Absent on runs saved before insights.
+    #[serde(default)]
+    pub insights: InsightStats,
 }
 
 impl RunStats {
@@ -845,6 +850,8 @@ pub fn format_run_card(run: &AtlasRunRow) -> String {
             ));
         }
     }
+    lines.push(String::new());
+    lines.extend(atlas_insights::insight_table_lines(&stats.insights));
     lines.join("\n")
 }
 
@@ -1173,7 +1180,10 @@ pub struct RunInput<'a> {
     pub resume: bool,
     pub feed: &'a [FeedArticle],
     /// Classifier account. Empty means every saved article stays `unk`.
+    /// A Jev decisions model tags categories through the decisions endpoint.
     pub classifier: Option<ProviderSecret>,
+    /// Synthesis account. Extracts claims. A decisions model is not used here.
+    pub synthesizer: Option<ProviderSecret>,
 }
 
 pub async fn run_atlas<F>(
@@ -1193,6 +1203,7 @@ where
         resume,
         feed,
         classifier,
+        synthesizer,
     } = input;
     let store = Store::open(db_path)?;
     let (run_id, mut cursor, mut stats) = if resume {
@@ -1596,6 +1607,77 @@ where
                 save(&store, &run_id, &cursor, &stats)?;
             }
         }
+        cursor = Cursor {
+            phase: 4,
+            chunk: 0,
+            leg: "insights".into(),
+            country: 0,
+            from: cursor.from.clone(),
+            page_token: String::new(),
+            kept: 0,
+        };
+        save(&store, &run_id, &cursor, &stats)?;
+    }
+
+    if cursor.phase == 4 && cursor.leg != "insights_done" {
+        if pause.load(Ordering::Relaxed) {
+            return park(&store, &run_id, &cursor, &stats, &mut emit);
+        }
+        let articles = store.atlas_list_articles(&run_id)?;
+        if let Some(existing) = atlas_insights::resume_stats(
+            &store,
+            &run_id,
+            &articles,
+            &stats.origins,
+            &stats.insights,
+        )? {
+            stats.insights = existing;
+        } else if let Some(secret) = synthesizer.as_ref() {
+            if provider::is_decisions_model(&secret.model) {
+                if !articles.is_empty() {
+                    emit(AtlasEvent::Note(
+                        "Synthesis is a decisions model, so no claims were extracted. Choose a chat model for Synthesis."
+                            .into(),
+                    ));
+                }
+            } else {
+                emit(AtlasEvent::Status("Extracting insights".into()));
+                match atlas_insights::extract(secret, &articles, &stats.origins).await {
+                    Ok(extraction) => {
+                        if !extraction.settled.claims.is_empty() {
+                            if let Err(err) = store.persist_atlas_insights(
+                                &run_id,
+                                &extraction.settled.claims,
+                                &extraction.settled.relations,
+                                &extraction.settled.brief,
+                                &extraction.settled.entity_path,
+                            ) {
+                                emit(AtlasEvent::Note(format!(
+                                    "Insights were not saved ({err})."
+                                )));
+                            }
+                        }
+                        stats.insights = extraction.settled.stats;
+                        if let Some(err) = extraction.context_error {
+                            emit(AtlasEvent::Note(format!(
+                                "Context claims were not extracted ({err})."
+                            )));
+                        }
+                    }
+                    Err(err) => {
+                        emit(AtlasEvent::Note(format!(
+                            "Insights were not extracted ({err})."
+                        )));
+                    }
+                }
+            }
+        } else if !articles.is_empty() {
+            emit(AtlasEvent::Note(
+                "Synthesis is not configured. No insights extracted.".into(),
+            ));
+        }
+        cursor.leg = "insights_done".into();
+        save(&store, &run_id, &cursor, &stats)?;
     }
 
     store.atlas_set_state(&run_id, "completed", "", true)?;
@@ -1787,6 +1869,7 @@ pub async fn run_live(
     resume: bool,
     feed: &[FeedArticle],
     classifier: Option<ProviderSecret>,
+    synthesizer: Option<ProviderSecret>,
     emit: impl FnMut(AtlasEvent) + Send,
 ) -> Result<Stop> {
     let client = reqwest::Client::builder()
@@ -1803,6 +1886,7 @@ pub async fn run_live(
             resume,
             feed,
             classifier,
+            synthesizer,
         },
         emit,
         move |call: HttpCall| {
@@ -1834,6 +1918,87 @@ pub fn charge_quota(store: &Store, bucket: &str) {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn insights_do_not_call_a_decisions_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atlas.db");
+        let store = Store::open(&path).unwrap();
+        let cursor = Cursor {
+            phase: 4,
+            leg: "insights".into(),
+            from: "2026-09-30T00:00:00Z".into(),
+            ..Cursor::default()
+        };
+        store
+            .atlas_insert_run(
+                "atlas-jev",
+                &serde_json::to_string(&cursor).unwrap(),
+                &serde_json::to_string(&RunStats::default()).unwrap(),
+            )
+            .unwrap();
+        store
+            .atlas_set_state("atlas-jev", "paused", "", false)
+            .unwrap();
+        store
+            .atlas_upsert_article(&AtlasArticleRow {
+                run_id: "atlas-jev".into(),
+                id: "art-1".into(),
+                title: "Putin sanctioned Acme".into(),
+                description: String::new(),
+                url: "https://example.com/art-1".into(),
+                country: "us".into(),
+                source_name: "Desk".into(),
+                source_domain: "example.com".into(),
+                published_at: String::new(),
+                provider: "newsapi".into(),
+                temperature: 1.0,
+                category: "military".into(),
+                seen_at: String::new(),
+                author: String::new(),
+                image_url: String::new(),
+            })
+            .unwrap();
+        drop(store);
+        let notes = Arc::new(Mutex::new(Vec::new()));
+        let noted = notes.clone();
+        let pause = AtomicBool::new(false);
+        let keys = keys();
+        let secret = ProviderSecret {
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "typesafe/jev-1.3".into(),
+            api_key: Some("test".into()),
+            stt_model: None,
+            device: None,
+        };
+        let stop = run_atlas(
+            RunInput {
+                db_path: &path,
+                pause: &pause,
+                keys: &keys,
+                user_agent: "Argos test",
+                pace: false,
+                resume: true,
+                feed: &[],
+                classifier: None,
+                synthesizer: Some(secret),
+            },
+            move |event| {
+                if let AtlasEvent::Note(text) = event {
+                    noted.lock().unwrap().push(text);
+                }
+            },
+            |_call| Box::pin(async { Err(anyhow!("insight phase must not fetch news")) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stop, Stop::Finished);
+        let notes = notes.lock().unwrap();
+        assert!(notes
+            .iter()
+            .any(|note| note.contains("decisions model") && note.contains("Synthesis")));
+    }
 
     #[test]
     fn the_classifier_keeps_a_known_choice_and_maps_anything_else_to_unk() {
@@ -1992,6 +2157,7 @@ mod tests {
                 resume: false,
                 feed: &[],
                 classifier: None,
+                synthesizer: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2027,6 +2193,7 @@ mod tests {
                 resume: true,
                 feed: &[],
                 classifier: None,
+                synthesizer: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2108,6 +2275,7 @@ mod tests {
                 resume: true,
                 feed: &[],
                 classifier: None,
+                synthesizer: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2194,6 +2362,7 @@ mod tests {
                 resume: true,
                 feed: &[],
                 classifier: None,
+                synthesizer: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2280,7 +2449,7 @@ mod tests {
         assert_eq!(country_label("us"), "United States (US)");
         assert_eq!(country_label("CN"), "China (CN)");
         assert_eq!(country_label("qa"), "Qatar (QA)");
-        assert!(format_run_card(&crate::store::AtlasRunRow {
+        let card = format_run_card(&crate::store::AtlasRunRow {
             id: "atlas-1".into(),
             state: "completed".into(),
             phase: 2,
@@ -2300,8 +2469,10 @@ mod tests {
             note: String::new(),
             started_at: "2026-10-01T00:00:00Z".into(),
             finished_at: String::new(),
-        })
-        .contains("Germany (DE)"));
+        });
+        let country = card.find("Germany (DE)").unwrap();
+        let insights = card.find("No insights extracted for this cycle.").unwrap();
+        assert!(country < insights);
     }
 
     #[tokio::test]
@@ -2362,6 +2533,7 @@ mod tests {
                 resume: true,
                 feed: &[],
                 classifier: None,
+                synthesizer: None,
             },
             move |event| {
                 if let AtlasEvent::Note(text) = event {
@@ -2442,6 +2614,7 @@ mod tests {
                 resume: true,
                 feed: &[],
                 classifier: None,
+                synthesizer: None,
             },
             move |event| {
                 if let AtlasEvent::Note(text) = event {
@@ -2529,6 +2702,7 @@ mod tests {
                 resume: false,
                 feed: &[],
                 classifier: None,
+                synthesizer: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2587,6 +2761,7 @@ mod tests {
                 resume: false,
                 feed: &[],
                 classifier: None,
+                synthesizer: None,
             },
             |_| {},
             move |call: HttpCall| {

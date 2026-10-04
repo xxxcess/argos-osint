@@ -16,6 +16,7 @@ use super::app::{
 };
 use super::theme;
 use argos_osint_core::atlas;
+use argos_osint_core::atlas_insights;
 use argos_osint_core::osint;
 use argos_osint_core::provider;
 use argos_osint_core::recon::{self, Plan};
@@ -2157,7 +2158,7 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
                     }
                 }
             } else {
-                let (_, table, feed) = atlas_live_areas(body);
+                let (_, table, _insights, feed) = atlas_live_areas(body);
                 if contains(feed, x, y) {
                     Region::AtlasFeed
                 } else if contains(table, x, y) {
@@ -4296,16 +4297,17 @@ fn log_rows(app: &App, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-fn atlas_live_areas(area: Rect) -> (Rect, Rect, Rect) {
+fn atlas_live_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
     let rows = split_vertical(
         area,
         [
             Constraint::Length(ACTION_H),
-            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(28),
             Constraint::Min(0),
         ],
     );
-    (rows[0], rows[1], rows[2])
+    (rows[0], rows[1], rows[2], rows[3])
 }
 
 fn atlas_runs_areas(area: Rect) -> (Rect, Rect, Rect) {
@@ -4436,8 +4438,30 @@ fn draw_atlas(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn draw_atlas_insights(frame: &mut Frame, app: &App, area: Rect) {
+    let width = inset(area).width as usize;
+    let lines = atlas_insights::insight_table_lines(&app.atlas_stats.insights)
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let style = if index < 2 {
+                theme::dim()
+            } else {
+                theme::text()
+            };
+            Line::from(Span::styled(center_text(&line, width), style))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(pane(" insights "))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
-    let (actions, table, feed) = atlas_live_areas(area);
+    let (actions, table, insights, feed) = atlas_live_areas(area);
     let buttons = button_areas(actions, 3);
     let auto = atlas_auto_label(app);
     draw_button(frame, app, ButtonId::AtlasRuns, "History", buttons[0]);
@@ -4487,6 +4511,7 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: false }),
         table,
     );
+    draw_atlas_insights(frame, app, insights);
     let feed_width = inset(feed).width as usize;
     let feed_lines = if app.atlas_feed.is_empty() {
         vec![Line::from(Span::styled(
@@ -4672,7 +4697,7 @@ fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
         return None;
     }
-    let (actions, _table, feed) = atlas_live_areas(body);
+    let (actions, _table, _insights, feed) = atlas_live_areas(body);
     if contains(actions, x, y) {
         let buttons = button_areas(actions, 3);
         return Some(Target::Button(if contains(buttons[0], x, y) {

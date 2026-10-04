@@ -1,6 +1,7 @@
 //! Shared services for Argos apps: memory recall, providers, and hardware.
 
 pub mod atlas;
+pub mod atlas_insights;
 pub mod brain;
 pub mod grok_oauth;
 pub mod hardware;

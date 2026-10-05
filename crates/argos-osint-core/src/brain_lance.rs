@@ -139,6 +139,8 @@ pub fn clear_fingerprint(conn: &Connection) -> Result<()> {
 pub struct BrainIndex {
     uri: PathBuf,
     table: Mutex<Option<lancedb::Table>>,
+    /// Lance table name currently used for search/upsert (serving generation).
+    serving_name: Mutex<String>,
     /// Set once this process has checked the fingerprint and reconciled ids.
     ready: AtomicBool,
 }
@@ -203,6 +205,7 @@ impl BrainIndex {
         Self {
             uri: uri.to_path_buf(),
             table: Mutex::new(None),
+            serving_name: Mutex::new(TABLE.to_string()),
             ready: AtomicBool::new(false),
         }
     }
@@ -226,7 +229,8 @@ impl BrainIndex {
 
     /// True once the Lance table exists on disk.
     pub fn exists(&self) -> bool {
-        self.uri.join(format!("{TABLE}.lance")).is_dir()
+        let name = self.serving_table_name();
+        self.uri.join(format!("{name}.lance")).is_dir()
     }
 
     async fn connect(uri: PathBuf) -> Result<lancedb::Connection> {
@@ -238,25 +242,105 @@ impl BrainIndex {
         Ok(lancedb::connect(&uri).execute().await?)
     }
 
-    /// Opens the table, creating an empty one the first time.
+    pub fn serving_table_name(&self) -> String {
+        self.serving_name
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Point search/live upserts at `name` and drop the cached handle.
+    pub fn set_serving_table(&self, name: &str) {
+        let mut slot = self.serving_name.lock().unwrap_or_else(|p| p.into_inner());
+        *slot = name.to_string();
+        *self.table.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        self.mark_stale();
+    }
+
+    /// Opens the serving table, creating an empty one the first time.
     fn table(&self) -> Result<lancedb::Table> {
-        let mut slot = self.table.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(table) = slot.as_ref() {
-            return Ok(table.clone());
+        let name = self.serving_table_name();
+        self.table_named(&name)
+    }
+
+    /// Open or create a named Lance table in this directory (shadow generations).
+    pub fn table_named(&self, name: &str) -> Result<lancedb::Table> {
+        let serving = self.serving_table_name();
+        if name == serving {
+            let mut slot = self.table.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(table) = slot.as_ref() {
+                return Ok(table.clone());
+            }
+            let table = self.open_or_create(name)?;
+            *slot = Some(table.clone());
+            return Ok(table);
         }
+        self.open_or_create(name)
+    }
+
+    fn open_or_create(&self, name: &str) -> Result<lancedb::Table> {
         let uri = self.uri.clone();
-        let table = block_on(async move {
+        let name = name.to_string();
+        block_on(async move {
             let db = Self::connect(uri).await?;
-            match db.open_table(TABLE).execute().await {
+            match db.open_table(&name).execute().await {
                 Ok(table) => anyhow::Ok(table),
                 Err(lancedb::Error::TableNotFound { .. }) => {
-                    Ok(db.create_empty_table(TABLE, schema()).execute().await?)
+                    Ok(db.create_empty_table(&name, schema()).execute().await?)
                 }
                 Err(err) => Err(err.into()),
             }
-        })?;
-        *slot = Some(table.clone());
-        Ok(table)
+        })
+    }
+
+    /// Upsert into a shadow building table (does not touch the serving table).
+    pub fn upsert_texts_into(&self, table_name: &str, rows: &[(String, String)]) -> Result<()> {
+        for chunk in rows.chunks(EMBED_CHUNK) {
+            let texts: Vec<&str> = chunk.iter().map(|(_, text)| text.as_str()).collect();
+            let vectors = embed::embed_batch(&texts)?;
+            let pairs: Vec<(String, Vec<f32>)> = chunk
+                .iter()
+                .map(|(id, _)| id.clone())
+                .zip(vectors)
+                .collect();
+            self.upsert_vectors_into(table_name, &pairs)?;
+        }
+        Ok(())
+    }
+
+    pub fn upsert_vectors_into(&self, table_name: &str, rows: &[(String, Vec<f32>)]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let data = batch(rows)?;
+        let filter = id_filter(&rows.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>());
+        let table = self.table_named(table_name)?;
+        block_on(async move {
+            let _ = table.delete(filter.as_str()).await;
+            table.add(data).execute().await?;
+            anyhow::Ok(())
+        })
+    }
+
+    /// Drop a named table if it exists (best effort).
+    pub fn drop_table(&self, name: &str) -> Result<()> {
+        if name == TABLE || name.is_empty() {
+            return Ok(());
+        }
+        let uri = self.uri.clone();
+        let name = name.to_string();
+        block_on(async move {
+            let db = Self::connect(uri).await?;
+            match db.drop_table(&name, &[]).await {
+                Ok(()) => Ok(()),
+                Err(lancedb::Error::TableNotFound { .. }) => Ok(()),
+                Err(err) => Err(err.into()),
+            }
+        })
+    }
+
+    pub fn table_exists_named(&self, name: &str) -> bool {
+        self.uri.join(format!("{name}.lance")).is_dir()
     }
 
     pub fn upsert(&self, id: &str, text: &str) -> Result<()> {
@@ -446,6 +530,225 @@ impl BrainIndex {
     }
 }
 
+
+/// Durable generation metadata for automatic rebuilds (spec §9.2).
+pub fn migrate_generations(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS argos_index_generations (
+            id TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL,
+            state TEXT NOT NULL,
+            serving INTEGER NOT NULL DEFAULT 0,
+            source_count INTEGER NOT NULL DEFAULT 0,
+            batch_cursor INTEGER NOT NULL DEFAULT 0,
+            table_name TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );",
+    )?;
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(argos_index_generations)")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    if !cols.iter().any(|c| c == "table_name") {
+        conn.execute(
+            "ALTER TABLE argos_index_generations ADD COLUMN table_name TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Start a new generation without dropping the serving table.
+pub fn begin_generation(conn: &rusqlite::Connection, source_count: usize) -> anyhow::Result<String> {
+    migrate_generations(conn)?;
+    let id = format!("gen-{}", chrono::Utc::now().timestamp_millis());
+    let now = chrono::Utc::now().to_rfc3339();
+    let table_name = shadow_table_name(&id);
+    conn.execute(
+        "INSERT INTO argos_index_generations(id,fingerprint,state,serving,source_count,batch_cursor,table_name,created_at,updated_at)
+         VALUES (?1,?2,'building',0,?3,0,?4,?5,?5)",
+        rusqlite::params![id, current_fingerprint(), source_count as i64, table_name, now],
+    )?;
+    Ok(id)
+}
+
+pub fn shadow_table_name(generation_id: &str) -> String {
+    let safe: String = generation_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{TABLE}__{safe}")
+}
+
+pub fn generation_table_name(conn: &rusqlite::Connection, id: &str) -> anyhow::Result<String> {
+    let name: String = conn.query_row(
+        "SELECT table_name FROM argos_index_generations WHERE id=?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    if name.is_empty() {
+        Ok(shadow_table_name(id))
+    } else {
+        Ok(name)
+    }
+}
+
+pub fn serving_table_name(conn: &rusqlite::Connection) -> anyhow::Result<Option<String>> {
+    migrate_generations(conn)?;
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT id, table_name FROM argos_index_generations WHERE serving=1 LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(id, name)| {
+        if name.is_empty() {
+            shadow_table_name(&id)
+        } else {
+            name
+        }
+    }))
+}
+
+/// Mark `id` as the serving generation and point the Lance index at its shadow table.
+pub fn activate_generation(
+    conn: &rusqlite::Connection,
+    id: &str,
+    index: Option<&BrainIndex>,
+) -> anyhow::Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let previous_table = serving_table_name(conn)?;
+    let table_name = generation_table_name(conn, id)?;
+    // Ensure empty shadow generations still have a table handle before promote.
+    if let Some(index) = index {
+        let _ = index.table_named(&table_name)?;
+    }
+    conn.execute(
+        "UPDATE argos_index_generations SET serving=0, updated_at=?1 WHERE serving=1",
+        rusqlite::params![now],
+    )?;
+    conn.execute(
+        "UPDATE argos_index_generations SET state='active', serving=1, updated_at=?1 WHERE id=?2",
+        rusqlite::params![now, id],
+    )?;
+    write_fingerprint(conn)?;
+    if let Some(index) = index {
+        let old = index.serving_table_name();
+        index.set_serving_table(&table_name);
+        // Drop prior shadow (never drop the legacy default table name used as bootstrap).
+        if let Some(ref prev) = previous_table {
+            if prev.as_str() != table_name && prev.as_str() != TABLE {
+                let _ = index.drop_table(prev);
+            }
+        }
+        if old != table_name
+            && old != TABLE
+            && Some(old.as_str()) != previous_table.as_deref()
+        {
+            let _ = index.drop_table(&old);
+        }
+        index.mark_ready();
+    }
+    Ok(())
+}
+
+
+const GENERATION_BATCH: usize = 64;
+
+/// Advance a building generation by embedding up to `GENERATION_BATCH` memories,
+/// checkpointing the cursor. Does not drop the serving table. Refuses to activate
+/// when the generation fingerprint no longer matches the process fingerprint
+/// (embedding-space mix guard).
+pub fn rebuild_generation_batched(
+    conn: &rusqlite::Connection,
+    index: &BrainIndex,
+    generation_id: &str,
+    memories: &[(String, String)],
+) -> anyhow::Result<GenerationProgress> {
+    migrate_generations(conn)?;
+    let (state, fingerprint, cursor, source_count, table_name): (String, String, i64, i64, String) =
+        conn.query_row(
+            "SELECT state, fingerprint, batch_cursor, source_count, table_name FROM argos_index_generations WHERE id=?1",
+            [generation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )?;
+    anyhow::ensure!(
+        state == "building" || state == "replaying",
+        "generation {generation_id} is not buildable (state={state})"
+    );
+    anyhow::ensure!(
+        fingerprint == current_fingerprint(),
+        "generation fingerprint mismatch; refusing to mix embedding spaces"
+    );
+    let building = if table_name.is_empty() {
+        let name = shadow_table_name(generation_id);
+        conn.execute(
+            "UPDATE argos_index_generations SET table_name=?1 WHERE id=?2",
+            rusqlite::params![&name, generation_id],
+        )?;
+        name
+    } else {
+        table_name
+    };
+    let cursor = cursor as usize;
+    if cursor >= memories.len() {
+        activate_generation(conn, generation_id, Some(index))?;
+        return Ok(GenerationProgress {
+            generation_id: generation_id.into(),
+            cursor: memories.len(),
+            total: memories.len(),
+            activated: true,
+        });
+    }
+    let end = (cursor + GENERATION_BATCH).min(memories.len());
+    let slice = &memories[cursor..end];
+    // Build into the shadow generation table — serving table stays readable until activate.
+    index.upsert_texts_into(&building, slice)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE argos_index_generations SET batch_cursor=?1, state='building', updated_at=?2 WHERE id=?3",
+        rusqlite::params![end as i64, now, generation_id],
+    )?;
+    let activated = end >= memories.len() || end as i64 >= source_count;
+    if activated {
+        activate_generation(conn, generation_id, Some(index))?;
+    }
+    Ok(GenerationProgress {
+        generation_id: generation_id.into(),
+        cursor: end,
+        total: memories.len(),
+        activated,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationProgress {
+    pub generation_id: String,
+    pub cursor: usize,
+    pub total: usize,
+    pub activated: bool,
+}
+
+
+pub fn serving_generation(conn: &rusqlite::Connection) -> anyhow::Result<Option<String>> {
+    migrate_generations(conn)?;
+    let id = conn
+        .query_row(
+            "SELECT id FROM argos_index_generations WHERE serving=1 LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(id)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +804,41 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_generation_batched_respects_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let lance = dir.path().join("lance");
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memory_embed_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        let index = BrainIndex::shared(&lance);
+        let id = begin_generation(&conn, 2).unwrap();
+        let memories = vec![
+            ("m1".into(), "Harbor tanker manifests".into()),
+            ("m2".into(), "Night desk shift".into()),
+        ];
+        // Force fingerprint mismatch
+        conn.execute(
+            "UPDATE argos_index_generations SET fingerprint='other' WHERE id=?1",
+            [&id],
+        )
+        .unwrap();
+        assert!(rebuild_generation_batched(&conn, &index, &id, &memories).is_err());
+    }
+
+    #[test]
+    fn begin_generation_then_activate() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE memory_embed_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);").unwrap();
+        let id = begin_generation(&conn, 10).unwrap();
+        assert!(serving_generation(&conn).unwrap().is_none());
+        activate_generation(&conn, &id, None).unwrap();
+        assert_eq!(serving_generation(&conn).unwrap().as_deref(), Some(id.as_str()));
+        assert!(fingerprint_matches(&conn).unwrap());
+    }
+
+    #[test]
     fn fingerprint_round_trips_through_memory_embed_meta() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -513,4 +851,41 @@ mod tests {
         conn.execute("UPDATE memory_embed_meta SET value='old'", []).unwrap();
         assert!(!fingerprint_matches(&conn).unwrap());
     }
+    #[test]
+    fn rebuild_writes_shadow_then_activates_serving_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let lance = dir.path().join("lance");
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memory_embed_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        let index = BrainIndex::shared(&lance);
+        index
+            .upsert_vectors(&[("legacy".into(), unit(1))])
+            .unwrap();
+        assert_eq!(index.serving_table_name(), TABLE);
+        let id = begin_generation(&conn, 2).unwrap();
+        let building = generation_table_name(&conn, &id).unwrap();
+        assert!(building.starts_with(&format!("{TABLE}__")));
+        // Offline: write vectors into the shadow table the same way batched rebuild does.
+        index
+            .upsert_vectors_into(
+                &building,
+                &[("m1".into(), unit(3)), ("m2".into(), unit(4))],
+            )
+            .unwrap();
+        assert_eq!(index.serving_table_name(), TABLE, "serving unchanged while building");
+        assert!(index.table_exists_named(&building) || index.ids().is_ok());
+        activate_generation(&conn, &id, Some(&index)).unwrap();
+        assert_eq!(index.serving_table_name(), building);
+        assert_eq!(serving_generation(&conn).unwrap().as_deref(), Some(id.as_str()));
+        let ids = index.ids().unwrap();
+        assert!(
+            ids.contains(&"m1".to_string()) && ids.contains(&"m2".to_string()),
+            "{ids:?}"
+        );
+        assert!(!ids.contains(&"legacy".to_string()));
+    }
+
 }

@@ -482,11 +482,11 @@ async fn commit_refined_body(
                 )
                 .await
                 {
-                    Ok(claim_count) => {
+                    Ok(outcome) => {
                         on_event(BodyFetchEvent::InsightsReplaced {
                             article_id: article_id.into(),
                             body_id: body_id.into(),
-                            claim_count,
+                            claim_count: outcome.claims,
                             generation,
                         });
                     }

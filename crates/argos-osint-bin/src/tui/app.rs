@@ -248,6 +248,8 @@ pub enum FieldId {
     SynthesisModel,
     ClassifierProvider,
     ClassifierModel,
+    SummarizationProvider,
+    SummarizationModel,
     RouterKey,
     RouterEndpoint,
     Composer,
@@ -260,14 +262,16 @@ pub enum DefaultsRole {
     ToolPicker,
     Synthesis,
     Classifier,
+    Summarization,
 }
 
 impl DefaultsRole {
-    pub const ALL: [DefaultsRole; 4] = [
+    pub const ALL: [DefaultsRole; 5] = [
         DefaultsRole::Recon,
         DefaultsRole::ToolPicker,
         DefaultsRole::Synthesis,
         DefaultsRole::Classifier,
+        DefaultsRole::Summarization,
     ];
 
     pub fn label(self) -> &'static str {
@@ -276,6 +280,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => "Tool picker",
             DefaultsRole::Synthesis => "Synthesis",
             DefaultsRole::Classifier => "Classifier",
+            DefaultsRole::Summarization => "Summarization",
         }
     }
 
@@ -286,6 +291,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => "defaults.tool_picker",
             DefaultsRole::Synthesis => "defaults.synthesis",
             DefaultsRole::Classifier => "defaults.classifier",
+            DefaultsRole::Summarization => "defaults.summarization",
         }
     }
 
@@ -295,6 +301,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => FieldId::PickerProvider,
             DefaultsRole::Synthesis => FieldId::SynthesisProvider,
             DefaultsRole::Classifier => FieldId::ClassifierProvider,
+            DefaultsRole::Summarization => FieldId::SummarizationProvider,
         }
     }
 
@@ -304,6 +311,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => FieldId::PickerModel,
             DefaultsRole::Synthesis => FieldId::SynthesisModel,
             DefaultsRole::Classifier => FieldId::ClassifierModel,
+            DefaultsRole::Summarization => FieldId::SummarizationModel,
         }
     }
 
@@ -313,6 +321,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => ButtonId::SavePicker,
             DefaultsRole::Synthesis => ButtonId::SaveSynthesis,
             DefaultsRole::Classifier => ButtonId::SaveClassifier,
+            DefaultsRole::Summarization => ButtonId::SaveSummarization,
         }
     }
 
@@ -323,6 +332,9 @@ impl DefaultsRole {
             FieldId::SynthesisProvider | FieldId::SynthesisModel => Some(DefaultsRole::Synthesis),
             FieldId::ClassifierProvider | FieldId::ClassifierModel => {
                 Some(DefaultsRole::Classifier)
+            }
+            FieldId::SummarizationProvider | FieldId::SummarizationModel => {
+                Some(DefaultsRole::Summarization)
             }
             _ => None,
         }
@@ -339,6 +351,7 @@ pub enum ButtonId {
     SavePicker,
     SaveSynthesis,
     SaveClassifier,
+    SaveSummarization,
     DefaultRole(DefaultsRole),
     RefreshModels,
     NewThread,
@@ -581,6 +594,8 @@ pub struct App {
     pub synthesis_model: String,
     pub classifier_provider: String,
     pub classifier_model: String,
+    pub summarization_provider: String,
+    pub summarization_model: String,
     pub defaults_role: DefaultsRole,
     pub model_catalog: Vec<ListedModel>,
     pub catalog_for: String,
@@ -679,6 +694,8 @@ pub struct App {
     pub currents_fallback: String,
     pub brain_graph: recon::MemoryGraph,
     brain_graph_for: Option<String>,
+    /// Bounded related-evidence / why-matched labels for the open graph (spec §15).
+    pub brain_related_lines: Vec<String>,
     pub graph_summary: String,
     graph_summary_pending: Option<String>,
     pub hits: Vec<ScoredMemory>,
@@ -762,6 +779,7 @@ impl App {
         let picker_default = provider::role_secret(&auth, &settings, "tool-picker")?;
         let synthesis_default = provider::role_secret(&auth, &settings, "synthesis")?;
         let classifier_default = provider::role_secret(&auth, &settings, "classifier")?;
+        let summarization_default = provider::role_secret(&auth, &settings, "summarization")?;
         let router = provider::account_secret(&auth, "openrouter");
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
@@ -848,6 +866,8 @@ impl App {
             synthesis_model: synthesis_default.model,
             classifier_provider: provider::effective_kind(&classifier_default),
             classifier_model: classifier_default.model,
+            summarization_provider: provider::effective_kind(&summarization_default),
+            summarization_model: summarization_default.model,
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),
@@ -924,6 +944,7 @@ impl App {
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
+            brain_related_lines: Vec::new(),
             graph_summary: String::new(),
             graph_summary_pending: None,
             hits: Vec::new(),
@@ -1266,6 +1287,8 @@ impl App {
             FieldId::SynthesisModel => &self.synthesis_model,
             FieldId::ClassifierProvider => &self.classifier_provider,
             FieldId::ClassifierModel => &self.classifier_model,
+            FieldId::SummarizationProvider => &self.summarization_provider,
+            FieldId::SummarizationModel => &self.summarization_model,
             FieldId::RouterKey => &self.router_key,
             FieldId::RouterEndpoint => &self.router_endpoint,
             FieldId::Composer => &self.input,
@@ -1306,6 +1329,8 @@ impl App {
             FieldId::SynthesisModel => &mut self.synthesis_model,
             FieldId::ClassifierProvider => &mut self.classifier_provider,
             FieldId::ClassifierModel => &mut self.classifier_model,
+            FieldId::SummarizationProvider => &mut self.summarization_provider,
+            FieldId::SummarizationModel => &mut self.summarization_model,
             FieldId::RouterKey => &mut self.router_key,
             FieldId::RouterEndpoint => &mut self.router_endpoint,
             FieldId::Composer => &mut self.input,
@@ -3241,7 +3266,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             FieldId::ReconProvider
             | FieldId::PickerProvider
             | FieldId::SynthesisProvider
-            | FieldId::ClassifierProvider => {
+            | FieldId::ClassifierProvider
+            | FieldId::SummarizationProvider => {
                 let kind = self.field(field);
                 if kind.is_empty() {
                     String::new()
@@ -3552,6 +3578,59 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             Some(id) => self.store.graph_for_memory(id).unwrap_or_default(),
             None => recon::MemoryGraph::default(),
         };
+        self.brain_related_lines = self.related_evidence_labels();
+    }
+
+    /// Bound related-evidence / why-matched labels for the Brain graph pane.
+    fn related_evidence_labels(&self) -> Vec<String> {
+        const MAX_SEMANTIC: usize = 3;
+        let Some(memory) = self.memories.get(self.memory_sel) else {
+            return Vec::new();
+        };
+        let mut factual = Vec::new();
+        for node in &self.brain_graph.nodes {
+            if node.kind != recon::GraphNodeKind::Evidence {
+                continue;
+            }
+            let supported = self.brain_graph.edges.iter().any(|edge| {
+                edge.to == node.id
+                    && matches!(
+                        edge.kind,
+                        recon::GraphEdgeKind::Supports | recon::GraphEdgeKind::DerivedFrom
+                    )
+            });
+            if supported {
+                factual.push((
+                    node.id.clone(),
+                    node.label.clone(),
+                    1.0_f32,
+                ));
+            }
+        }
+        let mut semantic = Vec::new();
+        if let Ok(hits) = self.store.recall(&memory.text, MAX_SEMANTIC + 2) {
+            for hit in hits {
+                if hit.memory.id == memory.id {
+                    continue;
+                }
+                let label = hit.memory.text.chars().take(72).collect::<String>();
+                semantic.push((hit.memory.id, label, hit.score));
+            }
+        }
+        let view = argos_osint_core::explore::related_evidence_view(factual, semantic, MAX_SEMANTIC);
+        let mut lines = Vec::new();
+        if !view.is_empty() {
+            lines.push("Related evidence".into());
+        }
+        for hit in view {
+            lines.push(format!(
+                "· {} — {} ({})",
+                hit.label.chars().take(56).collect::<String>(),
+                hit.why,
+                hit.edge_kind.as_str()
+            ));
+        }
+        lines
     }
 
     fn filtered_memories(&self) -> Vec<Memory> {
@@ -3645,7 +3724,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.status = self.graph_summary.clone();
             return;
         }
-        let secret = match provider::role_secret(&self.auth, &self.settings, "synthesis") {
+        let secret = match provider::role_secret(&self.auth, &self.settings, "summarization") {
             Ok(secret) => secret,
             Err(err) => {
                 self.graph_summary = format!("Graph summary unavailable: {err}");
@@ -3860,6 +3939,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             ButtonId::SavePicker => self.save_role(DefaultsRole::ToolPicker),
             ButtonId::SaveSynthesis => self.save_role(DefaultsRole::Synthesis),
             ButtonId::SaveClassifier => self.save_role(DefaultsRole::Classifier),
+            ButtonId::SaveSummarization => self.save_role(DefaultsRole::Summarization),
             ButtonId::AtlasNewsFeed => {
                 self.open_atlas_news();
                 return;
@@ -4030,6 +4110,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 DefaultsRole::ToolPicker => "tool-picker",
                 DefaultsRole::Synthesis => "synthesis",
                 DefaultsRole::Classifier => "classifier",
+                DefaultsRole::Summarization => "summarization",
             })
             .ok_or_else(|| anyhow::anyhow!("unknown role"))?;
         let before = format!("{} / {}", assignment.provider, assignment.model);
@@ -4054,6 +4135,15 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 "Classifier: {after} ({})",
                 provider::picker_transport(&model)
             ),
+            DefaultsRole::Summarization => {
+                let inherited = self.settings.defaults.summarization.provider.trim().is_empty()
+                    && self.settings.defaults.summarization.model.trim().is_empty();
+                if inherited {
+                    format!("Summarization: {after} (inherits Synthesis)")
+                } else {
+                    format!("Summarization: {after}")
+                }
+            }
         })
     }
 
@@ -5312,6 +5402,8 @@ pub fn is_picker_field(field: FieldId) -> bool {
             | FieldId::SynthesisModel
             | FieldId::ClassifierProvider
             | FieldId::ClassifierModel
+            | FieldId::SummarizationProvider
+            | FieldId::SummarizationModel
     )
 }
 
@@ -5569,11 +5661,17 @@ pub async fn run(mut app: App) -> Result<()> {
 }
 
 fn summary_system(claim: bool) -> String {
-    if claim {
-        "You explain the conclusion of one news claim. The claim path lists the concluding relation and the articles that support it as hard evidence, each with its published time. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how those articles support the relation and why the concluding insight is a fact or an inference. A fact means both spans are in an article title. An inference means a span is only in the description, or the article is context. Use only the graph and the memory. Do not invent sources, times, or outcomes. No bullet list.".into()
+    let mode = argos_osint_core::summarization::system_prompt(
+        argos_osint_core::summarization::SummarizationMode::GraphExplanation,
+    );
+    let detail = if claim {
+        "The claim path lists the concluding relation and the articles that support it as hard evidence, each with its published time. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how those articles support the relation and why the concluding insight is a fact or an inference. A fact means both spans are in an article title. An inference means a span is only in the description, or the article is context. Use only the graph and the memory. Do not invent sources, times, or outcomes. No bullet list."
     } else {
-        "You explain the conclusion of one investigation insight. The recon path already keeps only the directive this insight rests on, with the subjects and evidence that contributed to it. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how that directive and the contributing evidence support the relation, and why the concluding insight is a fact or an inference. A fact rests on a tool result that states the relation. An inference is drawn when the evidence does not state it directly. Use only the graph and the memory. Do not mention directives that are absent from the recon path. Do not invent sources or outcomes. No bullet list.".into()
-    }
+        "The recon path already keeps only the directive this insight rests on, with the subjects and evidence that contributed to it. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how that directive and the contributing evidence support the relation, and why the concluding insight is a fact or an inference. A fact rests on a tool result that states the relation. An inference is drawn when the evidence does not state it directly. Use only the graph and the memory. Do not mention directives that are absent from the recon path. Do not invent sources or outcomes. No bullet list."
+    };
+    format!("{mode}
+
+{detail}")
 }
 
 async fn write_graph_summary(secret: &ProviderSecret, system: &str, prompt: &str) -> Result<String> {
@@ -5593,8 +5691,14 @@ async fn write_graph_summary(secret: &ProviderSecret, system: &str, prompt: &str
     ];
     let completion = provider::complete(secret, &messages, &[], |_| {}).await?;
     let text = completion.content.trim().to_string();
+    argos_osint_core::summarization::validate_result(
+        argos_osint_core::summarization::SummarizationMode::GraphExplanation,
+        &text,
+        &[],
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
     if text.is_empty() {
-        return Err(completion.empty_error("synthesis graph summary"));
+        return Err(completion.empty_error("summarization graph explanation"));
     }
     Ok(text)
 }
@@ -5742,6 +5846,8 @@ mod tests {
             synthesis_model: String::new(),
             classifier_provider: String::new(),
             classifier_model: String::new(),
+            summarization_provider: String::new(),
+            summarization_model: String::new(),
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),
@@ -5818,6 +5924,7 @@ mod tests {
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
+            brain_related_lines: Vec::new(),
             graph_summary: String::new(),
             graph_summary_pending: None,
             hits: Vec::new(),

@@ -5,6 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
+    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
@@ -12,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::{
     brain_resources::{self, BrainResourceSummary},
-    investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, PickRecord, Plan,
+    investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan,
     PlanCall,
     Run, Store,
 };
@@ -310,6 +311,7 @@ pub async fn run_turn(
         progress,
     )
     .await?;
+    refresh_directive_coverage(&mut plan);
     Store::open(&service.db_path)?.set_run(
         &run.id,
         "running",
@@ -376,6 +378,7 @@ pub async fn continue_turn(
         progress,
     )
     .await?;
+    refresh_directive_coverage(&mut plan);
     let store = Store::open(&service.db_path)?;
     for call in store.calls_for_run(&run.id)? {
         if results.iter().any(|(id, _)| id == &call.id) {
@@ -440,6 +443,29 @@ fn picker_snapshot(run: &Run, secret: &ProviderSecret) -> String {
         format!("{} / {}", secret.kind, secret.model)
     } else {
         run.tool_picker_model.clone()
+    }
+}
+
+/// Score directive coverage from completed plan calls and refresh `plan.gaps`.
+fn refresh_directive_coverage(plan: &mut Plan) {
+    let directives: Vec<(String, String)> = plan
+        .directives
+        .iter()
+        .map(|d| (d.id.clone(), d.goal.clone()))
+        .collect();
+    let calls: Vec<(String, String, String)> = plan
+        .calls
+        .iter()
+        .map(|c| (c.reason.clone(), c.call_id.clone(), c.status.clone()))
+        .collect();
+    let (coverage, gaps) = crate::pipeline::apply_recon_directive_coverage(&directives, &calls);
+    plan.gaps = gaps;
+    if !coverage.is_empty() {
+        let covered = coverage.iter().filter(|c| c.covered).count();
+        plan.binding_notes.push(format!(
+            "directive coverage: {covered}/{} supported by cited calls",
+            coverage.len()
+        ));
     }
 }
 
@@ -2162,58 +2188,59 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
     let Some(latest) = messages
         .iter()
         .rev()
-        .find(|message| message.role == "assistant")
+        .find(|message| message.role == "assistant" && !message.content.trim().is_empty())
     else {
         return Ok(String::new());
     };
+    // Prefer a cached FollowUpContext summary when present.
+    let req = crate::summarization::SummaryRequest {
+        mode: crate::summarization::SummarizationMode::FollowUpContext,
+        sources: vec![crate::summarization::SummarySource {
+            id: latest.id.clone(),
+            revision: latest.id.clone(),
+            hash: crate::evidence::content_hash(&latest.content),
+            text: latest.content.clone(),
+            meta: serde_json::json!({"thread_id": thread_id}),
+        }],
+        focus: thread_id.into(),
+        budget_chars: PRIOR_SYNTHESIS_CHARS,
+        required_fields: vec![],
+        model: String::new(),
+        provider: String::new(),
+        prompt_version: crate::summarization::SummarizationMode::FollowUpContext
+            .prompt_version()
+            .into(),
+    };
+    if let Ok(Some(hit)) = crate::summarization::cache_get(&store.conn, &req) {
+        return Ok(hit.content);
+    }
     Ok(compact_prior_synthesis(&latest.content))
 }
 
+
 /// Drops citations, the evidence trailer, and repeated article lines, then keeps the
 /// lead findings and the D1–D5 lines within [`PRIOR_SYNTHESIS_CHARS`].
+/// Deterministic FollowUpContext fallback when Summarization is unavailable.
 fn compact_prior_synthesis(raw: &str) -> String {
-    let raw = raw.split(super::budget::CUT_SHORT).next().unwrap_or(raw);
-    let raw = raw.split("\nEvidence:").next().unwrap_or(raw);
-    let mut narrative = String::new();
-    let mut directives = Vec::new();
+    let mut kept = Vec::new();
     for line in raw.lines() {
-        let line = strip_call_citations(line.trim());
-        if line.is_empty()
-            || line.eq_ignore_ascii_case("Directive evaluation")
-            || line.starts_with("Evidence:")
-        {
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
-        if directive_line(&line) {
-            directives.push(line);
-            continue;
+        if directive_line(line) || kept.len() < 8 {
+            kept.push(strip_call_citations(line));
         }
-        if !narrative.is_empty() {
-            narrative.push(' ');
-        }
-        narrative.push_str(&line);
     }
-    let mut out = clip_at_word(
-        &narrative,
-        PRIOR_SYNTHESIS_CHARS.saturating_sub(400).max(400),
-    );
-    for line in directives {
-        let next = if out.is_empty() {
-            line
-        } else {
-            format!("\n{line}")
-        };
-        if out.chars().count() + next.chars().count() > PRIOR_SYNTHESIS_CHARS {
-            break;
-        }
-        out.push_str(&next);
-    }
-    if out.is_empty() {
-        clip_at_word(&strip_call_citations(raw.trim()), PRIOR_SYNTHESIS_CHARS)
+    let joined = if kept.is_empty() {
+        strip_call_citations(raw.trim())
     } else {
-        out
-    }
+        kept.join("\n")
+    };
+    let clipped = clip_at_word(&joined, PRIOR_SYNTHESIS_CHARS);
+    crate::summarization::deterministic_follow_up(&clipped, PRIOR_SYNTHESIS_CHARS).content
 }
+
 
 fn directive_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
@@ -3015,7 +3042,20 @@ fn publish(gate: &ModelGate, plan: &mut Plan, progress: &mut impl FnMut(super::T
         return;
     };
     let mut clock = clock.lock().unwrap();
+    let _ = clock.note_foreground_transition();
     plan.deadline_note = clock.breakdown();
+    // Persist a lightweight checkpoint string for resume/diagnostics.
+    if clock.should_continue_in_background() || clock.hard_limit_reached() {
+        let cp = clock.checkpoint();
+        plan.deadline_note = format!(
+            "{} [{} rounds, {} calls, {} chars, {}]",
+            plan.deadline_note,
+            cp.recon_rounds,
+            cp.tool_calls_scheduled,
+            cp.evidence_chars,
+            cp.continuation
+        );
+    }
     let labels = clock.take_labels();
     drop(clock);
     for label in labels {
@@ -3028,6 +3068,7 @@ fn sync_budget(plan: &Plan, gate: &ModelGate) {
         return;
     };
     let store = gate.db().and_then(|path| Store::open(&path).ok());
+    let sequential = plan.calls.iter().any(|call| !call.depends_on.is_empty());
     let calls = plan
         .calls
         .iter()
@@ -3048,7 +3089,10 @@ fn sync_budget(plan: &Plan, gate: &ModelGate) {
             super::budget::scheduled(&call.tool_id, cached)
         })
         .collect();
-    clock.lock().unwrap().raise_calls(calls);
+    clock
+        .lock()
+        .unwrap()
+        .raise_calls_with_deps(calls, sequential);
 }
 
 fn call_cached(gate: &ModelGate, call: &PlanCall) -> bool {
@@ -3123,6 +3167,9 @@ async fn model_json(
     ];
     let limit = gate.clock().map(|clock| {
         let mut clock = clock.lock().unwrap();
+        if clock.hard_limit_reached() {
+            return Duration::ZERO;
+        }
         clock.note_round();
         clock.recon_remaining()
     });
@@ -3163,6 +3210,7 @@ async fn model_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::PickRecord;
     use std::time::Duration;
 
     /// `recall_for_turn` stays sync and runs inside the async Recon turn; with the

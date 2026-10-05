@@ -45,7 +45,7 @@ pub use persist::{
     ArticleBodyRow, IntelAssessmentRow, IntelElementRow, IntelEvidenceRow, IntelInvestigationRow,
     IntelReportJobRow, IntelReportSectionRow, IntelReportTaskRow, RetrievalAttemptRow,
 };
-pub use replace_insights::replace_article_insights_from_body;
+pub use replace_insights::{replace_article_insights_from_body, ReplaceOutcome};
 pub use synthesize::{
     refine_retrieved_article_body, save_section, synthesize_section, RefinedArticleBody,
     SectionJudgment, SectionSynthInput, SectionSynthOutput,

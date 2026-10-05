@@ -1412,30 +1412,22 @@ fn stored_claim(claim: &KeptClaim) -> AtlasInsightClaim {
 }
 
 fn brief_text(claims: &[&KeptClaim]) -> String {
+    // Deterministic AtlasBrief renderer (Summarization fallback / immediate output).
     if claims.is_empty() {
         return String::new();
     }
-    let lead = claims
+    let lines: Vec<String> = claims
         .iter()
-        .take(2)
-        .map(|claim| claim.claim.trim().trim_end_matches('.'))
-        .collect::<Vec<_>>()
-        .join(". ");
-    let mut lines = vec![format!("{lead}.")];
-    for claim in claims {
-        let code = if claim.admiralty.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", claim.admiralty)
-        };
-        lines.push(format!(
-            "- {}{} ({})",
-            claim.claim.trim(),
-            code,
-            claim.article_id
-        ));
-    }
-    lines.join("\n")
+        .map(|claim| {
+            let code = if claim.admiralty.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", claim.admiralty)
+            };
+            format!("{}{} ({})", claim.claim.trim(), code, claim.article_id)
+        })
+        .collect();
+    crate::summarization::deterministic_atlas_brief(&lines).content
 }
 
 fn entity_path(claims: &[KeptClaim]) -> String {
@@ -1450,13 +1442,26 @@ fn packet_json(articles: &[AtlasArticleRow]) -> Result<String> {
     let rows: Vec<Value> = articles
         .iter()
         .map(|article| {
+            // ArticleDescription: prefer a concise derived view over blind 160-char clip
+            // when descriptions are oversized. Deterministic only on the pack path.
+            let description = if article.description.chars().count() <= DESCRIPTION_CHARS {
+                article.description.clone()
+            } else {
+                crate::summarization::deterministic_article_description(
+                    &article.title,
+                    &article.description,
+                    DESCRIPTION_CHARS,
+                )
+                .content
+            };
             serde_json::json!({
                 "id": article.id,
                 "title": article.title,
-                "description": clip_chars(&article.description, DESCRIPTION_CHARS),
+                "description": description,
                 "category": article.category,
                 "country": article.country,
                 "published_at": article.published_at,
+                "description_mode": "article_description",
             })
         })
         .collect();

@@ -76,6 +76,27 @@ pub fn tool_allowance_seconds(calls: &[ScheduledCall]) -> u64 {
     concurrent + spacing + polling
 }
 
+/// Build a [`super::clocks::ClockSet`] from turn limits (spec §7 bridge).
+pub fn clock_set_for_turn(turn_seconds: u16, max_turn_seconds: u16) -> super::clocks::ClockSet {
+    let foreground = Duration::from_secs(u64::from(turn_seconds));
+    let lifetime = Duration::from_secs(u64::from(max_turn_seconds.max(turn_seconds)));
+    super::clocks::ClockSet::new(lifetime, foreground)
+}
+
+/// Prefer sequential budgeting when the plan marks steps as dependent.
+pub fn tool_allowance_for_deps(calls: &[ScheduledCall], sequential: bool) -> u64 {
+    if sequential {
+        let timeouts: Vec<Duration> = calls
+            .iter()
+            .filter(|c| !c.cached)
+            .map(|c| Duration::from_secs(c.timeout_seconds + c.poll_seconds))
+            .collect();
+        super::clocks::ClockSet::sequential_tool_budget(&timeouts).as_secs()
+    } else {
+        tool_allowance_seconds(calls)
+    }
+}
+
 /// 300s plus 1s per 1,000 characters, capped by `ceiling`. A repair pass adds half of
 /// that again, still not past the ceiling.
 pub fn synthesis_allowance_seconds(chars: usize, repair: bool) -> u64 {
@@ -130,14 +151,40 @@ pub fn format_deadline(total: u64, calls: usize, evidence_chars: usize) -> Strin
     }
 }
 
-/// Wall-clock budget for one turn. Phase checks read this; callers emit [`Self::take_labels`]
-/// after each change.
+/// What the turn should do when the interactive window ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnContinuation {
+    /// Still inside the foreground window.
+    Active,
+    /// Foreground expired; keep the same job identity in the background.
+    Background,
+    /// Hard job lifetime exhausted — pause/partial finish.
+    Exhausted,
+}
+
+/// A durable-ish checkpoint of completed work for resume after foreground expiry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TurnCheckpoint {
+    pub recon_rounds: u32,
+    pub tool_calls_scheduled: usize,
+    pub evidence_chars: usize,
+    pub synthesis_started: bool,
+    pub continuation: String,
+}
+
+/// Wall-clock budget for one turn. [`ClockSet`] is the primary timing source for
+/// foreground vs job-lifetime; phase allowances still shape the dynamic deadline label.
+/// Callers emit [`Self::take_labels`] after each change.
 pub struct TurnClock {
     pub started: Instant,
     pub floor: Duration,
     pub ceiling: Duration,
+    /// Spec §7 clocks: foreground window + hard job lifetime + active/queue ledgers.
+    pub clocks: super::clocks::ClockSet,
     pub recon_rounds: u32,
     calls: Vec<ScheduledCall>,
+    /// When true, tool steps are budgeted sequentially (dependent plan).
+    pub sequential_tools: bool,
     /// Tool allowance, raised when the plan grows and never lowered when steps are skipped.
     tool_hold: u64,
     pub evidence_chars: usize,
@@ -149,17 +196,23 @@ pub struct TurnClock {
     pub synthesis_override: Option<u64>,
     last_label: String,
     pending: Vec<String>,
+    /// Set once when foreground first expires so UI can show "Continuing in background".
+    foreground_notified: bool,
 }
 
 impl TurnClock {
     pub fn new(floor_secs: u64, ceiling_secs: u64) -> Self {
         let ceiling = ceiling_secs.max(floor_secs);
+        let floor = Duration::from_secs(floor_secs);
+        let ceiling_d = Duration::from_secs(ceiling);
         Self {
             started: Instant::now(),
-            floor: Duration::from_secs(floor_secs),
-            ceiling: Duration::from_secs(ceiling),
+            floor,
+            ceiling: ceiling_d,
+            clocks: super::clocks::ClockSet::new(ceiling_d, floor),
             recon_rounds: 0,
             calls: Vec::new(),
+            sequential_tools: false,
             tool_hold: 0,
             evidence_chars: 0,
             repair: false,
@@ -169,6 +222,7 @@ impl TurnClock {
             synthesis_override: None,
             last_label: String::new(),
             pending: Vec::new(),
+            foreground_notified: false,
         }
     }
 
@@ -178,12 +232,27 @@ impl TurnClock {
     }
 
     pub fn raise_calls(&mut self, calls: Vec<ScheduledCall>) {
-        let allowance = tool_allowance_seconds(&calls);
+        self.raise_calls_with_deps(calls, self.sequential_tools);
+    }
+
+    /// Budget tools using sequential accumulation when `sequential` is true (dependent steps).
+    pub fn raise_calls_with_deps(&mut self, calls: Vec<ScheduledCall>, sequential: bool) {
+        self.sequential_tools = sequential;
+        let allowance = tool_allowance_for_deps(&calls, sequential);
         if allowance >= self.tool_hold {
             self.tool_hold = allowance;
         }
         self.calls = calls;
         self.queue();
+    }
+
+    #[allow(dead_code)]
+    pub fn set_sequential_tools(&mut self, sequential: bool) {
+        self.sequential_tools = sequential;
+        if !self.calls.is_empty() {
+            let calls = self.calls.clone();
+            self.raise_calls_with_deps(calls, sequential);
+        }
     }
 
     pub fn set_evidence(&mut self, chars: usize) {
@@ -213,6 +282,7 @@ impl TurnClock {
     #[cfg(test)]
     pub fn age(&mut self, by: Duration) {
         self.started = self.started.checked_sub(by).unwrap_or(self.started);
+        self.clocks.started = self.clocks.started.checked_sub(by).unwrap_or(self.clocks.started);
         if let Some(at) = self.tools_started {
             self.tools_started = Some(at.checked_sub(by).unwrap_or(at));
         }
@@ -308,12 +378,68 @@ impl TurnClock {
     }
 
     pub fn ceiling_remaining(&self) -> Duration {
-        self.ceiling.saturating_sub(self.started.elapsed())
+        // Hard job lifetime from ClockSet is authoritative for "stop admission".
+        self.clocks
+            .remaining_lifetime()
+            .min(self.ceiling.saturating_sub(self.started.elapsed()))
+    }
+
+    pub fn continuation(&self) -> TurnContinuation {
+        if self.clocks.job_expired() {
+            TurnContinuation::Exhausted
+        } else if self.clocks.foreground_expired() {
+            TurnContinuation::Background
+        } else {
+            TurnContinuation::Active
+        }
+    }
+
+    /// When foreground first expires, queue a user-visible status once.
+    pub fn note_foreground_transition(&mut self) -> Option<&'static str> {
+        if self.continuation() == TurnContinuation::Background && !self.foreground_notified {
+            self.foreground_notified = true;
+            self.pending
+                .push("Continuing in background".into());
+            Some("Continuing in background")
+        } else if self.continuation() == TurnContinuation::Exhausted {
+            self.pending
+                .push("Paused: limit reached".into());
+            Some("Paused: limit reached")
+        } else {
+            None
+        }
+    }
+
+    pub fn checkpoint(&self) -> TurnCheckpoint {
+        TurnCheckpoint {
+            recon_rounds: self.recon_rounds,
+            tool_calls_scheduled: self.calls.iter().filter(|c| !c.cached).count(),
+            evidence_chars: self.evidence_chars,
+            synthesis_started: self.synthesis_started.is_some(),
+            continuation: match self.continuation() {
+                TurnContinuation::Active => "active".into(),
+                TurnContinuation::Background => "background".into(),
+                TurnContinuation::Exhausted => "exhausted".into(),
+            },
+        }
+    }
+
+    /// True when interactive wait is over but the job may continue (same identity).
+    pub fn should_continue_in_background(&self) -> bool {
+        self.continuation() == TurnContinuation::Background
+    }
+
+    /// Hard stop: no new provider admission.
+    pub fn hard_limit_reached(&self) -> bool {
+        self.continuation() == TurnContinuation::Exhausted
     }
 
     /// The tool phase has used its allowance (plus any floor slack), or the ceiling would
     /// eat the synthesis reserve. In-flight calls are left to finish; new ones are not launched.
     pub fn tools_blocked(&self) -> bool {
+        if self.hard_limit_reached() {
+            return true;
+        }
         let Some(started) = self.tools_started else {
             return false;
         };
@@ -343,6 +469,51 @@ impl TurnClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_expiry_continues_in_background() {
+        let mut clock = TurnClock::new(1, 30);
+        assert_eq!(clock.continuation(), TurnContinuation::Active);
+        clock.age(Duration::from_secs(2));
+        assert_eq!(clock.continuation(), TurnContinuation::Background);
+        assert!(clock.should_continue_in_background());
+        let cp = clock.checkpoint();
+        assert_eq!(cp.continuation, "background");
+        assert_eq!(
+            clock.note_foreground_transition(),
+            Some("Continuing in background")
+        );
+        clock.age(Duration::from_secs(40));
+        assert_eq!(clock.continuation(), TurnContinuation::Exhausted);
+        assert!(clock.hard_limit_reached());
+    }
+
+    #[test]
+    fn sequential_raise_calls_budgets_higher() {
+        let mut clock = TurnClock::new(300, 900);
+        let calls = vec![
+            scheduled("firecrawl_scrape", false),
+            scheduled("firecrawl_scrape", false),
+            scheduled("firecrawl_scrape", false),
+            scheduled("firecrawl_scrape", false),
+        ];
+        clock.raise_calls_with_deps(calls.clone(), false);
+        let parallel = clock.tool_seconds();
+        clock.raise_calls_with_deps(calls, true);
+        assert!(clock.tool_seconds() >= parallel);
+    }
+
+    #[test]
+    fn tool_allowance_for_deps_sequential_sums() {
+        let calls = [
+            scheduled("firecrawl_scrape", false),
+            scheduled("firecrawl_scrape", false),
+        ];
+        let seq = tool_allowance_for_deps(&calls, true);
+        let par = tool_allowance_for_deps(&calls, false);
+        assert!(seq >= par);
+        let _ = clock_set_for_turn(300, 900);
+    }
 
     fn live(id: &str) -> ScheduledCall {
         scheduled(id, false)

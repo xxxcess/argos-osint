@@ -75,6 +75,14 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         path_lines(&app.brain_graph)
     };
+    let mut lines = lines;
+    for text in &app.brain_related_lines {
+        lines.push(PathLine {
+            text: text.clone(),
+            article_id: String::new(),
+            run_id: String::new(),
+        });
+    }
     let widest = lines
         .iter()
         .map(|line| line.text.chars().count())

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GitHub retired the macos-13 image; macos-15-intel is its x86_64 replacement.
+          - { name: macOS Intel (x86_64), os: macos-15-intel }
+          - { name: macOS Apple Silicon (arm64), os: macos-14 }
+          - { name: Linux x86_64, os: ubuntu-24.04 }
+          - { name: Linux aarch64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # No protoc install step on purpose: .cargo/config.toml points PROTOC at
+      # tools/protoc, which uses the protoc-bin-vendored binary for this host.
+      - name: Show which protoc the build will use
+        run: |
+          uname -sm
+          command -v protoc || echo "no system protoc on PATH"
+          cargo fetch --locked
+          tools/protoc --version
+      - name: Build
+        run: cargo build --locked
+      - name: Test (offline; ARGOS_EMBED unset)
+        run: cargo test --workspace --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: MiniLM + LanceDB integration (downloads the model)
+        env:
+          ARGOS_EMBED: "1"
+          ARGOS_HOME: ${{ runner.temp }}/argos-home
+        run: cargo test -p argos-osint-core --locked -- --ignored minilm

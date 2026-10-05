@@ -2396,13 +2396,28 @@ fn packet_observation(value: &Value) -> Value {
             if raw.chars().count() <= 4000 {
                 value.clone()
             } else {
+                let tool_id = value.get("tool_id").and_then(Value::as_str).unwrap_or("tool");
+                let call_id = value.get("call_id").and_then(Value::as_str).unwrap_or("call");
+                let status = value.get("status").and_then(Value::as_str).unwrap_or("unknown");
                 let digest = crate::summarization::deterministic_tool_observation(
-                    value.get("tool_id").and_then(Value::as_str).unwrap_or("tool"),
-                    value.get("call_id").and_then(Value::as_str).unwrap_or("call"),
-                    value.get("status").and_then(Value::as_str).unwrap_or("unknown"),
-                    value,
-                    4000,
+                    tool_id, call_id, status, value, 4000,
                 );
+                // Best-effort flush enqueue when the process DB is reachable.
+                if let Ok(store) = Store::open(&crate::paths::db_path()) {
+                    let req = crate::summarization::flush_request(
+                        crate::summarization::SummarizationMode::ToolObservation,
+                        call_id,
+                        call_id,
+                        &digest.content,
+                        tool_id,
+                        4000,
+                    );
+                    let _ = crate::summarization::publish_deterministic_and_enqueue(
+                        &store.conn,
+                        &req,
+                        digest.clone(),
+                    );
+                }
                 json!({
                     "tool_observation_digest": digest.content,
                     "tool_meta": digest.coverage.notes,

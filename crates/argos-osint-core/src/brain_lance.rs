@@ -493,6 +493,75 @@ impl BrainIndex {
         block_on(async move { Ok(table.count_rows(None).await?) })
     }
 
+    /// Whether a vector ANN index currently exists on the serving table.
+    pub fn has_vector_ann_index(&self) -> bool {
+        if !self.exists() {
+            return false;
+        }
+        let table = match self.table() {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        block_on(async move {
+            match table.list_indices().await {
+                Ok(indices) => indices.iter().any(|idx| {
+                    matches!(
+                        idx.index_type,
+                        lancedb::index::IndexType::IvfFlat
+                            | lancedb::index::IndexType::IvfPq
+                            | lancedb::index::IndexType::IvfSq
+                            | lancedb::index::IndexType::IvfHnswFlat
+                            | lancedb::index::IndexType::IvfHnswPq
+                            | lancedb::index::IndexType::IvfHnswSq
+                    ) || idx.columns.iter().any(|c| c == "vector")
+                }),
+                Err(_) => false,
+            }
+        })
+    }
+
+    /// Create an IVF-Flat ANN index when `policy` is [`crate::evidence::AnnPolicy::AnnEnabled`].
+    /// Uses cosine distance to match [`Self::search_vector`]. Returns whether an index
+    /// was created (false when policy forbids it or the table is empty).
+    pub fn ensure_ann_index(&self, policy: crate::evidence::AnnPolicy) -> Result<bool> {
+        if !policy.uses_ann() {
+            return Ok(false);
+        }
+        if !self.exists() || self.count()? == 0 {
+            return Ok(false);
+        }
+        if self.has_vector_ann_index() {
+            return Ok(true);
+        }
+        let rows = self.count()?;
+        // Keep partitions small enough to train on modest corpora.
+        let partitions = ((rows as f64).sqrt() as u32).clamp(2, 64);
+        let table = self.table()?;
+        block_on(async move {
+            use lancedb::index::vector::IvfFlatIndexBuilder;
+            use lancedb::index::Index;
+            use lancedb::DistanceType;
+            let builder = IvfFlatIndexBuilder::default()
+                .distance_type(DistanceType::Cosine)
+                .num_partitions(partitions);
+            table
+                .create_index(&["vector"], Index::IvfFlat(builder))
+                .execute()
+                .await?;
+            anyhow::Ok(())
+        })?;
+        Ok(true)
+    }
+
+    /// Offline measurement helper: exact search IDs for synthetic query vectors.
+    pub fn exact_top_ids(&self, query: &[f32], k: usize) -> Result<Vec<String>> {
+        Ok(self
+            .search_vector(query, k)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
+    }
+
     /// Drops and recreates the table from `(memory_id, text)` pairs.
     pub fn rebuild(&self, memories: &[(String, String)]) -> Result<usize> {
         let mut rows = Vec::with_capacity(memories.len());
@@ -886,6 +955,42 @@ mod tests {
             "{ids:?}"
         );
         assert!(!ids.contains(&"legacy".to_string()));
+    }
+
+
+    #[test]
+    fn ensure_ann_index_respects_exact_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = BrainIndex::new(&dir.path().join("lance"));
+        for i in 0..40 {
+            index
+                .upsert_vectors(&[(format!("m{i}"), unit(i))])
+                .unwrap();
+        }
+        assert!(!index
+            .ensure_ann_index(crate::evidence::AnnPolicy::ExactSearch)
+            .unwrap());
+        assert!(!index.has_vector_ann_index());
+    }
+
+    #[test]
+    fn measured_ann_can_build_ivf_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = BrainIndex::new(&dir.path().join("lance"));
+        let n = 80usize;
+        for i in 0..n {
+            index
+                .upsert_vectors(&[(format!("m{i}"), unit(i * 3 + 1))])
+                .unwrap();
+        }
+        // Build under AnnEnabled (criteria already decided by caller/harness).
+        assert!(index
+            .ensure_ann_index(crate::evidence::AnnPolicy::AnnEnabled)
+            .unwrap());
+        assert!(index.has_vector_ann_index());
+        let q = unit(1);
+        let hits = index.search_vector(&q, 5).unwrap();
+        assert!(!hits.is_empty());
     }
 
 }

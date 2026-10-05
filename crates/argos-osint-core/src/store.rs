@@ -58,6 +58,80 @@ pub struct ReindexReport {
     pub fingerprint: String,
 }
 
+
+/// Re-rank memory hits using passage hybrid scores for long texts.
+fn boost_with_passage_hybrid(
+    query: &str,
+    memories: &[Memory],
+    mut ranked: Vec<ScoredMemory>,
+    top_k: usize,
+) -> Vec<ScoredMemory> {
+    use crate::evidence::{chunk_text, hybrid_passage_candidates, RecordKind};
+    const LONG: usize = 360;
+    let mut passages = Vec::new();
+    for memory in memories {
+        if memory.text.chars().count() < LONG {
+            continue;
+        }
+        passages.extend(chunk_text(
+            &memory.id,
+            &memory.created_at,
+            RecordKind::Memory,
+            &memory.text,
+            280,
+            40,
+        ));
+    }
+    if passages.is_empty() {
+        ranked.truncate(top_k);
+        return ranked;
+    }
+    let hits = hybrid_passage_candidates(query, &passages, &[], (top_k * 3).max(8));
+    if hits.is_empty() {
+        ranked.truncate(top_k);
+        return ranked;
+    }
+    let mut bonus: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+    for hit in hits {
+        // passage id is `{memory_id}:p{n}`
+        let mem_id = hit
+            .passage_id
+            .rsplit_once(":p")
+            .map(|(id, _)| id.to_string())
+            .unwrap_or_else(|| hit.passage_id.clone());
+        let slot = bonus.entry(mem_id).or_insert(0.0);
+        *slot = slot.max(hit.score * 0.15);
+    }
+    for item in &mut ranked {
+        if let Some(b) = bonus.get(&item.memory.id) {
+            item.score += *b;
+        }
+    }
+    // Also surface long memories that only matched via passages.
+    let have: std::collections::HashSet<String> =
+        ranked.iter().map(|h| h.memory.id.clone()).collect();
+    for memory in memories {
+        if have.contains(&memory.id) {
+            continue;
+        }
+        if let Some(b) = bonus.get(&memory.id) {
+            if *b > 0.0 {
+                ranked.push(ScoredMemory {
+                    memory: memory.clone(),
+                    score: *b,
+                });
+            }
+        }
+    }
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    ranked.truncate(top_k);
+    ranked
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -450,7 +524,9 @@ impl Store {
         Ok(memory)
     }
 
-    /// Hybrid recall: Lance vector search blended with Jaccard ([`hybrid_recall`]).
+    /// Hybrid recall: Lance vector search blended with Jaccard ([`hybrid_recall`]),
+    /// then passage-level [`crate::evidence::hybrid_passage_candidates`] for long
+    /// memories so Brain/Recon share the same hybrid path (spec follow-up).
     /// Falls back to Jaccard alone when embedding is off or the index fails; an
     /// index problem never fails the caller.
     pub fn recall(&self, query: &str, top_k: usize) -> Result<Vec<ScoredMemory>> {
@@ -458,16 +534,20 @@ impl Store {
         if query.trim().is_empty() || memories.is_empty() || top_k == 0 {
             return Ok(Vec::new());
         }
-        if let Some(index) = self.vector_index() {
+        let mut ranked = if let Some(index) = self.vector_index() {
             match index.search(query, (top_k * 3).max(16)) {
-                Ok(hits) => return Ok(hybrid_recall(&memories, query, &hits, top_k)),
+                Ok(hits) => hybrid_recall(&memories, query, &hits, (top_k * 2).max(top_k)),
                 Err(err) => {
                     brain_lance::note_error(&err);
                     index.mark_stale();
+                    recall(&memories, query, (top_k * 2).max(top_k))
                 }
             }
-        }
-        Ok(recall(&memories, query, top_k))
+        } else {
+            recall(&memories, query, (top_k * 2).max(top_k))
+        };
+        ranked = boost_with_passage_hybrid(query, &memories, ranked, top_k);
+        Ok(ranked)
     }
 
     /// True when recall will use the vector index (embedding on, file-backed store).

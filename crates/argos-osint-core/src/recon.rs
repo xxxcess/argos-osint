@@ -4559,12 +4559,14 @@ mod tests {
                 name: "submit_recon_plan".into(),
                 arguments: payload.clone(),
             }],
+            ..Default::default()
         };
         assert_eq!(decode_plan(&native, 1).unwrap().planning_mode, "native");
         assert!(decode_plan(&native, 0).is_err());
         let structured = provider::Completion {
             content: payload,
             tool_calls: vec![],
+            ..Default::default()
         };
         assert_eq!(
             decode_plan(&structured, 1).unwrap().planning_mode,

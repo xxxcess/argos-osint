@@ -203,7 +203,7 @@ pub async fn complete(
         if !child.wait().await?.success() || content.trim().is_empty() {
             return Err(anyhow!("Codex completion returned no successful answer; update Codex CLI or check ChatGPT sign-in"));
         }
-        Ok(Completion { content, tool_calls: Vec::new() })
+        Ok(Completion { content, tool_calls: Vec::new(), ..Default::default() })
     }).await.context("Codex completion timed out")?;
     result
 }

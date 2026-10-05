@@ -5593,10 +5593,9 @@ async fn write_graph_summary(secret: &ProviderSecret, system: &str, prompt: &str
     ];
     let completion = provider::complete(secret, &messages, &[], |_| {}).await?;
     let text = completion.content.trim().to_string();
-    anyhow::ensure!(
-        !text.is_empty(),
-        "synthesis returned an empty graph summary"
-    );
+    if text.is_empty() {
+        return Err(completion.empty_error("synthesis graph summary"));
+    }
     Ok(text)
 }
 

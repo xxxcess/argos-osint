@@ -76,6 +76,29 @@ pub fn tool_allowance_seconds(calls: &[ScheduledCall]) -> u64 {
     concurrent + spacing + polling
 }
 
+/// Build a [`super::clocks::ClockSet`] from turn limits (spec §7 bridge).
+#[allow(dead_code)]
+pub fn clock_set_for_turn(turn_seconds: u16, max_turn_seconds: u16) -> super::clocks::ClockSet {
+    let foreground = Duration::from_secs(u64::from(turn_seconds));
+    let lifetime = Duration::from_secs(u64::from(max_turn_seconds.max(turn_seconds)));
+    super::clocks::ClockSet::new(lifetime, foreground)
+}
+
+/// Prefer sequential budgeting when the plan marks steps as dependent.
+#[allow(dead_code)]
+pub fn tool_allowance_for_deps(calls: &[ScheduledCall], sequential: bool) -> u64 {
+    if sequential {
+        let timeouts: Vec<Duration> = calls
+            .iter()
+            .filter(|c| !c.cached)
+            .map(|c| Duration::from_secs(c.timeout_seconds + c.poll_seconds))
+            .collect();
+        super::clocks::ClockSet::sequential_tool_budget(&timeouts).as_secs()
+    } else {
+        tool_allowance_seconds(calls)
+    }
+}
+
 /// 300s plus 1s per 1,000 characters, capped by `ceiling`. A repair pass adds half of
 /// that again, still not past the ceiling.
 pub fn synthesis_allowance_seconds(chars: usize, repair: bool) -> u64 {
@@ -342,6 +365,18 @@ impl TurnClock {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_allowance_for_deps_sequential_sums() {
+        let calls = [
+            super::scheduled("firecrawl_scrape", false),
+            super::scheduled("firecrawl_scrape", false),
+        ];
+        let seq = super::tool_allowance_for_deps(&calls, true);
+        let par = super::tool_allowance_for_deps(&calls, false);
+        assert!(seq >= par);
+        let _ = super::clock_set_for_turn(300, 900);
+    }
+
     use super::*;
 
     fn live(id: &str) -> ScheduledCall {

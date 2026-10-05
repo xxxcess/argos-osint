@@ -351,10 +351,14 @@ impl Store {
             // v18: durable jobs/tasks/attempts, index change queue, derived summaries.
             if version < 18 {
                 crate::tasks::migrate_tables(&self.conn)?;
+                crate::scheduler::migrate_scheduler(&self.conn)?;
+                crate::brain_lance::migrate_generations(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 18)?;
             } else {
                 // Idempotent ensure for databases already at 18+.
                 crate::tasks::migrate_tables(&self.conn)?;
+                crate::scheduler::migrate_scheduler(&self.conn)?;
+                let _ = crate::brain_lance::migrate_generations(&self.conn);
             }
             Ok(())
         })();
@@ -544,10 +548,11 @@ impl Store {
             } else {
                 // Do not block recall. Queue a durable rebuild and keep Jaccard until ready.
                 let now = chrono::Utc::now().to_rfc3339();
+                let gen = crate::brain_lance::begin_generation(&self.conn, rows.len()).unwrap_or_default();
                 let _ = crate::tasks::enqueue_index_change(
                     &self.conn,
                     "memory_index",
-                    "generation",
+                    if gen.is_empty() { "generation" } else { &gen },
                     &format!("count={}", rows.len()),
                     "rebuild",
                     &now,

@@ -446,6 +446,65 @@ impl BrainIndex {
     }
 }
 
+
+/// Durable generation metadata for automatic rebuilds (spec §9.2).
+pub fn migrate_generations(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS argos_index_generations (
+            id TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL,
+            state TEXT NOT NULL,
+            serving INTEGER NOT NULL DEFAULT 0,
+            source_count INTEGER NOT NULL DEFAULT 0,
+            batch_cursor INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );",
+    )?;
+    Ok(())
+}
+
+/// Start a new generation without dropping the serving table.
+pub fn begin_generation(conn: &rusqlite::Connection, source_count: usize) -> anyhow::Result<String> {
+    migrate_generations(conn)?;
+    let id = format!("gen-{}", chrono::Utc::now().timestamp_millis());
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO argos_index_generations(id,fingerprint,state,serving,source_count,batch_cursor,created_at,updated_at)
+         VALUES (?1,?2,'building',0,?3,0,?4,?4)",
+        rusqlite::params![id, current_fingerprint(), source_count as i64, now],
+    )?;
+    Ok(id)
+}
+
+pub fn activate_generation(conn: &rusqlite::Connection, id: &str) -> anyhow::Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE argos_index_generations SET serving=0, updated_at=?1 WHERE serving=1",
+        rusqlite::params![now],
+    )?;
+    conn.execute(
+        "UPDATE argos_index_generations SET state='active', serving=1, updated_at=?1 WHERE id=?2",
+        rusqlite::params![now, id],
+    )?;
+    write_fingerprint(conn)?;
+    Ok(())
+}
+
+pub fn serving_generation(conn: &rusqlite::Connection) -> anyhow::Result<Option<String>> {
+    migrate_generations(conn)?;
+    let id = conn
+        .query_row(
+            "SELECT id FROM argos_index_generations WHERE serving=1 LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(id)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +557,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let index = BrainIndex::new(&dir.path().join("memory_lancedb"));
         roundtrip(&index);
+    }
+
+    #[test]
+    fn begin_generation_then_activate() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE memory_embed_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);").unwrap();
+        let id = begin_generation(&conn, 10).unwrap();
+        assert!(serving_generation(&conn).unwrap().is_none());
+        activate_generation(&conn, &id).unwrap();
+        assert_eq!(serving_generation(&conn).unwrap().as_deref(), Some(id.as_str()));
+        assert!(fingerprint_matches(&conn).unwrap());
     }
 
     #[test]

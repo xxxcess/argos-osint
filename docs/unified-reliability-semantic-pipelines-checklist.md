@@ -2,31 +2,41 @@
 
 Branch: `feat/unified-reliability-semantic-pipelines`
 Spec: `specs/argos-unified-reliability-semantic-pipelines-spec.md`
+PR: https://github.com/xxxcess/argos-osint/pull/35
 
-## Phase status
+## Phase status (§18)
 
 | Phase | Status | Notes |
 | --- | --- | --- |
-| 1. Preserve data (safe insight replace) | Done | Stage/validate before delete; single TX commit; user-edit preservation |
-| 2. Shared execution | Partial | `tasks.rs` SQLite jobs/tasks/attempts/leases + admission + retry caps; provider typed categories in `provider_request.rs`. Full worker pools / cross-process scheduler ownership still open |
-| 3. Deadline integration | Partial | `recon/clocks.rs` separate clocks; Recon orchestrator not fully switched yet |
-| 4. Role + summary foundation | Done | Fifth role + inheritance; `summarization.rs` nine modes + validators + cache key |
-| 5. Existing summary call sites | Partial | InvestigationTitle + GraphExplanation (TUI→summarization role) + PageEvidence (compact_page) wired; FollowUpContext still deterministic fallback |
-| 6. Automatic vectors | Partial | Removed 3000 sync barrier; large rebuilds enqueue `argos_index_changes`; claim/complete helpers; generation activate/replay incomplete |
-| 7. Shared evidence retrieval | Partial | `evidence.rs` passage chunking + identifier coverage; hybrid/ANN not started |
-| 8. Remaining summary modes | Partial | Modes defined; ReportContext/SectionDigest/AtlasBrief/ArticleDescription/ToolObservation/FollowUpContext/PageEvidence/GraphExplanation call-site wiring incomplete |
-| 9. Pipeline adoption | Not started | |
-| 10. Exploration / tool routing | Not started | |
-| 11. Release verification | In progress | Focused unit tests for landed slices; full §19 matrix incomplete |
+| 1. Preserve data | **Done** | Safe insight replace; user-edit + shared-source preservation; zero-claim success |
+| 2. Shared execution | **Partial** | tasks + admission + 2/3 attempts; `execute_with_retries`; elected `scheduler` lease; index worker pool skeleton; full LLM/network pools & cross-process stress still open |
+| 3. Deadline integration | **Partial** | `ClockSet` + budget bridges (`clock_set_for_turn`, `tool_allowance_for_deps`); TurnClock not fully replaced in orchestrator |
+| 4. Role + summary foundation | **Done** | Fifth role + inheritance; nine modes; cache get/put; CLI + TUI Defaults |
+| 5. Existing summary call sites | **Mostly done** | InvestigationTitle, GraphExplanation, PageEvidence, FollowUpContext (cache+deterministic), ToolObservation digest |
+| 6. Automatic vectors | **Partial** | No 3000 barrier; index-change queue; `argos_index_generations` begin/activate; batch rebuild/replay incomplete |
+| 7. Shared evidence retrieval | **Partial** | `evidence.rs` passages + identifier coverage; hybrid/ANN not started |
+| 8. Remaining summary modes | **Mostly done** | ReportContext + SectionDigest + AtlasBrief + ArticleDescription wired (deterministic/service path); live model paths still optional via `complete_summary` |
+| 9. Pipeline adoption | **Not started** | Directive coverage / Atlas events / selective Intel refresh |
+| 10. Exploration / tool routing | **Not started** | Brain semantic UX / catalog ranking fallback |
+| 11. Release verification | **In progress** | Focused offline tests green; full §19 matrix incomplete |
 
-## Acceptance criteria mapping (landed tests)
+## Mode wiring
 
-- AC1–2, user-edit preserve: `intel_recon/replace_insights.rs` tests
-- Attempt caps 2/3 + admission 2: `tasks.rs` tests
-- Nine modes / validators / cache key: `summarization.rs` tests
-- Schema v18 + tasks tables: store open / migrate
-- HTTP categorization: `provider_request.rs` tests
-- Clock separation: `recon/clocks.rs` tests
-- Role inheritance: provider `role_secret("summarization")` + CLI `defaults show`
+| Mode | Call site | Status |
+| --- | --- | --- |
+| PageEvidence | `recon::compact_page` | Prompt + summarization secret |
+| GraphExplanation | TUI `write_graph_summary` | Summarization role + validate |
+| FollowUpContext | `previous_synthesis` / `compact_prior_synthesis` | Cache lookup + deterministic |
+| ToolObservation | `packet_observation` | Deterministic structured digest |
+| InvestigationTitle | `investigation_title` | Summarization system prompt |
+| ReportContext | `intel_recon/synthesize` model packet | Deterministic digests for body/upstream |
+| SectionDigest | `save_section` | Digest after analytical save |
+| AtlasBrief | `atlas_insights::brief_text` | Deterministic AtlasBrief |
+| ArticleDescription | `packet_json` | Deterministic when oversized |
 
-Mark unfinished §19 items explicitly in the PR body until green.
+## Honest gaps
+
+- Live LLM Summarization for FollowUp/Tool/Atlas/Article still mostly deterministic (no background job flush yet)
+- Recon orchestrator still on TurnClock; ClockSet is bridge-only
+- Lance generation activate does not yet stream batch embeds into a shadow table
+- Phases 9–10 not started

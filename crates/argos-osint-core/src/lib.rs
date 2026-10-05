@@ -15,6 +15,7 @@ pub mod paths;
 pub mod provider;
 pub mod provider_request;
 pub mod recon;
+pub mod scheduler;
 pub mod secrets;
 pub mod store;
 pub mod summarization;

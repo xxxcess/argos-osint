@@ -248,6 +248,8 @@ pub enum FieldId {
     SynthesisModel,
     ClassifierProvider,
     ClassifierModel,
+    SummarizationProvider,
+    SummarizationModel,
     RouterKey,
     RouterEndpoint,
     Composer,
@@ -260,14 +262,16 @@ pub enum DefaultsRole {
     ToolPicker,
     Synthesis,
     Classifier,
+    Summarization,
 }
 
 impl DefaultsRole {
-    pub const ALL: [DefaultsRole; 4] = [
+    pub const ALL: [DefaultsRole; 5] = [
         DefaultsRole::Recon,
         DefaultsRole::ToolPicker,
         DefaultsRole::Synthesis,
         DefaultsRole::Classifier,
+        DefaultsRole::Summarization,
     ];
 
     pub fn label(self) -> &'static str {
@@ -276,6 +280,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => "Tool picker",
             DefaultsRole::Synthesis => "Synthesis",
             DefaultsRole::Classifier => "Classifier",
+            DefaultsRole::Summarization => "Summarization",
         }
     }
 
@@ -286,6 +291,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => "defaults.tool_picker",
             DefaultsRole::Synthesis => "defaults.synthesis",
             DefaultsRole::Classifier => "defaults.classifier",
+            DefaultsRole::Summarization => "defaults.summarization",
         }
     }
 
@@ -295,6 +301,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => FieldId::PickerProvider,
             DefaultsRole::Synthesis => FieldId::SynthesisProvider,
             DefaultsRole::Classifier => FieldId::ClassifierProvider,
+            DefaultsRole::Summarization => FieldId::SummarizationProvider,
         }
     }
 
@@ -304,6 +311,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => FieldId::PickerModel,
             DefaultsRole::Synthesis => FieldId::SynthesisModel,
             DefaultsRole::Classifier => FieldId::ClassifierModel,
+            DefaultsRole::Summarization => FieldId::SummarizationModel,
         }
     }
 
@@ -313,6 +321,7 @@ impl DefaultsRole {
             DefaultsRole::ToolPicker => ButtonId::SavePicker,
             DefaultsRole::Synthesis => ButtonId::SaveSynthesis,
             DefaultsRole::Classifier => ButtonId::SaveClassifier,
+            DefaultsRole::Summarization => ButtonId::SaveSummarization,
         }
     }
 
@@ -323,6 +332,9 @@ impl DefaultsRole {
             FieldId::SynthesisProvider | FieldId::SynthesisModel => Some(DefaultsRole::Synthesis),
             FieldId::ClassifierProvider | FieldId::ClassifierModel => {
                 Some(DefaultsRole::Classifier)
+            }
+            FieldId::SummarizationProvider | FieldId::SummarizationModel => {
+                Some(DefaultsRole::Summarization)
             }
             _ => None,
         }
@@ -339,6 +351,7 @@ pub enum ButtonId {
     SavePicker,
     SaveSynthesis,
     SaveClassifier,
+    SaveSummarization,
     DefaultRole(DefaultsRole),
     RefreshModels,
     NewThread,
@@ -581,6 +594,8 @@ pub struct App {
     pub synthesis_model: String,
     pub classifier_provider: String,
     pub classifier_model: String,
+    pub summarization_provider: String,
+    pub summarization_model: String,
     pub defaults_role: DefaultsRole,
     pub model_catalog: Vec<ListedModel>,
     pub catalog_for: String,
@@ -762,6 +777,7 @@ impl App {
         let picker_default = provider::role_secret(&auth, &settings, "tool-picker")?;
         let synthesis_default = provider::role_secret(&auth, &settings, "synthesis")?;
         let classifier_default = provider::role_secret(&auth, &settings, "classifier")?;
+        let summarization_default = provider::role_secret(&auth, &settings, "summarization")?;
         let router = provider::account_secret(&auth, "openrouter");
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
@@ -848,6 +864,8 @@ impl App {
             synthesis_model: synthesis_default.model,
             classifier_provider: provider::effective_kind(&classifier_default),
             classifier_model: classifier_default.model,
+            summarization_provider: provider::effective_kind(&summarization_default),
+            summarization_model: summarization_default.model,
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),
@@ -1266,6 +1284,8 @@ impl App {
             FieldId::SynthesisModel => &self.synthesis_model,
             FieldId::ClassifierProvider => &self.classifier_provider,
             FieldId::ClassifierModel => &self.classifier_model,
+            FieldId::SummarizationProvider => &self.summarization_provider,
+            FieldId::SummarizationModel => &self.summarization_model,
             FieldId::RouterKey => &self.router_key,
             FieldId::RouterEndpoint => &self.router_endpoint,
             FieldId::Composer => &self.input,
@@ -1306,6 +1326,8 @@ impl App {
             FieldId::SynthesisModel => &mut self.synthesis_model,
             FieldId::ClassifierProvider => &mut self.classifier_provider,
             FieldId::ClassifierModel => &mut self.classifier_model,
+            FieldId::SummarizationProvider => &mut self.summarization_provider,
+            FieldId::SummarizationModel => &mut self.summarization_model,
             FieldId::RouterKey => &mut self.router_key,
             FieldId::RouterEndpoint => &mut self.router_endpoint,
             FieldId::Composer => &mut self.input,
@@ -3241,7 +3263,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             FieldId::ReconProvider
             | FieldId::PickerProvider
             | FieldId::SynthesisProvider
-            | FieldId::ClassifierProvider => {
+            | FieldId::ClassifierProvider
+            | FieldId::SummarizationProvider => {
                 let kind = self.field(field);
                 if kind.is_empty() {
                     String::new()
@@ -3860,6 +3883,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             ButtonId::SavePicker => self.save_role(DefaultsRole::ToolPicker),
             ButtonId::SaveSynthesis => self.save_role(DefaultsRole::Synthesis),
             ButtonId::SaveClassifier => self.save_role(DefaultsRole::Classifier),
+            ButtonId::SaveSummarization => self.save_role(DefaultsRole::Summarization),
             ButtonId::AtlasNewsFeed => {
                 self.open_atlas_news();
                 return;
@@ -4030,6 +4054,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 DefaultsRole::ToolPicker => "tool-picker",
                 DefaultsRole::Synthesis => "synthesis",
                 DefaultsRole::Classifier => "classifier",
+                DefaultsRole::Summarization => "summarization",
             })
             .ok_or_else(|| anyhow::anyhow!("unknown role"))?;
         let before = format!("{} / {}", assignment.provider, assignment.model);
@@ -4054,6 +4079,15 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 "Classifier: {after} ({})",
                 provider::picker_transport(&model)
             ),
+            DefaultsRole::Summarization => {
+                let inherited = self.settings.defaults.summarization.provider.trim().is_empty()
+                    && self.settings.defaults.summarization.model.trim().is_empty();
+                if inherited {
+                    format!("Summarization: {after} (inherits Synthesis)")
+                } else {
+                    format!("Summarization: {after}")
+                }
+            }
         })
     }
 
@@ -5312,6 +5346,8 @@ pub fn is_picker_field(field: FieldId) -> bool {
             | FieldId::SynthesisModel
             | FieldId::ClassifierProvider
             | FieldId::ClassifierModel
+            | FieldId::SummarizationProvider
+            | FieldId::SummarizationModel
     )
 }
 
@@ -5754,6 +5790,8 @@ mod tests {
             synthesis_model: String::new(),
             classifier_provider: String::new(),
             classifier_model: String::new(),
+            summarization_provider: String::new(),
+            summarization_model: String::new(),
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),

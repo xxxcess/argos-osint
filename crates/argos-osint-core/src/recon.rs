@@ -2396,7 +2396,20 @@ fn packet_observation(value: &Value) -> Value {
             if raw.chars().count() <= 4000 {
                 value.clone()
             } else {
-                json!({"preview":raw.chars().take(4000).collect::<String>(),"truncated_for_model":true})
+                let digest = crate::summarization::deterministic_tool_observation(
+                    value.get("tool_id").and_then(Value::as_str).unwrap_or("tool"),
+                    value.get("call_id").and_then(Value::as_str).unwrap_or("call"),
+                    value.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+                    value,
+                    4000,
+                );
+                json!({
+                    "tool_observation_digest": digest.content,
+                    "tool_meta": digest.coverage.notes,
+                    "truncated_for_model": digest.coverage.partial,
+                    "summarization_mode": "tool_observation",
+                    "fallback": true,
+                })
             }
         }
     }

@@ -61,7 +61,7 @@ enum Command {
     Logout,
     /// Print the host profile.
     Hardware,
-    /// List the model catalog for a role: recon, tool-picker, or synthesis.
+    /// List the model catalog for a role: recon, tool-picker, synthesis, classifier, or summarization.
     Models {
         #[arg(long, default_value = "synthesis")]
         role: String,
@@ -203,7 +203,7 @@ enum OsintCommand {
 #[derive(Subcommand)]
 enum DefaultsCommand {
     Show,
-    /// Set a role's provider and model. Role: recon, tool-picker, or synthesis.
+    /// Set a role's provider and model. Role: recon, tool-picker, synthesis, classifier, or summarization.
     Set {
         role: String,
         #[arg(long)]
@@ -419,6 +419,10 @@ fn defaults_json(auth: &AuthFile, settings: &SettingsFile) -> Result<serde_json:
     let (recon_provider, recon_model) = role("recon")?;
     let (picker_provider, picker_model) = role("tool-picker")?;
     let (synthesis_provider, synthesis_model) = role("synthesis")?;
+    let (classifier_provider, classifier_model) = role("classifier")?;
+    let (summarization_provider, summarization_model) = role("summarization")?;
+    let summarization_inherited = settings.defaults.summarization.provider.trim().is_empty()
+        && settings.defaults.summarization.model.trim().is_empty();
     Ok(serde_json::json!({
         "recon": {"provider": recon_provider, "model": recon_model},
         "tool_picker": {
@@ -427,6 +431,12 @@ fn defaults_json(auth: &AuthFile, settings: &SettingsFile) -> Result<serde_json:
             "model": picker_model,
         },
         "synthesis": {"provider": synthesis_provider, "model": synthesis_model},
+        "classifier": {"provider": classifier_provider, "model": classifier_model},
+        "summarization": {
+            "provider": summarization_provider,
+            "model": summarization_model,
+            "inherited_from_synthesis": summarization_inherited,
+        },
     }))
 }
 
@@ -459,7 +469,7 @@ fn defaults_command(command: DefaultsCommand) -> Result<()> {
             let target = settings
                 .defaults
                 .role_mut(&role)
-                .ok_or_else(|| anyhow!("role must be recon, tool-picker, or synthesis"))?;
+                .ok_or_else(|| anyhow!("role must be recon, tool-picker, synthesis, classifier, or summarization"))?;
             target.provider = kind;
             target.model = model.trim().into();
             settings.save()?;

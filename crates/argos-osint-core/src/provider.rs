@@ -338,6 +338,9 @@ pub struct RoleDefaults {
     /// Tags Atlas articles with an OSINT category. Seeded to OpenRouter Jev.
     #[serde(default)]
     pub classifier: ModelAssignment,
+    /// Evidence compression and source-grounded views. Empty inherits Synthesis.
+    #[serde(default)]
+    pub summarization: ModelAssignment,
 }
 
 /// Pinned default for the tool picker. The `~typesafe/jev-latest` alias is accepted
@@ -369,6 +372,7 @@ pub fn role_name(role: &str) -> Option<&'static str> {
         "synthesis" => Some("synthesis"),
         "tool-picker" | "tool_picker" | "toolpicker" | "picker" => Some("tool_picker"),
         "classifier" => Some("classifier"),
+        "summarization" | "summary" | "summariser" | "summarizer" => Some("summarization"),
         _ => None,
     }
 }
@@ -379,6 +383,7 @@ impl RoleDefaults {
             "recon" => Some(&self.recon),
             "synthesis" => Some(&self.synthesis),
             "classifier" => Some(&self.classifier),
+            "summarization" => Some(&self.summarization),
             _ => Some(&self.tool_picker),
         }
     }
@@ -388,8 +393,21 @@ impl RoleDefaults {
             "recon" => Some(&mut self.recon),
             "synthesis" => Some(&mut self.synthesis),
             "classifier" => Some(&mut self.classifier),
+            "summarization" => Some(&mut self.summarization),
             _ => Some(&mut self.tool_picker),
         }
+    }
+
+    /// When Summarization is unset, copy Synthesis so existing installs inherit.
+    pub fn inherit_summarization_from_synthesis(&mut self) -> bool {
+        if self.summarization.provider.trim().is_empty()
+            && self.summarization.model.trim().is_empty()
+            && (!self.synthesis.provider.trim().is_empty() || !self.synthesis.model.trim().is_empty())
+        {
+            self.summarization = self.synthesis.clone();
+            return true;
+        }
+        false
     }
 
     /// Seeds the tool picker only when both of its fields are empty. Never touches
@@ -650,7 +668,19 @@ pub fn role_secret(
     let assignment = settings
         .defaults
         .role(role)
-        .ok_or_else(|| anyhow!("role must be recon, tool-picker, synthesis, or classifier"))?;
+        .ok_or_else(|| anyhow!("role must be recon, tool-picker, synthesis, classifier, or summarization"))?;
+    // Summarization inherits Synthesis when both of its fields are empty.
+    let assignment = if role_name(role) == Some("summarization")
+        && assignment.provider.trim().is_empty()
+        && assignment.model.trim().is_empty()
+    {
+        settings
+            .defaults
+            .role("synthesis")
+            .ok_or_else(|| anyhow!("synthesis role missing"))?
+    } else {
+        assignment
+    };
     let legacy = writer_secret(auth, settings);
     let mut secret = if assignment.provider.is_empty() {
         legacy
@@ -1627,6 +1657,7 @@ impl SettingsFile {
             let mut settings = Self::default();
             settings.defaults.seed_tool_picker();
             settings.defaults.seed_classifier();
+            settings.defaults.inherit_summarization_from_synthesis();
             settings
         };
         if !path.exists() {
@@ -1663,7 +1694,9 @@ impl SettingsFile {
         if settings.defaults.seed_tool_picker() {
             migrated = true;
         }
-        if settings.defaults.seed_classifier() {
+        let mutated = settings.defaults.seed_classifier()
+            | settings.defaults.inherit_summarization_from_synthesis();
+        if mutated {
             migrated = true;
         }
         // Bump the old product default (200) to the current monthly Firecrawl allowance.
@@ -1951,6 +1984,22 @@ mod tests {
         }
         assert!(role_secret(&auth, &settings, "writer").is_err());
         assert!(role_secret(&auth, &settings, "").is_err());
+    }
+
+    #[test]
+    fn summarization_inherits_synthesis_when_unset() {
+        let auth = crate::secrets::AuthFile::default();
+        let mut settings = SettingsFile::default();
+        settings.defaults.synthesis = ModelAssignment {
+            provider: "openrouter".into(),
+            model: "test/synth".into(),
+        };
+        // Empty summarization → inherits at resolve time.
+        let secret = role_secret(&auth, &settings, "summarization").unwrap();
+        assert_eq!(secret.model, "test/synth");
+        assert!(settings.defaults.inherit_summarization_from_synthesis());
+        assert_eq!(settings.defaults.summarization.model, "test/synth");
+        assert!(!settings.defaults.inherit_summarization_from_synthesis());
     }
 
     #[tokio::test]

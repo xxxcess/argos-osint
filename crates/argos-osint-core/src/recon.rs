@@ -1,4 +1,5 @@
 //! Persistent investigations and evidence-grounded model orchestration.
+pub mod clocks;
 mod brain_resources;
 pub(crate) mod budget;
 mod graph;
@@ -113,7 +114,7 @@ async fn investigation_title(secret: &crate::secrets::ProviderSecret, question: 
     let messages = vec![
         chat(
             "system",
-            "You name an OSINT investigation from the user's query. Reply with only a short distinctive title of 5 to 10 words. Super info dense, no filler. Plain text, no quotes, labels, or markdown.".into(),
+            crate::summarization::system_prompt(crate::summarization::SummarizationMode::InvestigationTitle).into(),
         ),
         chat(
             "user",

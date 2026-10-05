@@ -47,6 +47,28 @@ pub struct CatalogEntry {
 
 /// Enabled tools with a bindable input. Unkeyed tools stay, marked `keyed: false`, except
 /// News and Legal tools (#29): without their key they are left out entirely.
+
+/// Apply semantic ranking then ensure no eligible tool is hard-excluded (spec §15).
+#[allow(dead_code)]
+pub fn merge_semantic_with_catalog_fallback(
+    ranked_ids: &[(String, f32)],
+    eligible_ids: &[String],
+    limit: usize,
+) -> Vec<String> {
+    let ranked = ranked_ids
+        .iter()
+        .map(|(id, score)| crate::explore::ToolCandidate {
+            tool_id: id.clone(),
+            score: *score,
+            reason: "semantic".into(),
+        })
+        .collect();
+    crate::explore::tool_candidates_with_fallback(ranked, eligible_ids, limit)
+        .into_iter()
+        .map(|c| c.tool_id)
+        .collect()
+}
+
 pub fn eligible_catalog(enabled: &HashSet<String>, unkeyed: &HashSet<String>) -> Vec<CatalogEntry> {
     crate::osint::registry()
         .iter()
@@ -1088,6 +1110,17 @@ pub fn parse_chat_pick(text: &str) -> PickReply {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merge_semantic_keeps_catalog_fallback() {
+        let ranked = vec![("newsapi_search".into(), 0.9)];
+        let eligible = vec![
+            "newsapi_search".into(),
+            "courtlistener_search".into(),
+        ];
+        let out = super::merge_semantic_with_catalog_fallback(&ranked, &eligible, 1);
+        assert!(out.contains(&"courtlistener_search".into()));
+    }
+
     use super::*;
     use crate::recon::Binding;
     use std::collections::BTreeMap;

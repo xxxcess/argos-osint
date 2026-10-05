@@ -807,6 +807,37 @@ impl Store {
         })
     }
 
+    /// Drain pending generation rebuild work in bounded batches (off the TUI path).
+    pub fn process_pending_vector_rebuild(&self, max_batches: usize) -> Result<usize> {
+        let index = self
+            .vectors
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Brain vectors are off"))?;
+        crate::embed::warm_up()?;
+        let rows = self.memory_texts(None)?;
+        let mut done = 0usize;
+        for _ in 0..max_batches {
+            let pending: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM argos_index_generations WHERE state='building' ORDER BY created_at ASC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(gen) = pending else {
+                break;
+            };
+            let progress = brain_lance::rebuild_generation_batched(&self.conn, index, &gen, &rows)?;
+            done += 1;
+            if progress.activated {
+                index.mark_ready();
+                break;
+            }
+        }
+        Ok(done)
+    }
+
     /// Index hook after memories were written or their text changed. Best effort.
     pub(crate) fn index_upsert(&self, ids: &[String]) {
         if ids.is_empty() || self.vectors.is_none() {

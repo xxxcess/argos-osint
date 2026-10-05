@@ -492,6 +492,74 @@ pub fn activate_generation(conn: &rusqlite::Connection, id: &str) -> anyhow::Res
     Ok(())
 }
 
+
+const GENERATION_BATCH: usize = 64;
+
+/// Advance a building generation by embedding up to `GENERATION_BATCH` memories,
+/// checkpointing the cursor. Does not drop the serving table. Refuses to activate
+/// when the generation fingerprint no longer matches the process fingerprint
+/// (embedding-space mix guard).
+pub fn rebuild_generation_batched(
+    conn: &rusqlite::Connection,
+    index: &BrainIndex,
+    generation_id: &str,
+    memories: &[(String, String)],
+) -> anyhow::Result<GenerationProgress> {
+    migrate_generations(conn)?;
+    let (state, fingerprint, cursor, source_count): (String, String, i64, i64) = conn.query_row(
+        "SELECT state, fingerprint, batch_cursor, source_count FROM argos_index_generations WHERE id=?1",
+        [generation_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    anyhow::ensure!(
+        state == "building" || state == "replaying",
+        "generation {generation_id} is not buildable (state={state})"
+    );
+    anyhow::ensure!(
+        fingerprint == current_fingerprint(),
+        "generation fingerprint mismatch; refusing to mix embedding spaces"
+    );
+    let cursor = cursor as usize;
+    if cursor >= memories.len() {
+        // Caught up: activate.
+        activate_generation(conn, generation_id)?;
+        return Ok(GenerationProgress {
+            generation_id: generation_id.into(),
+            cursor: memories.len(),
+            total: memories.len(),
+            activated: true,
+        });
+    }
+    let end = (cursor + GENERATION_BATCH).min(memories.len());
+    let slice = &memories[cursor..end];
+    // Upsert into the live index in batches (serving table retained; IDs merge idempotently).
+    index.upsert_texts(slice)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE argos_index_generations SET batch_cursor=?1, state='building', updated_at=?2 WHERE id=?3",
+        rusqlite::params![end as i64, now, generation_id],
+    )?;
+    let activated = end >= memories.len() || end as i64 >= source_count;
+    if activated {
+        activate_generation(conn, generation_id)?;
+    }
+    Ok(GenerationProgress {
+        generation_id: generation_id.into(),
+        cursor: end,
+        total: memories.len(),
+        activated,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationProgress {
+    pub generation_id: String,
+    pub cursor: usize,
+    pub total: usize,
+    pub activated: bool,
+}
+
+
 pub fn serving_generation(conn: &rusqlite::Connection) -> anyhow::Result<Option<String>> {
     migrate_generations(conn)?;
     let id = conn
@@ -557,6 +625,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let index = BrainIndex::new(&dir.path().join("memory_lancedb"));
         roundtrip(&index);
+    }
+
+    #[test]
+    fn rebuild_generation_batched_respects_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let lance = dir.path().join("lance");
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memory_embed_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        let index = BrainIndex::shared(&lance);
+        let id = begin_generation(&conn, 2).unwrap();
+        let memories = vec![
+            ("m1".into(), "Harbor tanker manifests".into()),
+            ("m2".into(), "Night desk shift".into()),
+        ];
+        // Force fingerprint mismatch
+        conn.execute(
+            "UPDATE argos_index_generations SET fingerprint='other' WHERE id=?1",
+            [&id],
+        )
+        .unwrap();
+        assert!(rebuild_generation_batched(&conn, &index, &id, &memories).is_err());
     }
 
     #[test]

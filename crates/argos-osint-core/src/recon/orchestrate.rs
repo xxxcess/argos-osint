@@ -5,6 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
+    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
@@ -3016,7 +3017,20 @@ fn publish(gate: &ModelGate, plan: &mut Plan, progress: &mut impl FnMut(super::T
         return;
     };
     let mut clock = clock.lock().unwrap();
+    let _ = clock.note_foreground_transition();
     plan.deadline_note = clock.breakdown();
+    // Persist a lightweight checkpoint string for resume/diagnostics.
+    if clock.should_continue_in_background() || clock.hard_limit_reached() {
+        let cp = clock.checkpoint();
+        plan.deadline_note = format!(
+            "{} [{} rounds, {} calls, {} chars, {}]",
+            plan.deadline_note,
+            cp.recon_rounds,
+            cp.tool_calls_scheduled,
+            cp.evidence_chars,
+            cp.continuation
+        );
+    }
     let labels = clock.take_labels();
     drop(clock);
     for label in labels {
@@ -3029,6 +3043,7 @@ fn sync_budget(plan: &Plan, gate: &ModelGate) {
         return;
     };
     let store = gate.db().and_then(|path| Store::open(&path).ok());
+    let sequential = plan.calls.iter().any(|call| !call.depends_on.is_empty());
     let calls = plan
         .calls
         .iter()
@@ -3049,7 +3064,10 @@ fn sync_budget(plan: &Plan, gate: &ModelGate) {
             super::budget::scheduled(&call.tool_id, cached)
         })
         .collect();
-    clock.lock().unwrap().raise_calls(calls);
+    clock
+        .lock()
+        .unwrap()
+        .raise_calls_with_deps(calls, sequential);
 }
 
 fn call_cached(gate: &ModelGate, call: &PlanCall) -> bool {
@@ -3124,6 +3142,9 @@ async fn model_json(
     ];
     let limit = gate.clock().map(|clock| {
         let mut clock = clock.lock().unwrap();
+        if clock.hard_limit_reached() {
+            return Duration::ZERO;
+        }
         clock.note_round();
         clock.recon_remaining()
     });

@@ -12,6 +12,8 @@ pub mod intel_recon;
 pub mod iso3166;
 pub mod osint;
 pub mod paths;
+pub mod pipeline;
+pub mod explore;
 pub mod provider;
 pub mod provider_request;
 pub mod recon;

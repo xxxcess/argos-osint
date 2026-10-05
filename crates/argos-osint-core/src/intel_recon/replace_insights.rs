@@ -41,13 +41,7 @@ pub async fn replace_article_insights_from_body(
     )
     .await?;
     let store = Store::open(db_path)?;
-    store.persist_atlas_insights(
-        &article.run_id,
-        &settled.claims,
-        &settled.relations,
-        "",
-        "",
-    )?;
+    store.persist_atlas_insights(&article.run_id, &settled.claims, &settled.relations, "", "")?;
     Ok(settled.claims.len())
 }
 
@@ -100,7 +94,10 @@ mod tests {
             .persist_atlas_insights("run-1", &[old], &[], "", "")
             .unwrap();
         assert_eq!(
-            store.atlas_claims_for_article("run-1", "art-1").unwrap().len(),
+            store
+                .atlas_claims_for_article("run-1", "art-1")
+                .unwrap()
+                .len(),
             1
         );
         let orphaned = store.delete_article_insights("run-1", "art-1").unwrap();

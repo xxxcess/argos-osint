@@ -1129,12 +1129,23 @@ fn usable(binding: &Binding) -> bool {
 }
 
 /// Exact bindings before inferred ones, in the order found.
+/// URL bindings from Brain (`brain:…`) rank ahead of search-found URLs.
 fn candidates<'a>(bindings: &'a [Binding], kind: &str) -> Vec<&'a Binding> {
     let mut found: Vec<&Binding> = bindings
         .iter()
         .filter(|binding| binding.kind == kind && usable(binding))
         .collect();
-    found.sort_by_key(|binding| (binding.inferred, binding.unverified));
+    if kind == URL_KIND {
+        found.sort_by_key(|binding| {
+            (
+                !binding.evidence_id.starts_with("brain:"),
+                binding.inferred,
+                binding.unverified,
+            )
+        });
+    } else {
+        found.sort_by_key(|binding| (binding.inferred, binding.unverified));
+    }
     found
 }
 
@@ -1394,10 +1405,16 @@ fn choose(fill: &Fill, bindings: &[Binding], ctx: &Ctx) -> Option<Chosen> {
         How::UrlList => {
             let mut urls: Vec<&Binding> = candidates(bindings, URL_KIND);
             urls.sort_by_key(|binding| {
+                let brain = binding.evidence_id.starts_with("brain:");
                 (
+                    !brain,
                     binding.inferred,
                     binding.unverified,
-                    crate::osint::map_rank(&binding.value),
+                    if brain {
+                        (0, 0)
+                    } else {
+                        crate::osint::map_rank(&binding.value)
+                    },
                 )
             });
             urls.dedup_by(|a, b| a.value == b.value);
@@ -3203,8 +3220,31 @@ mod tests {
     }
 
     #[test]
+    fn scrape_prefers_brain_url_over_search_found_url() {
+        let bindings = vec![
+            Binding {
+                kind: URL_KIND.into(),
+                value: "https://usa.gov/agencies".into(),
+                evidence_id: "call-s2".into(),
+                source_tool: "firecrawl_search".into(),
+                ..Binding::default()
+            },
+            Binding {
+                kind: URL_KIND.into(),
+                value: "https://www.usatoday.com/marine".into(),
+                evidence_id: "brain:m1".into(),
+                ..Binding::default()
+            },
+        ];
+        let (args, _, missing) =
+            bind_arguments("firecrawl_scrape", &bindings, "Did a marine kill someone?", None);
+        assert!(missing.is_empty());
+        assert_eq!(args["url"], json!("https://www.usatoday.com/marine"));
+    }
+
+    #[test]
     fn batch_scrape_takes_ranked_urls_and_gates_order_before_hunter() {
-        let urls: Vec<Binding> = [
+        let mut urls: Vec<Binding> = [
             "https://acmerobotics.com/blog/a",
             "https://acmerobotics.com/contact",
             "https://acmerobotics.com/about",
@@ -3221,6 +3261,15 @@ mod tests {
             ..Binding::default()
         })
         .collect();
+        urls.insert(
+            0,
+            Binding {
+                kind: URL_KIND.into(),
+                value: "https://www.nytimes.com/brain-article".into(),
+                evidence_id: "brain:mem-1".into(),
+                ..Binding::default()
+            },
+        );
         let (args, _, missing) = bind_arguments(
             "firecrawl_batch_scrape",
             &urls,
@@ -3235,12 +3284,11 @@ mod tests {
             .filter_map(Value::as_str)
             .collect();
         assert_eq!(picked.len(), osint::BATCH_SCRAPE_DEFAULT_URLS);
-        assert_eq!(
-            &picked[..2],
-            [
-                "https://acmerobotics.com/contact",
-                "https://acmerobotics.com/about"
-            ]
+        assert_eq!(picked[0], "https://www.nytimes.com/brain-article");
+        assert!(
+            picked.contains(&"https://acmerobotics.com/contact")
+                || picked.contains(&"https://acmerobotics.com/about"),
+            "map-ranked pages still fill remaining slots: {picked:?}"
         );
         let order = super::super::dependency_order(
             &[

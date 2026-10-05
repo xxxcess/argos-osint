@@ -27,15 +27,20 @@ pub use body_filter::{
 pub use brain::{upsert_recon_insights, ReconInsightUpdate};
 pub use briefing_view::{bucket_extracted, ExtractedBuckets, ExtractedLine};
 pub use classify_mode::{
-    classifiable_modes, classify_recon_mode, default_recon_mode, parse_mode_choice,
-    parse_mode_from_chat, ModeClassifyInput,
+    classifiable_modes, classify_prompt_mode, classify_recon_mode, default_recon_mode,
+    heuristic_prompt_mode, parse_mode_choice, parse_mode_from_chat, ModeClassifyInput,
+    PromptModeClassifyInput,
 };
 pub use jobs::{
     active_job_for_mode, cancel_job, create_report_job, pause_job, resume_job, retry_failed_tasks,
     scoped_section_plan, start_report_worker, IntelReportEvent, ReportScope,
 };
-pub use ledger::{body_assertion_candidates, coverage_complete, seed_element_ledger, ElementStatus};
-pub use modes::{section_plan, ReportMode, SectionPlan};
+pub use ledger::{
+    body_assertion_candidates, coverage_complete, seed_element_ledger, ElementStatus,
+};
+pub use modes::{
+    chat_response_spec, investigation_mode_spec, section_plan, ReportMode, SectionPlan,
+};
 pub use persist::{
     ArticleBodyRow, IntelAssessmentRow, IntelElementRow, IntelEvidenceRow, IntelInvestigationRow,
     IntelReportJobRow, IntelReportSectionRow, IntelReportTaskRow, RetrievalAttemptRow,

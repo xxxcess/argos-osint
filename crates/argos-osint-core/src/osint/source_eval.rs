@@ -233,10 +233,7 @@ mod tests {
 
     #[test]
     fn unlisted_reliability_is_neutral() {
-        let code = AdmiraltyCode::new(
-            SourceReliability::F,
-            InformationCredibility::CannotBeJudged,
-        );
+        let code = AdmiraltyCode::new(SourceReliability::F, InformationCredibility::CannotBeJudged);
         assert!((scale_confidence(0.70, code) - 0.70).abs() < f64::EPSILON);
     }
 

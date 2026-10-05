@@ -74,7 +74,10 @@ impl Default for ReportScope {
 }
 
 /// Mode section plan filtered by `scope.sections` (empty scope keeps the full plan).
-pub fn scoped_section_plan(mode: ReportMode, scope: &ReportScope) -> Vec<super::modes::SectionPlan> {
+pub fn scoped_section_plan(
+    mode: ReportMode,
+    scope: &ReportScope,
+) -> Vec<super::modes::SectionPlan> {
     let plan = section_plan(mode);
     if scope.sections.is_empty() {
         return plan;
@@ -121,7 +124,10 @@ pub fn create_report_job(
         .atlas_claims_for_article(&article.run_id, &article.id)
         .unwrap_or_default();
     let body = store.article_body_for_article(&article.id)?;
-    let body_md = body.as_ref().map(|b| b.body_markdown.as_str()).unwrap_or("");
+    let body_md = body
+        .as_ref()
+        .map(|b| b.body_markdown.as_str())
+        .unwrap_or("");
     let candidates = if claims.is_empty() {
         body_assertion_candidates(body_md, 12)
     } else {
@@ -176,8 +182,13 @@ pub fn create_report_job(
 
     // Task DAG.
     let acquire = store.insert_report_task(&job.id, "acquire_body", "", "[]", "pending")?;
-    let inventory =
-        store.insert_report_task(&job.id, "inventory", "", &serde_json::json!([acquire]).to_string(), "pending")?;
+    let inventory = store.insert_report_task(
+        &job.id,
+        "inventory",
+        "",
+        &serde_json::json!([acquire]).to_string(),
+        "pending",
+    )?;
     let collect = store.insert_report_task(
         &job.id,
         "collect",
@@ -260,17 +271,7 @@ pub fn create_report_job(
         }
     }
 
-    store.update_report_job(
-        &job.id,
-        "queued",
-        "planned",
-        0,
-        0,
-        0,
-        "",
-        "",
-        "",
-    )?;
+    store.update_report_job(&job.id, "queued", "planned", 0, 0, 0, "", "", "")?;
     Ok(store.intel_report_job(&job.id)?.expect("job exists"))
 }
 
@@ -425,16 +426,27 @@ mod tests {
             image_url: String::new(),
         };
         store.atlas_upsert_article(&article).unwrap();
-        let job = create_report_job(&store, &article, ReportMode::Verify, &ReportScope::default(), false)
-            .unwrap();
+        let job = create_report_job(
+            &store,
+            &article,
+            ReportMode::Verify,
+            &ReportScope::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(job.mode, "verify");
         assert_eq!(job.sections_total, 6);
         let sections = store.intel_report_sections(&job.id).unwrap();
         assert_eq!(sections.len(), 6);
         assert_eq!(sections[0].section_key, "bluf");
-        let again =
-            create_report_job(&store, &article, ReportMode::Verify, &ReportScope::default(), false)
-                .unwrap();
+        let again = create_report_job(
+            &store,
+            &article,
+            ReportMode::Verify,
+            &ReportScope::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(again.id, job.id, "active job is reused");
     }
 }

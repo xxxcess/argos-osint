@@ -139,9 +139,7 @@ impl Store {
             .query_map([memory_id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         if insight.sources.iter().any(|source| {
-            source
-                .answer_id
-                .starts_with("atlas-")
+            source.answer_id.starts_with("atlas-")
                 || (source.thread_id.is_none() && source.run_id.is_some())
         }) {
             let mut articles = Vec::new();
@@ -399,7 +397,10 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
 }
 
 /// News-cycle claim: the concluding relation, with each supporting article as hard evidence.
-pub fn build_claim_graph(insight: &InsightView, articles: &[crate::store::AtlasArticleRow]) -> MemoryGraph {
+pub fn build_claim_graph(
+    insight: &InsightView,
+    articles: &[crate::store::AtlasArticleRow],
+) -> MemoryGraph {
     let mut graph = GraphBuilder::default();
     let relation = format!(
         "{} {} {}",

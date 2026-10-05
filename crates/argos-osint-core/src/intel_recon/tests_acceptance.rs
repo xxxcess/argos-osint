@@ -134,7 +134,10 @@ mod acceptance {
         let removed = store.atlas_prune_expired().unwrap();
         // Run may be listed for prune attempt, but the protected article must remain.
         let kept = store.atlas_article("run-acc", "art-acc").unwrap();
-        assert!(kept.is_some(), "protected article survived prune; removed={removed:?}");
+        assert!(
+            kept.is_some(),
+            "protected article survived prune; removed={removed:?}"
+        );
         let _ = removed;
     }
 
@@ -265,10 +268,7 @@ mod acceptance {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(
-                finished.state.as_str(),
-                "completed" | "partial"
-            ),
+            matches!(finished.state.as_str(), "completed" | "partial"),
             "state={}",
             finished.state
         );
@@ -277,7 +277,9 @@ mod acceptance {
             .unwrap()
             .intel_report_sections(&job.id)
             .unwrap();
-        assert!(sections.iter().any(|s| s.status == "complete" && !s.markdown.is_empty()));
+        assert!(sections
+            .iter()
+            .any(|s| s.status == "complete" && !s.markdown.is_empty()));
         assert!(events > 0);
     }
 }

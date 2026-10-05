@@ -153,7 +153,10 @@ pub fn enqueue_article_body(
 #[derive(Clone, Debug)]
 pub enum EnqueueOutcome {
     Cached(String),
-    AlreadyRunning { body_id: String, generation: i64 },
+    AlreadyRunning {
+        body_id: String,
+        generation: i64,
+    },
     Cooldown {
         body_id: String,
         retry_after: String,
@@ -248,15 +251,7 @@ pub async fn fetch_article_body(
 
         let attempt_id = {
             let store = Store::open(db_path)?;
-            store.insert_retrieval_attempt(
-                body_id,
-                route,
-                &url,
-                "running",
-                "",
-                "",
-                generation,
-            )?
+            store.insert_retrieval_attempt(body_id, route, &url, "running", "", "", generation)?
         };
         attempted.push(route.to_string());
 
@@ -432,15 +427,9 @@ async fn commit_refined_body(
             generation,
         });
     }
-    let refined = refine_retrieved_article_body(
-        synthesis,
-        classifier,
-        title,
-        brief,
-        url,
-        scraped_markdown,
-    )
-    .await;
+    let refined =
+        refine_retrieved_article_body(synthesis, classifier, title, brief, url, scraped_markdown)
+            .await;
     let store = Store::open(db_path)?;
     store.commit_article_body(
         body_id,
@@ -459,8 +448,10 @@ async fn commit_refined_body(
         quality: refined.quality.as_str().into(),
         generation,
     });
-    let usable_body = matches!(refined.quality.as_str(), "complete" | "partial" | "uncertain")
-        && !refined.markdown.trim().is_empty();
+    let usable_body = matches!(
+        refined.quality.as_str(),
+        "complete" | "partial" | "uncertain"
+    ) && !refined.markdown.trim().is_empty();
     if usable_body {
         if let Some(synthesis) = synthesis {
             let article = {
@@ -592,7 +583,11 @@ async fn discover_and_scrape(
     let query = if title.trim().is_empty() {
         format!("site:{domain}")
     } else {
-        format!("{} site:{}", title.chars().take(80).collect::<String>(), domain)
+        format!(
+            "{} site:{}",
+            title.chars().take(80).collect::<String>(),
+            domain
+        )
     };
     let result = executor
         .run_configured(
@@ -622,7 +617,9 @@ async fn discover_and_scrape(
             break;
         }
     }
-    Err(anyhow!("Firecrawl search found no fetchable canonical article URL"))
+    Err(anyhow!(
+        "Firecrawl search found no fetchable canonical article URL"
+    ))
 }
 
 fn search_urls(obs: &Value) -> Vec<String> {
@@ -668,7 +665,12 @@ async fn wayback_then_fetch(
     url: &str,
 ) -> Result<FetchedBody> {
     let result = executor
-        .run_configured("wayback_availability", json!({"url": url}), user_agent, keys)
+        .run_configured(
+            "wayback_availability",
+            json!({"url": url}),
+            user_agent,
+            keys,
+        )
         .await?;
     if let Some(err) = result.error {
         return Err(anyhow!(err));
@@ -677,7 +679,12 @@ async fn wayback_then_fetch(
         .observations
         .pointer("/url")
         .or_else(|| result.observations.pointer("/snapshot"))
-        .or_else(|| result.observations.get("closest").and_then(|c| c.get("url")))
+        .or_else(|| {
+            result
+                .observations
+                .get("closest")
+                .and_then(|c| c.get("url"))
+        })
         .and_then(Value::as_str)
         .map(|s| s.to_string());
     let Some(snapshot) = snapshot else {
@@ -773,8 +780,10 @@ fn html_main_content(html: &str) -> String {
                 if name == "script" || name == "style" || name == "noscript" {
                     in_script = !tag.trim().starts_with('/');
                 }
-                if matches!(name.as_str(), "p" | "br" | "h1" | "h2" | "h3" | "li" | "div")
-                    && !tag.trim().starts_with('/')
+                if matches!(
+                    name.as_str(),
+                    "p" | "br" | "h1" | "h2" | "h3" | "li" | "div"
+                ) && !tag.trim().starts_with('/')
                 {
                     text.push('\n');
                 }

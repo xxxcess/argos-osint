@@ -516,7 +516,13 @@ pub fn insight_stats_line(stats: &InsightStats) -> String {
         + stats.co_mentioned;
     format!(
         "Gated {}  Claims {}  Fact {}  Inference {}  Context {}  Dropped {}  Links {}",
-        stats.gated, stats.claims, stats.facts, stats.inferences, stats.context, stats.dropped, links
+        stats.gated,
+        stats.claims,
+        stats.facts,
+        stats.inferences,
+        stats.context,
+        stats.dropped,
+        links
     )
 }
 
@@ -708,7 +714,14 @@ pub async fn extract_for_article_body(
         ));
     }
     if body_markdown.trim().is_empty() {
-        return Ok(finish_insights(1, 0, &[article.clone()], Vec::new(), &[], &[]));
+        return Ok(finish_insights(
+            1,
+            0,
+            &[article.clone()],
+            Vec::new(),
+            &[],
+            &[],
+        ));
     }
     let span_article = article_with_body_spans(article, body_markdown);
     let packet = [span_article];
@@ -716,14 +729,7 @@ pub async fn extract_for_article_body(
     let raw = ask_claims(synthesis, &body_lead_prompt(BODY_CLAIM_LIMIT), &user).await?;
     let (mut lead, lead_dropped) = accept_claims(&packet, &raw, AcceptMode::Lead);
     if lead.is_empty() {
-        return Ok(finish_insights(
-            1,
-            lead_dropped,
-            &packet,
-            lead,
-            &[],
-            &[],
-        ));
+        return Ok(finish_insights(1, lead_dropped, &packet, lead, &[], &[]));
     }
     merge_aliases(&mut lead, &packet);
     let mut catalog = peer_articles.to_vec();
@@ -738,14 +744,7 @@ pub async fn extract_for_article_body(
     };
     apply_peer_support(&mut lead, &catalog, &peers);
     let lead = cap_claims(dedupe_claims(lead), BODY_CLAIM_LIMIT);
-    Ok(finish_insights(
-        1,
-        lead_dropped,
-        &packet,
-        lead,
-        &[],
-        &[],
-    ))
+    Ok(finish_insights(1, lead_dropped, &packet, lead, &[], &[]))
 }
 
 fn packet_json_with_body(article: &AtlasArticleRow, body_markdown: &str) -> Result<String> {
@@ -800,7 +799,12 @@ pub fn related_articles<'a>(
             Some((score, article))
         })
         .collect();
-    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.id.cmp(&right.1.id)));
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.id.cmp(&right.1.id))
+    });
     scored
         .into_iter()
         .take(RELATED_LIMIT)
@@ -877,9 +881,7 @@ pub fn apply_admiralty_evaluation(
         .collect();
     for claim in claims.iter_mut() {
         let article = articles.iter().find(|row| row.id == claim.article_id);
-        let domain = article
-            .map(|row| row.source_domain.as_str())
-            .unwrap_or("");
+        let domain = article.map(|row| row.source_domain.as_str()).unwrap_or("");
         let (reliability, entry) = match index.as_ref() {
             Some(index) => index.reliability_for_domain(domain),
             None => (SourceReliability::F, None),
@@ -903,7 +905,9 @@ pub fn apply_admiralty_evaluation(
         claim.reliability = reliability.as_str().into();
         claim.info_credibility = credibility.as_u8();
         claim.admiralty = code.display();
-        claim.rsp_status = entry.map(|item| item.status.as_str().to_string()).unwrap_or_default();
+        claim.rsp_status = entry
+            .map(|item| item.status.as_str().to_string())
+            .unwrap_or_default();
     }
 }
 
@@ -1697,9 +1701,7 @@ mod tests {
 
     #[test]
     fn admiralty_scales_claim_confidence_from_rsp_and_peers() {
-        use crate::osint::wikipedia_rsp::{
-            install_index, parse_rsp_wikitext, RspIndex, RspStatus,
-        };
+        use crate::osint::wikipedia_rsp::{install_index, parse_rsp_wikitext, RspIndex, RspStatus};
         let sample = r#"
 |- class="s-gr" id="Wire"
 | [[Wire]]

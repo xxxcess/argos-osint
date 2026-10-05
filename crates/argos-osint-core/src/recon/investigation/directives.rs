@@ -795,38 +795,125 @@ fn directive(
 /// domains. A successful derivation does not use this set; the model infers the goals
 /// from the prompt. A prompt identifier (IP, CVE, wallet, …) joins d1's targets.
 pub fn fallback_directives(question: &str, thread: &[String]) -> Vec<Directive> {
+    fallback_directives_for(question, thread, crate::intel_recon::ReportMode::Verify)
+}
+
+/// Deterministic directives shaped for the classified Recon mode. Verify keeps the
+/// identity / accounts / companies set used for who-is prompts; Explain and Assess
+/// Outlook use situation and outlook goals and bias toward `news` context.
+pub fn fallback_directives_for(
+    question: &str,
+    thread: &[String],
+    mode: crate::intel_recon::ReportMode,
+) -> Vec<Directive> {
+    let mode = if mode == crate::intel_recon::ReportMode::FullAssessment {
+        crate::intel_recon::ReportMode::Explain
+    } else {
+        mode
+    };
     let entities = directive_entities(question, thread);
-    let mut first = directive(
-        "d1",
-        "Establish the subject's identity and public roles",
-        &entities,
-        &["person_name", "org_name", "url"],
-        "the subject's identity is confirmed by at least one accepted record",
-    );
-    for kind in prompt_targets(question) {
-        if !first.targets.contains(&kind) {
-            first.targets.push(kind);
+    let mut list = match mode {
+        crate::intel_recon::ReportMode::Explain => vec![
+            directive(
+                "d1",
+                "Establish the main actors and their roles",
+                &entities,
+                &["person_name", "org_name", "url", "news"],
+                "at least one primary actor or organization is established",
+            ),
+            directive(
+                "d2",
+                "Reconstruct recent events and their timeline",
+                &entities,
+                &["url", "news"],
+                "a dated sequence of recent events is supported",
+            ),
+            directive(
+                "d3",
+                "Map relationships, drivers, and affected parties",
+                &entities,
+                &["org_name", "domain", "url", "news"],
+                "key relationships or drivers are evidenced",
+            ),
+        ],
+        crate::intel_recon::ReportMode::AssessOutlook => vec![
+            directive(
+                "d1",
+                "Establish the current baseline and uncertainties",
+                &entities,
+                &["person_name", "org_name", "url", "news"],
+                "the baseline situation is supported by recent evidence",
+            ),
+            directive(
+                "d2",
+                "Identify competing scenarios for what happens next",
+                &entities,
+                &["url", "news"],
+                "at least two grounded scenarios are available",
+            ),
+            directive(
+                "d3",
+                "Find indicators that confirm or disconfirm each scenario",
+                &entities,
+                &["url", "news"],
+                "observable indicators for the scenarios are named",
+            ),
+        ],
+        _ => {
+            let mut first = directive(
+                "d1",
+                "Establish the subject's identity and public roles",
+                &entities,
+                &["person_name", "org_name", "url"],
+                "the subject's identity is confirmed by at least one accepted record",
+            );
+            for kind in prompt_targets(question) {
+                if !first.targets.contains(&kind) {
+                    first.targets.push(kind);
+                }
+            }
+            vec![
+                first,
+                directive(
+                    "d2",
+                    "Find the subject's official online accounts and websites",
+                    &entities,
+                    &["handle", "domain", "url"],
+                    "at least one subject-owned handle or domain is accepted",
+                ),
+                directive(
+                    "d3",
+                    "Find organizations affiliated with the subject and their contact domains",
+                    &entities,
+                    &["org_name", "domain", "email"],
+                    "at least one affiliated organization or contact domain is accepted",
+                ),
+            ]
         }
-    }
-    let mut list = vec![
-        first,
-        directive(
-            "d2",
-            "Find the subject's official online accounts and websites",
-            &entities,
-            &["handle", "domain", "url"],
-            "at least one subject-owned handle or domain is accepted",
-        ),
-        directive(
-            "d3",
-            "Find organizations affiliated with the subject and their contact domains",
-            &entities,
-            &["org_name", "domain", "email"],
-            "at least one affiliated organization or contact domain is accepted",
-        ),
-    ];
+    };
     apply_context_targets(&mut list, question, thread);
+    ensure_mode_news_target(&mut list, mode);
     list
+}
+
+fn ensure_mode_news_target(list: &mut [Directive], mode: crate::intel_recon::ReportMode) {
+    if !matches!(
+        mode,
+        crate::intel_recon::ReportMode::Explain | crate::intel_recon::ReportMode::AssessOutlook
+    ) {
+        return;
+    }
+    let has_news = list.iter().any(|item| {
+        item.targets
+            .iter()
+            .any(|target| target == super::tool_io::NEWS_KIND)
+    });
+    if has_news {
+        return;
+    }
+    if let Some(first) = list.first_mut() {
+        first.targets.push(super::tool_io::NEWS_KIND.into());
+    }
 }
 
 /// Why a goal is not a valid directive goal, if it is not (tests; parsing uses

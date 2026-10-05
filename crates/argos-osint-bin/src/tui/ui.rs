@@ -766,8 +766,11 @@ fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock 
             } else {
                 plan.picker_transport.as_str()
             };
+            let mode = argos_osint_core::intel_recon::ReportMode::parse(&plan.report_mode)
+                .map(|mode| format!(" · {}", mode.title()))
+                .unwrap_or_default();
             format!(
-                "Recon log · tool picker ({transport}) · {}",
+                "Recon log · tool picker ({transport}){mode} · {}",
                 clip_chars(&plan.directives[0].goal, 64)
             )
         }
@@ -908,6 +911,12 @@ fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock 
 /// probabilities stay in `plan_json` (`recon show`); they are not rendered here.
 fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> Vec<String> {
     let mut lines = Vec::new();
+    if !plan.report_mode.is_empty() {
+        let title = argos_osint_core::intel_recon::ReportMode::parse(&plan.report_mode)
+            .map(|mode| mode.title())
+            .unwrap_or(plan.report_mode.as_str());
+        lines.push(format!("Report mode: {title}"));
+    }
     lines.push(
         if matches!(
             plan.directives_mode.as_str(),
@@ -997,28 +1006,46 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> 
             ));
         }
     }
-    let explicit: Vec<_> = plan
+    let format_seed = |binding: &recon::Binding| {
+        let platform = if binding.qualifier.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", binding.qualifier)
+        };
+        if binding.unverified {
+            format!(
+                "{} {}{platform} · named in {}, unverified",
+                binding.kind, binding.value, binding.evidence_id
+            )
+        } else {
+            format!("{} {}{platform}", binding.kind, binding.value)
+        }
+    };
+    let from_brain: Vec<_> = plan
         .bindings
         .iter()
-        .filter(|binding| binding.step_id.is_empty() && !binding.inferred)
-        .map(|binding| {
-            let platform = if binding.qualifier.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", binding.qualifier)
-            };
-            if binding.unverified {
-                format!(
-                    "{} {}{platform} · named in {}, unverified",
-                    binding.kind, binding.value, binding.evidence_id
-                )
-            } else {
-                format!("{} {}{platform}", binding.kind, binding.value)
-            }
+        .filter(|binding| {
+            binding.step_id.is_empty()
+                && !binding.inferred
+                && binding.evidence_id.starts_with("brain:")
         })
+        .map(format_seed)
         .collect();
-    if !explicit.is_empty() {
-        lines.push(format!("From the question: {}", explicit.join("; ")));
+    if !from_brain.is_empty() {
+        lines.push(format!("From Brain: {}", from_brain.join("; ")));
+    }
+    let from_question: Vec<_> = plan
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.step_id.is_empty()
+                && !binding.inferred
+                && !binding.evidence_id.starts_with("brain:")
+        })
+        .map(format_seed)
+        .collect();
+    if !from_question.is_empty() {
+        lines.push(format!("From the question: {}", from_question.join("; ")));
     }
     if !plan.binding_notes.is_empty() {
         lines.push("Binding extraction:".into());
@@ -7317,6 +7344,7 @@ mod tests {
                 ),
             ],
             directives_mode: "directives_fallback".into(),
+            report_mode: "explain".into(),
             picker_transport: "decisions".into(),
             picker_model: "typesafe/jev-1.13".into(),
             picks: vec![PickRecord {
@@ -7378,6 +7406,16 @@ mod tests {
                     unverified: true,
                     source_tool: String::new(),
                 },
+                Binding {
+                    kind: "url".into(),
+                    value: "https://example.test/brain-article".into(),
+                    evidence_id: "brain:mem-1".into(),
+                    step_id: String::new(),
+                    qualifier: String::new(),
+                    inferred: false,
+                    unverified: false,
+                    source_tool: String::new(),
+                },
             ],
             binding_notes: vec!["s1 firecrawl_search: rules found 1; Recon model added 0".into()],
             fallback_requests: vec![
@@ -7433,11 +7471,12 @@ mod tests {
         assert!(
             block
                 .title
-                .starts_with("Recon log · tool picker (decisions)"),
+                .starts_with("Recon log · tool picker (decisions) · Explain ·"),
             "{}",
             block.title
         );
         for needle in [
+            "Report mode: Explain",
             "Directives (fallback set):",
             "d1: Establish the subject's identity and public roles · entities Jane Roe · targets person_name, org_name, url",
             "d2: Find the subject's official online accounts and websites · entities Jane Roe · targets handle, domain, url",
@@ -7451,6 +7490,7 @@ mod tests {
             "found handle janeroe (github) · evidence call-s1",
             "found handle janeroe (facebook) · evidence call-s1 · inferred",
             "Binding extraction:",
+            "From Brain: url https://example.test/brain-article",
             "From the question: handle janeroe (twitter) · named in d2, unverified",
             "s1 firecrawl_search: rules found 1; Recon model added 0",
             "Fallback requests:",

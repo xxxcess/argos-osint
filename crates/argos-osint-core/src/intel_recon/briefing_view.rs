@@ -36,10 +36,8 @@ pub fn bucket_extracted(
         .map(|(left, _, _)| left.as_str())
         .collect();
 
-    let by_fp: std::collections::HashMap<&str, &AtlasArticleClaim> = claims
-        .iter()
-        .map(|c| (c.fingerprint.as_str(), c))
-        .collect();
+    let by_fp: std::collections::HashMap<&str, &AtlasArticleClaim> =
+        claims.iter().map(|c| (c.fingerprint.as_str(), c)).collect();
 
     let mut facts = Vec::new();
     let mut inferences = Vec::new();
@@ -154,7 +152,15 @@ mod tests {
     #[test]
     fn buckets_split_facts_inferences_context_and_links() {
         let claims = vec![
-            claim("f1", "nato", "announces", "aid", "fact", 0.9, "NATO announces aid."),
+            claim(
+                "f1",
+                "nato",
+                "announces",
+                "aid",
+                "fact",
+                0.9,
+                "NATO announces aid.",
+            ),
             claim(
                 "f2",
                 "nato",

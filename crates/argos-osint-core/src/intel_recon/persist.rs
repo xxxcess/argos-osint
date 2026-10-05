@@ -238,15 +238,7 @@ impl Store {
                 body_markdown, content_hash, quality, quality_rationale, body_version,
                 fetch_tool, fetched_at, retry_after, state, created_at, updated_at
              ) VALUES (?1,?2,?3,?4,'',?5,?6,'','','unavailable','',1,'','','','idle',?7,?7)",
-            params![
-                id,
-                article_id,
-                run_id,
-                url,
-                source_domain,
-                source_name,
-                ts
-            ],
+            params![id, article_id, run_id, url, source_domain, source_name, ts],
         )?;
         Ok(self.article_body_by_id(&id)?.expect("just inserted"))
     }
@@ -439,9 +431,7 @@ impl Store {
              ) VALUES (?1,?2,?3,?4,NULL,?5,'{}',0,?6,?6)",
             params![id, article_id, run_id, article_url, scope_json, ts],
         )?;
-        Ok(self
-            .intel_investigation_by_id(&id)?
-            .expect("just inserted"))
+        Ok(self.intel_investigation_by_id(&id)?.expect("just inserted"))
     }
 
     pub fn intel_investigation_for_article(
@@ -652,7 +642,16 @@ impl Store {
                 evidence_ids_json, judgment_json, assessment_version, waiting_on,
                 created_at, updated_at
              ) VALUES (?1,?2,?3,?4,?5,'',?6,1,'[]','{}',0,?7,?8,?8)",
-            params![id, job_id, section_key, title, ordinal, status, waiting_on, ts],
+            params![
+                id,
+                job_id,
+                section_key,
+                title,
+                ordinal,
+                status,
+                waiting_on,
+                ts
+            ],
         )?;
         Ok(self
             .intel_report_section(job_id, section_key)?
@@ -717,7 +716,12 @@ impl Store {
         Ok(())
     }
 
-    pub fn mark_sections_stale(&self, job_id: &str, keys: &[String], waiting_on: &str) -> Result<()> {
+    pub fn mark_sections_stale(
+        &self,
+        job_id: &str,
+        keys: &[String],
+        waiting_on: &str,
+    ) -> Result<()> {
         for key in keys {
             self.conn.execute(
                 "UPDATE intel_report_sections SET status='stale', waiting_on=?3, updated_at=?4
@@ -744,7 +748,15 @@ impl Store {
                 status, attempts, max_attempts, output_ref, lease_owner, lease_until,
                 error, created_at, updated_at
              ) VALUES (?1,?2,?3,?4,?5,'',?6,0,3,'','','','',?7,?7)",
-            params![id, job_id, task_type, section_key, depends_on_json, status, ts],
+            params![
+                id,
+                job_id,
+                task_type,
+                section_key,
+                depends_on_json,
+                status,
+                ts
+            ],
         )?;
         Ok(id)
     }
@@ -1215,7 +1227,13 @@ mod tests {
     fn migration_creates_intel_tables_and_body_round_trip() {
         let store = Store::memory().unwrap();
         let body = store
-            .ensure_article_body("art-1", "run-1", "https://example.com/a", "example.com", "Ex")
+            .ensure_article_body(
+                "art-1",
+                "run-1",
+                "https://example.com/a",
+                "example.com",
+                "Ex",
+            )
             .unwrap();
         assert_eq!(body.article_id, "art-1");
         store
@@ -1237,21 +1255,17 @@ mod tests {
             .ensure_intel_investigation("art-1", "run-1", "https://example.com/a", "{}")
             .unwrap();
         let job = store
-            .insert_report_job(
-                &inv.id,
-                "art-1",
-                "verify",
-                1,
-                "{}",
-                "{}",
-                6,
-                0,
-                12,
-                None,
-            )
+            .insert_report_job(&inv.id, "art-1", "verify", 1, "{}", "{}", 6, 0, 12, None)
             .unwrap();
         store
-            .insert_report_section(&job.id, "bluf", "Key Judgments / BLUF", 0, "waiting", "evidence")
+            .insert_report_section(
+                &job.id,
+                "bluf",
+                "Key Judgments / BLUF",
+                0,
+                "waiting",
+                "evidence",
+            )
             .unwrap();
         let sections = store.intel_report_sections(&job.id).unwrap();
         assert_eq!(sections.len(), 1);

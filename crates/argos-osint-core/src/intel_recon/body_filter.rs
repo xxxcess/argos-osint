@@ -167,8 +167,7 @@ fn merge_small_blocks(blocks: &mut Vec<(usize, usize)>, chars: &[char]) {
         let chrome = looks_like_chrome_heading(text.lines().next().unwrap_or(""));
         if let Some(prev) = out.last_mut() {
             let prev_text: String = chars[prev.0..prev.1].iter().collect();
-            let prev_chrome =
-                looks_like_chrome_heading(prev_text.lines().next().unwrap_or(""));
+            let prev_chrome = looks_like_chrome_heading(prev_text.lines().next().unwrap_or(""));
             // Never merge story prose into sponsored/related chrome (or the reverse).
             if chrome || prev_chrome {
                 out.push((start, end));
@@ -313,7 +312,10 @@ fn parse_irrelevant_ranges(
         .ok_or_else(|| anyhow!("missing irrelevant array"))?;
     let mut out = Vec::new();
     for item in items {
-        let start = item.get("start").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize;
+        let start = item
+            .get("start")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX) as usize;
         let end = item.get("end").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize;
         if start >= end || end > full_len {
             continue;
@@ -324,9 +326,7 @@ fn parse_irrelevant_ranges(
             .any(|c| start < c.end && end > c.start && start >= c.start && end <= c.end);
         // Also allow ranges that fall within a chunk with slight boundary fuzz.
         let within = batch.iter().any(|c| {
-            start >= c.start.saturating_sub(2)
-                && end <= c.end.saturating_add(2)
-                && start < end
+            start >= c.start.saturating_sub(2) && end <= c.end.saturating_add(2) && start < end
         });
         if !overlaps && !within {
             continue;
@@ -436,14 +436,19 @@ mod tests {
 
     #[test]
     fn chunks_preserve_absolute_offsets() {
-        let text = "First paragraph about Geneva talks with enough words to stand alone as a block.\n\n\
+        let text =
+            "First paragraph about Geneva talks with enough words to stand alone as a block.\n\n\
 Second paragraph continues the diplomatic story with additional detail for classifiers.\n\n\
 Related stories\n\
 [Other](https://example.com/x)";
         let chunks = chunk_article_body(text);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
-            let slice: String = text.chars().skip(chunk.start).take(chunk.end - chunk.start).collect();
+            let slice: String = text
+                .chars()
+                .skip(chunk.start)
+                .take(chunk.end - chunk.start)
+                .collect();
             assert_eq!(slice, chunk.text);
         }
     }

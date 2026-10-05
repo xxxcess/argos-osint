@@ -289,7 +289,10 @@ impl Store {
                         .collect::<rusqlite::Result<_>>()?;
                     columns
                 };
-                if !claim_columns.iter().any(|name| name == "source_reliability") {
+                if !claim_columns
+                    .iter()
+                    .any(|name| name == "source_reliability")
+                {
                     self.conn.execute_batch(
                         "ALTER TABLE insight_claims ADD COLUMN source_reliability TEXT NOT NULL DEFAULT '';
                          ALTER TABLE insight_claims ADD COLUMN info_credibility INTEGER NOT NULL DEFAULT 0;
@@ -924,11 +927,9 @@ impl Store {
     pub fn app_state_get(&self, key: &str) -> Result<Option<String>> {
         let value: Option<String> = self
             .conn
-            .query_row(
-                "SELECT value FROM app_state WHERE key=?1",
-                [key],
-                |row| row.get(0),
-            )
+            .query_row("SELECT value FROM app_state WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
             .optional()?;
         Ok(value)
     }

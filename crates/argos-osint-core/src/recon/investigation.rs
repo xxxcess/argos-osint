@@ -3256,8 +3256,8 @@ pub(crate) mod directives;
 pub use directives::parse_directives;
 pub use directives::{
     context_gate, directive_entities, directive_for_target, directive_query, fallback_directives,
-    grounded_query, known_directive_id, parse_directives_with, refers_back, relevance_gate,
-    GroundedQuery, QUALIFIERS,
+    fallback_directives_for, grounded_query, known_directive_id, parse_directives_with,
+    refers_back, relevance_gate, GroundedQuery, QUALIFIERS,
 };
 mod tool_io;
 #[cfg(test)]
@@ -3278,6 +3278,12 @@ pub use tool_io::{context_of, CONTEXT_KINDS, LEGAL_KIND, NEWS_KIND};
 pub(crate) fn social_or_publisher(domain: &str) -> bool {
     let host = domain.trim_start_matches("www.").to_ascii_lowercase();
     account_platform_host(&host) || publisher_host(&host)
+}
+
+/// News/reference publisher host (citations), used when classifying Brain resource URLs.
+pub(crate) fn is_publisher_host(host: &str) -> bool {
+    let host = host.trim_start_matches("www.").to_ascii_lowercase();
+    publisher_host(&host)
 }
 
 fn first<'a>(bindings: &'a [Binding], kind: &str) -> Option<&'a Binding> {
@@ -3658,26 +3664,33 @@ pub fn dependency_order(
 ) -> Vec<String> {
     let mut order: Vec<String> = picked.to_vec();
     let produces = |tool: &str, kind: &str| {
+        let tool = super::brain_resources::resolve_pick_tool(tool);
         output_kinds(tool).contains(&kind)
             || chat_produces
                 .get(tool)
                 .is_some_and(|kinds| kinds.iter().any(|item| item == kind))
+            || chat_produces.iter().any(|(pick, kinds)| {
+                super::brain_resources::resolve_pick_tool(pick) == tool
+                    && kinds.iter().any(|item| item == kind)
+            })
     };
     for _ in 0..(order.len() * order.len() + 1) {
         let mut moved = false;
         'scan: for index in 0..order.len() {
             let tool = order[index].clone();
-            let Some(row) = dependency(&tool) else {
+            let catalog = super::brain_resources::resolve_pick_tool(&tool);
+            let Some(row) = dependency(catalog) else {
                 continue;
             };
-            let unmet = unmet_kinds(&tool, known);
+            let unmet = unmet_kinds(catalog, known);
             for group in &row.needs {
                 if !unmet.contains(group) {
                     continue;
                 }
                 let earlier = order[..index].iter().any(|other| {
-                    allowed_producer(&tool, other)
-                        && (row.producers.contains(&other.as_str())
+                    let other_cat = super::brain_resources::resolve_pick_tool(other);
+                    allowed_producer(catalog, other_cat)
+                        && (row.producers.contains(&other_cat)
                             || group.iter().any(|kind| produces(other, kind)))
                 });
                 if earlier {
@@ -3685,7 +3698,10 @@ pub fn dependency_order(
                 }
                 let later = order[index + 1..]
                     .iter()
-                    .position(|other| row.producers.contains(&other.as_str()))
+                    .position(|other| {
+                        row.producers
+                            .contains(&super::brain_resources::resolve_pick_tool(other))
+                    })
                     .map(|offset| index + 1 + offset);
                 if let Some(at) = later {
                     let producer = order.remove(at);
@@ -3718,7 +3734,7 @@ pub fn dependency_order(
 }
 
 fn canonical(id: &str) -> &str {
-    crate::osint::canonical_tool_id(id)
+    crate::osint::canonical_tool_id(super::brain_resources::resolve_pick_tool(id))
 }
 
 /// Earlier steps whose output a step needs: declared producers and output kinds for
@@ -3730,12 +3746,18 @@ pub fn depends_on(
     chat_needs: &HashMap<String, Vec<String>>,
     chat_produces: &HashMap<String, Vec<String>>,
 ) -> Vec<usize> {
-    let tool = &order[index];
+    let pick = &order[index];
+    let tool = super::brain_resources::resolve_pick_tool(pick);
     let mut wanted: Vec<String> = unmet_needs(tool, known)
         .iter()
         .flat_map(|group| group.split(" or ").map(String::from).collect::<Vec<_>>())
         .collect();
-    for kind in chat_needs.get(tool).into_iter().flatten() {
+    for kind in chat_needs
+        .get(pick)
+        .into_iter()
+        .chain(chat_needs.get(tool))
+        .flatten()
+    {
         if !known.iter().any(|binding| &binding.kind == kind) && !wanted.contains(kind) {
             wanted.push(kind.clone());
         }
@@ -3743,17 +3765,21 @@ pub fn depends_on(
     let producers = dependency(tool).map(|row| row.producers).unwrap_or(&[]);
     let mut deps = Vec::new();
     for (earlier, other) in order[..index].iter().enumerate() {
-        let declared = !wanted.is_empty() && producers.contains(&other.as_str());
-        let yields = allowed_producer(tool, other)
+        let other_cat = super::brain_resources::resolve_pick_tool(other);
+        let declared = !wanted.is_empty() && producers.contains(&other_cat);
+        let yields = allowed_producer(tool, other_cat)
             && wanted.iter().any(|kind| {
-                output_kinds(other).contains(&kind.as_str())
+                output_kinds(other_cat).contains(&kind.as_str())
                     || chat_produces
                         .get(other)
-                        .is_some_and(|kinds| kinds.contains(kind))
+                        .into_iter()
+                        .chain(chat_produces.get(other_cat))
+                        .flatten()
+                        .any(|item| item == kind)
             });
         let gated = GATES
             .iter()
-            .any(|(first, second)| *first == canonical(other) && *second == canonical(tool));
+            .any(|(first, second)| *first == canonical(other_cat) && *second == canonical(tool));
         if declared || yields || gated {
             deps.push(earlier);
         }
@@ -4831,6 +4857,15 @@ mod tests {
         );
         assert!(deps.contains(&at("firecrawl_search")));
         assert_eq!(fallback_directives("who is jane example?", &[]).len(), 3);
+        let explain = fallback_directives_for(
+            "what is going on with iran?",
+            &[],
+            crate::intel_recon::ReportMode::Explain,
+        );
+        assert!(explain[0].goal.to_ascii_lowercase().contains("actor"));
+        assert!(explain
+            .iter()
+            .any(|item| item.targets.iter().any(|target| target == "news")));
         // Geocoder coordinates make Overpass reachable.
         assert!(pickable("overpass_places"));
         assert!(dependencies()

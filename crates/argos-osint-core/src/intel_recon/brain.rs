@@ -80,9 +80,10 @@ pub fn upsert_recon_insights(
         let object = update.object.trim().to_ascii_lowercase();
         let fingerprint = insight_fingerprint(&ns, &entity, &predicate, &object);
         retag_memory_source(store, &fingerprint, run_id)?;
-        if let (Some(inv), Some(element_id)) =
-            (update.investigation_id.as_deref(), update.element_id.as_deref())
-        {
+        if let (Some(inv), Some(element_id)) = (
+            update.investigation_id.as_deref(),
+            update.element_id.as_deref(),
+        ) {
             let revised = serde_json::json!({
                 "confidence": update.confidence,
                 "stance": update.stance,
@@ -119,12 +120,14 @@ pub fn upsert_recon_insights(
 }
 
 fn retag_memory_source(store: &Store, fingerprint: &str, run_id: &str) -> Result<()> {
-    let memory_id: Option<String> = store.conn.query_row(
-        "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-        [fingerprint],
-        |row| row.get(0),
-    )
-    .ok();
+    let memory_id: Option<String> = store
+        .conn
+        .query_row(
+            "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
+            [fingerprint],
+            |row| row.get(0),
+        )
+        .ok();
     let Some(memory_id) = memory_id else {
         return Ok(());
     };

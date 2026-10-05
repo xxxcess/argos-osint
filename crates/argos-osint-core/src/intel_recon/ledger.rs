@@ -176,7 +176,10 @@ mod tests {
             &store,
             &inv.id,
             &[claim],
-            &[("Extra body assertion about logistics.".into(), "assertion".into())],
+            &[(
+                "Extra body assertion about logistics.".into(),
+                "assertion".into(),
+            )],
         )
         .unwrap();
         assert_eq!(rows.len(), 2);

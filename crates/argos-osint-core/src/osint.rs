@@ -30,8 +30,8 @@ pub use providers::{
     BATCH_SCRAPE_DEFAULT_URLS, BATCH_SCRAPE_MAX_URLS, SOCIAVAULT_ROUTES, SOCIAVAULT_TOOLS,
 };
 pub use source_eval::{
-    best_credibility, information_credibility, scale_confidence, AdmiraltyCode,
-    CredibilityInputs, InformationCredibility, SourceReliability,
+    best_credibility, information_credibility, scale_confidence, AdmiraltyCode, CredibilityInputs,
+    InformationCredibility, SourceReliability,
 };
 pub use wikipedia_rsp::{RspEntry, RspIndex, RspStatus, SourceReliabilityObservation};
 
@@ -2312,7 +2312,13 @@ impl Executor {
         let def = definition(id).ok_or_else(|| anyhow!("unknown tool {id}"))?;
         // A blank osint_user_agent is unset: requests fall back to DEFAULT_USER_AGENT.
         let user_agent = custom_user_agent(user_agent);
-        if ["nominatim_geocode", "sec_submissions", wikipedia_rsp::TOOL_ID].contains(&id) {
+        if [
+            "nominatim_geocode",
+            "sec_submissions",
+            wikipedia_rsp::TOOL_ID,
+        ]
+        .contains(&id)
+        {
             ensure!(
                 user_agent.is_some_and(|s| s.contains('@') || s.contains("http")),
                 "configure identifying osint_user_agent for {id}"

@@ -211,11 +211,7 @@ async fn run_acquire_body(runtime: &JobRuntime, article_id: &str) -> Result<Stri
                 runtime.keys.clone(),
                 runtime.synthesis_secret.clone(),
                 runtime.classifier_secret.clone(),
-                if ua.trim().is_empty() {
-                    None
-                } else {
-                    Some(ua)
-                },
+                if ua.trim().is_empty() { None } else { Some(ua) },
                 force_refresh,
                 runtime.cancel.clone(),
                 |_| {},
@@ -514,7 +510,10 @@ async fn run_synthesize(
                 mode,
                 section_key: section_key.into(),
                 section_title: section.title.clone(),
-                objective: format!("Write the {section_key} section for a {} report.", mode.title()),
+                objective: format!(
+                    "Write the {section_key} section for a {} report.",
+                    mode.title()
+                ),
                 article_title: runtime.article_title.clone(),
                 article_url: runtime.article_url.clone(),
                 preview: runtime.article_preview.clone(),

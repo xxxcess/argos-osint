@@ -59,6 +59,76 @@ impl ReportMode {
     }
 }
 
+/// Markdown section headings and analyst framing for a chat Recon synthesis answer.
+pub fn chat_response_spec(mode: ReportMode) -> String {
+    let mode = normalize_chat_mode(mode);
+    let headings: Vec<String> = chat_section_titles(mode)
+        .into_iter()
+        .map(|title| format!("## {title}"))
+        .collect();
+    format!(
+        "Recon mode: {} — {}.\n\
+Write the answer as Markdown with these headings in order (omit a heading only when \
+there is nothing evidence-backed to say under it):\n{}\n\
+After the sections, add one line per directive (D1:, D2:, …) saying whether it was met, \
+partly met, or not met, with citations.",
+        mode.title(),
+        mode.description(),
+        headings.join("\n")
+    )
+}
+
+fn normalize_chat_mode(mode: ReportMode) -> ReportMode {
+    if mode == ReportMode::FullAssessment {
+        ReportMode::Explain
+    } else {
+        mode
+    }
+}
+
+fn chat_section_titles(mode: ReportMode) -> Vec<&'static str> {
+    section_plan(mode)
+        .into_iter()
+        .map(|section| match (mode, section.key) {
+            (ReportMode::Verify, "assertions") => "Claims and Evidence Assessments",
+            _ => section.title,
+        })
+        .collect()
+}
+
+/// Compact mode guidance for directive derivation and tool picking (not synthesis prose).
+pub fn investigation_mode_spec(mode: ReportMode) -> String {
+    let mode = normalize_chat_mode(mode);
+    let sections = chat_section_titles(mode).join("; ");
+    let focus = match mode {
+        ReportMode::Verify => {
+            "Investigate assertions and consequential claims. Prefer tools that surface \
+primary reporting, corroboration, contradictions, corrections, and source reliability. \
+Do not expand into wide geopolitical overview unless the prompt requires it."
+        }
+        ReportMode::Explain => {
+            "Map the larger situation: actors and roles, event timeline and locations, \
+drivers, relationships, and implications. Prefer discovery and news/context tools that \
+establish who is involved, what happened when, and how entities connect."
+        }
+        ReportMode::AssessOutlook => {
+            "Establish the baseline, then competing scenarios with indicators and \
+disconfirming evidence. Prefer recent news and monitoring tools that support or refute \
+conditional outlooks; avoid speculative tools that cannot ground indicators."
+        }
+        ReportMode::FullAssessment => unreachable!("normalized away"),
+    };
+    format!(
+        "Recon mode: {} — {}.\n\
+Section priorities to support: {}.\n\
+Investigation focus: {}",
+        mode.title(),
+        mode.description(),
+        sections,
+        focus
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SectionPlan {
     pub key: &'static str,
@@ -211,5 +281,28 @@ mod tests {
     #[test]
     fn full_assessment_has_ten_sections() {
         assert_eq!(section_plan(ReportMode::FullAssessment).len(), 10);
+    }
+
+    #[test]
+    fn chat_response_spec_lists_mode_headings() {
+        let spec = chat_response_spec(ReportMode::Explain);
+        assert!(spec.contains("Recon mode: Explain"));
+        assert!(spec.contains("## Key Judgments / BLUF"));
+        assert!(spec.contains("## Actors, Roles and Relevant Relationships"));
+        assert!(spec.contains("D1:"));
+        let verify = chat_response_spec(ReportMode::Verify);
+        assert!(verify.contains("## Claims and Evidence Assessments"));
+        assert!(!verify.contains("Article Assertions"));
+    }
+
+    #[test]
+    fn investigation_mode_spec_guides_directives_and_picker() {
+        let explain = investigation_mode_spec(ReportMode::Explain);
+        assert!(explain.contains("Recon mode: Explain"));
+        assert!(explain.contains("Actors, Roles and Relevant Relationships"));
+        assert!(explain.contains("who is involved"));
+        let outlook = investigation_mode_spec(ReportMode::AssessOutlook);
+        assert!(outlook.contains("competing scenarios"));
+        assert!(outlook.contains("Indicators"));
     }
 }

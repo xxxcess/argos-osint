@@ -1,4 +1,5 @@
-//! Classifier picks the default Intel Recon report mode for a briefing article.
+//! Classifier picks the default Intel Recon report mode for a briefing article
+//! or a chat Recon user prompt.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -9,7 +10,7 @@ use crate::store::{AtlasArticleClaim, AtlasArticleRow};
 
 use super::modes::ReportMode;
 
-/// Inputs the classifier uses to choose a recon mode.
+/// Inputs the classifier uses to choose a recon mode for an Atlas article.
 #[derive(Clone, Debug)]
 pub struct ModeClassifyInput {
     pub category: String,
@@ -25,10 +26,7 @@ pub struct ModeClassifyInput {
 
 impl ModeClassifyInput {
     pub fn from_article(article: &AtlasArticleRow, claims: &[AtlasArticleClaim]) -> Self {
-        let fact_count = claims
-            .iter()
-            .filter(|c| c.classification == "fact")
-            .count();
+        let fact_count = claims.iter().filter(|c| c.classification == "fact").count();
         let inference_count = claims
             .iter()
             .filter(|c| c.classification == "inference")
@@ -36,10 +34,7 @@ impl ModeClassifyInput {
         let (high_confidence, mean_confidence) = if claims.is_empty() {
             (0.0, 0.0)
         } else {
-            let high = claims
-                .iter()
-                .map(|c| c.confidence)
-                .fold(0.0_f64, f64::max);
+            let high = claims.iter().map(|c| c.confidence).fold(0.0_f64, f64::max);
             let mean = claims.iter().map(|c| c.confidence).sum::<f64>() / claims.len() as f64;
             (high, mean)
         };
@@ -60,6 +55,14 @@ impl ModeClassifyInput {
             admiralty_sample,
         }
     }
+}
+
+/// Inputs the classifier uses to choose a recon mode for a chat Recon prompt.
+#[derive(Clone, Debug, Default)]
+pub struct PromptModeClassifyInput {
+    pub question: String,
+    pub prior: String,
+    pub known_facts: Vec<String>,
 }
 
 /// Classifiable defaults: Verify, Explain, Assess Outlook (never Full Assessment).
@@ -84,6 +87,63 @@ pub fn parse_mode_choice(raw: &str) -> ReportMode {
     }
 }
 
+/// Cheap keyword fallback when the classifier role is missing or fails.
+pub fn heuristic_prompt_mode(question: &str) -> ReportMode {
+    let q = question.to_ascii_lowercase();
+    let outlook = [
+        "what happens next",
+        "what might happen",
+        "outlook",
+        "scenario",
+        "forecast",
+        "escalate",
+        "escalation",
+        "risk of",
+        "will iran",
+        "early warning",
+    ];
+    let explain = [
+        "what is going on",
+        "what's going on",
+        "whats going on",
+        "what happened",
+        "what's happening",
+        "whats happening",
+        "explain",
+        "context",
+        "background",
+        "how does",
+        "situation",
+        "developments",
+        "why is",
+        "who is involved",
+    ];
+    let verify = [
+        "is it true",
+        "is this true",
+        "did they",
+        "did he",
+        "did she",
+        "verify",
+        "confirm",
+        "allegation",
+        "claim that",
+        "false flag",
+        "debunk",
+        "corroborat",
+    ];
+    if outlook.iter().any(|needle| q.contains(needle)) {
+        return ReportMode::AssessOutlook;
+    }
+    if verify.iter().any(|needle| q.contains(needle)) {
+        return ReportMode::Verify;
+    }
+    if explain.iter().any(|needle| q.contains(needle)) {
+        return ReportMode::Explain;
+    }
+    default_recon_mode()
+}
+
 fn mode_catalog_text() -> &'static str {
     "Modes and best use (pick exactly one; Full Assessment is not a classifier option):\n\
 - verify: Breaking news, allegations, conflicting reporting, or consequential claims. \
@@ -102,7 +162,7 @@ Example military deployment: routine exercise vs coercive signaling vs sustained
 Tradeoff: most vulnerable to speculation; missing info lowers confidence."
 }
 
-/// Build the Decisions API state/questions for mode selection.
+/// Build the Decisions API state/questions for article mode selection.
 pub fn mode_decisions_request(input: &ModeClassifyInput) -> (Value, Value) {
     let state = json!({
         "category": input.category,
@@ -129,7 +189,34 @@ pub fn mode_decisions_request(input: &ModeClassifyInput) -> (Value, Value) {
     (state, questions)
 }
 
-/// Ask the classifier which recon mode to default to. Falls back to Verify on error.
+/// Build the Decisions API state/questions for chat Recon prompt mode selection.
+pub fn prompt_mode_decisions_request(input: &PromptModeClassifyInput) -> (Value, Value) {
+    let facts: Vec<String> = input
+        .known_facts
+        .iter()
+        .take(6)
+        .map(|fact| fact.chars().take(160).collect())
+        .collect();
+    let state = json!({
+        "question": input.question,
+        "prior_synthesis": input.prior.chars().take(400).collect::<String>(),
+        "known_facts": facts,
+        "guidance": mode_catalog_text(),
+    });
+    let questions = json!([{
+        "id": "mode",
+        "type": "choice",
+        "question": "Which Recon report mode best fits this user investigation prompt?",
+        "options": {
+            "verify": "Verify — evidence-led claim investigation",
+            "explain": "Explain — actors, timeline, relationships",
+            "assess_outlook": "Assess Outlook — scenarios and indicators",
+        }
+    }]);
+    (state, questions)
+}
+
+/// Ask the classifier which recon mode to default to for an article. Falls back to Verify.
 pub async fn classify_recon_mode(
     classifier: Option<&ProviderSecret>,
     input: &ModeClassifyInput,
@@ -145,11 +232,43 @@ pub async fn classify_recon_mode(
     result.unwrap_or_else(|_| default_recon_mode())
 }
 
+/// Ask the classifier which recon mode fits a chat Recon user prompt.
+/// Falls back to [`heuristic_prompt_mode`] when the classifier is missing or fails.
+pub async fn classify_prompt_mode(
+    classifier: Option<&ProviderSecret>,
+    input: &PromptModeClassifyInput,
+) -> ReportMode {
+    let fallback = heuristic_prompt_mode(&input.question);
+    let Some(classifier) = classifier else {
+        return fallback;
+    };
+    let result = if provider::is_decisions_model(&classifier.model) {
+        classify_prompt_mode_decisions(classifier, input).await
+    } else {
+        classify_prompt_mode_chat(classifier, input).await
+    };
+    result.unwrap_or(fallback)
+}
+
 async fn classify_mode_decisions(
     classifier: &ProviderSecret,
     input: &ModeClassifyInput,
 ) -> Result<ReportMode> {
     let (state, questions) = mode_decisions_request(input);
+    let response = provider::decide(classifier, &state, &questions).await?;
+    let choice = response
+        .answers
+        .get("mode")
+        .and_then(|answer| answer.choice.as_deref())
+        .unwrap_or("");
+    Ok(parse_mode_choice(choice))
+}
+
+async fn classify_prompt_mode_decisions(
+    classifier: &ProviderSecret,
+    input: &PromptModeClassifyInput,
+) -> Result<ReportMode> {
+    let (state, questions) = prompt_mode_decisions_request(input);
     let response = provider::decide(classifier, &state, &questions).await?;
     let choice = response
         .answers
@@ -179,6 +298,46 @@ Return JSON only: {{\"mode\":\"verify\"|\"explain\"|\"assess_outlook\"}}.\n\n{}"
         "mean_confidence": input.mean_confidence,
         "high_confidence": input.high_confidence,
         "admiralty": input.admiralty_sample,
+    })
+    .to_string();
+    let messages = [
+        ChatMessage {
+            role: "system".into(),
+            content: system,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+        ChatMessage {
+            role: "user".into(),
+            content: user,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+    ];
+    let done = provider::complete(classifier, &messages, &[], |_| {}).await?;
+    Ok(parse_mode_from_chat(&done.content))
+}
+
+async fn classify_prompt_mode_chat(
+    classifier: &ProviderSecret,
+    input: &PromptModeClassifyInput,
+) -> Result<ReportMode> {
+    let system = format!(
+        "Choose the single best Recon report mode for this user investigation prompt. \
+Do not choose full_assessment. \
+Return JSON only: {{\"mode\":\"verify\"|\"explain\"|\"assess_outlook\"}}.\n\n{}",
+        mode_catalog_text()
+    );
+    let facts: Vec<String> = input
+        .known_facts
+        .iter()
+        .take(6)
+        .map(|fact| fact.chars().take(160).collect())
+        .collect();
+    let user = json!({
+        "question": input.question,
+        "prior_synthesis": input.prior.chars().take(400).collect::<String>(),
+        "known_facts": facts,
     })
     .to_string();
     let messages = [
@@ -251,6 +410,26 @@ mod tests {
         );
         assert_eq!(
             parse_mode_from_chat(r#"{"mode":"full_assessment"}"#),
+            ReportMode::Verify
+        );
+    }
+
+    #[test]
+    fn heuristic_prompt_mode_matches_common_prompts() {
+        assert_eq!(
+            heuristic_prompt_mode("what is going on with iran?"),
+            ReportMode::Explain
+        );
+        assert_eq!(
+            heuristic_prompt_mode("is it true that Iran transferred uranium?"),
+            ReportMode::Verify
+        );
+        assert_eq!(
+            heuristic_prompt_mode("what might happen next in the Strait?"),
+            ReportMode::AssessOutlook
+        );
+        assert_eq!(
+            heuristic_prompt_mode("who runs example.org?"),
             ReportMode::Verify
         );
     }

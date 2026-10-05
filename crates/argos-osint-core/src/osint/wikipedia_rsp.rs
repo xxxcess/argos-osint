@@ -190,8 +190,9 @@ impl SourceReliabilityObservation {
                 blacklisted: false,
                 last_year: String::new(),
                 summary: "Source is not listed on English Wikipedia WP:RSP.".into(),
-                rsp_url: "https://en.wikipedia.org/wiki/Wikipedia:Reliable_sources/Perennial_sources"
-                    .into(),
+                rsp_url:
+                    "https://en.wikipedia.org/wiki/Wikipedia:Reliable_sources/Perennial_sources"
+                        .into(),
                 listed: false,
             },
         }
@@ -254,12 +255,8 @@ pub fn parse_rsp_wikitext(wikitext: &str) -> Vec<RspEntry> {
             status
         };
         let domains = parse_uses(chunk);
-        let name = parse_source_name(chunk).unwrap_or_else(|| {
-            domains
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "unknown".into())
-        });
+        let name = parse_source_name(chunk)
+            .unwrap_or_else(|| domains.first().cloned().unwrap_or_else(|| "unknown".into()));
         let last_year = parse_last_year(chunk);
         let summary = parse_summary(chunk);
         if domains.is_empty() && name == "unknown" {
@@ -307,7 +304,12 @@ fn parse_uses(chunk: &str) -> Vec<String> {
         .split('|')
         .map(str::trim)
         .filter(|part| !part.is_empty() && *part != "—" && *part != "-")
-        .map(|part| normalize_host(part.trim_start_matches("https://").trim_start_matches("http://")))
+        .map(|part| {
+            normalize_host(
+                part.trim_start_matches("https://")
+                    .trim_start_matches("http://"),
+            )
+        })
         .filter(|host| host.contains('.'))
         .collect()
 }
@@ -316,7 +318,9 @@ fn parse_source_name(chunk: &str) -> Option<String> {
     // First cell after the row marker often looks like: | [[ABC News (United States)|ABC News (USA)]]
     for line in chunk.lines() {
         let line = line.trim();
-        if !line.starts_with('|') || line.starts_with("|{{") || line.starts_with("| ") && line.contains("WP:RSP")
+        if !line.starts_with('|')
+            || line.starts_with("|{{")
+            || line.starts_with("| ") && line.contains("WP:RSP")
         {
             continue;
         }
@@ -376,7 +380,9 @@ fn parse_summary(chunk: &str) -> String {
     }
     // Summary is typically the last prose cell before USES.
     for cell in cells.iter().rev() {
-        if cell.contains("{{WP:RSPUSES") || cell.contains("{{WP:RSPSTATUS") || cell.contains("{{WP:RSPLAST")
+        if cell.contains("{{WP:RSPUSES")
+            || cell.contains("{{WP:RSPSTATUS")
+            || cell.contains("{{WP:RSPLAST")
         {
             continue;
         }
@@ -454,7 +460,11 @@ pub fn resolve_lookup_inputs(inputs: &Value) -> Result<(String, String)> {
     Err(anyhow!("domain, url, or publisher required"))
 }
 
-pub fn observation_for(index: &RspIndex, domain: &str, publisher: &str) -> SourceReliabilityObservation {
+pub fn observation_for(
+    index: &RspIndex,
+    domain: &str,
+    publisher: &str,
+) -> SourceReliabilityObservation {
     let entry = if !domain.is_empty() {
         index.lookup_domain(domain)
     } else {

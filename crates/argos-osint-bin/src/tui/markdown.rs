@@ -55,8 +55,16 @@ pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {
     let mut rows = Vec::new();
     let mut fence: Option<String> = None;
     let mut blank = false;
+    let mut table: Vec<Vec<String>> = Vec::new();
+    let flush_table = |table: &mut Vec<Vec<String>>, rows: &mut Vec<MdLine>, width: usize| {
+        if table.is_empty() {
+            return;
+        }
+        rows.extend(render_table(std::mem::take(table), width));
+    };
     for line in text.split('\n') {
         if let Some(rest) = line.trim().strip_prefix("```") {
+            flush_table(&mut table, &mut rows, width);
             if fence.is_some() {
                 fence = None;
             } else {
@@ -65,6 +73,7 @@ pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {
             continue;
         }
         if fence.is_some() {
+            flush_table(&mut table, &mut rows, width);
             rows.extend(
                 hard_rows(line, width, Tone::Body)
                     .into_iter()
@@ -74,6 +83,7 @@ pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {
             continue;
         }
         if line.trim().is_empty() {
+            flush_table(&mut table, &mut rows, width);
             if !blank && !rows.is_empty() {
                 rows.push(MdLine {
                     pieces: Vec::new(),
@@ -85,26 +95,22 @@ pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {
         }
         blank = false;
         let trimmed = line.trim();
+        if let Some(cells) = table_row(trimmed) {
+            if is_table_separator_cells(&cells) {
+                // Keep an empty header marker so the next data rows stay in the block.
+                if table.is_empty() {
+                    continue;
+                }
+                // Separator only separates header from body; do not render it.
+                continue;
+            }
+            table.push(cells);
+            continue;
+        }
+        flush_table(&mut table, &mut rows, width);
         if is_rule(trimmed) {
             let bar = "─".repeat(width.clamp(1, 24));
             rows.push(md_line(vec![piece(bar, Tone::Dim)]));
-            continue;
-        }
-        if is_table_separator(trimmed) {
-            continue;
-        }
-        if trimmed.starts_with('|') && trimmed.matches('|').count() >= 2 {
-            let cells: Vec<&str> = trimmed
-                .trim_matches('|')
-                .split('|')
-                .map(str::trim)
-                .collect();
-            let joined = cells.join(" │ ");
-            rows.extend(
-                wrap_pieces(&inline(&joined), width)
-                    .into_iter()
-                    .map(md_line),
-            );
             continue;
         }
         if let Some(marks) = heading_marks(trimmed) {
@@ -141,6 +147,7 @@ pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {
                 .map(md_line),
         );
     }
+    flush_table(&mut table, &mut rows, width);
     if rows.is_empty() {
         rows.push(MdLine {
             pieces: Vec::new(),
@@ -148,6 +155,152 @@ pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {
         });
     }
     rows
+}
+
+/// Parse a GFM table row: leading pipe optional, at least two cells.
+fn table_row(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if !trimmed.contains('|') {
+        return None;
+    }
+    // Bare rules like `---` are not tables.
+    if is_rule(trimmed) {
+        return None;
+    }
+    let cells: Vec<String> = trimmed
+        .trim_matches(|ch| ch == '|')
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect();
+    if cells.len() < 2 {
+        return None;
+    }
+    // Reject prose that merely mentions a pipe once without looking tabular:
+    // require content on both sides of a pipe, or a leading/trailing pipe (canonical GFM).
+    let pipe_framed = trimmed.starts_with('|') || trimmed.ends_with('|');
+    if !pipe_framed {
+        let non_empty = cells.iter().filter(|cell| !cell.is_empty()).count();
+        if non_empty < 2 {
+            return None;
+        }
+    }
+    Some(cells)
+}
+
+fn is_table_separator_cells(cells: &[String]) -> bool {
+    cells.len() >= 2
+        && cells.iter().all(|cell| {
+            let cell = cell.trim();
+            !cell.is_empty()
+                && cell
+                    .chars()
+                    .all(|ch| ch == '-' || ch == ':' || ch.is_whitespace())
+        })
+}
+
+fn render_table(rows: Vec<Vec<String>>, width: usize) -> Vec<MdLine> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let columns = rows.iter().map(|row| row.len()).max().unwrap_or(0).max(1);
+    let mut grid: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|mut row| {
+            while row.len() < columns {
+                row.push(String::new());
+            }
+            row.truncate(columns);
+            row
+        })
+        .collect();
+    // Column widths from content, then shrink to fit the terminal.
+    let mut widths: Vec<usize> = (0..columns)
+        .map(|index| {
+            grid.iter()
+                .map(|row| row[index].chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(1)
+        })
+        .collect();
+    // Separators: ` │ ` between columns → 3 chars each gap.
+    let gaps = columns.saturating_sub(1) * 3;
+    let available = width.saturating_sub(gaps).max(columns);
+    let total: usize = widths.iter().sum();
+    if total > available {
+        // Shrink largest columns until they fit.
+        while widths.iter().sum::<usize>() > available {
+            if let Some((index, _)) = widths
+                .iter()
+                .enumerate()
+                .filter(|(_, width)| **width > 1)
+                .max_by_key(|(_, width)| *width)
+            {
+                widths[index] -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+    for row in &mut grid {
+        for (index, cell) in row.iter_mut().enumerate() {
+            *cell = clip_cell(cell, widths[index]);
+        }
+    }
+    let mut out = Vec::new();
+    for (row_index, row) in grid.iter().enumerate() {
+        let mut line = String::new();
+        for (index, cell) in row.iter().enumerate() {
+            if index > 0 {
+                line.push_str(" │ ");
+            }
+            let pad = widths[index].saturating_sub(cell.chars().count());
+            line.push_str(cell);
+            if pad > 0 {
+                line.push_str(&" ".repeat(pad));
+            }
+        }
+        let tone = if row_index == 0 {
+            Tone::Heading
+        } else {
+            Tone::Body
+        };
+        // Keep each table row on one visual line; hard-clip if still over width.
+        let clipped: String = line.chars().take(width).collect();
+        out.push(md_line(vec![piece(clipped, tone)]));
+        if row_index == 0 {
+            let rule: String = widths
+                .iter()
+                .enumerate()
+                .map(|(index, col)| {
+                    let bar = "─".repeat((*col).max(1));
+                    if index == 0 {
+                        bar
+                    } else {
+                        format!("─┼─{bar}")
+                    }
+                })
+                .collect();
+            out.push(md_line(vec![piece(
+                rule.chars().take(width).collect::<String>(),
+                Tone::Dim,
+            )]));
+        }
+    }
+    out
+}
+
+fn clip_cell(text: &str, width: usize) -> String {
+    let width = width.max(1);
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_string();
+    }
+    if width == 1 {
+        return "…".into();
+    }
+    let keep: String = text.chars().take(width - 1).collect();
+    format!("{keep}…")
 }
 
 fn md_line(pieces: Vec<Piece>) -> MdLine {
@@ -239,18 +392,6 @@ fn is_rule(line: &str) -> bool {
         && chars
             .iter()
             .all(|ch| *ch == '-' || *ch == '*' || *ch == '_')
-}
-
-fn is_table_separator(line: &str) -> bool {
-    let cells: Vec<&str> = line.trim_matches('|').split('|').collect();
-    cells.len() >= 2
-        && cells.iter().all(|cell| {
-            let cell = cell.trim();
-            !cell.is_empty()
-                && cell
-                    .chars()
-                    .all(|ch| ch == '-' || ch == ':' || ch.is_whitespace())
-        })
 }
 
 struct ListItem<'a> {
@@ -554,5 +695,35 @@ mod tests {
         }));
         assert!(flat(&lines).contains("• second"));
         assert!(!flat(&lines).contains("```"));
+    }
+
+    #[test]
+    fn markdown_tables_align_columns_and_drop_separators() {
+        let source = "| Actor | Role |\n| --- | --- |\n| Iran | State |\n| IAEA | Watchdog |\n";
+        let lines = markdown_lines(source, 40);
+        let text = flat(&lines);
+        assert!(!text.contains("---"));
+        assert!(text.contains("Actor"));
+        assert!(text.contains("│"));
+        assert!(text.contains("┼"));
+        let header = lines[0]
+            .pieces
+            .iter()
+            .map(|piece| piece.text.as_str())
+            .collect::<String>();
+        let body = lines[2]
+            .pieces
+            .iter()
+            .map(|piece| piece.text.as_str())
+            .collect::<String>();
+        // Columns stay vertically aligned across header and body.
+        let role_at = header.find("Role").expect("header Role");
+        assert_eq!(&body[role_at..role_at + 5], "State");
+        assert_eq!(lines[0].pieces[0].tone, Tone::Heading);
+        // Pipe-free GFM rows also parse.
+        let loose = markdown_lines("Left | Right\n--- | ---\nA | B\n", 30);
+        assert!(flat(&loose).contains("Left"));
+        assert!(flat(&loose).contains("A"));
+        assert!(!flat(&loose).contains("---"));
     }
 }

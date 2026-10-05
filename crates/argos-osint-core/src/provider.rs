@@ -397,7 +397,8 @@ pub struct ReconLimits {
     /// this, and never drops below `turn_seconds`. Missing values load as 900.
     #[serde(default = "default_max_turn_seconds")]
     pub max_turn_seconds: u16,
-    /// Recurring Firecrawl credits available to automatic investigation.
+    /// Recurring Firecrawl credits available to automatic investigation (local Argos
+    /// monthly allowance; independent of the Firecrawl account balance).
     #[serde(default = "default_firecrawl_credits")]
     pub firecrawl_credits: u32,
     /// Recurring Hunter credits available to automatic investigation.
@@ -468,7 +469,7 @@ fn default_max_turn_seconds() -> u16 {
     DEFAULT_MAX_TURN_SECONDS
 }
 fn default_firecrawl_credits() -> u32 {
-    200
+    1_000
 }
 fn default_hunter_credits() -> u32 {
     50
@@ -1513,6 +1514,11 @@ impl SettingsFile {
         if settings.defaults.seed_classifier() {
             migrated = true;
         }
+        // Bump the old product default (200) to the current monthly Firecrawl allowance.
+        if settings.recon_limits.firecrawl_credits == 200 {
+            settings.recon_limits.firecrawl_credits = default_firecrawl_credits();
+            migrated = true;
+        }
         let old_keys = toml::from_str::<toml::Value>(&raw)?
             .as_table()
             .is_some_and(|table| {
@@ -1654,6 +1660,21 @@ mod tests {
         let before = std::fs::read_to_string(&path).unwrap();
         SettingsFile::load_from(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn old_firecrawl_credit_default_migrates_to_1000() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[recon_limits]\nfirecrawl_credits = 200\n").unwrap();
+        let loaded = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(loaded.recon_limits.firecrawl_credits, 1_000);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.contains("firecrawl_credits = 1000"),
+            "migration should persist: {saved}"
+        );
+        assert_eq!(ReconLimits::default().firecrawl_credits, 1_000);
     }
 
     #[test]

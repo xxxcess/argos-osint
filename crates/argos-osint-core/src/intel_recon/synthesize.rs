@@ -289,7 +289,11 @@ Return JSON: {{\"markdown\":string,\"summary\":string,\"confidence\":number,\
         input.article_url,
         input.preview.chars().take(500).collect::<String>(),
         input.body_excerpt.chars().take(3000).collect::<String>(),
-        input.shared_assessment.chars().take(1500).collect::<String>(),
+        input
+            .shared_assessment
+            .chars()
+            .take(1500)
+            .collect::<String>(),
         upstream.chars().take(2000).collect::<String>(),
         elements_block,
         evidence_block,
@@ -398,7 +402,9 @@ fn deterministic_section(input: &SectionSynthInput) -> SectionSynthOutput {
             ));
             lines.push(String::new());
             if input.elements.is_empty() {
-                lines.push("No in-scope elements were available yet; key judgments await evidence.".into());
+                lines.push(
+                    "No in-scope elements were available yet; key judgments await evidence.".into(),
+                );
             } else {
                 lines.push("Preliminary judgments:".into());
                 for el in input.elements.iter().take(5) {
@@ -416,9 +422,7 @@ fn deterministic_section(input: &SectionSynthInput) -> SectionSynthOutput {
             for el in &input.elements {
                 lines.push(format!(
                     "- `{}` · {} · {}",
-                    el.status,
-                    el.element_type,
-                    el.original_text
+                    el.status, el.element_type, el.original_text
                 ));
             }
             lines.push(String::new());
@@ -597,6 +601,10 @@ Subscribe to our newsletter for more coverage.";
         .await;
         assert!(!out.refined);
         assert!(out.markdown.contains("Diplomats from France"));
-        assert!(!matches!(out.quality, BodyQuality::Unavailable), "{}", out.rationale);
+        assert!(
+            !matches!(out.quality, BodyQuality::Unavailable),
+            "{}",
+            out.rationale
+        );
     }
 }

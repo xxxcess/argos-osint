@@ -584,11 +584,20 @@ pub struct ProviderFault {
 pub enum AtlasEvent {
     Status(String),
     /// Insight extraction step progress (`done` of `total` work units).
-    InsightProgress { done: u32, total: u32 },
+    InsightProgress {
+        done: u32,
+        total: u32,
+    },
     Stats(RunStats),
     Article(FeedArticle),
-    Replaced { id: String, article: FeedArticle },
-    Classified { id: String, category: String },
+    Replaced {
+        id: String,
+        article: FeedArticle,
+    },
+    Classified {
+        id: String,
+        category: String,
+    },
     Note(String),
     Fault(ProviderFault),
 }

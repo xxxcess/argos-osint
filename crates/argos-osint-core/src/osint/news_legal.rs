@@ -539,10 +539,7 @@ mod tests {
             .map(|tool| tool.id)
             .collect();
         assert_eq!(&news[..NEWS_TOOLS.len()], NEWS_TOOLS);
-        assert_eq!(
-            news[NEWS_TOOLS.len()],
-            "wikipedia_source_reliability"
-        );
+        assert_eq!(news[NEWS_TOOLS.len()], "wikipedia_source_reliability");
         assert_eq!(
             &news[NEWS_TOOLS.len() + 1..],
             super::super::atlas_news::ATLAS_TOOLS

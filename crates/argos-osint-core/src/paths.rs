@@ -23,6 +23,19 @@ pub fn db_path() -> PathBuf {
     home_dir().join("argos.db")
 }
 
+/// Brain vector index (LanceDB) for the default database, beside `argos.db`.
+pub fn lancedb_dir() -> PathBuf {
+    home_dir().join("memory_lancedb")
+}
+
+/// Brain vector index for the database at `db`: `memory_lancedb/` in the same folder.
+/// For [`db_path`] this is [`lancedb_dir`].
+pub fn lancedb_dir_for(db: &std::path::Path) -> PathBuf {
+    db.parent()
+        .map(|dir| dir.join("memory_lancedb"))
+        .unwrap_or_else(lancedb_dir)
+}
+
 pub fn auth_path() -> PathBuf {
     home_dir().join("auth.json")
 }

@@ -1,0 +1,7 @@
+# Build-time environment for every crate in the graph, including dependency build
+# scripts. The lance-* crates run prost-build, which needs protoc; tools/protoc
+# finds the prebuilt binary from the `protoc-bin-vendored` build-dependency for the
+# host OS/arch (macOS x86_64 / arm64, Linux x86_64 / aarch64), so no manual install
+# is needed. An explicitly exported PROTOC still wins (force = false).
+[env]
+PROTOC = { value = "tools/protoc", relative = true, force = false }

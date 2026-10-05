@@ -1357,6 +1357,7 @@ impl Store {
         Ok(())
     }
     pub fn delete_thread(&mut self, tid: &str, insights: bool) -> Result<bool> {
+        let mut doomed_memories: Vec<String> = Vec::new();
         let tx = self.conn.transaction()?;
         let found = tx.execute(
             "UPDATE recon_threads SET deleted=1 WHERE id=?1 AND deleted=0",
@@ -1380,6 +1381,7 @@ impl Store {
                     [id.as_str()],
                 )?;
                 tx.execute("DELETE FROM memories WHERE id=?1 AND id NOT IN (SELECT memory_id FROM insight_claims)",[id.as_str()])?;
+                doomed_memories.push(id);
             }
         } else {
             tx.execute("UPDATE insight_sources SET deleted_origin=1,thread_id=NULL,run_id=NULL,answer_id='deleted-origin' WHERE thread_id=?1",[tid])?;
@@ -1429,6 +1431,7 @@ impl Store {
             [tid],
         )?;
         tx.commit()?;
+        self.index_remove_missing(&doomed_memories);
         Ok(true)
     }
     pub fn attach_call(&self, call_id: &str, tid: &str) -> Result<bool> {
@@ -3672,6 +3675,7 @@ fn persist_claims(
     evidence: &[(String, ToolResult)],
     claims: &[Value],
 ) -> Result<()> {
+    let mut written: Vec<String> = Vec::new();
     let tx = store.conn.transaction()?;
     let source_exists:i64=tx.query_row("SELECT COUNT(*) FROM recon_messages m JOIN recon_threads t ON t.id=m.thread_id WHERE m.id=?1 AND m.thread_id=?2 AND t.deleted=0",params![answer.id,answer.thread_id],|r|r.get(0))?;
     ensure!(source_exists == 1, "source answer or thread was deleted");
@@ -3742,6 +3746,7 @@ fn persist_claims(
             };
             let memory_id = id("mem");
             tx.execute("INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",params![memory_id,claim,now(),serde_json::to_string(&source)?])?;
+            written.push(memory_id.clone());
             tx.execute("INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![fingerprint,memory_id,entity,predicate,object,claim_value.get("topic").and_then(Value::as_str).unwrap_or(""),claim_value.get("classification").and_then(Value::as_str).unwrap_or("fact"),claim_value.get("confidence").and_then(Value::as_f64).unwrap_or(0.5),now(),now()])?;
             let mut stmt=tx.prepare("SELECT fingerprint FROM insight_claims WHERE entity_id=?1 AND predicate=?2 AND fingerprint<>?3")?;
             let other: Vec<String> = stmt
@@ -3767,6 +3772,7 @@ fn persist_claims(
         params![now(), answer.id],
     )?;
     tx.commit()?;
+    store.index_upsert(&written);
     Ok(())
 }
 fn turn_clock(floor: u16, max_turn: u16) -> Arc<std::sync::Mutex<budget::TurnClock>> {

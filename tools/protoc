@@ -1,0 +1,41 @@
+#!/bin/sh
+# protoc shim for the lance-* build scripts (prost-build reads $PROTOC).
+# .cargo/config.toml points PROTOC here, so `cargo build` needs no system protoc
+# on Intel or Apple Silicon macOS or on x86_64/aarch64 Linux.
+#
+# Order: the prebuilt protoc that Cargo already downloaded for the
+# `protoc-bin-vendored` build-dependency of argos-osint-core, matching this host
+# (uname); otherwise a protoc on PATH. Set PROTOC yourself to bypass this shim.
+set -e
+
+case "$(uname -s)-$(uname -m)" in
+  Darwin-x86_64) plat=macos-x86_64 ;;
+  Darwin-arm64 | Darwin-aarch64) plat=macos-aarch_64 ;;
+  Linux-x86_64 | Linux-amd64) plat=linux-x86_64 ;;
+  Linux-aarch64 | Linux-arm64) plat=linux-aarch_64 ;;
+  Linux-i686 | Linux-i386) plat=linux-x86_32 ;;
+  *) plat="" ;;
+esac
+
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+if [ -n "$plat" ]; then
+  found=""
+  for candidate in "$cargo_home"/registry/src/*/protoc-bin-vendored-"$plat"-*/bin/protoc; do
+    [ -f "$candidate" ] && found="$candidate"
+  done
+  if [ -n "$found" ]; then
+    [ -x "$found" ] || chmod +x "$found" 2>/dev/null || true
+    exec "$found" "$@"
+  fi
+fi
+
+self_dir=$(cd "$(dirname "$0")" && pwd)
+IFS=:
+for dir in $PATH; do
+  if [ -x "$dir/protoc" ] && [ "$dir" != "$self_dir" ]; then
+    exec "$dir/protoc" "$@"
+  fi
+done
+
+echo "argos: no protoc found. Expected the vendored binary under $cargo_home/registry/src/*/protoc-bin-vendored-${plat:-<platform>}-*/bin/protoc (run \`cargo fetch\`), or install one: brew install protobuf / apt install protobuf-compiler, or set PROTOC." >&2
+exit 127

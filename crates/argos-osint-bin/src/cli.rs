@@ -37,13 +37,17 @@ enum Command {
         text: String,
     },
     /// Retrieve relevant saved insights as JSON, including their source metadata.
+    /// Uses hybrid recall (LanceDB vectors + Jaccard), or Jaccard when ARGOS_EMBED=0.
     Recall {
         query: String,
         #[arg(long, default_value_t = 8)]
         limit: usize,
     },
-    /// List all saved memories as JSON.
-    Memories,
+    /// List all saved memories as JSON, or manage the Brain vector index.
+    Memories {
+        #[command(subcommand)]
+        command: Option<MemoriesCommand>,
+    },
     /// List investigated claims with their evidence links.
     Insights {
         #[arg(long, default_value = "")]
@@ -74,6 +78,13 @@ enum Command {
         #[command(subcommand)]
         command: DefaultsCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum MemoriesCommand {
+    /// Rebuild the LanceDB vector index (memory_lancedb beside argos.db) from every
+    /// memory and record the embedding fingerprint.
+    Reindex,
 }
 
 #[derive(Subcommand)]
@@ -241,7 +252,22 @@ pub async fn dispatch() -> Result<()> {
             );
             Ok(())
         }
-        Some(Command::Memories) => {
+        Some(Command::Memories {
+            command: Some(MemoriesCommand::Reindex),
+        }) => {
+            let store = open_store()?;
+            let report = store.reindex_memory_vectors()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "memories": report.memories,
+                    "lance_dir": report.lance_dir.display().to_string(),
+                    "fingerprint": report.fingerprint,
+                }))?
+            );
+            Ok(())
+        }
+        Some(Command::Memories { command: None }) => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&open_store()?.list_memories()?)?

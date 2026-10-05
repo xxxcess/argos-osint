@@ -3165,6 +3165,32 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// `recall_for_turn` stays sync and runs inside the async Recon turn; with the
+    /// Lance index on, its sync wrapper must not panic inside the runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recall_for_turn_uses_lance_inside_the_turn_runtime() {
+        let _fake = crate::embed::testing::fake();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("argos.db")).unwrap();
+        let memory = store
+            .add_memory(
+                "Northwind ferry timetable changed in March",
+                "fact",
+                false,
+                crate::brain::MemorySource {
+                    app: "test".into(),
+                    conversation_id: "c".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        let (recalled, _, _) =
+            recall_for_turn(&store, "no-thread", "northwind ferry timetable").unwrap();
+        assert!(recalled.iter().any(|item| item.memory_id == memory.id));
+        assert!(dir.path().join("memory_lancedb").is_dir());
+    }
+
     fn action(tool_id: &str, arguments: Value) -> investigation::ProposedAction {
         investigation::ProposedAction {
             id: String::new(),

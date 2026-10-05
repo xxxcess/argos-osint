@@ -268,6 +268,65 @@ pub fn recall(memories: &[Memory], query: &str, top_k: usize) -> Vec<ScoredMemor
     scored
 }
 
+/// Cosine similarity below which a vector hit is noise for MiniLM and is dropped.
+pub const SEMANTIC_FLOOR: f32 = 0.35;
+/// Bonus weight for the weaker signal when lexical and vector recall agree.
+const AGREEMENT_WEIGHT: f32 = 0.1;
+
+/// Blends vector hits (`(memory_id, cosine similarity)` from the Lance index) with
+/// the Jaccard/category ranking of [`recall`]. Each memory scores the stronger of
+/// the two signals plus a small bonus from the weaker one, so a paraphrase with no
+/// shared words is still recalled and agreement ranks first. Vector hits below
+/// [`SEMANTIC_FLOOR`] or for ids not in `memories` are ignored. With no vector hits
+/// this is exactly [`recall`]. Entity-linked insights (`Store::recon_recall`) are
+/// merged on top by `recall_for_turn`.
+pub fn hybrid_recall(
+    memories: &[Memory],
+    query: &str,
+    vector_hits: &[(String, f32)],
+    top_k: usize,
+) -> Vec<ScoredMemory> {
+    let query = query.trim();
+    if query.is_empty() || memories.is_empty() || top_k == 0 {
+        return Vec::new();
+    }
+    let lexical: std::collections::HashMap<String, f32> = recall(memories, query, memories.len())
+        .into_iter()
+        .map(|hit| (hit.memory.id, hit.score))
+        .collect();
+    let mut semantic: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+    for (id, score) in vector_hits {
+        if *score >= SEMANTIC_FLOOR {
+            let slot = semantic.entry(id.as_str()).or_insert(*score);
+            *slot = slot.max(*score);
+        }
+    }
+    let mut scored = Vec::new();
+    for memory in memories {
+        let lex = lexical.get(&memory.id).copied();
+        let sem = semantic.get(memory.id.as_str()).copied();
+        if lex.is_none() && sem.is_none() {
+            continue;
+        }
+        let (lex, sem) = (lex.unwrap_or(0.0), sem.unwrap_or(0.0));
+        let mut score = lex.max(sem) + AGREEMENT_WEIGHT * lex.min(sem);
+        if memory.pinned && sem > 0.0 {
+            score = score.max(0.55);
+        }
+        scored.push(ScoredMemory {
+            memory: memory.clone(),
+            score,
+        });
+    }
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(top_k);
+    scored
+}
+
 /// Format recalled insights with their origin for a downstream chat app.
 pub fn format_injection(hits: &[ScoredMemory]) -> String {
     if hits.is_empty() {
@@ -348,6 +407,36 @@ mod tests {
         let hits = recall(&all, "who am I", 3);
         assert_eq!(hits[0].memory.id, "2");
         assert!(hits[0].score >= 0.9);
+    }
+
+    #[test]
+    fn hybrid_recall_adds_paraphrases_and_rewards_agreement() {
+        let all = vec![
+            mem("lex", "Harbor tanker manifests list the cargo"),
+            mem("sem", "The vessel docked at dawn"),
+            mem("both", "Harbor arrivals logged by the port authority"),
+            mem("noise", "Kettle in the galley"),
+        ];
+        let hits = vec![
+            ("sem".to_string(), 0.71),
+            ("both".to_string(), 0.6),
+            ("noise".to_string(), 0.2),
+            ("gone".to_string(), 0.99),
+        ];
+        let ranked = hybrid_recall(&all, "harbor ship arrivals", &hits, 5);
+        let ids: Vec<&str> = ranked.iter().map(|h| h.memory.id.as_str()).collect();
+        assert_eq!(ids[0], "sem");
+        assert!(ids.contains(&"both") && ids.contains(&"lex"));
+        assert!(!ids.contains(&"noise"), "below the semantic floor");
+        assert!(!ids.contains(&"gone"), "vector ids missing from SQLite are dropped");
+        let both = ranked.iter().find(|h| h.memory.id == "both").unwrap().score;
+        assert!(both > 0.6, "agreement adds a bonus over the vector score: {both}");
+        // No vector hits: identical to Jaccard recall.
+        assert_eq!(
+            hybrid_recall(&all, "harbor cargo", &[], 3),
+            recall(&all, "harbor cargo", 3)
+        );
+        assert!(hybrid_recall(&all, "  ", &hits, 3).is_empty());
     }
 
     #[test]

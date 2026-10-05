@@ -81,15 +81,32 @@ argos models --role tool-picker
 argos insights --entity example.org
 argos remember --app research --conversation thread-123 'A manually saved fact'
 argos recall 'What do I know?'
+argos memories
+argos memories reindex
 ```
 
 `recon show` includes each run's plan, with the directives, input grounding, bindings, and per-pick tool-picker records (transport, confidence, reason). `recon delete` removes the thread and its contribution links. The default keeps Brain memories and marks their source deleted. `--with-insights` removes every Brain memory that belongs only to that investigation, including pinned and edited ones, and removes each memory's saved recon-path summary. A memory still sourced by another investigation stays. `recon limits` shows or changes the per-turn round, call, and time budgets, including `--max-turn-seconds` (default 900, range 120 to 1800), the hard ceiling for one turn. A turn's deadline grows with recon rounds, scheduled tool time, and the evidence packet, and it never drops below `turn_seconds`. Synthesis text streams into the transcript and to stderr for `argos ask`; stdout stays the final JSON. `osint enable` and `osint disable` control tools. CLI commands return JSON where practical and use the same store, registry, and executor as the TUI.
 
 ## State and migration
 
-State lives in `~/.argos`; `ARGOS_HOME` overrides the directory. `argos.db` holds Brain memories, threads, runs, calls, bounded cached responses, entities, and provenance. `config.toml` holds role defaults and OSINT settings. `auth.json` holds provider credentials with owner only permissions on Unix; `hardware.json` caches the host profile.
+State lives in `~/.argos`; `ARGOS_HOME` overrides the directory. `argos.db` holds Brain memories, threads, runs, calls, bounded cached responses, entities, and provenance. Brain vectors live beside it in `memory_lancedb/` (LanceDB). The MiniLM model and tokenizer cache under `models/all-MiniLM-L6-v2/` (or `ARGOS_EMBED_MODEL_DIR`). `config.toml` holds role defaults and OSINT settings. `auth.json` holds provider credentials with owner only permissions on Unix; `hardware.json` caches the host profile. Set `ARGOS_EMBED=0` to skip embedding and fall back to Jaccard recall.
 
 Opening the database performs additive versioned migrations. Existing Brain memories and unrelated tables are preserved. Old Writer settings seed the Recon and Synthesis defaults once; the Tool picker default is seeded only when it is empty. Subsequent loads preserve every role choice. A run interrupted by process exit keeps completed observations and is marked interrupted on the next TUI launch. Resume explicitly continues remaining steps; retry starts a new turn.
+
+## Build
+
+Rust **1.91+** (workspace `rust-version`; CI and this box use 1.94). LanceDB's build scripts need `protoc`; Argos vendors it so you should not need `brew install protobuf` or `apt install protobuf-compiler`:
+
+- `argos-osint-core` depends on `protoc-bin-vendored` (build-dependency), which downloads a prebuilt `protoc` for the host (macOS x86_64 / arm64, Linux x86_64 / aarch64).
+- `.cargo/config.toml` sets `PROTOC` to `tools/protoc`, a small shim that picks that binary (or an already-exported `PROTOC` / a system one on `PATH`).
+
+On an Intel MacBook (`x86_64-apple-darwin`) that is enough for a normal `cargo build` / `cargo test`. First LanceDB compile is slow (many Arrow/DataFusion crates) and needs a C toolchain (Xcode CLT on macOS: `xcode-select --install`). The MiniLM ONNX (~23 MB) downloads on first embed into `ARGOS_HOME/models/…`.
+
+```sh
+cargo build
+cargo test --workspace          # offline; ARGOS_EMBED unset in tests
+ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm
+```
 
 ## Limits and verification
 

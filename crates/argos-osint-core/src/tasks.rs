@@ -475,6 +475,40 @@ pub fn enqueue_index_change(
     Ok(())
 }
 
+
+/// Claim a batch of pending index changes for a worker.
+pub fn claim_index_changes(conn: &Connection, limit: usize) -> Result<Vec<(i64, String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, record_kind, record_id, operation FROM argos_index_changes
+         WHERE state='pending' ORDER BY seq ASC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map([limit as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (seq, _, _, _) in &rows {
+        conn.execute(
+            "UPDATE argos_index_changes SET state='running', updated_at=?1 WHERE seq=?2 AND state='pending'",
+            params![chrono::Utc::now().to_rfc3339(), seq],
+        )?;
+    }
+    Ok(rows)
+}
+
+pub fn complete_index_change(conn: &Connection, seq: i64, outcome: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE argos_index_changes SET state='completed', outcome=?1, updated_at=?2 WHERE seq=?3",
+        params![outcome, chrono::Utc::now().to_rfc3339(), seq],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,6 +529,25 @@ mod tests {
         assert!(can_retry(OperationKind::OtherLlm, 2, ErrorCategory::TemporaryNetwork));
         assert!(!can_retry(OperationKind::OtherLlm, 3, ErrorCategory::TemporaryNetwork));
         assert!(!can_retry(OperationKind::OtherLlm, 1, ErrorCategory::AuthOrQuota));
+    }
+
+    #[test]
+    fn index_change_claim_and_complete() {
+        let conn = mem();
+        let now = chrono::Utc::now().to_rfc3339();
+        enqueue_index_change(&conn, "memory_index", "generation", "count=99", "rebuild", &now).unwrap();
+        let batch = claim_index_changes(&conn, 10).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].3, "rebuild");
+        complete_index_change(&conn, batch[0].0, "enqueued").unwrap();
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM argos_index_changes WHERE seq=?1",
+                [batch[0].0],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "completed");
     }
 
     #[test]

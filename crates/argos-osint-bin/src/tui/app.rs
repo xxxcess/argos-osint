@@ -3645,7 +3645,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.status = self.graph_summary.clone();
             return;
         }
-        let secret = match provider::role_secret(&self.auth, &self.settings, "synthesis") {
+        let secret = match provider::role_secret(&self.auth, &self.settings, "summarization") {
             Ok(secret) => secret,
             Err(err) => {
                 self.graph_summary = format!("Graph summary unavailable: {err}");
@@ -5569,11 +5569,17 @@ pub async fn run(mut app: App) -> Result<()> {
 }
 
 fn summary_system(claim: bool) -> String {
-    if claim {
-        "You explain the conclusion of one news claim. The claim path lists the concluding relation and the articles that support it as hard evidence, each with its published time. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how those articles support the relation and why the concluding insight is a fact or an inference. A fact means both spans are in an article title. An inference means a span is only in the description, or the article is context. Use only the graph and the memory. Do not invent sources, times, or outcomes. No bullet list.".into()
+    let mode = argos_osint_core::summarization::system_prompt(
+        argos_osint_core::summarization::SummarizationMode::GraphExplanation,
+    );
+    let detail = if claim {
+        "The claim path lists the concluding relation and the articles that support it as hard evidence, each with its published time. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how those articles support the relation and why the concluding insight is a fact or an inference. A fact means both spans are in an article title. An inference means a span is only in the description, or the article is context. Use only the graph and the memory. Do not invent sources, times, or outcomes. No bullet list."
     } else {
-        "You explain the conclusion of one investigation insight. The recon path already keeps only the directive this insight rests on, with the subjects and evidence that contributed to it. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how that directive and the contributing evidence support the relation, and why the concluding insight is a fact or an inference. A fact rests on a tool result that states the relation. An inference is drawn when the evidence does not state it directly. Use only the graph and the memory. Do not mention directives that are absent from the recon path. Do not invent sources or outcomes. No bullet list.".into()
-    }
+        "The recon path already keeps only the directive this insight rests on, with the subjects and evidence that contributed to it. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how that directive and the contributing evidence support the relation, and why the concluding insight is a fact or an inference. A fact rests on a tool result that states the relation. An inference is drawn when the evidence does not state it directly. Use only the graph and the memory. Do not mention directives that are absent from the recon path. Do not invent sources or outcomes. No bullet list."
+    };
+    format!("{mode}
+
+{detail}")
 }
 
 async fn write_graph_summary(secret: &ProviderSecret, system: &str, prompt: &str) -> Result<String> {
@@ -5593,8 +5599,14 @@ async fn write_graph_summary(secret: &ProviderSecret, system: &str, prompt: &str
     ];
     let completion = provider::complete(secret, &messages, &[], |_| {}).await?;
     let text = completion.content.trim().to_string();
+    argos_osint_core::summarization::validate_result(
+        argos_osint_core::summarization::SummarizationMode::GraphExplanation,
+        &text,
+        &[],
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
     if text.is_empty() {
-        return Err(completion.empty_error("synthesis graph summary"));
+        return Err(completion.empty_error("summarization graph explanation"));
     }
     Ok(text)
 }

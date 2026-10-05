@@ -2171,6 +2171,7 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
 
 /// Drops citations, the evidence trailer, and repeated article lines, then keeps the
 /// lead findings and the D1–D5 lines within [`PRIOR_SYNTHESIS_CHARS`].
+/// Deterministic FollowUpContext fallback when Summarization is unavailable.
 fn compact_prior_synthesis(raw: &str) -> String {
     let raw = raw.split(super::budget::CUT_SHORT).next().unwrap_or(raw);
     let raw = raw.split("\nEvidence:").next().unwrap_or(raw);

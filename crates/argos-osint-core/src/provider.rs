@@ -38,10 +38,43 @@ pub struct ToolSpec {
     pub parameters: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Completion {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
+    /// OpenAI-compatible `choices[0].finish_reason` when the provider sent one.
+    pub finish_reason: Option<String>,
+    /// Provider refusal text when the model declined instead of answering.
+    pub refusal: Option<String>,
+}
+
+impl Completion {
+    /// True when there is neither answer text nor a tool call.
+    pub fn is_empty(&self) -> bool {
+        self.content.trim().is_empty() && self.tool_calls.is_empty()
+    }
+
+    /// Error used when a completion that should contain text is blank.
+    pub fn empty_error(&self, what: &str) -> anyhow::Error {
+        let mut msg = format!("{what} returned an empty completion");
+        if let Some(reason) = self
+            .finish_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            msg.push_str(&format!(" (finish_reason={reason})"));
+        }
+        if let Some(refusal) = self
+            .refusal
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            msg.push_str(&format!("; refusal: {refusal}"));
+        }
+        anyhow!(msg)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -789,7 +822,7 @@ pub async fn complete(
             Ok(chunk) => chunk,
             Err(err) => {
                 // Mid-stream drops are common on large synthesis replies; finish without streaming.
-                if acc.content.is_empty() && acc.tool_calls.is_empty() {
+                if acc.is_empty() {
                     return complete_once(secret, messages, tools).await;
                 }
                 return Err(err).context("read provider stream");
@@ -804,13 +837,13 @@ pub async fn complete(
             }
         }
     }
-    if acc.content.is_empty() && acc.tool_calls.is_empty() {
+    let completion = acc.into_completion();
+    if completion.is_empty() {
+        // Stream produced no text and no tools (or only metadata). Retry once
+        // without streaming; parse_completion also folds reasoning_content.
         return complete_once(secret, messages, tools).await;
     }
-    Ok(Completion {
-        content: acc.content,
-        tool_calls: acc.tool_calls,
-    })
+    Ok(completion)
 }
 
 /// One Decisions answer. `choice` for choice questions, `score` for score questions,
@@ -960,17 +993,84 @@ fn tool_json(t: &ToolSpec) -> Value {
     })
 }
 
+/// Pulls assistant text from a chat-completions message object.
+///
+/// Prefer `content` (string or multipart text parts). When that is empty — common
+/// for OpenRouter / reasoning models that only fill `reasoning_content` or
+/// `reasoning` — fold that reasoning text into the answer so callers such as
+/// Brain graph summaries still see the Markdown they asked for.
+pub fn message_text(msg: &Value) -> String {
+    let content = value_text(msg.get("content"));
+    if !content.trim().is_empty() {
+        return content;
+    }
+    for key in ["reasoning_content", "reasoning"] {
+        let text = value_text(msg.get(key));
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    String::new()
+}
+
+fn value_text(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    let Some(parts) = value.as_array() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+            out.push_str(text);
+            continue;
+        }
+        if part
+            .get("type")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t == "text")
+        {
+            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                out.push_str(text);
+            }
+        }
+    }
+    out
+}
+
+fn delta_text(delta: &Value, key: &str) -> Option<String> {
+    let value = delta.get(key)?;
+    let text = value_text(Some(value));
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 pub fn parse_completion(text: &str) -> Result<Completion> {
     let v: Value = serde_json::from_str(text).context("provider JSON")?;
     let msg = v
         .pointer("/choices/0/message")
         .cloned()
         .unwrap_or(Value::Null);
-    let content = msg
-        .get("content")
+    let content = message_text(&msg);
+    let refusal = msg
+        .get("refusal")
         .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let finish_reason = v
+        .pointer("/choices/0/finish_reason")
+        .and_then(|c| c.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let mut tool_calls = Vec::new();
     if let Some(calls) = msg.get("tool_calls").and_then(|c| c.as_array()) {
         for call in calls {
@@ -993,19 +1093,48 @@ pub fn parse_completion(text: &str) -> Result<Completion> {
             });
         }
     }
-    Ok(Completion {
+    let completion = Completion {
         content,
         tool_calls,
-    })
+        finish_reason,
+        refusal,
+    };
+    if completion.is_empty() {
+        return Err(completion.empty_error("provider"));
+    }
+    Ok(completion)
 }
 
 #[derive(Default)]
 struct SseAcc {
     content: String,
+    reasoning: String,
     tool_calls: Vec<ToolCall>,
+    finish_reason: Option<String>,
+    refusal: Option<String>,
 }
 
 impl SseAcc {
+    fn is_empty(&self) -> bool {
+        self.content.trim().is_empty()
+            && self.reasoning.trim().is_empty()
+            && self.tool_calls.is_empty()
+    }
+
+    fn into_completion(self) -> Completion {
+        let content = if !self.content.trim().is_empty() {
+            self.content
+        } else {
+            self.reasoning
+        };
+        Completion {
+            content,
+            tool_calls: self.tool_calls,
+            finish_reason: self.finish_reason,
+            refusal: self.refusal,
+        }
+    }
+
     fn push_line(&mut self, line: &str) -> Option<String> {
         let line = line.trim();
         if line.is_empty() || line.starts_with(':') {
@@ -1016,12 +1145,35 @@ impl SseAcc {
             return None;
         }
         let v: Value = serde_json::from_str(data).ok()?;
+        if let Some(reason) = v
+            .pointer("/choices/0/finish_reason")
+            .and_then(|c| c.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.finish_reason = Some(reason.to_string());
+        }
         let delta = v.pointer("/choices/0/delta")?;
+        if let Some(refusal) = delta
+            .get("refusal")
+            .and_then(|c| c.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.refusal = Some(refusal.to_string());
+        }
         let mut emitted = None;
-        if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
-            if !text.is_empty() {
-                self.content.push_str(text);
-                emitted = Some(text.to_string());
+        if let Some(text) = delta_text(delta, "content") {
+            self.content.push_str(&text);
+            emitted = Some(text);
+        }
+        // Reasoning-only models stream here with an empty content field.
+        for key in ["reasoning_content", "reasoning"] {
+            if let Some(text) = delta_text(delta, key) {
+                self.reasoning.push_str(&text);
+                if emitted.is_none() {
+                    emitted = Some(text);
+                }
             }
         }
         if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
@@ -1866,6 +2018,312 @@ mod tests {
         assert_eq!(pick.choice_probability(), Some(0.82));
         assert_eq!(response.answers["depth"].score, Some(1.6));
         assert_eq!(response.cost, Some(0.00002));
+    }
+
+
+    #[test]
+    fn parse_completion_folds_reasoning_content_when_content_is_empty() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "## Entity with **predicate**\n\nThe articles support the relation."
+                }
+            }]
+        })
+        .to_string();
+        let completion = parse_completion(&raw).unwrap();
+        assert!(completion.content.starts_with("## Entity"));
+        assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn parse_completion_prefers_content_over_reasoning() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Visible answer",
+                    "reasoning_content": "Hidden chain of thought"
+                }
+            }]
+        })
+        .to_string();
+        assert_eq!(parse_completion(&raw).unwrap().content, "Visible answer");
+    }
+
+    #[test]
+    fn parse_completion_reads_multipart_text_parts() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Hello "},
+                        {"type": "text", "text": "world"}
+                    ]
+                }
+            }]
+        })
+        .to_string();
+        assert_eq!(parse_completion(&raw).unwrap().content, "Hello world");
+    }
+
+    #[test]
+    fn parse_completion_errors_clearly_when_truly_empty() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "refusal": "Policy blocked"
+                }
+            }]
+        })
+        .to_string();
+        let err = parse_completion(&raw).unwrap_err().to_string();
+        assert!(err.contains("empty completion"), "{err}");
+        assert!(err.contains("finish_reason=content_filter"), "{err}");
+        assert!(err.contains("refusal: Policy blocked"), "{err}");
+    }
+
+    #[test]
+    fn sse_acc_folds_reasoning_deltas_into_content() {
+        let mut acc = SseAcc::default();
+        let line1 = format!(
+            "data: {}",
+            serde_json::json!({"choices":[{"delta":{"reasoning_content":"## Heading"}}]})
+        );
+        let line2 = format!(
+            "data: {}",
+            serde_json::json!({"choices":[{"delta":{"reasoning":" body"},"finish_reason":"stop"}]})
+        );
+        assert!(acc.push_line(&line1).is_some());
+        assert!(acc.push_line(&line2).is_some());
+        let completion = acc.into_completion();
+        assert_eq!(completion.content, "## Heading body");
+        assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_reads_reasoning_only_non_stream_json() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buffer = vec![0u8; 65536];
+                let mut request = String::new();
+                loop {
+                    let n = socket.read(&mut buffer).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    request.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                    let Some(end) = request.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let length = request[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                if request.contains("\"stream\":true") {
+                    let body = "{\"error\":{\"message\":\"stream unsupported\"}}";
+                    let reply = format!(
+                        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                    continue;
+                }
+                let body = serde_json::json!({
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "## Graph\n\nSupported by the articles."
+                        }
+                    }]
+                })
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+        let secret = ProviderSecret {
+            kind: "openrouter".into(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "test-reasoning".into(),
+            api_key: Some("sk-test".into()),
+            stt_model: None,
+            device: None,
+        };
+        let messages = [ChatMessage {
+            role: "user".into(),
+            content: "Summarize".into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }];
+        let completion = complete(&secret, &messages, &[], |_| {}).await.unwrap();
+        assert!(
+            completion.content.contains("## Graph"),
+            "got {:?}",
+            completion.content
+        );
+    }
+
+        /// Streaming path: reasoning deltas only (no content field).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_stream_of_reasoning_deltas_yields_text() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 1 << 16];
+            let mut req = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.expect("read");
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    // One shot is enough for this test; ignore remaining body bytes.
+                    break;
+                }
+            }
+            let event1 = serde_json::json!({"choices":[{"delta":{"reasoning_content":"## Claim"}}]});
+            let event2 = serde_json::json!({"choices":[{"delta":{"reasoning_content":" paragraph"},"finish_reason":"stop"}]});
+            let body = format!("data: {event1}\n\ndata: {event2}\n\ndata: [DONE]\n\n");
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(reply.as_bytes()).await.expect("write");
+        });
+        // Yield so the accept future is polled before the client connects.
+        tokio::task::yield_now().await;
+        let secret = ProviderSecret {
+            kind: "local".into(),
+            base_url: format!("http://{addr}/v1"),
+            model: "test-reasoning".into(),
+            api_key: None,
+            stt_model: None,
+            device: None,
+        };
+        let messages = [ChatMessage {
+            role: "user".into(),
+            content: "Summarize".into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }];
+        let mut deltas = String::new();
+        let completion = complete(&secret, &messages, &[], |d| deltas.push_str(d))
+            .await
+            .expect("complete stream");
+        assert_eq!(completion.content, "## Claim paragraph");
+        assert!(deltas.contains("## Claim"), "{deltas}");
+    }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_errors_with_finish_reason_when_response_is_empty() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buffer = vec![0u8; 65536];
+                let mut request = String::new();
+                loop {
+                    let n = socket.read(&mut buffer).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    request.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                    let Some(end) = request.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let length = request[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                if request.contains("\"stream\":true") {
+                    let event = serde_json::json!({"choices":[{"delta":{},"finish_reason":"content_filter"}]});
+                    let stream_body = format!("data: {event}\n\ndata: [DONE]\n\n");
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{stream_body}",
+                        stream_body.len()
+                    );
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                } else {
+                    let body = serde_json::json!({
+                        "choices": [{
+                            "finish_reason": "content_filter",
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "refusal": "blocked"
+                            }
+                        }]
+                    })
+                    .to_string();
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                }
+            }
+        });
+        let secret = ProviderSecret {
+            kind: "openrouter".into(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "test-empty".into(),
+            api_key: Some("sk-test".into()),
+            stt_model: None,
+            device: None,
+        };
+        let messages = [ChatMessage {
+            role: "user".into(),
+            content: "Summarize".into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }];
+        let err = complete(&secret, &messages, &[], |_| {})
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty completion"), "{err}");
+        assert!(err.contains("finish_reason=content_filter"), "{err}");
+        assert!(err.contains("refusal: blocked"), "{err}");
     }
 
     /// Live Jev smoke. Runs only with `OPENROUTER_API_KEY` set: `cargo test -- --ignored`.

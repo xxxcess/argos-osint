@@ -1572,7 +1572,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         // A version-7 database without the column gains it, keeping existing runs.
         let file = tempfile::NamedTempFile::new().unwrap();
         let store = Store::open(file.path()).unwrap();

@@ -13,16 +13,24 @@ PR: https://github.com/xxxcess/argos-osint/pull/35
 | 3. Deadline integration | **Mostly done** | TurnClock embeds ClockSet; foreground→background + exhausted; checkpoints; sequential `depends_on` budgeting; hard-limit gates recon/tools |
 | 4. Role + summary foundation | **Done** | CLI + TUI Summarization |
 | 5. Summary call sites | **Mostly done** | All nine modes wired |
-| 6. Automatic vectors | **Partial→advanced** | No 3000 barrier; generations; batched rebuild with fingerprint mix guard; `process_pending_vector_rebuild`; full shadow-table dual-index still open |
-| 7. Evidence retrieval | **Partial** | passages + ID coverage |
-| 8. Remaining summary modes | **Mostly done** | |
-| 9. Pipeline adoption | **Partial** | `pipeline.rs`: directive coverage, Atlas event grouping, claim compare, selective refresh |
-| 10. Exploration / tools | **Partial** | `explore.rs` + picker catalog fallback helper; Brain UI wiring still open |
-| 11. Verification | **In progress** | Focused offline suites green |
+| 6. Automatic vectors | **Mostly done** | No 3000 barrier; generations; **shadow building tables** (`brain_memories__{gen}`); activate swaps serving pointer; live upserts still hit serving |
+| 7. Evidence retrieval | **Partial** | passages + ID coverage; hybrid/ANN not started |
+| 8. Remaining summary modes | **Mostly done** | Many paths still deterministic / not full background LLM flush |
+| 9. Pipeline adoption | **Mostly done** | Helpers + **live Recon gap loop** via `refresh_directive_coverage` → `plan.gaps` |
+| 10. Exploration / tools | **Mostly done** | `explore.rs` + picker fallback; **Brain TUI related-evidence / why-matched** labels on graph |
+| 11. Verification | **Advanced partial** | Focused offline suites + `reliability_faults` (§19 slice); full matrix not closed |
 
 ## Honest remaining gaps
 
-- Dual Lance serving/building tables (current batched rebuild upserts into live index)
-- Full Brain TUI “why this matched” / related-evidence UI
-- Wire directive_coverage into live Recon gap loop (helpers ready)
-- Full §19 fault-injection matrix
+- Hybrid / ANN evidence retrieval (§7)
+- Full background LLM flush for every summary call site (many still deterministic/`complete_summary`)
+- Broader §19 matrix items not yet covered offline (e.g. concurrent multi-worker insight replace races under load, real HTTP mock providers beyond `execute_with_retries`, stream inactivity cutovers)
+- Scheduler index worker pool still a skeleton relative to full elected rebuild orchestration
+- Clippy `-D warnings` repo-wide still fails on pre-existing issues
+
+## Recent gap closures (this push)
+
+1. Dual Lance serving/building: rebuild batches write `upsert_texts_into(shadow)`; `activate_generation` points `BrainIndex` at shadow and drops prior shadow; Store open restores serving table name.
+2. Recon `run_turn` / `continue_turn` call `refresh_directive_coverage` so uncovered directives land in `plan.gaps` before synthesis.
+3. Brain graph pane appends bounded related-evidence lines (`explore::related_evidence_view`) with why-matched labels.
+4. `reliability_faults` module: mock provider retries, ClockSet expiry, cache revision invalidation, lease fencing, non-retryable auth.

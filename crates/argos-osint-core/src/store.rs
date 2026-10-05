@@ -68,6 +68,7 @@ impl Store {
             .then(|| BrainIndex::shared(&crate::paths::lancedb_dir_for(path)));
         let store = Self { conn, vectors };
         store.ensure_schema()?;
+        store.restore_serving_vector_table();
         Ok(store)
     }
 
@@ -805,6 +806,21 @@ impl Store {
             lance_dir: index.uri().to_path_buf(),
             fingerprint: brain_lance::current_fingerprint(),
         })
+    }
+
+    /// Point BrainIndex at the active generation's shadow table after open.
+    fn restore_serving_vector_table(&self) {
+        let Some(index) = self.vectors.as_deref() else {
+            return;
+        };
+        match brain_lance::serving_table_name(&self.conn) {
+            Ok(Some(name)) if !name.is_empty() => {
+                if index.serving_table_name() != name {
+                    index.set_serving_table(&name);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Drain pending generation rebuild work in bounded batches (off the TUI path).

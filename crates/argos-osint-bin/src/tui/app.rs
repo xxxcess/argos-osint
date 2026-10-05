@@ -694,6 +694,8 @@ pub struct App {
     pub currents_fallback: String,
     pub brain_graph: recon::MemoryGraph,
     brain_graph_for: Option<String>,
+    /// Bounded related-evidence / why-matched labels for the open graph (spec §15).
+    pub brain_related_lines: Vec<String>,
     pub graph_summary: String,
     graph_summary_pending: Option<String>,
     pub hits: Vec<ScoredMemory>,
@@ -942,6 +944,7 @@ impl App {
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
+            brain_related_lines: Vec::new(),
             graph_summary: String::new(),
             graph_summary_pending: None,
             hits: Vec::new(),
@@ -3575,6 +3578,59 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             Some(id) => self.store.graph_for_memory(id).unwrap_or_default(),
             None => recon::MemoryGraph::default(),
         };
+        self.brain_related_lines = self.related_evidence_labels();
+    }
+
+    /// Bound related-evidence / why-matched labels for the Brain graph pane.
+    fn related_evidence_labels(&self) -> Vec<String> {
+        const MAX_SEMANTIC: usize = 3;
+        let Some(memory) = self.memories.get(self.memory_sel) else {
+            return Vec::new();
+        };
+        let mut factual = Vec::new();
+        for node in &self.brain_graph.nodes {
+            if node.kind != recon::GraphNodeKind::Evidence {
+                continue;
+            }
+            let supported = self.brain_graph.edges.iter().any(|edge| {
+                edge.to == node.id
+                    && matches!(
+                        edge.kind,
+                        recon::GraphEdgeKind::Supports | recon::GraphEdgeKind::DerivedFrom
+                    )
+            });
+            if supported {
+                factual.push((
+                    node.id.clone(),
+                    node.label.clone(),
+                    1.0_f32,
+                ));
+            }
+        }
+        let mut semantic = Vec::new();
+        if let Ok(hits) = self.store.recall(&memory.text, MAX_SEMANTIC + 2) {
+            for hit in hits {
+                if hit.memory.id == memory.id {
+                    continue;
+                }
+                let label = hit.memory.text.chars().take(72).collect::<String>();
+                semantic.push((hit.memory.id, label, hit.score));
+            }
+        }
+        let view = argos_osint_core::explore::related_evidence_view(factual, semantic, MAX_SEMANTIC);
+        let mut lines = Vec::new();
+        if !view.is_empty() {
+            lines.push("Related evidence".into());
+        }
+        for hit in view {
+            lines.push(format!(
+                "· {} — {} ({})",
+                hit.label.chars().take(56).collect::<String>(),
+                hit.why,
+                hit.edge_kind.as_str()
+            ));
+        }
+        lines
     }
 
     fn filtered_memories(&self) -> Vec<Memory> {
@@ -5868,6 +5924,7 @@ mod tests {
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
+            brain_related_lines: Vec::new(),
             graph_summary: String::new(),
             graph_summary_pending: None,
             hits: Vec::new(),

@@ -22,4 +22,5 @@ pub mod secrets;
 pub mod store;
 pub mod summarization;
 pub mod tasks;
+pub mod reliability_faults;
 pub mod subscription;

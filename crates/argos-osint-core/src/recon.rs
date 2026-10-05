@@ -4,8 +4,8 @@ mod brain_resources;
 pub(crate) mod budget;
 mod graph;
 pub use graph::{
-    force_links, graph_brief, recon_path, ForceLink, GraphNode, GraphNodeKind, MemoryGraph,
-    PathBand, ReconPath,
+    force_links, graph_brief, recon_path, ForceLink, GraphEdge, GraphEdgeKind, GraphNode,
+    GraphNodeKind, MemoryGraph, PathBand, ReconPath,
 };
 pub(crate) mod investigation;
 mod orchestrate;

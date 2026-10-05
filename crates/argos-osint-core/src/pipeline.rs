@@ -48,6 +48,40 @@ pub fn uncovered_directives(coverage: &[DirectiveCoverage]) -> Vec<&DirectiveCov
     coverage.iter().filter(|c| !c.covered).collect()
 }
 
+/// Update `plan.gaps` from completed tool calls that cite directives they serve.
+/// Coverage requires a concrete call id on a successful step — similarity alone
+/// never marks a directive covered (spec §12).
+pub fn apply_recon_directive_coverage(
+    directives: &[(String, String)],
+    calls: &[(String, String, String)],
+) -> (Vec<DirectiveCoverage>, Vec<String>) {
+    // calls: (directive_ids_csv_or_reason, call_id, status)
+    use std::collections::HashMap;
+    let mut by_dir: HashMap<String, Vec<String>> = HashMap::new();
+    for (reason, call_id, status) in calls {
+        if call_id.is_empty() {
+            continue;
+        }
+        if !matches!(status.as_str(), "completed" | "no_results") {
+            continue;
+        }
+        for part in reason.split(|c: char| c == ',' || c.is_whitespace()) {
+            let id = part.trim();
+            if id.starts_with('d') && id.len() <= 3 && id[1..].chars().all(|c| c.is_ascii_digit()) {
+                by_dir.entry(id.to_string()).or_default().push(call_id.clone());
+            }
+        }
+    }
+    let evidence: Vec<(String, Vec<String>)> = by_dir.into_iter().collect();
+    let coverage = directive_coverage(directives, &evidence);
+    let gaps: Vec<String> = uncovered_directives(&coverage)
+        .into_iter()
+        .map(|c| format!("{}: {}", c.directive_id, c.goal))
+        .collect();
+    (coverage, gaps)
+}
+
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventGroup {
     pub event_key: String,
@@ -227,6 +261,7 @@ pub fn selective_refresh_targets(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -278,4 +313,18 @@ mod tests {
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].section_key, "bluf");
     }
+    #[test]
+    fn recon_coverage_needs_call_ids() {
+        let dirs = vec![("d1".into(), "Confirm identity".into()), ("d2".into(), "Find accounts".into())];
+        let calls = vec![
+            ("d1".into(), "call-1".into(), "completed".into()),
+            ("d2".into(), "".into(), "completed".into()), // no call id → uncovered
+        ];
+        let (cov, gaps) = apply_recon_directive_coverage(&dirs, &calls);
+        assert!(cov.iter().find(|c| c.directive_id == "d1").unwrap().covered);
+        assert!(!cov.iter().find(|c| c.directive_id == "d2").unwrap().covered);
+        assert_eq!(gaps.len(), 1);
+        assert!(gaps[0].starts_with("d2:"));
+    }
+
 }

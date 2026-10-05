@@ -311,6 +311,7 @@ pub async fn run_turn(
         progress,
     )
     .await?;
+    refresh_directive_coverage(&mut plan);
     Store::open(&service.db_path)?.set_run(
         &run.id,
         "running",
@@ -377,6 +378,7 @@ pub async fn continue_turn(
         progress,
     )
     .await?;
+    refresh_directive_coverage(&mut plan);
     let store = Store::open(&service.db_path)?;
     for call in store.calls_for_run(&run.id)? {
         if results.iter().any(|(id, _)| id == &call.id) {
@@ -441,6 +443,29 @@ fn picker_snapshot(run: &Run, secret: &ProviderSecret) -> String {
         format!("{} / {}", secret.kind, secret.model)
     } else {
         run.tool_picker_model.clone()
+    }
+}
+
+/// Score directive coverage from completed plan calls and refresh `plan.gaps`.
+fn refresh_directive_coverage(plan: &mut Plan) {
+    let directives: Vec<(String, String)> = plan
+        .directives
+        .iter()
+        .map(|d| (d.id.clone(), d.goal.clone()))
+        .collect();
+    let calls: Vec<(String, String, String)> = plan
+        .calls
+        .iter()
+        .map(|c| (c.reason.clone(), c.call_id.clone(), c.status.clone()))
+        .collect();
+    let (coverage, gaps) = crate::pipeline::apply_recon_directive_coverage(&directives, &calls);
+    plan.gaps = gaps;
+    if !coverage.is_empty() {
+        let covered = coverage.iter().filter(|c| c.covered).count();
+        plan.binding_notes.push(format!(
+            "directive coverage: {covered}/{} supported by cited calls",
+            coverage.len()
+        ));
     }
 }
 

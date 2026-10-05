@@ -3,7 +3,7 @@
 Branch: `feat/ann-live-summary-flush`
 Spec: `specs/argos-unified-reliability-semantic-pipelines-spec.md` (local path on agent box)
 Base: `main` @ `8e9e144` (PR #35 squash-merge)
-PR: (this follow-up)
+PR: https://github.com/xxxcess/argos-osint/pull/36
 
 ## Phase status (§18)
 

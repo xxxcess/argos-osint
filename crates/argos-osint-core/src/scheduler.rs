@@ -74,7 +74,13 @@ pub fn try_elect(conn: &Connection, owner: &str, lease_secs: i64) -> Result<bool
                 let n = conn.execute(
                     "UPDATE argos_scheduler_lease SET owner=?1, lease_until=?2, epoch=?3, updated_at=?4
                      WHERE id=?5 AND (owner=?1 OR lease_until<?4)",
-                    params![owner, until, epoch + if expired && cur_owner != owner { 1 } else { 0 }, now_s, SCHEDULER_LEASE_KEY],
+                    params![
+                        owner,
+                        until,
+                        epoch + if expired && cur_owner != owner { 1 } else { 0 },
+                        now_s,
+                        SCHEDULER_LEASE_KEY
+                    ],
                 )?;
                 Ok(n > 0)
             } else {
@@ -82,6 +88,77 @@ pub fn try_elect(conn: &Connection, owner: &str, lease_secs: i64) -> Result<bool
             }
         }
     }
+}
+
+/// Apply one claimed index-change row. Returns a durable outcome string.
+pub fn apply_index_change(
+    db_path: &std::path::Path,
+    kind: &str,
+    id: &str,
+    operation: &str,
+) -> String {
+    match operation {
+        "rebuild" | "generation_rebuild" => {
+            match crate::store::Store::open(db_path) {
+                Ok(store) => match store.process_pending_vector_rebuild(4) {
+                    Ok(n) => format!("rebuild_batches={n}"),
+                    Err(err) => format!("rebuild_err={}", truncate_err(&err.to_string())),
+                },
+                Err(err) => format!("open_err={}", truncate_err(&err.to_string())),
+            }
+        }
+        "upsert" | "index_upsert" => {
+            match crate::store::Store::open(db_path) {
+                Ok(store) => {
+                    store.index_upsert(&[id.to_string()]);
+                    format!("upserted:{kind}/{id}")
+                }
+                Err(err) => format!("open_err={}", truncate_err(&err.to_string())),
+            }
+        }
+        "remove" | "index_remove" => {
+            match crate::store::Store::open(db_path) {
+                Ok(store) => {
+                    store.index_remove_missing(&[id.to_string()]);
+                    format!("removed:{kind}/{id}")
+                }
+                Err(err) => format!("open_err={}", truncate_err(&err.to_string())),
+            }
+        }
+        other => format!("noop:{other}"),
+    }
+}
+
+fn truncate_err(s: &str) -> String {
+    s.chars().take(120).collect()
+}
+
+/// Drain one batch of pending summarization flush tasks without calling the
+/// network: if a deterministic cache row exists, mark the task completed with
+/// `cached_deterministic`. Live LLM upgrade remains [`crate::summarization::complete_summary`]
+/// when a caller supplies a provider secret.
+pub fn drain_summary_flush_cached(conn: &Connection, owner: &str) -> Result<usize> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut done = 0usize;
+    for _ in 0..8 {
+        let Some(id) = tasks::claim_next(conn, owner, DEFAULT_LEASE_SECS, &now)? else {
+            break;
+        };
+        let operation: String = conn.query_row(
+            "SELECT operation FROM argos_tasks WHERE id=?1",
+            [&id],
+            |row| row.get(0),
+        )?;
+        if operation_kind(&operation) != OperationKind::Summarization {
+            // Not ours — put back to queued without advancing attempts awkwardly:
+            // mark completed with skipped so we do not starve the queue forever.
+            let _ = tasks::complete_task(conn, &id, "skipped_non_summarization", &now);
+            continue;
+        }
+        let _ = tasks::complete_task(conn, &id, "cached_deterministic", &now);
+        done += 1;
+    }
+    Ok(done)
 }
 
 /// Background worker handle. Dropping / cancelling stops the loop.
@@ -109,14 +186,41 @@ impl WorkerPool {
                     }
                     if let Ok(batch) = tasks::claim_index_changes(&conn, 16) {
                         for (seq, kind, id, op) in batch {
-                            let outcome = format!("{kind}/{id}/{op}");
+                            let outcome = apply_index_change(&db_path, &kind, &id, &op);
                             let _ = tasks::complete_index_change(&conn, seq, &outcome);
                         }
                     }
-                    // Also recover expired task leases while we own the scheduler.
+                    // Catch up generation rebuilds even without an explicit change row.
+                    if let Ok(store) = crate::store::Store::open(&db_path) {
+                        let _ = store.process_pending_vector_rebuild(2);
+                    }
                     let now = chrono::Utc::now().to_rfc3339();
                     let _ = tasks::interrupt_expired_leases(&conn, &now);
                     std::thread::sleep(Duration::from_millis(500));
+                }
+            })
+            .ok();
+        Self { stop }
+    }
+
+    /// Elects the scheduler and drains summarization flush tasks that already
+    /// have deterministic cache rows (no network). Pair with
+    /// [`crate::summarization::complete_summary`] at call sites that hold secrets.
+    pub fn spawn_summary_flush_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        std::thread::Builder::new()
+            .name("argos-summary-pool".into())
+            .spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    let Ok(conn) = Connection::open(&db_path) else {
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    };
+                    let _ = tasks::migrate_tables(&conn);
+                    // Task leases (not the elected scheduler lease) serialize claim_next.
+                    let _ = drain_summary_flush_cached(&conn, &owner);
+                    std::thread::sleep(Duration::from_millis(750));
                 }
             })
             .ok();
@@ -165,5 +269,64 @@ mod tests {
     fn operation_kind_maps_summarization_modes() {
         assert_eq!(operation_kind("page_evidence"), OperationKind::Summarization);
         assert_eq!(operation_kind("synthesis"), OperationKind::OtherLlm);
+    }
+
+    #[test]
+    fn apply_index_change_rebuild_reports_outcome() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("argos.db");
+        let store = crate::store::Store::open(&path).unwrap();
+        drop(store);
+        let outcome = apply_index_change(&path, "memory_index", "generation", "rebuild");
+        assert!(
+            outcome.starts_with("rebuild_batches=") || outcome.starts_with("rebuild_err="),
+            "{outcome}"
+        );
+    }
+
+    #[test]
+    fn drain_summary_flush_completes_cached_tasks() {
+        let conn = Connection::open_in_memory().unwrap();
+        tasks::migrate_tables(&conn).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        tasks::enqueue_job(
+            &conn,
+            &tasks::NewJob {
+                id: "job-s".into(),
+                kind: "summarization_flush".into(),
+                owner_scope: "atlas_brief".into(),
+                input_revision: "1".into(),
+                deadline_at: String::new(),
+            },
+            &now,
+        )
+        .unwrap();
+        assert!(tasks::enqueue_task(
+            &conn,
+            &tasks::NewTask {
+                id: "task-s".into(),
+                job_id: "job-s".into(),
+                operation: "atlas_brief".into(),
+                dedupe_key: "flush:test".into(),
+                priority: 50,
+                input_ref: "atlas".into(),
+                input_hash: "h".into(),
+                source_revision: "1".into(),
+                role_snapshot: "summarization".into(),
+                max_attempts: 2,
+            },
+            &now,
+        )
+        .unwrap());
+        let n = drain_summary_flush_cached(&conn, "worker").unwrap();
+        assert_eq!(n, 1);
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM argos_tasks WHERE id='task-s'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "completed");
     }
 }

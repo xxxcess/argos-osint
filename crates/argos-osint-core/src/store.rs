@@ -1623,6 +1623,49 @@ impl Store {
         Ok(kept)
     }
 
+    /// Cache a deterministic summary and enqueue a background LLM flush task
+    /// (summarization 2-attempt policy). Failures are ignored — callers already
+    /// have usable deterministic text.
+    pub(crate) fn enqueue_summary_flush_best_effort(
+        &self,
+        mode: crate::summarization::SummarizationMode,
+        source_id: &str,
+        revision: &str,
+        text: &str,
+        focus: &str,
+        budget_chars: usize,
+    ) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let req = crate::summarization::flush_request(
+            mode,
+            source_id,
+            revision,
+            text,
+            focus,
+            budget_chars,
+        );
+        let deterministic = crate::summarization::SummaryResult {
+            content: text.to_string(),
+            source_refs: vec![source_id.into()],
+            source_hash: req.sources.first().map(|s| s.hash.clone()).unwrap_or_default(),
+            model: "deterministic".into(),
+            prompt_version: mode.prompt_version().into(),
+            coverage: crate::summarization::CoverageMeta {
+                partial: false,
+                omitted: Vec::new(),
+                notes: "queued_for_flush".into(),
+            },
+            fallback: true,
+        };
+        let _ = crate::summarization::publish_deterministic_and_enqueue(
+            &self.conn,
+            &req,
+            deterministic,
+        );
+    }
+
     /// Writes Atlas claims into the same Brain tables Recon reads.
     /// `answer_id` is `atlas-{run_id}` and is not a Recon message.
     pub fn persist_atlas_insights(
@@ -1782,6 +1825,16 @@ impl Store {
             Ok(()) => {
                 self.conn.execute_batch("COMMIT")?;
                 self.index_upsert(&written);
+                if !brief.trim().is_empty() {
+                    self.enqueue_summary_flush_best_effort(
+                        crate::summarization::SummarizationMode::AtlasBrief,
+                        &format!("atlas-brief-{run_id}"),
+                        run_id,
+                        brief.trim(),
+                        "atlas",
+                        800,
+                    );
+                }
                 Ok(())
             }
             Err(err) => {

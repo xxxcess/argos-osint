@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::{
     brain_resources::{self, BrainResourceSummary},
-    investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, PickRecord, Plan,
+    investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan,
     PlanCall,
     Run, Store,
 };
@@ -3210,6 +3210,7 @@ async fn model_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::PickRecord;
     use std::time::Duration;
 
     /// `recall_for_turn` stays sync and runs inside the async Recon turn; with the

@@ -550,7 +550,15 @@ pub fn save_section(
         &output.markdown,
         480,
     );
-    judgment.summary = digest.content;
+    judgment.summary = digest.content.clone();
+    store.enqueue_summary_flush_best_effort(
+        crate::summarization::SummarizationMode::SectionDigest,
+        &format!("section-{}-{}", section.job_id, section.section_key),
+        &assessment_version.to_string(),
+        &digest.content,
+        &section.section_key,
+        480,
+    );
     let judgment = serde_json::to_string(&judgment).unwrap_or_else(|_| "{}".into());
     let evidence_ids = json!(output.judgment.cited_evidence_ids).to_string();
     store.upsert_report_section_markdown(

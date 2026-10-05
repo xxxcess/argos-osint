@@ -470,6 +470,93 @@ pub fn deterministic_section_digest(section_key: &str, markdown: &str, budget: u
     }
 }
 
+/// Enqueue a background LLM polish for a mode that already published a
+/// deterministic (or cached) result. Uses the shared task schema and
+/// summarization attempt cap (2). Dedupes on the request cache key.
+pub fn enqueue_summary_flush(conn: &Connection, req: &SummaryRequest) -> anyhow::Result<bool> {
+    use crate::tasks::{enqueue_job, enqueue_task, NewJob, NewTask};
+    let now = chrono::Utc::now().to_rfc3339();
+    let key = req.cache_key();
+    let job_id = format!("sum-job-{key}");
+    let task_id = format!("sum-task-{key}");
+    enqueue_job(
+        conn,
+        &NewJob {
+            id: job_id.clone(),
+            kind: "summarization_flush".into(),
+            owner_scope: req.mode.as_str().into(),
+            input_revision: req
+                .sources
+                .first()
+                .map(|s| s.revision.clone())
+                .unwrap_or_default(),
+            deadline_at: String::new(),
+        },
+        &now,
+    )?;
+    enqueue_task(
+        conn,
+        &NewTask {
+            id: task_id,
+            job_id,
+            operation: req.mode.as_str().into(),
+            dedupe_key: format!("flush:{key}"),
+            priority: 50,
+            input_ref: req.focus.clone(),
+            input_hash: key,
+            source_revision: req
+                .sources
+                .first()
+                .map(|s| s.revision.clone())
+                .unwrap_or_default(),
+            role_snapshot: "summarization".into(),
+            max_attempts: OperationKind::Summarization.attempt_cap(),
+        },
+        &now,
+    )
+}
+
+/// Cache a deterministic result immediately and enqueue a background flush task
+/// under the shared 2-attempt summarization policy. Synchronous callers keep the
+/// deterministic text; an elected LLM worker may later upgrade the cache via
+/// [`complete_summary`] when a provider secret is available.
+pub fn publish_deterministic_and_enqueue(
+    conn: &Connection,
+    req: &SummaryRequest,
+    deterministic: SummaryResult,
+) -> anyhow::Result<SummaryResult> {
+    cache_put(conn, req, &deterministic)?;
+    let _ = enqueue_summary_flush(conn, req)?;
+    Ok(deterministic)
+}
+
+/// Build a minimal request for a deterministic mode publish.
+pub fn flush_request(
+    mode: SummarizationMode,
+    source_id: &str,
+    revision: &str,
+    text: &str,
+    focus: &str,
+    budget_chars: usize,
+) -> SummaryRequest {
+    SummaryRequest {
+        mode,
+        sources: vec![SummarySource {
+            id: source_id.into(),
+            revision: revision.into(),
+            hash: sha_hex(text),
+            text: text.into(),
+            meta: serde_json::json!({}),
+        }],
+        focus: focus.into(),
+        budget_chars,
+        required_fields: Vec::new(),
+        model: "deterministic".into(),
+        provider: "local".into(),
+        prompt_version: mode.prompt_version().into(),
+    }
+}
+
 /// Run a summarization completion under the shared attempt/admission policy.
 /// Returns deterministic fallback content when the model cannot produce valid text.
 pub async fn complete_summary(
@@ -621,6 +708,27 @@ mod service_tests {
     use super::*;
     use crate::tasks::migrate_tables;
     use rusqlite::Connection;
+
+    #[test]
+    fn publish_enqueues_deduped_flush_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_tables(&conn).unwrap();
+        let req = flush_request(
+            SummarizationMode::AtlasBrief,
+            "brief-1",
+            "1",
+            "claim line",
+            "atlas",
+            400,
+        );
+        let det = deterministic_atlas_brief(&["claim line".into()]);
+        let out = publish_deterministic_and_enqueue(&conn, &req, det).unwrap();
+        assert!(out.fallback);
+        assert!(cache_get(&conn, &req).unwrap().is_some());
+        // Second publish coalesces on dedupe key.
+        let again = enqueue_summary_flush(&conn, &req).unwrap();
+        assert!(!again);
+    }
 
     #[test]
     fn cache_round_trip() {

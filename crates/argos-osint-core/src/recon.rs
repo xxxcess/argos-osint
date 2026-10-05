@@ -3931,7 +3931,7 @@ async fn await_completion(
     }
 }
 
-fn cut_short_answer(streamed: &str, results: &[(String, ToolResult)], reason: &str) -> String {
+pub(crate) fn cut_short_answer(streamed: &str, results: &[(String, ToolResult)], reason: &str) -> String {
     let mut out = String::new();
     let streamed = streamed.trim();
     if !streamed.is_empty() {

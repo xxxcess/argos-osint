@@ -151,6 +151,9 @@ where
             Err(category) => {
                 last = category;
                 drop(guard);
+                if category == ErrorCategory::RateLimit {
+                    tasks::note_shared_rate_limit(account, tasks::backoff_delay(attempts));
+                }
                 if !tasks::can_retry(kind, attempts, category) {
                     break;
                 }

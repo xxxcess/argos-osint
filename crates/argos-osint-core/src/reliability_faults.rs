@@ -1,8 +1,8 @@
 //! Spec §19 fault-injection / reliability matrix (offline).
 //!
-//! Covers mock providers, clocks, retries, cache invalidation, and lease fencing
-//! without network access. Insight-replace atomicity lives in
-//! `intel_recon::replace_insights` tests; dual Lance activation in `brain_lance`.
+//! Covers mock providers, clocks, retries, cache invalidation, lease fencing,
+//! concurrent insight replace serialization, stream interruption partial
+//! preserve, and shared rate-limit cooldown — without network access.
 
 #[cfg(test)]
 mod tests {
@@ -13,11 +13,13 @@ mod tests {
         SummarizationMode,
     };
     use crate::tasks::{
-        can_retry, claim_next, enqueue_job, enqueue_task, migrate_tables, renew_lease,
-        ErrorCategory, NewJob, NewTask, OperationKind, TaskState,
+        can_retry, claim_next, enqueue_job, enqueue_task, migrate_tables, note_shared_rate_limit,
+        renew_lease, AdmissionGuard, ErrorCategory, NewJob, NewTask, OperationKind,
+        ProviderAdmission, TaskState,
     };
     use rusqlite::Connection;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     #[tokio::test]
@@ -193,5 +195,111 @@ mod tests {
             TaskState::RetryScheduled
         );
         assert_eq!(TaskState::RetryScheduled.as_str(), "retry_scheduled");
+    }
+
+    #[test]
+    fn concurrent_insight_replace_serializes_on_same_article() {
+        use crate::store::{AtlasInsightClaim, Store};
+        use tempfile::tempdir;
+
+        fn claim(entity: &str) -> AtlasInsightClaim {
+            AtlasInsightClaim {
+                fingerprint: String::new(),
+                entity: entity.into(),
+                namespace: "place".into(),
+                predicate: "hosts".into(),
+                object: "talks".into(),
+                topic: "geopolitical".into(),
+                claim: format!("{entity} hosts talks."),
+                classification: "fact".into(),
+                confidence: 0.5,
+                article_id: "art-1".into(),
+                source_url: "https://example.com/a".into(),
+                published_at: "2026-10-04T12:00:00+00:00".into(),
+                reliability: "B".into(),
+                info_credibility: 2,
+                admiralty: "B2".into(),
+                rsp_status: String::new(),
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("race.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.atlas_insert_run("run-1", "{}", "{}").unwrap();
+            // Minimal article row so FK/helpers stay happy if present.
+            let _ = store.atlas_upsert_article(&crate::store::AtlasArticleRow {
+                run_id: "run-1".into(),
+                id: "art-1".into(),
+                title: "Geneva hosts talks".into(),
+                description: "Leaders meet.".into(),
+                url: "https://example.com/a".into(),
+                country: "CH".into(),
+                source_name: "Ex".into(),
+                source_domain: "example.com".into(),
+                published_at: "2026-10-04T12:00:00+00:00".into(),
+                provider: "news".into(),
+                temperature: 0.4,
+                category: "geopolitical".into(),
+                seen_at: String::new(),
+                author: String::new(),
+                image_url: String::new(),
+            });
+            store
+                .persist_atlas_insights("run-1", &[claim("geneva")], &[], "", "")
+                .unwrap();
+        }
+
+        let path = Arc::new(path);
+        let mut handles = Vec::new();
+        for entity in ["alpha", "bravo", "charlie"] {
+            let path = path.clone();
+            let entity = entity.to_string();
+            handles.push(std::thread::spawn(move || {
+                let store = Store::open(&path).unwrap();
+                store.commit_article_insight_replacement("run-1", "art-1", &[claim(&entity)], &[])
+            }));
+        }
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "BEGIN IMMEDIATE must serialize replaces: {results:?}"
+        );
+        let store = Store::open(&path).unwrap();
+        let rows = store.atlas_claims_for_article("run-1", "art-1").unwrap();
+        // Last writer wins; set is consistent (single entity from one of the racers).
+        assert_eq!(rows.len(), 1, "{rows:?}");
+    }
+
+    #[test]
+    fn stream_interruption_preserves_partial_text() {
+        use crate::osint::ToolResult;
+        use crate::recon::budget;
+        let results: Vec<(String, ToolResult)> = Vec::new();
+        let partial = "The subject operates from Geneva.";
+        let out = crate::recon::cut_short_answer(partial, &results, budget::STREAM_LOST);
+        assert!(out.contains(partial), "{out}");
+        assert!(
+            out.contains("kept") || out.contains(budget::CUT_SHORT),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn shared_rate_limit_cooldown_blocks_admission() {
+        let mut gate = ProviderAdmission::default();
+        gate.note_rate_limit("fault-local", Duration::from_secs(5));
+        assert!(gate.cooling_down("fault-local"));
+        assert!(!gate.try_acquire("fault-local", 2));
+
+        note_shared_rate_limit("fault-global-cool", Duration::from_millis(250));
+        assert!(
+            AdmissionGuard::try_enter("fault-global-cool").is_none()
+                || ProviderAdmission::global()
+                    .lock()
+                    .map(|g| g.cooling_down("fault-global-cool"))
+                    .unwrap_or(true)
+        );
     }
 }

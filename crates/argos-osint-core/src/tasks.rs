@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -129,6 +129,9 @@ impl OperationKind {
 pub struct ProviderAdmission {
     /// key: provider kind / account id → active count
     active: HashMap<String, usize>,
+    /// Shared cooldown after a rate-limit / 429 (spec §19). Blocks new acquires
+    /// for the account until `Instant` elapses.
+    cooldown_until: HashMap<String, Instant>,
 }
 
 impl ProviderAdmission {
@@ -138,6 +141,12 @@ impl ProviderAdmission {
     }
 
     pub fn try_acquire(&mut self, account: &str, limit: usize) -> bool {
+        if let Some(until) = self.cooldown_until.get(account) {
+            if Instant::now() < *until {
+                return false;
+            }
+            self.cooldown_until.remove(account);
+        }
         let slot = self.active.entry(account.to_string()).or_insert(0);
         if *slot >= limit {
             return false;
@@ -154,6 +163,21 @@ impl ProviderAdmission {
 
     pub fn active(&self, account: &str) -> usize {
         self.active.get(account).copied().unwrap_or(0)
+    }
+
+    /// Record a shared cooldown for this account (e.g. after HTTP 429).
+    pub fn note_rate_limit(&mut self, account: &str, cooldown: Duration) {
+        let until = Instant::now() + cooldown;
+        let slot = self.cooldown_until.entry(account.to_string()).or_insert(until);
+        if until > *slot {
+            *slot = until;
+        }
+    }
+
+    pub fn cooling_down(&self, account: &str) -> bool {
+        self.cooldown_until
+            .get(account)
+            .is_some_and(|until| Instant::now() < *until)
     }
 }
 
@@ -180,6 +204,13 @@ impl Drop for AdmissionGuard {
         if let Ok(mut gate) = ProviderAdmission::global().lock() {
             gate.release(&self.account);
         }
+    }
+}
+
+/// Apply a process-wide cooldown for `account` after a rate-limit response.
+pub fn note_shared_rate_limit(account: &str, cooldown: Duration) {
+    if let Ok(mut gate) = ProviderAdmission::global().lock() {
+        gate.note_rate_limit(account, cooldown);
     }
 }
 
@@ -518,6 +549,16 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         migrate_tables(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn rate_limit_cooldown_blocks_acquire() {
+        let mut gate = ProviderAdmission::default();
+        assert!(gate.try_acquire("acct", 2));
+        gate.release("acct");
+        gate.note_rate_limit("acct", Duration::from_secs(30));
+        assert!(gate.cooling_down("acct"));
+        assert!(!gate.try_acquire("acct", 2));
     }
 
     #[test]

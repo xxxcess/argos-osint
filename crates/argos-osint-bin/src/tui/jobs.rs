@@ -156,6 +156,16 @@ impl JobsView {
     pub fn can_retry(&self) -> bool {
         self.detail.as_ref().is_some_and(|d| d.retryable > 0)
     }
+
+    /// Cancel is offered only for running jobs that declared it safe and
+    /// have not already been asked to stop.
+    pub fn can_cancel(&self) -> bool {
+        self.selected().is_some_and(|job| {
+            job.cancellable
+                && !job.cancel_requested
+                && matches!(job.state.as_str(), "running" | "queued")
+        })
+    }
 }
 
 pub struct JobsAreas {
@@ -237,6 +247,9 @@ pub fn buttons(view: &JobsView, can_open_source: bool) -> Vec<ButtonId> {
     if view.can_retry() {
         out.push(ButtonId::JobsRetry);
     }
+    if view.can_cancel() {
+        out.push(ButtonId::JobsCancel);
+    }
     if can_open_source {
         out.push(ButtonId::JobsOpenSource);
     }
@@ -256,6 +269,7 @@ fn button_label(view: &JobsView, button: ButtonId) -> String {
         ),
         ButtonId::JobsViewLogs => "View logs".into(),
         ButtonId::JobsRetry => "Retry failed".into(),
+        ButtonId::JobsCancel => "Cancel".into(),
         ButtonId::JobsOpenSource => "Open source".into(),
         _ => String::new(),
     }
@@ -423,6 +437,9 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
     ];
     if !job.operation.is_empty() {
         lines.push(format!("Operation: {}", job.operation));
+    }
+    if job.cancel_requested && matches!(job.state.as_str(), "running" | "queued") {
+        lines.push("Cancelling… (stops at the next safe point)".into());
     }
     let progress = progress(job);
     if !progress.is_empty() {

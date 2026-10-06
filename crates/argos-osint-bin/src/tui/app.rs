@@ -5,6 +5,8 @@ use argos_osint_core::brain::{Memory, MemorySource, ScoredMemory};
 use argos_osint_core::hardware::{self, HardwareProfile};
 use argos_osint_core::paths;
 use argos_osint_core::related_memories::{RelatedLimits, RelatedMemory};
+use argos_osint_core::job_registry::{CancelRequest, JobSpec};
+use super::tracked;
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
@@ -417,6 +419,7 @@ pub enum ButtonId {
     JobsApp,
     JobsViewLogs,
     JobsRetry,
+    JobsCancel,
     JobsOpenSource,
     LogsLevel,
     LogsApp,
@@ -2211,8 +2214,18 @@ impl App {
                 let article_id = article.id.clone();
                 let tx = self.work_tx.clone();
                 let cancel = Arc::new(AtomicBool::new(false));
+                let job = tracked::begin_cancellable(
+                    JobSpec::new(
+                        "intel",
+                        "article_body",
+                        format!("Article body · {}", title.chars().take(60).collect::<String>()),
+                    )
+                    .resource(format!("article:{article_id}")),
+                    cancel.clone(),
+                );
+                let stop = cancel.clone();
                 tokio::spawn(async move {
-                    let _ = intel_recon::fetch_article_body(
+                    let outcome = intel_recon::fetch_article_body(
                         &db,
                         &body_id,
                         &title,
@@ -2232,6 +2245,7 @@ impl App {
                         },
                     )
                     .await;
+                    tracked::finish(job, "intel", &outcome, Some(&stop));
                     let _ = article_id;
                 });
             }
@@ -2278,9 +2292,15 @@ impl App {
             .filter(|secret| provider::resolved_key(secret).is_some());
         let article_id = article.id.clone();
         let tx = self.work_tx.clone();
+        let job = tracked::begin(
+            JobSpec::new("intel", "recon_mode", "Recommend an Intel Recon mode")
+                .resource(format!("article:{article_id}")),
+        );
         tokio::spawn(async move {
             let mode =
                 intel_recon::classify_recon_mode(classifier.as_ref(), &input).await;
+            // Falls back to the default mode on its own; never an error.
+            tracked::finish(job, "classifier", &Ok::<(), String>(()), None);
             let _ = tx.send(WorkEvent::IntelReconMode { article_id, mode });
         });
     }
@@ -3059,11 +3079,17 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         let cancel = Arc::new(AtomicBool::new(false));
         self.osint_cancel = Some(cancel.clone());
         self.status = format!("Running {}", tool.name);
+        let job = tracked::begin_cancellable(
+            JobSpec::new("tools", "tool_run", format!("Run {}", tool.name)).tool(tool.id),
+            cancel.clone(),
+        );
+        let stop = cancel.clone();
         tokio::spawn(async move {
             let outcome = service
                 .manual_with_cancel(&tool_id, input, cancel)
                 .await
                 .map_err(|e| e.to_string());
+            tracked::finish(job, "tool", &outcome, Some(&stop));
             let _ = tx.send(WorkEvent::OsintDone { outcome });
         });
         Ok(())
@@ -3529,10 +3555,15 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
+        let job = tracked::begin(
+            JobSpec::new("models", "model_catalog", format!("Load {provider} models"))
+                .model(provider.clone(), String::new()),
+        );
         tokio::spawn(async move {
             let outcome = provider::verified_catalog(&secret)
                 .await
                 .map_err(|e| e.to_string());
+            tracked::finish(job, "provider", &outcome, None);
             let _ = tx.send(WorkEvent::CatalogDone {
                 role,
                 provider,
@@ -3733,9 +3764,16 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
         self.access_probe = true;
         let tx = self.work_tx.clone();
+        let job = tracked::begin(JobSpec::new(
+            "models",
+            "access_probe",
+            "Check subscription sign-ins",
+        ));
         tokio::spawn(async move {
             let grok = argos_osint_core::grok_oauth::check_login().await.is_ok();
             let openai = argos_osint_core::subscription::check_login().await.is_ok();
+            // Signed-out accounts are an answer, not a failure.
+            tracked::finish(job, "provider", &Ok::<(), String>(()), None);
             let _ = tx.send(WorkEvent::Access { grok, openai });
         });
     }
@@ -4166,6 +4204,19 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         let memory_id = memory.id.clone();
         let tx = self.work_tx.clone();
         let db = paths::db_path();
+        let job = tracked::begin(
+            JobSpec::new(
+                "brain",
+                "graph_summary",
+                if claim {
+                    "Explain claim path"
+                } else {
+                    "Explain recon path"
+                },
+            )
+            .resource(format!("memory:{memory_id}"))
+            .model(secret.kind.clone(), secret.model.clone()),
+        );
         runtime.spawn(async move {
             let outcome = write_graph_summary(&secret, &system, &prompt)
                 .await
@@ -4176,6 +4227,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     }
                     Ok(text)
                 });
+            tracked::finish(job, "summary", &outcome, None);
             let _ = tx.send(WorkEvent::GraphSummary {
                 memory_id,
                 outcome: outcome.map_err(|err| err.to_string()),
@@ -4363,6 +4415,19 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     } else {
                         format!("Retrying {n} failed task(s)")
                     }
+                })
+            }
+            ButtonId::JobsCancel => {
+                let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
+                    return;
+                };
+                let requested = self.store.request_job_cancel(&id);
+                self.reload_jobs();
+                requested.map(|outcome| match outcome {
+                    CancelRequest::Requested => "Cancel requested · the job stops at its next safe point".into(),
+                    CancelRequest::NotCancellable => "This job cannot be cancelled safely".into(),
+                    CancelRequest::NotRunning => "This job is not running".into(),
+                    CancelRequest::Missing => "This job no longer exists".into(),
                 })
             }
             ButtonId::JobsOpenSource => self.open_job_source(),
@@ -4729,6 +4794,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         self.router_status = "Verifying OpenRouter connection…".into();
         self.status = self.router_status.clone();
         let tx = self.provider_tx.clone();
+        let job = tracked::begin(JobSpec::new(
+            "models",
+            "provider_verify",
+            "Verify OpenRouter connection",
+        ));
         tokio::spawn(async move {
             let result = provider::verified_catalog(&secret)
                 .await
@@ -4740,6 +4810,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     )
                 })
                 .map_err(|err| err.to_string());
+            tracked::finish(job, "provider", &result, None);
             let _ = tx.send(ProviderEvent::Finished {
                 page: ProviderPage::OpenRouter,
                 result,
@@ -4768,6 +4839,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
         self.status = status;
         let tx = self.provider_tx.clone();
+        let job = tracked::begin(JobSpec::new(
+            "models",
+            if login { "provider_login" } else { "provider_check" },
+            format!("{} {label} subscription", if login { "Sign in to" } else { "Check" }),
+        ));
         tokio::spawn(async move {
             let result = if page == ProviderPage::Grok {
                 let outcome = if login {
@@ -4809,6 +4885,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 };
                 outcome.map_err(|err| err.to_string())
             };
+            tracked::finish(job, "provider", &result, None);
             let _ = tx.send(ProviderEvent::Finished { page, result });
         });
     }
@@ -5715,6 +5792,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             (Some(ModuleId::Logs), 'v') => ButtonId::LogsLevel,
             (Some(ModuleId::Jobs), 'l') if self.jobs.selected().is_some() => ButtonId::JobsViewLogs,
             (Some(ModuleId::Jobs), 'r') if self.jobs.can_retry() => ButtonId::JobsRetry,
+            (Some(ModuleId::Jobs), 'c') if self.jobs.can_cancel() => ButtonId::JobsCancel,
             (Some(ModuleId::Jobs), 's') => ButtonId::JobsStatus,
             _ => return false,
         };
@@ -6163,6 +6241,9 @@ pub async fn run(mut app: App) -> Result<()> {
     // its own pool. Stopped when dropped at the end of the session.
     let _workers =
         argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
+    // Process liveness for the job registry: jobs left running by a process
+    // that exited become interrupted; cross-process Cancel reaches this one.
+    let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
     // One-time "Repair Atlas memories" reconciliation (resumes if interrupted).
     argos_osint_core::atlas_memory::spawn_startup_reconciliation(paths::db_path());
     // Committed memory changes from any writer (Atlas, Recon, Intel Recon, the
@@ -7622,6 +7703,57 @@ mod tests {
         let order = ["Intel", "Atlas", "Brain", "Recon", "Jobs", "Logs", "Tools", "Models", "System"];
         let positions: Vec<usize> = order.iter().map(|label| first.find(label).unwrap()).collect();
         assert!(positions.windows(2).all(|w| w[0] < w[1]), "{first}");
+    }
+
+    #[test]
+    fn registered_operations_show_in_jobs_and_cancel_is_cooperative() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        let mut app = app();
+        app.store = Store::open(&db).unwrap();
+        app.screen = Rect::new(0, 0, 140, 40);
+        super::super::tracked::testing::use_db(Some(db.clone()));
+        // A tool run as the TUI registers it: durable before work starts.
+        let stop = Arc::new(AtomicBool::new(false));
+        let job = super::super::tracked::begin_cancellable(
+            JobSpec::new("tools", "tool_run", "Run WHOIS lookup").tool("whois"),
+            stop.clone(),
+        )
+        .expect("registered");
+        let id = job.id().to_string();
+        // A non-cancellable operation never offers Cancel.
+        let summary = super::super::tracked::begin(JobSpec::new("brain", "graph_summary", "Explain claim path"))
+            .expect("registered");
+        app.select(ModuleId::Jobs.index());
+        assert!(app.jobs.focus_job(&app.store, &id), "listed");
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains("Run WHOIS lookup") && text.contains("Explain claim path"), "{text}");
+        assert!(text.contains("Cancel"), "{text}");
+        assert!(app.jobs.selected().unwrap().active_now(chrono::Utc::now()).is_some(), "live active time");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(stop.load(Ordering::Relaxed), "the tool's own stop flag is set");
+        assert!(app.status.contains("Cancel requested"), "{}", app.status);
+        assert_eq!(app.jobs.selected().unwrap().state, "running", "not cancelled until it stops");
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains("Cancelling…"), "{text}");
+        assert!(!app.jobs.can_cancel(), "no second Cancel");
+
+        // The operation observes the flag and stops: cancelled, not failed.
+        super::super::tracked::finish(Some(job), "tool", &Err::<(), _>("stopped"), Some(&stop));
+        super::super::tracked::finish(Some(summary), "summary", &Ok::<(), String>(()), None);
+        app.reload_jobs();
+        let rows: HashMap<String, String> = app
+            .jobs
+            .rows
+            .iter()
+            .map(|r| (r.title.clone(), r.state.clone()))
+            .collect();
+        assert_eq!(rows["Run WHOIS lookup"], "cancelled");
+        assert_eq!(rows["Explain claim path"], "completed");
+        let summary_row = app.jobs.rows.iter().find(|r| r.title == "Explain claim path").unwrap();
+        assert!(!summary_row.cancellable);
+        super::super::tracked::testing::use_db(None);
     }
 
     #[test]

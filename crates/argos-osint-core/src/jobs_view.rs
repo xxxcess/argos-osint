@@ -631,6 +631,11 @@ impl Store {
         job_apps(&self.conn)
     }
 
+    /// Jobs → Cancel: cooperative stop request (see [`crate::job_registry::request_cancel`]).
+    pub fn request_job_cancel(&self, id: &str) -> Result<crate::job_registry::CancelRequest> {
+        crate::job_registry::request_cancel(&self.conn, id)
+    }
+
     /// Register a user-visible job before launching its work (idempotent).
     pub fn register_job(&self, job: &tasks::NewJob, meta: &tasks::JobMeta) -> Result<()> {
         tasks::enqueue_job_with(&self.conn, job, meta, &chrono::Utc::now().to_rfc3339())

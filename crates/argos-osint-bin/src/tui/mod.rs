@@ -8,6 +8,7 @@ mod logs;
 mod map;
 mod markdown;
 mod theme;
+mod tracked;
 mod ui;
 
 pub use app::{run, App};

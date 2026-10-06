@@ -3832,7 +3832,7 @@ fn footer_line(app: &App) -> Paragraph<'static> {
                 "↑↓ event · Enter fold · f follow · o job · Esc back to job"
             }
             (Some(ModuleId::Logs), _) => "↑↓ event · Enter fold · f follow · o job · Esc home",
-            (Some(ModuleId::Jobs), _) => "↑↓ job · Enter detail · l logs · s status · Esc home",
+            (Some(ModuleId::Jobs), _) => "↑↓ job · Enter detail · l logs · r retry · c cancel · s status · Esc home",
             (Some(ModuleId::System), _) => "Tab next · Enter · Ctrl+K · Esc home",
             _ => "Tab next · 1–9 apps · Enter · Ctrl+K · Esc home",
         }

@@ -258,7 +258,6 @@ impl JobHandle {
                 ],
             )?;
         }
-        cancel.store(false, Ordering::Relaxed);
         live()
             .lock()
             .unwrap_or_else(|e| e.into_inner())

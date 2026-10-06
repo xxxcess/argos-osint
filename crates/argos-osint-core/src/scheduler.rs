@@ -214,6 +214,9 @@ fn load_summarization_secret() -> Option<crate::secrets::ProviderSecret> {
     crate::provider::role_secret(&auth, &settings, "summarization").ok()
 }
 
+/// Service-health job for the summary flush pool.
+pub const SUMMARY_SERVICE_JOB: &str = "svc-summary-flush";
+
 /// Stable worker-owner id for this process (shared by all its pools so
 /// election stays coherent across processes sharing one state root).
 pub fn process_owner() -> String {
@@ -283,6 +286,7 @@ impl WorkerPool {
         std::thread::Builder::new()
             .name("argos-summary-pool".into())
             .spawn(move || {
+                let mut loops = 0u32;
                 while !flag.load(Ordering::Relaxed) {
                     let Ok(conn) = Connection::open(&db_path) else {
                         std::thread::sleep(Duration::from_secs(2));
@@ -297,6 +301,19 @@ impl WorkerPool {
                     // Best-effort: load summarization role secret when configured.
                     // Never invents success when auth/settings/secret are missing.
                     let secret = load_summarization_secret();
+                    // Service-health row; batches/tasks supply the job history.
+                    if loops % 40 == 0 {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let _ = tasks::ensure_service_job(
+                            &conn,
+                            SUMMARY_SERVICE_JOB,
+                            "brain",
+                            "Summary flush worker",
+                            &now,
+                        );
+                        let _ = tasks::refresh_job_state(&conn, SUMMARY_SERVICE_JOB, &now);
+                    }
+                    loops = loops.wrapping_add(1);
                     let _ = drain_summary_flush(&conn, &owner, secret.as_ref());
                     std::thread::sleep(Duration::from_millis(750));
                 }

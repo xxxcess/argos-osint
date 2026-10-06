@@ -2752,6 +2752,36 @@ pub fn validate_ordered_plan(plan: &Plan) -> Result<()> {
     }
     Ok(())
 }
+
+/// Terminal job state for a Recon investigation from its outcome.
+fn finish_recon_job(
+    job: Option<crate::job_registry::JobHandle>,
+    run_id: Option<&str>,
+    outcome: &Result<Run>,
+    cancel: &AtomicBool,
+) {
+    use crate::job_registry::Finish;
+    let Some(mut job) = job else {
+        return;
+    };
+    if let Some(run_id) = run_id {
+        job.link_run(run_id);
+    }
+    let finish = match outcome {
+        Ok(run) if run.stage == "cut short" => Finish::Partial {
+            summary: format!("cut short: {}", run.error.clone().unwrap_or_default()),
+        },
+        Ok(run) => Finish::Completed {
+            result_ref: format!("recon_run:{}", run.id),
+        },
+        Err(_) if cancel.load(Ordering::Relaxed) => Finish::Cancelled {
+            summary: "cancelled by user".into(),
+        },
+        Err(err) => Finish::failed("recon", format!("{err:#}")),
+    };
+    job.finish(finish);
+}
+
 #[cfg(test)]
 fn decode_plan(response: &provider::Completion, max_calls: usize) -> Result<Plan> {
     let (value, mode) = if let Some(call) = response.tool_calls.first() {
@@ -2939,7 +2969,44 @@ impl Service {
             }
         }))
     }
+    /// Ask a question as a Recon investigation, tracked as a registry job
+    /// (cancellable; Jobs → Cancel sets `cancel`).
     pub async fn ask(
+        &self,
+        tid: &str,
+        question: &str,
+        cancel: Arc<AtomicBool>,
+        mut progress: impl FnMut(TurnEvent) + Send,
+    ) -> Result<Run> {
+        let title: String = question.trim().chars().take(80).collect();
+        let job = crate::job_registry::begin_optional_with(
+            &self.db_path,
+            crate::job_registry::JobSpec::new("recon", "recon_investigation", format!("Recon · {title}"))
+                .resource(format!("thread:{tid}"))
+                .cancellable(),
+            cancel.clone(),
+        );
+        let outcome = {
+            let tracked = |event: TurnEvent| {
+                if let (Some(job), TurnEvent::Stage(stage)) = (&job, &event) {
+                    job.phase(stage, None, None);
+                }
+                progress(event)
+            };
+            self.ask_untracked(tid, question, cancel.clone(), tracked).await
+        };
+        let run_id = match &outcome {
+            Ok(run) => Some(run.id.clone()),
+            Err(_) => Store::open(&self.db_path)
+                .ok()
+                .and_then(|store| store.runs_for_thread(tid).ok())
+                .and_then(|runs| runs.last().map(|run| run.id.clone())),
+        };
+        finish_recon_job(job, run_id.as_deref(), &outcome, &cancel);
+        outcome
+    }
+
+    async fn ask_untracked(
         &self,
         tid: &str,
         question: &str,
@@ -3020,7 +3087,46 @@ impl Service {
             .get_run(&run.id)?
             .ok_or_else(|| anyhow!("run was deleted"))
     }
+    /// Resume an interrupted or failed investigation. The run's existing job
+    /// is reused (one row, attempts + 1); completed tool calls are not re-run.
     pub async fn resume(
+        &self,
+        rid: &str,
+        cancel: Arc<AtomicBool>,
+        mut progress: impl FnMut(TurnEvent) + Send,
+    ) -> Result<Run> {
+        let existing = rusqlite::Connection::open(&self.db_path).ok().and_then(|conn| {
+            crate::job_registry::job_for_run(&conn, "recon_investigation", rid)
+                .ok()
+                .flatten()
+        });
+        let thread = Store::open(&self.db_path)
+            .ok()
+            .and_then(|store| store.get_run(rid).ok().flatten())
+            .map(|run| run.thread_id)
+            .unwrap_or_default();
+        let mut spec = crate::job_registry::JobSpec::new("recon", "recon_investigation", "Recon · resumed investigation")
+            .run(rid)
+            .resource(format!("thread:{thread}"))
+            .cancellable();
+        if let Some(id) = existing {
+            spec = spec.with_id(id);
+        }
+        let job = crate::job_registry::begin_optional_with(&self.db_path, spec, cancel.clone());
+        let outcome = {
+            let tracked = |event: TurnEvent| {
+                if let (Some(job), TurnEvent::Stage(stage)) = (&job, &event) {
+                    job.phase(stage, None, None);
+                }
+                progress(event)
+            };
+            self.resume_untracked(rid, cancel.clone(), tracked).await
+        };
+        finish_recon_job(job, Some(rid), &outcome, &cancel);
+        outcome
+    }
+
+    async fn resume_untracked(
         &self,
         rid: &str,
         cancel: Arc<AtomicBool>,
@@ -4355,6 +4461,40 @@ fn citation_ids(answer: &str) -> Vec<String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn investigation_jobs_finish_truthfully_and_link_their_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        drop(Store::open(&db).unwrap());
+        let spec = || {
+            crate::job_registry::JobSpec::new("recon", "recon_investigation", "Recon · q")
+                .resource("thread:t1")
+                .cancellable()
+        };
+        // Cancelled through the shared flag: the job reads cancelled, not failed.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let job = crate::job_registry::begin_optional_with(&db, spec(), cancel.clone()).unwrap();
+        let id = job.id().to_string();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        crate::job_registry::request_cancel(&conn, &id).unwrap();
+        assert!(cancel.load(Ordering::Relaxed), "Jobs → Cancel flips the run's own flag");
+        finish_recon_job(Some(job), Some("run-1"), &Err(anyhow!("stopped")), &cancel);
+        let row = Store::open(&db).unwrap().get_job(&id).unwrap().unwrap();
+        assert_eq!((row.state.as_str(), row.run_ref.as_str()), ("cancelled", "run-1"));
+        assert_eq!(
+            crate::job_registry::job_for_run(&conn, "recon_investigation", "run-1").unwrap(),
+            Some(id)
+        );
+        // A provider error is a failure with the (redacted) cause.
+        let calm = Arc::new(AtomicBool::new(false));
+        let job = crate::job_registry::begin_optional_with(&db, spec(), calm.clone()).unwrap();
+        let id = job.id().to_string();
+        finish_recon_job(Some(job), None, &Err(anyhow!("HTTP 401 key sk-abcdefghijklmnopqrstuv")), &calm);
+        let row = Store::open(&db).unwrap().get_job(&id).unwrap().unwrap();
+        assert_eq!(row.state, "failed");
+        assert!(!row.error_summary.contains("sk-abcdefghijklmnopqrstuv"), "{}", row.error_summary);
+    }
+
     use super::*;
     fn cited(id: &str, status: &str) -> (String, ToolResult) {
         (

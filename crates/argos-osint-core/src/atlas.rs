@@ -1263,7 +1263,7 @@ pub struct RunInput<'a> {
 
 /// A finished run can be resumed when it stopped in phase 4/5 with retained
 /// checkpoints (publication retry, indexing retry, configuration fixed).
-fn resumable(run: &AtlasRunRow) -> bool {
+pub fn resumable(run: &AtlasRunRow) -> bool {
     if run.state == "paused" {
         return true;
     }
@@ -2211,13 +2211,24 @@ where
     })
 }
 
+/// Which run [`run_live`] works on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveRun {
+    /// Start a new cycle.
+    Fresh,
+    /// Resume the latest run (paused, or stopped in phase 4/5).
+    Latest,
+    /// Resume this run (an older cycle stopped in phase 4/5).
+    Run(String),
+}
+
 /// Live pipeline. Uses the process HTTP client and paces GNews by one second.
 pub async fn run_live(
     db_path: &Path,
     pause: &AtomicBool,
     keys: &ProviderKeys,
     user_agent: &str,
-    resume: bool,
+    live: LiveRun,
     feed: &[FeedArticle],
     classifier: Option<ProviderSecret>,
     synthesizer: Option<ProviderSecret>,
@@ -2234,11 +2245,14 @@ pub async fn run_live(
             keys,
             user_agent,
             pace: true,
-            resume,
+            resume: live != LiveRun::Fresh,
             feed,
             classifier,
             synthesizer,
-            run_id: None,
+            run_id: match &live {
+                LiveRun::Run(id) => Some(id.as_str()),
+                _ => None,
+            },
         },
         emit,
         move |call: HttpCall| {

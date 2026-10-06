@@ -28,6 +28,35 @@ pub const MEMORY_RECORD: &str = "memory";
 pub const DELETED_REVISION: &str = "deleted";
 const INLINE_LEASE_SECS: i64 = 60;
 
+/// Test-only fault injection: runs right after the Lance write and before the
+/// compare-and-record step of [`Store::try_index_memory`] on this thread.
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn Fn(&rusqlite::Connection)>;
+
+    thread_local! {
+        static AFTER_WRITE: RefCell<Option<Hook>> = RefCell::new(None);
+    }
+
+    pub(crate) fn set_after_write(hook: impl Fn(&rusqlite::Connection) + 'static) {
+        AFTER_WRITE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(crate) fn clear() {
+        AFTER_WRITE.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    pub(crate) fn fire(conn: &rusqlite::Connection) {
+        AFTER_WRITE.with(|slot| {
+            if let Some(hook) = slot.borrow().as_ref() {
+                hook(conn);
+            }
+        });
+    }
+}
+
 /// Stable revision of a memory's indexed content (SHA-256 of the text).
 pub fn memory_revision(text: &str) -> String {
     crate::evidence::content_hash(text)
@@ -477,6 +506,8 @@ impl Store {
         if let Err(err) = index.upsert_texts(&[(memory_id.to_string(), text)]) {
             return fail(err);
         }
+        #[cfg(test)]
+        fault::fire(&self.conn);
         match index.present_ids(&ids) {
             Ok(present) if present.contains(memory_id) => {}
             Ok(_) => {
@@ -1383,5 +1414,72 @@ mod tests {
             )
             .unwrap();
         assert_eq!(runs, 2);
+    }
+
+    #[test]
+    fn text_changed_mid_index_write_reruns_on_the_new_revision() {
+        let _fake = testing::fake();
+        let (_dir, store) = disk_store();
+        let memory = store
+            .add_memory(
+                "Harbor tanker manifests list cargo",
+                "fact",
+                false,
+                crate::brain::MemorySource {
+                    app: "test".into(),
+                    conversation_id: "c".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        // Force a fresh write of the current revision.
+        store
+            .conn
+            .execute(
+                "DELETE FROM argos_memory_index_state WHERE memory_id=?1",
+                [&memory.id],
+            )
+            .unwrap();
+        let old_rev = memory_revision(&memory.text);
+        let id = memory.id.clone();
+        fault::set_after_write(move |conn| {
+            conn.execute(
+                "UPDATE memories SET text='Northwind ferry timetable' WHERE id=?1",
+                [&id],
+            )
+            .unwrap();
+        });
+        let first = store.try_index_memory(&memory.id, &old_rev);
+        fault::clear();
+        assert!(matches!(first, IndexOutcome::Pending { .. }), "{first:?}");
+        assert_eq!(
+            indexed_revision(&store.conn, &memory.id).unwrap(),
+            None,
+            "the stale revision written mid-change is not acknowledged"
+        );
+        let new_rev = memory_revision("Northwind ferry timetable");
+        let second = store.try_index_memory(&memory.id, &old_rev);
+        assert!(
+            matches!(second, IndexOutcome::Ready { ref revision, .. } if *revision == new_rev),
+            "{second:?}"
+        );
+        assert_eq!(
+            indexed_revision(&store.conn, &memory.id).unwrap(),
+            Some(new_rev)
+        );
+        let hit = store
+            .vectors
+            .as_deref()
+            .unwrap()
+            .search("northwind ferry timetable", 1)
+            .unwrap();
+        assert_eq!(hit[0].0, memory.id);
+        assert!(hit[0].1 > 0.99, "{hit:?}");
+        // Through the durable path the pending outcome requeues the same task.
+        assert!(store
+            .verify_memory_coverage(&[memory.id.clone()])
+            .unwrap()
+            .complete());
     }
 }

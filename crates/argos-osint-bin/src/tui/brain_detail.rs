@@ -138,6 +138,9 @@ pub fn pane_of(focus: Target) -> DetailPane {
     match focus {
         Target::RelatedRow(_) => DetailPane::Related,
         Target::DetailSummary => DetailPane::Summary,
+        Target::Button(button) if super::summary_card::is_card_button(button) => {
+            DetailPane::Summary
+        }
         _ => DetailPane::Path,
     }
 }

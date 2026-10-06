@@ -2684,6 +2684,13 @@ pub fn focus_order(app: &App) -> Vec<Target> {
                         order.push(Target::RelatedRow(app.brain_detail.related.sel));
                     }
                     order.push(Target::DetailSummary);
+                    if let Some(failure) = &app.summary_failure {
+                        order.extend(
+                            super::summary_card::actions(failure)
+                                .into_iter()
+                                .map(Target::Button),
+                        );
+                    }
                 }
                 BrainListMode::Create => {
                     order.extend(
@@ -3085,6 +3092,12 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
                 .map(Target::RelatedRow);
         }
         if contains(areas.summary, x, y) {
+            if let Some(failure) = &app.summary_failure {
+                let inner = super::graph::summary_inner(areas.summary);
+                if let Some(button) = super::summary_card::button_at(app, failure, inner, x, y) {
+                    return Some(Target::Button(button));
+                }
+            }
             return Some(Target::DetailSummary);
         }
         return None;

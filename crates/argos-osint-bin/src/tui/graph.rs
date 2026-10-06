@@ -10,6 +10,7 @@ use argos_osint_core::recon::{recon_path, GraphNodeKind, MemoryGraph};
 use super::app::{App, Target};
 use super::brain_detail;
 use super::markdown;
+use super::summary_card;
 use super::theme::{self, panel};
 use super::ui::{center_line, contains};
 
@@ -166,18 +167,51 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
         app.graph_summary.as_str()
     };
     let width = area.width.saturating_sub(2) as usize;
-    let title = if app.focus == Target::DetailSummary {
+    let card_focused = matches!(app.focus, Target::Button(b) if summary_card::is_card_button(b));
+    let title = if app.focus == Target::DetailSummary || card_focused {
         " summary · focused "
     } else {
         " summary "
     };
+    let Some(failure) = &app.summary_failure else {
+        frame.render_widget(
+            Paragraph::new(summary_lines(text, width))
+                .style(theme::text())
+                .block(panel(title))
+                .scroll((app.scrolls.summary, 0)),
+            area,
+        );
+        return;
+    };
+    frame.render_widget(panel(title), area);
+    let inner = inset(area);
+    let card_h = summary_card::height(failure, app.summary_details_open, inner);
+    summary_card::draw(frame, app, failure, inner);
+    let body = Rect {
+        y: inner.y + card_h,
+        height: inner.height.saturating_sub(card_h),
+        ..inner
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    if app.summary_details_open {
+        for detail in &failure.details {
+            lines.push(Line::from(Span::styled(detail.clone(), theme::dim())));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.extend(summary_lines(text, width));
     frame.render_widget(
-        Paragraph::new(summary_lines(text, width))
+        Paragraph::new(lines)
             .style(theme::text())
-            .block(panel(title))
+            .wrap(Wrap { trim: false })
             .scroll((app.scrolls.summary, 0)),
-        area,
+        body,
     );
+}
+
+/// Inner area of the summary panel (where the failure card sits).
+pub fn summary_inner(area: Rect) -> Rect {
+    inset(area)
 }
 
 fn summary_lines(text: &str, width: usize) -> Vec<Line<'static>> {

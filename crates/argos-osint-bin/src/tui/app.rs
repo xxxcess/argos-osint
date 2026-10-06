@@ -413,6 +413,16 @@ pub enum ButtonId {
     BrainBack,
     /// Back in the memory detail history (or to the Brain list).
     BrainDetailBack,
+    /// Summary failure card: toggle the sanitized cause chain and attempts.
+    SummaryDetails,
+    /// Summary failure card: Logs filtered to the failed job.
+    SummaryLogs,
+    /// Summary failure card: the failed job in Jobs.
+    SummaryJob,
+    /// Summary failure card: a fresh, linked execution.
+    SummaryRetry,
+    /// Summary failure card: Models → Defaults with Summarization selected.
+    SummaryModels,
     /// Logs: clear durable events only (jobs, results, memories are kept).
     ClearLog,
     JobsStatus,
@@ -535,8 +545,7 @@ enum WorkEvent {
         label: String,
     },
     GraphSummary {
-        memory_id: String,
-        outcome: std::result::Result<String, String>,
+        report: Box<argos_osint_core::graph_explanation::ExplainReport>,
     },
     Related {
         request: u64,
@@ -749,6 +758,11 @@ pub struct App {
     pub memories_loaded: bool,
     pub graph_summary: String,
     graph_summary_pending: Option<String>,
+    /// Request id of the newest graph explanation; older completions are ignored.
+    graph_summary_request: String,
+    /// Failed graph explanation for the open memory (inline card).
+    pub summary_failure: Option<super::summary_card::SummaryFailure>,
+    pub summary_details_open: bool,
     pub hits: Vec<ScoredMemory>,
     pub auth: AuthFile,
     pub settings: SettingsFile,
@@ -1000,6 +1014,9 @@ impl App {
             memories_loaded: true,
             graph_summary: String::new(),
             graph_summary_pending: None,
+            graph_summary_request: String::new(),
+            summary_failure: None,
+            summary_details_open: false,
             hits: Vec::new(),
             auth,
             settings,
@@ -3224,31 +3241,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 }
                 true
             }
-            WorkEvent::GraphSummary { memory_id, outcome } => {
-                if self.graph_summary_pending.as_deref() == Some(memory_id.as_str()) {
-                    self.graph_summary_pending = None;
-                }
-                let viewing = self.brain_list_mode == BrainListMode::Graph
-                    && self.brain_detail.memory_id() == Some(memory_id.as_str());
-                match outcome {
-                    Ok(text) => {
-                        if viewing {
-                            self.graph_summary = text;
-                            self.status = "Graph summary saved".into();
-                        }
-                    }
-                    Err(err) => {
-                        self.push_log("error", format!("Graph summary failed: {err}"));
-                        if viewing {
-                            self.graph_summary = format!(
-                                "Graph summary failed: {err}\n\nLeave and open this memory again to retry."
-                            );
-                            self.status = "Graph summary failed".into();
-                        }
-                    }
-                }
-                viewing
-            }
+            WorkEvent::GraphSummary { report } => self.on_graph_summary(*report),
             WorkEvent::Related {
                 request,
                 memory_id,
@@ -3957,6 +3950,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         self.brain_detail.history.clear();
         self.brain_detail.related = Default::default();
         self.graph_summary.clear();
+        self.summary_failure = None;
+        self.summary_details_open = false;
         self.brain_graph_for = None;
         self.sync_graph();
         self.set_focus(if self.memories.is_empty() {
@@ -4033,6 +4028,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         self.brain_graph_for = Some(memory.id.clone());
         self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
         self.graph_summary.clear();
+        self.summary_failure = None;
+        self.summary_details_open = false;
         self.scrolls.path = restore.map_or(0, |s| s.path_scroll);
         self.scrolls.summary = restore.map_or(0, |s| s.summary_scroll);
         self.brain_detail.memory = Some(memory.clone());
@@ -4145,6 +4142,15 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     fn load_or_request_summary(&mut self, memory: &Memory) {
+        self.request_summary(memory, false);
+    }
+
+    /// Graph explanation for the open memory: a valid cached summary, the
+    /// running execution, the saved failure (inside the retry cooldown), or a
+    /// new budgeted execution. `explicit` is Brain → Retry summary.
+    fn request_summary(&mut self, memory: &Memory, explicit: bool) {
+        use argos_osint_core::graph_explanation::{self as ge, Cached, ExplainRequest, Gate};
+        use argos_osint_core::provider_diag::{Category, ProviderFailure, Stage};
         let claim = self.detail_claim();
         let title = if claim { "Claim path" } else { "Recon path" };
         let focus = recon::recon_path(&self.brain_graph)
@@ -4152,20 +4158,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             .first()
             .map(|band| band.directive_id.clone())
             .unwrap_or_default();
-        match self.store.graph_summary(&memory.id) {
-            Ok(Some(saved)) if saved.focus == focus || focus.is_empty() => {
-                self.graph_summary = saved.summary;
-                self.status = title.into();
-                return;
-            }
-            Ok(Some(_)) | Ok(None) => {}
-            Err(err) => {
-                self.graph_summary = format!("Graph summary unavailable: {err}");
-                self.status = "Graph summary unavailable".into();
-                return;
-            }
-        }
         if self.brain_graph.is_empty() {
+            self.summary_failure = None;
             self.graph_summary = if claim {
                 "This memory has no claim path.".into()
             } else {
@@ -4175,64 +4169,213 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             return;
         }
         if self.graph_summary_pending.as_deref() == Some(memory.id.as_str()) {
-            self.graph_summary = "Writing graph summary…".into();
-            self.status = self.graph_summary.clone();
+            if !explicit {
+                self.graph_summary = self.summary_body(memory, "Writing graph summary…");
+            }
+            self.status = "Graph summary is already being written".into();
             return;
         }
         let secret = match provider::role_secret(&self.auth, &self.settings, "summarization") {
             Ok(secret) => secret,
             Err(err) => {
-                self.graph_summary = format!("Graph summary unavailable: {err}");
-                self.status = "Graph summary unavailable".into();
+                let failure = ProviderFailure::from_error(
+                    Stage::Configuration,
+                    Category::Configuration,
+                    err.as_ref(),
+                );
+                self.summary_failure = Some(super::summary_card::SummaryFailure::local(
+                    &memory.id, &failure,
+                ));
+                self.graph_summary = self.summary_body(memory, "");
+                self.status = "Graph summary unavailable · configure Summarization".into();
                 return;
             }
         };
-        let prompt = format!(
-            "Memory:\n{}\n\n{}",
-            memory.text,
-            recon::graph_brief(&self.brain_graph)
-        );
+        let retry_of = self
+            .summary_failure
+            .as_ref()
+            .filter(|f| f.memory_id == memory.id && !f.job_id.is_empty())
+            .map(|f| f.job_id.clone());
+        let req = ExplainRequest {
+            memory_id: memory.id.clone(),
+            memory_text: memory.text.clone(),
+            focus,
+            claim,
+            system: summary_system(claim),
+            graph_brief: recon::graph_brief(&self.brain_graph),
+            request_id: argos_osint_core::job_registry::new_job_id("graph-request"),
+            retry_of,
+        };
+        let key = req.key(&secret);
+        match ge::cached(&self.store, &memory.id, &key) {
+            Ok(Cached::Valid(text)) if !explicit => {
+                self.summary_failure = None;
+                self.graph_summary = text;
+                self.status = title.into();
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                self.push_log("warn", format!("Graph summary cache unreadable: {err:#}"));
+            }
+        }
+        match ge::gate(&self.store, &memory.id, &key, explicit) {
+            Gate::Running(_) => {
+                self.graph_summary = self.summary_body(memory, "Writing graph summary…");
+                self.status = "Graph summary is already being written".into();
+                return;
+            }
+            Gate::CoolingDown(rec) => {
+                self.summary_failure = Some(super::summary_card::SummaryFailure::from_record(&rec));
+                self.graph_summary = self.summary_body(memory, "");
+                self.status = "Graph summary failed · Retry summary to try again".into();
+                return;
+            }
+            Gate::Ready => {}
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            self.graph_summary = "Graph summary unavailable: no background runtime".into();
-            self.status = "Graph summary unavailable".into();
+            self.graph_summary = self.summary_body(memory, "");
+            self.status = "Graph summary unavailable: no background runtime".into();
             return;
         };
-        let system = summary_system(claim);
+        self.summary_failure = None;
+        self.summary_details_open = false;
         self.graph_summary_pending = Some(memory.id.clone());
-        self.graph_summary = "Writing graph summary…".into();
-        self.status = self.graph_summary.clone();
-        let memory_id = memory.id.clone();
+        self.graph_summary_request = req.request_id.clone();
+        self.graph_summary = self.summary_body(memory, "Writing graph summary…");
+        self.status = if explicit {
+            "Retrying graph summary…".into()
+        } else {
+            "Writing graph summary…".into()
+        };
         let tx = self.work_tx.clone();
         let db = paths::db_path();
-        let job = tracked::begin(
-            JobSpec::new(
-                "brain",
-                "graph_summary",
-                if claim {
-                    "Explain claim path"
-                } else {
-                    "Explain recon path"
-                },
-            )
-            .resource(format!("memory:{memory_id}"))
-            .model(secret.kind.clone(), secret.model.clone()),
-        );
         runtime.spawn(async move {
-            let outcome = write_graph_summary(&secret, &system, &prompt)
-                .await
-                .and_then(|text| {
-                    let store = Store::open(&db)?;
-                    if !store.save_graph_summary(&memory_id, &text, &focus)? {
-                        anyhow::bail!("memory was deleted before the summary was saved");
-                    }
-                    Ok(text)
-                });
-            tracked::finish(job, "summary", &outcome, None);
+            let opts = argos_osint_core::summarization::ExecOptions::for_secret(&secret);
+            let report = ge::explain(&db, &secret, &req, &opts, ge::Faults::default()).await;
             let _ = tx.send(WorkEvent::GraphSummary {
-                memory_id,
-                outcome: outcome.map_err(|err| err.to_string()),
+                report: Box::new(report),
             });
         });
+    }
+
+    /// Body of the summary pane when no current summary exists: an optional
+    /// status line, then the last valid summary (labeled as an earlier
+    /// result) or the deterministic basic explanation.
+    fn summary_body(&self, memory: &Memory, status: &str) -> String {
+        let mut out = String::new();
+        if !status.is_empty() {
+            out.push_str(&format!("_{status}_\n\n"));
+        }
+        match self.store.graph_summary_entry(&memory.id) {
+            Ok(Some(entry)) => {
+                out.push_str("_Earlier result — written before the evidence, memory text, focus, model or prompt last changed._\n\n");
+                out.push_str(&entry.summary);
+            }
+            _ => out.push_str(&argos_osint_core::graph_explanation::basic_explanation(
+                &self.brain_graph,
+                &memory.text,
+            )),
+        }
+        out
+    }
+
+    /// A finished graph explanation. The job, events and diagnostic record
+    /// were persisted before this was sent.
+    fn on_graph_summary(&mut self, report: argos_osint_core::graph_explanation::ExplainReport) -> bool {
+        use argos_osint_core::graph_explanation::ExplainOutcome;
+        let newest = report.request_id == self.graph_summary_request;
+        if newest && self.graph_summary_pending.as_deref() == Some(report.memory_id.as_str()) {
+            self.graph_summary_pending = None;
+        }
+        if let Some(err) = &report.logging_error {
+            self.push_log("warn", format!("Graph summary logging incomplete: {err}"));
+        }
+        let viewing = newest
+            && self.brain_list_mode == BrainListMode::Graph
+            && self.brain_detail.memory_id() == Some(report.memory_id.as_str());
+        if !viewing {
+            return false;
+        }
+        let memory = self.brain_detail.memory.clone();
+        match &report.outcome {
+            ExplainOutcome::Saved(text) => {
+                self.summary_failure = None;
+                self.summary_details_open = false;
+                self.graph_summary = text.clone();
+                self.status = "Graph summary saved".into();
+            }
+            ExplainOutcome::Superseded(why) => {
+                if let Some(memory) = &memory {
+                    self.graph_summary = self.summary_body(memory, "");
+                }
+                self.status = format!("Graph summary discarded: {why}");
+            }
+            ExplainOutcome::Failed(failure) => {
+                self.summary_failure = Some(super::summary_card::SummaryFailure::from_report(
+                    &report, failure,
+                ));
+                if let Some(memory) = &memory {
+                    self.graph_summary = self.summary_body(memory, "");
+                }
+                self.status = format!("Graph summary failed: {}", failure.category.reason());
+            }
+        }
+        true
+    }
+
+    /// Brain summary card actions.
+    fn activate_summary_card(&mut self, button: ButtonId) -> Result<String> {
+        let Some(failure) = self.summary_failure.clone() else {
+            return Ok("No summary failure".into());
+        };
+        match button {
+            ButtonId::SummaryDetails => {
+                self.summary_details_open = !self.summary_details_open;
+                self.scrolls.summary = 0;
+                Ok(if self.summary_details_open {
+                    "Summary failure details".into()
+                } else {
+                    "Details hidden".into()
+                })
+            }
+            ButtonId::SummaryLogs => {
+                self.logs.job = failure.job_id.clone();
+                self.logs.back_to_job = Some(failure.job_id.clone());
+                self.logs.open.clear();
+                self.logs.follow = false;
+                self.select(ModuleId::Logs.index());
+                self.logs.reload(&self.store);
+                if let Some(index) = self.logs.rows.iter().position(|row| row.id == failure.event_id) {
+                    self.logs.select(index);
+                    self.logs.open.insert(failure.event_id.clone());
+                }
+                Ok(format!(
+                    "Logs for job {}",
+                    super::logs::short_id(&failure.job_id)
+                ))
+            }
+            ButtonId::SummaryJob => self.open_job(&failure.job_id),
+            ButtonId::SummaryRetry => {
+                let Some(memory) = self.brain_detail.memory.clone() else {
+                    return Ok("Open a memory first".into());
+                };
+                self.request_summary(&memory, true);
+                Ok(self.status.clone())
+            }
+            ButtonId::SummaryModels => {
+                self.select(ModuleId::Providers.index());
+                self.provider_page = ProviderPage::Defaults;
+                if self.defaults_role != DefaultsRole::Summarization {
+                    self.defaults_role = DefaultsRole::Summarization;
+                    self.model_catalog.clear();
+                    self.catalog_for.clear();
+                }
+                self.set_focus(Target::Button(ButtonId::DefaultRole(DefaultsRole::Summarization)));
+                Ok("Models · Summarization".into())
+            }
+            _ => Ok(String::new()),
+        }
     }
 
     fn activate_button(&mut self, button: ButtonId) {
@@ -4252,6 +4395,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.leave_brain_detail();
                 return;
             }
+            ButtonId::SummaryDetails
+            | ButtonId::SummaryLogs
+            | ButtonId::SummaryJob
+            | ButtonId::SummaryRetry
+            | ButtonId::SummaryModels => self.activate_summary_card(button),
             ButtonId::BrainDetailBack => {
                 self.detail_back();
                 return;
@@ -6352,34 +6500,6 @@ fn summary_system(claim: bool) -> String {
 {detail}")
 }
 
-async fn write_graph_summary(secret: &ProviderSecret, system: &str, prompt: &str) -> Result<String> {
-    let messages = [
-        provider::ChatMessage {
-            role: "system".into(),
-            content: system.into(),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        },
-        provider::ChatMessage {
-            role: "user".into(),
-            content: prompt.into(),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        },
-    ];
-    let completion = provider::complete(secret, &messages, &[], |_| {}).await?;
-    let text = completion.content.trim().to_string();
-    argos_osint_core::summarization::validate_result(
-        argos_osint_core::summarization::SummarizationMode::GraphExplanation,
-        &text,
-        &[],
-    )
-    .map_err(|err| anyhow::anyhow!("{err}"))?;
-    if text.is_empty() {
-        return Err(completion.empty_error("summarization graph explanation"));
-    }
-    Ok(text)
-}
 
 fn work_event(thread_id: &str, event: recon::TurnEvent) -> WorkEvent {
     let thread_id = thread_id.to_string();
@@ -6606,6 +6726,9 @@ mod tests {
             memories_loaded: true,
             graph_summary: String::new(),
             graph_summary_pending: None,
+            graph_summary_request: String::new(),
+            summary_failure: None,
+            summary_details_open: false,
             hits: Vec::new(),
             auth: AuthFile::default(),
             settings: SettingsFile::default(),

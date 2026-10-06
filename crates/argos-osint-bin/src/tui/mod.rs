@@ -7,6 +7,7 @@ mod land;
 mod logs;
 mod map;
 mod markdown;
+mod summary_card;
 mod theme;
 mod tracked;
 mod ui;

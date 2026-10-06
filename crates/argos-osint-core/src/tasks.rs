@@ -1272,13 +1272,21 @@ pub fn set_job_progress(
     now: &str,
 ) -> Result<()> {
     let terminal = matches!(state, "completed" | "failed" | "cancelled" | "partial");
+    // A stopped job folds its open running span (registry-owned jobs set
+    // `active_since`) into the durable active time.
+    let stopped = terminal || state == "paused";
     conn.execute(
         "UPDATE argos_jobs SET state=?2, phase=?3, progress_done=?4, progress_total=?5,
             error_summary=?6, updated_at=?7, heartbeat_at=?7,
             started_at=CASE WHEN started_at='' THEN ?7 ELSE started_at END,
-            finished_at=CASE WHEN ?8 THEN ?7 ELSE '' END
+            finished_at=CASE WHEN ?8 THEN ?7 ELSE '' END,
+            active_ms=CASE WHEN ?9 AND active_since<>'' THEN IFNULL(active_ms,0)
+                + MAX(0, CAST((julianday(?7)-julianday(active_since))*86400000 AS INTEGER))
+                ELSE active_ms END,
+            active_since=CASE WHEN ?9 THEN ''
+                WHEN active_since='' AND worker_owner<>'' THEN ?7 ELSE active_since END
          WHERE id=?1",
-        params![job_id, state, phase, done, total, error_summary, now, terminal],
+        params![job_id, state, phase, done, total, error_summary, now, terminal, stopped],
     )?;
     Ok(())
 }

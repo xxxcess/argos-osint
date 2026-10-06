@@ -512,20 +512,21 @@ pub fn beat(conn: &Connection, owner: &str) -> Result<()> {
     Ok(())
 }
 
-/// Mark open in-process jobs owned by processes that are gone as
-/// interrupted failures. Their active time ends at the last heartbeat seen.
+/// Mark open jobs owned by processes that are gone (registry jobs and
+/// owned task-less jobs such as the repair pass) as interrupted failures. Their active time ends at the last heartbeat seen.
 pub fn recover_orphans(conn: &Connection, me: &str) -> Result<usize> {
     let now_dt = chrono::Utc::now();
     let stale = (now_dt - chrono::Duration::seconds(PROCESS_STALE_SECS)).to_rfc3339();
     let mut stmt = conn.prepare(
         "SELECT j.id, j.active_ms, j.active_since, j.heartbeat_at, IFNULL(p.heartbeat_at,''), j.app, j.run_ref
          FROM argos_jobs j LEFT JOIN argos_processes p ON p.owner = j.worker_owner
-         WHERE j.kind=?1 AND j.state IN ('running','queued') AND j.worker_owner<>?2
-           AND (p.owner IS NULL OR p.heartbeat_at < ?3)",
+         WHERE j.kind<>'service' AND j.worker_owner<>'' AND j.worker_owner<>?1
+           AND j.state IN ('running','queued')
+           AND (p.owner IS NULL OR p.heartbeat_at < ?2)",
     )?;
     type Orphan = (String, Option<i64>, String, String, String, String, String);
     let rows = stmt
-        .query_map(params![KIND, me, stale], |r| {
+        .query_map(params![me, stale], |r| {
             Ok((
                 r.get(0)?,
                 r.get(1)?,

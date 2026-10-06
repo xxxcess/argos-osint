@@ -1031,10 +1031,51 @@ fn register_repair_job(store: &Store, job_id: &str) -> Result<()> {
             ..Default::default()
         },
         &chrono::Utc::now().to_rfc3339(),
-    )
+    )?;
+    // Owned by this process: if it exits mid-repair, the next start marks the
+    // job interrupted (and the resumable repair re-owns it when it continues).
+    store.conn.execute(
+        "UPDATE argos_jobs SET worker_owner=?2,
+            active_since=CASE WHEN active_since='' AND state IN ('queued','running') THEN ?3 ELSE active_since END
+         WHERE id=?1",
+        params![
+            job_id,
+            crate::scheduler::process_owner(),
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
 }
 
 static REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// A repair that died mid-pass must not read "running" forever.
+fn mark_repair_interrupted(store: &Store, reason: &str) {
+    let Ok(progress) = load_progress(store) else {
+        return;
+    };
+    if progress.job_id.is_empty() {
+        return;
+    }
+    let (done, total): (i64, Option<i64>) = store
+        .conn
+        .query_row(
+            "SELECT IFNULL(progress_done,0), progress_total FROM argos_jobs WHERE id=?1",
+            [&progress.job_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or((0, None));
+    let _ = tasks::set_job_progress(
+        &store.conn,
+        &progress.job_id,
+        "failed",
+        "repair",
+        done,
+        total,
+        reason,
+        &chrono::Utc::now().to_rfc3339(),
+    );
+}
 
 /// Start the repair job on a background thread (no-op when one is already
 /// running in this process). `restart` = user-triggered fresh pass.
@@ -1046,7 +1087,12 @@ pub fn spawn_repair(db_path: std::path::PathBuf, restart: bool) -> bool {
         .name("argos-atlas-repair".into())
         .spawn(move || {
             if let Ok(store) = Store::open(&db_path) {
-                let _ = run_repair_job(&store, 16, restart);
+                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_repair_job(&store, 16, restart)
+                }));
+                if ran.is_err() {
+                    mark_repair_interrupted(&store, "repair stopped by a panic");
+                }
             }
             REPAIR_RUNNING.store(false, Ordering::SeqCst);
         })
@@ -2006,6 +2052,24 @@ mod tests {
         assert_eq!(
             (state.as_str(), title.as_str()),
             ("completed", "Repair Atlas memories")
+        );
+        // Owned by this process; its running span is folded into active time.
+        let row = store.get_job(&done.job_id).unwrap().unwrap();
+        assert_eq!(row.active_since, "");
+        assert!(row.active_ms.is_some(), "active time recorded");
+        assert_eq!(row.active_now(chrono::Utc::now()), row.active_ms);
+        // A repair that dies mid-pass does not stay "running".
+        store
+            .conn
+            .execute(
+                "UPDATE argos_jobs SET state='running', finished_at='' WHERE id=?1",
+                [&done.job_id],
+            )
+            .unwrap();
+        mark_repair_interrupted(&store, "repair stopped by a panic");
+        assert_eq!(
+            store.get_job(&done.job_id).unwrap().unwrap().state,
+            "failed"
         );
         // User-triggered repair starts a fresh pass.
         let fresh = run_repair_job(&store, 10, true).unwrap();

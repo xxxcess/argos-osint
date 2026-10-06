@@ -16,7 +16,7 @@ Work proceeds in the spec's §9 order, one phase per push. Status is honest:
 | 3 | Atlas extraction checkpoint, phase 5, truthful state/counts, repair/resume | **Done (core)** | See phase 3 below; TUI resume/repair buttons and Brain provenance are phase 5 |
 | 4 | Intel Recon / other memory mutation paths reuse publication + refresh | **Done** | See phase 4 below |
 | 5 | TUI: Brain refresh, read errors, Jobs/Logs views, renames, Related/Summary layout | **Done** | 5a: Home order/renames, nine routes, System = hardware + paths, Jobs and Logs dashboards with job↔log navigation. 5b: Brain refresh keeping selection/Find, memory read-error and empty states, claim/Recon detail layout (graph above, Related left, Summary right; stacked when narrow) with by-id related navigation and Back history, Atlas Resume / Repair memories buttons, Brain claim-detail screenshots. See the phase 5a/5b sections below |
-| 6 | Shared job registration for all async entry points | Not started | `enqueue_job_with` + `JobMeta` available |
+| 6 | Shared job registration for all async entry points | **Done** (gaps listed) | Core `job_registry.rs` + TUI `tracked.rs`; inventory and gaps in "Phase 6 — what landed" below |
 | 7 | Typed provider diagnostics, unified graph explanation, bounded transport, revision cache | Not started | |
 | 8 | CLI/README/docs/tests | Not started | |
 
@@ -306,6 +306,59 @@ buttons.
 - **Screenshots** (fixture data, TestBackend → PNG): `brain-claim-detail.png` (140×40),
   `brain-claim-detail-narrow.png` (64×32), refreshed `jobs.png`.
 
+### Phase 6 — what landed
+
+- **Core `job_registry.rs`.** `JobHandle::begin(db, JobSpec)` writes the job row (kind `inproc`,
+  state running, owner = this process) before the caller spawns work. A known id is reused (a
+  resumed operation): attempts go up, earlier active time is kept, no second top-level row.
+  `child()` registers phases/sub-steps under a parent with the parent's correlation id;
+  `phase()` records phase/progress and doubles as a heartbeat; `finish(Finish)` records
+  completed / partial / failed / paused / cancelled with the monotonic active time, a redacted
+  error summary and a `job.<state>` event. Dropping an unfinished handle (panic, abort, early
+  return) records failed/"interrupted". `job_for_run` finds the canonical job for a legacy run
+  id (Atlas run, Recon run, Intel Recon job).
+- **Process liveness.** Registering (or the TUI at start-up) starts one heartbeat thread per
+  process and state root (`argos_processes`, every 5 s). `recover_orphans` (at TUI start and
+  every minute) marks open jobs of processes whose heartbeat is older than 30 s as failed
+  "Argos exited before this job finished", ending their active time at the last heartbeat. It
+  covers registry jobs and owned task-less jobs (the repair pass). CLI runs heartbeat too, so a
+  TUI never orphans a running CLI investigation.
+- **Cancellation.** `request_cancel` only sets `cancel_requested` and flips the operation's own
+  stop flag (same process immediately, other processes on their next heartbeat). The job reads
+  "Cancelling…" in Jobs until the operation stops, then "cancelled". Jobs shows Cancel (key `c`)
+  only for running jobs registered as cancellable.
+- **Schema (additive).** `argos_jobs.active_since`, `cancel_requested`, `cancellable`; table
+  `argos_processes`. `set_job_progress` folds an open `active_since` span into `active_ms` when a
+  job stops. `JobRow::active_now` uses `active_since` for live time.
+- **Inventory** (spec §5.1; every `tokio::spawn` / `spawn_blocking` / worker thread):
+
+| Entry point | Where | Registration | Cancel |
+| --- | --- | --- | --- |
+| Atlas cycle (manual, auto, resume) | core `atlas::run_atlas` | One `atlas_cycle` job per run (reused on resume) + `atlas_phase_N` children; truthful end from the run state (completed / partial / failed / paused) | Pause in Atlas (resumable) |
+| Atlas phase 5 index work | core outbox tasks | Task-backed (index service + attempts) | — |
+| Repair Atlas memories / startup reconciliation | core `atlas_memory` | Task-less job owned by the process; panic guard; orphan recovery | — |
+| Recon investigation (ask / resume) | core `recon::Service` | `recon_investigation`, stages as phase, run linked, resume reuses the job; completed tool calls are not re-run | Yes (run's stop flag) |
+| Intel Recon assessment | core `intel_recon::start_report_worker` | `intel_recon` canonical job, legacy job id as run ref, restart reuses it | Yes |
+| Intel article body (fetch, fallback, insight replacement) | TUI | `article_body` | Yes |
+| Intel Recon mode recommendation | TUI | `recon_mode` | — |
+| Tool runs (Tools app) | TUI | `tool_run` with tool id | Yes |
+| Graph explanation (Brain) | TUI | `graph_summary` with memory + model (phase 7 adds diagnostics/budget) | — |
+| Model catalog load, OpenRouter verify, subscription sign-in/check, access probe | TUI | `model_catalog`, `provider_verify`, `provider_login` / `provider_check`, `access_probe` | — |
+| Embedding model download | core `embed::ensure_file` | `model_download` (when the default state root exists) | — |
+| Index worker, summary flush worker | core `scheduler` | Service-health rows (`svc-local-index`, `svc-summary-flush`); their tasks carry the history | — |
+| Summary/compaction flushes | core summary pool | Task-backed | — |
+| Related-memory loading (Brain) | TUI `spawn_blocking` | Not a job: ordinary bounded read | — |
+| Hardware refresh, Brain recall | TUI | Not a job: synchronous | — |
+
+- **Gaps (honest).** Recon tool calls stay durable `osint_calls` rows shown through the
+  investigation's phase, not separate child jobs, and the short title-generation follow-up is
+  not its own job. The unused `retry_insights` TUI path is not wrapped. Registry jobs have no
+  Jobs → Retry button (resume stays in the source app: Atlas Resume, Recon resume), which
+  reuses the canonical job and skips completed work. In-process jobs start immediately, so their
+  queue time is 0 and retry wait applies only to task-backed jobs. Process exit is tested by
+  simulating a dead owner, not by killing a real process.
+- **Also.** The graph legend wraps instead of truncating on narrow widths (5b review nit).
+
 ## §10 acceptance checks
 
 | # | Check | Status | Evidence / gap |
@@ -320,7 +373,7 @@ buttons.
 | 8 | Change/delete during indexing cannot overwrite newer/resurrect | **Done (core)** | `stale_work_cannot_overwrite_a_newer_revision`, `deletion_during_indexing_is_not_resurrected`, `text_changed_mid_index_write_reruns_on_the_new_revision` (fault-injected). Phase 4: Recon/Intel Recon/manual edits use the same revision-aware outbox (`recon_claims_and_deletions_use_the_durable_index_outbox`, `intel_recon_publishes_durably_with_provenance_and_no_atlas_receipt`, `memory_writes_and_their_outbox_rows_commit_together`) |
 | 9 | Historical repair | **Done** | `repair_requeues_vectors_for_a_false_completed_cycle_without_rewriting_it`, `repair_restores_orphaned_links_from_the_checkpoint_and_respects_tombstones`, `repair_reports_missing_payload_and_unrecoverable_links_without_fabricating`, `repair_job_pages_resumably_and_records_job_progress`. TUI (5b): Atlas runs page has a "Repair memories" button that starts one repair job (progress in Jobs; a second press while running says so) and a Resume button offered only for resumable cycles (`atlas_history_resume_is_offered_only_for_resumable_cycles_and_repair_starts_once`). A separate re-extraction action is not implemented: resume reuses the saved checkpoint |
 | 10 | Summary worker cannot claim Atlas/index tasks; two processes cannot own one attempt | **Done** | `summary_pool_never_claims_index_or_atlas_work`, `summary_worker_leaves_index_and_atlas_tasks_alone`, `two_processes_cannot_own_the_same_attempt_and_stale_owner_cannot_publish` |
-| 11 | Jobs timing/history for every async op | Partial | Jobs dashboard (5a) reads durable jobs/tasks/attempts: active-first ordering, state/app/search filters, counts, phase/progress, active/elapsed timing (unknown → "Unavailable", never 0), attempt history, latest error, Retry only for failed index/summary tasks (`jobs_list_active_first_with_counts_filters_detail_and_retry`, `timing_is_unavailable_not_zero_and_expired_event_detail_is_explained`). Registration of every async entry point is phase 6 |
+| 11 | Jobs timing/history for every async op | **Done** (gaps listed in phase 6) | Task-backed work (index, summary, publication) keeps tasks/attempts (5a). Every other inventoried async entry point registers a registry job before it launches, with monotonic active time (`active_since` + durable `active_ms`, resumes add up), phase/progress, correlation id = job id on all its events, and a truthful end state: explicit finish, `Drop`/panic → failed "interrupted", exited process → failed "Argos exited before this job finished" via the per-process heartbeat (`registration_is_durable_before_work_and_finish_records_monotonic_timing`, `dropped_or_panicking_work_reaches_a_failed_state`, `jobs_of_exited_processes_become_interrupted_and_live_ones_stay`, `registering_makes_this_process_live_for_other_processes`). Retry does not repeat successful child work: an Atlas resume reuses the cycle job (attempts 2) and only re-runs the unfinished phase child (`embedding_failure_keeps_memories_visible_reports_partial_and_retry_verifies`, `publication_failure_is_failed_not_completed_and_retry_uses_the_checkpoint`); Recon resume and Intel Recon restarts reuse their canonical job (`investigation_jobs_finish_truthfully_and_link_their_run`, `intel_recon_links_its_legacy_job_to_one_canonical_registry_job`). Cooperative Cancel in Jobs (`cancel_is_cooperative_and_only_for_cancellable_running_jobs`, `cross_process_cancel_reaches_the_owner_through_its_heartbeat`, TUI `registered_operations_show_in_jobs_and_cancel_is_cooperative`) |
 | 12 | Job↔log navigation after restart; redaction | **Done (UI)** | Logs read durable `argos_events` (24 h retention), so links survive restart. Jobs → `l`/View logs opens Logs filtered to the job and its descendants with Back; Logs → `o`/Open job selects the job (clears hiding Jobs filters). `jobs_dashboard_navigates_to_logs_and_back_and_logs_open_jobs`. Redaction from phase 1 |
 | 13 | Home System category / nine routes | **Done** | Home: Applications = Intel, Atlas, Brain, Recon; System = Jobs, Logs, Tools, Models, System; digits 1–9, palette, slash (old `osint`/`providers` plus `tools`/`models`/`jobs`/`logs`), header tabs and help agree (`home_order_renames_and_nine_routes_agree`). Renames are display-only: `ModuleId::Osint`/`Providers` and config keys unchanged |
 | 14 | Tools/Models retain behavior; System hardware/paths only | **Done** | System shows host hardware + paths (config, database always; data, memory index, credentials, hardware cache when they exist) and a single Refresh hardware action; event log and Clear moved to Logs (`system_shows_only_hardware_and_paths_and_logs_own_clear`). Tools/Models screens are unchanged apart from titles |
@@ -354,3 +407,9 @@ buttons.
   argos-osint-bin` → 67 passed, 2 ignored (+5: Jobs column dropping, claim detail wide/narrow,
   Brain refresh/read errors, Atlas resume/repair; the ignored ones are the two screenshot dumps).
   `cargo clippy --workspace --all-targets`: no new findings.
+- Phase 6: `ARGOS_EMBED=0 cargo test -p argos-osint-core --lib` → 433 passed, 0 failed, 5 ignored
+  (+9: 7 `job_registry`, 1 Recon and 1 Intel Recon canonical-job test; the Atlas cycle and
+  repair job assertions extend existing tests). `ARGOS_EMBED=0 cargo test -p
+  argos-osint-bin` → 68 passed, 2 ignored (+1 `registered_operations_show_in_jobs_and_cancel_is_cooperative`;
+  the narrow claim-detail test now also checks the legend). `cargo clippy --workspace
+  --all-targets`: no new findings.

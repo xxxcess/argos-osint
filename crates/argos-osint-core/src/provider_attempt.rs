@@ -847,4 +847,22 @@ mod tests {
             (Category::RateLimited, Some(3000))
         );
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn other_complete_callers_get_typed_errors_without_extra_requests() {
+        let body = r#"{"error":{"message":"slow down","code":"rate_limit"}}"#;
+        let server = serve(vec![Reply::Json(429, body.into())]).await;
+        let err = crate::provider::complete(&secret(&server.base_url), &msgs(), &[], |_| {})
+            .await
+            .unwrap_err();
+        let f = err
+            .downcast_ref::<ProviderFailure>()
+            .expect("typed failure");
+        assert_eq!(
+            (f.category, f.http_status),
+            (Category::RateLimited, Some(429))
+        );
+        assert!(err.to_string().contains("429"), "{err}");
+        assert_eq!(server.hits(), 1, "no new retries for existing callers");
+    }
 }

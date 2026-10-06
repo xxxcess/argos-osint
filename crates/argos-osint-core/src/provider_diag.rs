@@ -611,6 +611,36 @@ pub fn provider_error(body: &str) -> (Option<String>, Option<String>) {
     )
 }
 
+/// Typed failure for a non-success HTTP response (status, provider code and
+/// message, request id, Retry-After), with the endpoint sanitized.
+pub fn http_failure(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+    endpoint: &str,
+    provider: &str,
+    model: &str,
+    transport: &str,
+) -> ProviderFailure {
+    let (code, message) = provider_error(body);
+    let category = classify_status(status, code.as_deref(), message.as_deref());
+    let mut f = ProviderFailure::new(
+        Stage::Response,
+        category,
+        format!("provider returned HTTP {status}"),
+    )
+    .with_context(provider, model, endpoint, transport);
+    if let Some(m) = &message {
+        f.causes.push(m.clone());
+    }
+    f.http_status = Some(status);
+    f.provider_code = code;
+    f.provider_message = message;
+    f.request_id = request_id(headers);
+    f.retry_after_ms = retry_after(headers, Duration::from_secs(300)).map(|d| d.as_millis() as u64);
+    f
+}
+
 /// `Retry-After` in seconds (HTTP-date values are ignored), capped.
 pub fn retry_after(headers: &reqwest::header::HeaderMap, cap: Duration) -> Option<Duration> {
     let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;

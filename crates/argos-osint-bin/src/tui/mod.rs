@@ -1,4 +1,6 @@
 mod app;
+mod atlas_actions;
+mod brain_detail;
 mod graph;
 mod jobs;
 mod land;

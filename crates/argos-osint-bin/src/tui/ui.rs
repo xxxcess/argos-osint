@@ -66,6 +66,11 @@ pub(super) fn body_rect(app: &App) -> Rect {
     chrome(app.screen, app).body
 }
 
+/// Memory detail rectangles for the current screen and focus (draw, hit, scroll).
+pub(crate) fn detail_areas(app: &App) -> super::brain_detail::DetailAreas {
+    super::brain_detail::areas(body_rect(app), super::brain_detail::pane_of(app.focus))
+}
+
 fn chrome(area: Rect, app: &App) -> Chrome {
     let composer_h = composer_height(app);
     let header_h = if app.module.is_none() { 0 } else { TAB_H };
@@ -201,14 +206,6 @@ fn brain_form(area: Rect) -> BrainForm {
 
 fn provider_areas(area: Rect) -> Vec<Rect> {
     split_vertical(area, [Constraint::Length(PAGE_TAB_H), Constraint::Min(4)])
-}
-
-struct BrainPath {
-    body: Rect,
-}
-
-fn brain_path(area: Rect) -> BrainPath {
-    BrainPath { body: area }
 }
 
 fn list_room(height: u16) -> usize {
@@ -2046,6 +2043,11 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         Region::Detail => nudge(&mut app.scrolls.detail, delta * 3, 10_000),
         Region::Recall => nudge(&mut app.scrolls.recall, delta * 3, 10_000),
         Region::Path => nudge(&mut app.scrolls.path, delta, 10_000),
+        Region::Related => {
+            let area = detail_areas(app).related;
+            let max = super::brain_detail::related_scroll_max(&app.brain_detail.related, area);
+            nudge(&mut app.brain_detail.related.scroll, delta * 2, max);
+        }
         Region::Summary => nudge(&mut app.scrolls.summary, delta * 3, 10_000),
         Region::AtlasFeed => shift_atlas_feed(app, delta * 3),
         Region::AtlasOrigins => {
@@ -2111,9 +2113,16 @@ pub fn page(app: &mut App, direction: i32) {
         Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::List => {
             nudge(&mut app.scrolls.recall, direction * 6, 10_000);
         }
-        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => {
-            nudge(&mut app.scrolls.summary, direction * 4, 10_000);
-        }
+        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => match app.focus {
+            Target::RelatedRow(_) => {
+                let area = detail_areas(app).related;
+                let max = super::brain_detail::related_scroll_max(&app.brain_detail.related, area);
+                let room = (super::brain_detail::inner(area).height / 2).max(1) as i32;
+                nudge(&mut app.brain_detail.related.scroll, direction * room, max);
+            }
+            Target::DetailPath => nudge(&mut app.scrolls.path, direction * 4, 10_000),
+            _ => nudge(&mut app.scrolls.summary, direction * 4, 10_000),
+        },
         Some(ModuleId::Brain) => {}
         Some(ModuleId::Osint) if matches!(app.focus, Target::Tool(_)) => {
             let room = (tool_room(app) / 2).max(1) as i32;
@@ -2225,6 +2234,7 @@ enum Region {
     AtlasRuns,
     AtlasNews,
     Path,
+    Related,
     Summary,
     IntelBrief,
     IntelFull,
@@ -2251,17 +2261,13 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
             }
         }
         Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => {
-            let layout = brain_path(body);
-            if contains(layout.body, x, y) {
-                let rows = split_vertical(
-                    layout.body,
-                    [Constraint::Percentage(55), Constraint::Percentage(45)],
-                );
-                if contains(rows[0], x, y) {
-                    Region::Path
-                } else {
-                    Region::Summary
-                }
+            let areas = detail_areas(app);
+            if contains(areas.path, x, y) {
+                Region::Path
+            } else if contains(areas.related, x, y) {
+                Region::Related
+            } else if contains(areas.summary, x, y) {
+                Region::Summary
             } else {
                 Region::None
             }
@@ -2671,7 +2677,14 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             let mut order = vec![Target::Home];
             order.extend((0..ModuleId::ALL.len()).map(Target::App));
             match app.brain_list_mode {
-                BrainListMode::Graph => {}
+                BrainListMode::Graph => {
+                    order.push(Target::Button(ButtonId::BrainDetailBack));
+                    order.push(Target::DetailPath);
+                    if !app.brain_detail.related.items.is_empty() {
+                        order.push(Target::RelatedRow(app.brain_detail.related.sel));
+                    }
+                    order.push(Target::DetailSummary);
+                }
                 BrainListMode::Create => {
                     order.extend(
                         [
@@ -2809,6 +2822,8 @@ pub fn focus_order(app: &App) -> Vec<Target> {
                     }
                 } else {
                     order.push(Target::Button(ButtonId::AtlasLive));
+                    order.push(Target::Button(ButtonId::AtlasResume));
+                    order.push(Target::Button(ButtonId::AtlasRepair));
                     order.push(Target::Button(ButtonId::AtlasDelete));
                     order.push(Target::AtlasCycleStats);
                     if !app.atlas_runs.is_empty() {
@@ -3054,8 +3069,25 @@ fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
 
 fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     if app.brain_list_mode == BrainListMode::Graph {
-        let index = super::graph::path_line_at(body, x, y, app.scrolls.path)?;
-        return Some(Target::PathLine(index));
+        let areas = super::brain_detail::areas(body, super::brain_detail::pane_of(app.focus));
+        if contains(areas.back, x, y) {
+            return Some(Target::Button(ButtonId::BrainDetailBack));
+        }
+        if contains(areas.path, x, y) {
+            return Some(
+                super::graph::path_line_at(areas.path, x, y, app.scrolls.path)
+                    .map(Target::PathLine)
+                    .unwrap_or(Target::DetailPath),
+            );
+        }
+        if contains(areas.related, x, y) {
+            return super::brain_detail::related_at(&app.brain_detail.related, areas.related, x, y)
+                .map(Target::RelatedRow);
+        }
+        if contains(areas.summary, x, y) {
+            return Some(Target::DetailSummary);
+        }
+        return None;
     }
     if app.brain_list_mode == BrainListMode::Create {
         let form = brain_form(body);
@@ -3735,12 +3767,7 @@ fn header_detail(app: &App) -> String {
             BrainListMode::List => "memories".into(),
             BrainListMode::Create => "new memory".into(),
             BrainListMode::Graph => {
-                if app.brain_graph.is_claim_path()
-                    || app
-                        .memories
-                        .get(app.memory_sel)
-                        .is_some_and(|memory| memory.source.app == "atlas")
-                {
+                if app.detail_claim() {
                     "claim path".into()
                 } else {
                     "recon path".into()
@@ -3796,7 +3823,7 @@ fn footer_line(app: &App) -> Paragraph<'static> {
             }
             (Some(ModuleId::Recon), _) => "Tab next · Enter · Ctrl+K · Esc list",
             (Some(ModuleId::Brain), _) if app.brain_list_mode == BrainListMode::Graph => {
-                "Esc memories · Ctrl+K"
+                "Tab section · ↑↓ select · Enter open related · Esc back · Ctrl+K"
             }
             (Some(ModuleId::Atlas), _) if app.atlas_news || app.atlas_page == AtlasPage::Live => {
                 "Tab next · Enter · Ctrl+K · Esc history"
@@ -4334,7 +4361,19 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
             })
         })
         .collect::<Vec<_>>();
-    frame.render_widget(List::new(items).block(pane(" memories ")), layout.list);
+    let title = memory_list_title(app);
+    if items.is_empty() {
+        let (text, style) = memory_list_note(app);
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(style)
+                .block(pane(&title))
+                .wrap(Wrap { trim: true }),
+            layout.list,
+        );
+    } else {
+        frame.render_widget(List::new(items).block(pane(&title)), layout.list);
+    }
     let recalled = if matches!(app.focus, Target::Memory(_)) {
         if let Some(insight) = &app.selected_insight {
             memory_anchors_text(insight)
@@ -4352,6 +4391,48 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: true }),
         layout.recall,
     );
+}
+
+/// Memory list title: read failure first, then an active Find filter.
+fn memory_list_title(app: &App) -> String {
+    if app.memory_error.is_some() && !app.memories.is_empty() {
+        return " memories · read failed · showing last loaded list ".into();
+    }
+    if !app.brain_query.trim().is_empty() && app.memories_loaded {
+        return format!(
+            " memories · Find active · {} of {} ",
+            app.memories.len(),
+            app.memory_total
+        );
+    }
+    " memories ".into()
+}
+
+/// Empty-list message: loading, read failure, no memories, or no Find matches.
+pub(crate) fn memory_list_note(app: &App) -> (String, ratatui::style::Style) {
+    if let Some(err) = &app.memory_error {
+        return (
+            format!("Could not read memories: {err}\nThe error is in Logs. The list reloads on the next change."),
+            theme::error(),
+        );
+    }
+    if !app.memories_loaded {
+        return ("Loading memories…".into(), theme::dim());
+    }
+    let query = app.brain_query.trim();
+    if !query.is_empty() {
+        return (
+            format!(
+                "No memories match \"{query}\". Find is still active; clear it to see all {}.",
+                app.memory_total
+            ),
+            theme::dim(),
+        );
+    }
+    (
+        "No memories yet. Create one, or run Atlas or Recon to save insights.".into(),
+        theme::dim(),
+    )
 }
 
 pub(crate) fn memory_anchors_text(insight: &argos_osint_core::recon::InsightView) -> String {
@@ -6516,10 +6597,17 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
     frame.render_widget(Paragraph::new(lines).block(pane(" news cycle ")), cycles);
-    let buttons = button_areas(actions, 2);
+    let buttons = button_areas(actions, 4);
     let live = atlas_history_live_label(app);
     draw_button(frame, app, ButtonId::AtlasLive, &live, buttons[0]);
-    draw_button(frame, app, ButtonId::AtlasDelete, "Delete", buttons[1]);
+    if app.atlas_can_resume() {
+        draw_button(frame, app, ButtonId::AtlasResume, "Resume", buttons[1]);
+    } else {
+        // Dimmed: the selected cycle has nothing to resume (Enter explains why).
+        draw_button_state(frame, app, ButtonId::AtlasResume, "Resume", buttons[1], false);
+    }
+    draw_button(frame, app, ButtonId::AtlasRepair, "Repair memories", buttons[2]);
+    draw_button(frame, app, ButtonId::AtlasDelete, "Delete", buttons[3]);
 }
 
 /// Date on the left, pipeline state on the right.
@@ -6704,12 +6792,17 @@ fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
         let (actions, _map, stats, cycles) = atlas_runs_areas(body);
         if contains(actions, x, y) {
-            let slots = button_areas(actions, 2);
-            return Some(Target::Button(if contains(slots[0], x, y) {
-                ButtonId::AtlasLive
-            } else {
-                ButtonId::AtlasDelete
-            }));
+            let slots = button_areas(actions, 4);
+            let buttons = [
+                ButtonId::AtlasLive,
+                ButtonId::AtlasResume,
+                ButtonId::AtlasRepair,
+                ButtonId::AtlasDelete,
+            ];
+            return slots
+                .iter()
+                .position(|slot| contains(*slot, x, y))
+                .map(|index| Target::Button(buttons[index]));
         }
         if contains(stats, x, y) {
             return Some(Target::AtlasCycleStats);
@@ -6905,13 +6998,13 @@ fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools · 8 Models · 9 System\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
         Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nThe mode button under the full article opens Verify / Explain / Assess Outlook / Full Assessment\nJobs pane tracks focus-brief background progress and recon reports\nEsc returns from briefing to bulletin, or from bulletin to home",
-        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live and Delete sit between the map and those panes. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
+        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, Repair memories, and Delete sit between the map and those panes. Resume continues the selected cycle when it stopped while saving or indexing memories. Repair memories rechecks saved cycles and requeues missing memories or vectors (progress in Jobs). When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "System\n\nHost hardware and the paths Argos uses\nRefresh hardware re-reads the host profile\nData, index, and cache paths are listed only when they exist\nEvents moved to Logs; background work is in Jobs\nEsc returns home",
         Some(ModuleId::Logs) => "Logs\n\nDurable events from every app and background worker, kept 24 hours\nThe header counts errors, warnings, and failures in the last hour\nFilter narrows by text. Level, App, and the job filter narrow further\n↑↓ select an event · Enter or click folds its detail\nf toggles live follow. Moving off the newest event pauses it\no or Open job shows the event's job in Jobs\nOpened from Jobs, Esc or Back to job returns there\nClear events removes events only; jobs, results, and memories stay\nCtrl+U/Ctrl+D and the wheel scroll the list",
         Some(ModuleId::Jobs) => "Jobs\n\nBackground work with timing, attempts, and errors\nActive work is listed first, then recent history, then service workers\nStatus and App filter the table. Filter matches title, id, operation, or error\n↑↓ select a job · Enter opens its detail (full screen when narrow)\nl or View logs opens Logs filtered to the job and its phases\nRetry failed requeues only failed index or summary tasks; completed work is kept\nOpen source jumps to the Atlas cycle or investigation when there is one\nUnknown historic timing shows Unavailable\nEsc closes the detail, then returns home",
-        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe path sits above a summary of the graph\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nEsc returns to memories\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
+        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe detail shows the path graph on top, Related on the left, and Summary on the right\nNarrow terminals stack Related above Summary; the focused one gets more room\nRelated lists other memories: linked ones (shared claim relation, source, entity, or investigation) first, then similar ones, which are not evidence\nTab moves between Back, the graph, Related, and Summary\n↑↓ select a related memory · Enter or click opens it, even when Find hides it\nEsc or Back returns to the previous memory, then to the list with its Find and selection\nThe list keeps its selection and Find when memories change elsewhere\nIf memories cannot be read, the last loaded list stays and the error is shown and logged\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
         Some(ModuleId::Providers) => "Models\n\nEach account tab stores that provider only\nDefaults sets Recon and Synthesis separately\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
         _ => "Controls\n\nTab moves between fields and buttons\n1–9 switch apps when not typing in a field\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }

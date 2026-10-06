@@ -1,13 +1,14 @@
-//! Recon-path layout for one memory, stacked above its saved summary.
+//! Claim/Recon detail for one memory: path graph above, Related left, Summary right.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use argos_osint_core::recon::{recon_path, GraphNodeKind, MemoryGraph};
 
-use super::app::App;
+use super::app::{App, Target};
+use super::brain_detail;
 use super::markdown;
 use super::theme::{self, panel};
 use super::ui::{center_line, contains};
@@ -18,30 +19,27 @@ pub struct PathLine {
     pub run_id: String,
 }
 
+/// Graph above, Related (left) and Summary (right) below; stacked when narrow.
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
-    let rows = split_vertical(
-        area,
-        [Constraint::Percentage(55), Constraint::Percentage(45)],
-    );
-    draw_path(frame, app, rows[0]);
-    draw_summary(frame, app, rows[1]);
+    let areas = brain_detail::areas(area, brain_detail::pane_of(app.focus));
+    let claim = app.detail_claim();
+    brain_detail::draw_nav(frame, app, &areas, claim);
+    draw_path(frame, app, areas.path, claim);
+    brain_detail::draw_related(frame, app, areas.related);
+    draw_summary(frame, app, areas.summary, claim);
 }
 
 /// Scrollable path lines, above the anchored legend. `None` when the click misses them.
-pub fn path_line_at(area: Rect, x: u16, y: u16, scroll: u16) -> Option<usize> {
-    let content = path_content(area);
+pub fn path_line_at(path: Rect, x: u16, y: u16, scroll: u16) -> Option<usize> {
+    let content = path_content(path);
     if !contains(content, x, y) {
         return None;
     }
     Some(scroll as usize + (y - content.y) as usize)
 }
 
-fn path_content(area: Rect) -> Rect {
-    let rows = split_vertical(
-        area,
-        [Constraint::Percentage(55), Constraint::Percentage(45)],
-    );
-    let inner = inset(rows[0]);
+fn path_content(path: Rect) -> Rect {
+    let inner = inset(path);
     Rect {
         x: inner.x,
         y: inner.y,
@@ -59,8 +57,8 @@ fn inset(area: Rect) -> Rect {
     }
 }
 
-fn draw_path(frame: &mut Frame, app: &App, area: Rect) {
-    let claim = claim_path(app);
+/// Only the current memory's path graph; Related lives in its own section.
+fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     let width = area.width.saturating_sub(2) as usize;
     let lines = if app.brain_graph.is_empty() {
         vec![PathLine {
@@ -75,14 +73,6 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         path_lines(&app.brain_graph)
     };
-    let mut lines = lines;
-    for text in &app.brain_related_lines {
-        lines.push(PathLine {
-            text: text.clone(),
-            article_id: String::new(),
-            run_id: String::new(),
-        });
-    }
     let widest = lines
         .iter()
         .map(|line| line.text.chars().count())
@@ -106,14 +96,12 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect) {
         width: inner.width,
         height: 1.min(inner.height),
     };
-    let path_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: inner.height.saturating_sub(1),
-    };
-    let title = if claim { " claim path " } else { " recon path " };
-    frame.render_widget(panel(title), area);
+    let path_area = path_content(area);
+    let mut title = if claim { " claim path " } else { " recon path " }.to_string();
+    if app.focus == Target::DetailPath {
+        title.push_str("· focused ");
+    }
+    frame.render_widget(panel(&title), area);
     frame.render_widget(
         Paragraph::new(painted)
             .style(theme::text())
@@ -123,23 +111,14 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect) {
     );
     if legend_area.height > 0 {
         frame.render_widget(
-            Paragraph::new(center_line(&legend_text(app), legend_area.width as usize))
+            Paragraph::new(center_line(&legend_text(app, claim), legend_area.width as usize))
                 .style(theme::dim()),
             legend_area,
         );
     }
 }
 
-fn claim_path(app: &App) -> bool {
-    app.brain_graph.is_claim_path()
-        || app
-            .memories
-            .get(app.memory_sel)
-            .is_some_and(|memory| memory.source.app == "atlas")
-}
-
-fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
-    let claim = claim_path(app);
+fn draw_summary(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     let text = if app.graph_summary.is_empty() {
         if claim {
             "Open a memory to read its claim path."
@@ -150,10 +129,15 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
         app.graph_summary.as_str()
     };
     let width = area.width.saturating_sub(2) as usize;
+    let title = if app.focus == Target::DetailSummary {
+        " summary · focused "
+    } else {
+        " summary "
+    };
     frame.render_widget(
         Paragraph::new(summary_lines(text, width))
             .style(theme::text())
-            .block(panel(" summary "))
+            .block(panel(title))
             .scroll((app.scrolls.summary, 0)),
         area,
     );
@@ -182,8 +166,7 @@ fn summary_lines(text: &str, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn legend_text(app: &App) -> String {
-    let claim = claim_path(app);
+fn legend_text(app: &App, claim: bool) -> String {
     let mut parts = Vec::new();
     let present = |kind: GraphNodeKind| {
         app.brain_graph
@@ -330,14 +313,6 @@ fn glyph(kind: GraphNodeKind) -> &'static str {
         GraphNodeKind::Source => "○",
         GraphNodeKind::Investigation => "▣",
     }
-}
-
-fn split_vertical(area: Rect, constraints: impl IntoIterator<Item = Constraint>) -> Vec<Rect> {
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area)
-        .to_vec()
 }
 
 #[cfg(test)]

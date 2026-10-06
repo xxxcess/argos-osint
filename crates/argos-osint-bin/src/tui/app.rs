@@ -4,6 +4,7 @@ use anyhow::Result;
 use argos_osint_core::brain::{Memory, MemorySource, ScoredMemory};
 use argos_osint_core::hardware::{self, HardwareProfile};
 use argos_osint_core::paths;
+use argos_osint_core::related_memories::{RelatedLimits, RelatedMemory};
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
@@ -388,6 +389,10 @@ pub enum ButtonId {
     AtlasRuns,
     AtlasLive,
     AtlasDelete,
+    /// Resume the selected cycle (stopped in phase 4/5 or paused).
+    AtlasResume,
+    /// Start the "Repair Atlas memories" job.
+    AtlasRepair,
     AtlasNewsFeed,
     AtlasWorld,
     AtlasNews,
@@ -404,6 +409,8 @@ pub enum ButtonId {
     IntelJobRetry,
     CreateMemory,
     BrainBack,
+    /// Back in the memory detail history (or to the Brain list).
+    BrainDetailBack,
     /// Logs: clear durable events only (jobs, results, memories are kept).
     ClearLog,
     JobsStatus,
@@ -464,6 +471,12 @@ pub enum Target {
     IntelReconSection(usize),
     /// One line of the open recon or claim path.
     PathLine(usize),
+    /// The path graph section of the memory detail (scroll focus).
+    DetailPath,
+    /// One Related memory row in the memory detail.
+    RelatedRow(usize),
+    /// The Summary section of the memory detail (scroll focus).
+    DetailSummary,
     Choice(usize),
     CloseOverlay,
 }
@@ -521,6 +534,11 @@ enum WorkEvent {
     GraphSummary {
         memory_id: String,
         outcome: std::result::Result<String, String>,
+    },
+    Related {
+        request: u64,
+        memory_id: String,
+        outcome: std::result::Result<Vec<RelatedMemory>, String>,
     },
     Atlas(atlas::AtlasEvent),
     AtlasDone {
@@ -718,8 +736,14 @@ pub struct App {
     pub currents_fallback: String,
     pub brain_graph: recon::MemoryGraph,
     brain_graph_for: Option<String>,
-    /// Bounded related-evidence / why-matched labels for the open graph (spec §15).
-    pub brain_related_lines: Vec<String>,
+    /// Open memory detail (graph, Related, Summary), independent of `memory_sel`.
+    pub brain_detail: super::brain_detail::BrainDetail,
+    /// Total saved memories, to explain an active Find filter.
+    pub memory_total: usize,
+    /// Last memory-list read failure; the previous list stays on screen.
+    pub memory_error: Option<String>,
+    /// False until the first memory list read finished.
+    pub memories_loaded: bool,
     pub graph_summary: String,
     graph_summary_pending: Option<String>,
     pub hits: Vec<ScoredMemory>,
@@ -797,6 +821,7 @@ impl App {
             .map(|tool| store.tool_enabled(tool.id))
             .collect::<Result<Vec<_>>>()?;
         let memories = store.list_memories()?;
+        let memory_total = memories.len();
         let auth = AuthFile::load()?;
         let settings = SettingsFile::load()?;
         let recon_default = provider::role_secret(&auth, &settings, "recon")?;
@@ -966,7 +991,10 @@ impl App {
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
-            brain_related_lines: Vec::new(),
+            brain_detail: Default::default(),
+            memory_total,
+            memory_error: None,
+            memories_loaded: true,
             graph_summary: String::new(),
             graph_summary_pending: None,
             hits: Vec::new(),
@@ -1353,6 +1381,10 @@ impl App {
         if self.module == Some(ModuleId::Intel) {
             self.intel_page = IntelPage::Bulletin;
             self.load_intel();
+        }
+        if self.module == Some(ModuleId::Brain) {
+            // Entering Brain picks up memories committed elsewhere.
+            self.reload_memories();
         }
         if self.module == Some(ModuleId::Logs) {
             self.reload_logs();
@@ -2730,7 +2762,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.atlas_feed_follow = true;
             self.scrolls.atlas_feed = 0;
         }
-        self.spawn_atlas(resume)?;
+        self.spawn_atlas(if resume {
+            atlas::LiveRun::Latest
+        } else {
+            atlas::LiveRun::Fresh
+        })?;
         if !resume {
             self.shift_atlas_auto_after_manual();
         }
@@ -2741,6 +2777,41 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         })
     }
 
+    /// Whether the selected history cycle can be resumed (paused, or stopped
+    /// in phase 4/5 with retained checkpoints) and nothing is running.
+    pub(crate) fn atlas_can_resume(&self) -> bool {
+        self.atlas_pause.is_none()
+            && self
+                .atlas_runs
+                .get(self.atlas_run_sel)
+                .is_some_and(atlas::resumable)
+    }
+
+    fn resume_atlas_run(&mut self) -> Result<String> {
+        let run = self
+            .atlas_runs
+            .get(self.atlas_run_sel)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Select a news cycle to resume"))?;
+        anyhow::ensure!(self.atlas_pause.is_none(), "Atlas is already running");
+        anyhow::ensure!(
+            atlas::resumable(&run),
+            "This cycle has nothing to resume"
+        );
+        self.spawn_atlas(atlas::LiveRun::Run(run.id.clone()))?;
+        self.push_log("info", format!("Atlas: resuming cycle {}", run.id));
+        Ok("Resuming cycle · progress in Atlas and Jobs".into())
+    }
+
+    fn start_atlas_repair(&mut self) -> Result<String> {
+        if super::atlas_actions::start_repair(paths::db_path()) {
+            self.push_log("info", "Atlas: Repair Atlas memories started");
+            Ok("Repair Atlas memories started · progress in Jobs".into())
+        } else {
+            Ok("Repair Atlas memories is already running".into())
+        }
+    }
+
     /// A manual start moves the next automatic run to 90 minutes from now.
     fn shift_atlas_auto_after_manual(&mut self) {
         if self.atlas_auto_next.is_some() {
@@ -2748,7 +2819,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
     }
 
-    fn spawn_atlas(&mut self, resume: bool) -> Result<()> {
+    fn spawn_atlas(&mut self, live: atlas::LiveRun) -> Result<()> {
+        let resume = live != atlas::LiveRun::Fresh;
         anyhow::ensure!(self.atlas_pause.is_none(), "Atlas is already running");
         let pause = Arc::new(AtomicBool::new(false));
         self.atlas_pause = Some(pause.clone());
@@ -2787,7 +2859,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 &pause,
                 &keys,
                 &user_agent,
-                resume,
+                live,
                 &feed,
                 classifier,
                 synthesizer,
@@ -2813,7 +2885,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             return Ok("Auto run on. Next pipeline in 90 minutes".into());
         }
         if tokio::runtime::Handle::try_current().is_ok() {
-            self.spawn_atlas(false)?;
+            self.spawn_atlas(atlas::LiveRun::Fresh)?;
             self.atlas_auto_started = true;
         }
         Ok("Auto run on. Pipeline started".into())
@@ -2841,7 +2913,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
         let start = self.take_atlas_auto_tick(now);
         if start {
-            if tokio::runtime::Handle::try_current().is_ok() && self.spawn_atlas(false).is_ok() {
+            if tokio::runtime::Handle::try_current().is_ok() && self.spawn_atlas(atlas::LiveRun::Fresh).is_ok() {
                 self.atlas_auto_started = true;
             }
         } else {
@@ -3054,7 +3126,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     let _ = self.refresh_selected();
                 }
                 let _ = self.refresh_threads();
-                self.memories = self.filtered_memories();
+                self.reload_memories();
                 true
             }
             WorkEvent::OsintDone { outcome } => {
@@ -3122,7 +3194,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                             text
                         }
                     };
-                    self.memories = self.filtered_memories();
+                    self.reload_memories();
                 }
                 true
             }
@@ -3131,10 +3203,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     self.graph_summary_pending = None;
                 }
                 let viewing = self.brain_list_mode == BrainListMode::Graph
-                    && self
-                        .memories
-                        .get(self.memory_sel)
-                        .is_some_and(|memory| memory.id == memory_id);
+                    && self.brain_detail.memory_id() == Some(memory_id.as_str());
                 match outcome {
                     Ok(text) => {
                         if viewing {
@@ -3154,6 +3223,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 }
                 viewing
             }
+            WorkEvent::Related {
+                request,
+                memory_id,
+                outcome,
+            } => self.on_related(request, &memory_id, outcome),
             WorkEvent::Atlas(event) => {
                 self.on_atlas(event);
                 self.module == Some(ModuleId::Atlas)
@@ -3706,12 +3780,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 reference: None,
             },
         )?;
-        self.memories = self.filtered_memories();
-        self.memory_sel = self
-            .memories
-            .iter()
-            .position(|item| item.id == memory.id)
-            .unwrap_or(0);
+        self.reload_memories_selecting(Some(memory.id.clone()));
         self.brain_insight.clear();
         self.brain_list_mode = BrainListMode::List;
         self.brain_graph_for = None;
@@ -3720,7 +3789,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         Ok("Insight saved with source".into())
     }
 
+    /// Graph of the selected list row (list mode only; the detail view owns its graph).
     fn sync_graph(&mut self) {
+        if self.brain_list_mode == BrainListMode::Graph {
+            return;
+        }
         let id = self
             .memories
             .get(self.memory_sel)
@@ -3734,94 +3807,120 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             Some(id) => self.store.graph_for_memory(id).unwrap_or_default(),
             None => recon::MemoryGraph::default(),
         };
-        self.brain_related_lines = self.related_evidence_labels();
     }
 
-    /// Bound related-evidence / why-matched labels for the Brain graph pane.
-    fn related_evidence_labels(&self) -> Vec<String> {
-        const MAX_SEMANTIC: usize = 3;
-        let Some(memory) = self.memories.get(self.memory_sel) else {
-            return Vec::new();
-        };
-        let mut factual = Vec::new();
-        for node in &self.brain_graph.nodes {
-            if node.kind != recon::GraphNodeKind::Evidence {
-                continue;
-            }
-            let supported = self.brain_graph.edges.iter().any(|edge| {
-                edge.to == node.id
-                    && matches!(
-                        edge.kind,
-                        recon::GraphEdgeKind::Supports | recon::GraphEdgeKind::DerivedFrom
-                    )
-            });
-            if supported {
-                factual.push((
-                    node.id.clone(),
-                    node.label.clone(),
-                    1.0_f32,
-                ));
-            }
-        }
-        let mut semantic = Vec::new();
-        if let Ok(hits) = self.store.recall(&memory.text, MAX_SEMANTIC + 2) {
-            for hit in hits {
-                if hit.memory.id == memory.id {
-                    continue;
-                }
-                let label = hit.memory.text.chars().take(72).collect::<String>();
-                semantic.push((hit.memory.id, label, hit.score));
-            }
-        }
-        let view = argos_osint_core::explore::related_evidence_view(factual, semantic, MAX_SEMANTIC);
-        let mut lines = Vec::new();
-        if !view.is_empty() {
-            lines.push("Related evidence".into());
-        }
-        for hit in view {
-            lines.push(format!(
-                "· {} — {} ({})",
-                hit.label.chars().take(56).collect::<String>(),
-                hit.why,
-                hit.edge_kind.as_str()
-            ));
-        }
-        lines
+    /// Claim mode follows the open detail memory's own provenance and graph.
+    pub(crate) fn detail_claim(&self) -> bool {
+        self.brain_graph.is_claim_path()
+            || self
+                .brain_detail
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.source.app == "atlas")
     }
 
-    fn filtered_memories(&self) -> Vec<Memory> {
+    /// Memories for the list plus the total, honoring Find. Errors are returned,
+    /// never turned into an empty list.
+    fn load_memory_list(&self) -> Result<(Vec<Memory>, usize)> {
+        if let Some(fault) = super::brain_detail::read_fault() {
+            anyhow::bail!(fault);
+        }
         let query = self.brain_query.trim();
-        let loaded = if query.is_empty() {
-            self.store.list_memories()
+        if query.is_empty() {
+            let list = self.store.list_memories()?;
+            let total = list.len();
+            Ok((list, total))
         } else {
-            self.store.search_memories(query)
-        };
-        loaded.unwrap_or_default()
+            let list = self.store.search_memories(query)?;
+            Ok((list, self.store.memory_count()?))
+        }
     }
 
-    fn reload_memories(&mut self) {
-        let shown = self.brain_graph_for.clone();
-        self.memories = self.filtered_memories();
-        if self.memories.is_empty() {
-            self.memory_sel = 0;
-        } else if self.memory_sel >= self.memories.len() {
-            self.memory_sel = self.memories.len() - 1;
+    pub(crate) fn reload_memories(&mut self) {
+        self.reload_memories_selecting(None);
+    }
+
+    /// Reload the Brain list, keeping the selected memory (by id), Find, and
+    /// scroll. A read failure keeps the last good list and reports the error.
+    fn reload_memories_selecting(&mut self, prefer: Option<String>) {
+        let selected = prefer.or_else(|| {
+            self.memories
+                .get(self.memory_sel)
+                .map(|memory| memory.id.clone())
+        });
+        match self.load_memory_list() {
+            Ok((list, total)) => {
+                self.memories = list;
+                self.memory_total = total;
+                self.memories_loaded = true;
+                if self.memory_error.take().is_some() {
+                    self.push_log("info", "Brain: memories readable again");
+                }
+            }
+            Err(err) => {
+                let message = err.to_string();
+                if self.memory_error.as_deref() != Some(message.as_str()) {
+                    self.push_log_detail(
+                        "error",
+                        "Brain: could not read memories",
+                        message.clone(),
+                    );
+                }
+                self.memory_error = Some(message);
+                self.status = "Could not read memories; showing the last loaded list".into();
+                return;
+            }
         }
-        let still = shown
+        let by_id = selected
             .as_ref()
-            .is_some_and(|id| self.memories.iter().any(|memory| &memory.id == id));
-        if self.brain_list_mode == BrainListMode::Graph && !still {
-            self.brain_list_mode = BrainListMode::List;
-            self.graph_summary.clear();
-            self.graph_summary_pending = None;
+            .and_then(|id| self.memories.iter().position(|memory| &memory.id == id));
+        self.memory_sel = match by_id {
+            Some(index) => index,
+            None => self.memory_sel.min(self.memories.len().saturating_sub(1)),
+        };
+        let room = super::ui::memory_room_for(self);
+        let max = self.memories.len().saturating_sub(room) as u16;
+        self.scrolls.memories = self.scrolls.memories.min(max);
+        super::ui::reveal_index(&mut self.scrolls.memories, self.memory_sel, room);
+        if matches!(self.focus, Target::Memory(_)) {
+            self.focus = if self.memories.is_empty() {
+                Target::Button(ButtonId::CreateMemory)
+            } else {
+                Target::Memory(self.memory_sel)
+            };
         }
-        self.brain_graph_for = None;
-        self.sync_graph();
-        self.sync_selected_insight();
+        if self.brain_list_mode == BrainListMode::Graph {
+            self.refresh_open_detail();
+        } else {
+            self.brain_graph_for = None;
+            self.sync_graph();
+            self.sync_selected_insight();
+        }
+    }
+
+    /// The open detail memory changed or vanished in another writer.
+    fn refresh_open_detail(&mut self) {
+        let Some(id) = self.brain_detail.memory_id().map(str::to_string) else {
+            return;
+        };
+        match self.store.get_memory(&id) {
+            Ok(Some(memory)) => self.brain_detail.memory = Some(memory),
+            Ok(None) => {
+                self.leave_brain_detail();
+                self.status = "The open memory was deleted".into();
+            }
+            Err(_) => {}
+        }
     }
 
     fn leave_brain_detail(&mut self) {
         self.brain_list_mode = BrainListMode::List;
+        self.brain_detail.memory = None;
+        self.brain_detail.history.clear();
+        self.brain_detail.related = Default::default();
+        self.graph_summary.clear();
+        self.brain_graph_for = None;
+        self.sync_graph();
         self.set_focus(if self.memories.is_empty() {
             Target::Button(ButtonId::CreateMemory)
         } else {
@@ -3831,22 +3930,184 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     fn open_memory_graph(&mut self) {
-        let Some(memory) = self.memories.get(self.memory_sel).cloned() else {
+        let Some(id) = self.memories.get(self.memory_sel).map(|m| m.id.clone()) else {
             self.status = "No memory selected".into();
             return;
         };
+        self.open_memory_detail(&id);
+    }
+
+    fn detail_snapshot(&self) -> Option<super::brain_detail::DetailSnapshot> {
+        Some(super::brain_detail::DetailSnapshot {
+            memory_id: self.brain_detail.memory_id()?.to_string(),
+            related_sel: self.brain_detail.related.sel,
+            related_scroll: self.brain_detail.related.scroll,
+            path_scroll: self.scrolls.path,
+            summary_scroll: self.scrolls.summary,
+            focus: self.focus,
+        })
+    }
+
+    /// One transition for every memory link (Brain list, Related, others).
+    /// Fetches the destination by id, even when Find hides it. On failure the
+    /// current view stays intact. Returns whether the detail opened.
+    pub(crate) fn open_memory_detail(&mut self, memory_id: &str) -> bool {
+        let memory = match self.store.get_memory(memory_id) {
+            Ok(Some(memory)) => memory,
+            Ok(None) => {
+                self.reload_memories();
+                self.status = "That memory no longer exists; the list was refreshed".into();
+                return false;
+            }
+            Err(err) => {
+                self.status = format!("Could not open that memory: {err}");
+                return false;
+            }
+        };
+        let graph = match self.store.graph_for_memory(&memory.id) {
+            Ok(graph) => graph,
+            Err(err) => {
+                self.status = format!("Could not load that memory's graph: {err}");
+                return false;
+            }
+        };
+        if self.brain_list_mode == BrainListMode::Graph {
+            if let Some(snapshot) = self.detail_snapshot() {
+                if snapshot.memory_id != memory.id {
+                    self.brain_detail.push(snapshot);
+                }
+            }
+        } else {
+            self.brain_detail.history.clear();
+        }
+        self.show_detail(memory, graph, None);
+        true
+    }
+
+    fn show_detail(
+        &mut self,
+        memory: Memory,
+        graph: recon::MemoryGraph,
+        restore: Option<&super::brain_detail::DetailSnapshot>,
+    ) {
         self.brain_list_mode = BrainListMode::Graph;
-        self.scrolls.path = 0;
-        self.scrolls.summary = 0;
-        self.selected_insight = None;
-        self.brain_graph_for = None;
-        self.sync_graph();
+        self.brain_graph = graph;
+        self.brain_graph_for = Some(memory.id.clone());
+        self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
+        self.graph_summary.clear();
+        self.scrolls.path = restore.map_or(0, |s| s.path_scroll);
+        self.scrolls.summary = restore.map_or(0, |s| s.summary_scroll);
+        self.brain_detail.memory = Some(memory.clone());
+        let request = self.brain_detail.begin_related(
+            restore.map_or(0, |s| s.related_sel),
+            restore.map_or(0, |s| s.related_scroll),
+        );
+        self.request_related(request, &memory.id);
         self.load_or_request_summary(&memory);
-        self.set_focus(Target::Home);
+        let focus = restore.map_or(Target::DetailPath, |s| s.focus);
+        self.set_focus(match focus {
+            Target::RelatedRow(_) if self.brain_detail.related.items.is_empty() => {
+                Target::DetailPath
+            }
+            Target::RelatedRow(_) => Target::RelatedRow(self.brain_detail.related.sel),
+            other => other,
+        });
+    }
+
+    /// Related items for `memory_id`: on a blocking worker in the live app, inline
+    /// otherwise. Late results for another request or memory are dropped.
+    fn request_related(&mut self, request: u64, memory_id: &str) {
+        let limits = RelatedLimits::default();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let tx = self.work_tx.clone();
+            let db = paths::db_path();
+            let memory_id = memory_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let outcome = Store::open(&db)
+                    .and_then(|store| store.related_memories(&memory_id, limits))
+                    .map_err(|err| err.to_string());
+                let _ = tx.send(WorkEvent::Related {
+                    request,
+                    memory_id,
+                    outcome,
+                });
+            });
+            return;
+        }
+        let outcome = self
+            .store
+            .related_memories(memory_id, limits)
+            .map_err(|err| err.to_string());
+        self.on_related(request, memory_id, outcome);
+    }
+
+    fn on_related(
+        &mut self,
+        request: u64,
+        memory_id: &str,
+        outcome: std::result::Result<Vec<RelatedMemory>, String>,
+    ) -> bool {
+        if !self.brain_detail.finish_related(request, memory_id, outcome) {
+            return false;
+        }
+        let area = super::ui::detail_areas(self).related;
+        super::brain_detail::reveal_related(&mut self.brain_detail.related, area);
+        if matches!(self.focus, Target::RelatedRow(_)) {
+            self.focus = if self.brain_detail.related.items.is_empty() {
+                Target::DetailPath
+            } else {
+                Target::RelatedRow(self.brain_detail.related.sel)
+            };
+        }
+        true
+    }
+
+    /// Back: the previous detail memory with its selection, focus, and scroll;
+    /// at the first detail, the Brain list with its Find and selection.
+    fn detail_back(&mut self) {
+        while let Some(snapshot) = self.brain_detail.history.pop() {
+            let Ok(Some(memory)) = self.store.get_memory(&snapshot.memory_id) else {
+                continue;
+            };
+            let graph = self
+                .store
+                .graph_for_memory(&memory.id)
+                .unwrap_or_default();
+            self.show_detail(memory, graph, Some(&snapshot));
+            self.status = "Back".into();
+            return;
+        }
+        self.leave_brain_detail();
+    }
+
+    /// Selection only; never navigates or starts a summary.
+    fn move_related(&mut self, delta: i32) {
+        let len = self.brain_detail.related.items.len();
+        if len == 0 {
+            return;
+        }
+        let next = (self.brain_detail.related.sel as i32 + delta).clamp(0, len as i32 - 1) as usize;
+        self.brain_detail.related.sel = next;
+        let area = super::ui::detail_areas(self).related;
+        super::brain_detail::reveal_related(&mut self.brain_detail.related, area);
+        self.set_focus(Target::RelatedRow(next));
+    }
+
+    fn open_selected_related(&mut self) {
+        let Some(id) = self
+            .brain_detail
+            .selected_related()
+            .map(|item| item.memory_id.clone())
+        else {
+            return;
+        };
+        if self.open_memory_detail(&id) {
+            self.status = "Related memory opened".into();
+        }
     }
 
     fn load_or_request_summary(&mut self, memory: &Memory) {
-        let claim = self.brain_graph.is_claim_path() || memory.source.app == "atlas";
+        let claim = self.detail_claim();
         let title = if claim { "Claim path" } else { "Recon path" };
         let focus = recon::recon_path(&self.brain_graph)
             .bands
@@ -3934,6 +4195,10 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.leave_brain_detail();
                 return;
             }
+            ButtonId::BrainDetailBack => {
+                self.detail_back();
+                return;
+            }
             ButtonId::Add => self.save_insight(),
             ButtonId::Pin => {
                 let Some(memory) = self.memories.get(self.memory_sel) else {
@@ -3943,7 +4208,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.store
                     .update_memory(&memory.id, &memory.text, &memory.category, !memory.pinned)
                     .map(|_| {
-                        self.memories = self.filtered_memories();
+                        self.reload_memories();
                         "Memory pin updated".into()
                     })
             }
@@ -4058,6 +4323,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 Ok("Atlas".into())
             }
             ButtonId::AtlasDelete => self.delete_atlas_run(),
+            ButtonId::AtlasResume => self.resume_atlas_run(),
+            ButtonId::AtlasRepair => self.start_atlas_repair(),
             ButtonId::ClearLog => {
                 // Scope: durable events only. Jobs, task results and memories stay.
                 let cleared = self.store.clear_events();
@@ -4662,6 +4929,14 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.set_focus(Target::AtlasCycleStats);
             }
             Target::PathLine(index) => self.activate_path_line(index),
+            Target::RelatedRow(index) => {
+                // A click opens the row under the pointer immediately.
+                if index < self.brain_detail.related.items.len() {
+                    self.brain_detail.related.sel = index;
+                    self.open_selected_related();
+                }
+            }
+            Target::DetailPath | Target::DetailSummary => self.set_focus(target),
             Target::AtlasArticle(index) => {
                 if self.atlas_articles.is_empty() {
                     return;
@@ -5316,6 +5591,10 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             return;
         }
+        if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Graph {
+            self.detail_back();
+            return;
+        }
         if self.module == Some(ModuleId::Brain) && self.brain_list_mode != BrainListMode::List {
             self.leave_brain_detail();
             return;
@@ -5396,6 +5675,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             Target::Field(_) => self.focus_next(false),
             Target::Transcript => self.enter_chat(),
             Target::Memory(_) => self.open_memory_graph(),
+            Target::RelatedRow(_) => self.open_selected_related(),
             Target::AtlasFeed(_) => self.open_atlas_article(),
             Target::AtlasHistory(_) => self.open_atlas_news(),
             Target::AtlasArticle(_) => self.open_saved_article(),
@@ -5450,6 +5730,16 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
 
     fn move_vertical(&mut self, delta: i32) {
         if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Graph {
+            match self.focus {
+                Target::RelatedRow(_) => self.move_related(delta),
+                Target::DetailSummary => {
+                    self.scrolls.summary = add_scroll(self.scrolls.summary, delta);
+                }
+                Target::DetailPath => {
+                    self.scrolls.path = add_scroll(self.scrolls.path, delta);
+                }
+                _ => {}
+            }
             return;
         }
         match self.focus {
@@ -6224,7 +6514,10 @@ mod tests {
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
-            brain_related_lines: Vec::new(),
+            brain_detail: Default::default(),
+            memory_total: 0,
+            memory_error: None,
+            memories_loaded: true,
             graph_summary: String::new(),
             graph_summary_pending: None,
             hits: Vec::new(),
@@ -6320,7 +6613,7 @@ mod tests {
             .any(|target| matches!(target, Target::Field(FieldId::BrainInsight))));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.brain_list_mode, BrainListMode::Graph);
-        assert_eq!(app.focus, Target::Home);
+        assert_eq!(app.focus, Target::DetailPath, "detail opens with the graph section focused");
         assert!(app.brain_graph.is_empty());
         assert!(app.graph_summary.contains("no investigation graph"));
         assert!(app.graph_summary_pending.is_none());

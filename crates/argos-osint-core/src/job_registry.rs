@@ -201,6 +201,7 @@ impl JobHandle {
     /// operation's own stop flag and Jobs → Cancel are the same switch.
     pub fn begin_with(db: &Path, spec: JobSpec, cancel: Arc<AtomicBool>) -> Result<Self> {
         let conn = open(db)?;
+        let _ = ensure_beat(db);
         let ts = now();
         let owner = crate::scheduler::process_owner();
         let correlation = if spec.correlation_id.is_empty() {
@@ -594,23 +595,34 @@ impl Drop for ProcessBeat {
     }
 }
 
-/// Write the first heartbeat, recover jobs left by exited processes, then
-/// keep beating on a thread.
-pub fn start_process_beat(db: &Path) -> Result<ProcessBeat> {
+/// Running heartbeat threads by database (one per process and state root).
+fn beats() -> &'static Mutex<HashMap<PathBuf, Arc<AtomicBool>>> {
+    static BEATS: OnceLock<Mutex<HashMap<PathBuf, Arc<AtomicBool>>>> = OnceLock::new();
+    BEATS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Make sure this process heartbeats for `db`, so other processes never
+/// mistake its running jobs for orphans. Registration calls this, so CLI
+/// runs are covered as well as the TUI.
+fn ensure_beat(db: &Path) -> Result<Arc<AtomicBool>> {
+    let mut running = beats().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(flag) = running.get(db) {
+        if !flag.load(Ordering::Relaxed) {
+            return Ok(flag.clone());
+        }
+    }
     let owner = crate::scheduler::process_owner();
-    let conn = open(db)?;
-    beat(&conn, &owner)?;
-    recover_orphans(&conn, &owner)?;
+    beat(&open(db)?, &owner)?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
-    let db = db.to_path_buf();
+    let path = db.to_path_buf();
     std::thread::Builder::new()
         .name("argos-job-beat".into())
         .spawn(move || {
             let mut ticks = 0u32;
             while !flag.load(Ordering::Relaxed) {
                 std::thread::sleep(BEAT_INTERVAL);
-                if let Ok(conn) = open(&db) {
+                if let Ok(conn) = open(&path) {
                     let _ = beat(&conn, &owner);
                     ticks += 1;
                     if ticks % 12 == 0 {
@@ -619,6 +631,15 @@ pub fn start_process_beat(db: &Path) -> Result<ProcessBeat> {
                 }
             }
         })?;
+    running.insert(db.to_path_buf(), stop.clone());
+    Ok(stop)
+}
+
+/// Write the first heartbeat, recover jobs left by exited processes, then
+/// keep beating on a thread until the returned guard is dropped.
+pub fn start_process_beat(db: &Path) -> Result<ProcessBeat> {
+    let stop = ensure_beat(db)?;
+    recover_orphans(&open(db)?, &crate::scheduler::process_owner())?;
     Ok(ProcessBeat { stop })
 }
 
@@ -835,6 +856,19 @@ mod tests {
         job.finish(Finish::Cancelled {
             summary: String::new(),
         });
+    }
+
+    #[test]
+    fn registering_makes_this_process_live_for_other_processes() {
+        let (_dir, path) = db();
+        // A CLI-style process that never started the TUI heartbeat explicitly.
+        let job =
+            JobHandle::begin(&path, JobSpec::new("recon", "recon_investigation", "Q")).unwrap();
+        let conn = open(&path).unwrap();
+        // Another process sweeping for orphans leaves it alone.
+        assert_eq!(recover_orphans(&conn, "argos-other-1").unwrap(), 0);
+        assert_eq!(row(&path, job.id()).state, "running");
+        job.finish(Finish::completed());
     }
 
     #[test]

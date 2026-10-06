@@ -20,6 +20,8 @@ pub mod paths;
 pub mod pipeline;
 pub mod explore;
 pub mod provider;
+pub mod provider_attempt;
+pub mod provider_diag;
 pub mod provider_request;
 pub mod recon;
 pub mod scheduler;

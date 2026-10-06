@@ -798,7 +798,7 @@ async fn bearer_token(secret: &ProviderSecret) -> Result<Option<String>, String>
     Ok(None)
 }
 
-async fn authorize(
+pub(crate) async fn authorize(
     mut req: reqwest::RequestBuilder,
     secret: &ProviderSecret,
 ) -> Result<reqwest::RequestBuilder> {
@@ -973,7 +973,7 @@ async fn complete_once(
     parse_completion(&text)
 }
 
-fn chat_body(
+pub(crate) fn chat_body(
     secret: &ProviderSecret,
     messages: &[ChatMessage],
     tools: &[ToolSpec],

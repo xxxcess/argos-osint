@@ -15,7 +15,7 @@ Work proceeds in the spec's §9 order, one phase per push. Status is honest:
 | 2 | Transactional outbox, revision-aware indexing, coverage receipts | **Done** | See phase 2 below; Recon moved onto the outbox in phase 4 |
 | 3 | Atlas extraction checkpoint, phase 5, truthful state/counts, repair/resume | **Done (core)** | See phase 3 below; TUI resume/repair buttons and Brain provenance are phase 5 |
 | 4 | Intel Recon / other memory mutation paths reuse publication + refresh | **Done** | See phase 4 below |
-| 5 | TUI: Brain refresh, read errors, Jobs/Logs views, renames, Related/Summary layout | **Partial (5a done)** | 5a (phase 5a below): Home order/renames, nine routes, System = hardware + paths, Jobs and Logs dashboards with job↔log navigation. 5b pending: Brain refresh preserving selection/filters, memory read-error states, claim/Recon detail layout (graph above, Related left, Summary right) with related navigation + Back, Repair Atlas memories / Resume buttons, Brain claim-detail screenshots |
+| 5 | TUI: Brain refresh, read errors, Jobs/Logs views, renames, Related/Summary layout | **Done** | 5a: Home order/renames, nine routes, System = hardware + paths, Jobs and Logs dashboards with job↔log navigation. 5b: Brain refresh keeping selection/Find, memory read-error and empty states, claim/Recon detail layout (graph above, Related left, Summary right; stacked when narrow) with by-id related navigation and Back history, Atlas Resume / Repair memories buttons, Brain claim-detail screenshots. See the phase 5a/5b sections below |
 | 6 | Shared job registration for all async entry points | Not started | `enqueue_job_with` + `JobMeta` available |
 | 7 | Typed provider diagnostics, unified graph explanation, bounded transport, revision cache | Not started | |
 | 8 | CLI/README/docs/tests | Not started | |
@@ -271,19 +271,54 @@ buttons.
   `scripts/render_tui_cells.py` renders them to PNG (fixture data, not a live
   run).
 
+### Phase 5b — what landed
+
+- **Core `related_memories.rs`.** `Store::related_memories(id, RelatedLimits)` returns
+  `RelatedMemory {memory_id, title, provenance, reason, kind, score}`. Explicit links rank first
+  (stored claim relations such as conflict/revision, same source article or cited tool result,
+  same entity, same investigation; up to 12), then up to 5 `Similar` rows whose reason says "not
+  evidence". Every row resolves to an existing memory; self and duplicates are dropped; a missing
+  memory is an error. `Store::memory_count` backs the "N of M" Find title.
+- **Brain list.** `reload_memories` keeps the selected memory by id, the Find text and scroll, and
+  reloads on Brain entry. A read failure keeps the last loaded list, titles it "read failed ·
+  showing last loaded list", logs one event and sets a status message. Empty states distinguish
+  loading, no memories, and "No memories match … Find is still active".
+- **Detail layout (`tui/brain_detail.rs`).** A nav row (‹ Back, mode, title, history depth), the
+  claim/Recon path, then Related | Summary side by side when there is room, stacked otherwise.
+  The path pane no longer contains Related text. Detail opens focused on the graph; Tab cycles
+  Back → path → Related → Summary.
+- **Related navigation.** Selection and opening are separate (↑↓ vs Enter/click). Opening fetches
+  by id (works when Find hides the memory), pushes a history snapshot (memory, Related selection,
+  focus, scroll; capped at 32) and Esc/Back pops it, skipping deleted entries, then returns to the
+  list. Related results arrive as `WorkEvent::Related` with a request id; stale results are
+  ignored.
+- **Atlas buttons.** Runs page: Live, Resume (dimmed unless the selected cycle is resumable via
+  the now-public `atlas::resumable`; `run_live` takes `LiveRun {Fresh, Latest, Run(id)}`), Repair
+  memories (`atlas_actions::start_repair` → `atlas_memory::spawn_repair`, one at a time) and
+  Delete.
+- **Jobs fixes (from review).** Active time is live: closed attempts plus the open attempt's
+  running span, or start→finish/now for in-process jobs without attempts; "Unavailable" only when
+  there is no start time. The "logs" header no longer truncates — optional columns (logs, then
+  phase) drop on narrow widths. The screenshot fixture now records real attempts (core
+  `fixtures` feature, dev-only).
+- **Robustness.** The graph-summary request no longer panics without a Tokio runtime; it reports
+  "Graph summary unavailable" instead.
+- **Screenshots** (fixture data, TestBackend → PNG): `brain-claim-detail.png` (140×40),
+  `brain-claim-detail-narrow.png` (64×32), refreshed `jobs.png`.
+
 ## §10 acceptance checks
 
 | # | Check | Status | Evidence / gap |
 | --- | --- | --- | --- |
-| 1 | Atlas run creates visible memories in-session | Partial | Core: `successful_run_publishes_indexes_verifies_and_completes` (disk store; memories in `list_memories`, `MemoriesChanged` emitted). TUI reloads on `MemoriesChanged`/`AtlasDone`; full Brain refresh semantics (selection/filter preservation) and screenshot are phase 5 |
-| 2 | Brain entry refreshes externally committed memories | Partial | Every mutation path bumps the durable counter in its transaction. `MemoryChangeWatcher` notifies only after commit, across processes, coalesced (`change_watcher_sees_only_committed_changes_and_coalesces`). The TUI reloads memories on it (1 s poll). Selection/filter preservation, read errors and the screenshot are phase 5 |
+| 1 | Atlas run creates visible memories in-session | **Done** | Core: `successful_run_publishes_indexes_verifies_and_completes` (disk store; memories in `list_memories`, `MemoriesChanged` emitted). TUI reloads on `MemoriesChanged`/`AtlasDone` and on Brain entry, keeping the selected id, Find text and scroll (`brain_refresh_keeps_selection_and_find_and_shows_read_errors`). Screenshot: `brain-claim-detail.png` (fixture data) |
+| 2 | Brain entry refreshes externally committed memories | **Done** | Every mutation path bumps the durable counter in its transaction. `MemoryChangeWatcher` notifies only after commit, across processes, coalesced (`change_watcher_sees_only_committed_changes_and_coalesces`). The TUI reloads on it (1 s poll) and on entering Brain. Selection by id and Find survive reloads; a failed read keeps the last list with a "read failed" title, an error note, one log event and a status message; an open detail whose memory was deleted says so (`brain_refresh_keeps_selection_and_find_and_shows_read_errors`) |
 | 3 | Publication failure cannot report completed; retry uses saved payload | **Done (core)** | `publication_failure_is_failed_not_completed_and_retry_uses_the_checkpoint`: state `failed`, extracted 2 vs created 0, rollback, resume completes with extraction called once |
 | 4 | Embedding/Lance failure: memories visible, phase 5 incomplete, retry reaches verified | **Done (core)** | `embedding_failure_keeps_memories_visible_reports_partial_and_retry_verifies` (run `partial`, `0/3 indexed`, resume reaches `3/3`), `background_indexing_then_refresh_upgrades_a_partial_run`; UI screenshot phase 5 |
 | 5 | Embeddings disabled: honest status; enabling resumes | **Done (core)** | `disabled_embeddings_save_memories_and_say_so_honestly` ("Saved; semantic indexing disabled", never claims indexed, work stays queued), `enabling_embeddings_resumes_outstanding_work_and_upgrades_the_run` |
 | 6 | Kill/restart at each boundary | Partial | Outbox claim/lease expiry (phase 1/2 tests), extraction checkpoint (`crash_after_checkpoint_resumes_without_reextracting`), SQLite commit (rollback + retry test), phase-5 pause/resume from receipt (`pause_in_phase5_parks_then_resumes_from_the_stored_receipt`), index write (mid-write test), and a process kill between the Lance write and the task acknowledgement (`worker_killed_after_the_lance_write_is_recovered_by_revision`: lease expiry, revision-aware re-record, no duplicate vector, stale ack rejected). Remaining: an end-to-end kill test of a real process |
 | 7 | Duplicate claims reuse canonical memories, keep links, repair vectors | **Done (core)** | `publication_receipt_reconciles_and_reports_rejections`, `retrying_the_same_payload_is_idempotent`, `reused_claims_with_damaged_rows_are_repaired_and_reindexed`, `indexing_is_verified_by_exact_id_and_revision` |
 | 8 | Change/delete during indexing cannot overwrite newer/resurrect | **Done (core)** | `stale_work_cannot_overwrite_a_newer_revision`, `deletion_during_indexing_is_not_resurrected`, `text_changed_mid_index_write_reruns_on_the_new_revision` (fault-injected). Phase 4: Recon/Intel Recon/manual edits use the same revision-aware outbox (`recon_claims_and_deletions_use_the_durable_index_outbox`, `intel_recon_publishes_durably_with_provenance_and_no_atlas_receipt`, `memory_writes_and_their_outbox_rows_commit_together`) |
-| 9 | Historical repair | **Done (core)** | `repair_requeues_vectors_for_a_false_completed_cycle_without_rewriting_it`, `repair_restores_orphaned_links_from_the_checkpoint_and_respects_tombstones`, `repair_reports_missing_payload_and_unrecoverable_links_without_fabricating`, `repair_job_pages_resumably_and_records_job_progress`. User-triggered repair button / re-extraction action in the TUI: phase 5 |
+| 9 | Historical repair | **Done** | `repair_requeues_vectors_for_a_false_completed_cycle_without_rewriting_it`, `repair_restores_orphaned_links_from_the_checkpoint_and_respects_tombstones`, `repair_reports_missing_payload_and_unrecoverable_links_without_fabricating`, `repair_job_pages_resumably_and_records_job_progress`. TUI (5b): Atlas runs page has a "Repair memories" button that starts one repair job (progress in Jobs; a second press while running says so) and a Resume button offered only for resumable cycles (`atlas_history_resume_is_offered_only_for_resumable_cycles_and_repair_starts_once`). A separate re-extraction action is not implemented: resume reuses the saved checkpoint |
 | 10 | Summary worker cannot claim Atlas/index tasks; two processes cannot own one attempt | **Done** | `summary_pool_never_claims_index_or_atlas_work`, `summary_worker_leaves_index_and_atlas_tasks_alone`, `two_processes_cannot_own_the_same_attempt_and_stale_owner_cannot_publish` |
 | 11 | Jobs timing/history for every async op | Partial | Jobs dashboard (5a) reads durable jobs/tasks/attempts: active-first ordering, state/app/search filters, counts, phase/progress, active/elapsed timing (unknown → "Unavailable", never 0), attempt history, latest error, Retry only for failed index/summary tasks (`jobs_list_active_first_with_counts_filters_detail_and_retry`, `timing_is_unavailable_not_zero_and_expired_event_detail_is_explained`). Registration of every async entry point is phase 6 |
 | 12 | Job↔log navigation after restart; redaction | **Done (UI)** | Logs read durable `argos_events` (24 h retention), so links survive restart. Jobs → `l`/View logs opens Logs filtered to the job and its descendants with Back; Logs → `o`/Open job selects the job (clears hiding Jobs filters). `jobs_dashboard_navigates_to_logs_and_back_and_logs_open_jobs`. Redaction from phase 1 |
@@ -291,7 +326,7 @@ buttons.
 | 14 | Tools/Models retain behavior; System hardware/paths only | **Done** | System shows host hardware + paths (config, database always; data, memory index, credentials, hardware cache when they exist) and a single Refresh hardware action; event log and Clear moved to Logs (`system_shows_only_hardware_and_paths_and_logs_own_clear`). Tools/Models screens are unchanged apart from titles |
 | 15 | Targeted tests / CI gates | Partial | Per-phase runs recorded below; real local Lance fixture (fake embedder) used for exact id/revision checks |
 | 16–22 | Graph-summary diagnostics, budget, cache, retry | Not started | Phase 7 |
-| 23–26 | Claim/Recon layout, Related navigation | Not started | Phase 5 |
+| 23–26 | Claim/Recon layout, Related navigation | **Done** (async edge partial) | Detail opens with the graph on top, Related left and Summary right on one row (≥68 cols below the graph), stacked Related-above-Summary when narrower with the focused pane taller; no Related text in the graph pane. Related is a selectable list from core `related_memories` (claim relations, shared source article/tool result, same entity, same investigation, then "Similar · not evidence"); unique, self excluded, each row resolves to an existing memory. ↑↓ selects, Enter/click opens by id even when Find hides the target, Esc/‹ Back restores the previous memory with its Related selection and focus, deleted targets keep the current view with a status message (`claim_detail_has_graph_above_related_left_summary_right_and_navigates_by_id`, `narrow_claim_detail_stacks_related_above_summary_and_keeps_both_reachable`, core `related_rows_are_unique_existing_memories_ranked_explicit_before_similar`). Related loads on a blocking task with request-id/memory-id rejection of stale results (tested by injecting late results); tests run the load inline, so a real-runtime rapid-navigation race is not exercised end to end. Summary failure card / retry text are phase 7 |
 
 ## Test log
 
@@ -314,3 +349,8 @@ buttons.
   (+2 `jobs_view`). `ARGOS_EMBED=0 cargo test -p argos-osint-bin` → 62 passed, 1 ignored (+3 new
   TUI tests; the ignored one is the screenshot dump; old System-log tests rewritten for durable
   Logs). `cargo clippy --workspace --all-targets`: no new findings.
+- Phase 5b: `ARGOS_EMBED=0 cargo test -p argos-osint-core --lib` → 424 passed, 0 failed, 5 ignored
+  (+1 `jobs_view` live active time, +1 `related_memories`). `ARGOS_EMBED=0 cargo test -p
+  argos-osint-bin` → 67 passed, 2 ignored (+5: Jobs column dropping, claim detail wide/narrow,
+  Brain refresh/read errors, Atlas resume/repair; the ignored ones are the two screenshot dumps).
+  `cargo clippy --workspace --all-targets`: no new findings.

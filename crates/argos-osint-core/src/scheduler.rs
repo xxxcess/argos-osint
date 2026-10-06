@@ -302,7 +302,7 @@ impl WorkerPool {
                     // Never invents success when auth/settings/secret are missing.
                     let secret = load_summarization_secret();
                     // Service-health row; batches/tasks supply the job history.
-                    if loops % 40 == 0 {
+                    if loops.is_multiple_of(40) {
                         let now = chrono::Utc::now().to_rfc3339();
                         let _ = tasks::ensure_service_job(
                             &conn,

@@ -625,7 +625,7 @@ fn ensure_beat(db: &Path) -> Result<Arc<AtomicBool>> {
                 if let Ok(conn) = open(&path) {
                     let _ = beat(&conn, &owner);
                     ticks += 1;
-                    if ticks % 12 == 0 {
+                    if ticks.is_multiple_of(12) {
                         let _ = recover_orphans(&conn, &owner);
                     }
                 }

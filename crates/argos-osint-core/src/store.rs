@@ -27,10 +27,13 @@ pub struct GraphSummary {
     pub focus: String,
 }
 
-/// Schema version this build writes. 18 adds durable task/index-change tables
-/// (`argos_jobs`, `argos_tasks`, `argos_attempts`, `argos_index_changes`,
-/// `argos_derived_summaries`). 17 added `memory_embed_meta` and dropped sqlite-vec.
-pub const SCHEMA_VERSION: i64 = 18;
+/// Schema version this build writes. 19 adds (additively) job timing/routing
+/// columns, leased index-outbox columns, `argos_events`, Atlas extraction
+/// checkpoints/publication receipts and memory tombstones. 18 added durable
+/// task/index-change tables (`argos_jobs`, `argos_tasks`, `argos_attempts`,
+/// `argos_index_changes`, `argos_derived_summaries`). 17 added
+/// `memory_embed_meta` and dropped sqlite-vec.
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -144,6 +147,11 @@ impl Store {
         store.ensure_schema()?;
         store.restore_serving_vector_table();
         Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn conn_for_tests(&self) -> &Connection {
+        &self.conn
     }
 
     pub fn memory() -> Result<Self> {
@@ -434,6 +442,13 @@ impl Store {
                 crate::tasks::migrate_tables(&self.conn)?;
                 crate::scheduler::migrate_scheduler(&self.conn)?;
                 let _ = crate::brain_lance::migrate_generations(&self.conn);
+            }
+            // v19: additive job timing, pool routing, leased index outbox, events,
+            // Atlas checkpoints/receipts, tombstones. `migrate_tables` above already
+            // applied the idempotent additive step; this only records the version.
+            if version < 19 {
+                crate::tasks::migrate_additive(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 19)?;
             }
             Ok(())
         })();
@@ -934,31 +949,65 @@ impl Store {
         Ok(done)
     }
 
-    /// Index hook after memories were written or their text changed. Best effort.
-    pub(crate) fn index_upsert(&self, ids: &[String]) {
-        if ids.is_empty() || self.vectors.is_none() {
-            return;
+    /// Typed index upsert used by the reliable (outbox) path. Distinguishes
+    /// ready, pending, disabled and retryable/permanent failures; a missing
+    /// memory row means the memory was deleted, so its vector is removed instead
+    /// of resurrected.
+    pub fn try_index_upsert(&self, ids: &[String]) -> crate::tasks::IndexOutcome {
+        use crate::tasks::IndexOutcome;
+        if let Some(outcome) = self.index_unavailable() {
+            return outcome;
+        }
+        if let Some(reason) = self.rebuild_in_progress() {
+            return IndexOutcome::Pending { reason };
         }
         let Some(index) = self.vector_index() else {
-            return;
+            return IndexOutcome::RetryableFailure {
+                message: brain_lance::last_error()
+                    .unwrap_or_else(|| "vector index is not ready".into()),
+            };
         };
-        let result = self
-            .memory_texts(Some(ids))
-            .and_then(|rows| index.upsert_texts(&rows));
-        if let Err(err) = result {
-            brain_lance::note_error(&err);
-            index.mark_stale();
+        let result = (|| -> Result<usize> {
+            let rows = self.memory_texts(Some(ids))?;
+            let present: HashSet<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+            let gone: Vec<String> = ids
+                .iter()
+                .filter(|id| !present.contains(id.as_str()))
+                .cloned()
+                .collect();
+            index.upsert_texts(&rows)?;
+            if !gone.is_empty() {
+                index.remove_many(&gone)?;
+            }
+            Ok(rows.len())
+        })();
+        match result {
+            Ok(_) => IndexOutcome::Ready {
+                revision: String::new(),
+                fingerprint: brain_lance::current_fingerprint(),
+                generation: index.serving_table_name(),
+            },
+            Err(err) => {
+                brain_lance::note_error(&err);
+                index.mark_stale();
+                IndexOutcome::RetryableFailure {
+                    message: format!("{err:#}"),
+                }
+            }
         }
     }
 
-    /// Index hook after memories may have been deleted: drops vectors for the ids
-    /// that are gone from SQLite. Best effort.
-    pub(crate) fn index_remove_missing(&self, ids: &[String]) {
-        if ids.is_empty() || self.vectors.is_none() {
-            return;
+    /// Typed removal of vectors whose memories are gone from SQLite.
+    pub fn try_index_remove_missing(&self, ids: &[String]) -> crate::tasks::IndexOutcome {
+        use crate::tasks::IndexOutcome;
+        if let Some(outcome) = self.index_unavailable() {
+            return outcome;
         }
         let Some(index) = self.vector_index() else {
-            return;
+            return IndexOutcome::RetryableFailure {
+                message: brain_lance::last_error()
+                    .unwrap_or_else(|| "vector index is not ready".into()),
+            };
         };
         let result = (|| -> Result<()> {
             let present: HashSet<String> = self
@@ -973,10 +1022,95 @@ impl Store {
                 .collect();
             index.remove_many(&gone)
         })();
-        if let Err(err) = result {
-            brain_lance::note_error(&err);
-            index.mark_stale();
+        match result {
+            Ok(()) => IndexOutcome::Ready {
+                revision: String::new(),
+                fingerprint: brain_lance::current_fingerprint(),
+                generation: index.serving_table_name(),
+            },
+            Err(err) => {
+                brain_lance::note_error(&err);
+                index.mark_stale();
+                IndexOutcome::RetryableFailure {
+                    message: format!("{err:#}"),
+                }
+            }
         }
+    }
+
+    /// Drain generation rebuild batches with a typed outcome: a batch is
+    /// progress (`Pending`), only an activated (or absent) generation is `Ready`.
+    pub fn try_process_vector_rebuild(&self, max_batches: usize) -> crate::tasks::IndexOutcome {
+        use crate::tasks::IndexOutcome;
+        if let Some(outcome) = self.index_unavailable() {
+            return outcome;
+        }
+        match self.process_pending_vector_rebuild(max_batches) {
+            Ok(batches) => match self.rebuild_in_progress() {
+                Some(_) => IndexOutcome::Pending {
+                    reason: format!("rebuild progress: {batches} batch(es) this pass"),
+                },
+                None => IndexOutcome::Ready {
+                    revision: String::new(),
+                    fingerprint: brain_lance::current_fingerprint(),
+                    generation: self
+                        .vectors
+                        .as_deref()
+                        .map(|i| i.serving_table_name())
+                        .unwrap_or_default(),
+                },
+            },
+            Err(err) => IndexOutcome::RetryableFailure {
+                message: format!("{err:#}"),
+            },
+        }
+    }
+
+    /// `Some(Disabled)` when this store has no vector index at all.
+    fn index_unavailable(&self) -> Option<crate::tasks::IndexOutcome> {
+        if self.vectors.is_some() {
+            return None;
+        }
+        let reason = if crate::embed::enabled() {
+            "semantic indexing unavailable for this store (in-memory)"
+        } else {
+            "semantic indexing disabled (ARGOS_EMBED=0)"
+        };
+        Some(crate::tasks::IndexOutcome::Disabled {
+            reason: reason.into(),
+        })
+    }
+
+    /// Reason string when a shadow generation is still building.
+    fn rebuild_in_progress(&self) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT id FROM argos_index_generations WHERE state='building' ORDER BY created_at ASC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .map(|gen| format!("generation rebuild {gen} in progress"))
+    }
+
+    /// Index hook after memories were written or their text changed. Best effort
+    /// (non-durable callers); the reliable path uses [`Self::try_index_upsert`].
+    pub(crate) fn index_upsert(&self, ids: &[String]) {
+        if ids.is_empty() || self.vectors.is_none() {
+            return;
+        }
+        let _ = self.try_index_upsert(ids);
+    }
+
+    /// Index hook after memories may have been deleted: drops vectors for the ids
+    /// that are gone from SQLite. Best effort.
+    pub(crate) fn index_remove_missing(&self, ids: &[String]) {
+        if ids.is_empty() || self.vectors.is_none() {
+            return;
+        }
+        let _ = self.try_index_remove_missing(ids);
     }
 
     pub fn update_memory(
@@ -2248,7 +2382,7 @@ mod tests {
             drop(Store::open(&path).unwrap());
             Connection::open(&path)
                 .unwrap()
-                .execute_batch("PRAGMA user_version=19")
+                .execute_batch(&format!("PRAGMA user_version={}", SCHEMA_VERSION + 1))
                 .unwrap();
             assert!(Store::open(&path).is_err());
         }

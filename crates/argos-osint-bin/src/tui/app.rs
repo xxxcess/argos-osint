@@ -5582,6 +5582,10 @@ pub async fn run(mut app: App) -> Result<()> {
     )?;
     let mut terminal: Terminal<ratatui::backend::CrosstermBackend<Stdout>> =
         Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
+    // Durable local workers (index outbox + summary flush), each claiming only
+    // its own pool. Stopped when dropped at the end of the session.
+    let _workers =
+        argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
     let mut dirty = true;
     loop {
         if pump(&mut app) {

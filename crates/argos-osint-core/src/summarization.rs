@@ -344,6 +344,13 @@ pub fn persist_flush_request(conn: &Connection, req: &SummaryRequest) -> anyhow:
 }
 
 pub fn load_flush_request(conn: &Connection, cache_key: &str) -> anyhow::Result<Option<SummaryRequest>> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS argos_summary_flush_requests (
+            cache_key TEXT PRIMARY KEY,
+            request_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    )?;
     let row: Option<String> = conn
         .query_row(
             "SELECT request_json FROM argos_summary_flush_requests WHERE cache_key=?1",

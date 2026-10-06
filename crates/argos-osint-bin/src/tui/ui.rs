@@ -3075,7 +3075,7 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
         if contains(areas.path, x, y) {
             return Some(
-                super::graph::path_line_at(areas.path, x, y, app.scrolls.path)
+                super::graph::path_line_at(app, areas.path, x, y, app.scrolls.path)
                     .map(Target::PathLine)
                     .unwrap_or(Target::DetailPath),
             );

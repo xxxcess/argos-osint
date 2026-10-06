@@ -8072,6 +8072,9 @@ mod tests {
         assert!(areas.related.height >= 3 && areas.summary.height >= 3);
         let text = buffer_text(&render(&mut app, 64, 32));
         assert!(text.contains(" related ") && text.contains(" summary "), "{text}");
+        // The legend wraps instead of truncating on narrow widths.
+        assert!(text.contains("finding") && text.contains("source"), "{text}");
+        assert!(!text.contains("findin…"), "{text}");
         // Focusing Summary gives it the larger share; Related stays visible.
         app.set_focus(Target::DetailSummary);
         let focused = super::super::ui::detail_areas(&app);

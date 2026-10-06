@@ -30,22 +30,52 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Scrollable path lines, above the anchored legend. `None` when the click misses them.
-pub fn path_line_at(path: Rect, x: u16, y: u16, scroll: u16) -> Option<usize> {
-    let content = path_content(path);
+pub fn path_line_at(app: &App, path: Rect, x: u16, y: u16, scroll: u16) -> Option<usize> {
+    let content = path_content(path, legend_height(app, path));
     if !contains(content, x, y) {
         return None;
     }
     Some(scroll as usize + (y - content.y) as usize)
 }
 
-fn path_content(path: Rect) -> Rect {
+fn path_content(path: Rect, legend: u16) -> Rect {
     let inner = inset(path);
     Rect {
         x: inner.x,
         y: inner.y,
         width: inner.width,
-        height: inner.height.saturating_sub(1),
+        height: inner.height.saturating_sub(legend),
     }
+}
+
+/// Legend rows that fit the path pane: one row when it fits, otherwise the
+/// entries wrap (at most three rows, never more than half the pane).
+fn legend_rows(app: &App, claim: bool, width: usize) -> Vec<String> {
+    let parts = legend_parts(app, claim);
+    if parts.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    let joined = parts.join("   ");
+    if joined.chars().count() <= width {
+        return vec![joined];
+    }
+    let mut rows: Vec<String> = Vec::new();
+    for part in parts {
+        match rows.last_mut() {
+            Some(row) if row.chars().count() + 2 + part.chars().count() <= width => {
+                row.push_str("  ");
+                row.push_str(&part);
+            }
+            _ => rows.push(part),
+        }
+    }
+    rows
+}
+
+fn legend_height(app: &App, path: Rect) -> u16 {
+    let inner = inset(path);
+    let rows = legend_rows(app, app.detail_claim(), inner.width as usize).len() as u16;
+    rows.min(3).min((inner.height / 2).max(1)).min(inner.height)
 }
 
 fn inset(area: Rect) -> Rect {
@@ -90,13 +120,14 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
         })
         .collect::<Vec<_>>();
     let inner = inset(area);
+    let legend_h = legend_height(app, area);
     let legend_area = Rect {
         x: inner.x,
-        y: inner.y.saturating_add(inner.height.saturating_sub(1)),
+        y: inner.y.saturating_add(inner.height.saturating_sub(legend_h)),
         width: inner.width,
-        height: 1.min(inner.height),
+        height: legend_h,
     };
-    let path_area = path_content(area);
+    let path_area = path_content(area, legend_h);
     let mut title = if claim { " claim path " } else { " recon path " }.to_string();
     if app.focus == Target::DetailPath {
         title.push_str("· focused ");
@@ -111,8 +142,14 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     );
     if legend_area.height > 0 {
         frame.render_widget(
-            Paragraph::new(center_line(&legend_text(app, claim), legend_area.width as usize))
-                .style(theme::dim()),
+            Paragraph::new(
+                legend_rows(app, claim, legend_area.width as usize)
+                    .iter()
+                    .take(legend_h as usize)
+                    .map(|row| Line::from(center_line(row, legend_area.width as usize)))
+                    .collect::<Vec<_>>(),
+            )
+            .style(theme::dim()),
             legend_area,
         );
     }
@@ -166,7 +203,7 @@ fn summary_lines(text: &str, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn legend_text(app: &App, claim: bool) -> String {
+fn legend_parts(app: &App, claim: bool) -> Vec<String> {
     let mut parts = Vec::new();
     let present = |kind: GraphNodeKind| {
         app.brain_graph
@@ -198,10 +235,7 @@ fn legend_text(app: &App, claim: bool) -> String {
     );
     push(&mut parts, GraphNodeKind::Finding, "finding");
     push(&mut parts, GraphNodeKind::Source, "source");
-    if parts.is_empty() {
-        return String::new();
-    }
-    parts.join("   ")
+    parts
 }
 
 pub(crate) fn path_lines(graph: &MemoryGraph) -> Vec<PathLine> {

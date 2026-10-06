@@ -377,6 +377,7 @@ pub fn publish_checkpoint(
             parent_job: parent_job.map(str::to_string),
             repair,
             index_now: false,
+            ..Default::default()
         },
     )?;
     if receipt.brief_memory_id.is_some() && !repair {

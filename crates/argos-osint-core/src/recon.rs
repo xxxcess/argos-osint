@@ -1393,7 +1393,17 @@ impl Store {
             message_id: None,
             reference: None,
         };
-        tx.execute("UPDATE memories SET source_json=?1 WHERE id IN (SELECT memory_id FROM insight_claims) AND source_json LIKE ?2",params![serde_json::to_string(&deleted_source)?,format!("%{tid}%")])?;
+        let retagged = tx.execute("UPDATE memories SET source_json=?1 WHERE id IN (SELECT memory_id FROM insight_claims) AND source_json LIKE ?2",params![serde_json::to_string(&deleted_source)?,format!("%{tid}%")])?;
+        // Durable vector removal (or re-verification for survivors) commits with
+        // the deletion; the index pool applies it after commit.
+        let queued = if doomed_memories.is_empty() {
+            Vec::new()
+        } else {
+            crate::store::enqueue_memory_index_on(&tx, &doomed_memories, None)?.0
+        };
+        if !doomed_memories.is_empty() || retagged > 0 {
+            crate::store::bump_memories_changed(&tx)?;
+        }
         tx.execute(
             "DELETE FROM investigation_strategies WHERE thread_id=?1",
             [tid],
@@ -1432,7 +1442,7 @@ impl Store {
             [tid],
         )?;
         tx.commit()?;
-        self.index_remove_missing(&doomed_memories);
+        let _ = self.index_now(&queued);
         Ok(true)
     }
     pub fn attach_call(&self, call_id: &str, tid: &str) -> Result<bool> {
@@ -3712,6 +3722,9 @@ fn persist_claims(
     claims: &[Value],
 ) -> Result<()> {
     let mut written: Vec<String> = Vec::new();
+    // Every canonical memory these claims resolve to (new and reused), so reused
+    // claims with missing/stale vectors are re-verified too.
+    let mut touched: Vec<String> = Vec::new();
     let tx = store.conn.transaction()?;
     let source_exists:i64=tx.query_row("SELECT COUNT(*) FROM recon_messages m JOIN recon_threads t ON t.id=m.thread_id WHERE m.id=?1 AND m.thread_id=?2 AND t.deleted=0",params![answer.id,answer.thread_id],|r|r.get(0))?;
     ensure!(source_exists == 1, "source answer or thread was deleted");
@@ -3774,6 +3787,22 @@ fn persist_claims(
             )
             .optional()?;
         if existing.is_none() {
+            // Never recreate a claim the user deleted from this run.
+            if let (Some(runs), Some(run_id)) = (
+                crate::store::tombstone_runs(&tx, &fingerprint)?,
+                answer.run_id.as_deref(),
+            ) {
+                if runs.iter().any(|r| r == run_id) {
+                    continue;
+                }
+            }
+        }
+        if let Some(memory_id) = &existing {
+            if !touched.contains(memory_id) {
+                touched.push(memory_id.clone());
+            }
+        }
+        if existing.is_none() {
             let source = crate::brain::MemorySource {
                 app: "recon".into(),
                 conversation_id: answer.thread_id.clone(),
@@ -3783,6 +3812,7 @@ fn persist_claims(
             let memory_id = id("mem");
             tx.execute("INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",params![memory_id,claim,now(),serde_json::to_string(&source)?])?;
             written.push(memory_id.clone());
+            touched.push(memory_id.clone());
             tx.execute("INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![fingerprint,memory_id,entity,predicate,object,claim_value.get("topic").and_then(Value::as_str).unwrap_or(""),claim_value.get("classification").and_then(Value::as_str).unwrap_or("fact"),claim_value.get("confidence").and_then(Value::as_f64).unwrap_or(0.5),now(),now()])?;
             let mut stmt=tx.prepare("SELECT fingerprint FROM insight_claims WHERE entity_id=?1 AND predicate=?2 AND fingerprint<>?3")?;
             let other: Vec<String> = stmt
@@ -3807,8 +3837,13 @@ fn persist_claims(
         "UPDATE extraction_jobs SET state='completed',updated_at=?1 WHERE answer_id=?2",
         params![now(), answer.id],
     )?;
+    // Index-outbox rows commit atomically with the memories and links.
+    let queued = crate::store::enqueue_memory_index_on(&tx, &touched, None)?.0;
+    if !written.is_empty() {
+        crate::store::bump_memories_changed(&tx)?;
+    }
     tx.commit()?;
-    store.index_upsert(&written);
+    let _ = store.index_now(&queued);
     Ok(())
 }
 fn turn_clock(floor: u16, max_turn: u16) -> Arc<std::sync::Mutex<budget::TurnClock>> {
@@ -4664,6 +4699,94 @@ mod tests {
         assert_eq!(relation, 1);
         s.delete_thread(&a.id, true).unwrap();
         assert_eq!(s.list_memories().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn recon_claims_and_deletions_use_the_durable_index_outbox() {
+        let _fake = crate::embed::testing::fake();
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::open(&dir.path().join("argos.db")).unwrap();
+        let thread = s.new_thread("A").unwrap();
+        let user = s
+            .add_message(&thread.id, "user", "Who owns 8.8.8.8?", None)
+            .unwrap();
+        let run = s.new_run(&thread.id, &user.id, "m", "m").unwrap();
+        let answer = s
+            .add_message(&thread.id, "assistant", "Evidence answer", Some(&run.id))
+            .unwrap();
+        let result = ToolResult {
+            tool_id: "arin_rdap".into(),
+            inputs: json!({"ip":"8.8.8.8"}),
+            status: "completed".into(),
+            source_url: "https://rdap.arin.net/registry/ip/8.8.8.8".into(),
+            retrieved_at: now(),
+            observations: json!({"name":"Example"}),
+            raw: "{}".into(),
+            error: None,
+            cached: false,
+            truncated: false,
+            credits_charged: 0,
+            credits_reported: None,
+        };
+        let evidence = vec![("call-one".into(), result)];
+        let claim = json!({"entity":"8.8.8.8","namespace":"ip","predicate":"registrant","object":"Example Org","claim":"Example Org is the listed registrant.","evidence_ids":["call-one"]});
+        let completed = |s: &Store, id: &str, op: &str| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM argos_index_changes WHERE record_id=?1 AND operation=?2 AND state='completed'",
+                    params![id, op],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let before = s.memories_changed_seq().unwrap();
+        persist_claims(&mut s, &answer, &evidence, std::slice::from_ref(&claim)).unwrap();
+        let ids: Vec<String> = s
+            .list_memories()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids.len(), 1);
+        assert!(s.memories_changed_seq().unwrap() > before);
+        assert_eq!(completed(&s, &ids[0], "index_upsert"), 1);
+        assert!(s.verify_memory_coverage(&ids).unwrap().complete());
+
+        // A reused claim whose vector state was lost is re-verified on reuse.
+        s.conn
+            .execute(
+                "DELETE FROM argos_memory_index_state WHERE memory_id=?1",
+                [&ids[0]],
+            )
+            .unwrap();
+        assert!(!s.verify_memory_coverage(&ids).unwrap().complete());
+        let seq = s.memories_changed_seq().unwrap();
+        persist_claims(&mut s, &answer, &evidence, std::slice::from_ref(&claim)).unwrap();
+        assert!(s.verify_memory_coverage(&ids).unwrap().complete());
+        assert_eq!(s.memories_changed_seq().unwrap(), seq, "no memory changed");
+
+        // A claim the user deleted from this run is never recreated by it.
+        s.delete_memory(&ids[0]).unwrap();
+        persist_claims(&mut s, &answer, &evidence, std::slice::from_ref(&claim)).unwrap();
+        assert!(s.list_memories().unwrap().is_empty());
+
+        // Thread deletion queues removal durably and notifies.
+        let other = json!({"entity":"8.8.4.4","namespace":"ip","predicate":"registrant","object":"Example Org","claim":"Example Org also holds 8.8.4.4.","evidence_ids":["call-one"]});
+        persist_claims(&mut s, &answer, &evidence, std::slice::from_ref(&other)).unwrap();
+        let kept: Vec<String> = s
+            .list_memories()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(kept.len(), 1);
+        let seq = s.memories_changed_seq().unwrap();
+        s.delete_thread(&thread.id, true).unwrap();
+        assert!(s.list_memories().unwrap().is_empty());
+        assert!(s.memories_changed_seq().unwrap() > seq);
+        assert_eq!(completed(&s, &kept[0], "index_remove"), 1);
+        let report = s.verify_memory_coverage(&kept).unwrap();
+        assert_eq!(report.missing_rows, kept);
     }
 
     #[test]

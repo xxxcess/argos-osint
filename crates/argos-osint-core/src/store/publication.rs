@@ -145,6 +145,59 @@ pub struct PublishOptions {
     /// Attempt the queued index work right after commit (still acknowledged
     /// through the same leased outbox tasks).
     pub index_now: bool,
+    /// Provenance tag for a non-Atlas publisher (e.g. `intel-recon`): new
+    /// memories and reused ones are tagged in the same transaction (see
+    /// [`retag_source`]).
+    pub retag_app: Option<String>,
+    /// Do not persist an Atlas publication receipt (publishers that reuse the
+    /// Atlas tables for another run kind must not shadow the cycle's receipt).
+    pub skip_receipt: bool,
+}
+
+/// Tag a memory's provenance as touched by another app/run. Atlas provenance is
+/// kept (with a reference suffix); anything else is re-attributed.
+pub fn retag_source(mut source: MemorySource, app: &str, run_id: &str) -> MemorySource {
+    if source.app == "atlas" {
+        source.reference = Some(format!("atlas+{app}:{run_id}"));
+    } else {
+        source.app = app.into();
+        source.conversation_id = run_id.into();
+        source.reference = Some(run_id.into());
+    }
+    source
+}
+
+/// Typed "memories changed" notification derived from the durable commit
+/// counter, so it is emitted only for committed changes and also observes
+/// commits from other processes. Coalesces any number of commits per poll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoriesChanged {
+    pub seq: i64,
+}
+
+/// Polls [`Store::memories_changed_seq`] and yields [`MemoriesChanged`] when it
+/// moved since the last poll.
+#[derive(Clone, Debug, Default)]
+pub struct MemoryChangeWatcher {
+    seq: i64,
+}
+
+impl MemoryChangeWatcher {
+    /// Start watching from the current committed sequence.
+    pub fn new(store: &Store) -> Self {
+        Self {
+            seq: store.memories_changed_seq().unwrap_or(0),
+        }
+    }
+
+    pub fn poll(&mut self, store: &Store) -> Option<MemoriesChanged> {
+        let seq = store.memories_changed_seq().ok()?;
+        if seq == self.seq {
+            return None;
+        }
+        self.seq = seq;
+        Some(MemoriesChanged { seq })
+    }
 }
 
 /// Exact index coverage for a set of required memories.
@@ -286,7 +339,7 @@ fn memory_text(conn: &Connection, id: &str) -> Result<Option<String>> {
 }
 
 /// Tombstoned fingerprint → run ids it was deleted from (`None` = any run).
-fn tombstone_runs(conn: &Connection, fingerprint: &str) -> Result<Option<Vec<String>>> {
+pub(crate) fn tombstone_runs(conn: &Connection, fingerprint: &str) -> Result<Option<Vec<String>>> {
     let rows: Vec<String> = {
         let mut stmt = conn.prepare(
             "SELECT run_ids FROM argos_memory_tombstones WHERE fingerprint=?1 AND fingerprint<>''",
@@ -346,56 +399,79 @@ fn reject_reason(claim: &AtlasInsightClaim) -> Option<String> {
     }
 }
 
+/// Queue index work for every memory whose current revision is not recorded as
+/// indexed, and removal work for ids that no longer exist. Plain statements
+/// only, so it joins the caller's transaction (including a
+/// `rusqlite::Transaction`, which derefs to `Connection`).
+pub(crate) fn enqueue_memory_index_on(
+    conn: &Connection,
+    ids: &[String],
+    parent_job: Option<&str>,
+) -> Result<(Vec<IndexEnqueue>, usize)> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut queued = Vec::new();
+    let mut already = 0usize;
+    let mut seen = HashSet::new();
+    for id in ids {
+        if !seen.insert(id.as_str()) {
+            continue;
+        }
+        match memory_text(conn, id)? {
+            Some(text) => {
+                let rev = memory_revision(&text);
+                if indexed_revision(conn, id)?.as_deref() == Some(rev.as_str()) {
+                    already += 1;
+                    continue;
+                }
+                queued.push(tasks::enqueue_index_work(
+                    conn,
+                    MEMORY_RECORD,
+                    id,
+                    &rev,
+                    &rev,
+                    "index_upsert",
+                    parent_job,
+                    &now,
+                )?);
+            }
+            None => {
+                queued.push(tasks::enqueue_index_work(
+                    conn,
+                    MEMORY_RECORD,
+                    id,
+                    DELETED_REVISION,
+                    "",
+                    "index_remove",
+                    parent_job,
+                    &now,
+                )?);
+            }
+        }
+    }
+    Ok((queued, already))
+}
+
 impl Store {
-    /// Queue index work for every required memory whose current revision is not
-    /// recorded as indexed; removal work for ids that no longer exist. Plain
-    /// statements only, so it joins the caller's transaction.
+    /// Store-connection form of [`enqueue_memory_index_on`].
     pub(crate) fn enqueue_memory_index(
         &self,
         ids: &[String],
         parent_job: Option<&str>,
     ) -> Result<(Vec<IndexEnqueue>, usize)> {
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut queued = Vec::new();
-        let mut already = 0usize;
-        let mut seen = HashSet::new();
-        for id in ids {
-            if !seen.insert(id.as_str()) {
-                continue;
-            }
-            match memory_text(&self.conn, id)? {
-                Some(text) => {
-                    let rev = memory_revision(&text);
-                    if indexed_revision(&self.conn, id)?.as_deref() == Some(rev.as_str()) {
-                        already += 1;
-                        continue;
-                    }
-                    queued.push(tasks::enqueue_index_work(
-                        &self.conn,
-                        MEMORY_RECORD,
-                        id,
-                        &rev,
-                        &rev,
-                        "index_upsert",
-                        parent_job,
-                        &now,
-                    )?);
-                }
-                None => {
-                    queued.push(tasks::enqueue_index_work(
-                        &self.conn,
-                        MEMORY_RECORD,
-                        id,
-                        DELETED_REVISION,
-                        "",
-                        "index_remove",
-                        parent_job,
-                        &now,
-                    )?);
-                }
-            }
-        }
-        Ok((queued, already))
+        enqueue_memory_index_on(&self.conn, ids, parent_job)
+    }
+
+    /// Durable memories-changed counter (committed changes only).
+    pub fn memories_changed_seq(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM app_state WHERE key='memories_changed_seq'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
 
     /// Optional immediate indexing after commit: claims exactly the queued
@@ -677,13 +753,17 @@ impl Store {
         let mut queued_all: Vec<IndexEnqueue> = Vec::new();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
-            let source = MemorySource {
+            let mut source = MemorySource {
                 app: "atlas".into(),
                 conversation_id: run_id.into(),
                 message_id: None,
                 reference: Some(run_id.into()),
             };
+            if let Some(app) = &options.retag_app {
+                source = retag_source(source, app, run_id);
+            }
             let source_json = serde_json::to_string(&source)?;
+            let mut retagged = 0usize;
             for (index, claim) in claims.iter().enumerate() {
                 if let Some(reason) = reject_reason(claim) {
                     receipt.rejected.push(RejectedClaim {
@@ -723,6 +803,29 @@ impl Store {
                     Some(memory_id) => {
                         let row_exists = memory_text(&self.conn, &memory_id)?.is_some();
                         if row_exists {
+                            if let Some(app) = &options.retag_app {
+                                let current: String = self.conn.query_row(
+                                    "SELECT source_json FROM memories WHERE id=?1",
+                                    [&memory_id],
+                                    |r| r.get(0),
+                                )?;
+                                let parsed: MemorySource = serde_json::from_str(&current)
+                                    .unwrap_or_else(|_| MemorySource {
+                                        app: app.clone(),
+                                        conversation_id: run_id.into(),
+                                        message_id: None,
+                                        reference: Some(run_id.into()),
+                                    });
+                                let tagged =
+                                    serde_json::to_string(&retag_source(parsed, app, run_id))?;
+                                if tagged != current {
+                                    self.conn.execute(
+                                        "UPDATE memories SET source_json=?1 WHERE id=?2",
+                                        params![tagged, memory_id],
+                                    )?;
+                                    retagged += 1;
+                                }
+                            }
                             receipt.reused += 1;
                             if !receipt.reused_memory_ids.contains(&memory_id)
                                 && !receipt.created_memory_ids.contains(&memory_id)
@@ -865,20 +968,23 @@ impl Store {
             receipt.queued_index_changes = queued.iter().map(|q| q.seq).collect();
             receipt.index_tasks = queued.iter().map(|q| q.task_id.clone()).collect();
             queued_all = queued;
-            self.conn.execute(
-                "INSERT INTO argos_atlas_publications(run_id,revision,state,receipt_json,job_id,created_at,updated_at)
-                 VALUES (?1,?2,'published',?3,?4,?5,?5)
-                 ON CONFLICT(run_id,revision) DO UPDATE SET state='published', receipt_json=excluded.receipt_json,
-                    job_id=excluded.job_id, updated_at=excluded.updated_at",
-                params![
-                    run_id,
-                    revision,
-                    serde_json::to_string(&receipt)?,
-                    options.parent_job.clone().unwrap_or_default(),
-                    now
-                ],
-            )?;
-            if receipt.created + receipt.repaired > 0
+            if !options.skip_receipt {
+                self.conn.execute(
+                    "INSERT INTO argos_atlas_publications(run_id,revision,state,receipt_json,job_id,created_at,updated_at)
+                     VALUES (?1,?2,'published',?3,?4,?5,?5)
+                     ON CONFLICT(run_id,revision) DO UPDATE SET state='published', receipt_json=excluded.receipt_json,
+                        job_id=excluded.job_id, updated_at=excluded.updated_at",
+                    params![
+                        run_id,
+                        revision,
+                        serde_json::to_string(&receipt)?,
+                        options.parent_job.clone().unwrap_or_default(),
+                        now
+                    ],
+                )?;
+            }
+            if retagged > 0
+                || receipt.created + receipt.repaired > 0
                 || !receipt.updated_memory_ids.is_empty()
                 || receipt.brief_memory_id.is_some()
             {
@@ -1512,5 +1618,192 @@ mod tests {
             .verify_memory_coverage(std::slice::from_ref(&memory.id))
             .unwrap()
             .complete());
+    }
+
+    fn source() -> crate::brain::MemorySource {
+        crate::brain::MemorySource {
+            app: "test".into(),
+            conversation_id: "c".into(),
+            message_id: None,
+            reference: None,
+        }
+    }
+
+    #[test]
+    fn memory_writes_and_their_outbox_rows_commit_together() {
+        let _off = testing::disable();
+        let store = Store::memory().unwrap();
+        let before = store.memories_changed_seq().unwrap();
+        let memory = store
+            .add_memory(
+                "Harbor tanker manifests list cargo",
+                "fact",
+                false,
+                source(),
+            )
+            .unwrap();
+        let active = |store: &Store, id: &str| -> i64 {
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM argos_index_changes
+                     WHERE record_id=?1 AND state IN ('pending','running','blocked')",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            active(&store, &memory.id),
+            1,
+            "add queues durable index work"
+        );
+        assert_eq!(store.memories_changed_seq().unwrap(), before + 1);
+        store
+            .update_memory(&memory.id, "Northwind ferry timetable", "fact", false)
+            .unwrap();
+        assert!(
+            active(&store, &memory.id) >= 1,
+            "edit queues the new revision"
+        );
+        assert_eq!(store.memories_changed_seq().unwrap(), before + 2);
+
+        // When the outbox insert fails, the memory write rolls back with it.
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER outbox_down BEFORE INSERT ON argos_index_changes
+                 BEGIN SELECT RAISE(ABORT, 'outbox down'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .add_memory("Orphan without an outbox row", "fact", false, source())
+            .is_err());
+        assert!(store
+            .update_memory(&memory.id, "Edited without an outbox row", "fact", false)
+            .is_err());
+        let texts: Vec<String> = store
+            .list_memories()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(texts, vec!["Northwind ferry timetable".to_string()]);
+        assert_eq!(store.memories_changed_seq().unwrap(), before + 2);
+        assert!(store.conn.is_autocommit(), "no transaction left open");
+    }
+
+    #[test]
+    fn change_watcher_sees_only_committed_changes_and_coalesces() {
+        let _off = testing::disable();
+        let (dir, store) = disk_store();
+        let other = Store::open(&dir.path().join("argos.db")).unwrap();
+        let mut watch = MemoryChangeWatcher::new(&store);
+        assert_eq!(watch.poll(&store), None);
+        // An uncommitted write in another connection is invisible.
+        other.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let memory = other
+            .add_memory(
+                "Harbor tanker manifests list cargo",
+                "fact",
+                false,
+                source(),
+            )
+            .unwrap();
+        assert_eq!(watch.poll(&store), None);
+        other
+            .update_memory(&memory.id, "Northwind ferry timetable", "fact", false)
+            .unwrap();
+        other.conn.execute_batch("COMMIT").unwrap();
+        // Two commits from another process coalesce into one notification.
+        let changed = watch.poll(&store).expect("committed change observed");
+        assert_eq!(changed.seq, store.memories_changed_seq().unwrap());
+        assert_eq!(watch.poll(&store), None);
+        other.delete_memory(&memory.id).unwrap();
+        assert!(watch.poll(&store).is_some(), "deletes notify too");
+    }
+
+    #[test]
+    fn worker_killed_after_the_lance_write_is_recovered_by_revision() {
+        let _fake = testing::fake();
+        let (_dir, store) = disk_store();
+        let memory = store
+            .add_memory(
+                "Harbor tanker manifests list cargo",
+                "fact",
+                false,
+                source(),
+            )
+            .unwrap();
+        // An external edit commits with its outbox row; no inline indexing.
+        let edit = |store: &Store, text: &str| {
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET text=?1 WHERE id=?2",
+                    rusqlite::params![text, memory.id],
+                )
+                .unwrap();
+            store
+                .enqueue_memory_index(std::slice::from_ref(&memory.id), None)
+                .unwrap();
+        };
+        edit(&store, "Northwind ferry timetable");
+        let now = chrono::Utc::now().to_rfc3339();
+        let (claimed, work) = tasks::claim_index_work(&store.conn, "worker-a", 30, &now)
+            .unwrap()
+            .expect("index work queued");
+        assert_eq!(work.record_id, memory.id);
+        // Worker A writes Lance, then the process dies before recording the
+        // revision or acknowledging the task.
+        store
+            .vectors
+            .as_deref()
+            .unwrap()
+            .upsert_texts(&[(memory.id.clone(), "Northwind ferry timetable".into())])
+            .unwrap();
+        // While A is dead, the memory changes again.
+        edit(&store, "Granite quarry shipping ledger");
+        assert_eq!(
+            indexed_revision(&store.conn, &memory.id).unwrap(),
+            Some(memory_revision("Harbor tanker manifests list cargo")),
+            "the unacknowledged write recorded nothing"
+        );
+        let later = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(tasks::interrupt_expired_leases(&store.conn, &later).unwrap() >= 1);
+        crate::scheduler::drain_index_once(&store.conn, &store, "worker-b", 16).unwrap();
+
+        let current = memory_revision("Granite quarry shipping ledger");
+        assert_eq!(
+            indexed_revision(&store.conn, &memory.id).unwrap(),
+            Some(current)
+        );
+        assert!(store
+            .verify_memory_coverage(std::slice::from_ref(&memory.id))
+            .unwrap()
+            .complete());
+        assert_eq!(active_index_rows(&store), 0);
+        let index = store.vectors.as_deref().unwrap();
+        let copies = index
+            .ids()
+            .unwrap()
+            .into_iter()
+            .filter(|id| *id == memory.id)
+            .count();
+        assert_eq!(copies, 1, "re-running the write does not duplicate vectors");
+        let hit = index.search("granite quarry shipping ledger", 1).unwrap();
+        assert_eq!(hit[0].0, memory.id);
+        assert!(hit[0].1 > 0.99, "{hit:?}");
+        // The dead worker's late acknowledgement is rejected by owner/epoch.
+        let stale = IndexOutcome::Ready {
+            revision: memory_revision("Northwind ferry timetable"),
+            fingerprint: String::new(),
+            generation: String::new(),
+        };
+        assert!(!tasks::finish_index_work(&store.conn, &claimed, &work, &stale, &later).unwrap());
+        assert_eq!(
+            indexed_revision(&store.conn, &memory.id).unwrap(),
+            Some(memory_revision("Granite quarry shipping ledger"))
+        );
     }
 }

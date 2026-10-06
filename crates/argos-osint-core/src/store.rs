@@ -17,9 +17,11 @@ mod publication;
 #[cfg(test)]
 pub(crate) use publication::fault as publication_fault;
 pub use publication::{
-    memory_revision, payload_revision, CoverageReport, PublicationReceipt, PublicationVerification,
-    PublishOptions, RejectedClaim, DELETED_REVISION, MEMORY_RECORD,
+    memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
+    MemoryChangeWatcher, PublicationReceipt, PublicationVerification, PublishOptions,
+    RejectedClaim, DELETED_REVISION, MEMORY_RECORD,
 };
+pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
 
 static IDS: AtomicU64 = AtomicU64::new(1);
 
@@ -532,19 +534,59 @@ impl Store {
             created_at: chrono::Utc::now().to_rfc3339(),
             source,
         };
-        self.conn.execute(
-            "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                memory.id,
-                memory.text,
-                memory.category,
-                i64::from(memory.pinned),
-                memory.created_at,
-                serde_json::to_string(&memory.source)?
-            ],
-        )?;
-        self.after_memory_write(std::slice::from_ref(&memory.id));
+        let source_json = serde_json::to_string(&memory.source)?;
+        self.write_then_index(|| {
+            self.conn.execute(
+                "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    memory.id,
+                    memory.text,
+                    memory.category,
+                    i64::from(memory.pinned),
+                    memory.created_at,
+                    source_json
+                ],
+            )?;
+            Ok(((), vec![memory.id.clone()]))
+        })?;
         Ok(memory)
+    }
+
+    /// Run a memory write, its durable index-outbox rows and the
+    /// memories-changed bump in one transaction, then attempt the queued work
+    /// immediately through the same leased tasks. `write` returns its value and
+    /// the memory ids whose index state it may have changed. Index failure never
+    /// fails the write; the outbox keeps the work. Inside a caller's transaction
+    /// it only adds statements (the caller commits; the pool indexes).
+    fn write_then_index<T>(&self, write: impl FnOnce() -> Result<(T, Vec<String>)>) -> Result<T> {
+        let own_tx = self.conn.is_autocommit();
+        if own_tx {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        }
+        let result = (|| -> Result<(T, Vec<crate::tasks::IndexEnqueue>)> {
+            let (value, ids) = write()?;
+            let queued = if ids.is_empty() {
+                Vec::new()
+            } else {
+                publication::bump_memories_changed(&self.conn)?;
+                self.enqueue_memory_index(&ids, None)?.0
+            };
+            Ok((value, queued))
+        })();
+        if !own_tx {
+            return result.map(|(value, _)| value);
+        }
+        match result {
+            Ok((value, queued)) => {
+                self.conn.execute_batch("COMMIT")?;
+                let _ = self.index_now(&queued);
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
     }
 
     /// Hybrid recall: Lance vector search blended with Jaccard ([`hybrid_recall`]),
@@ -1108,24 +1150,6 @@ impl Store {
             .map(|gen| format!("generation rebuild {gen} in progress"))
     }
 
-    /// Index hook after memories were written or their text changed. Best effort
-    /// (non-durable callers); the reliable path uses [`Self::try_index_upsert`].
-    pub(crate) fn index_upsert(&self, ids: &[String]) {
-        if ids.is_empty() || self.vectors.is_none() {
-            return;
-        }
-        let _ = self.try_index_upsert(ids);
-    }
-
-    /// Index hook after memories may have been deleted: drops vectors for the ids
-    /// that are gone from SQLite. Best effort.
-    pub(crate) fn index_remove_missing(&self, ids: &[String]) {
-        if ids.is_empty() || self.vectors.is_none() {
-            return;
-        }
-        let _ = self.try_index_remove_missing(ids);
-    }
-
     pub fn update_memory(
         &self,
         id: &str,
@@ -1135,15 +1159,17 @@ impl Store {
     ) -> Result<bool> {
         let text = text.trim();
         anyhow::ensure!(!text.is_empty(), "memory text is empty");
-        let changed = self.conn.execute(
-            "UPDATE memories SET text=?1,category=?2,pinned=?3 WHERE id=?4",
-            params![text, normalize_category(category), i64::from(pinned), id],
-        )? > 0;
-        if changed {
+        self.write_then_index(|| {
+            let changed = self.conn.execute(
+                "UPDATE memories SET text=?1,category=?2,pinned=?3 WHERE id=?4",
+                params![text, normalize_category(category), i64::from(pinned), id],
+            )? > 0;
+            if !changed {
+                return Ok((false, Vec::new()));
+            }
             self.conn.execute("INSERT OR IGNORE INTO insight_user_edits(memory_id) SELECT memory_id FROM insight_claims WHERE memory_id=?1",[id])?;
-            self.after_memory_write(&[id.to_string()]);
-        }
-        Ok(changed)
+            Ok((true, vec![id.to_string()]))
+        })
     }
 
     pub fn graph_summary(&self, memory_id: &str) -> Result<Option<GraphSummary>> {
@@ -1237,19 +1263,6 @@ impl Store {
                 memory_row,
             )
             .optional()?)
-    }
-
-    /// Durable index work for written memories, then an optional immediate
-    /// attempt acknowledged through the same outbox task. Must run after commit
-    /// (or outside any transaction). Index failure never fails the write.
-    fn after_memory_write(&self, ids: &[String]) {
-        match self.enqueue_memory_index(ids, None) {
-            Ok((queued, _)) => {
-                let _ = publication::bump_memories_changed(&self.conn);
-                let _ = self.index_now(&queued);
-            }
-            Err(err) => brain_lance::note_error(&err),
-        }
     }
 
     /// Durable removal work for memories deleted inside the caller's transaction.

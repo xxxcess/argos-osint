@@ -12,10 +12,10 @@ Work proceeds in the spec's §9 order, one phase per push. Status is honest:
 | # | Area | Status | Notes |
 | --- | --- | --- | --- |
 | 1 | Core `tasks.rs`, `scheduler.rs`, `store.rs`: typed outcomes, worker routing, safe claims/leases, additive schema | **Done** | See phase 1 below |
-| 2 | Transactional outbox, revision-aware indexing, coverage receipts | **Done** | See phase 2 below; Recon (`recon.rs`) still uses best-effort hooks → phase 4 |
+| 2 | Transactional outbox, revision-aware indexing, coverage receipts | **Done** | See phase 2 below; Recon moved onto the outbox in phase 4 |
 | 3 | Atlas extraction checkpoint, phase 5, truthful state/counts, repair/resume | **Done (core)** | See phase 3 below; TUI resume/repair buttons and Brain provenance are phase 5 |
-| 4 | Intel Recon / other memory mutation paths reuse publication + refresh | Not started | |
-| 5 | TUI: Brain refresh, read errors, Jobs/Logs views, renames, Related/Summary layout | Not started | Default worker pools are spawned by the TUI; phase 3 added the minimal Atlas hooks (memory reload on `MemoriesChanged`/`AtlasDone`, stored run state, phase-5 row) |
+| 4 | Intel Recon / other memory mutation paths reuse publication + refresh | **Done** | See phase 4 below |
+| 5 | TUI: Brain refresh, read errors, Jobs/Logs views, renames, Related/Summary layout | Not started | Default worker pools are spawned by the TUI; phase 3 added the minimal Atlas hooks (memory reload on `MemoriesChanged`/`AtlasDone`, stored run state, phase-5 row); phase 4 added a 1 s `MemoryChangeWatcher` poll that reloads Brain memories after any committed change |
 | 6 | Shared job registration for all async entry points | Not started | `enqueue_job_with` + `JobMeta` available |
 | 7 | Typed provider diagnostics, unified graph explanation, bounded transport, revision cache | Not started | |
 | 8 | CLI/README/docs/tests | Not started | |
@@ -175,18 +175,66 @@ served vector matches the new text (commit `ced3514`).
   `store::publication_fault::fail_publish` (fails right before COMMIT, after rows were written),
   `embed::testing::disable()` (behaves like `ARGOS_EMBED=0`).
 
+### Phase 4 — what landed
+
+- **No best-effort index hooks left.** `Store::index_upsert`, `index_remove_missing` and
+  `after_memory_write` are gone, along with Intel Recon's non-atomic `retag_memory_source`. Every
+  memory mutation now commits its index-outbox rows (and the `memories_changed_seq` bump) in the
+  same SQLite transaction as the change. Any immediate indexing after commit goes through
+  `Store::index_now`, i.e. the same leased tasks the index pool runs.
+- **`add_memory` / `update_memory`** (including the `insight_user_edits` row) go through a new
+  `write_then_index` helper. It opens `BEGIN IMMEDIATE` when autocommit, or joins the caller's
+  transaction. If the outbox insert fails, the memory write rolls back.
+- **Recon (`recon.rs`).**
+  - `persist_claims` queues outbox work inside its transaction for every memory the claims resolve
+    to. Reused claims are re-verified, so a lost vector is repaired on reuse. It bumps the change
+    counter when it writes and never recreates a claim the user deleted from the same run (the
+    tombstone check).
+  - `delete_thread` queues durable vector removal for the memories it deletes and bumps the counter
+    for both deletes and provenance re-tags in that transaction.
+- **Intel Recon (`intel_recon/brain.rs`).** `upsert_recon_insights` publishes through
+  `publish_atlas_insights` with new `PublishOptions`:
+  - `retag_app: "intel-recon"`: provenance is applied to new and reused memories in the same
+    transaction. `retag_source` keeps Atlas provenance and adds the reference
+    `atlas+intel-recon:{run}`. Any other provenance is re-attributed.
+  - `skip_receipt: true`: no `argos_atlas_publications` row is written, so an Atlas cycle's
+    receipt is never shadowed.
+
+  `intel_recon/replace_insights.rs` already used `commit_article_insight_replacement`, which has
+  been durable since phase 2. Other memory writers (`delete_memory`, `delete_article_insights`,
+  `delete_cycle_memories`, the Atlas publisher) were already on the outbox. Audit: every
+  `INSERT/UPDATE/DELETE` on `memories` outside tests now runs in a transaction that queues the
+  outbox.
+- **Refresh notifications.** New typed `store::MemoriesChanged { seq }` and
+  `MemoryChangeWatcher`. Both are derived from the durable commit counter, so they fire only for
+  committed changes, include commits from other processes and coalesce bursts. The TUI main loop
+  polls the watcher about once per second and reloads Brain memories. Full Brain refresh semantics
+  (keeping selection and filters, read-error states) are phase 5.
+- **Kill test.** `worker_killed_after_the_lance_write_is_recovered_by_revision`:
+  1. Worker A claims the index task, writes the vector to Lance and "dies" without recording or
+     acknowledging.
+  2. The text changes again while A is dead.
+  3. The lease expires (`interrupt_expired_leases`) and worker B drains.
+
+  The test asserts that the recorded revision equals the newest text, coverage is complete, no
+  active outbox rows remain, there is exactly one vector for the id, and search serves the newest
+  text. A's late acknowledgement is rejected by the owner/epoch guard and does not change the
+  recorded revision.
+- **Left as-is.** `ensure_memory_vectors`, the recall-path reconciliation, still writes Lance
+  directly. It records revision states and is a self-healing reconciler, not a mutation path.
+
 ## §10 acceptance checks
 
 | # | Check | Status | Evidence / gap |
 | --- | --- | --- | --- |
 | 1 | Atlas run creates visible memories in-session | Partial | Core: `successful_run_publishes_indexes_verifies_and_completes` (disk store; memories in `list_memories`, `MemoriesChanged` emitted). TUI reloads on `MemoriesChanged`/`AtlasDone`; full Brain refresh semantics (selection/filter preservation) and screenshot are phase 5 |
-| 2 | Brain entry refreshes externally committed memories | Not started | Phase 5 |
+| 2 | Brain entry refreshes externally committed memories | Partial | Every mutation path bumps the durable counter in its transaction. `MemoryChangeWatcher` notifies only after commit, across processes, coalesced (`change_watcher_sees_only_committed_changes_and_coalesces`). The TUI reloads memories on it (1 s poll). Selection/filter preservation, read errors and the screenshot are phase 5 |
 | 3 | Publication failure cannot report completed; retry uses saved payload | **Done (core)** | `publication_failure_is_failed_not_completed_and_retry_uses_the_checkpoint`: state `failed`, extracted 2 vs created 0, rollback, resume completes with extraction called once |
 | 4 | Embedding/Lance failure: memories visible, phase 5 incomplete, retry reaches verified | **Done (core)** | `embedding_failure_keeps_memories_visible_reports_partial_and_retry_verifies` (run `partial`, `0/3 indexed`, resume reaches `3/3`), `background_indexing_then_refresh_upgrades_a_partial_run`; UI screenshot phase 5 |
 | 5 | Embeddings disabled: honest status; enabling resumes | **Done (core)** | `disabled_embeddings_save_memories_and_say_so_honestly` ("Saved; semantic indexing disabled", never claims indexed, work stays queued), `enabling_embeddings_resumes_outstanding_work_and_upgrades_the_run` |
-| 6 | Kill/restart at each boundary | Partial | Outbox claim/lease expiry (phase 1/2 tests), extraction checkpoint (`crash_after_checkpoint_resumes_without_reextracting`), SQLite commit (rollback + retry test), phase-5 pause/resume from receipt (`pause_in_phase5_parks_then_resumes_from_the_stored_receipt`), index write (mid-write test). Not simulated: a process kill between the Lance write and the task acknowledgement (covered logically by revision-aware recording + lease expiry, but no dedicated test) |
+| 6 | Kill/restart at each boundary | Partial | Outbox claim/lease expiry (phase 1/2 tests), extraction checkpoint (`crash_after_checkpoint_resumes_without_reextracting`), SQLite commit (rollback + retry test), phase-5 pause/resume from receipt (`pause_in_phase5_parks_then_resumes_from_the_stored_receipt`), index write (mid-write test), and a process kill between the Lance write and the task acknowledgement (`worker_killed_after_the_lance_write_is_recovered_by_revision`: lease expiry, revision-aware re-record, no duplicate vector, stale ack rejected). Remaining: an end-to-end kill test of a real process |
 | 7 | Duplicate claims reuse canonical memories, keep links, repair vectors | **Done (core)** | `publication_receipt_reconciles_and_reports_rejections`, `retrying_the_same_payload_is_idempotent`, `reused_claims_with_damaged_rows_are_repaired_and_reindexed`, `indexing_is_verified_by_exact_id_and_revision` |
-| 8 | Change/delete during indexing cannot overwrite newer/resurrect | **Done (core)** | `stale_work_cannot_overwrite_a_newer_revision`, `deletion_during_indexing_is_not_resurrected`, `text_changed_mid_index_write_reruns_on_the_new_revision` (fault-injected) |
+| 8 | Change/delete during indexing cannot overwrite newer/resurrect | **Done (core)** | `stale_work_cannot_overwrite_a_newer_revision`, `deletion_during_indexing_is_not_resurrected`, `text_changed_mid_index_write_reruns_on_the_new_revision` (fault-injected). Phase 4: Recon/Intel Recon/manual edits use the same revision-aware outbox (`recon_claims_and_deletions_use_the_durable_index_outbox`, `intel_recon_publishes_durably_with_provenance_and_no_atlas_receipt`, `memory_writes_and_their_outbox_rows_commit_together`) |
 | 9 | Historical repair | **Done (core)** | `repair_requeues_vectors_for_a_false_completed_cycle_without_rewriting_it`, `repair_restores_orphaned_links_from_the_checkpoint_and_respects_tombstones`, `repair_reports_missing_payload_and_unrecoverable_links_without_fabricating`, `repair_job_pages_resumably_and_records_job_progress`. User-triggered repair button / re-extraction action in the TUI: phase 5 |
 | 10 | Summary worker cannot claim Atlas/index tasks; two processes cannot own one attempt | **Done** | `summary_pool_never_claims_index_or_atlas_work`, `summary_worker_leaves_index_and_atlas_tasks_alone`, `two_processes_cannot_own_the_same_attempt_and_stale_owner_cannot_publish` |
 | 11 | Jobs timing/history for every async op | Partial | Durable timing + aggregate state (`job_timing_and_partial_aggregate_come_from_durable_tasks`); registration of all entry points and UI pending |
@@ -209,3 +257,8 @@ served vector matches the new text (commit `ced3514`).
   `cargo clippy --workspace --all-targets` shows no findings in files touched by this branch apart
   from two that were already there (`format_article_card`, `run_live` argument counts). Other
   pre-existing clippy findings elsewhere mean `-D warnings` CI fails on `main` too.
+- Phase 4: `ARGOS_EMBED=0 cargo test -p argos-osint-core --lib` → 420 passed, 0 failed, 5 ignored
+  (+5: outbox atomicity/rollback for `add_memory`/`update_memory`, change-watcher, kill between the
+  Lance write and the acknowledgement, Recon outbox/tombstone/deletion, Intel Recon provenance/no
+  receipt). `ARGOS_EMBED=0 cargo test -p argos-osint-bin` → 59 passed. `cargo clippy --workspace
+  --all-targets`: no new findings; all remaining findings were already on `main`.

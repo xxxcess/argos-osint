@@ -2,8 +2,7 @@
 
 use anyhow::Result;
 
-use crate::brain::MemorySource;
-use crate::store::{insight_fingerprint, AtlasInsightClaim, Store};
+use crate::store::{insight_fingerprint, AtlasInsightClaim, PublishOptions, Store};
 
 /// One recon-derived or revised insight to merge into Brain.
 #[derive(Clone, Debug)]
@@ -68,18 +67,25 @@ pub fn upsert_recon_insights(
         })
         .collect();
 
-    // persist_atlas_insights tags memories as app=atlas; rewrite provenance for new inserts
-    // after the call for fingerprints that were freshly created by recon.
-    store.persist_atlas_insights(run_id, &claims, relations, "", "")?;
+    // One transaction through the durable publisher: memories, claim/source
+    // links, intel-recon provenance (new and reused memories) and index-outbox
+    // rows commit together; indexing is acknowledged through leased tasks. No
+    // Atlas receipt is written so the cycle's own receipt is never shadowed.
+    store.publish_atlas_insights(
+        run_id,
+        &claims,
+        relations,
+        "",
+        &PublishOptions {
+            index_now: true,
+            retag_app: Some("intel-recon".into()),
+            skip_receipt: true,
+            ..Default::default()
+        },
+    )?;
 
-    // Annotate sources / assessments with recon origin where applicable.
+    // Record recon assessments where applicable.
     for update in updates {
-        let ns = update.namespace.trim().to_ascii_lowercase();
-        let entity = update.entity.trim().to_ascii_lowercase();
-        let predicate = update.predicate.trim().to_ascii_lowercase();
-        let object = update.object.trim().to_ascii_lowercase();
-        let fingerprint = insight_fingerprint(&ns, &entity, &predicate, &object);
-        retag_memory_source(store, &fingerprint, run_id)?;
         if let (Some(inv), Some(element_id)) = (
             update.investigation_id.as_deref(),
             update.element_id.as_deref(),
@@ -119,47 +125,106 @@ pub fn upsert_recon_insights(
     Ok(claims.len())
 }
 
-fn retag_memory_source(store: &Store, fingerprint: &str, run_id: &str) -> Result<()> {
-    let memory_id: Option<String> = store
-        .conn
-        .query_row(
-            "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-            [fingerprint],
-            |row| row.get(0),
-        )
-        .ok();
-    let Some(memory_id) = memory_id else {
-        return Ok(());
-    };
-    let source_json: String = store.conn.query_row(
-        "SELECT source_json FROM memories WHERE id=?1",
-        [&memory_id],
-        |row| row.get(0),
-    )?;
-    let mut source: MemorySource = serde_json::from_str(&source_json).unwrap_or(MemorySource {
-        app: "intel-recon".into(),
-        conversation_id: run_id.into(),
-        message_id: None,
-        reference: Some(run_id.into()),
-    });
-    // Keep original atlas provenance; mark recon touch via reference suffix when already atlas.
-    if source.app == "atlas" {
-        source.reference = Some(format!("atlas+intel-recon:{run_id}"));
-    } else {
-        source.app = "intel-recon".into();
-        source.conversation_id = run_id.into();
-        source.reference = Some(run_id.into());
-    }
-    store.conn.execute(
-        "UPDATE memories SET source_json=?1 WHERE id=?2",
-        rusqlite::params![serde_json::to_string(&source)?, memory_id],
-    )?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn update(entity: &str, object: &str, claim: &str) -> ReconInsightUpdate {
+        ReconInsightUpdate {
+            entity: entity.into(),
+            namespace: "news".into(),
+            predicate: "announces".into(),
+            object: object.into(),
+            topic: "military".into(),
+            claim: claim.into(),
+            classification: "fact".into(),
+            confidence: 0.7,
+            article_id: "art-1".into(),
+            source_url: "https://ex.com".into(),
+            published_at: "2026-10-01".into(),
+            reliability: "B".into(),
+            info_credibility: 2,
+            admiralty: "B2".into(),
+            rsp_status: String::new(),
+            element_id: None,
+            investigation_id: None,
+            stance: "supported".into(),
+            rationale: String::new(),
+        }
+    }
+
+    #[test]
+    fn intel_recon_publishes_durably_with_provenance_and_no_atlas_receipt() {
+        let _fake = crate::embed::testing::fake();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("argos.db")).unwrap();
+        // An Atlas cycle published the first claim.
+        let u = update("NATO", "aid", "NATO announces aid");
+        let atlas_claim = AtlasInsightClaim {
+            fingerprint: String::new(),
+            entity: u.entity,
+            namespace: u.namespace,
+            predicate: u.predicate,
+            object: u.object,
+            topic: u.topic,
+            claim: u.claim,
+            classification: u.classification,
+            confidence: u.confidence,
+            article_id: u.article_id,
+            source_url: u.source_url,
+            published_at: u.published_at,
+            reliability: u.reliability,
+            info_credibility: u.info_credibility,
+            admiralty: u.admiralty,
+            rsp_status: u.rsp_status,
+        };
+        let atlas = store
+            .publish_atlas_insights(
+                "atlas-run",
+                &[atlas_claim],
+                &[],
+                "",
+                &PublishOptions::default(),
+            )
+            .unwrap();
+        let seq = store.memories_changed_seq().unwrap();
+        let n = upsert_recon_insights(
+            &store,
+            "recon-run",
+            &[
+                update("NATO", "aid", "NATO announces aid"),
+                update("NATO", "drills", "NATO announces drills"),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(n, 2);
+        assert!(store
+            .atlas_publication_receipt("recon-run")
+            .unwrap()
+            .is_none());
+        let kept = store
+            .atlas_publication_receipt("atlas-run")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (kept.revision, kept.created_memory_ids),
+            (atlas.revision, atlas.created_memory_ids),
+            "the cycle's own receipt is untouched"
+        );
+        assert!(store.memories_changed_seq().unwrap() > seq);
+        let memories = store.list_memories().unwrap();
+        assert_eq!(memories.len(), 2, "the shared claim is reused");
+        for memory in &memories {
+            assert_eq!(
+                memory.source.reference.as_deref(),
+                Some("atlas+intel-recon:recon-run"),
+                "{memory:?}"
+            );
+        }
+        let ids: Vec<String> = memories.into_iter().map(|m| m.id).collect();
+        assert!(store.verify_memory_coverage(&ids).unwrap().complete());
+    }
 
     #[test]
     fn upsert_adds_and_updates_claims() {

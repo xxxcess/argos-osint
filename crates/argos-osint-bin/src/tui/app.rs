@@ -5608,10 +5608,21 @@ pub async fn run(mut app: App) -> Result<()> {
         argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
     // One-time "Repair Atlas memories" reconciliation (resumes if interrupted).
     argos_osint_core::atlas_memory::spawn_startup_reconciliation(paths::db_path());
+    // Committed memory changes from any writer (Atlas, Recon, Intel Recon, the
+    // index/repair workers, other processes) reload Brain, coalesced per poll.
+    let mut memory_watch = argos_osint_core::store::MemoryChangeWatcher::new(&app.store);
+    let mut memory_polled = std::time::Instant::now();
     let mut dirty = true;
     loop {
         if pump(&mut app) {
             dirty = true;
+        }
+        if memory_polled.elapsed() >= Duration::from_secs(1) {
+            memory_polled = std::time::Instant::now();
+            if memory_watch.poll(&app.store).is_some() {
+                app.reload_memories();
+                dirty = true;
+            }
         }
         if dirty {
             if let Ok(size) = terminal.size() {

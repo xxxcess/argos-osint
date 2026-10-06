@@ -300,6 +300,69 @@ fn state_style(job: &JobRow) -> ratatui::style::Style {
     }
 }
 
+/// Column layout for the Jobs table. Optional columns drop on narrow widths
+/// (logs first, then phase) so every visible header stays readable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableColumns {
+    pub title: usize,
+    pub phase: bool,
+    pub logs: bool,
+}
+
+const MIN_TITLE: usize = 16;
+/// status 11 + app 7 + active 12 + elapsed 12 + try 5.
+const BASE_COLUMNS: usize = 11 + 7 + 12 + 12 + 5;
+const PHASE_COLUMN: usize = 12;
+const LOGS_COLUMN: usize = 5;
+
+impl TableColumns {
+    pub fn for_width(width: usize) -> Self {
+        let phase = width >= BASE_COLUMNS + PHASE_COLUMN + MIN_TITLE;
+        let used = BASE_COLUMNS + if phase { PHASE_COLUMN } else { 0 };
+        let logs = width >= used + LOGS_COLUMN + MIN_TITLE;
+        let used = used + if logs { LOGS_COLUMN } else { 0 };
+        Self {
+            title: width.saturating_sub(used).max(8),
+            phase,
+            logs,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn row(
+        &self,
+        status: &str,
+        job: &str,
+        app: &str,
+        phase: &str,
+        active: &str,
+        elapsed: &str,
+        attempts: &str,
+        logs: &str,
+    ) -> String {
+        let mut out = format!(
+            "{:<11}{:<w$} {:<6} ",
+            fit(status, 10),
+            fit(job, self.title.saturating_sub(1)),
+            fit(app, 6),
+            w = self.title.saturating_sub(1)
+        );
+        if self.phase {
+            out.push_str(&format!("{:<11} ", fit(phase, 11)));
+        }
+        out.push_str(&format!(
+            "{:>11} {:>11} {:>4}",
+            fit(active, 11),
+            fit(elapsed, 11),
+            fit(attempts, 4)
+        ));
+        if self.logs {
+            out.push_str(&format!(" {:^4}", logs));
+        }
+        out
+    }
+}
+
 /// One table line per job: status, title, app, phase/progress, active, elapsed,
 /// attempts, log indicator.
 pub fn table_lines(
@@ -308,21 +371,11 @@ pub fn table_lines(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<Line<'static>> {
     let width = width.max(1);
-    let fixed = 11 + 7 + 12 + 12 + 12 + 5 + 2;
-    let title_w = width.saturating_sub(fixed).max(8);
+    let cols = TableColumns::for_width(width);
     let mut lines = vec![Line::from(Span::styled(
         fit(
-            &format!(
-                "{:<11}{:<w$} {:<6} {:<11} {:>11} {:>11} {:>4} {}",
-                "status",
-                "job",
-                "app",
-                "phase",
-                "active",
-                "elapsed",
-                "try",
-                "log",
-                w = title_w.saturating_sub(1)
+            &cols.row(
+                "status", "job", "app", "phase", "active", "elapsed", "try", "logs",
             ),
             width,
         ),
@@ -334,17 +387,15 @@ pub fn table_lines(
         } else {
             job.attempts_used.to_string()
         };
-        let text = format!(
-            "{:<11}{:<w$} {:<6} {:<11} {:>11} {:>11} {:>4} {}",
-            fit(job.state_label(), 10),
-            fit(&title(job), title_w.saturating_sub(1)),
-            fit(&job.app, 6),
-            fit(&progress(job), 11),
-            fit(&format_duration(job.active_ms), 11),
-            fit(&format_duration(job.elapsed_ms(now)), 11),
-            fit(&attempts, 4),
+        let text = cols.row(
+            job.state_label(),
+            &title(job),
+            &job.app,
+            &progress(job),
+            &format_duration(job.active_now(now)),
+            &format_duration(job.elapsed_ms(now)),
+            &attempts,
             if job.events > 0 { "◆" } else { "" },
-            w = title_w.saturating_sub(1)
         );
         let style = if index == view.sel {
             theme::selected()
@@ -389,7 +440,7 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
     }
     lines.push(format!(
         "Active {} · queued {} · retry wait {} · elapsed {}",
-        format_duration(job.active_ms),
+        format_duration(job.active_now(now)),
         format_duration(job.queue_ms),
         format_duration(job.retry_wait_ms),
         format_duration(job.elapsed_ms(now))
@@ -451,7 +502,7 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
                 "  {} {} {}",
                 child.state_label(),
                 title(child),
-                format_duration(child.active_ms)
+                format_duration(child.active_now(now))
             ));
         }
     }
@@ -625,5 +676,33 @@ pub fn reveal(view: &mut JobsView, room: usize) {
         view.scroll = view.sel as u16;
     } else if view.sel >= top + room {
         view.scroll = (view.sel + 1 - room) as u16;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TableColumns;
+
+    #[test]
+    fn optional_columns_drop_instead_of_truncating_headers() {
+        let wide = TableColumns::for_width(120);
+        assert!(wide.phase && wide.logs);
+        let mid = TableColumns::for_width(78);
+        assert!(mid.phase && !mid.logs, "{mid:?}");
+        let narrow = TableColumns::for_width(60);
+        assert!(!narrow.phase && !narrow.logs, "{narrow:?}");
+        for width in [50usize, 60, 70, 80, 90, 120] {
+            let cols = TableColumns::for_width(width);
+            let header = cols.row(
+                "status", "job", "app", "phase", "active", "elapsed", "try", "logs",
+            );
+            assert!(
+                header.chars().count() <= width.max(cols.title + 47),
+                "{width}: {header}"
+            );
+            if cols.logs {
+                assert!(header.trim_end().ends_with("logs"), "{width}: {header}");
+            }
+        }
     }
 }

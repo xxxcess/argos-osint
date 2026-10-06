@@ -28,6 +28,10 @@ toml.workspace = true
 tract-onnx.workspace = true
 url.workspace = true
 
+[features]
+# Test/screenshot fixtures used by the binary's tests. Never enabled in release builds.
+fixtures = []
+
 [build-dependencies]
 # Prebuilt protoc for every host; see tools/protoc and .cargo/config.toml.
 protoc-bin-vendored.workspace = true

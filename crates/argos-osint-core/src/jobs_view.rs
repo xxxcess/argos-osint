@@ -104,6 +104,10 @@ pub struct JobRow {
     pub children: i64,
     /// Durable events correlated with this job or its descendants.
     pub events: i64,
+    /// Attempts recorded for this job's tasks (open or closed).
+    pub attempt_rows: i64,
+    /// Earliest start of an attempt that is still open (`""` when none).
+    pub open_attempt_started: String,
 }
 
 impl JobRow {
@@ -133,6 +137,28 @@ impl JobRow {
             "blocked" => "blocked",
             _ => "unknown",
         }
+    }
+
+    /// Active (working) time as of `now`.
+    ///
+    /// Jobs whose work runs as task attempts sum the closed attempts' durable
+    /// `active_ms` and add the live span of any attempt still open. A job that
+    /// runs in-process without task attempts counts its whole run
+    /// (start → finish, or `now` while running). `None` ("Unavailable") only
+    /// when there is no start timestamp at all.
+    pub fn active_now(&self, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+        if self.attempt_rows > 0 {
+            let open = parse(&self.open_attempt_started)
+                .map(|start| (now - start).num_milliseconds().max(0))
+                .unwrap_or(0);
+            return Some(self.active_ms.unwrap_or(0) + open);
+        }
+        if let Some(stored) = self.active_ms.filter(|ms| *ms > 0) {
+            return Some(stored);
+        }
+        let start = parse(&self.started_at)?;
+        let end = parse(&self.finished_at).unwrap_or(now);
+        Some((end - start).num_milliseconds().max(0))
     }
 
     /// Total elapsed time from start (or queue) to finish (or `now`). `None`
@@ -239,7 +265,11 @@ const JOB_COLUMNS: &str =
     j.error_category, j.error_summary, j.correlation_id,
     (SELECT COUNT(*) FROM argos_jobs c WHERE c.parent_id = j.id),
     (SELECT COUNT(*) FROM argos_events e WHERE e.job_id = j.id
-        OR e.job_id IN (SELECT c.id FROM argos_jobs c WHERE c.parent_id = j.id))";
+        OR e.job_id IN (SELECT c.id FROM argos_jobs c WHERE c.parent_id = j.id)),
+    (SELECT COUNT(*) FROM argos_attempts a JOIN argos_tasks t ON t.id = a.task_id
+        WHERE t.job_id = j.id),
+    IFNULL((SELECT MIN(a.started_at) FROM argos_attempts a JOIN argos_tasks t ON t.id = a.task_id
+        WHERE t.job_id = j.id AND a.finished_at = ''), '')";
 
 fn job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
     Ok(JobRow {
@@ -275,6 +305,8 @@ fn job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         correlation_id: r.get(29)?,
         children: r.get(30)?,
         events: r.get(31)?,
+        attempt_rows: r.get(32)?,
+        open_attempt_started: r.get(33)?,
     })
 }
 
@@ -642,6 +674,49 @@ impl Store {
     }
 }
 
+/// Fixtures for the binary's tests and screenshot dumps (feature `fixtures`).
+#[cfg(any(test, feature = "fixtures"))]
+impl Store {
+    /// Enqueue one task under `job_id` and record its attempt as started
+    /// `started_secs_ago`; the attempt stays open unless `ran_secs` is given.
+    pub fn fixture_task_attempt(
+        &self,
+        job_id: &str,
+        task_id: &str,
+        operation: &str,
+        started_secs_ago: i64,
+        ran_secs: Option<i64>,
+    ) -> Result<()> {
+        let start = chrono::Utc::now() - chrono::Duration::seconds(started_secs_ago);
+        tasks::enqueue_task(
+            &self.conn,
+            &tasks::NewTask {
+                id: task_id.into(),
+                job_id: job_id.into(),
+                operation: operation.into(),
+                dedupe_key: String::new(),
+                priority: 100,
+                input_ref: String::new(),
+                input_hash: String::new(),
+                source_revision: String::new(),
+                role_snapshot: String::new(),
+                max_attempts: 3,
+            },
+            &start.to_rfc3339(),
+        )?;
+        let pool = tasks::pool_for_operation(operation);
+        let claimed =
+            tasks::claim_next_in(&self.conn, &[pool], "fixture", 3600, &start.to_rfc3339())?
+                .ok_or_else(|| anyhow::anyhow!("fixture task was not claimable"))?;
+        if let Some(ran) = ran_secs {
+            let end = start + chrono::Duration::seconds(ran);
+            tasks::complete_claimed(&self.conn, &claimed, "ok", &end.to_rfc3339())?;
+        }
+        tasks::refresh_job_state(&self.conn, job_id, &chrono::Utc::now().to_rfc3339())?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,6 +889,64 @@ mod tests {
             )
             .unwrap();
         assert!(events.iter().any(|e| e.event_type == "job.retry"));
+    }
+
+    #[test]
+    fn active_time_is_live_for_open_attempts_and_unavailable_only_without_a_start() {
+        let store = Store::memory().unwrap();
+        let conn = &store.conn;
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(90);
+        job(conn, "j-live", "", "atlas", "Atlas news cycle");
+        tasks::enqueue_task(
+            conn,
+            &NewTask {
+                id: "t-live".into(),
+                job_id: "j-live".into(),
+                operation: "index_upsert".into(),
+                dedupe_key: String::new(),
+                priority: 100,
+                input_ref: String::new(),
+                input_hash: String::new(),
+                source_revision: String::new(),
+                role_snapshot: String::new(),
+                max_attempts: 3,
+            },
+            &t0.to_rfc3339(),
+        )
+        .unwrap();
+        let pool = tasks::pool_for_operation("index_upsert");
+        let claimed = tasks::claim_next_in(conn, &[pool], "worker", 600, &t0.to_rfc3339())
+            .unwrap()
+            .expect("claimed");
+        tasks::refresh_job_state(conn, "j-live", &t0.to_rfc3339()).unwrap();
+        let row = store.get_job("j-live").unwrap().unwrap();
+        assert_eq!(row.attempt_rows, 1);
+        assert!(!row.open_attempt_started.is_empty());
+        let live = row
+            .active_now(chrono::Utc::now())
+            .expect("live active time");
+        assert!((89_000..120_000).contains(&live), "live span {live}");
+        // Closing the attempt freezes the durable duration.
+        let t1 = (t0 + chrono::Duration::seconds(30)).to_rfc3339();
+        tasks::complete_claimed(conn, &claimed, "ok", &t1).unwrap();
+        tasks::refresh_job_state(conn, "j-live", &t1).unwrap();
+        let row = store.get_job("j-live").unwrap().unwrap();
+        assert_eq!(row.active_now(chrono::Utc::now()), Some(30_000));
+        // In-process job without task attempts: its run is the active span.
+        job(conn, "j-inproc", "", "brain", "Graph summary");
+        store
+            .set_job_progress("j-inproc", "running", "explanation", 0, None, "")
+            .unwrap();
+        let row = store.get_job("j-inproc").unwrap().unwrap();
+        assert!(row.active_now(chrono::Utc::now()).is_some());
+        // Never started: Unavailable, not zero.
+        job(conn, "j-queued", "", "intel", "Queued");
+        let row = store.get_job("j-queued").unwrap().unwrap();
+        assert_eq!(row.active_now(chrono::Utc::now()), None);
+        assert_eq!(
+            format_duration(row.active_now(chrono::Utc::now())),
+            "Unavailable"
+        );
     }
 
     #[test]

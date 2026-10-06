@@ -7423,11 +7423,24 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = app();
         register(&app, "job-atlas-0412", "atlas", "Atlas news cycle · 04:12");
+        // Realistic timing: two finished index attempts and one still open.
+        app.store
+            .fixture_task_attempt("job-atlas-0412", "t-idx-1", "index_upsert", 600, Some(45))
+            .unwrap();
+        app.store
+            .fixture_task_attempt("job-atlas-0412", "t-idx-2", "index_upsert", 420, Some(38))
+            .unwrap();
+        app.store
+            .fixture_task_attempt("job-atlas-0412", "t-idx-3", "index_upsert", 192, None)
+            .unwrap();
         app.store
             .set_job_progress("job-atlas-0412", "running", "Index and verify memories", 41, Some(57), "")
             .unwrap();
         register(&app, "job-intel-77", "intel", "Intel Recon · Full assessment");
         register(&app, "job-graph-19", "brain", "Graph summary · Northwind ferry");
+        app.store
+            .fixture_task_attempt("job-graph-19", "t-sum-1", "graph_explanation", 300, Some(12))
+            .unwrap();
         app.store
             .set_job_progress(
                 "job-graph-19",
@@ -7439,6 +7452,9 @@ mod tests {
             )
             .unwrap();
         register(&app, "atlas-memory-repair", "atlas", "Repair Atlas memories");
+        app.store
+            .fixture_task_attempt("atlas-memory-repair", "t-rep-1", "index_rebuild", 3000, Some(21))
+            .unwrap();
         app.store
             .set_job_progress("atlas-memory-repair", "completed", "done", 12, Some(12), "")
             .unwrap();

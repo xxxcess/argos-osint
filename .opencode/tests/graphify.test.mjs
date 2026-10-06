@@ -48,6 +48,12 @@ test("missing graph permits search, invalid query does not unlock, and classifie
   assert.doesNotThrow(() => hooks.tool["execute.before"]({ sessionID: "missing", tool: "grep", input: { pattern: "foo" } }));
   assert.equal(isBroadSearch("grep", { path: "crates/argos-osint-core" }), false);
   assert.equal(isBroadSearch("bash", { command: "rg foo crates/argos-osint-core" }), false);
+  assert.equal(isBroadSearch("bash", { command: 'cd /repo && cargo test --workspace 2>&1 | grep -E "FAILED|ok"' }), false);
+  assert.equal(isBroadSearch("bash", { command: 'cargo test -- --nocapture | rg "FAILED"' }), false);
+  assert.equal(isBroadSearch("bash", { command: 'rg "panic" target/debug/test.log' }), false);
+  assert.equal(isBroadSearch("bash", { command: 'rg "Profile" assets/screenshots/' }), false);
+  assert.equal(isBroadSearch("bash", { command: 'rg "binding" | grep Hunter' }), true);
+  assert.equal(isBroadSearch("bash", { command: 'cd /repo && rg "binding" .' }), true);
   assert.equal(isGraphQuery('node gsd-tools.cjs graphify query "x"'), true);
   assert.equal(isGraphQuery('echo graphify query "x"'), false);
   mkdirSync(join(root, "graphify-out"));

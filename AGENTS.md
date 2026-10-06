@@ -110,6 +110,8 @@ Runs on 4 targets: macOS Intel (macos-15-intel), macOS ARM (macos-14), Linux x86
 
 This project tracks a code and Cargo dependency graph at `graphify-out/`. OpenCode V2 uses project plugins in `.opencode/plugins/` for graph-first navigation, GSD hook compatibility, and a small session handoff. Use GSD for phases and milestones; use `/ecc-plan`, `/ecc-review`, `/ecc-verify`, `/ecc-checkpoint`, and `/ecc-learn` for focused workflow steps.
 
+When working as the default `plan` agent, wait for the user to approve a plan before starting implementation. Once approved, prefer launching the `build` subagent with the approved plan and relevant paths, then review its result and report the outcome. Keep the approved scope and preserve existing working tree changes.
+
 When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
 
 Rules:

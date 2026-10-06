@@ -74,20 +74,20 @@ impl ModuleId {
             Self::Logs => "Logs",
             Self::Osint => "Tools",
             Self::Providers => "Models",
-            Self::System => "System",
+            Self::System => "Profile",
         }
     }
     pub fn blurb(self) -> &'static str {
         match self {
-            Self::Intel => "View and Manage Intel Reconnaissance",
-            Self::Recon => "View and Manage Investigations",
-            Self::Brain => "View and Manage Memories",
-            Self::Atlas => "Global News Cycles",
-            Self::Jobs => "Background work, timing, and retries",
-            Self::Logs => "Events, failures, and diagnostics",
-            Self::Osint => "Configure public lookup tools",
-            Self::Providers => "Accounts and model defaults",
-            Self::System => "Hardware and paths",
+            Self::Intel => "Review intelligence briefings and investigate emerging stories",
+            Self::Recon => "Run evidence-driven OSINT investigations",
+            Self::Brain => "Recall and explore connected intelligence",
+            Self::Atlas => "Map and track the global news cycle",
+            Self::Jobs => "Track work running across Argos",
+            Self::Logs => "Trace activity, failures, and execution",
+            Self::Osint => "Browse, configure, and run OSINT tools",
+            Self::Providers => "Configure AI providers and intelligence roles",
+            Self::System => "Inspect host hardware and Argos storage",
         }
     }
 }
@@ -1220,6 +1220,7 @@ impl App {
             ("tools", "Open Tools (osint)"),
             ("models", "Open Models (providers)"),
             ("system", "Open System"),
+            ("profile", "Open Profile"),
             ("new", "New investigation"),
             ("sessions", "Investigation list"),
             ("help", "Shortcuts"),
@@ -1264,7 +1265,7 @@ impl App {
             "logs" => self.select(ModuleId::Logs.index()),
             "tools" | "osint" => self.select(ModuleId::Osint.index()),
             "models" | "providers" => self.select(ModuleId::Providers.index()),
-            "system" => self.select(ModuleId::System.index()),
+            "system" | "profile" => self.select(ModuleId::System.index()),
             "new" => {
                 let created = self.new_thread().map(|_| "New investigation".into());
                 self.report(created);
@@ -1335,7 +1336,7 @@ impl App {
                 Ok("Home".into())
             }
             "brain" | "atlas" | "osint" | "providers" | "tools" | "models" | "jobs" | "logs"
-            | "system" | "recon" | "intel" => {
+            | "system" | "profile" | "recon" | "intel" => {
                 let index = match name.as_str() {
                     "intel" => ModuleId::Intel.index(),
                     "atlas" => ModuleId::Atlas.index(),
@@ -1345,6 +1346,7 @@ impl App {
                     "logs" => ModuleId::Logs.index(),
                     "tools" | "osint" => ModuleId::Osint.index(),
                     "models" | "providers" => ModuleId::Providers.index(),
+                    "system" | "profile" => ModuleId::System.index(),
                     _ => ModuleId::System.index(),
                 };
                 self.select(index);
@@ -6860,11 +6862,11 @@ mod tests {
         );
         assert_eq!(
             ModuleId::Intel.blurb(),
-            "View and Manage Intel Reconnaissance"
+            "Review intelligence briefings and investigate emerging stories"
         );
-        assert_eq!(ModuleId::Atlas.blurb(), "Global News Cycles");
-        assert_eq!(ModuleId::Brain.blurb(), "View and Manage Memories");
-        assert_eq!(ModuleId::Recon.blurb(), "View and Manage Investigations");
+        assert_eq!(ModuleId::Atlas.blurb(), "Map and track the global news cycle");
+        assert_eq!(ModuleId::Brain.blurb(), "Recall and explore connected intelligence");
+        assert_eq!(ModuleId::Recon.blurb(), "Run evidence-driven OSINT investigations");
     }
 
     #[test]
@@ -7780,7 +7782,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(titles("Applications"), ["Intel", "Atlas", "Brain", "Recon"]);
-        assert_eq!(titles("System"), ["Jobs", "Logs", "Tools", "Models", "System"]);
+        assert_eq!(titles("System"), ["Jobs", "Logs", "Tools", "Models", "Profile"]);
         let all: Vec<usize> = groups.iter().flat_map(|g| g.1.iter().map(|i| i.2)).collect();
         assert_eq!(all, (0..9).collect::<Vec<_>>(), "home targets follow numeric order");
         let logs = &groups[1].1[1];
@@ -7789,7 +7791,7 @@ mod tests {
         // Display renames keep internal ids.
         assert_eq!(ModuleId::Osint.title(), "Tools");
         assert_eq!(ModuleId::Providers.title(), "Models");
-        assert_eq!(ModuleId::System.blurb(), "Hardware and paths");
+        assert_eq!(ModuleId::System.blurb(), "Inspect host hardware and Argos storage");
         // 1–9 from home.
         for (index, module) in ModuleId::ALL.iter().enumerate() {
             let mut app = app();
@@ -7807,6 +7809,7 @@ mod tests {
             ("jobs", ModuleId::Jobs),
             ("logs", ModuleId::Logs),
             ("system", ModuleId::System),
+            ("profile", ModuleId::System),
         ] {
             app.go_home();
             app.run_palette(alias);
@@ -7816,7 +7819,7 @@ mod tests {
             assert_eq!(app.module, Some(module), "slash {alias}");
         }
         let ids: Vec<String> = app.palette_items().into_iter().map(|i| i.id).collect();
-        for id in ["jobs", "logs", "tools", "models", "system", "clear-log"] {
+        for id in ["jobs", "logs", "tools", "models", "system", "profile", "clear-log"] {
             assert!(ids.contains(&id.to_string()), "{id}");
         }
         // Help and the header agree with the order.
@@ -7825,12 +7828,12 @@ mod tests {
         let mut app2 = app;
         let text = buffer_text(&render(&mut app2, 160, 40));
         assert!(text.contains("1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools"), "{text}");
-        assert!(text.contains("Models · 9 System"));
+        assert!(text.contains("Models · 9 Profile"));
         app2.overlay = Overlay::None;
         app2.select(ModuleId::Jobs.index());
         let header = buffer_text(&render(&mut app2, 160, 40));
         let first = header.lines().next().unwrap();
-        let order = ["Intel", "Atlas", "Brain", "Recon", "Jobs", "Logs", "Tools", "Models", "System"];
+        let order = ["Intel", "Atlas", "Brain", "Recon", "Jobs", "Logs", "Tools", "Models", "Profile"];
         let positions: Vec<usize> = order.iter().map(|label| first.find(label).unwrap()).collect();
         assert!(positions.windows(2).all(|w| w[0] < w[1]), "{first}");
     }

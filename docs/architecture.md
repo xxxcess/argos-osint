@@ -1,6 +1,6 @@
 # Architecture
 
-`argos-osint-core` owns durable state, the shared OSINT registry/executor, provider routing, and Recon orchestration. `argos-osint-bin` owns the CLI and terminal UI. Home launches Intel, Atlas, Brain, and Recon. OSINT, Providers, and System configure Argos and do not accept chat. `tui/ui.rs` renders controls, the Recon transcript, and matching hit regions; `tui/app.rs` manages focus, scrolling, and background events. System keeps an in-memory event log of those events.
+`argos-osint-core` owns durable state, the shared OSINT registry/executor, provider routing, and Recon orchestration. `argos-osint-bin` owns the CLI and terminal UI. Home launches Intel, Atlas, Brain, and Recon. OSINT, Providers, and Profile configure Argos and do not accept chat. `tui/ui.rs` renders controls, the Recon transcript, and matching hit regions; `tui/app.rs` manages focus, scrolling, and background events. Profile keeps an in-memory event log of those events.
 
 ## Investigation flow
 

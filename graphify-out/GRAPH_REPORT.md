@@ -1,17 +1,17 @@
 # Graph Report - argos-osint  (2026-10-06)
 
 ## Corpus Check
-- 122 files · ~325,779 words
+- 122 files · ~325,555 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 4 file(s) not represented in the graph (top: .toml 2, (none) 2)
 
 ## Summary
-- 5133 nodes · 13084 edges · 201 communities (180 shown, 21 thin omitted)
+- 5158 nodes · 13142 edges · 198 communities (175 shown, 23 thin omitted)
 - Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 225 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `793164fd`
+- Built from commit: `5f71b71b`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -38,8 +38,8 @@
 - atlas_news.rs
 - Store
 - publication.rs
-- Rect
-- Service
+- Frame
+- TurnEvent
 - news_legal.rs
 - hardware.rs
 - App
@@ -50,7 +50,7 @@
 - tasks.rs
 - provider.rs
 - run_turn
-- fit
+- Piece
 - body.rs
 - .run_configured
 - brain_detail.rs
@@ -61,7 +61,7 @@
 - scheduler.rs
 - jobs_view.rs
 - provider_attempt.rs
-- .memory
+- .new
 - picker.rs
 - ReportMode
 - .default
@@ -70,7 +70,7 @@
 - SettingsFile
 - events.rs
 - exec.rs
-- Binding
+- .publish_atlas_insights
 - .is_empty
 - ErrorCategory
 - grok_oauth.rs
@@ -91,7 +91,7 @@
 - anyhow
 - result
 - theme.rs
-- Value
+- Request
 - pipeline.rs
 - summarization.rs
 - tui/graph.rs
@@ -108,7 +108,7 @@
 - evidence.rs
 - ProviderSecret
 - BrainResourceSummary
-- IndexOutcome
+- Store
 - F
 - wikipedia_rsp.rs
 - TurnClock
@@ -116,7 +116,7 @@
 - mem
 - summary_card.rs
 - contains
-- home_rows
+- Line
 - Region
 - ledger.rs
 - validate.rs
@@ -124,14 +124,14 @@
 - PlanCall
 - .order
 - DefaultsRole
-- finish_index_work
+- enqueue_index_work
 - Architecture
 - KeptClaim
 - serde
 - ClockSet
 - ProviderAdmission
 - ToolResult
-- now
+- ProviderFailure
 - gsd-v2.js
 - extract
 - super
@@ -146,10 +146,10 @@
 - poll_device
 - Value
 - RspIndex
-- Gate
+- agents
 - Functional Requirements
-- fail_claimed
-- GraphNodeKind
+- TaskState
+- IndexOutcome
 - accept_claims
 - SourceReliability
 - OsintCommand
@@ -158,18 +158,18 @@
 - Argos OSINT — Agent Instructions
 - intel_recon/brain.rs
 - RspStatus
-- GraphEdgeKind
-- atomic
-- db
+- SummarizationMode
+- SummaryRequest
+- modes.rs
 - run_live
 - RecordKind
-- Value
+- PublicationReceipt
 - ClaimRelation
-- role_secret
+- render_tui_cells.py
 - Store
 - HypothesisRecord
-- accounts_search_query
-- split_vertical
+- rule_bindings
+- Rect
 - §9 implementation order
 - TurnContinuation
 - AtlasPage
@@ -179,27 +179,24 @@
 - What Was Learned
 - ModuleId
 - paths.rs
-- complementary_queries
+- subject_of
 - Milestone 1 — Core Onboarding (Current)
-- Finish
-- begin
-- WorkerPool
-- accept_one
+- BodyFetchEvent
+- article
+- atlas_actions.rs
+- PlanInterval
 - youtube_pair
 - Codebase Map — argos-osint
 - PROJECT.md — argos-osint
 - Current Phase State
 - ReconLimits
 - TimeoutProfile
-- CancelRequest
-- InsightView
+- .begin_title
 - select_strategy
 - Docs Ingest — argos-osint
 - .job_source
-- PoolKind
 - OpenCode V2 workflow
 - Unified reliability / summarization / semantic pipelines — completion checklist
-- cancel_is_cooperative_and_only_for_cancellable_running_jobs
 - package.json
 
 ## God Nodes (most connected - your core abstractions)
@@ -229,7 +226,7 @@
 ## Import Cycles
 - 2-file cycle: `crates/argos-osint-bin/src/cli.rs -> crates/argos-osint-core/src/hardware.rs -> crates/argos-osint-bin/src/cli.rs`
 
-## Communities (201 total, 21 thin omitted)
+## Communities (198 total, 23 thin omitted)
 
 ### Community 0 - "land.rs"
 Cohesion: 0.01
@@ -245,11 +242,11 @@ Nodes (11): a_failed_turn_keeps_the_streamed_answer_on_screen(), a_log_or_late_t
 
 ### Community 3 - "atlas_memory.rs"
 Cohesion: 0.06
-Nodes (90): InsightStats, atlas_memory_count(), background_indexing_then_refresh_upgrades_a_partial_run(), Barrier, Checkpoint, CheckpointInput, claims(), clear() (+82 more)
+Nodes (88): Extraction, atlas_memory_count(), background_indexing_then_refresh_upgrades_a_partial_run(), Barrier, Checkpoint, CheckpointInput, claims(), clear() (+80 more)
 
 ### Community 4 - "tool_io.rs"
 Cohesion: 0.04
-Nodes (95): normalize_platform(), question_bindings(), a_gap_filler_only_domain_waits_for_a_primary_observation_before_hunter(), accept_bindings(), batch_scrape_takes_ranked_urls_and_gates_order_before_hunter(), bind_arguments(), BINDING_KINDS, bitcoins_in() (+87 more)
+Nodes (90): Binding, canonical(), dependency_order(), depends_on(), question_bindings_and_dependency_fix(), accept_bindings(), allowed_producer(), best_handle() (+82 more)
 
 ### Community 5 - "app.rs"
 Cohesion: 0.06
@@ -265,35 +262,35 @@ Nodes (42): FieldId, BrainApp, BrainConversation, BrainInsight, BrainQuery, Clas
 
 ### Community 8 - "map.rs"
 Cohesion: 0.05
-Nodes (74): BRAILLE_MAP, canonical(), claim_label(), contains(), country_at(), country_fit(), country_pixel(), draw_country_mini_map() (+66 more)
+Nodes (73): BRAILLE_MAP, canonical(), claim_label(), contains(), country_at(), country_fit(), country_pixel(), draw_country_mini_map() (+65 more)
 
 ### Community 9 - "recon.rs"
 Cohesion: 0.06
-Nodes (52): answer_step_rate_limit_is_explicit_and_keeps_results(), attribute_word(), auxiliary(), BRIEF_SYNTHESIS, broad_question_collapses_to_grounded_lookups(), char_ceil(), char_floor(), clean_investigation_title() (+44 more)
+Nodes (47): answer_step_rate_limit_is_explicit_and_keeps_results(), attribute_word(), auxiliary(), BRIEF_SYNTHESIS, cacheable(), char_ceil(), char_floor(), cited() (+39 more)
 
 ### Community 10 - "ButtonId"
 Cohesion: 0.03
 Nodes (79): ButtonId, Add, AtlasAuto, AtlasDelete, AtlasLive, AtlasNews, AtlasNewsFeed, AtlasRepair (+71 more)
 
 ### Community 11 - "Store"
-Cohesion: 0.08
-Nodes (5): Call, CreditHold, Store, strategy_and_provider_credits_survive_reopen(), Thread
+Cohesion: 0.07
+Nodes (14): answer_evidence_survives_reopen_and_deleted_thread_rejects_late_calls(), claims_deduplicate_and_reject_unsupported_sources(), CreditHold, deleting_an_investigation_removes_its_brain_memories_and_graph_summary(), investigation_memory_ids(), now(), persist_claims(), persistence_and_plan() (+6 more)
 
 ### Community 12 - "absorb_hit"
-Cohesion: 0.13
-Nodes (20): absorb_hit(), account_platform_host(), Candidate, content_tokens(), distinct_queries(), domain_label(), EntityIdentifier, Focus (+12 more)
+Cohesion: 0.12
+Nodes (22): absorb_hit(), account_platform_host(), Candidate, content_tokens(), distinct_queries(), domain_label(), EntityIdentifier, first_domain() (+14 more)
 
 ### Community 13 - "job_registry.rs"
-Cohesion: 0.11
-Nodes (10): BEAT_INTERVAL, fmt(), job_for_run(), KIND, open(), PROCESS_STALE_SECS, ProcessBeat, recover_orphans() (+2 more)
+Cohesion: 0.06
+Nodes (46): begin(), begin_cancellable(), db(), db_path(), finish(), register_canonical(), beat(), BEAT_INTERVAL (+38 more)
 
 ### Community 14 - "ui.rs"
-Cohesion: 0.05
-Nodes (67): ACTION_H, atlas_countdown(), atlas_extracting(), atlas_history_live_label(), atlas_source_anchors_are_not_labeled_deleted_origin(), build_blocks(), call_stamp(), center_line() (+59 more)
+Cohesion: 0.06
+Nodes (57): ACTION_H, atlas_countdown(), atlas_extracting(), atlas_history_live_label(), atlas_source_anchors_are_not_labeled_deleted_origin(), build_blocks(), call_stamp(), center_line() (+49 more)
 
 ### Community 15 - "directives.rs"
 Cohesion: 0.06
-Nodes (63): apply_context_targets(), asks(), asks_about_judge(), asks_for_headlines(), clip_words(), context_entity(), CONTEXT_FILLER, context_gate() (+55 more)
+Nodes (64): apply_context_targets(), asks(), asks_about_judge(), asks_for_headlines(), clip_words(), context_entity(), CONTEXT_FILLER, context_gate() (+56 more)
 
 ### Community 16 - ".handle_key"
 Cohesion: 0.10
@@ -301,31 +298,31 @@ Nodes (15): backspace_after_a_sent_question_deletes_one_character(), home_order_
 
 ### Community 17 - "investigation.rs"
 Cohesion: 0.07
-Nodes (81): Account, account_hits(), ACCOUNT_PLATFORMS, account_platforms_attach_to_the_subject_and_are_never_entities(), ACCOUNTS, action_order(), actions_are_grounded_capped_and_not_a_sweep(), ADAPTIVE (+73 more)
+Nodes (74): Account, account_hits(), ACCOUNT_PLATFORMS, account_platforms_attach_to_the_subject_and_are_never_entities(), ACCOUNTS, action_order(), actions_are_grounded_capped_and_not_a_sweep(), ADAPTIVE (+66 more)
 
 ### Community 18 - "providers.rs"
 Cohesion: 0.05
-Nodes (42): clip_page(), assert_host_locked(), BATCH_SCRAPE_DEFAULT_URLS, BATCH_SCRAPE_MAX_URLS, company_card(), CRAWL_MAX_PAGES, every_firecrawl_tool_builds_a_host_locked_post(), every_hunter_tool_builds_a_host_locked_get() (+34 more)
+Nodes (64): annotate(), clip_page(), number_arg(), assert_host_locked(), BATCH_SCRAPE_DEFAULT_URLS, BATCH_SCRAPE_MAX_URLS, batch_urls(), company_card() (+56 more)
 
 ### Community 19 - "atlas_news.rs"
-Cohesion: 0.06
-Nodes (47): api_error(), ATLAS_TOOLS, authors(), clip(), country_arg(), country_code(), CURRENTS_COUNTRIES, CURRENTS_HOST (+39 more)
+Cohesion: 0.08
+Nodes (44): api_error(), ATLAS_TOOLS, authors(), clip(), country_arg(), country_code(), CURRENTS_COUNTRIES, CURRENTS_HOST (+36 more)
 
 ### Community 20 - "Store"
 Cohesion: 0.07
-Nodes (17): article_body_from_row(), ArticleBodyRow, element_from_row(), IntelAssessmentRow, IntelEvidenceRow, IntelInvestigationRow, IntelReportSectionRow, IntelReportTaskRow (+9 more)
+Nodes (18): article_body_from_row(), ArticleBodyRow, element_from_row(), IntelAssessmentRow, IntelEvidenceRow, IntelInvestigationRow, IntelReportJobRow, IntelReportSectionRow (+10 more)
 
 ### Community 21 - "publication.rs"
-Cohesion: 0.09
-Nodes (40): claim(), AtlasInsightClaim, bump_memories_changed(), change_watcher_sees_only_committed_changes_and_coalesces(), claim(), clear(), clear_index_state(), delete_run_memory_state() (+32 more)
+Cohesion: 0.10
+Nodes (33): MemorySource, bump_memories_changed(), change_watcher_sees_only_committed_changes_and_coalesces(), claim(), clear(), clear_index_state(), delete_run_memory_state(), DELETED_REVISION (+25 more)
 
-### Community 22 - "Rect"
+### Community 22 - "Frame"
+Cohesion: 0.13
+Nodes (33): draw(), AbsRect, atlas_auto_label(), atlas_run_label(), draw_atlas(), draw_atlas_cycle_stats(), draw_atlas_live(), draw_atlas_news() (+25 more)
+
+### Community 23 - "TurnEvent"
 Cohesion: 0.16
-Nodes (44): draw(), abs_rect(), AbsRect, button_areas(), draw(), draw_atlas(), draw_atlas_cycle_stats(), draw_atlas_live() (+36 more)
-
-### Community 23 - "Service"
-Cohesion: 0.14
-Nodes (21): AnswerContext, await_completion(), compact_page(), compact_page_evidence(), compact_page_system(), cut_footer(), cut_short_answer(), finish_recon_job() (+13 more)
+Nodes (13): await_completion(), finish_recon_job(), investigation_jobs_finish_truthfully_and_link_their_run(), deltas(), Run, Streamed, turn_clock(), TurnEvent (+5 more)
 
 ### Community 24 - "news_legal.rs"
 Cohesion: 0.07
@@ -337,55 +334,55 @@ Nodes (18): System, CACHE_TTL_SECS, classify_arch(), disk_totals(), HardwareProf
 
 ### Community 26 - "App"
 Cohesion: 0.07
-Nodes (69): api_key_slot(), ApiKeySlot, atlas_auto_label(), atlas_cycle_stats_room(), atlas_cycle_stats_scroll_max(), atlas_feed_room(), atlas_feed_room_for(), atlas_hit() (+61 more)
+Nodes (77): abs_contains(), abs_rect(), api_key_slot(), ApiKeySlot, atlas_cycle_stats_room(), atlas_cycle_stats_scroll_max(), atlas_feed_room(), atlas_feed_room_for() (+69 more)
 
 ### Community 27 - "Store"
 Cohesion: 0.07
-Nodes (9): stats_from_stored(), atlas_answer_id(), atlas_brief_id(), AtlasRunRow, AtlasStoredClaim, has_table(), repair_embed_tables(), Store (+1 more)
+Nodes (9): atlas_brief_id(), atlas_prune_drops_finished_runs_older_than_the_cutoff(), AtlasRunRow, GraphSummary, has_table(), ReindexReport, repair_embed_tables(), Store (+1 more)
 
 ### Community 28 - "embed.rs"
-Cohesion: 0.07
-Nodes (33): record_start(), start_repair(), active(), DIM, disable(), disabled(), DisableGuard, download_file() (+25 more)
+Cohesion: 0.08
+Nodes (31): active(), DIM, disable(), disabled(), DisableGuard, download_file(), DOWNLOAD_TIMEOUT_SECS, embed_batch() (+23 more)
 
 ### Community 29 - "osint.rs"
 Cohesion: 0.07
-Nodes (46): a_claimed_email_keeps_no_person_data(), bitcoin(), CACHE_DAY_SECONDS, cache_follows_the_provider_plan_interval(), CACHE_MONTH_SECONDS, cache_seconds(), CACHE_WEEK_SECONDS, canonical_tool_id() (+38 more)
+Nodes (45): a_claimed_email_keeps_no_person_data(), bitcoin(), CACHE_DAY_SECONDS, cache_follows_the_provider_plan_interval(), CACHE_MONTH_SECONDS, cache_seconds(), CACHE_WEEK_SECONDS, canonical_tool_id() (+37 more)
 
 ### Community 30 - "Plan"
 Cohesion: 0.12
 Nodes (34): EntityView, HypothesisView, after_step(), binding_ground(), cancelled(), context_block(), context_dispatched(), directive_for() (+26 more)
 
 ### Community 31 - "tasks.rs"
-Cohesion: 0.10
-Nodes (38): lease_fencing_rejects_stale_epoch_and_foreign_owner(), add_missing_columns(), adopt_untracked_index_changes(), claim_complete_and_retry_round_trip(), claim_next(), complete_task(), DEFAULT_LLM_ATTEMPTS, DEFAULT_PROVIDER_CONCURRENCY (+30 more)
+Cohesion: 0.11
+Nodes (37): add_missing_columns(), block_claimed(), claim_task(), claim_with(), ClaimedTask, complete_claimed(), complete_task(), DEFAULT_LLM_ATTEMPTS (+29 more)
 
 ### Community 32 - "provider.rs"
 Cohesion: 0.06
-Nodes (32): concrete_free_models(), decide(), DecisionAnswer, decisions_client_posts_to_alpha_decisions_and_parses_answers(), DECISIONS_MODELS, decisions_url(), DecisionsResponse, default_grok_model() (+24 more)
+Nodes (31): concrete_free_models(), decide(), DecisionAnswer, decisions_client_posts_to_alpha_decisions_and_parses_answers(), DECISIONS_MODELS, decisions_url(), DecisionsResponse, default_grok_model() (+23 more)
 
 ### Community 33 - "run_turn"
 Cohesion: 0.12
 Nodes (28): call_cached(), classify_turn_mode(), continue_turn(), enabled_tools(), execute_ordered(), missing_keys(), model_json(), model_queries() (+20 more)
 
-### Community 34 - "fit"
-Cohesion: 0.08
-Nodes (31): chat_blocks(), chat_max(), chat_spots(), chat_view(), ChatRow, clip_pieces(), disclosure_pieces(), ensure_frame() (+23 more)
+### Community 34 - "Piece"
+Cohesion: 0.20
+Nodes (15): Piece, ChatRow, clip_pieces(), disclosure_pieces(), expanded(), face_background(), memory_list_note(), paint_pieces() (+7 more)
 
 ### Community 35 - "body.rs"
-Cohesion: 0.09
-Nodes (34): body_fetch_routes(), BodyFetchEvent, Attempt, Failed, InsightsFailed, InsightsRefreshing, InsightsReplaced, Progress (+26 more)
+Cohesion: 0.12
+Nodes (25): body_fetch_routes(), direct_http_extract(), discover_and_scrape(), enqueue_article_body(), EnqueueOutcome, AlreadyRunning, Cached, Cooldown (+17 more)
 
 ### Community 36 - ".run_configured"
-Cohesion: 0.12
-Nodes (22): bind_request(), credential_key(), custom_user_agent(), effective_user_agent(), every_tool_request_sends_a_non_empty_user_agent(), Executor, get(), header_for() (+14 more)
+Cohesion: 0.14
+Nodes (19): bind_request(), credential_key(), custom_user_agent(), effective_user_agent(), Executor, get(), header_for(), job_status_url() (+11 more)
 
 ### Community 37 - "brain_detail.rs"
 Cohesion: 0.06
 Nodes (45): areas(), BrainDetail, DetailAreas, DetailPane, Path, Related, Summary, DetailSnapshot (+37 more)
 
 ### Community 38 - "recon/graph.rs"
-Cohesion: 0.17
-Nodes (26): basic_explanation(), build_claim_graph(), build_memory_graph(), call_for(), choose_directive(), claim_tokens(), directive_ids(), directive_tokens() (+18 more)
+Cohesion: 0.08
+Nodes (45): glyph(), basic_explanation(), build_claim_graph(), build_memory_graph(), call_for(), choose_directive(), claim_tokens(), directive_ids() (+37 more)
 
 ### Community 39 - "atlas.rs"
 Cohesion: 0.08
@@ -396,32 +393,32 @@ Cohesion: 0.09
 Nodes (31): AtlasEvent, Classified, InsightProgress, MemoriesChanged, MemoryProgress, Note, Replaced, Stats (+23 more)
 
 ### Community 41 - "provider_diag.rs"
-Cohesion: 0.16
+Cohesion: 0.17
 Nodes (12): bounded(), classify_status(), endpoint_strips_query_and_userinfo(), find_url(), http_failure(), Leaf, provider_error(), request_id() (+4 more)
 
 ### Community 42 - "scheduler.rs"
-Cohesion: 0.16
-Nodes (14): DEFAULT_LEASE_SECS, drain_index_once(), drain_summary_flush(), drain_summary_flush_cached(), drain_summary_flush_completes_cached_tasks(), index_drain_on_store_without_vectors_blocks_honestly(), load_summarization_secret(), migrate_scheduler() (+6 more)
+Cohesion: 0.10
+Nodes (22): apply_index_change(), apply_index_change_rebuild_reports_outcome(), apply_index_with(), DEFAULT_LEASE_SECS, drain_index_once(), drain_summary_flush(), drain_summary_flush_cached(), drain_summary_flush_completes_cached_tasks() (+14 more)
 
 ### Community 43 - "jobs_view.rs"
-Cohesion: 0.11
-Nodes (21): summary_text(), active_time_is_live_for_open_attempts_and_unavailable_only_without_a_start(), AttemptRow, event_apps(), event_counts(), EventCounts, get_job(), job() (+13 more)
+Cohesion: 0.12
+Nodes (20): summary_text(), active_time_is_live_for_open_attempts_and_unavailable_only_without_a_start(), AttemptRow, event_apps(), event_counts(), EventCounts, job(), job_apps() (+12 more)
 
 ### Community 44 - "provider_attempt.rs"
 Cohesion: 0.12
-Nodes (33): Acc, attempt(), AttemptReport, check_final(), complete_stream_and_json_answers_succeed(), Deadlines, delta(), fill() (+25 more)
+Nodes (26): attempt(), AttemptReport, complete_stream_and_json_answers_succeed(), Deadlines, delta(), http_errors_carry_status_code_and_redacted_message(), is_subscription(), msgs() (+18 more)
 
-### Community 45 - ".memory"
-Cohesion: 0.15
-Nodes (14): article(), atlas_articles_for_intel_dedupes_same_article_id_across_runs(), atlas_articles_for_intel_filters_category_day_and_query(), atlas_auto_next_round_trips_through_app_state(), atlas_claims_for_article_returns_linked_claims(), atlas_prune_drops_finished_runs_older_than_the_cutoff(), atlas_recent_articles_lists_retained_rows(), atlas_run_days_lists_distinct_days_newest_first() (+6 more)
+### Community 45 - ".new"
+Cohesion: 0.14
+Nodes (18): broad_question_collapses_to_grounded_lookups(), clean_investigation_title(), directive_goals_line(), explicit_entities(), extract_at_handles(), extract_grounding(), extract_qids(), extract_social_handles() (+10 more)
 
 ### Community 46 - "picker.rs"
 Cohesion: 0.11
 Nodes (25): brain_scrape_options_hide_bare_scrape_and_include_claim_criteria(), CatalogEntry, chat_request(), CONFIDENCE_FLOOR, decisions_request(), directives_phrase(), DONE, eligible_catalog() (+17 more)
 
 ### Community 47 - "ReportMode"
-Cohesion: 0.09
-Nodes (32): classifiable_modes(), classify_mode_chat(), classify_mode_decisions(), classify_prompt_mode(), classify_prompt_mode_chat(), classify_prompt_mode_decisions(), classify_recon_mode(), default_recon_mode() (+24 more)
+Cohesion: 0.13
+Nodes (21): classifiable_modes(), classify_mode_chat(), classify_mode_decisions(), classify_prompt_mode(), classify_prompt_mode_chat(), classify_prompt_mode_decisions(), classify_recon_mode(), default_recon_mode() (+13 more)
 
 ### Community 48 - ".default"
 Cohesion: 0.15
@@ -432,32 +429,32 @@ Cohesion: 0.10
 Nodes (9): AttemptOutcome, categorize_http(), execute_with_retries(), other_llm_allows_three(), summarization_stops_at_two_attempts(), cache_invalidates_when_source_revision_changes(), mock_provider_other_llm_allows_three_attempts(), mock_provider_recovers_after_transient_error() (+1 more)
 
 ### Community 50 - "tests.rs"
-Cohesion: 0.20
-Nodes (19): auth_failure_sends_one_request_gives_guidance_and_redacts(), conn(), count(), failure_is_durable_correlated_bounded_and_harmless(), fixture(), Fx, GOOD, late_completion_for_a_changed_or_deleted_memory_is_not_published() (+11 more)
+Cohesion: 0.14
+Nodes (24): explain(), ExplainOutcome, Failed, Saved, Superseded, ExplainReport, ExplainRequest, Faults (+16 more)
 
 ### Community 51 - "SettingsFile"
-Cohesion: 0.09
-Nodes (20): a_blank_osint_user_agent_loads_as_unset(), default_credit_reset(), default_firecrawl_credits(), default_hunter_credits(), default_max_calls(), default_max_rounds(), default_one_cost(), default_opening_cap() (+12 more)
+Cohesion: 0.08
+Nodes (26): a_blank_osint_user_agent_loads_as_unset(), default_credit_reset(), default_firecrawl_credits(), default_hunter_credits(), default_max_calls(), default_max_rounds(), default_one_cost(), default_opening_cap() (+18 more)
 
 ### Community 52 - "events.rs"
-Cohesion: 0.09
-Nodes (27): starts(), infer_app(), session_event(), clear_events(), DEFAULT_RETENTION_HOURS, EventFilter, get_event(), job_filter_includes_descendants_and_prune_keeps_jobs() (+19 more)
+Cohesion: 0.10
+Nodes (24): clear_events(), DEFAULT_RETENTION_HOURS, EventFilter, get_event(), job_filter_includes_descendants_and_prune_keeps_jobs(), list_events(), MAX_DETAIL_CHARS, MAX_MESSAGE_CHARS (+16 more)
 
 ### Community 53 - "exec.rs"
 Cohesion: 0.14
-Nodes (19): admission_account(), admission_contention_consumes_no_attempt(), AttemptEvent, Finished, Started, AttemptLog, cancelled(), complete_summary_report() (+11 more)
+Nodes (21): ChatMessage, admission_account(), admission_contention_consumes_no_attempt(), AttemptEvent, Finished, Started, AttemptLog, cancelled() (+13 more)
 
-### Community 54 - "Binding"
-Cohesion: 0.17
-Nodes (26): Binding, canonical(), dependency_order(), depends_on(), question_bindings_and_dependency_fix(), allowed_producer(), best_handle(), bind_step() (+18 more)
+### Community 54 - ".publish_atlas_insights"
+Cohesion: 0.15
+Nodes (12): claim(), ArticleInsightCommit, atlas_answer_id(), AtlasInsightClaim, AtlasStoredClaim, insight_fingerprint(), new_id(), payload_revision() (+4 more)
 
 ### Community 55 - ".is_empty"
 Cohesion: 0.15
-Nodes (20): chat_body(), ChatMessage, complete(), complete_errors_with_finish_reason_when_response_is_empty(), complete_reads_reasoning_only_non_stream_json(), complete_stream_of_reasoning_deltas_yields_text(), Completion, delta_text() (+12 more)
+Nodes (19): chat_body(), complete(), complete_errors_with_finish_reason_when_response_is_empty(), complete_reads_reasoning_only_non_stream_json(), complete_stream_of_reasoning_deltas_yields_text(), delta_text(), is_concrete_free(), json_number() (+11 more)
 
 ### Community 56 - "ErrorCategory"
-Cohesion: 0.10
-Nodes (15): ErrorCategory, AuthOrQuota, CancelledOrStale, ConfigurationMissing, ContextLimit, IndexFailure, InterruptedStream, InvalidResult (+7 more)
+Cohesion: 0.08
+Nodes (24): operation_kind(), backoff_delay(), can_retry(), ErrorCategory, AuthOrQuota, CancelledOrStale, ConfigurationMissing, ContextLimit (+16 more)
 
 ### Community 57 - "grok_oauth.rs"
 Cohesion: 0.13
@@ -476,20 +473,20 @@ Cohesion: 0.10
 Nodes (22): source_anchor_label(), BRAIN_SCRAPE_PREFIX, CLAIM_CHARS, classify_resource(), file_link_url(), is_brain_binding(), is_brain_scrape_pick(), looks_like_api_endpoint() (+14 more)
 
 ### Community 61 - "worker.rs"
-Cohesion: 0.15
-Nodes (19): IntelReportEvent, InsightsUpdated, JobCreated, JobDone, Section, Stage, IntelReportJobRow, cancel_if_needed() (+11 more)
+Cohesion: 0.17
+Nodes (18): IntelReportEvent, InsightsUpdated, JobCreated, JobDone, Section, Stage, cancel_if_needed(), finalize_job_state() (+10 more)
 
 ### Community 62 - "run"
 Cohesion: 0.09
 Nodes (19): atlas_countdown_visible(), atlas_extracting_visible(), flush_streams(), intel_body_loading_visible(), intel_insights_loading_visible(), mouse_dirties(), ProviderEvent, Finished (+11 more)
 
 ### Community 63 - "src/brain.rs"
-Cohesion: 0.12
-Nodes (22): AGREEMENT_WEIGHT, CATEGORIES, category_hint(), format_injection(), hybrid_recall(), hybrid_recall_adds_paraphrases_and_rewards_agreement(), identity_query_prefers_name_memory(), jaccard() (+14 more)
+Cohesion: 0.14
+Nodes (19): AGREEMENT_WEIGHT, CATEGORIES, category_hint(), format_injection(), hybrid_recall(), hybrid_recall_adds_paraphrases_and_rewards_agreement(), identity_query_prefers_name_memory(), jaccard() (+11 more)
 
 ### Community 64 - "intel_recon/jobs.rs"
 Cohesion: 0.15
-Nodes (18): active_job_for_mode(), cancel_job(), create_job_inserts_all_verify_sections(), create_report_job(), finish_canonical(), intel_recon_links_its_legacy_job_to_one_canonical_registry_job(), pause_job(), register_canonical() (+10 more)
+Nodes (18): active_job_for_mode(), cancel_job(), create_job_inserts_all_verify_sections(), create_report_job(), finish_canonical(), intel_recon_links_its_legacy_job_to_one_canonical_registry_job(), pause_job(), ReportScope (+10 more)
 
 ### Community 65 - "cli.rs"
 Cohesion: 0.14
@@ -497,7 +494,7 @@ Nodes (21): ask(), ask_thread(), atlas_command(), defaults_command(), defaults_j
 
 ### Community 66 - "atlas_insights.rs"
 Cohesion: 0.09
-Nodes (29): a_country_token_does_not_merge_into_a_longer_name(), aliases_merge_on_shared_tokens_when_the_longer_form_is_a_span(), articles_have_span(), BODY_CLAIM_LIMIT, BODY_SPAN_CHARS, COL_CLASS, COL_ENTITY, COL_OBJECT (+21 more)
+Nodes (34): a_country_token_does_not_merge_into_a_longer_name(), aliases_merge_on_shared_tokens_when_the_longer_form_is_a_span(), article_with_body_spans(), articles_have_span(), BODY_CLAIM_LIMIT, BODY_SPAN_CHARS, clip_chars(), COL_CLASS (+26 more)
 
 ### Community 67 - "InformationCredibility"
 Cohesion: 0.13
@@ -505,43 +502,43 @@ Nodes (17): AdmiraltyCode, best_credibility(), CredibilityInputs, information_cr
 
 ### Community 68 - "Category"
 Cohesion: 0.06
-Nodes (34): Category, Auth, Cancelled, Configuration, Empty, InvalidModel, InvalidResult, MalformedPayload (+26 more)
+Nodes (33): Category, Auth, Cancelled, Configuration, Empty, InvalidModel, InvalidResult, MalformedPayload (+25 more)
 
 ### Community 69 - "body_filter.rs"
 Cohesion: 0.17
 Nodes (22): BATCH_SIZE, BodyChunk, chunk_article_body(), CHUNK_MAX, CHUNK_MIN, CHUNK_TARGET, chunks_preserve_absolute_offsets(), classify_chunk_batch() (+14 more)
 
 ### Community 70 - "synthesize.rs"
-Cohesion: 0.16
-Nodes (20): commit_refined_body(), BODY_REFINE_INPUT_CHARS, deterministic_bluf_mentions_title(), deterministic_section(), model_refine_body(), model_synthesize(), parse_json_object(), refine_retrieved_article_body() (+12 more)
+Cohesion: 0.17
+Nodes (19): BODY_REFINE_INPUT_CHARS, deterministic_bluf_mentions_title(), deterministic_section(), model_refine_body(), model_synthesize(), parse_json_object(), refine_retrieved_article_body(), refine_without_secret_keeps_validated_scrape() (+11 more)
 
 ### Community 71 - "AtlasArticleRow"
 Cohesion: 0.18
-Nodes (20): category_tag(), apply_peer_support(), article_with_body_spans(), body_lead_prompt(), catalog_json(), classifier_peers_are_preferred_over_token_overlap(), classify_peers_chat(), classify_peers_decisions() (+12 more)
+Nodes (20): category_tag(), accept_one(), AcceptMode, Context, Lead, apply_peer_support(), catalog_json(), classifier_peers_are_preferred_over_token_overlap() (+12 more)
 
 ### Community 72 - "anyhow"
-Cohesion: 0.16
-Nodes (7): openrouter_ready(), accounts_persist_with_owner_only_permissions(), AuthFile, legacy_connection_migrates_without_overwriting_other_accounts(), loading_old_auth_removes_gmail_setup_credentials(), owner_only(), write_private()
+Cohesion: 0.15
+Nodes (8): openrouter_ready(), snapshot_secret(), accounts_persist_with_owner_only_permissions(), AuthFile, legacy_connection_migrates_without_overwriting_other_accounts(), loading_old_auth_removes_gmail_setup_credentials(), owner_only(), write_private()
 
 ### Community 73 - "result"
-Cohesion: 0.17
-Nodes (6): record_detail_lines(), ExplanationRecord, GraphSummaryEntry, migrate(), put_record(), Store
+Cohesion: 0.12
+Nodes (11): record_detail_lines(), ExplanationRecord, GraphSummaryEntry, migrate(), put_record(), SaveOutcome, MemoryChanged, MemoryGone (+3 more)
 
 ### Community 74 - "theme.rs"
 Cohesion: 0.19
 Nodes (19): ACCENT, BG, BORDER, card_accent(), card_dim(), card_text(), CODE_BG, DIM (+11 more)
 
-### Community 75 - "Value"
-Cohesion: 0.15
-Nodes (28): annotate(), bounded(), domain(), email_address(), ip(), linkedin_handle(), number_arg(), one_of() (+20 more)
+### Community 75 - "Request"
+Cohesion: 0.32
+Nodes (8): bounded(), domain(), email_address(), ip(), linkedin_handle(), one_of(), hunter_request(), Request
 
 ### Community 76 - "pipeline.rs"
 Cohesion: 0.16
 Nodes (19): apply_recon_directive_coverage(), compare_claims(), coverage_requires_cited_evidence_not_similarity(), directive_coverage(), DirectiveCoverage, event_grouping_keeps_separate_days_apart(), EventGroup, group_atlas_events() (+11 more)
 
 ### Community 77 - "summarization.rs"
-Cohesion: 0.09
-Nodes (38): cache_get(), cache_key_changes_with_revision_and_focus(), cache_put(), cache_round_trip(), complete_summary(), CoverageMeta, deterministic_article_description(), deterministic_atlas_brief() (+30 more)
+Cohesion: 0.18
+Nodes (14): cache_get(), cache_key_changes_with_revision_and_focus(), cache_round_trip(), CoverageMeta, deterministic_article_description(), deterministic_atlas_brief(), deterministic_follow_up(), deterministic_report_context() (+6 more)
 
 ### Community 78 - "tui/graph.rs"
 Cohesion: 0.27
@@ -549,11 +546,11 @@ Nodes (15): draw(), draw_path(), draw_summary(), inset(), legend_height(), legen
 
 ### Community 79 - "LogsView"
 Cohesion: 0.10
-Nodes (11): buttons(), LevelFilter, All, Error, Info, Warn, LogsView, row_lines() (+3 more)
+Nodes (10): LevelFilter, All, Error, Info, Warn, LogsView, row_lines(), detail_rows() (+2 more)
 
 ### Community 80 - "graph_explanation.rs"
 Cohesion: 0.12
-Nodes (14): BASIC_HEADING, event(), explain(), ExplainOutcome, Failed, Saved, Superseded, ExplainReport (+6 more)
+Nodes (14): BASIC_HEADING, Cached, None, Stale, Valid, event(), FAILURE_COOLDOWN, Gate (+6 more)
 
 ### Community 81 - "tui/jobs.rs"
 Cohesion: 0.08
@@ -572,8 +569,8 @@ Cohesion: 0.11
 Nodes (24): courtlistener_spacing_and_firecrawl_polling_are_counted(), CUT_NOTE, CUT_SHORT, deadline_seconds(), live(), more_calls_mean_more_tool_time_and_cache_hits_add_nothing(), PHASE_WINDOW_SECONDS, RECON_DEADLINE (+16 more)
 
 ### Community 85 - "store.rs"
-Cohesion: 0.10
-Nodes (21): ArticleInsightCommit, atlas_article_from_row(), AUTO_REBUILD_HINT, embedding_disabled_degrades_to_jaccard(), embedding_failure_mid_session_degrades_to_jaccard(), fingerprint_mismatch_rebuilds_and_drift_is_reconciled(), GraphSummary, IDS (+13 more)
+Cohesion: 0.09
+Nodes (29): article(), atlas_article_from_row(), atlas_articles_for_intel_dedupes_same_article_id_across_runs(), atlas_articles_for_intel_filters_category_day_and_query(), atlas_auto_next_round_trips_through_app_state(), atlas_claims_for_article_returns_linked_claims(), atlas_recent_articles_lists_retained_rows(), atlas_run_days_lists_distinct_days_newest_first() (+21 more)
 
 ### Community 86 - "Command"
 Cohesion: 0.10
@@ -585,23 +582,23 @@ Nodes (19): brain_article_source_opens_intel_brief(), hit(), Target, App, AtlasC
 
 ### Community 88 - "logs.rs"
 Cohesion: 0.16
-Nodes (14): stamp(), areas(), button_label(), count(), draw(), hit(), in_list(), list_geometry() (+6 more)
+Nodes (18): starts(), stamp(), areas(), button_label(), buttons(), count(), draw(), hit() (+10 more)
 
 ### Community 89 - "evidence.rs"
-Cohesion: 0.23
-Nodes (14): AGREEMENT_WEIGHT, chunk_text(), chunks_cover_end_of_long_source(), content_hash(), ensure_identifier_coverage(), EvidencePassage, hybrid_bounds_and_prefers_agreement(), hybrid_passage_candidates() (+6 more)
+Cohesion: 0.20
+Nodes (15): AGREEMENT_WEIGHT, chunk_text(), chunks_cover_end_of_long_source(), content_hash(), ensure_identifier_coverage(), EvidencePassage, hybrid_bounds_and_prefers_agreement(), hybrid_passage_candidates() (+7 more)
 
 ### Community 90 - "ProviderSecret"
-Cohesion: 0.18
-Nodes (23): account_secret(), active_text_secret(), authorize(), bearer_token(), catalog_error(), complete_once(), effective_kind(), http() (+15 more)
+Cohesion: 0.19
+Nodes (22): account_secret(), active_text_secret(), authorize(), bearer_token(), catalog_error(), complete_once(), effective_kind(), http() (+14 more)
 
 ### Community 91 - "BrainResourceSummary"
 Cohesion: 0.19
 Nodes (10): bindings_use_brain_evidence_ids(), BrainResourceHit, BrainResourceSummary, candidate_json(), clip(), format_counts(), hit(), is_http_url() (+2 more)
 
-### Community 92 - "IndexOutcome"
-Cohesion: 0.10
-Nodes (10): active_index_rows(), CoverageReport, Store, IndexEnqueue, IndexOutcome, Disabled, Pending, PermanentFailure (+2 more)
+### Community 92 - "Store"
+Cohesion: 0.23
+Nodes (3): active_index_rows(), Store, IndexEnqueue
 
 ### Community 93 - "F"
 Cohesion: 0.17
@@ -616,20 +613,20 @@ Cohesion: 0.11
 Nodes (18): How, CompanyEmail, Coordinates, DomainAsUrl, EntityPhrase, PackageName, PackageParts, Plain (+10 more)
 
 ### Community 97 - "mem"
-Cohesion: 0.23
-Nodes (15): claim_index_changes(), claim_index_work(), complete_index_change(), disabled_outcome_blocks_without_spending_attempts_and_resumes(), enqueue_index_change(), expired_index_lease_recovers_and_exhausted_work_fails_not_running_forever(), index_change_claim_and_complete(), job() (+7 more)
+Cohesion: 0.22
+Nodes (17): claim_index_changes(), claim_index_work(), claim_next_in(), complete_index_change(), disabled_outcome_blocks_without_spending_attempts_and_resumes(), enqueue_index_change(), expired_index_lease_recovers_and_exhausted_work_fails_not_running_forever(), index_change_claim_and_complete() (+9 more)
 
 ### Community 98 - "summary_card.rs"
 Cohesion: 0.32
 Nodes (11): actions(), button_at(), button_cells(), button_row_area(), draw(), height(), is_card_button(), label() (+3 more)
 
 ### Community 99 - "contains"
-Cohesion: 0.13
-Nodes (26): abs_contains(), body_rect(), contains(), detail_areas(), home_line_text(), intel_body_loading(), intel_body_progress_lines(), intel_brief_full_lines() (+18 more)
+Cohesion: 0.36
+Nodes (9): atlas_hit(), atlas_row_at(), contains(), intel_body_loading(), intel_body_progress_lines(), intel_brief_task_lines(), intel_insights_loading(), intel_insights_progress_detail() (+1 more)
 
-### Community 100 - "home_rows"
-Cohesion: 0.19
-Nodes (16): center_row(), gap_row(), home_group(), home_line(), home_pads_titles_and_application_order(), home_rows(), HomeKind, Gap (+8 more)
+### Community 100 - "Line"
+Cohesion: 0.11
+Nodes (27): center_row(), draw_home(), gap_row(), home_group(), home_line(), home_line_text(), home_pads_titles_and_application_order(), home_row_width() (+19 more)
 
 ### Community 101 - "Region"
 Cohesion: 0.12
@@ -644,8 +641,8 @@ Cohesion: 0.19
 Nodes (15): BLOCK_MARKERS, BodyQuality, Complete, Partial, Unavailable, Uncertain, BodyValidation, clean_markdown() (+7 more)
 
 ### Community 104 - "replace_insights.rs"
-Cohesion: 0.35
-Nodes (10): article(), claim(), commit_replaces_atomically_and_keeps_shared_support(), failed_validation_leaves_prior_insights(), replace_article_insights_from_body(), ReplaceOutcome, snapshot_counts_are_stable_before_commit(), user_edited_memories_are_not_orphaned() (+2 more)
+Cohesion: 0.31
+Nodes (11): commit_refined_body(), article(), claim(), commit_replaces_atomically_and_keeps_shared_support(), failed_validation_leaves_prior_insights(), replace_article_insights_from_body(), ReplaceOutcome, snapshot_counts_are_stable_before_commit() (+3 more)
 
 ### Community 105 - "PlanCall"
 Cohesion: 0.17
@@ -659,17 +656,17 @@ Nodes (12): checked_serves(), context_additions(), context_tools(), fallback_rec
 Cohesion: 0.09
 Nodes (11): ChoiceItem, codex_models(), DefaultsRole, .ALL, Classifier, Recon, Summarization, Synthesis (+3 more)
 
-### Community 108 - "finish_index_work"
-Cohesion: 0.20
-Nodes (16): block_claimed(), claim_next_in(), claim_task(), claim_with(), ClaimedTask, complete_claimed(), finish_attempt(), finish_index_work() (+8 more)
+### Community 108 - "enqueue_index_work"
+Cohesion: 0.17
+Nodes (16): lease_fencing_rejects_stale_epoch_and_foreign_owner(), adopt_untracked_index_changes(), claim_complete_and_retry_round_trip(), claim_next(), enqueue_index_work(), enqueue_job(), enqueue_job_with(), enqueue_task() (+8 more)
 
 ### Community 109 - "Architecture"
 Cohesion: 0.07
 Nodes (24): Admiralty source evaluation (WP:RSP), Architecture, Atlas, Investigation flow, Model and UI boundaries, News and Legal context tools (#29), Persistence, Primary providers (+16 more)
 
 ### Community 110 - "KeptClaim"
-Cohesion: 0.20
-Nodes (18): admiralty_scales_claim_confidence_from_rsp_and_peers(), apply_admiralty_evaluation(), article(), article_information_credibility(), brief_text(), cap_claims(), dedupe_claims(), entity_path() (+10 more)
+Cohesion: 0.26
+Nodes (15): apply_admiralty_evaluation(), article_information_credibility(), body_lead_prompt(), brief_text(), cap_claims(), dedupe_claims(), entity_path(), extract_for_article_body() (+7 more)
 
 ### Community 111 - "serde"
 Cohesion: 0.18
@@ -685,19 +682,19 @@ Nodes (6): shared_rate_limit_cooldown_blocks_admission(), AdmissionGuard, note_s
 
 ### Community 114 - "ToolResult"
 Cohesion: 0.13
-Nodes (19): ToolResult, ac6_citation_groups_split_validate_each_id_and_normalize(), cacheable(), chat(), citation_groups(), citation_ids(), cited(), evidence_summary() (+11 more)
+Nodes (22): ToolResult, ac6_citation_groups_split_validate_each_id_and_normalize(), AnswerContext, chat(), citation_groups(), citation_ids(), cut_footer(), cut_short_answer() (+14 more)
 
-### Community 115 - "now"
-Cohesion: 0.19
-Nodes (11): answer_evidence_survives_reopen_and_deleted_thread_rejects_late_calls(), claims_deduplicate_and_reject_unsupported_sources(), deleting_an_investigation_removes_its_brain_memories_and_graph_summary(), investigation_memory_ids(), now(), persistence_and_plan(), recon_claims_and_deletions_use_the_durable_index_outbox(), RunLimits (+3 more)
+### Community 115 - "ProviderFailure"
+Cohesion: 0.26
+Nodes (12): Acc, check_final(), fill(), line_event(), parse_final_json(), read_stream(), sse_error(), stream_fail() (+4 more)
 
 ### Community 116 - "gsd-v2.js"
 Cohesion: 0.12
 Nodes (7): core, home, hooks, names, payload(), run(), setup()
 
 ### Community 117 - "extract"
-Cohesion: 0.17
-Nodes (14): a_decisions_model_does_not_extract_claims(), context_prompt(), extract(), Extraction, insight_packet(), lead_prompt(), origin(), packet_json() (+6 more)
+Cohesion: 0.19
+Nodes (14): a_decisions_model_does_not_extract_claims(), context_candidates(), context_prompt(), countries_equal(), extract(), insight_packet(), is_significant(), lead_prompt() (+6 more)
 
 ### Community 118 - "super"
 Cohesion: 0.14
@@ -712,7 +709,7 @@ Cohesion: 0.15
 Nodes (13): ChoiceKind, IntelDay, Model, Provider, Overlay, Block, Choice, Help (+5 more)
 
 ### Community 121 - "AnnPolicy"
-Cohesion: 0.16
+Cohesion: 0.17
 Nodes (9): AnnMeasurement, AnnPolicy, AnnDeferredUnmeasured, AnnEnabled, ExactSearch, AnnThresholds, decide_ann_policy(), measure_ann_recall() (+1 more)
 
 ### Community 122 - "synthesize"
@@ -728,8 +725,8 @@ Cohesion: 0.17
 Nodes (12): ReconCommand, Ask, AskNew, Delete, Limits, List, New, Rename (+4 more)
 
 ### Community 125 - "JobRow"
-Cohesion: 0.12
-Nodes (11): job_row(), JobFilter, JobRow, JobStatusFilter, Active, All, Completed, Failed (+3 more)
+Cohesion: 0.11
+Nodes (12): get_job(), job_row(), JobFilter, JobRow, JobStatusFilter, Active, All, Completed (+4 more)
 
 ### Community 126 - "RouteInput"
 Cohesion: 0.17
@@ -747,21 +744,21 @@ Nodes (18): a_keyword_inside_the_subjects_name_runs_no_news_or_legal_tool(), a_k
 Cohesion: 0.36
 Nodes (9): cache(), cached_index(), CachedIndex, ensure_index(), fetch_index(), index_from_json(), install_index(), RspIndex (+1 more)
 
-### Community 130 - "Gate"
-Cohesion: 0.13
-Nodes (13): Cached, None, Stale, Valid, Gate, CoolingDown, Ready, Running (+5 more)
+### Community 130 - "agents"
+Cohesion: 0.12
+Nodes (16): agents, build, explore, general, plan, description, mode, model (+8 more)
 
 ### Community 131 - "Functional Requirements"
 Cohesion: 0.12
 Nodes (15): Atlas (News Pipeline), Brain / Memory, Configuration Requirements, Context Provider Keys, Functional Requirements, Non-Functional Requirements, Non-Goals, OSINT Manual Runs (+7 more)
 
-### Community 132 - "fail_claimed"
-Cohesion: 0.13
-Nodes (18): backoff_delay(), can_retry(), fail_claimed(), fail_or_retry(), OperationKind, LocalIndex, NetworkCollect, OtherLlm (+10 more)
+### Community 132 - "TaskState"
+Cohesion: 0.18
+Nodes (9): TaskState, Cancelled, Completed, Failed, Paused, Queued, RetryScheduled, Running (+1 more)
 
-### Community 133 - "GraphNodeKind"
-Cohesion: 0.20
-Nodes (9): glyph(), GraphNodeKind, Directive, Entity, Evidence, Finding, Investigation, Source (+1 more)
+### Community 133 - "IndexOutcome"
+Cohesion: 0.19
+Nodes (6): IndexOutcome, Disabled, Pending, PermanentFailure, Ready, RetryableFailure
 
 ### Community 134 - "accept_claims"
 Cohesion: 0.22
@@ -795,17 +792,17 @@ Nodes (5): intel_recon_publishes_durably_with_provenance_and_no_atlas_receipt(),
 Cohesion: 0.29
 Nodes (7): parse_status(), RspStatus, Blacklisted, Deprecated, GenerallyReliable, GenerallyUnreliable, NoConsensus
 
-### Community 142 - "GraphEdgeKind"
-Cohesion: 0.25
-Nodes (7): GraphEdgeKind, Answers, Concerns, DerivedFrom, DiscoveredIn, Investigates, Supports
+### Community 142 - "SummarizationMode"
+Cohesion: 0.14
+Nodes (12): SummarizationMode, .ALL, ArticleDescription, AtlasBrief, FollowUpContext, GraphExplanation, InvestigationTitle, PageEvidence (+4 more)
 
-### Community 143 - "atomic"
-Cohesion: 0.21
-Nodes (6): begin(), begin_cancellable(), db(), db_path(), finish(), E
+### Community 143 - "SummaryRequest"
+Cohesion: 0.34
+Nodes (11): cache_put(), complete_summary(), enqueue_summary_flush(), flush_request(), load_flush_request(), persist_flush_request(), publish_deterministic_and_enqueue(), publish_enqueues_deduped_flush_task() (+3 more)
 
-### Community 144 - "db"
-Cohesion: 0.22
-Nodes (11): db(), drop(), dropped_or_panicking_work_reaches_a_failed_state(), now(), process_kill_recovers_jobs(), registering_makes_this_process_live_for_other_processes(), registration_is_durable_before_work_and_finish_records_monotonic_timing(), resume_reuses_the_job_and_keeps_earlier_active_time() (+3 more)
+### Community 144 - "modes.rs"
+Cohesion: 0.30
+Nodes (10): chat_response_spec(), chat_response_spec_lists_mode_headings(), chat_section_titles(), every_mode_has_bluf_first_and_sources_last(), investigation_mode_spec(), investigation_mode_spec_guides_directives_and_picker(), normalize_chat_mode(), section_plan() (+2 more)
 
 ### Community 145 - "run_live"
 Cohesion: 0.29
@@ -815,17 +812,17 @@ Nodes (6): LiveRun, Fresh, Latest, Run, run_live(), RunInput
 Cohesion: 0.29
 Nodes (6): RecordKind, Claim, DerivedSummary, Memory, Passage, ToolObservation
 
-### Community 147 - "Value"
-Cohesion: 0.23
-Nodes (9): clip_chars_ellipsis(), clip_long_strings(), long_page_evidence_compacts_to_a_summary_for_synthesis(), packet_observation(), page_and_extract_evidence_stay_structured_in_the_packet(), page_excerpt(), page_needs_compact(), page_summary_observation() (+1 more)
+### Community 147 - "PublicationReceipt"
+Cohesion: 0.22
+Nodes (5): CoverageReport, publication_receipt_reconciles_and_reports_rejections(), PublicationReceipt, PublicationVerification, RejectedClaim
 
 ### Community 148 - "ClaimRelation"
 Cohesion: 0.29
 Nodes (7): ClaimRelation, AmbiguousEntity, ChangedQuantity, Equivalent, Negation, PlannedVsCompleted, Unrelated
 
-### Community 149 - "role_secret"
-Cohesion: 0.27
-Nodes (6): ModelAssignment, role_name(), role_secret(), RoleDefaults, summarization_inherits_synthesis_when_unset(), tool_picker_role_resolves_and_unknown_roles_error()
+### Community 149 - "render_tui_cells.py"
+Cohesion: 0.29
+Nodes (3): box(), color(), render()
 
 ### Community 150 - "Store"
 Cohesion: 0.53
@@ -835,13 +832,13 @@ Nodes (5): charge_newsapi(), charge_quota(), open_key(), quota_open(), utc_day()
 Cohesion: 0.18
 Nodes (13): Alternative, classify_hypothesis(), contradiction(), draft_hypotheses(), hypothesis_absence_stays_unresolved(), hypothesis_status(), HypothesisRecord, leading_name() (+5 more)
 
-### Community 152 - "accounts_search_query"
-Cohesion: 0.33
-Nodes (5): accounts_search_query(), binder_maps_kinds_to_inputs_and_never_hands_hunter_a_social_host(), binding(), derived_question_handles(), fallback_directives()
+### Community 152 - "rule_bindings"
+Cohesion: 0.10
+Nodes (33): binder_maps_kinds_to_inputs_and_never_hands_hunter_a_social_host(), binding(), normalize_platform(), question_bindings(), a_gap_filler_only_domain_waits_for_a_primary_observation_before_hunter(), batch_scrape_takes_ranked_urls_and_gates_order_before_hunter(), bind_arguments(), bitcoins_in() (+25 more)
 
-### Community 153 - "split_vertical"
-Cohesion: 0.14
-Nodes (23): auth_areas(), brain_form(), brain_hit(), brain_list(), BrainForm, BrainList, chat_areas(), Chrome (+15 more)
+### Community 153 - "Rect"
+Cohesion: 0.10
+Nodes (60): auth_areas(), brain_form(), brain_hit(), brain_list(), BrainForm, BrainList, button_areas(), chat_areas() (+52 more)
 
 ### Community 154 - "§9 implementation order"
 Cohesion: 0.15
@@ -871,33 +868,29 @@ Nodes (10): ModuleId, .ALL, Atlas, Brain, Intel, Jobs, Logs, Osint (+2 more)
 Cohesion: 0.31
 Nodes (8): write_cache(), auth_path(), config_path(), db_path(), ensure_home(), hardware_cache_path(), home_dir(), lancedb_dir()
 
-### Community 167 - "complementary_queries"
-Cohesion: 0.18
-Nodes (11): accounts_flow(), clip_query(), complementary_queries(), DiscoveryQuery, investigative_angle(), opening_queries_take_two_different_angles(), other_subjects_keep_the_investigative_question_and_skip_accounts(), person_and_organization_discovery_searches_for_accounts_second() (+3 more)
+### Community 167 - "subject_of"
+Cohesion: 0.12
+Nodes (17): accounts_flow(), accounts_search_query(), clip_query(), complementary_queries(), derived_question_handles(), DiscoveryQuery, investigation_frame(), InvestigationFrame (+9 more)
 
 ### Community 168 - "Milestone 1 — Core Onboarding (Current)"
 Cohesion: 0.18
 Nodes (10): Deliverables, Dependencies, Future Milestones (Planned), Milestone 1 — Core Onboarding (Current), Milestone 2 — CLI Verification, Milestone 3 — Test Coverage, Milestone 4 — Integration & Ship, Objectives (+2 more)
 
-### Community 169 - "Finish"
-Cohesion: 0.20
-Nodes (9): beats(), Finish, Cancelled, Completed, Failed, Partial, Paused, live() (+1 more)
-
-### Community 170 - "begin"
-Cohesion: 0.38
-Nodes (9): begin(), begin_optional(), begin_optional_with(), begin_with(), cancel_flag(), child(), JobHandle, JobSpec (+1 more)
-
-### Community 171 - "WorkerPool"
+### Community 169 - "BodyFetchEvent"
 Cohesion: 0.22
-Nodes (5): apply_index_change(), apply_index_change_rebuild_reports_outcome(), apply_index_with(), process_owner(), WorkerPool
+Nodes (9): BodyFetchEvent, Attempt, Failed, InsightsFailed, InsightsRefreshing, InsightsReplaced, Progress, Ready (+1 more)
 
-### Community 172 - "accept_one"
-Cohesion: 0.25
-Nodes (9): accept_one(), AcceptMode, Context, Lead, contains_span(), context_candidates(), countries_equal(), is_significant() (+1 more)
+### Community 170 - "article"
+Cohesion: 0.29
+Nodes (8): admiralty_scales_claim_confidence_from_rsp_and_peers(), article(), kept(), lead_claims_scale_with_the_gate_and_context_is_not_capped_at_five(), peer_decisions_offer_candidate_ids_or_none(), peer_decisions_request(), the_highest_confidence_claims_survive_a_budget(), the_packet_keeps_four_and_reports_the_full_gate()
+
+### Community 172 - "PlanInterval"
+Cohesion: 0.33
+Nodes (5): PlanInterval, Daily, Monthly, Never, Weekly
 
 ### Community 173 - "youtube_pair"
-Cohesion: 0.25
-Nodes (8): https_on_host(), profile_path_token(), facebook_url(), linkedin_url(), platform_id(), sociavault_platform_id(), youtube_pair(), social_token()
+Cohesion: 0.33
+Nodes (6): https_on_host(), profile_path_token(), facebook_url(), linkedin_url(), youtube_pair(), social_token()
 
 ### Community 174 - "Codebase Map — argos-osint"
 Cohesion: 0.22
@@ -915,14 +908,6 @@ Nodes (7): Artifacts Status, Configuration State, Current Phase State, Next Step
 Cohesion: 0.29
 Nodes (6): TimeoutProfile, .CLASSIFIER, .EXTRACTION, .PLANNING, .SUMMARIZATION, .SYNTHESIS
 
-### Community 179 - "CancelRequest"
-Cohesion: 0.33
-Nodes (5): CancelRequest, Missing, NotCancellable, NotRunning, Requested
-
-### Community 180 - "InsightView"
-Cohesion: 0.40
-Nodes (3): manual_memory_has_no_graph(), Store, InsightView
-
 ### Community 181 - "select_strategy"
 Cohesion: 0.40
 Nodes (6): has_concrete_identifier(), hypothesis_question(), select_strategy(), strategy_change_reason(), strategy_follows_the_question_and_can_change_without_erasing_work(), StrategyChoice
@@ -935,10 +920,6 @@ Nodes (5): `docs/architecture.md`, Docs Ingest — argos-osint, `docs/providers.
 Cohesion: 0.50
 Nodes (4): AtlasRun, JobSource, AtlasRun, ReconThread
 
-### Community 184 - "PoolKind"
-Cohesion: 0.40
-Nodes (4): PoolKind, Index, Llm, Network
-
 ### Community 185 - "OpenCode V2 workflow"
 Cohesion: 0.40
 Nodes (4): Focused ECC commands, OpenCode V2 workflow, Start with the graph, Verify setup
@@ -947,29 +928,25 @@ Nodes (4): Focused ECC commands, OpenCode V2 workflow, Start with the graph, Ver
 Cohesion: 0.40
 Nodes (4): Honest remaining gaps, Phase status (§18), This follow-up, Unified reliability / summarization / semantic pipelines — completion checklist
 
-### Community 187 - "cancel_is_cooperative_and_only_for_cancellable_running_jobs"
-Cohesion: 0.67
-Nodes (3): cancel_is_cooperative_and_only_for_cancellable_running_jobs(), cancellable(), cross_process_cancel_reaches_the_owner_through_its_heartbeat()
-
 ## Knowledge Gaps
-- **1165 isolated node(s):** `private`, `type`, `home`, `hooks`, `core` (+1160 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1591 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **21 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **1175 isolated node(s):** `$schema`, `default_agent`, `mode`, `model`, `mode` (+1170 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1602 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **23 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `App` connect `App` to `app.rs`, `FieldId`, `Store`, `ui.rs`, `.handle_key`, `Store`, `hardware.rs`, `Store`, `AtlasPage`, `BrainListMode`, `provider.rs`, `ModuleId`, `brain_detail.rs`, `recon/graph.rs`, `run_atlas_inner`, `ReportMode`, `SettingsFile`, `InsightView`, `.job_source`, `.activate_button`, `WorkEvent`, `worker.rs`, `run`, `src/brain.rs`, `AtlasArticleRow`, `anyhow`, `LogsView`, `tui/jobs.rs`, `FeedArticle`, `Target`, `summary_card.rs`, `DefaultsRole`, `ToolResult`, `super`, `Overlay`?**
-  _High betweenness centrality (0.089) - this node is a cross-community bridge._
-- **What connects `private`, `type`, `home` to the rest of the system?**
-  _1165 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Why does `App` connect `App` to `app.rs`, `FieldId`, `ui.rs`, `.handle_key`, `Store`, `hardware.rs`, `Store`, `AtlasPage`, `BrainListMode`, `ModuleId`, `brain_detail.rs`, `recon/graph.rs`, `run_atlas_inner`, `ReportMode`, `SettingsFile`, `.job_source`, `.activate_button`, `WorkEvent`, `run`, `src/brain.rs`, `AtlasArticleRow`, `anyhow`, `LogsView`, `tui/jobs.rs`, `FeedArticle`, `Target`, `ProviderSecret`, `summary_card.rs`, `DefaultsRole`, `ToolResult`, `super`, `Overlay`?**
+  _High betweenness centrality (0.090) - this node is a cross-community bridge._
+- **What connects `$schema`, `default_agent`, `mode` to the rest of the system?**
+  _1175 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `land.rs` be split into smaller, more focused modules?**
   _Cohesion score 0.0076045627376425855 - nodes in this community are weakly interconnected._
-- **Why does `ButtonId` connect `ButtonId` to `summary_card.rs`, `App`, `app.rs`, `DefaultsRole`, `LogsView`, `tui/jobs.rs`, `Rect`, `Target`, `logs.rs`, `.job_source`, `.activate_button`?**
-  _High betweenness centrality (0.068) - this node is a cross-community bridge._
+- **Why does `ButtonId` connect `ButtonId` to `summary_card.rs`, `App`, `Rect`, `app.rs`, `DefaultsRole`, `tui/jobs.rs`, `Frame`, `Target`, `logs.rs`, `.job_source`, `.activate_button`?**
+  _High betweenness centrality (0.054) - this node is a cross-community bridge._
 - **Should `orchestrate.rs` be split into smaller, more focused modules?**
   _Cohesion score 0.05701754385964912 - nodes in this community are weakly interconnected._
-- **Why does `ProviderSecret` connect `ProviderSecret` to `atlas_memory.rs`, `accept_claims`, `recon.rs`, `Store`, `run_live`, `role_secret`, `Service`, `Plan`, `provider.rs`, `run_turn`, `body.rs`, `atlas.rs`, `scheduler.rs`, `provider_attempt.rs`, `ReportMode`, `.default`, `tests.rs`, `exec.rs`, `.is_empty`, `.activate_button`, `worker.rs`, `intel_recon/jobs.rs`, `atlas_insights.rs`, `body_filter.rs`, `synthesize.rs`, `AtlasArticleRow`, `anyhow`, `summarization.rs`, `graph_explanation.rs`, `replace_insights.rs`, `.order`, `ToolResult`, `extract`, `subscription.rs`, `synthesize`, `poll_device`?**
-  _High betweenness centrality (0.031) - this node is a cross-community bridge._
+- **Why does `ProviderSecret` connect `ProviderSecret` to `atlas_memory.rs`, `accept_claims`, `recon.rs`, `SummaryRequest`, `run_live`, `TurnEvent`, `Plan`, `provider.rs`, `run_turn`, `body.rs`, `atlas.rs`, `scheduler.rs`, `provider_attempt.rs`, `.new`, `ReportMode`, `.default`, `tests.rs`, `SettingsFile`, `.begin_title`, `exec.rs`, `.is_empty`, `.activate_button`, `worker.rs`, `intel_recon/jobs.rs`, `atlas_insights.rs`, `body_filter.rs`, `synthesize.rs`, `AtlasArticleRow`, `anyhow`, `summarization.rs`, `graph_explanation.rs`, `replace_insights.rs`, `.order`, `KeptClaim`, `ToolResult`, `extract`, `subscription.rs`, `synthesize`, `poll_device`?**
+  _High betweenness centrality (0.029) - this node is a cross-community bridge._
 - **Should `App` be split into smaller, more focused modules?**
   _Cohesion score 0.047332185886402756 - nodes in this community are weakly interconnected._

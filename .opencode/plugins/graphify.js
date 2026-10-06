@@ -20,9 +20,19 @@ export function isBroadSearch(tool, input = {}) {
   }
   if (tool !== "bash" && tool !== "shell") return false;
   const command = String(input.command ?? "");
-  if (!/(?:^|[;&|\n]\s*)(?:rg|grep|find)\s/.test(command)) return false;
-  if (/\b(?:crates\/|src\/|docs\/|\.opencode\/|\.planning\/)/.test(command)) return false;
-  return true;
+  const parts = command.split(/(\|\||&&|[|;\n])/);
+  for (let i = 0; i < parts.length; i += 2) {
+    const segment = parts[i].trim();
+    if (!/^(?:rg|grep|find)\s/.test(segment)) continue;
+    // grep/rg after a non-search pipeline filters command output (for example cargo test logs).
+    const pipedInput = parts[i - 1] === "|";
+    const previous = parts[i - 2]?.trim() ?? "";
+    if (pipedInput && !/^(?:rg|grep|find)\s/.test(previous)) continue;
+    if (/\b(?:crates\/|src\/|docs\/|\.opencode\/|\.planning\/|graphify-out\/|(?:logs?|assets?|target|fixtures?|screenshots?)\/|(?:\/private)?\/tmp\/)/.test(segment)) continue;
+    if (/\s\S+\.(?:log|txt|json|png|jpg|jpeg|svg)(?:\s|$)/.test(segment)) continue;
+    return true;
+  }
+  return false;
 }
 
 export function graphUsable(root) {

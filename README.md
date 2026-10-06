@@ -1,6 +1,6 @@
 # Argos OSINT
 
-Argos is a terminal investigation workspace. It opens on **Home**. **Intel**, **Atlas**, **Brain**, and **Recon** are the applications. **OSINT**, **Providers**, and **System** are system apps: they configure gathering, accounts, and host state. Only Recon has a chat. The last surviving Recon thread is restored when Recon opens.
+Argos is a terminal investigation workspace. It opens on **Home**. **Intel**, **Atlas**, **Brain**, and **Recon** are the applications. **OSINT**, **Providers**, and **Profile** are system apps: they configure gathering, accounts, and host state. Only Recon has a chat. The last surviving Recon thread is restored when Recon opens.
 
 ## Run and navigate
 
@@ -8,7 +8,7 @@ Argos is a terminal investigation workspace. It opens on **Home**. **Intel**, **
 cargo run -p argos-osint-bin
 ```
 
-From Home, ↑↓ select and Enter opens. `1` opens Intel, `2` Atlas, `3` Brain, `4` Recon, `5` Jobs, `6` Logs, `7` Tools, `8` Models, `9` System. Esc or the Home control leaves an app. `?` opens the shortcut card for the current screen.
+From Home, ↑↓ select and Enter opens. `1` opens Intel, `2` Atlas, `3` Brain, `4` Recon, `5` Jobs, `6` Logs, `7` Tools, `8` Models, `9` Profile. Esc or the Home control leaves an app. `?` opens the shortcut card for the current screen.
 
 Recon opens on a full-screen list of recent investigations. ↑↓ moves through that list and Enter opens the selected investigation as its own full-screen transcript. Esc from the transcript returns to the list; Esc from the list returns Home. In the transcript, Tab moves between the log and the prompt. Enter sends; Shift+Enter adds a line. While the transcript is focused, ↑↓ select a message, decision, or tool, and ←→ fold a decision or tool log. Enter toggles the selected fold. `f` opens the full text. Ctrl+U and Ctrl+D scroll the focused pane, and the mouse wheel scrolls the pane under the pointer. Ctrl+N starts an investigation and opens its transcript. In the transcript, when the cursor is not in a text field, Alt+Left and Alt+Right move through recently opened investigations. A click counts on release, so dragging across Home does not launch an app. Ctrl+C cancels a running turn, or clears a draft first. Press Ctrl+C or Ctrl+Q again within a second to quit when nothing else is pending.
 
@@ -16,7 +16,7 @@ The transcript follows the Grok Build chat. Your question sits on a raised band 
 
 Intel browses Atlas-stored headlines on a bulletin board: six classification tabs, a news-cycle day filter, search, and a hero story. Enter opens Briefing Focus with extracted claims, tags, links, and a country mini-map. Recon on that screen is a stub for a later handoff.
 
-Brain, Atlas, OSINT, Providers, and System use fields and buttons only. OSINT keeps previous and next controls for saved manual runs. System shows hardware, paths, and a scrollable event log of run stages and failures.
+Brain, Atlas, OSINT, Providers, and System use fields and buttons only. OSINT keeps previous and next controls for saved manual runs. Profile shows hardware and storage paths.
 
 Atlas is a two-phase news pipeline. **Run** scans a 48-hour window with GNews and NewsData keyword clusters, scores countries into four heat bands, and drops the bottom 20%. It then pulls country headlines from NewsAPI and Currents for the kept bands, Group 1 first. **Pause** finishes the request in flight and stores a cursor. **Resume** continues that run. Ctrl+C on the Atlas screen pauses. The origins table names each country as `United States (US)` with its tier, temperature, discovery volume, and headline count. The feed below lists headlines from the current session only; article text is not stored. Enter or a click opens the headline. Atlas opens on **History**, the list of saved runs. Enter or a click opens that run's statistics. A world map sits above the history list and takes most of that pane. It is a Web Mercator coastline drawn as Braille. Tier 1 and 2 countries are named in full. Tier 3 shows the country code. The map does not take keys or clicks. Fully zoomed out, countries from the selected run are colored by temperature, and choosing another history row recolours the map. `+` and `-` zoom, and the arrow keys pan once the map is focused. Daily free-tier caps are GNews 100, NewsData 200, NewsAPI 100, and Currents 250.
 
@@ -52,7 +52,7 @@ The other 30 tools are gap-fillers (DNS, certificates, RDAP, archives, code sear
 cargo run -p argos-osint-bin -- osint user-agent 'Argos contact@example.com'
 ```
 
-Brain retains manual save, recall, pin, edit, and delete. Investigation insights have entity and topic anchors, evidence sources, and merged provenance. Providers keeps Grok, OpenAI, and OpenRouter connections, plus independent **Recon**, **Tool picker**, and **Synthesis** choices under **Defaults** (a three-way selector; the Tool picker defaults to OpenRouter `typesafe/jev-1.13`, which uses the OpenRouter decisions API). Account sign-in does not change any default. System shows hardware and storage paths.
+Brain retains manual save, recall, pin, edit, and delete. Investigation insights have entity and topic anchors, evidence sources, and merged provenance. Providers keeps Grok, OpenAI, and OpenRouter connections, plus independent **Recon**, **Tool picker**, and **Synthesis** choices under **Defaults** (a three-way selector; the Tool picker defaults to OpenRouter `typesafe/jev-1.13`, which uses the OpenRouter decisions API). Account sign-in does not change any default. Profile inspects host hardware and Argos storage.
 
 ## CLI
 

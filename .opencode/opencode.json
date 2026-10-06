@@ -10,7 +10,8 @@
     },
 
     "build": {
-      "mode": "primary",
+      "mode": "all",
+      "description": "Implements an approved plan in a child session and reports changes and checks",
       "model": "openrouter/cohere/north-mini-code:free"
     },
 

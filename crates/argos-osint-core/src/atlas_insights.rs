@@ -1447,12 +1447,27 @@ fn packet_json(articles: &[AtlasArticleRow]) -> Result<String> {
             let description = if article.description.chars().count() <= DESCRIPTION_CHARS {
                 article.description.clone()
             } else {
-                crate::summarization::deterministic_article_description(
+                let det = crate::summarization::deterministic_article_description(
                     &article.title,
                     &article.description,
                     DESCRIPTION_CHARS,
-                )
-                .content
+                );
+                if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
+                    let req = crate::summarization::flush_request(
+                        crate::summarization::SummarizationMode::ArticleDescription,
+                        &article.id,
+                        &article.published_at,
+                        &det.content,
+                        "atlas",
+                        DESCRIPTION_CHARS,
+                    );
+                    let _ = crate::summarization::publish_deterministic_and_enqueue(
+                        &store.conn,
+                        &req,
+                        det.clone(),
+                    );
+                }
+                det.content
             };
             serde_json::json!({
                 "id": article.id,

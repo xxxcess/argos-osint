@@ -133,32 +133,55 @@ fn truncate_err(s: &str) -> String {
     s.chars().take(120).collect()
 }
 
-/// Drain one batch of pending summarization flush tasks without calling the
-/// network: if a deterministic cache row exists, mark the task completed with
-/// `cached_deterministic`. Live LLM upgrade remains [`crate::summarization::complete_summary`]
-/// when a caller supplies a provider secret.
-pub fn drain_summary_flush_cached(conn: &Connection, owner: &str) -> Result<usize> {
+/// Drain pending summarization flush tasks.
+///
+/// When `secret` is `Some`, runs [`crate::summarization::try_live_summary_upgrade`]
+/// (2-attempt `complete_summary`). When `None`, keeps deterministic cache and
+/// records `cached_deterministic_no_secret` — never invents network success.
+pub fn drain_summary_flush(
+    conn: &Connection,
+    owner: &str,
+    secret: Option<&crate::secrets::ProviderSecret>,
+) -> Result<usize> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut done = 0usize;
     for _ in 0..8 {
         let Some(id) = tasks::claim_next(conn, owner, DEFAULT_LEASE_SECS, &now)? else {
             break;
         };
-        let operation: String = conn.query_row(
-            "SELECT operation FROM argos_tasks WHERE id=?1",
+        let (operation, input_hash): (String, String) = conn.query_row(
+            "SELECT operation, input_hash FROM argos_tasks WHERE id=?1",
             [&id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if operation_kind(&operation) != OperationKind::Summarization {
-            // Not ours — put back to queued without advancing attempts awkwardly:
-            // mark completed with skipped so we do not starve the queue forever.
             let _ = tasks::complete_task(conn, &id, "skipped_non_summarization", &now);
             continue;
         }
-        let _ = tasks::complete_task(conn, &id, "cached_deterministic", &now);
+        let outcome = match crate::summarization::try_live_summary_upgrade(conn, secret, &input_hash)
+        {
+            Ok((_, tag)) => tag.to_string(),
+            Err(err) => format!(
+                "upgrade_err={}",
+                err.to_string().chars().take(80).collect::<String>()
+            ),
+        };
+        let _ = tasks::complete_task(conn, &id, &outcome, &now);
         done += 1;
     }
     Ok(done)
+}
+
+/// Drain without a provider secret (deterministic cache only).
+pub fn drain_summary_flush_cached(conn: &Connection, owner: &str) -> Result<usize> {
+    drain_summary_flush(conn, owner, None)
+}
+
+
+fn load_summarization_secret() -> Option<crate::secrets::ProviderSecret> {
+    let auth = crate::secrets::AuthFile::load().ok()?;
+    let settings = crate::provider::SettingsFile::load().ok()?;
+    crate::provider::role_secret(&auth, &settings, "summarization").ok()
 }
 
 /// Background worker handle. Dropping / cancelling stops the loop.
@@ -218,8 +241,10 @@ impl WorkerPool {
                         continue;
                     };
                     let _ = tasks::migrate_tables(&conn);
-                    // Task leases (not the elected scheduler lease) serialize claim_next.
-                    let _ = drain_summary_flush_cached(&conn, &owner);
+                    // Best-effort: load summarization role secret when configured.
+                    // Never invents success when auth/settings/secret are missing.
+                    let secret = load_summarization_secret();
+                    let _ = drain_summary_flush(&conn, &owner, secret.as_ref());
                     std::thread::sleep(Duration::from_millis(750));
                 }
             })
@@ -328,5 +353,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "completed");
+        let result_ref: String = conn
+            .query_row(
+                "SELECT result_ref FROM argos_tasks WHERE id='task-s'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            result_ref.contains("cached_deterministic") || result_ref.contains("upgrade_err"),
+            "{result_ref}"
+        );
     }
 }

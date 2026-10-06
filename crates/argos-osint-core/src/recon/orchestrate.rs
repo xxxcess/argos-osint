@@ -2214,7 +2214,10 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
     if let Ok(Some(hit)) = crate::summarization::cache_get(&store.conn, &req) {
         return Ok(hit.content);
     }
-    Ok(compact_prior_synthesis(&latest.content))
+    let content = compact_prior_synthesis(&latest.content);
+    let det = crate::summarization::deterministic_follow_up(&content, PRIOR_SYNTHESIS_CHARS);
+    let _ = crate::summarization::publish_deterministic_and_enqueue(&store.conn, &req, det);
+    Ok(content)
 }
 
 

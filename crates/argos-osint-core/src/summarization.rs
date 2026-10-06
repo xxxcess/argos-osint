@@ -324,6 +324,78 @@ pub fn cache_put(conn: &Connection, req: &SummaryRequest, result: &SummaryResult
     Ok(())
 }
 
+/// Persist the full SummaryRequest so a worker can run live LLM upgrade later.
+pub fn persist_flush_request(conn: &Connection, req: &SummaryRequest) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS argos_summary_flush_requests (
+            cache_key TEXT PRIMARY KEY,
+            request_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    )?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO argos_summary_flush_requests(cache_key, request_json, created_at)
+         VALUES (?1,?2,?3)
+         ON CONFLICT(cache_key) DO UPDATE SET request_json=excluded.request_json, created_at=excluded.created_at",
+        params![req.cache_key(), serde_json::to_string(req)?, now],
+    )?;
+    Ok(())
+}
+
+pub fn load_flush_request(conn: &Connection, cache_key: &str) -> anyhow::Result<Option<SummaryRequest>> {
+    let row: Option<String> = conn
+        .query_row(
+            "SELECT request_json FROM argos_summary_flush_requests WHERE cache_key=?1",
+            [cache_key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match row {
+        Some(json) => Some(serde_json::from_str(&json)?),
+        None => None,
+    })
+}
+
+/// When a provider secret is present, run [`complete_summary`] (2-attempt policy)
+/// and refresh the cache. Without a secret, returns the deterministic/cached value
+/// and does **not** invent network success.
+pub fn try_live_summary_upgrade(
+    conn: &Connection,
+    secret: Option<&ProviderSecret>,
+    cache_key: &str,
+) -> anyhow::Result<(SummaryResult, &'static str)> {
+    let Some(req) = load_flush_request(conn, cache_key)? else {
+        anyhow::bail!("flush request missing for {cache_key}");
+    };
+    let cached = cache_get(conn, &req)?.unwrap_or_else(|| {
+        SummaryResult {
+            content: String::new(),
+            source_refs: Vec::new(),
+            source_hash: String::new(),
+            model: "deterministic".into(),
+            prompt_version: req.prompt_version.clone(),
+            coverage: CoverageMeta::default(),
+            fallback: true,
+        }
+    });
+    if !cached.fallback {
+        return Ok((cached, "already_upgraded"));
+    }
+    let Some(secret) = secret else {
+        return Ok((cached, "cached_deterministic_no_secret"));
+    };
+    let upgraded =
+        crate::brain_lance::block_on(complete_summary(secret, &req, cached.clone()));
+    cache_put(conn, &req, &upgraded)?;
+    let outcome = if upgraded.fallback {
+        "llm_fallback"
+    } else {
+        "llm_upgraded"
+    };
+    Ok((upgraded, outcome))
+}
+
 fn sha_hex(text: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -526,6 +598,7 @@ pub fn publish_deterministic_and_enqueue(
     deterministic: SummaryResult,
 ) -> anyhow::Result<SummaryResult> {
     cache_put(conn, req, &deterministic)?;
+    let _ = persist_flush_request(conn, req);
     let _ = enqueue_summary_flush(conn, req)?;
     Ok(deterministic)
 }
@@ -708,6 +781,31 @@ mod service_tests {
     use super::*;
     use crate::tasks::migrate_tables;
     use rusqlite::Connection;
+
+    #[test]
+    fn try_live_without_secret_keeps_deterministic() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_tables(&conn).unwrap();
+        let req = flush_request(
+            SummarizationMode::ToolObservation,
+            "call-1",
+            "1",
+            "tool digest",
+            "news",
+            200,
+        );
+        let det = deterministic_tool_observation(
+            "news",
+            "call-1",
+            "ok",
+            &serde_json::json!({"a": 1}),
+            200,
+        );
+        publish_deterministic_and_enqueue(&conn, &req, det).unwrap();
+        let (out, tag) = try_live_summary_upgrade(&conn, None, &req.cache_key()).unwrap();
+        assert!(out.fallback);
+        assert_eq!(tag, "cached_deterministic_no_secret");
+    }
 
     #[test]
     fn publish_enqueues_deduped_flush_task() {

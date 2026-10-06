@@ -10,6 +10,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -1272,14 +1273,185 @@ pub fn resumable(run: &AtlasRunRow) -> bool {
         && (cursor.phase == 5 || (cursor.phase == 4 && cursor.leg != "insights_done"))
 }
 
+/// Phase names shown as child jobs of an Atlas cycle.
+pub fn phase_title(phase: u8) -> &'static str {
+    match phase {
+        1 => "Latest headlines",
+        2 => "Local coverage",
+        3 => "Classify articles",
+        4 => "Extract and save insights",
+        _ => "Index and verify memories",
+    }
+}
+
+/// Registry tracking for one Atlas cycle: one canonical parent job per run
+/// (reused when the run resumes) and one child per phase. Completed phases
+/// are skipped by the cursor on resume, so their children are never re-run.
+#[derive(Debug)]
+pub struct AtlasJob {
+    db: std::path::PathBuf,
+    run_id: String,
+    job: Option<crate::job_registry::JobHandle>,
+    phase: Option<(u8, crate::job_registry::JobHandle)>,
+}
+
+impl AtlasJob {
+    fn new(db: &Path) -> Self {
+        Self {
+            db: db.to_path_buf(),
+            run_id: String::new(),
+            job: None,
+            phase: None,
+        }
+    }
+
+    fn start(&mut self, run_id: &str) {
+        use crate::job_registry::{begin_optional, job_for_run, JobSpec};
+        self.run_id = run_id.to_string();
+        let existing = rusqlite::Connection::open(&self.db)
+            .ok()
+            .and_then(|conn| job_for_run(&conn, "atlas_cycle", run_id).ok().flatten());
+        let mut spec = JobSpec::new(
+            "atlas",
+            "atlas_cycle",
+            format!("Atlas news cycle · {run_id}"),
+        )
+        .run(run_id)
+        .resource(format!("atlas:{run_id}"));
+        if let Some(id) = existing {
+            spec = spec.with_id(id);
+        }
+        self.job = begin_optional(&self.db, spec);
+    }
+
+    fn enter(&mut self, phase: u8) {
+        if self.phase.as_ref().map(|(n, _)| *n) == Some(phase) {
+            return;
+        }
+        if let Some((_, done)) = self.phase.take() {
+            done.finish(crate::job_registry::Finish::completed());
+        }
+        let Some(parent) = &self.job else {
+            return;
+        };
+        parent.phase(phase_title(phase), Some(phase as i64 - 1), Some(5));
+        let spec = crate::job_registry::JobSpec::new(
+            "atlas",
+            &format!("atlas_phase_{phase}"),
+            format!("Phase {phase} · {}", phase_title(phase)),
+        )
+        .with_id(format!("{}-p{phase}", parent.id()));
+        self.phase = parent.child(spec).ok().map(|child| (phase, child));
+    }
+
+    fn progress(&self, done: u32, total: u32) {
+        if let Some((phase, child)) = &self.phase {
+            child.phase(phase_title(*phase), Some(done as i64), Some(total as i64));
+        }
+    }
+
+    /// Canonical job id once the run is known.
+    pub fn job_id(&self) -> Option<String> {
+        self.job.as_ref().map(|job| job.id().to_string())
+    }
+
+    fn close(&mut self, outcome: crate::job_registry::Finish) {
+        use crate::job_registry::Finish;
+        if let Some((_, child)) = self.phase.take() {
+            child.finish(match &outcome {
+                Finish::Completed { .. } => Finish::completed(),
+                other => other.clone(),
+            });
+        }
+        if let Some(job) = self.job.take() {
+            job.finish(outcome);
+        }
+    }
+}
+
+/// Run one Atlas cycle, tracked as a registry job (see [`AtlasJob`]).
 pub async fn run_atlas<F>(
     input: RunInput<'_>,
-    mut emit: impl FnMut(AtlasEvent) + Send,
-    mut fetch: F,
+    emit: impl FnMut(AtlasEvent) + Send,
+    fetch: F,
 ) -> Result<Stop>
 where
     F: FnMut(HttpCall) -> FetchFut + Send,
 {
+    use crate::job_registry::Finish;
+    let db_path = input.db_path.to_path_buf();
+    let tracker = Arc::new(std::sync::Mutex::new(AtlasJob::new(&db_path)));
+    let progress = tracker.clone();
+    let mut emit = emit;
+    let tracked_emit = move |event: AtlasEvent| {
+        match &event {
+            AtlasEvent::InsightProgress { done, total } => {
+                if let Ok(job) = progress.lock() {
+                    job.progress(*done, *total);
+                }
+            }
+            AtlasEvent::MemoryProgress { indexed, required } => {
+                if let Ok(job) = progress.lock() {
+                    job.progress(*indexed, *required);
+                }
+            }
+            _ => {}
+        }
+        emit(event);
+    };
+    let result = run_atlas_inner(input, tracked_emit, fetch, &tracker).await;
+    let run_state = || {
+        let run_id = tracker.lock().ok()?.run_id.clone();
+        if run_id.is_empty() {
+            return None;
+        }
+        Store::open(&db_path)
+            .ok()?
+            .atlas_list_runs()
+            .ok()?
+            .into_iter()
+            .find(|run| run.id == run_id)
+            .map(|run| (run.state, run.note))
+    };
+    let outcome = match &result {
+        Ok(Stop::Paused) => Finish::Paused {
+            summary: "paused; resume continues from the saved cursor".into(),
+        },
+        Ok(Stop::Failed(message)) => Finish::failed("atlas", message.clone()),
+        Ok(Stop::Finished) => match run_state() {
+            Some((state, _)) if state == "completed" => Finish::completed(),
+            Some((state, note)) if state == "failed" => Finish::failed("atlas", note),
+            Some((state, note)) => Finish::Partial {
+                summary: if note.is_empty() {
+                    state
+                } else {
+                    format!("{state}: {note}")
+                },
+            },
+            None => Finish::completed(),
+        },
+        Err(err) => Finish::failed("error", format!("{err:#}")),
+    };
+    if let Ok(mut job) = tracker.lock() {
+        job.close(outcome);
+    }
+    result
+}
+
+async fn run_atlas_inner<F>(
+    input: RunInput<'_>,
+    mut emit: impl FnMut(AtlasEvent) + Send,
+    mut fetch: F,
+    job: &std::sync::Mutex<AtlasJob>,
+) -> Result<Stop>
+where
+    F: FnMut(HttpCall) -> FetchFut + Send,
+{
+    let track = |phase: u8| {
+        if let Ok(mut job) = job.lock() {
+            job.enter(phase);
+        }
+    };
     let RunInput {
         db_path,
         pause,
@@ -1327,6 +1499,9 @@ where
         )?;
         (id, cursor, RunStats::default())
     };
+    if let Ok(mut job) = job.lock() {
+        job.start(&run_id);
+    }
     if cursor.from.is_empty() {
         cursor.from = lookback_from();
     }
@@ -1357,6 +1532,7 @@ where
     };
 
     if cursor.phase <= 1 {
+        track(1);
         let providers = ["gnews", "newsdata"];
         let start = providers
             .iter()
@@ -1508,6 +1684,7 @@ where
     }
 
     if cursor.phase == 2 {
+        track(2);
         require_either(&keys.newsapi, &keys.newsapi_fallback, "NewsAPI key")?;
         require_either(&keys.currents, &keys.currents_fallback, "Currents API key")?;
         if stats.origins.is_empty() {
@@ -1666,6 +1843,7 @@ where
     }
 
     if cursor.phase == 3 {
+        track(3);
         let articles = store.atlas_list_articles(&run_id)?;
         if !articles.is_empty() && classifier.is_none() {
             emit(AtlasEvent::Note(
@@ -1730,6 +1908,7 @@ where
     }
 
     if cursor.phase == 4 && cursor.leg != "publish" {
+        track(4);
         if pause.load(Ordering::Relaxed) {
             return park(&store, &run_id, &cursor, &stats, &mut emit);
         }
@@ -1895,6 +2074,7 @@ where
     }
 
     if cursor.phase == 4 && cursor.leg == "publish" {
+        track(4);
         if pause.load(Ordering::Relaxed) {
             return park(&store, &run_id, &cursor, &stats, &mut emit);
         }
@@ -1944,6 +2124,7 @@ where
     }
 
     if cursor.phase == 5 {
+        track(5);
         if pause.load(Ordering::Relaxed) {
             return park(&store, &run_id, &cursor, &stats, &mut emit);
         }

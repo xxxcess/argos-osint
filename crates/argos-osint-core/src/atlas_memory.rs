@@ -1400,6 +1400,13 @@ mod tests {
             "the failed transaction rolled back"
         );
         assert_eq!((cursor.phase, cursor.leg.as_str()), (4, "publish"));
+        let jobs = cycle_jobs(&store);
+        assert_eq!(jobs.len(), 2, "{jobs:?}");
+        assert_eq!(
+            jobs[0].1, "failed",
+            "a failed publication never reads completed"
+        );
+        assert_eq!(jobs[1].1, "failed");
         drop(store);
 
         // Retry resumes the failed run from the saved payload; no new extraction.
@@ -1412,6 +1419,13 @@ mod tests {
         assert_eq!(state, "completed");
         assert_eq!((stats.memories.created, stats.memories.indexed), (2, 3));
         assert_eq!(atlas_memory_count(&store), 3);
+        let jobs = cycle_jobs(&store);
+        assert_eq!(
+            (jobs[0].1.as_str(), jobs[0].2),
+            ("completed", 2),
+            "{jobs:?}"
+        );
+        assert_eq!(jobs.len(), 3, "one parent, phases 4 and 5: {jobs:?}");
     }
 
     #[tokio::test]
@@ -1436,6 +1450,17 @@ mod tests {
             "memories visible without vectors"
         );
         assert_eq!(cursor.phase, 5);
+        // Jobs: one cycle job (partial) with the phase 4 and 5 children.
+        let jobs = cycle_jobs(&store);
+        assert_eq!(jobs.len(), 3, "{jobs:?}");
+        assert_eq!(jobs[0].1, "partial", "{jobs:?}");
+        assert_eq!(
+            &jobs[1..],
+            &[
+                (format!("{}-p4", jobs[0].0), "completed".into(), 1),
+                (format!("{}-p5", jobs[0].0), "partial".into(), 1),
+            ]
+        );
         drop(failing);
         // The background pool retries; once it has, the refresh reaches verified status.
         drop(store);
@@ -1445,6 +1470,34 @@ mod tests {
         let (state, _, stats, _) = run_state(&store);
         assert_eq!(state, "completed");
         assert_eq!((stats.memories.indexed, stats.memories.required), (3, 3));
+        // Retry reused the cycle job and only re-ran phase 5; the successful
+        // extraction phase was not repeated.
+        let jobs = cycle_jobs(&store);
+        assert_eq!(jobs.len(), 3, "{jobs:?}");
+        assert_eq!((jobs[0].1.as_str(), jobs[0].2), ("completed", 2));
+        assert_eq!(
+            &jobs[1..],
+            &[
+                (format!("{}-p4", jobs[0].0), "completed".into(), 1),
+                (format!("{}-p5", jobs[0].0), "completed".into(), 2),
+            ]
+        );
+    }
+
+    /// Atlas cycle jobs (parent first, then phase children): id, state, attempts.
+    fn cycle_jobs(store: &Store) -> Vec<(String, String, i64)> {
+        let mut stmt = store
+            .conn
+            .prepare(
+                "SELECT id, state, attempts_used FROM argos_jobs
+                 WHERE operation='atlas_cycle' OR operation LIKE 'atlas_phase_%'
+                 ORDER BY parent_id<>'', id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
     }
 
     #[tokio::test]

@@ -1126,8 +1126,15 @@ pub fn spawn_startup_reconciliation(db_path: std::path::PathBuf) -> bool {
         .name("argos-atlas-reconcile".into())
         .spawn(move || {
             if let Ok(store) = Store::open(&db_path) {
-                if run_repair_job(&store, 16, false).is_ok() {
-                    let _ = store.app_state_set(STARTUP_REPAIR_KEY, "done");
+                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_repair_job(&store, 16, false)
+                }));
+                match ran {
+                    Ok(Ok(_)) => {
+                        let _ = store.app_state_set(STARTUP_REPAIR_KEY, "done");
+                    }
+                    Ok(Err(_)) => {}
+                    Err(_) => mark_repair_interrupted(&store, "repair stopped by a panic"),
                 }
             }
             REPAIR_RUNNING.store(false, Ordering::SeqCst);

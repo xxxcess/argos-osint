@@ -258,6 +258,36 @@ fn ensure_file(path: &Path, url: &str) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("no parent for {}", path.display()))?;
     std::fs::create_dir_all(dir)?;
+    // Downloads are user-visible jobs when the default state root exists.
+    let registry_db = crate::paths::db_path();
+    let job = registry_db
+        .is_file()
+        .then(|| {
+            crate::job_registry::begin_optional(
+                &registry_db,
+                crate::job_registry::JobSpec::new(
+                    "brain",
+                    "model_download",
+                    format!(
+                        "Download embedding model file {}",
+                        path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+                    ),
+                )
+                .resource(url.to_string()),
+            )
+        })
+        .flatten();
+    let result = download_file(path, url);
+    if let Some(job) = job {
+        job.finish(match &result {
+            Ok(()) => crate::job_registry::Finish::completed(),
+            Err(err) => crate::job_registry::Finish::failed("download", format!("{err:#}")),
+        });
+    }
+    result
+}
+
+fn download_file(path: &Path, url: &str) -> Result<()> {
     let url = url.to_string();
     let bytes = crate::brain_lance::block_on(async move {
         let client = reqwest::Client::builder()

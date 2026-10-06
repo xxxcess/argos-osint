@@ -15,7 +15,7 @@ Work proceeds in the spec's §9 order, one phase per push. Status is honest:
 | 2 | Transactional outbox, revision-aware indexing, coverage receipts | **Done** | See phase 2 below; Recon moved onto the outbox in phase 4 |
 | 3 | Atlas extraction checkpoint, phase 5, truthful state/counts, repair/resume | **Done (core)** | See phase 3 below; TUI resume/repair buttons and Brain provenance are phase 5 |
 | 4 | Intel Recon / other memory mutation paths reuse publication + refresh | **Done** | See phase 4 below |
-| 5 | TUI: Brain refresh, read errors, Jobs/Logs views, renames, Related/Summary layout | Not started | Default worker pools are spawned by the TUI; phase 3 added the minimal Atlas hooks (memory reload on `MemoriesChanged`/`AtlasDone`, stored run state, phase-5 row); phase 4 added a 1 s `MemoryChangeWatcher` poll that reloads Brain memories after any committed change |
+| 5 | TUI: Brain refresh, read errors, Jobs/Logs views, renames, Related/Summary layout | **Partial (5a done)** | 5a (phase 5a below): Home order/renames, nine routes, System = hardware + paths, Jobs and Logs dashboards with job↔log navigation. 5b pending: Brain refresh preserving selection/filters, memory read-error states, claim/Recon detail layout (graph above, Related left, Summary right) with related navigation + Back, Repair Atlas memories / Resume buttons, Brain claim-detail screenshots |
 | 6 | Shared job registration for all async entry points | Not started | `enqueue_job_with` + `JobMeta` available |
 | 7 | Typed provider diagnostics, unified graph explanation, bounded transport, revision cache | Not started | |
 | 8 | CLI/README/docs/tests | Not started | |
@@ -223,6 +223,54 @@ served vector matches the new text (commit `ced3514`).
 - **Left as-is.** `ensure_memory_vectors`, the recall-path reconciliation, still writes Lance
   directly. It records revision states and is a self-healing reconciler, not a mutation path.
 
+### Phase 5a — what landed
+
+Phase 5 was split. 5a covers navigation, renames, System, Jobs and Logs; 5b covers Brain
+refresh/read errors, the claim/Recon detail layout with related navigation, and the Repair/Resume
+buttons.
+
+- **Home order and renames.** `ModuleId::ALL` is now Intel, Atlas, Brain, Recon, Jobs, Logs,
+  Osint, Providers, System. Home groups them as Applications (Intel, Atlas, Brain, Recon) and
+  System (Jobs, Logs, Tools, Models, System). `Osint` shows as "Tools" and `Providers` as
+  "Models". Internal ids, settings keys and stored values stay the same. Number keys 1–9, the
+  header tabs, palette, slash commands and help follow the same order. Old aliases (`osint`,
+  `providers`) still work next to the new `tools`, `models`, `jobs`, `logs`.
+- **Core read model `jobs_view.rs`.** `list_jobs` returns top-level jobs only: active non-service
+  work first, then everything else, service workers last. It filters by status, app and search.
+  Also `job_counts`, `job_detail` (children, a bounded task list, ≤20 attempts, retryable flag,
+  expired-events note), `retry_failed_tasks` (only failed INDEX/SUMMARY operations; resets
+  attempts, re-pends outbox rows, records `job.retry`), `event_counts` (with failures in the last
+  hour) and `event_apps`. `format_duration(None)` is "Unavailable". `Store` wrappers for these
+  plus `register_job`, `set_job_progress`, `record_event`, `list_events`, `prune_events` and
+  `clear_events`.
+- **Jobs dashboard (`tui/jobs.rs`).** Has its own selection (kept by job id across reloads),
+  scroll, detail scroll, status/app/search filters and counts. Wide terminals (≥100 cols) show the
+  table and detail side by side. Narrow terminals show one panel: Enter opens the detail, Esc
+  closes it. The table shows status, job, app, phase/progress, active, elapsed, attempts and a
+  log marker. Detail shows timestamps, timing (unknown values read "Unavailable"), resources,
+  latest error, phases/children, tasks and attempt history. Actions: View logs; Retry failed only
+  when retryable work exists; Open source only when the job resolves to an Atlas run or Recon
+  thread.
+- **Logs dashboard (`tui/logs.rs`).** Replaces the in-memory System event log. Reads durable
+  `argos_events` (24 h retention, pruned on the first dashboard tick) with its own selection,
+  folding, scroll, level/app/job/search filters and Follow. Selecting a row other than the newest
+  pauses Follow. Counts cover errors, warnings, info and failures in the last hour. Clear events
+  removes events only; jobs stay.
+- **Job↔log navigation.** In Jobs, `l` / View logs opens Logs filtered to the job and its
+  descendants, with Back / Esc returning to the same job. In Logs, `o` / Open job selects the
+  event's job, clearing any Jobs filters that would hide it. Both dashboards reload every second
+  while open (`tick_dashboards`). Otherwise only counts refresh, for the Logs error badge.
+- **System is hardware + paths.** It has a host pane, a paths pane (config and database always;
+  data, memory index, credentials and hardware cache only when present) and one Refresh hardware
+  button. `push_log_detail` (tool calls, settings saves, Atlas faults) now writes durable events.
+  The error badge moved from System to Logs on Home and in the header.
+- **Tests.** New TUI tests: `home_order_renames_and_nine_routes_agree`,
+  `jobs_dashboard_navigates_to_logs_and_back_and_logs_open_jobs`,
+  `system_shows_only_hardware_and_paths_and_logs_own_clear`. Existing log tests were rewritten
+  against durable events. The ignored `dump_phase5_screens` writes TestBackend cell dumps, and
+  `scripts/render_tui_cells.py` renders them to PNG (fixture data, not a live
+  run).
+
 ## §10 acceptance checks
 
 | # | Check | Status | Evidence / gap |
@@ -237,10 +285,10 @@ served vector matches the new text (commit `ced3514`).
 | 8 | Change/delete during indexing cannot overwrite newer/resurrect | **Done (core)** | `stale_work_cannot_overwrite_a_newer_revision`, `deletion_during_indexing_is_not_resurrected`, `text_changed_mid_index_write_reruns_on_the_new_revision` (fault-injected). Phase 4: Recon/Intel Recon/manual edits use the same revision-aware outbox (`recon_claims_and_deletions_use_the_durable_index_outbox`, `intel_recon_publishes_durably_with_provenance_and_no_atlas_receipt`, `memory_writes_and_their_outbox_rows_commit_together`) |
 | 9 | Historical repair | **Done (core)** | `repair_requeues_vectors_for_a_false_completed_cycle_without_rewriting_it`, `repair_restores_orphaned_links_from_the_checkpoint_and_respects_tombstones`, `repair_reports_missing_payload_and_unrecoverable_links_without_fabricating`, `repair_job_pages_resumably_and_records_job_progress`. User-triggered repair button / re-extraction action in the TUI: phase 5 |
 | 10 | Summary worker cannot claim Atlas/index tasks; two processes cannot own one attempt | **Done** | `summary_pool_never_claims_index_or_atlas_work`, `summary_worker_leaves_index_and_atlas_tasks_alone`, `two_processes_cannot_own_the_same_attempt_and_stale_owner_cannot_publish` |
-| 11 | Jobs timing/history for every async op | Partial | Durable timing + aggregate state (`job_timing_and_partial_aggregate_come_from_durable_tasks`); registration of all entry points and UI pending |
-| 12 | Job↔log navigation after restart; redaction | Partial | `argos_events` + redaction + job-descendant filter tested; navigation UI pending |
-| 13 | Home System category / nine routes | Not started | Phase 5 |
-| 14 | Tools/Models retain behavior; System hardware/paths only | Not started | Phase 5 |
+| 11 | Jobs timing/history for every async op | Partial | Jobs dashboard (5a) reads durable jobs/tasks/attempts: active-first ordering, state/app/search filters, counts, phase/progress, active/elapsed timing (unknown → "Unavailable", never 0), attempt history, latest error, Retry only for failed index/summary tasks (`jobs_list_active_first_with_counts_filters_detail_and_retry`, `timing_is_unavailable_not_zero_and_expired_event_detail_is_explained`). Registration of every async entry point is phase 6 |
+| 12 | Job↔log navigation after restart; redaction | **Done (UI)** | Logs read durable `argos_events` (24 h retention), so links survive restart. Jobs → `l`/View logs opens Logs filtered to the job and its descendants with Back; Logs → `o`/Open job selects the job (clears hiding Jobs filters). `jobs_dashboard_navigates_to_logs_and_back_and_logs_open_jobs`. Redaction from phase 1 |
+| 13 | Home System category / nine routes | **Done** | Home: Applications = Intel, Atlas, Brain, Recon; System = Jobs, Logs, Tools, Models, System; digits 1–9, palette, slash (old `osint`/`providers` plus `tools`/`models`/`jobs`/`logs`), header tabs and help agree (`home_order_renames_and_nine_routes_agree`). Renames are display-only: `ModuleId::Osint`/`Providers` and config keys unchanged |
+| 14 | Tools/Models retain behavior; System hardware/paths only | **Done** | System shows host hardware + paths (config, database always; data, memory index, credentials, hardware cache when they exist) and a single Refresh hardware action; event log and Clear moved to Logs (`system_shows_only_hardware_and_paths_and_logs_own_clear`). Tools/Models screens are unchanged apart from titles |
 | 15 | Targeted tests / CI gates | Partial | Per-phase runs recorded below; real local Lance fixture (fake embedder) used for exact id/revision checks |
 | 16–22 | Graph-summary diagnostics, budget, cache, retry | Not started | Phase 7 |
 | 23–26 | Claim/Recon layout, Related navigation | Not started | Phase 5 |
@@ -262,3 +310,7 @@ served vector matches the new text (commit `ced3514`).
   Lance write and the acknowledgement, Recon outbox/tombstone/deletion, Intel Recon provenance/no
   receipt). `ARGOS_EMBED=0 cargo test -p argos-osint-bin` → 59 passed. `cargo clippy --workspace
   --all-targets`: no new findings; all remaining findings were already on `main`.
+- Phase 5a: `ARGOS_EMBED=0 cargo test -p argos-osint-core --lib` → 422 passed, 0 failed, 5 ignored
+  (+2 `jobs_view`). `ARGOS_EMBED=0 cargo test -p argos-osint-bin` → 62 passed, 1 ignored (+3 new
+  TUI tests; the ignored one is the screenshot dump; old System-log tests rewritten for durable
+  Logs). `cargo clippy --workspace --all-targets`: no new findings.

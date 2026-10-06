@@ -1,6 +1,8 @@
 mod app;
 mod graph;
+mod jobs;
 mod land;
+mod logs;
 mod map;
 mod markdown;
 mod theme;

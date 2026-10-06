@@ -36,16 +36,24 @@ pub enum ModuleId {
     Recon,
     Brain,
     Atlas,
+    Jobs,
+    Logs,
+    /// Displayed as "Tools"; the internal id and config keys stay `osint`.
     Osint,
+    /// Displayed as "Models"; the internal id and config keys stay `providers`.
     Providers,
     System,
 }
 impl ModuleId {
-    pub const ALL: [Self; 7] = [
+    /// Home and numeric order: 1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs ·
+    /// 6 Logs · 7 Tools · 8 Models · 9 System.
+    pub const ALL: [Self; 9] = [
         Self::Intel,
         Self::Atlas,
         Self::Brain,
         Self::Recon,
+        Self::Jobs,
+        Self::Logs,
         Self::Osint,
         Self::Providers,
         Self::System,
@@ -59,8 +67,10 @@ impl ModuleId {
             Self::Recon => "Recon",
             Self::Brain => "Brain",
             Self::Atlas => "Atlas",
-            Self::Osint => "OSINT",
-            Self::Providers => "Providers",
+            Self::Jobs => "Jobs",
+            Self::Logs => "Logs",
+            Self::Osint => "Tools",
+            Self::Providers => "Models",
             Self::System => "System",
         }
     }
@@ -70,11 +80,20 @@ impl ModuleId {
             Self::Recon => "View and Manage Investigations",
             Self::Brain => "View and Manage Memories",
             Self::Atlas => "Global News Cycles",
+            Self::Jobs => "Background work, timing, and retries",
+            Self::Logs => "Events, failures, and diagnostics",
             Self::Osint => "Configure public lookup tools",
             Self::Providers => "Accounts and model defaults",
-            Self::System => "Hardware, paths, and event log",
+            Self::System => "Hardware and paths",
         }
     }
+}
+
+/// Where a job's "Open source" action leads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobSource {
+    AtlasRun(usize),
+    ReconThread(String),
 }
 
 /// Live pipeline, or the list of past runs.
@@ -121,7 +140,6 @@ pub struct Scrolls {
     pub memories: u16,
     pub tools: u16,
     pub detail: u16,
-    pub log: u16,
     pub atlas_feed: u16,
     pub atlas_runs: u16,
     pub atlas_news: u16,
@@ -176,18 +194,6 @@ pub struct PaletteItem {
     pub label: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct LogLine {
-    pub id: u64,
-    /// Unix seconds. Lines older than 24 hours are dropped.
-    pub created: u64,
-    pub at: String,
-    pub level: String,
-    pub text: String,
-    /// Full tool result. Empty lines stay a single row.
-    pub detail: String,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderPage {
     Grok,
@@ -240,6 +246,8 @@ pub enum FieldId {
     NewsDataFallback,
     CurrentsKey,
     CurrentsFallback,
+    JobsSearch,
+    LogsSearch,
     ReconProvider,
     ReconModel,
     PickerProvider,
@@ -284,7 +292,7 @@ impl DefaultsRole {
         }
     }
 
-    /// The settings key the System event log names when this role changes.
+    /// The settings key the Logs entry names when this role changes.
     pub fn settings_key(self) -> &'static str {
         match self {
             DefaultsRole::Recon => "defaults.recon",
@@ -396,7 +404,18 @@ pub enum ButtonId {
     IntelJobRetry,
     CreateMemory,
     BrainBack,
+    /// Logs: clear durable events only (jobs, results, memories are kept).
     ClearLog,
+    JobsStatus,
+    JobsApp,
+    JobsViewLogs,
+    JobsRetry,
+    JobsOpenSource,
+    LogsLevel,
+    LogsApp,
+    LogsFollow,
+    LogsOpenJob,
+    LogsBack,
     GrokSignIn,
     GrokCheck,
     OpenAISignIn,
@@ -421,8 +440,12 @@ pub enum Target {
     ChatHeader(usize),
     ChatBody(usize),
     BrainMark(usize),
-    /// One System event-log row. Clicking it folds the entry when it has a detail.
+    /// One Logs event row. Clicking it folds the entry when it has a detail.
     LogLine(usize),
+    /// One Jobs table row.
+    JobRow(usize),
+    /// The Jobs detail panel (scroll focus).
+    JobDetail,
     /// One Atlas headline in the live feed.
     AtlasFeed(usize),
     /// One past Atlas run in the history list.
@@ -569,11 +592,12 @@ pub struct App {
     pub chat_sel: usize,
     pub chat_follow: bool,
     pub overlay: Overlay,
-    pub log: Vec<LogLine>,
-    pub log_sel: usize,
-    pub log_open: HashSet<u64>,
-    pub log_browsing: bool,
-    log_seq: u64,
+    /// Logs dashboard (durable events).
+    pub logs: super::logs::LogsView,
+    /// Jobs dashboard.
+    pub jobs: super::jobs::JobsView,
+    /// Last dashboard refresh (throttles live updates).
+    dashboards_at: Option<Instant>,
     logged_calls: HashSet<String>,
     pub runs: Vec<recon::Run>,
     pub answer_memories: HashMap<String, Vec<Memory>>,
@@ -841,11 +865,9 @@ impl App {
             chat_sel: 0,
             chat_follow: chat_scroll == 0,
             overlay: Overlay::None,
-            log: Vec::new(),
-            log_sel: 0,
-            log_open: HashSet::new(),
-            log_browsing: false,
-            log_seq: 0,
+            logs: crate::tui::logs::LogsView::default(),
+            jobs: crate::tui::jobs::JobsView::default(),
+            dashboards_at: None,
             logged_calls: HashSet::new(),
             runs: Vec::new(),
             answer_memories: HashMap::new(),
@@ -969,8 +991,9 @@ impl App {
         Ok(app)
     }
 
+    /// Durable error events within retention (home badge, Logs header).
     pub fn error_count(&self) -> usize {
-        self.log.iter().filter(|line| line.level == "error").count()
+        self.logs.counts.error.max(0) as usize
     }
 
     pub fn running_thread(&self, id: &str) -> bool {
@@ -1002,42 +1025,129 @@ impl App {
         self.push_log_detail(level, text, "");
     }
 
+    /// Session log lines are durable events (Logs is their only view).
     fn push_log_detail(&mut self, level: &str, text: impl Into<String>, detail: impl Into<String>) {
-        self.prune_log();
-        let at_end = self.log.is_empty() || self.log_sel + 1 >= self.log.len();
-        self.log_seq = self.log_seq.saturating_add(1);
-        self.log.push(LogLine {
-            id: self.log_seq,
-            created: unix_now(),
-            at: log_stamp(),
-            level: level.into(),
-            text: text.into(),
-            detail: detail.into(),
-        });
-        if self.log.len() > 400 {
-            let extra = self.log.len() - 400;
-            for line in self.log.drain(0..extra) {
-                self.log_open.remove(&line.id);
-            }
+        let text = text.into();
+        let detail = detail.into();
+        let event = super::logs::session_event(level, &text, &detail);
+        if self.store.record_event(&event).is_ok() && level == "error" {
+            self.logs.counts.error += 1;
         }
-        if at_end || self.log_sel >= self.log.len() {
-            self.log_sel = self.log.len().saturating_sub(1);
+        if self.module == Some(ModuleId::Logs) {
+            self.dashboards_at = None;
         }
     }
 
-    /// Drops event-log lines older than 24 hours.
-    pub(crate) fn prune_log(&mut self) {
-        let now = unix_now();
-        let before = self.log.len();
-        self.log
-            .retain(|line| now.saturating_sub(line.created) < LOG_TTL_SECS);
-        if self.log.len() == before {
-            return;
+    /// Throttled live refresh for Jobs/Logs and the home error badge. Returns
+    /// true when something may have changed on screen.
+    pub(crate) fn tick_dashboards(&mut self) -> bool {
+        if self
+            .dashboards_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+        {
+            return false;
         }
-        let live: HashSet<u64> = self.log.iter().map(|line| line.id).collect();
-        self.log_open.retain(|id| live.contains(id));
-        if self.log_sel >= self.log.len() {
-            self.log_sel = self.log.len().saturating_sub(1);
+        let first = self.dashboards_at.is_none() && !self.logs.loaded;
+        self.dashboards_at = Some(Instant::now());
+        if first {
+            let _ = self.store.prune_events(super::logs::RETENTION_HOURS);
+        }
+        match self.module {
+            Some(ModuleId::Logs) => self.reload_logs(),
+            Some(ModuleId::Jobs) => self.reload_jobs(),
+            _ => self.logs.refresh_counts(&self.store),
+        }
+        true
+    }
+
+    pub(crate) fn reload_logs(&mut self) {
+        self.logs.reload(&self.store);
+        let (room, width) = super::logs::list_geometry(super::ui::body_rect(self));
+        self.logs.reveal(room, width);
+        let max = self.logs.scroll_max(room, width);
+        if self.logs.follow || self.logs.scroll > max {
+            self.logs.scroll = if self.logs.follow { max } else { self.logs.scroll.min(max) };
+        }
+    }
+
+    pub(crate) fn reload_jobs(&mut self) {
+        self.jobs.reload(&self.store);
+        let room = super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
+        super::jobs::reveal(&mut self.jobs, room);
+    }
+
+    /// Jobs → Logs prefiltered to the job and its descendants, keeping a
+    /// return path to the job.
+    fn view_job_logs(&mut self) -> Result<String> {
+        let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
+            return Ok("Select a job first".into());
+        };
+        self.logs.job = id.clone();
+        self.logs.back_to_job = Some(id.clone());
+        self.logs.follow = true;
+        self.logs.open.clear();
+        self.select(ModuleId::Logs.index());
+        Ok(format!("Logs for job {}", super::logs::short_id(&id)))
+    }
+
+    /// Logs → Jobs for a job id (selected event's job, or the return path).
+    fn open_job(&mut self, id: &str) -> Result<String> {
+        self.select(ModuleId::Jobs.index());
+        if self.jobs.focus_job(&self.store, id) {
+            let room = super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
+            super::jobs::reveal(&mut self.jobs, room);
+            self.set_focus(Target::JobRow(self.jobs.sel));
+            Ok(format!("Job {}", super::logs::short_id(id)))
+        } else {
+            Ok(format!(
+                "Job {} is no longer in history",
+                super::logs::short_id(id)
+            ))
+        }
+    }
+
+    fn leave_logs_to_job(&mut self) -> bool {
+        let Some(id) = self.logs.back_to_job.take() else {
+            return false;
+        };
+        self.logs.job.clear();
+        let opened = self.open_job(&id);
+        self.report(opened);
+        true
+    }
+
+    /// Where "Open source" leads for the selected job, when it is resolvable.
+    pub(crate) fn job_source(&self) -> Option<JobSource> {
+        let job = self.jobs.selected()?;
+        if job.app == "atlas" && !job.run_ref.is_empty() {
+            let index = self.atlas_runs.iter().position(|run| run.id == job.run_ref)?;
+            return Some(JobSource::AtlasRun(index));
+        }
+        let thread = job
+            .resource_ref
+            .strip_prefix("thread:")
+            .or_else(|| (job.app == "recon").then_some(job.run_ref.as_str()))
+            .filter(|id| !id.is_empty())?;
+        self.threads
+            .iter()
+            .any(|t| t.id == thread)
+            .then(|| JobSource::ReconThread(thread.to_string()))
+    }
+
+    fn open_job_source(&mut self) -> Result<String> {
+        match self.job_source() {
+            Some(JobSource::AtlasRun(index)) => {
+                self.select(ModuleId::Atlas.index());
+                self.atlas_run_sel = index.min(self.atlas_runs.len().saturating_sub(1));
+                self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
+                Ok("Atlas cycle".into())
+            }
+            Some(JobSource::ReconThread(id)) => {
+                self.select(ModuleId::Recon.index());
+                self.open_thread_with_history(&id, true)?;
+                Ok("Investigation".into())
+            }
+            None => Ok("This job has no source to open".into()),
         }
     }
 
@@ -1057,8 +1167,10 @@ impl App {
             ("recon", "Open Recon"),
             ("brain", "Open Brain"),
             ("atlas", "Open Atlas"),
-            ("osint", "Open OSINT"),
-            ("providers", "Open Providers"),
+            ("jobs", "Open Jobs"),
+            ("logs", "Open Logs"),
+            ("tools", "Open Tools (osint)"),
+            ("models", "Open Models (providers)"),
             ("system", "Open System"),
             ("new", "New investigation"),
             ("sessions", "Investigation list"),
@@ -1067,7 +1179,7 @@ impl App {
             ("resume", "Resume remaining steps"),
             ("insights", "Toggle recall"),
             ("create-memory", "Create memory"),
-            ("clear-log", "Clear event log"),
+            ("clear-log", "Clear events in Logs"),
         ];
         items.retain(|(id, label)| {
             query.is_empty() || id.contains(&query) || label.to_ascii_lowercase().contains(&query)
@@ -1100,8 +1212,10 @@ impl App {
             "recon" => self.select(ModuleId::Recon.index()),
             "brain" => self.select(ModuleId::Brain.index()),
             "atlas" => self.select(ModuleId::Atlas.index()),
-            "osint" => self.select(ModuleId::Osint.index()),
-            "providers" => self.select(ModuleId::Providers.index()),
+            "jobs" => self.select(ModuleId::Jobs.index()),
+            "logs" => self.select(ModuleId::Logs.index()),
+            "tools" | "osint" => self.select(ModuleId::Osint.index()),
+            "models" | "providers" => self.select(ModuleId::Providers.index()),
             "system" => self.select(ModuleId::System.index()),
             "new" => {
                 let created = self.new_thread().map(|_| "New investigation".into());
@@ -1125,7 +1239,10 @@ impl App {
                 self.select(ModuleId::Brain.index());
                 self.activate_button(ButtonId::CreateMemory);
             }
-            "clear-log" => self.activate_button(ButtonId::ClearLog),
+            "clear-log" => {
+                self.select(ModuleId::Logs.index());
+                self.activate_button(ButtonId::ClearLog);
+            }
             _ => {}
         }
     }
@@ -1169,14 +1286,17 @@ impl App {
                 self.go_home();
                 Ok("Home".into())
             }
-            "brain" | "atlas" | "osint" | "providers" | "system" | "recon" | "intel" => {
+            "brain" | "atlas" | "osint" | "providers" | "tools" | "models" | "jobs" | "logs"
+            | "system" | "recon" | "intel" => {
                 let index = match name.as_str() {
                     "intel" => ModuleId::Intel.index(),
                     "atlas" => ModuleId::Atlas.index(),
                     "brain" => ModuleId::Brain.index(),
                     "recon" => ModuleId::Recon.index(),
-                    "osint" => ModuleId::Osint.index(),
-                    "providers" => ModuleId::Providers.index(),
+                    "jobs" => ModuleId::Jobs.index(),
+                    "logs" => ModuleId::Logs.index(),
+                    "tools" | "osint" => ModuleId::Osint.index(),
+                    "models" | "providers" => ModuleId::Providers.index(),
                     _ => ModuleId::System.index(),
                 };
                 self.select(index);
@@ -1234,6 +1354,15 @@ impl App {
             self.intel_page = IntelPage::Bulletin;
             self.load_intel();
         }
+        if self.module == Some(ModuleId::Logs) {
+            self.reload_logs();
+            self.dashboards_at = Some(Instant::now());
+        }
+        if self.module == Some(ModuleId::Jobs) {
+            self.atlas_runs = self.store.atlas_list_runs().unwrap_or_default();
+            self.reload_jobs();
+            self.dashboards_at = Some(Instant::now());
+        }
         self.status = format!("{} open", ModuleId::ALL[index].title());
         self.set_focus(match self.module {
             Some(ModuleId::Intel) if !self.intel_articles.is_empty() => {
@@ -1249,6 +1378,10 @@ impl App {
             Some(ModuleId::Atlas) => Target::Button(ButtonId::AtlasLive),
             Some(ModuleId::Osint) => Target::Field(FieldId::OsintSearch),
             Some(ModuleId::Providers) => Target::ProviderTab(self.provider_page),
+            Some(ModuleId::Jobs) if !self.jobs.rows.is_empty() => Target::JobRow(self.jobs.sel),
+            Some(ModuleId::Jobs) => Target::Field(FieldId::JobsSearch),
+            Some(ModuleId::Logs) if !self.logs.rows.is_empty() => Target::LogLine(self.logs.sel),
+            Some(ModuleId::Logs) => Target::Field(FieldId::LogsSearch),
             _ => Target::Button(ButtonId::RefreshHardware),
         });
     }
@@ -1261,6 +1394,8 @@ impl App {
             FieldId::BrainQuery => &self.brain_query,
             FieldId::ReconSearch => &self.recon_search,
             FieldId::IntelSearch => &self.intel_search,
+            FieldId::JobsSearch => &self.jobs.search,
+            FieldId::LogsSearch => &self.logs.search,
             FieldId::OsintSearch => &self.osint_search,
             FieldId::OsintInput => &self.osint_input,
             FieldId::FirecrawlKey => &self.firecrawl_key,
@@ -1303,6 +1438,8 @@ impl App {
             FieldId::BrainQuery => &mut self.brain_query,
             FieldId::ReconSearch => &mut self.recon_search,
             FieldId::IntelSearch => &mut self.intel_search,
+            FieldId::JobsSearch => &mut self.jobs.search,
+            FieldId::LogsSearch => &mut self.logs.search,
             FieldId::OsintSearch => &mut self.osint_search,
             FieldId::OsintInput => &mut self.osint_input,
             FieldId::FirecrawlKey => &mut self.firecrawl_key,
@@ -1343,7 +1480,6 @@ impl App {
         {
             self.flush_draft();
         }
-        self.log_browsing = false;
         self.focus = target;
         self.cursor = match target {
             Target::Field(field) => self.field(field).chars().count(),
@@ -3923,11 +4059,72 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             ButtonId::AtlasDelete => self.delete_atlas_run(),
             ButtonId::ClearLog => {
-                self.log.clear();
-                self.log_open.clear();
-                self.log_sel = 0;
-                self.push_log("info", "Event log cleared");
-                Ok("Event log cleared".into())
+                // Scope: durable events only. Jobs, task results and memories stay.
+                let cleared = self.store.clear_events();
+                self.logs.open.clear();
+                self.logs.scroll = 0;
+                self.logs.follow = true;
+                self.push_log("info", "Events cleared (jobs, results, and memories kept)");
+                self.reload_logs();
+                cleared.map(|n| format!("Cleared {n} events"))
+            }
+            ButtonId::JobsStatus => {
+                self.jobs.cycle_status();
+                self.reload_jobs();
+                Ok(format!("Status: {}", self.jobs.status.label()))
+            }
+            ButtonId::JobsApp => {
+                self.jobs.cycle_app();
+                self.reload_jobs();
+                Ok("Jobs filtered".into())
+            }
+            ButtonId::JobsViewLogs => self.view_job_logs(),
+            ButtonId::JobsRetry => {
+                let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
+                    return;
+                };
+                let retried = self.store.retry_failed_tasks(&id);
+                self.reload_jobs();
+                retried.map(|n| {
+                    if n == 0 {
+                        "Nothing to retry".into()
+                    } else {
+                        format!("Retrying {n} failed task(s)")
+                    }
+                })
+            }
+            ButtonId::JobsOpenSource => self.open_job_source(),
+            ButtonId::LogsLevel => {
+                self.logs.level = self.logs.level.next();
+                self.reload_logs();
+                Ok(format!("Level: {}", self.logs.level.label()))
+            }
+            ButtonId::LogsApp => {
+                self.logs.cycle_app();
+                self.reload_logs();
+                Ok("Logs filtered".into())
+            }
+            ButtonId::LogsFollow => {
+                self.logs.follow = !self.logs.follow;
+                self.reload_logs();
+                Ok(format!(
+                    "Live follow {}",
+                    if self.logs.follow { "on" } else { "off" }
+                ))
+            }
+            ButtonId::LogsOpenJob => {
+                let Some(job) = self.logs.selected().map(|row| row.job_id.clone()) else {
+                    return;
+                };
+                if job.is_empty() {
+                    Ok("This event has no job".into())
+                } else {
+                    self.open_job(&job)
+                }
+            }
+            ButtonId::LogsBack => {
+                self.leave_logs_to_job();
+                return;
             }
             ButtonId::OsintAttach => {
                 let Some((call_id, _)) = &self.osint_result else {
@@ -4101,7 +4298,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     /// Saves one role's provider and model. Only `settings.toml` changes; credentials
-    /// stay where they are. The change is recorded in the System event log.
+    /// stay where they are. The change is recorded in Logs.
     fn save_role(&mut self, role: DefaultsRole) -> Result<String> {
         let provider = self.field(role.provider_field()).trim().to_string();
         let model = self.field(role.model_field()).trim().to_string();
@@ -4483,13 +4680,18 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.open_intel_briefing();
             }
             Target::LogLine(index) => {
-                if self.log.is_empty() {
+                if self.logs.rows.is_empty() {
                     return;
                 }
-                self.log_sel = index.min(self.log.len() - 1);
-                self.log_browsing = true;
+                self.logs.select(index);
+                self.set_focus(Target::LogLine(self.logs.sel));
                 self.toggle_log();
             }
+            Target::JobRow(index) => {
+                self.jobs.select(index, &self.store);
+                self.set_focus(Target::JobRow(self.jobs.sel));
+            }
+            Target::JobDetail => self.set_focus(Target::JobDetail),
             Target::Choice(index) if self.overlay == Overlay::Palette => {
                 if let Some(id) = self.palette_items().get(index).map(|item| item.id.clone()) {
                     self.run_palette(&id);
@@ -4597,6 +4799,12 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         if self.focus == Target::Field(FieldId::IntelSearch) && self.module == Some(ModuleId::Intel)
         {
             self.load_intel();
+        }
+        if self.focus == Target::Field(FieldId::LogsSearch) {
+            self.reload_logs();
+        }
+        if self.focus == Target::Field(FieldId::JobsSearch) {
+            self.reload_jobs();
         }
     }
 
@@ -4979,11 +5187,18 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             KeyCode::Char(c)
                 if !self.field_focused()
                     && key.modifiers.is_empty()
-                    && matches!(c, '1' | '2' | '3' | '4' | '5' | '6' | '7') =>
+                    && c.is_ascii_digit()
+                    && c != '0' =>
             {
-                // Home-order apps: 1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 OSINT · 6 Providers · 7 System
+                // Home order: 1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs ·
+                // 7 Tools · 8 Models · 9 System
                 self.select((c as u8 - b'1') as usize);
             }
+            KeyCode::Char(c)
+                if !self.field_focused()
+                    && key.modifiers.is_empty()
+                    && matches!(self.module, Some(ModuleId::Logs) | Some(ModuleId::Jobs))
+                    && self.dashboard_key(c) => {}
             KeyCode::Char(c) if self.module.is_none() && matches!(c, 'j' | 'k') => {
                 self.move_vertical(if c == 'j' { 1 } else { -1 });
             }
@@ -5109,6 +5324,20 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.show_atlas_world();
             return;
         }
+        if self.module == Some(ModuleId::Logs) && self.leave_logs_to_job() {
+            return;
+        }
+        if self.module == Some(ModuleId::Jobs)
+            && (self.jobs.detail_open || self.focus == Target::JobDetail)
+        {
+            self.jobs.detail_open = false;
+            self.set_focus(if self.jobs.rows.is_empty() {
+                Target::Field(FieldId::JobsSearch)
+            } else {
+                Target::JobRow(self.jobs.sel)
+            });
+            return;
+        }
         if self.module == Some(ModuleId::Atlas) && self.atlas_page == AtlasPage::Live {
             self.atlas_page = AtlasPage::Runs;
             self.atlas_news = false;
@@ -5142,22 +5371,23 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     fn toggle_log(&mut self) {
-        let Some(line) = self.log.get(self.log_sel) else {
-            return;
-        };
-        if line.detail.is_empty() {
-            return;
+        if self.logs.toggle_open() {
+            let (room, width) = super::logs::list_geometry(super::ui::body_rect(self));
+            self.logs.reveal(room, width);
         }
-        let id = line.id;
-        if !self.log_open.insert(id) {
-            self.log_open.remove(&id);
-        }
-        super::ui::reveal_log(self);
     }
 
     fn on_enter(&mut self) {
-        if self.module == Some(ModuleId::System) && self.log_browsing {
+        if self.module == Some(ModuleId::Logs) && matches!(self.focus, Target::LogLine(_)) {
             self.toggle_log();
+            return;
+        }
+        if self.module == Some(ModuleId::Jobs) && matches!(self.focus, Target::JobRow(_)) {
+            // Narrow layouts swap the table for the detail; wide ones focus it.
+            if super::ui::body_rect(self).width < super::jobs::WIDE {
+                self.jobs.detail_open = true;
+            }
+            self.set_focus(Target::JobDetail);
             return;
         }
         match self.focus {
@@ -5189,6 +5419,24 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
     }
 
+    /// Single-key dashboard shortcuts (not typing in a field). Returns true
+    /// when the key was handled.
+    fn dashboard_key(&mut self, c: char) -> bool {
+        let button = match (self.module, c) {
+            (Some(ModuleId::Logs), 'f') => ButtonId::LogsFollow,
+            (Some(ModuleId::Logs), 'o') if self.logs.selected().is_some_and(|r| !r.job_id.is_empty()) => {
+                ButtonId::LogsOpenJob
+            }
+            (Some(ModuleId::Logs), 'v') => ButtonId::LogsLevel,
+            (Some(ModuleId::Jobs), 'l') if self.jobs.selected().is_some() => ButtonId::JobsViewLogs,
+            (Some(ModuleId::Jobs), 'r') if self.jobs.can_retry() => ButtonId::JobsRetry,
+            (Some(ModuleId::Jobs), 's') => ButtonId::JobsStatus,
+            _ => return false,
+        };
+        self.activate_button(button);
+        true
+    }
+
     fn field_focused(&self) -> bool {
         matches!(self.focus, Target::Field(_))
     }
@@ -5216,6 +5464,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             Target::Memory(_) => self.move_memory(delta),
             Target::Tool(_) => self.move_tool(delta),
+            Target::LogLine(_) => self.move_log(delta),
+            Target::JobRow(_) => self.move_job(delta),
+            Target::JobDetail => {
+                self.jobs.detail_scroll = add_scroll(self.jobs.detail_scroll, delta);
+            }
             _ => match self.module {
                 None => self.move_home(delta),
                 Some(ModuleId::Brain) if self.brain_list_mode == BrainListMode::Create => {}
@@ -5228,9 +5481,9 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                         .min(max);
                 }
                 Some(ModuleId::Intel) => self.move_intel(delta),
-                Some(ModuleId::System) => {
-                    super::ui::move_system_log(self, delta);
-                }
+                Some(ModuleId::System) => {}
+                Some(ModuleId::Logs) => self.move_log(delta),
+                Some(ModuleId::Jobs) => self.move_job(delta),
                 Some(ModuleId::Recon) if self.recon_chat => super::ui::move_chat(self, delta),
                 Some(ModuleId::Recon) => self.move_thread(delta),
                 Some(ModuleId::Providers) => {
@@ -5238,6 +5491,26 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 }
             },
         }
+    }
+
+    fn move_log(&mut self, delta: i32) {
+        if self.logs.rows.is_empty() {
+            return;
+        }
+        self.logs.move_by(delta);
+        let (room, width) = super::logs::list_geometry(super::ui::body_rect(self));
+        self.logs.reveal(room, width);
+        self.set_focus(Target::LogLine(self.logs.sel));
+    }
+
+    fn move_job(&mut self, delta: i32) {
+        if self.jobs.rows.is_empty() {
+            return;
+        }
+        self.jobs.move_by(delta, &self.store);
+        let room = super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
+        super::jobs::reveal(&mut self.jobs, room);
+        self.set_focus(Target::JobRow(self.jobs.sel));
     }
 
     fn move_home(&mut self, delta: i32) {
@@ -5504,16 +5777,6 @@ fn add_scroll(value: u16, delta: i32) -> u16 {
     (i32::from(value) + delta).clamp(0, i32::from(u16::MAX)) as u16
 }
 
-fn log_stamp() -> String {
-    let secs = unix_now();
-    format!(
-        "{:02}:{:02}:{:02}Z",
-        (secs / 3600) % 24,
-        (secs / 60) % 60,
-        secs % 60
-    )
-}
-
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5521,7 +5784,6 @@ pub(crate) fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-const LOG_TTL_SECS: u64 = 24 * 60 * 60;
 const ATLAS_AUTO_SECS: u64 = 90 * 60;
 
 fn atlas_countdown_visible(app: &App) -> bool {
@@ -5615,6 +5877,9 @@ pub async fn run(mut app: App) -> Result<()> {
     let mut dirty = true;
     loop {
         if pump(&mut app) {
+            dirty = true;
+        }
+        if app.tick_dashboards() {
             dirty = true;
         }
         if memory_polled.elapsed() >= Duration::from_secs(1) {
@@ -5858,11 +6123,9 @@ mod tests {
             chat_sel: 0,
             chat_follow: true,
             overlay: Overlay::None,
-            log: Vec::new(),
-            log_sel: 0,
-            log_open: HashSet::new(),
-            log_browsing: false,
-            log_seq: 0,
+            logs: crate::tui::logs::LogsView::default(),
+            jobs: crate::tui::jobs::JobsView::default(),
+            dashboards_at: None,
             logged_calls: HashSet::new(),
             runs: Vec::new(),
             answer_memories: HashMap::new(),
@@ -6378,10 +6641,9 @@ mod tests {
         assert_eq!(app.settings.defaults.synthesis.model, "openrouter/free");
         assert_eq!(app.recon_model, "grok-4.6");
         assert_eq!(app.synthesis_model, "openrouter/free");
-        assert!(app
-            .log
+        assert!(events(&app)
             .iter()
-            .any(|line| line.text.starts_with("defaults.tool_picker:")));
+            .any(|line| line.message.starts_with("defaults.tool_picker:")));
         let saved = std::fs::read_to_string(&app.settings_path).unwrap();
         assert!(saved.contains("[defaults.tool_picker]"), "{saved}");
         assert!(saved.contains("typesafe/jev-1.13"));
@@ -6788,17 +7050,40 @@ mod tests {
         assert!(app.expanded.contains(&key));
     }
 
+    fn events(app: &App) -> Vec<argos_osint_core::events::EventRow> {
+        let mut rows = app
+            .store
+            .list_events(&Default::default(), 500)
+            .unwrap();
+        rows.reverse();
+        rows
+    }
+
     #[test]
-    fn system_log_records_errors_and_scrolls() {
+    fn logs_record_errors_durably_and_scroll() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 80, 24);
         for index in 0..40 {
             app.push_log("error", format!("lookup failed {index}"));
         }
+        assert_eq!(app.error_count(), 40, "home badge counts durable errors");
+        app.select(ModuleId::Logs.index());
+        assert_eq!(app.logs.rows.len(), 40);
+        assert!(app.logs.follow);
+        assert_eq!(app.logs.sel, 39, "live follow selects the newest event");
+        let bottom = app.logs.scroll;
+        assert!(bottom > 0, "follow keeps the newest event in view");
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert!(app.logs.scroll < bottom);
+        // System no longer shows or routes the event log.
         app.select(ModuleId::System.index());
-        assert_eq!(app.error_count(), 40);
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(app.scrolls.log > 0);
+        assert_eq!(
+            super::super::ui::focus_order(&app)
+                .into_iter()
+                .filter(|t| matches!(t, Target::Button(_)))
+                .collect::<Vec<_>>(),
+            vec![Target::Button(ButtonId::RefreshHardware)]
+        );
     }
 
     #[test]
@@ -6834,15 +7119,12 @@ mod tests {
         });
         app.note_finished_calls();
         app.note_finished_calls();
-        let logged: Vec<_> = app
-            .log
-            .iter()
-            .filter(|line| !line.detail.is_empty())
-            .collect();
+        let all = events(&app);
+        let logged: Vec<_> = all.iter().filter(|line| !line.details.is_empty()).collect();
         assert_eq!(logged.len(), 1);
-        assert!(logged[0].text.contains("cache"));
-        assert!(logged[0].text.contains("2 results"));
-        assert!(logged[0].detail.contains("Jane Roe role"));
+        assert!(logged[0].message.contains("cache"));
+        assert!(logged[0].message.contains("2 results"));
+        assert!(logged[0].details.contains("Jane Roe role"));
         app.module = Some(ModuleId::Recon);
         app.recon_chat = true;
         app.expanded.insert("tool:call-s1".into());
@@ -6851,7 +7133,7 @@ mod tests {
             .find(|block| block.key == "tool:call-s1")
             .expect("tool row")
             .body;
-        assert!(body.contains("System event log"));
+        assert!(body.contains("Full result is in Logs"));
         assert!(body.contains("cache"));
         assert!(body.contains("query: Jane Roe"));
         assert!(!body.contains("Jane Roe role"));
@@ -6861,36 +7143,364 @@ mod tests {
             .expect("tool row")
             .title;
         assert!(title.contains("query=Jane Roe"), "{title}");
-        app.select(ModuleId::System.index());
+        app.select(ModuleId::Logs.index());
         let index = app
-            .log
+            .logs
+            .rows
             .iter()
-            .position(|line| !line.detail.is_empty())
+            .position(|line| !line.details.is_empty())
             .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.log_sel = index;
-        let id = app.log[index].id;
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.logs.select(index);
+        app.set_focus(Target::LogLine(index));
+        let id = app.logs.rows[index].id.clone();
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.log_open.contains(&id));
+        assert!(app.logs.open.contains(&id));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(!app.log_open.contains(&id));
+        assert!(!app.logs.open.contains(&id));
     }
 
     #[test]
-    fn event_log_entries_expire_after_a_day_and_a_click_folds_the_arrow() {
+    fn a_click_folds_an_event_and_incoming_entries_do_not_move_a_paused_list() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 100, 40);
         app.push_log_detail("info", "old lookup", "detail line");
-        app.log[0].created = unix_now().saturating_sub(LOG_TTL_SECS + 60);
         app.push_log_detail("info", "fresh lookup", "fresh detail");
-        app.prune_log();
-        assert_eq!(app.log.len(), 1);
-        assert!(app.log[0].text.contains("fresh"));
+        app.select(ModuleId::Logs.index());
+        let index = app
+            .logs
+            .rows
+            .iter()
+            .position(|row| row.message == "old lookup")
+            .unwrap();
+        let id = app.logs.rows[index].id.clone();
+        click(&mut app, Target::LogLine(index));
+        assert!(app.logs.open.contains(&id));
+        assert!(!app.logs.follow, "selecting an older event pauses follow");
+        app.push_log("info", "incoming while reading");
+        app.dashboards_at = None;
+        app.tick_dashboards();
+        assert_eq!(app.logs.selected().unwrap().id, id, "selection kept by id");
+        assert!(app.logs.open.contains(&id));
+        let sel = app.logs.sel;
+        click(&mut app, Target::LogLine(sel));
+        assert!(!app.logs.open.contains(&id));
+    }
+
+    fn render(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        app.screen = Rect::new(0, 0, width, height);
+        super::super::ui::normalize(app);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, app))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = buffer.area;
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn register(app: &App, id: &str, app_name: &str, title: &str) {
+        app.store
+            .register_job(
+                &argos_osint_core::tasks::NewJob {
+                    id: id.into(),
+                    kind: "user".into(),
+                    owner_scope: String::new(),
+                    input_revision: String::new(),
+                    deadline_at: String::new(),
+                },
+                &argos_osint_core::tasks::JobMeta {
+                    app: app_name.into(),
+                    operation: "test".into(),
+                    title: title.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    fn job_event(app: &App, job: &str, app_name: &str, severity: &str, message: &str, details: &str) {
+        app.store
+            .record_event(&argos_osint_core::events::NewEvent {
+                severity: Some(argos_osint_core::events::Severity::parse(severity)),
+                app: app_name.into(),
+                event_type: "test".into(),
+                message: message.into(),
+                details: details.into(),
+                job_id: job.into(),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn home_order_renames_and_nine_routes_agree() {
+        let rows = super::super::ui::home_rows(Rect::new(0, 0, 140, 50), 3);
+        type Group = (String, Vec<(String, String, usize)>);
+        let mut groups: Vec<Group> = Vec::new();
+        for row in rows {
+            match row.kind {
+                super::super::ui::HomeKind::Heading(title) => groups.push((title.into(), Vec::new())),
+                super::super::ui::HomeKind::Item { title, detail } => {
+                    if let Some(group) = groups.last_mut() {
+                        group.1.push((title, detail, row.target.unwrap()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let titles = |name: &str| -> Vec<String> {
+            groups
+                .iter()
+                .find(|(title, _)| title == name)
+                .unwrap()
+                .1
+                .iter()
+                .map(|(title, _, _)| title.clone())
+                .collect()
+        };
+        assert_eq!(titles("Applications"), ["Intel", "Atlas", "Brain", "Recon"]);
+        assert_eq!(titles("System"), ["Jobs", "Logs", "Tools", "Models", "System"]);
+        let all: Vec<usize> = groups.iter().flat_map(|g| g.1.iter().map(|i| i.2)).collect();
+        assert_eq!(all, (0..9).collect::<Vec<_>>(), "home targets follow numeric order");
+        let logs = &groups[1].1[1];
+        assert!(logs.1.contains("3 errors"), "error badge moved to Logs: {logs:?}");
+        assert!(!groups[1].1[4].1.contains("errors"));
+        // Display renames keep internal ids.
+        assert_eq!(ModuleId::Osint.title(), "Tools");
+        assert_eq!(ModuleId::Providers.title(), "Models");
+        assert_eq!(ModuleId::System.blurb(), "Hardware and paths");
+        // 1–9 from home.
+        for (index, module) in ModuleId::ALL.iter().enumerate() {
+            let mut app = app();
+            let digit = char::from(b'1' + index as u8);
+            app.handle_key(KeyEvent::new(KeyCode::Char(digit), KeyModifiers::NONE));
+            assert_eq!(app.module, Some(*module), "digit {digit}");
+        }
+        // Palette and slash aliases, old and new.
+        let mut app = app();
+        for (alias, module) in [
+            ("tools", ModuleId::Osint),
+            ("osint", ModuleId::Osint),
+            ("models", ModuleId::Providers),
+            ("providers", ModuleId::Providers),
+            ("jobs", ModuleId::Jobs),
+            ("logs", ModuleId::Logs),
+            ("system", ModuleId::System),
+        ] {
+            app.go_home();
+            app.run_palette(alias);
+            assert_eq!(app.module, Some(module), "palette {alias}");
+            app.go_home();
+            app.run_slash(&format!("/{alias}")).unwrap();
+            assert_eq!(app.module, Some(module), "slash {alias}");
+        }
+        let ids: Vec<String> = app.palette_items().into_iter().map(|i| i.id).collect();
+        for id in ["jobs", "logs", "tools", "models", "system", "clear-log"] {
+            assert!(ids.contains(&id.to_string()), "{id}");
+        }
+        // Help and the header agree with the order.
+        app.go_home();
+        app.overlay = Overlay::Help;
+        let mut app2 = app;
+        let text = buffer_text(&render(&mut app2, 160, 40));
+        assert!(text.contains("1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools"), "{text}");
+        assert!(text.contains("Models · 9 System"));
+        app2.overlay = Overlay::None;
+        app2.select(ModuleId::Jobs.index());
+        let header = buffer_text(&render(&mut app2, 160, 40));
+        let first = header.lines().next().unwrap();
+        let order = ["Intel", "Atlas", "Brain", "Recon", "Jobs", "Logs", "Tools", "Models", "System"];
+        let positions: Vec<usize> = order.iter().map(|label| first.find(label).unwrap()).collect();
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{first}");
+    }
+
+    #[test]
+    fn jobs_dashboard_navigates_to_logs_and_back_and_logs_open_jobs() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        register(&app, "job-a", "atlas", "Atlas news cycle");
+        app.store
+            .set_job_progress("job-a", "running", "Index and verify memories", 3, Some(5), "")
+            .unwrap();
+        register(&app, "job-b", "atlas", "Repair Atlas memories");
+        app.store
+            .set_job_progress("job-b", "completed", "done", 4, Some(4), "")
+            .unwrap();
+        job_event(&app, "job-a", "atlas", "info", "phase 5 started", "");
+        job_event(&app, "", "recon", "warn", "unrelated", "");
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+        assert_eq!(app.jobs.rows[0].id, "job-a", "active work first");
+        assert_eq!(app.focus, Target::JobRow(0));
+        assert!(app.jobs.detail.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.jobs.selected().unwrap().id, "job-b");
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains("Index and verify memories"), "{text}");
+        assert!(text.contains("View logs"));
+        assert!(!text.contains("Retry failed"), "no misleading Retry");
+
+        // Jobs → Logs prefiltered to the job, with a return path.
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Logs));
+        assert_eq!(app.logs.job, "job-a");
+        let messages: Vec<&str> = app.logs.rows.iter().map(|r| r.message.as_str()).collect();
+        assert_eq!(messages, ["phase 5 started"]);
+        app.set_focus(Target::LogLine(0));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+        assert_eq!(app.jobs.selected().unwrap().id, "job-a");
+        assert!(app.logs.job.is_empty() && app.logs.back_to_job.is_none());
+
+        // Logs → job for an event that carries one, even with Jobs filtered.
+        app.jobs.status = argos_osint_core::jobs_view::JobStatusFilter::Completed;
+        app.select(ModuleId::Logs.index());
+        assert_eq!(app.logs.rows.len(), 2, "unfiltered Logs keep app events");
+        let index = app.logs.rows.iter().position(|r| r.job_id == "job-a").unwrap();
+        click(&mut app, Target::LogLine(index));
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+        assert_eq!(app.jobs.selected().unwrap().id, "job-a");
+
+        // Narrow terminals switch to a single-panel detail.
+        app.screen = Rect::new(0, 0, 80, 30);
+        app.set_focus(Target::JobRow(app.jobs.sel));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.jobs.detail_open);
+        let narrow = buffer_text(&render(&mut app, 80, 30));
+        assert!(narrow.contains("detail") && !narrow.contains("Repair Atlas memories"), "{narrow}");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.jobs.detail_open);
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+    }
+
+    #[test]
+    fn system_shows_only_hardware_and_paths_and_logs_own_clear() {
+        let mut app = app();
         app.select(ModuleId::System.index());
-        click(&mut app, Target::LogLine(0));
-        assert!(app.log_open.contains(&app.log[0].id));
-        click(&mut app, Target::LogLine(0));
-        assert!(!app.log_open.contains(&app.log[0].id));
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("Refresh hardware"));
+        assert!(text.contains(" host ") && text.contains(" paths "));
+        assert!(text.contains("Database:") && text.contains("Config:"));
+        assert!(!text.contains("event log") && !text.contains("Clear"), "{text}");
+        click(&mut app, Target::Button(ButtonId::RefreshHardware));
+        assert_eq!(app.status, "Hardware refreshed");
+
+        register(&app, "job-c", "brain", "Graph summary");
+        job_event(&app, "job-c", "brain", "error", "summary failed", "HTTP 503");
+        app.select(ModuleId::Logs.index());
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("Clear events") && text.contains("kept 24 h"), "{text}");
+        click(&mut app, Target::Button(ButtonId::ClearLog));
+        assert!(app.status.starts_with("Cleared"), "{}", app.status);
+        assert!(
+            app.store.get_job("job-c").unwrap().is_some(),
+            "clearing events keeps jobs"
+        );
+    }
+
+    /// Writes cell dumps of the phase-5 screens for PNG rendering:
+    /// `ARGOS_SCREEN_DIR=/workspace/screens/atlas-memory cargo test -p argos-osint-bin dump_phase5_screens -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_phase5_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = app();
+        register(&app, "job-atlas-0412", "atlas", "Atlas news cycle · 04:12");
+        app.store
+            .set_job_progress("job-atlas-0412", "running", "Index and verify memories", 41, Some(57), "")
+            .unwrap();
+        register(&app, "job-intel-77", "intel", "Intel Recon · Full assessment");
+        register(&app, "job-graph-19", "brain", "Graph summary · Northwind ferry");
+        app.store
+            .set_job_progress(
+                "job-graph-19",
+                "failed",
+                "explanation",
+                1,
+                Some(2),
+                "provider HTTP 503: upstream unavailable after 2 attempts",
+            )
+            .unwrap();
+        register(&app, "atlas-memory-repair", "atlas", "Repair Atlas memories");
+        app.store
+            .set_job_progress("atlas-memory-repair", "completed", "done", 12, Some(12), "")
+            .unwrap();
+        let _ = app.store.add_memory(
+            "Harbor tanker manifests list cargo",
+            "fact",
+            false,
+            MemorySource {
+                app: "test".into(),
+                conversation_id: "c".into(),
+                message_id: None,
+                reference: None,
+            },
+        );
+        job_event(&app, "job-atlas-0412", "atlas", "info", "Atlas: phase 4 published 57 memories (12 created, 45 reused)", "");
+        job_event(&app, "job-atlas-0412", "atlas", "info", "Atlas: phase 5 indexing 41/57 verified", "");
+        job_event(&app, "job-graph-19", "brain", "error", "Graph summary failed: provider HTTP 503", "stage: stream\nattempt 1: HTTP 503 upstream unavailable\nattempt 2: HTTP 503 upstream unavailable\nfallback: basic graph explanation");
+        job_event(&app, "", "recon", "info", "Recon turn complete", "");
+        job_event(&app, "", "atlas", "warn", "Atlas: GNews rate limit reached (HTTP 429)", "");
+        job_event(&app, "atlas-memory-repair", "atlas", "info", "Repair Atlas memories: 12 runs checked, 3 vectors requeued", "");
+        let mut shots: Vec<(&str, u16, u16)> = Vec::new();
+        let mut save = |app: &mut App, name: &str, width: u16, height: u16| {
+            let buffer = render(app, width, height);
+            let mut cells = Vec::new();
+            for y in 0..height {
+                let mut row = Vec::new();
+                for x in 0..width {
+                    let cell = &buffer[(x, y)];
+                    row.push(serde_json::json!({
+                        "s": cell.symbol(),
+                        "fg": format!("{:?}", cell.fg),
+                        "bg": format!("{:?}", cell.bg),
+                        "b": cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                        "u": cell.modifier.contains(ratatui::style::Modifier::UNDERLINED),
+                    }));
+                }
+                cells.push(row);
+            }
+            let json = serde_json::json!({"width": width, "height": height, "cells": cells});
+            std::fs::write(format!("{dir}/{name}.json"), json.to_string()).unwrap();
+            shots.push(("", width, height));
+        };
+        app.logs.refresh_counts(&app.store);
+        save(&mut app, "home", 140, 42);
+        app.select(ModuleId::Jobs.index());
+        save(&mut app, "jobs", 140, 40);
+        let failed = app.jobs.rows.iter().position(|r| r.id == "job-graph-19").unwrap();
+        click(&mut app, Target::JobRow(failed));
+        save(&mut app, "jobs-failed", 140, 40);
+        app.screen = Rect::new(0, 0, 80, 30);
+        app.set_focus(Target::JobRow(app.jobs.sel));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        save(&mut app, "jobs-narrow-detail", 80, 30);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.select(ModuleId::Logs.index());
+        let index = app.logs.rows.iter().position(|r| r.message.starts_with("Graph summary failed")).unwrap();
+        click(&mut app, Target::LogLine(index));
+        save(&mut app, "logs", 140, 40);
+        app.select(ModuleId::System.index());
+        click(&mut app, Target::Button(ButtonId::RefreshHardware));
+        save(&mut app, "system", 140, 40);
+        assert!(!shots.is_empty());
     }
 
     #[test]
@@ -7907,17 +8517,15 @@ mod tests {
         app.on_work_event(WorkEvent::Atlas(atlas::AtlasEvent::Note(
             "GNews rate limit reached (HTTP 429). The free tier allows 100 requests a day.".into(),
         )));
-        assert!(app
-            .log
-            .iter()
-            .any(|line| { line.level == "error" && line.text.contains("rate limit") }));
+        assert!(events(&app).iter().any(|line| {
+            line.severity == "error" && line.app == "atlas" && line.message.contains("rate limit")
+        }));
         app.on_work_event(WorkEvent::Atlas(atlas::AtlasEvent::Note(
             "newsapi daily quota is spent".into(),
         )));
-        assert!(app
-            .log
+        assert!(events(&app)
             .iter()
-            .any(|line| { line.level == "info" && line.text.contains("quota") }));
+            .any(|line| { line.severity == "info" && line.message.contains("quota") }));
         let body = "{\n  \"status\": \"error\",\n  \"results\": {\n    \"message\": \"Access Denied! To use the latest endpoint you must upgrade.\"\n  }\n}";
         app.on_work_event(WorkEvent::Atlas(atlas::AtlasEvent::Fault(
             atlas::ProviderFault {
@@ -7927,28 +8535,22 @@ mod tests {
                 body: body.into(),
             },
         )));
-        let logged = app
-            .log
-            .iter()
-            .find(|line| line.text.contains("HTTP 422"))
+        let logged = events(&app)
+            .into_iter()
+            .find(|line| line.message.contains("HTTP 422"))
             .expect("fault line");
-        assert!(logged.detail.contains("you must upgrade"));
-        assert!(!logged.detail.is_empty());
-        app.module = Some(ModuleId::System);
-        app.log_sel = app
-            .log
+        assert!(logged.details.contains("you must upgrade"));
+        app.select(ModuleId::Logs.index());
+        let index = app
+            .logs
+            .rows
             .iter()
-            .position(|line| line.text.contains("HTTP 422"))
+            .position(|line| line.message.contains("HTTP 422"))
             .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.log_sel = app
-            .log
-            .iter()
-            .position(|line| line.text.contains("HTTP 422"))
-            .unwrap();
-        let id = app.log[app.log_sel].id;
+        app.logs.select(index);
+        app.set_focus(Target::LogLine(index));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.log_open.contains(&id));
+        assert!(app.logs.open.contains(&logged.id));
     }
 
     #[test]

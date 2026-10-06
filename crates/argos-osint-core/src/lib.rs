@@ -12,6 +12,7 @@ pub mod evidence;
 pub mod hardware;
 pub mod intel_recon;
 pub mod iso3166;
+pub mod jobs_view;
 pub mod osint;
 pub mod paths;
 pub mod pipeline;

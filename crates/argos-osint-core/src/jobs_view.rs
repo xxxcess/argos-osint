@@ -108,6 +108,10 @@ pub struct JobRow {
     pub attempt_rows: i64,
     /// Earliest start of an attempt that is still open (`""` when none).
     pub open_attempt_started: String,
+    /// Registry jobs: start of the running span ('' when not running).
+    pub active_since: String,
+    pub cancel_requested: bool,
+    pub cancellable: bool,
 }
 
 impl JobRow {
@@ -152,6 +156,15 @@ impl JobRow {
                 .map(|start| (now - start).num_milliseconds().max(0))
                 .unwrap_or(0);
             return Some(self.active_ms.unwrap_or(0) + open);
+        }
+        // Registry jobs: durable active time of earlier spans plus the live span.
+        if let Some(since) = parse(&self.active_since) {
+            return Some(self.active_ms.unwrap_or(0) + (now - since).num_milliseconds().max(0));
+        }
+        if self.kind == crate::job_registry::KIND {
+            if let Some(stored) = self.active_ms {
+                return Some(stored);
+            }
         }
         if let Some(stored) = self.active_ms.filter(|ms| *ms > 0) {
             return Some(stored);
@@ -269,7 +282,8 @@ const JOB_COLUMNS: &str =
     (SELECT COUNT(*) FROM argos_attempts a JOIN argos_tasks t ON t.id = a.task_id
         WHERE t.job_id = j.id),
     IFNULL((SELECT MIN(a.started_at) FROM argos_attempts a JOIN argos_tasks t ON t.id = a.task_id
-        WHERE t.job_id = j.id AND a.finished_at = ''), '')";
+        WHERE t.job_id = j.id AND a.finished_at = ''), ''),
+    j.active_since, j.cancel_requested, j.cancellable";
 
 fn job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
     Ok(JobRow {
@@ -307,6 +321,9 @@ fn job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         events: r.get(31)?,
         attempt_rows: r.get(32)?,
         open_attempt_started: r.get(33)?,
+        active_since: r.get(34)?,
+        cancel_requested: r.get(35)?,
+        cancellable: r.get(36)?,
     })
 }
 

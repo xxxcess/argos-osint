@@ -485,6 +485,11 @@ pub fn migrate_additive(conn: &Connection) -> Result<()> {
             ("error_category", "TEXT NOT NULL DEFAULT ''"),
             ("error_summary", "TEXT NOT NULL DEFAULT ''"),
             ("correlation_id", "TEXT NOT NULL DEFAULT ''"),
+            // In-process registry (phase 6): start of the current running span,
+            // cooperative cancellation request, and whether Cancel is safe.
+            ("active_since", "TEXT NOT NULL DEFAULT ''"),
+            ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+            ("cancellable", "INTEGER NOT NULL DEFAULT 0"),
         ],
     )?;
     add_missing_columns(
@@ -619,6 +624,13 @@ pub fn migrate_additive(conn: &Connection) -> Result<()> {
             job_id TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS argos_processes (
+            owner TEXT PRIMARY KEY,
+            pid INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS argos_jobs_owner_state ON argos_jobs(worker_owner, state);
         CREATE TABLE IF NOT EXISTS argos_memory_index_state (
             memory_id TEXT PRIMARY KEY,
             revision TEXT NOT NULL,

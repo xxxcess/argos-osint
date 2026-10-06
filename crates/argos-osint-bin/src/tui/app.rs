@@ -4348,11 +4348,18 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 if let Some(index) = self.logs.rows.iter().position(|row| row.id == failure.event_id) {
                     self.logs.select(index);
                     self.logs.open.insert(failure.event_id.clone());
+                    Ok(format!(
+                        "Logs for job {}",
+                        super::logs::short_id(&failure.job_id)
+                    ))
+                } else {
+                    // Events expire after the retention window; the job row and
+                    // the saved diagnostic (View details) keep the error summary.
+                    Ok(format!(
+                        "Log detail for job {} has expired (24 h retention) · the job keeps its error summary; Brain → View details keeps the cause chain",
+                        super::logs::short_id(&failure.job_id)
+                    ))
                 }
-                Ok(format!(
-                    "Logs for job {}",
-                    super::logs::short_id(&failure.job_id)
-                ))
             }
             ButtonId::SummaryJob => self.open_job(&failure.job_id),
             ButtonId::SummaryRetry => {
@@ -8621,6 +8628,15 @@ mod tests {
         assert_eq!(app.module, Some(ModuleId::Logs));
         assert_eq!(app.logs.job, failure.job_id);
         assert_eq!(app.logs.selected().map(|r| r.id.clone()), Some(failure.event_id.clone()));
+
+        // After the events expire (simulated by clearing them), the link says
+        // so; the job and the saved diagnostic keep the error summary.
+        app.store.clear_events().unwrap();
+        app.activate_button(ButtonId::SummaryLogs);
+        assert!(app.status.contains("expired"), "{}", app.status);
+        let rec = app.store.graph_explanation_record(&fx.ids[0]).unwrap().unwrap();
+        assert_eq!(rec.state, "failed");
+        assert!(rec.diagnostic_json.contains("invalid_api_key"));
 
         // Open Models focuses the Summarization role.
         app.activate_button(ButtonId::SummaryModels);

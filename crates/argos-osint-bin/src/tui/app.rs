@@ -4053,9 +4053,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     /// otherwise. Late results for another request or memory are dropped.
     fn request_related(&mut self, request: u64, memory_id: &str) {
         let limits = RelatedLimits::default();
-        if tokio::runtime::Handle::try_current().is_ok() {
+        if let (Ok(_), Some(db)) = (tokio::runtime::Handle::try_current(), tracked::db_path()) {
             let tx = self.work_tx.clone();
-            let db = paths::db_path();
             let memory_id = memory_id.to_string();
             tokio::task::spawn_blocking(move || {
                 let outcome = Store::open(&db)
@@ -4233,7 +4232,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             Gate::Ready => {}
         }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let (Ok(runtime), Some(db)) = (tokio::runtime::Handle::try_current(), tracked::db_path())
+        else {
             self.graph_summary = self.summary_body(memory, "");
             self.status = "Graph summary unavailable: no background runtime".into();
             return;
@@ -4249,7 +4249,6 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             "Writing graph summary…".into()
         };
         let tx = self.work_tx.clone();
-        let db = paths::db_path();
         runtime.spawn(async move {
             let opts = argos_osint_core::summarization::ExecOptions::for_secret(&secret);
             let report = ge::explain(&db, &secret, &req, &opts, ge::Faults::default()).await;
@@ -8508,6 +8507,216 @@ mod tests {
         }
         let json = serde_json::json!({"width": width, "height": height, "cells": cells});
         std::fs::write(format!("{dir}/{name}.json"), json.to_string()).unwrap();
+    }
+
+    /// Phase 7 fixture: a claim memory whose Summarization role points at a
+    /// scripted local provider; jobs/events go to the test database.
+    struct SummaryFx {
+        _dir: tempfile::TempDir,
+        db: std::path::PathBuf,
+        rt: tokio::runtime::Runtime,
+        server: argos_osint_core::provider_attempt::mock::Server,
+        ids: Vec<String>,
+    }
+
+    fn summary_fixture(app: &mut App, script: Vec<argos_osint_core::provider_attempt::mock::Reply>) -> SummaryFx {
+        use argos_osint_core::provider_attempt::mock;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        app.store = Store::open(&db).unwrap();
+        super::super::tracked::testing::use_db(Some(db.clone()));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = rt.block_on(mock::serve(script));
+        app.auth.set_account(mock::secret(&server.base_url));
+        app.settings.defaults.summarization = argos_osint_core::provider::ModelAssignment {
+            provider: "openrouter".into(),
+            model: "mock-model".into(),
+        };
+        let ids = claim_fixture(app);
+        app.select(ModuleId::Brain.index());
+        app.reload_memories();
+        SummaryFx {
+            _dir: dir,
+            db,
+            rt,
+            server,
+            ids,
+        }
+    }
+
+    /// Pump work events until the pending graph summary settles.
+    fn settle_summary(app: &mut App, fx: &SummaryFx) {
+        for _ in 0..400 {
+            fx.rt.block_on(tokio::time::sleep(Duration::from_millis(25)));
+            pump(app);
+            if app.graph_summary_pending.is_none() {
+                return;
+            }
+        }
+        panic!("graph summary never finished: {}", app.status);
+    }
+
+    fn graph_jobs(fx: &SummaryFx) -> Vec<(String, String, String)> {
+        Store::open(&fx.db).unwrap().graph_explanation_jobs(&fx.ids[0]).unwrap()
+    }
+
+    const AUTH_401: &str = r#"{"error":{"message":"Incorrect API key provided: sk-mocksecretvalue12345","code":"invalid_api_key"}}"#;
+
+    #[test]
+    fn brain_summary_failure_card_explains_links_and_retries_in_place() {
+        use argos_osint_core::provider_attempt::mock::Reply;
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let fx = summary_fixture(&mut app, vec![Reply::Json(401, AUTH_401.into())]);
+        let _enter = fx.rt.enter();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        settle_summary(&mut app, &fx);
+        let failure = app.summary_failure.clone().expect("failure card");
+        assert!(failure.needs_config, "{failure:?}");
+        assert!(failure.guidance.as_deref().unwrap_or("").contains("Providers"));
+        assert_eq!(fx.server.hits(), 1, "auth errors are not retried");
+        assert!(!failure.event_id.is_empty() && !failure.job_id.is_empty());
+        assert!(app.graph_summary.contains(argos_osint_core::graph_explanation::BASIC_HEADING));
+        let text = buffer_text(&render(&mut app, 140, 40));
+        for want in ["AI summary failed", "View details", "View logs", "View job", "Retry summary", "Open Models"] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
+        assert!(!text.contains("sk-mocksecretvalue12345"));
+        assert!(!text.contains("Leave and open"));
+        let order = super::super::ui::focus_order(&app);
+        assert!(order.contains(&Target::Button(ButtonId::SummaryRetry)));
+
+        click(&mut app, Target::Button(ButtonId::SummaryDetails));
+        assert!(app.summary_details_open);
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains("Stage: response"), "{text}");
+        assert!(text.contains("HTTP 401"), "{text}");
+
+        // Reopening inside the cooldown shows the saved failure; no new job or request.
+        app.leave_brain_detail();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        assert!(app.graph_summary_pending.is_none());
+        assert!(app.summary_failure.as_ref().is_some_and(|f| f.from_record));
+        assert_eq!((graph_jobs(&fx).len(), fx.server.hits()), (1, 1));
+
+        // Retry: fresh budget, linked to the failed job, without leaving Brain.
+        render(&mut app, 140, 40);
+        click(&mut app, Target::Button(ButtonId::SummaryRetry));
+        assert_eq!(app.module, Some(ModuleId::Brain));
+        settle_summary(&mut app, &fx);
+        let jobs = graph_jobs(&fx);
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[1].2, jobs[0].0, "retry correlates to the failed job");
+        assert_eq!(fx.server.hits(), 2);
+        assert_eq!(app.module, Some(ModuleId::Brain));
+
+        // View logs: filtered to the job, failure event selected.
+        let failure = app.summary_failure.clone().unwrap();
+        render(&mut app, 140, 40);
+        click(&mut app, Target::Button(ButtonId::SummaryLogs));
+        assert_eq!(app.module, Some(ModuleId::Logs));
+        assert_eq!(app.logs.job, failure.job_id);
+        assert_eq!(app.logs.selected().map(|r| r.id.clone()), Some(failure.event_id.clone()));
+
+        // Open Models focuses the Summarization role.
+        app.activate_button(ButtonId::SummaryModels);
+        assert_eq!(app.module, Some(ModuleId::Providers));
+        assert_eq!(app.provider_page, ProviderPage::Defaults);
+        assert_eq!(app.defaults_role, DefaultsRole::Summarization);
+
+        // View job opens the failed job in Jobs.
+        app.activate_button(ButtonId::SummaryJob);
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+        assert_eq!(app.jobs.selected().map(|j| j.id.clone()), Some(failure.job_id.clone()));
+
+        // The memory is untouched.
+        assert!(app.store.get_memory(&fx.ids[0]).unwrap().is_some());
+        super::super::tracked::testing::use_db(None);
+    }
+
+    #[test]
+    fn saved_summary_is_reused_until_its_inputs_change_then_shown_as_earlier() {
+        use argos_osint_core::provider_attempt::mock::{ok_json, Reply};
+        let good = "## Northwind **halted** Baltic crossings\n\nTwo Baltic Wire articles state the halt.";
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let fx = summary_fixture(&mut app, vec![ok_json(good, "stop"), Reply::Json(503, "{}".into())]);
+        let _enter = fx.rt.enter();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        settle_summary(&mut app, &fx);
+        assert_eq!(app.graph_summary, good);
+        assert!(app.summary_failure.is_none());
+        // Reopen: valid cache, no request.
+        app.leave_brain_detail();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        assert_eq!((app.graph_summary.as_str(), fx.server.hits()), (good, 1));
+        // Change the memory text: the old summary is only an earlier result.
+        let memory = app.store.get_memory(&fx.ids[0]).unwrap().unwrap();
+        app.store
+            .update_memory(&memory.id, &format!("{} (revised)", memory.text), &memory.category, memory.pinned)
+            .unwrap();
+        app.leave_brain_detail();
+        app.reload_memories();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        assert!(app.graph_summary.contains("Earlier result"), "{}", app.graph_summary);
+        settle_summary(&mut app, &fx);
+        assert!(app.summary_failure.is_some());
+        assert!(app.graph_summary.contains("Earlier result") && app.graph_summary.contains("Baltic Wire"));
+        assert_eq!(fx.server.hits(), 3, "503 retried once: 1 + 2 requests");
+        super::super::tracked::testing::use_db(None);
+    }
+
+    #[test]
+    fn late_summary_completions_are_ignored() {
+        use argos_osint_core::graph_explanation::{ExplainOutcome, ExplainReport};
+        let mut app = app();
+        app.graph_summary_request = "req-new".into();
+        app.graph_summary_pending = Some("m1".into());
+        let stale = ExplainReport {
+            request_id: "req-old".into(),
+            memory_id: "m1".into(),
+            job_id: "job-old".into(),
+            cache_key: String::new(),
+            outcome: ExplainOutcome::Saved("old text that must not appear".into()),
+            attempts: Vec::new(),
+            admission_wait_ms: 0,
+            fallback_reason: None,
+            event_id: String::new(),
+            logging_error: None,
+        };
+        assert!(!app.on_graph_summary(stale));
+        assert_eq!(app.graph_summary_pending.as_deref(), Some("m1"));
+        assert!(!app.graph_summary.contains("old text"));
+    }
+
+    /// Cell dumps of the Brain summary failure card for PNG rendering.
+    #[test]
+    #[ignore]
+    fn dump_phase7_screens() {
+        use argos_osint_core::provider_attempt::mock::Reply;
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let fx = summary_fixture(&mut app, vec![Reply::Json(401, AUTH_401.into())]);
+        let _enter = fx.rt.enter();
+        app.brain_query = "engine fire".into();
+        app.reload_memories();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        settle_summary(&mut app, &fx);
+        assert!(app.summary_failure.is_some());
+        render(&mut app, 140, 40);
+        app.set_focus(Target::Button(ButtonId::SummaryRetry));
+        dump_cells(&mut app, &dir, "brain-summary-failure", 140, 40);
+        click(&mut app, Target::Button(ButtonId::SummaryDetails));
+        dump_cells(&mut app, &dir, "brain-summary-failure-details", 140, 40);
+        super::super::tracked::testing::use_db(None);
     }
 
     #[test]

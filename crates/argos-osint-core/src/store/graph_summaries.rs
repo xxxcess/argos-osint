@@ -226,6 +226,20 @@ impl Store {
         put_record(&self.conn, rec)
     }
 
+    /// Graph explanation executions for one memory, oldest first:
+    /// `(job id, state, correlation id)`. Retries correlate to the failed job.
+    pub fn graph_explanation_jobs(&self, memory_id: &str) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, state, correlation_id FROM argos_jobs
+             WHERE operation='graph_explanation' AND run_ref=?1
+             ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map([format!("graph:{memory_id}")], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Current state of a registry job (`running`, `failed`, …).
     pub fn job_state(&self, job_id: &str) -> Result<Option<String>> {
         Ok(self

@@ -24,6 +24,11 @@ fn db() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Database for operations that register their own jobs (graph explanations).
+pub fn db_path() -> Option<std::path::PathBuf> {
+    db()
+}
+
 /// Register and start a job; `None` when the registry is unavailable.
 pub fn begin(spec: JobSpec) -> Option<JobHandle> {
     job_registry::begin_optional(&db()?, spec)

@@ -167,13 +167,21 @@ pub fn button_cells(
 ) -> Vec<(ButtonId, &'static str, Rect)> {
     let ids = actions(failure);
     let width = area.width as usize;
-    let total = |short: bool| -> usize {
-        ids.iter()
-            .map(|id| label(*id, details_open, short).chars().count() + 4)
-            .sum::<usize>()
-            .saturating_sub(1)
+    // Rows needed when laid out greedily with long or short labels.
+    let rows = |short: bool| -> usize {
+        let (mut rows, mut used) = (1usize, 0usize);
+        for id in &ids {
+            let w = label(*id, details_open, short).chars().count() + 4;
+            if used > 0 && used + 1 + w > width {
+                rows += 1;
+                used = 0;
+            }
+            used += if used > 0 { w + 1 } else { w };
+        }
+        rows
     };
-    let short = total(false) > width;
+    // Full labels unless they would need more than two rows.
+    let short = rows(false) > 2;
     let mut out = Vec::new();
     let (mut x, mut y) = (area.x, area.y);
     for id in ids {

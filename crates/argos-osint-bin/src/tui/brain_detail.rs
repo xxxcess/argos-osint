@@ -399,6 +399,18 @@ pub fn draw_nav(frame: &mut Frame, app: &App, areas: &DetailAreas, claim: bool) 
     );
 }
 
+/// The injected read failure, if any (always `None` outside tests).
+pub fn read_fault() -> Option<String> {
+    #[cfg(test)]
+    {
+        testing::read_fault()
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
 /// Test hook: make Brain memory list reads fail on this thread.
 #[cfg(test)]
 pub mod testing {
@@ -414,17 +426,5 @@ pub mod testing {
 
     pub fn read_fault() -> Option<String> {
         READ_FAULT.with(|fault| fault.borrow().clone())
-    }
-}
-
-/// The injected read failure, if any (always `None` outside tests).
-pub fn read_fault() -> Option<String> {
-    #[cfg(test)]
-    {
-        testing::read_fault()
-    }
-    #[cfg(not(test))]
-    {
-        None
     }
 }

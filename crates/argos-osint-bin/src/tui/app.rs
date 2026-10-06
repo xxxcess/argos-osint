@@ -7828,7 +7828,7 @@ mod tests {
             entity: entity.into(),
             namespace: "org".into(),
             predicate: "reported".into(),
-            object: claim.split(' ').last().unwrap_or("").into(),
+            object: claim.split(' ').next_back().unwrap_or("").into(),
             topic: "Baltic shipping".into(),
             claim: claim.into(),
             classification: "fact".into(),
@@ -8222,6 +8222,7 @@ mod tests {
         assert!(app.open_memory_detail(&ids[0]));
         // Fixture summary (the test app has no Summarization account).
         app.graph_summary = "## Northwind halted Baltic crossings\n\nTwo **Baltic Wire** articles in cycle 04:12 support the halt. A later board decision **revises** it to a partial suspension, so the claim is a *dated fact*, not current status.\n\n- Evidence: 2 articles, 1 cycle\n- Related: 1 revision, 2 linked claims".into();
+        app.status = "Claim path".into();
         while !matches!(app.focus, Target::RelatedRow(_)) {
             app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         }

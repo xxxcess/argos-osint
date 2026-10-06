@@ -25,4 +25,5 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+argos-osint-core = { path = "../argos-osint-core", features = ["fixtures"] }
 tempfile.workspace = true

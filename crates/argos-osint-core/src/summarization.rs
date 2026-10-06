@@ -7,9 +7,15 @@
 use serde::{Deserialize, Serialize};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::provider::{self, ChatMessage};
+use crate::provider::ChatMessage;
 use crate::secrets::ProviderSecret;
-use crate::tasks::{self, AdmissionGuard, ErrorCategory, OperationKind};
+use crate::tasks::OperationKind;
+
+mod exec;
+pub use exec::{
+    admission_account, complete_summary_report, AttemptEvent, AttemptLog, ExecOptions,
+    SummaryExecution, MAX_REQUESTS,
+};
 
 /// Nine production modes. Each maps to a real call site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -344,6 +350,13 @@ pub fn persist_flush_request(conn: &Connection, req: &SummaryRequest) -> anyhow:
 }
 
 pub fn load_flush_request(conn: &Connection, cache_key: &str) -> anyhow::Result<Option<SummaryRequest>> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS argos_summary_flush_requests (
+            cache_key TEXT PRIMARY KEY,
+            request_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    )?;
     let row: Option<String> = conn
         .query_row(
             "SELECT request_json FROM argos_summary_flush_requests WHERE cache_key=?1",
@@ -638,7 +651,6 @@ pub async fn complete_summary(
     fallback: SummaryResult,
 ) -> SummaryResult {
     let account = format!("{}:{}", req.provider, secret.kind);
-    let mut attempts = 0u32;
     let system = system_prompt(req.mode);
     let user = {
         let mut parts = vec![format!("Focus: {}", req.focus)];
@@ -664,51 +676,22 @@ pub async fn complete_summary(
             tool_calls: Vec::new(),
         },
     ];
-    while attempts < OperationKind::Summarization.attempt_cap() {
-        attempts += 1;
-        let _guard = match AdmissionGuard::try_enter(&account) {
-            Some(g) => g,
-            None => {
-                tokio::time::sleep(tasks::backoff_delay(attempts)).await;
-                continue;
-            }
-        };
-        match provider::complete(secret, &messages, &[], |_| {}).await {
-            Ok(done) => {
-                let text = done.content.trim().to_string();
-                let known: Vec<String> = req.sources.iter().map(|s| s.id.clone()).collect();
-                if validate_result(req.mode, &text, &known).is_ok() {
-                    return SummaryResult {
-                        content: text,
-                        source_refs: known,
-                        source_hash: req.sources.first().map(|s| s.hash.clone()).unwrap_or_default(),
-                        model: secret.model.clone(),
-                        prompt_version: req.prompt_version.clone(),
-                        coverage: CoverageMeta::default(),
-                        fallback: false,
-                    };
-                }
-                if !tasks::can_retry(
-                    OperationKind::Summarization,
-                    attempts,
-                    ErrorCategory::InvalidResult,
-                ) {
-                    break;
-                }
-            }
-            Err(_) => {
-                if !tasks::can_retry(
-                    OperationKind::Summarization,
-                    attempts,
-                    ErrorCategory::TemporaryNetwork,
-                ) {
-                    break;
-                }
-                tokio::time::sleep(tasks::backoff_delay(attempts)).await;
-            }
-        }
+    let known: Vec<String> = req.sources.iter().map(|s| s.id.clone()).collect();
+    let mut opts = ExecOptions::for_secret(secret);
+    opts.admission_account = account;
+    let exec = complete_summary_report(secret, req.mode, &messages, &known, &opts, |_| {}).await;
+    match exec.content {
+        Some(text) => SummaryResult {
+            content: text,
+            source_refs: known,
+            source_hash: req.sources.first().map(|s| s.hash.clone()).unwrap_or_default(),
+            model: secret.model.clone(),
+            prompt_version: req.prompt_version.clone(),
+            coverage: CoverageMeta::default(),
+            fallback: false,
+        },
+        None => fallback,
     }
-    fallback
 }
 
 

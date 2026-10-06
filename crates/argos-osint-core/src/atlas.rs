@@ -10,6 +10,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::atlas_insights::{self, InsightStats};
+use crate::atlas_memory::{self, StepState};
 use crate::osint::atlas_news::{self, Hit};
 use crate::osint::ProviderKeys;
 use crate::provider::{self, DecisionsResponse};
@@ -494,6 +496,10 @@ pub struct RunStats {
     /// Span-checked claims written for this cycle. Absent on runs saved before insights.
     #[serde(default)]
     pub insights: InsightStats,
+    /// Phase 4/5 memory lifecycle: extraction, publication and indexing tracked
+    /// independently. Absent on runs saved before phase 5.
+    #[serde(default)]
+    pub memories: atlas_memory::MemoryPhase,
 }
 
 impl RunStats {
@@ -600,6 +606,16 @@ pub enum AtlasEvent {
     },
     Note(String),
     Fault(ProviderFault),
+    /// Memories were durably published or repaired; Brain must refresh.
+    MemoriesChanged {
+        run_id: String,
+        memory_ids: Vec<String>,
+    },
+    /// Phase 5 progress: required memories verified in the active index.
+    MemoryProgress {
+        indexed: u32,
+        required: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -873,6 +889,9 @@ pub fn format_run_card(run: &AtlasRunRow) -> String {
     lines.push(String::new());
     lines.push(format!("Articles {}", stats.article_total()));
     lines.push(atlas_insights::insight_stats_line(&stats.insights));
+    if stats.memories.started() {
+        lines.push(stats.memories.line());
+    }
     lines.push(String::new());
     let origins: Vec<&OriginStat> = stats
         .origins
@@ -1238,16 +1257,201 @@ pub struct RunInput<'a> {
     pub classifier: Option<ProviderSecret>,
     /// Synthesis account. Extracts claims. A decisions model is not used here.
     pub synthesizer: Option<ProviderSecret>,
+    /// Resume this run instead of the latest one (targeted re-extraction or a
+    /// phase-5 retry of an older cycle). Only used when `resume` is true.
+    pub run_id: Option<&'a str>,
 }
 
+/// A finished run can be resumed when it stopped in phase 4/5 with retained
+/// checkpoints (publication retry, indexing retry, configuration fixed).
+pub fn resumable(run: &AtlasRunRow) -> bool {
+    if run.state == "paused" {
+        return true;
+    }
+    let cursor = parse_cursor(&run.cursor_json);
+    matches!(run.state.as_str(), "failed" | "partial" | "blocked")
+        && (cursor.phase == 5 || (cursor.phase == 4 && cursor.leg != "insights_done"))
+}
+
+/// Phase names shown as child jobs of an Atlas cycle.
+pub fn phase_title(phase: u8) -> &'static str {
+    match phase {
+        1 => "Latest headlines",
+        2 => "Local coverage",
+        3 => "Classify articles",
+        4 => "Extract and save insights",
+        _ => "Index and verify memories",
+    }
+}
+
+/// Registry tracking for one Atlas cycle: one canonical parent job per run
+/// (reused when the run resumes) and one child per phase. Completed phases
+/// are skipped by the cursor on resume, so their children are never re-run.
+#[derive(Debug)]
+pub struct AtlasJob {
+    db: std::path::PathBuf,
+    run_id: String,
+    job: Option<crate::job_registry::JobHandle>,
+    phase: Option<(u8, crate::job_registry::JobHandle)>,
+}
+
+impl AtlasJob {
+    fn new(db: &Path) -> Self {
+        Self {
+            db: db.to_path_buf(),
+            run_id: String::new(),
+            job: None,
+            phase: None,
+        }
+    }
+
+    fn start(&mut self, run_id: &str) {
+        use crate::job_registry::{begin_optional, job_for_run, JobSpec};
+        self.run_id = run_id.to_string();
+        let existing = rusqlite::Connection::open(&self.db)
+            .ok()
+            .and_then(|conn| job_for_run(&conn, "atlas_cycle", run_id).ok().flatten());
+        let mut spec = JobSpec::new(
+            "atlas",
+            "atlas_cycle",
+            format!("Atlas news cycle · {run_id}"),
+        )
+        .run(run_id)
+        .resource(format!("atlas:{run_id}"));
+        if let Some(id) = existing {
+            spec = spec.with_id(id);
+        }
+        self.job = begin_optional(&self.db, spec);
+    }
+
+    fn enter(&mut self, phase: u8) {
+        if self.phase.as_ref().map(|(n, _)| *n) == Some(phase) {
+            return;
+        }
+        if let Some((_, done)) = self.phase.take() {
+            done.finish(crate::job_registry::Finish::completed());
+        }
+        let Some(parent) = &self.job else {
+            return;
+        };
+        parent.phase(phase_title(phase), Some(phase as i64 - 1), Some(5));
+        let spec = crate::job_registry::JobSpec::new(
+            "atlas",
+            &format!("atlas_phase_{phase}"),
+            format!("Phase {phase} · {}", phase_title(phase)),
+        )
+        .with_id(format!("{}-p{phase}", parent.id()));
+        self.phase = parent.child(spec).ok().map(|child| (phase, child));
+    }
+
+    fn progress(&self, done: u32, total: u32) {
+        if let Some((phase, child)) = &self.phase {
+            child.phase(phase_title(*phase), Some(done as i64), Some(total as i64));
+        }
+    }
+
+    /// Canonical job id once the run is known.
+    pub fn job_id(&self) -> Option<String> {
+        self.job.as_ref().map(|job| job.id().to_string())
+    }
+
+    fn close(&mut self, outcome: crate::job_registry::Finish) {
+        use crate::job_registry::Finish;
+        if let Some((_, child)) = self.phase.take() {
+            child.finish(match &outcome {
+                Finish::Completed { .. } => Finish::completed(),
+                other => other.clone(),
+            });
+        }
+        if let Some(job) = self.job.take() {
+            job.finish(outcome);
+        }
+    }
+}
+
+/// Run one Atlas cycle, tracked as a registry job (see [`AtlasJob`]).
 pub async fn run_atlas<F>(
     input: RunInput<'_>,
-    mut emit: impl FnMut(AtlasEvent) + Send,
-    mut fetch: F,
+    emit: impl FnMut(AtlasEvent) + Send,
+    fetch: F,
 ) -> Result<Stop>
 where
     F: FnMut(HttpCall) -> FetchFut + Send,
 {
+    use crate::job_registry::Finish;
+    let db_path = input.db_path.to_path_buf();
+    let tracker = Arc::new(std::sync::Mutex::new(AtlasJob::new(&db_path)));
+    let progress = tracker.clone();
+    let mut emit = emit;
+    let tracked_emit = move |event: AtlasEvent| {
+        match &event {
+            AtlasEvent::InsightProgress { done, total } => {
+                if let Ok(job) = progress.lock() {
+                    job.progress(*done, *total);
+                }
+            }
+            AtlasEvent::MemoryProgress { indexed, required } => {
+                if let Ok(job) = progress.lock() {
+                    job.progress(*indexed, *required);
+                }
+            }
+            _ => {}
+        }
+        emit(event);
+    };
+    let result = run_atlas_inner(input, tracked_emit, fetch, &tracker).await;
+    let run_state = || {
+        let run_id = tracker.lock().ok()?.run_id.clone();
+        if run_id.is_empty() {
+            return None;
+        }
+        Store::open(&db_path)
+            .ok()?
+            .atlas_list_runs()
+            .ok()?
+            .into_iter()
+            .find(|run| run.id == run_id)
+            .map(|run| (run.state, run.note))
+    };
+    let outcome = match &result {
+        Ok(Stop::Paused) => Finish::Paused {
+            summary: "paused; resume continues from the saved cursor".into(),
+        },
+        Ok(Stop::Failed(message)) => Finish::failed("atlas", message.clone()),
+        Ok(Stop::Finished) => match run_state() {
+            Some((state, _)) if state == "completed" => Finish::completed(),
+            Some((state, note)) if state == "failed" => Finish::failed("atlas", note),
+            Some((state, note)) => Finish::Partial {
+                summary: if note.is_empty() {
+                    state
+                } else {
+                    format!("{state}: {note}")
+                },
+            },
+            None => Finish::completed(),
+        },
+        Err(err) => Finish::failed("error", format!("{err:#}")),
+    };
+    if let Ok(mut job) = tracker.lock() {
+        job.close(outcome);
+    }
+    result
+}
+
+async fn run_atlas_inner<F>(
+    input: RunInput<'_>,
+    mut emit: impl FnMut(AtlasEvent) + Send,
+    mut fetch: F,
+    job: &std::sync::Mutex<AtlasJob>,
+) -> Result<Stop>
+where
+    F: FnMut(HttpCall) -> FetchFut + Send,
+{
+    let track = |phase: u8| {
+        if let Ok(mut job) = job.lock() {
+            job.enter(phase);
+        }
+    };
     let RunInput {
         db_path,
         pause,
@@ -1258,13 +1462,21 @@ where
         feed,
         classifier,
         synthesizer,
+        run_id: resume_id,
     } = input;
     let store = Store::open(db_path)?;
     let (run_id, mut cursor, mut stats) = if resume {
-        let Some(run) = store.atlas_latest_run()? else {
+        let run = match resume_id {
+            Some(id) => store
+                .atlas_list_runs()?
+                .into_iter()
+                .find(|run| run.id == id),
+            None => store.atlas_latest_run()?,
+        };
+        let Some(run) = run else {
             return Ok(Stop::Failed("No Atlas run to resume".into()));
         };
-        if run.state != "paused" {
+        if !resumable(&run) {
             return Ok(Stop::Failed("The latest Atlas run is not paused".into()));
         }
         store.atlas_set_state(&run.id, "running", &run.note, false)?;
@@ -1287,6 +1499,9 @@ where
         )?;
         (id, cursor, RunStats::default())
     };
+    if let Ok(mut job) = job.lock() {
+        job.start(&run_id);
+    }
     if cursor.from.is_empty() {
         cursor.from = lookback_from();
     }
@@ -1317,6 +1532,7 @@ where
     };
 
     if cursor.phase <= 1 {
+        track(1);
         let providers = ["gnews", "newsdata"];
         let start = providers
             .iter()
@@ -1468,6 +1684,7 @@ where
     }
 
     if cursor.phase == 2 {
+        track(2);
         require_either(&keys.newsapi, &keys.newsapi_fallback, "NewsAPI key")?;
         require_either(&keys.currents, &keys.currents_fallback, "Currents API key")?;
         if stats.origins.is_empty() {
@@ -1626,6 +1843,7 @@ where
     }
 
     if cursor.phase == 3 {
+        track(3);
         let articles = store.atlas_list_articles(&run_id)?;
         if !articles.is_empty() && classifier.is_none() {
             emit(AtlasEvent::Note(
@@ -1683,117 +1901,321 @@ where
         save(&store, &run_id, &cursor, &stats)?;
     }
 
-    if cursor.phase == 4 && cursor.leg != "insights_done" {
+    // Runs saved before phase 5 marked publication with `insights_done`; that
+    // marker is not proof of publication or indexing, so verify in phase 5.
+    if cursor.phase == 4 && cursor.leg == "insights_done" {
+        cursor = phase5_cursor(&cursor);
+    }
+
+    if cursor.phase == 4 && cursor.leg != "publish" {
+        track(4);
         if pause.load(Ordering::Relaxed) {
             return park(&store, &run_id, &cursor, &stats, &mut emit);
         }
+        stats.memories = atlas_memory::MemoryPhase {
+            extraction: StepState::Running,
+            ..Default::default()
+        };
         let articles = store.atlas_list_articles(&run_id)?;
-        if let Some(existing) = atlas_insights::resume_stats(
+        if let Some(checkpoint) = atlas_memory::load_checkpoint(&store, &run_id)? {
+            // Crash after the checkpoint commit: never rerun a successful extraction.
+            stats.insights = checkpoint.stats.clone();
+            stats.memories.extracted = checkpoint.claims.len() as u32;
+            stats.memories.extraction = if checkpoint.partial {
+                StepState::Partial
+            } else {
+                StepState::Completed
+            };
+        } else if let Some(existing) = atlas_insights::resume_stats(
             &store,
             &run_id,
             &articles,
             &stats.origins,
             &stats.insights,
         )? {
+            // Published by an older build without a checkpoint: verify in phase 5.
+            stats.memories.extracted = existing.claims;
             stats.insights = existing;
+            stats.memories.extraction = StepState::Completed;
+            stats.memories.publication = StepState::Completed;
+            cursor = phase5_cursor(&cursor);
         } else if let Some(secret) = synthesizer.as_ref() {
             if provider::is_decisions_model(&secret.model) {
-                if !articles.is_empty() {
+                if articles.is_empty() {
+                    stats.memories.extraction = StepState::Skipped;
+                } else {
                     emit(AtlasEvent::Note(
                         "Synthesis is a decisions model, so no claims were extracted. Choose a chat model for Synthesis."
                             .into(),
                     ));
+                    stats.memories.extraction = StepState::Blocked;
+                    stats.memories.detail =
+                        "Synthesis is a decisions model; choose a chat model".into();
                 }
             } else {
                 emit(AtlasEvent::Status("Extracting insights".into()));
-                let stored_rsp = store
-                    .app_state_get(crate::osint::wikipedia_rsp::APP_STATE_KEY)
-                    .ok()
-                    .flatten();
-                match crate::osint::wikipedia_rsp::warm_with_store_json(
-                    stored_rsp.as_deref(),
-                    &user_agent,
-                )
-                .await
-                {
-                    Ok((index, fetched)) => {
-                        if fetched {
-                            if let Ok(json) = crate::osint::wikipedia_rsp::index_to_json(&index) {
+                #[cfg(test)]
+                let mocked = atlas_memory::testing::take_extraction();
+                #[cfg(not(test))]
+                let mocked: Option<Result<atlas_insights::Extraction>> = None;
+                let extracted = match mocked {
+                    Some(result) => result,
+                    None => {
+                        let stored_rsp = store
+                            .app_state_get(crate::osint::wikipedia_rsp::APP_STATE_KEY)
+                            .ok()
+                            .flatten();
+                        match refresh_rsp_index(stored_rsp, user_agent.clone()).await {
+                            Ok(Some(json)) => {
                                 let _ = store.app_state_set(
                                     crate::osint::wikipedia_rsp::APP_STATE_KEY,
                                     &json,
                                 );
                             }
+                            Ok(None) => {}
+                            Err(err) => emit(AtlasEvent::Note(format!(
+                                "WP:RSP source reliability index was not refreshed ({err})."
+                            ))),
                         }
+                        atlas_insights::extract(
+                            secret,
+                            classifier.as_ref(),
+                            &articles,
+                            &stats.origins,
+                            |done, total| {
+                                emit(AtlasEvent::InsightProgress { done, total });
+                            },
+                        )
+                        .await
                     }
-                    Err(err) => {
-                        emit(AtlasEvent::Note(format!(
-                            "WP:RSP source reliability index was not refreshed ({err})."
-                        )));
-                    }
-                }
-                match atlas_insights::extract(
-                    secret,
-                    classifier.as_ref(),
-                    &articles,
-                    &stats.origins,
-                    |done, total| {
-                        emit(AtlasEvent::InsightProgress { done, total });
-                    },
-                )
-                .await
-                {
+                };
+                match extracted {
                     Ok(extraction) => {
-                        if !extraction.settled.claims.is_empty() {
-                            if let Err(err) = store.persist_atlas_insights(
-                                &run_id,
-                                &extraction.settled.claims,
-                                &extraction.settled.relations,
-                                &extraction.settled.brief,
-                                &extraction.settled.entity_path,
-                            ) {
-                                emit(AtlasEvent::Note(format!(
-                                    "Insights were not saved ({err})."
-                                )));
-                            }
+                        let mut notes = Vec::new();
+                        if let Some(err) = &extraction.extract_error {
+                            notes.push(format!("Some insight packets were skipped ({err})."));
                         }
-                        stats.insights = extraction.settled.stats;
-                        if let Some(err) = extraction.extract_error {
-                            emit(AtlasEvent::Note(format!(
-                                "Some insight packets were skipped ({err})."
-                            )));
-                        }
-                        if let Some(err) = extraction.peer_error {
-                            emit(AtlasEvent::Note(format!(
+                        if let Some(err) = &extraction.peer_error {
+                            notes.push(format!(
                                 "Classifier peer matching failed; using overlap ({err})."
-                            )));
+                            ));
                         }
-                        if let Some(err) = extraction.context_error {
-                            emit(AtlasEvent::Note(format!(
-                                "Context claims were not extracted ({err})."
-                            )));
+                        if let Some(err) = &extraction.context_error {
+                            notes.push(format!("Context claims were not extracted ({err})."));
+                        }
+                        for note in &notes {
+                            emit(AtlasEvent::Note(note.clone()));
+                        }
+                        let partial = extraction.extract_error.is_some()
+                            || extraction.context_error.is_some();
+                        let settled = &extraction.settled;
+                        let checkpoint = atlas_memory::save_checkpoint(
+                            &store,
+                            &run_id,
+                            atlas_memory::CheckpointInput {
+                                claims: &settled.claims,
+                                relations: &settled.relations,
+                                brief: &settled.brief,
+                                entity_path: &settled.entity_path,
+                                stats: &settled.stats,
+                                partial,
+                                notes,
+                            },
+                        )?;
+                        stats.insights = extraction.settled.stats;
+                        stats.memories.revision = checkpoint.revision;
+                        stats.memories.extracted = checkpoint.claims.len() as u32;
+                        stats.memories.extraction = if partial {
+                            StepState::Partial
+                        } else {
+                            StepState::Completed
+                        };
+                        if partial {
+                            stats.memories.detail = "some insight packets failed".into();
                         }
                     }
                     Err(err) => {
                         emit(AtlasEvent::Note(format!(
                             "Insights were not extracted ({err})."
                         )));
+                        stats.memories.extraction = StepState::Failed;
+                        stats.memories.detail = format!("insights were not extracted ({err})");
                     }
                 }
             }
-        } else if !articles.is_empty() {
+        } else if articles.is_empty() {
+            stats.memories.extraction = StepState::Skipped;
+        } else {
             emit(AtlasEvent::Note(
                 "Synthesis is not configured. No insights extracted.".into(),
             ));
+            stats.memories.extraction = StepState::Blocked;
+            stats.memories.detail = "Synthesis is not configured".into();
         }
-        cursor.leg = "insights_done".into();
+        match stats.memories.extraction {
+            StepState::Completed | StepState::Partial if cursor.phase == 4 => {
+                cursor.leg = "publish".into();
+            }
+            StepState::Skipped => {
+                stats.memories.publication = StepState::Skipped;
+                stats.memories.indexing = StepState::Skipped;
+                cursor.leg = "insights_done".into();
+            }
+            _ => {}
+        }
+        save(&store, &run_id, &cursor, &stats)?;
+        if matches!(
+            stats.memories.extraction,
+            StepState::Failed | StepState::Blocked
+        ) {
+            // Cursor stays on extraction: a resume after fixing the cause re-extracts.
+            return finish(&store, &run_id, &stats, &mut emit);
+        }
+    }
+
+    if cursor.phase == 4 && cursor.leg == "publish" {
+        track(4);
+        if pause.load(Ordering::Relaxed) {
+            return park(&store, &run_id, &cursor, &stats, &mut emit);
+        }
+        let Some(checkpoint) = atlas_memory::load_checkpoint(&store, &run_id)? else {
+            stats.memories.extraction = StepState::Failed;
+            stats.memories.detail = atlas_memory::MISSING_PAYLOAD_LINE.into();
+            cursor.leg = "insights".into();
+            save(&store, &run_id, &cursor, &stats)?;
+            return finish(&store, &run_id, &stats, &mut emit);
+        };
+        if !stats.memories.started() {
+            stats.memories.extraction = if checkpoint.partial {
+                StepState::Partial
+            } else {
+                StepState::Completed
+            };
+            stats.memories.extracted = checkpoint.claims.len() as u32;
+            stats.insights = checkpoint.stats.clone();
+        }
+        stats.memories.revision = checkpoint.revision.clone();
+        stats.memories.publication = StepState::Running;
+        emit(AtlasEvent::Status("Saving memories".into()));
+        match atlas_memory::publish_checkpoint(&store, &checkpoint, None, false, None) {
+            Ok(receipt) => {
+                stats.memories.apply_receipt(&receipt);
+                if !receipt.affected_memory_ids.is_empty() {
+                    emit(AtlasEvent::MemoriesChanged {
+                        run_id: run_id.clone(),
+                        memory_ids: receipt.affected_memory_ids.clone(),
+                    });
+                }
+                // `insights_done` only after durable publication exists.
+                cursor = phase5_cursor(&cursor);
+                save(&store, &run_id, &cursor, &stats)?;
+            }
+            Err(err) => {
+                let message = format!("{err:#}");
+                emit(AtlasEvent::Note(format!(
+                    "Insights were extracted but not saved ({message}). Resume retries from the saved extraction."
+                )));
+                stats.memories.publication = StepState::Failed;
+                stats.memories.detail = format!("insights were not saved ({message})");
+                save(&store, &run_id, &cursor, &stats)?;
+                return finish(&store, &run_id, &stats, &mut emit);
+            }
+        }
+    }
+
+    if cursor.phase == 5 {
+        track(5);
+        if pause.load(Ordering::Relaxed) {
+            return park(&store, &run_id, &cursor, &stats, &mut emit);
+        }
+        let receipt = match store.atlas_publication_receipt(&run_id)? {
+            Some(receipt) => receipt,
+            None => atlas_memory::legacy_receipt(&store, &run_id, None)?,
+        };
+        if !stats.memories.started() {
+            stats.memories.extraction = StepState::Completed;
+            stats.memories.extracted = stats.insights.claims;
+        }
+        if matches!(
+            stats.memories.publication,
+            StepState::Pending | StepState::Running
+        ) || stats.memories.revision != receipt.revision
+        {
+            stats.memories.apply_receipt(&receipt);
+        }
+        stats.memories.indexing = StepState::Running;
+        emit(AtlasEvent::Status("Indexing memories".into()));
+        let report = atlas_memory::index_and_verify(
+            &store,
+            &receipt,
+            Some(pause),
+            atlas_memory::Barrier::default(),
+            |indexed, required| emit(AtlasEvent::MemoryProgress { indexed, required }),
+        )?;
+        stats.memories.apply_verification(&report.verification);
+        if report.paused {
+            return park(&store, &run_id, &cursor, &stats, &mut emit);
+        }
+        cursor.leg = "verified".into();
         save(&store, &run_id, &cursor, &stats)?;
     }
 
-    store.atlas_set_state(&run_id, "completed", "", true)?;
-    emit(AtlasEvent::Status("Pipeline complete".into()));
-    emit(AtlasEvent::Stats(stats));
-    Ok(Stop::Finished)
+    finish(&store, &run_id, &stats, &mut emit)
+}
+
+fn phase5_cursor(cursor: &Cursor) -> Cursor {
+    Cursor {
+        phase: 5,
+        chunk: 0,
+        leg: "index".into(),
+        country: 0,
+        from: cursor.from.clone(),
+        page_token: String::new(),
+        kept: 0,
+    }
+}
+
+/// Derive the stored run state from the durable child states. A failed save can
+/// never be reported as completed, and extraction counts are never shown as
+/// saved counts.
+fn finish(
+    store: &Store,
+    run_id: &str,
+    stats: &RunStats,
+    emit: &mut impl FnMut(AtlasEvent),
+) -> Result<Stop> {
+    let outcome = stats.memories.outcome();
+    let note = stats.memories.note();
+    store.atlas_set_state(run_id, outcome.as_state(), &note, true)?;
+    let status = match outcome {
+        atlas_memory::CycleOutcome::Completed => "Pipeline complete".to_string(),
+        atlas_memory::CycleOutcome::Partial => "Pipeline finished with incomplete work".into(),
+        atlas_memory::CycleOutcome::Blocked => "Pipeline blocked by configuration".into(),
+        atlas_memory::CycleOutcome::Failed => "Pipeline failed".into(),
+    };
+    emit(AtlasEvent::Status(status));
+    emit(AtlasEvent::Stats(stats.clone()));
+    Ok(match outcome {
+        atlas_memory::CycleOutcome::Failed => Stop::Failed(if note.is_empty() {
+            "Atlas memory publication failed".into()
+        } else {
+            note
+        }),
+        _ => Stop::Finished,
+    })
+}
+
+/// Refresh the WP:RSP reliability index. Takes owned inputs so no `Store`
+/// borrow is held across the await (the pipeline future must stay `Send`).
+/// Returns the JSON to store when a fresh index was fetched.
+async fn refresh_rsp_index(stored: Option<String>, user_agent: String) -> Result<Option<String>> {
+    let (index, fetched) =
+        crate::osint::wikipedia_rsp::warm_with_store_json(stored.as_deref(), &user_agent).await?;
+    Ok(if fetched {
+        crate::osint::wikipedia_rsp::index_to_json(&index).ok()
+    } else {
+        None
+    })
 }
 
 fn next_after_phase2(job: &Job, countries: usize) -> Job {
@@ -1970,13 +2392,24 @@ where
     })
 }
 
+/// Which run [`run_live`] works on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveRun {
+    /// Start a new cycle.
+    Fresh,
+    /// Resume the latest run (paused, or stopped in phase 4/5).
+    Latest,
+    /// Resume this run (an older cycle stopped in phase 4/5).
+    Run(String),
+}
+
 /// Live pipeline. Uses the process HTTP client and paces GNews by one second.
 pub async fn run_live(
     db_path: &Path,
     pause: &AtomicBool,
     keys: &ProviderKeys,
     user_agent: &str,
-    resume: bool,
+    live: LiveRun,
     feed: &[FeedArticle],
     classifier: Option<ProviderSecret>,
     synthesizer: Option<ProviderSecret>,
@@ -1993,10 +2426,14 @@ pub async fn run_live(
             keys,
             user_agent,
             pace: true,
-            resume,
+            resume: live != LiveRun::Fresh,
             feed,
             classifier,
             synthesizer,
+            run_id: match &live {
+                LiveRun::Run(id) => Some(id.as_str()),
+                _ => None,
+            },
         },
         emit,
         move |call: HttpCall| {
@@ -2093,6 +2530,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: Some(secret),
+                run_id: None,
             },
             move |event| {
                 if let AtlasEvent::Note(text) = event {
@@ -2328,6 +2766,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                run_id: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2364,6 +2803,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                run_id: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2446,6 +2886,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                run_id: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2533,6 +2974,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                run_id: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2705,6 +3147,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                run_id: None,
             },
             move |event| {
                 if let AtlasEvent::Note(text) = event {
@@ -2786,6 +3229,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                run_id: None,
             },
             move |event| {
                 if let AtlasEvent::Note(text) = event {
@@ -2874,6 +3318,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                run_id: None,
             },
             |_| {},
             move |call: HttpCall| {
@@ -2933,6 +3378,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                run_id: None,
             },
             |_| {},
             move |call: HttpCall| {

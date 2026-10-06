@@ -13,7 +13,7 @@ use super::markdown::{self, Piece, Tone};
 use super::app::{
     intel_category_short, intel_day_button_label, is_picker_field, unix_now, App, AtlasPage,
     BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId, IntelPage, IntelReconFocus,
-    LogLine, ModuleId, Overlay, ProviderPage, Target, INTEL_CATEGORIES,
+    ModuleId, Overlay, ProviderPage, Target, INTEL_CATEGORIES,
 };
 use super::theme;
 use argos_osint_core::atlas;
@@ -25,8 +25,8 @@ use argos_osint_core::recon::{self, Plan};
 
 const TAB_H: u16 = 1;
 const PAGE_TAB_H: u16 = 3;
-const FIELD_H: u16 = 2;
-const ACTION_H: u16 = 3;
+pub(super) const FIELD_H: u16 = 2;
+pub(super) const ACTION_H: u16 = 3;
 
 fn split_vertical(area: Rect, constraints: impl IntoIterator<Item = Constraint>) -> Vec<Rect> {
     Layout::default()
@@ -59,6 +59,16 @@ fn composer_height(app: &App) -> u16 {
     }
     let rows = app.input.split('\n').count().max(1) as u16;
     rows.clamp(1, 4)
+}
+
+/// Module body for the current screen (shared by dashboards for layout maths).
+pub(super) fn body_rect(app: &App) -> Rect {
+    chrome(app.screen, app).body
+}
+
+/// Memory detail rectangles for the current screen and focus (draw, hit, scroll).
+pub(crate) fn detail_areas(app: &App) -> super::brain_detail::DetailAreas {
+    super::brain_detail::areas(body_rect(app), super::brain_detail::pane_of(app.focus))
 }
 
 fn chrome(area: Rect, app: &App) -> Chrome {
@@ -117,7 +127,7 @@ fn header_tabs(area: Rect) -> Vec<(Option<ModuleId>, Rect)> {
     out
 }
 
-fn inset(area: Rect) -> Rect {
+pub(super) fn inset(area: Rect) -> Rect {
     Rect {
         x: area.x.saturating_add(1),
         y: area.y.saturating_add(1),
@@ -133,7 +143,7 @@ pub(crate) fn contains(rect: Rect, x: u16, y: u16) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
-fn button_areas(area: Rect, count: usize) -> Vec<Rect> {
+pub(super) fn button_areas(area: Rect, count: usize) -> Vec<Rect> {
     let count = count.max(1);
     split_horizontal(area, (0..count).map(|_| Constraint::Ratio(1, count as u32)))
 }
@@ -196,14 +206,6 @@ fn brain_form(area: Rect) -> BrainForm {
 
 fn provider_areas(area: Rect) -> Vec<Rect> {
     split_vertical(area, [Constraint::Length(PAGE_TAB_H), Constraint::Min(4)])
-}
-
-struct BrainPath {
-    body: Rect,
-}
-
-fn brain_path(area: Rect) -> BrainPath {
-    BrainPath { body: area }
 }
 
 fn list_room(height: u16) -> usize {
@@ -380,16 +382,10 @@ fn osint_areas(area: Rect, with_key: bool) -> OsintLayout {
     }
 }
 
-fn system_areas(area: Rect) -> (Rect, Rect, Rect) {
-    let rows = split_vertical(
-        area,
-        [
-            Constraint::Length(6),
-            Constraint::Length(ACTION_H),
-            Constraint::Min(0),
-        ],
-    );
-    (rows[0], rows[1], rows[2])
+/// System: the Refresh hardware action row, then host and path panes.
+fn system_areas(area: Rect) -> (Rect, Rect) {
+    let rows = split_vertical(area, [Constraint::Length(ACTION_H), Constraint::Min(0)]);
+    (rows[1], rows[0])
 }
 
 fn auth_areas(area: Rect) -> Vec<Rect> {
@@ -487,7 +483,13 @@ pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
     home_group(
         &mut rows,
         "System",
-        &[ModuleId::Osint, ModuleId::Providers, ModuleId::System],
+        &[
+            ModuleId::Jobs,
+            ModuleId::Logs,
+            ModuleId::Osint,
+            ModuleId::Providers,
+            ModuleId::System,
+        ],
         errors,
     );
     let spare = (area.height as usize)
@@ -551,8 +553,8 @@ fn gap_row() -> HomeRow {
 }
 
 fn module_detail(module: ModuleId, errors: usize) -> String {
-    if module == ModuleId::System && errors > 0 {
-        format!("{} · {errors} errors", module.blurb())
+    if module == ModuleId::Logs && errors > 0 {
+        format!("{} · {}", module.blurb(), super::logs::count(errors as i64, "error"))
     } else {
         module.blurb().to_string()
     }
@@ -1121,7 +1123,7 @@ pub struct ToolLog {
     pub detail: String,
 }
 
-/// One-line summary and the clipped result body for the System event log.
+/// One-line summary and the clipped result body for a Logs entry.
 pub fn tool_result_log(call: &recon::Call) -> Option<ToolLog> {
     let result = call.result.as_ref()?;
     let name = osint::definition(&call.tool_id)
@@ -1202,7 +1204,7 @@ fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
     if let Some(summary) = result_summary(call) {
         lines.push(format!("Result: {summary}"));
     }
-    lines.push("Full result is in the System event log.".into());
+    lines.push("Full result is in Logs.".into());
     ChatBlock {
         key,
         title: format!("{name} · {}{inputs}", call.status),
@@ -1415,7 +1417,7 @@ fn center_text(value: &str, width: usize) -> String {
     format!("{:pad$}{shown}", "", pad = pad)
 }
 
-fn fit(value: &str, width: usize) -> String {
+pub(super) fn fit(value: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
@@ -1867,7 +1869,6 @@ fn chat_spots(app: &App) -> Vec<Spot> {
 }
 
 pub fn normalize(app: &mut App) {
-    app.prune_log();
     let count = chat_blocks(app).len();
     if count == 0 {
         app.chat_sel = 0;
@@ -2006,6 +2007,26 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         nudge(&mut app.scrolls.popup, delta * 3, max);
         return;
     }
+    let body = chrome(app.screen, app).body;
+    if app.module == Some(ModuleId::Logs) {
+        if super::logs::in_list(body, x, y) {
+            let (room, width) = super::logs::list_geometry(body);
+            let max = app.logs.scroll_max(room, width);
+            nudge(&mut app.logs.scroll, delta * 3, max);
+        }
+        return;
+    }
+    if app.module == Some(ModuleId::Jobs) {
+        let areas = super::jobs::areas(body, &app.jobs);
+        if contains(areas.detail, x, y) {
+            nudge(&mut app.jobs.detail_scroll, delta * 3, 10_000);
+        } else if contains(areas.table, x, y) {
+            let room = super::jobs::table_room(body, &app.jobs);
+            let max = app.jobs.rows.len().saturating_sub(room) as u16;
+            nudge(&mut app.jobs.scroll, delta * 3, max);
+        }
+        return;
+    }
     match region_at(app, x, y) {
         Region::Chat => scroll_chat(app, delta * 3),
         Region::Threads => {
@@ -2022,11 +2043,12 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         Region::Detail => nudge(&mut app.scrolls.detail, delta * 3, 10_000),
         Region::Recall => nudge(&mut app.scrolls.recall, delta * 3, 10_000),
         Region::Path => nudge(&mut app.scrolls.path, delta, 10_000),
-        Region::Summary => nudge(&mut app.scrolls.summary, delta * 3, 10_000),
-        Region::Log => {
-            let max = log_max(app);
-            nudge(&mut app.scrolls.log, delta * 3, max);
+        Region::Related => {
+            let area = detail_areas(app).related;
+            let max = super::brain_detail::related_scroll_max(&app.brain_detail.related, area);
+            nudge(&mut app.brain_detail.related.scroll, delta * 2, max);
         }
+        Region::Summary => nudge(&mut app.scrolls.summary, delta * 3, 10_000),
         Region::AtlasFeed => shift_atlas_feed(app, delta * 3),
         Region::AtlasOrigins => {
             let max = if app.atlas_page == AtlasPage::Runs && !app.atlas_news {
@@ -2091,9 +2113,16 @@ pub fn page(app: &mut App, direction: i32) {
         Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::List => {
             nudge(&mut app.scrolls.recall, direction * 6, 10_000);
         }
-        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => {
-            nudge(&mut app.scrolls.summary, direction * 4, 10_000);
-        }
+        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => match app.focus {
+            Target::RelatedRow(_) => {
+                let area = detail_areas(app).related;
+                let max = super::brain_detail::related_scroll_max(&app.brain_detail.related, area);
+                let room = (super::brain_detail::inner(area).height / 2).max(1) as i32;
+                nudge(&mut app.brain_detail.related.scroll, direction * room, max);
+            }
+            Target::DetailPath => nudge(&mut app.scrolls.path, direction * 4, 10_000),
+            _ => nudge(&mut app.scrolls.summary, direction * 4, 10_000),
+        },
         Some(ModuleId::Brain) => {}
         Some(ModuleId::Osint) if matches!(app.focus, Target::Tool(_)) => {
             let room = (tool_room(app) / 2).max(1) as i32;
@@ -2103,11 +2132,23 @@ pub fn page(app: &mut App, direction: i32) {
         Some(ModuleId::Osint) | Some(ModuleId::Providers) => {
             nudge(&mut app.scrolls.detail, direction * 6, 10_000);
         }
-        Some(ModuleId::System) => {
-            let room = inset(system_areas(chrome(app.screen, app).body).2)
+        Some(ModuleId::System) => {}
+        Some(ModuleId::Logs) => {
+            let (room, width) = super::logs::list_geometry(chrome(app.screen, app).body);
+            let max = app.logs.scroll_max(room, width);
+            nudge(&mut app.logs.scroll, direction * room as i32, max);
+        }
+        Some(ModuleId::Jobs) if matches!(app.focus, Target::JobDetail) || app.jobs.detail_open => {
+            let room = inset(super::jobs::areas(chrome(app.screen, app).body, &app.jobs).detail)
                 .height
                 .max(1) as i32;
-            move_system_log(app, direction * room);
+            nudge(&mut app.jobs.detail_scroll, direction * room, 10_000);
+        }
+        Some(ModuleId::Jobs) => {
+            let body = chrome(app.screen, app).body;
+            let room = super::jobs::table_room(body, &app.jobs);
+            let max = app.jobs.rows.len().saturating_sub(room) as u16;
+            nudge(&mut app.jobs.scroll, direction * room as i32, max);
         }
         Some(ModuleId::Atlas) if app.atlas_page == AtlasPage::Runs && app.atlas_news => {
             let room = atlas_news_room(app).max(1) as i32;
@@ -2187,13 +2228,13 @@ enum Region {
     Tools,
     Detail,
     Recall,
-    Log,
     AtlasOrigins,
     AtlasInsights,
     AtlasFeed,
     AtlasRuns,
     AtlasNews,
     Path,
+    Related,
     Summary,
     IntelBrief,
     IntelFull,
@@ -2220,17 +2261,13 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
             }
         }
         Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => {
-            let layout = brain_path(body);
-            if contains(layout.body, x, y) {
-                let rows = split_vertical(
-                    layout.body,
-                    [Constraint::Percentage(55), Constraint::Percentage(45)],
-                );
-                if contains(rows[0], x, y) {
-                    Region::Path
-                } else {
-                    Region::Summary
-                }
+            let areas = detail_areas(app);
+            if contains(areas.path, x, y) {
+                Region::Path
+            } else if contains(areas.related, x, y) {
+                Region::Related
+            } else if contains(areas.summary, x, y) {
+                Region::Summary
             } else {
                 Region::None
             }
@@ -2266,14 +2303,7 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
                 Region::None
             }
         }
-        Some(ModuleId::System) => {
-            let (_, _, log) = system_areas(body);
-            if contains(log, x, y) {
-                Region::Log
-            } else {
-                Region::None
-            }
-        }
+        Some(ModuleId::System) | Some(ModuleId::Jobs) | Some(ModuleId::Logs) => Region::None,
         Some(ModuleId::Atlas) => {
             if app.atlas_page == AtlasPage::Runs {
                 if app.atlas_news {
@@ -2358,13 +2388,7 @@ fn tool_max(app: &App) -> u16 {
         .saturating_sub(tool_room(app).max(1)) as u16
 }
 
-fn log_pane_width(app: &App) -> usize {
-    inset(system_areas(chrome(app.screen, app).body).2)
-        .width
-        .max(1) as usize
-}
-
-fn detail_rows(detail: &str, width: usize) -> Vec<String> {
+pub(super) fn detail_rows(detail: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut rows = Vec::new();
     for line in detail.lines() {
@@ -2387,67 +2411,6 @@ fn detail_rows(detail: &str, width: usize) -> Vec<String> {
     rows
 }
 
-fn open_detail_rows(app: &App, entry: &LogLine) -> usize {
-    if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
-        detail_rows(&entry.detail, log_pane_width(app)).len()
-    } else {
-        0
-    }
-}
-
-fn log_max(app: &App) -> u16 {
-    let room = list_room(system_areas(chrome(app.screen, app).body).2.height) as u16;
-    log_line_count(app).saturating_sub(room as usize) as u16
-}
-
-fn log_line_count(app: &App) -> usize {
-    app.log
-        .iter()
-        .map(|entry| {
-            let extra = open_detail_rows(app, entry);
-            1 + extra
-        })
-        .sum()
-}
-
-fn log_entry_start(app: &App, index: usize) -> usize {
-    app.log
-        .iter()
-        .take(index)
-        .map(|entry| 1 + open_detail_rows(app, entry))
-        .sum()
-}
-
-pub fn move_system_log(app: &mut App, delta: i32) {
-    if app.log.is_empty() {
-        return;
-    }
-    app.log_browsing = true;
-    let last = app.log.len() as i32 - 1;
-    app.log_sel = (app.log_sel as i32 + delta).clamp(0, last) as usize;
-    reveal_log(app);
-}
-
-pub fn reveal_log(app: &mut App) {
-    if app.log.is_empty() {
-        app.scrolls.log = 0;
-        return;
-    }
-    if app.log_sel >= app.log.len() {
-        app.log_sel = app.log.len() - 1;
-    }
-    let room = system_areas(chrome(app.screen, app).body)
-        .2
-        .height
-        .saturating_sub(1)
-        .max(1) as usize;
-    let start = log_entry_start(app, app.log_sel);
-    reveal_index(&mut app.scrolls.log, start, room);
-    let max = log_max(app);
-    if app.scrolls.log > max {
-        app.scrolls.log = max;
-    }
-}
 
 fn popup_max(app: &App) -> u16 {
     let room = inset(popup_area(app.screen)).height.max(1) as usize;
@@ -2714,7 +2677,21 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             let mut order = vec![Target::Home];
             order.extend((0..ModuleId::ALL.len()).map(Target::App));
             match app.brain_list_mode {
-                BrainListMode::Graph => {}
+                BrainListMode::Graph => {
+                    order.push(Target::Button(ButtonId::BrainDetailBack));
+                    order.push(Target::DetailPath);
+                    if !app.brain_detail.related.items.is_empty() {
+                        order.push(Target::RelatedRow(app.brain_detail.related.sel));
+                    }
+                    order.push(Target::DetailSummary);
+                    if let Some(failure) = &app.summary_failure {
+                        order.extend(
+                            super::summary_card::actions(failure)
+                                .into_iter()
+                                .map(Target::Button),
+                        );
+                    }
+                }
                 BrainListMode::Create => {
                     order.extend(
                         [
@@ -2812,10 +2789,32 @@ pub fn focus_order(app: &App) -> Vec<Target> {
         Some(ModuleId::System) => {
             let mut order = vec![Target::Home];
             order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            order.extend([
-                Target::Button(ButtonId::RefreshHardware),
-                Target::Button(ButtonId::ClearLog),
-            ]);
+            order.push(Target::Button(ButtonId::RefreshHardware));
+            order
+        }
+        Some(ModuleId::Logs) => {
+            let mut order = vec![Target::Home];
+            order.extend((0..ModuleId::ALL.len()).map(Target::App));
+            order.push(Target::Field(FieldId::LogsSearch));
+            order.extend(super::logs::buttons(&app.logs).into_iter().map(Target::Button));
+            if !app.logs.rows.is_empty() {
+                order.push(Target::LogLine(app.logs.sel));
+            }
+            order
+        }
+        Some(ModuleId::Jobs) => {
+            let mut order = vec![Target::Home];
+            order.extend((0..ModuleId::ALL.len()).map(Target::App));
+            order.push(Target::Field(FieldId::JobsSearch));
+            order.extend(
+                super::jobs::buttons(&app.jobs, app.job_source().is_some())
+                    .into_iter()
+                    .map(Target::Button),
+            );
+            if !app.jobs.rows.is_empty() {
+                order.push(Target::JobRow(app.jobs.sel));
+                order.push(Target::JobDetail);
+            }
             order
         }
         Some(ModuleId::Atlas) => {
@@ -2830,6 +2829,8 @@ pub fn focus_order(app: &App) -> Vec<Target> {
                     }
                 } else {
                     order.push(Target::Button(ButtonId::AtlasLive));
+                    order.push(Target::Button(ButtonId::AtlasResume));
+                    order.push(Target::Button(ButtonId::AtlasRepair));
                     order.push(Target::Button(ButtonId::AtlasDelete));
                     order.push(Target::AtlasCycleStats);
                     if !app.atlas_runs.is_empty() {
@@ -3023,6 +3024,10 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
         Some(ModuleId::Atlas) => atlas_hit(app, layout.body, x, y),
         Some(ModuleId::Providers) => provider_hit(app, layout.body, x, y),
         Some(ModuleId::System) => system_hit(app, layout.body, x, y),
+        Some(ModuleId::Logs) => super::logs::hit(app, layout.body, x, y),
+        Some(ModuleId::Jobs) => {
+            super::jobs::hit(app, layout.body, x, y, app.job_source().is_some())
+        }
         None => None,
     }
 }
@@ -3071,8 +3076,31 @@ fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
 
 fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     if app.brain_list_mode == BrainListMode::Graph {
-        let index = super::graph::path_line_at(body, x, y, app.scrolls.path)?;
-        return Some(Target::PathLine(index));
+        let areas = super::brain_detail::areas(body, super::brain_detail::pane_of(app.focus));
+        if contains(areas.back, x, y) {
+            return Some(Target::Button(ButtonId::BrainDetailBack));
+        }
+        if contains(areas.path, x, y) {
+            return Some(
+                super::graph::path_line_at(app, areas.path, x, y, app.scrolls.path)
+                    .map(Target::PathLine)
+                    .unwrap_or(Target::DetailPath),
+            );
+        }
+        if contains(areas.related, x, y) {
+            return super::brain_detail::related_at(&app.brain_detail.related, areas.related, x, y)
+                .map(Target::RelatedRow);
+        }
+        if contains(areas.summary, x, y) {
+            if let Some(failure) = &app.summary_failure {
+                let inner = super::graph::summary_inner(areas.summary);
+                if let Some(button) = super::summary_card::button_at(app, failure, inner, x, y) {
+                    return Some(Target::Button(button));
+                }
+            }
+            return Some(Target::DetailSummary);
+        }
+        return None;
     }
     if app.brain_list_mode == BrainListMode::Create {
         let form = brain_form(body);
@@ -3247,40 +3275,14 @@ fn provider_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
 }
 
 fn system_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
-    let (_, actions, log) = system_areas(body);
-    if contains(actions, x, y) {
-        let areas = button_areas(actions, 2);
-        return Some(Target::Button(if contains(areas[0], x, y) {
-            ButtonId::RefreshHardware
-        } else {
-            ButtonId::ClearLog
-        }));
-    }
-    log_index_at(app, log, x, y).map(Target::LogLine)
+    let _ = app;
+    let (_, actions) = system_areas(body);
+    contains(system_button(actions), x, y).then_some(Target::Button(ButtonId::RefreshHardware))
 }
 
-/// The event-log entry under a click. The fold arrow is the first cell of the entry's
-/// header row; a click anywhere on that entry folds it.
-fn log_index_at(app: &App, log: Rect, x: u16, y: u16) -> Option<usize> {
-    let inner = inset(log);
-    if app.log.is_empty() || !contains(inner, x, y) {
-        return None;
-    }
-    let row = (y - inner.y) as usize + app.scrolls.log as usize;
-    let mut cursor = 0usize;
-    for (index, entry) in app.log.iter().enumerate() {
-        let extra = if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
-            detail_rows(&entry.detail, inner.width as usize).len()
-        } else {
-            0
-        };
-        let height = 1 + extra;
-        if row < cursor + height {
-            return Some(index);
-        }
-        cursor += height;
-    }
-    None
+fn system_button(actions: Rect) -> Rect {
+    let width = 22.min(actions.width);
+    Rect { width, ..actions }
 }
 
 fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
@@ -3289,6 +3291,12 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
         FieldId::Composer if composer_height(app) > 0 => Some(composer_parts(layout.composer).0),
         FieldId::ReconSearch if app.module == Some(ModuleId::Recon) && !app.recon_chat => {
             Some(dashboard_areas(layout.body).0)
+        }
+        FieldId::LogsSearch if app.module == Some(ModuleId::Logs) => {
+            Some(super::logs::areas(layout.body).search)
+        }
+        FieldId::JobsSearch if app.module == Some(ModuleId::Jobs) => {
+            Some(super::jobs::areas(layout.body, &app.jobs).search)
         }
         FieldId::OsintSearch if app.module == Some(ModuleId::Osint) => {
             Some(osint_areas(layout.body, api_key_slot(app).is_some()).search)
@@ -3442,7 +3450,7 @@ fn field_value_area(area: Rect) -> Rect {
     }
 }
 
-fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &str, area: Rect) {
+pub(super) fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &str, area: Rect) {
     if area.width < 2 || area.height == 0 {
         return;
     }
@@ -3588,7 +3596,7 @@ fn draw_button(frame: &mut Frame, app: &App, button: ButtonId, label: &str, area
     draw_button_state(frame, app, button, label, area, false);
 }
 
-fn draw_button_state(
+pub(super) fn draw_button_state(
     frame: &mut Frame,
     app: &App,
     button: ButtonId,
@@ -3664,7 +3672,7 @@ fn draw_tabs<T: Copy>(
     }
 }
 
-fn pane(title: &str) -> Block<'static> {
+pub(super) fn pane(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
@@ -3689,6 +3697,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Some(ModuleId::Atlas) => draw_atlas(frame, app, layout.body),
         Some(ModuleId::Providers) => draw_providers(frame, app, layout.body),
         Some(ModuleId::System) => draw_system(frame, app, layout.body),
+        Some(ModuleId::Logs) => super::logs::draw(frame, app, layout.body),
+        Some(ModuleId::Jobs) => {
+            super::jobs::draw(frame, app, layout.body, app.job_source().is_some())
+        }
     }
     if composer_height(app) > 0 {
         let (field, send) = composer_parts(layout.composer);
@@ -3768,12 +3780,7 @@ fn header_detail(app: &App) -> String {
             BrainListMode::List => "memories".into(),
             BrainListMode::Create => "new memory".into(),
             BrainListMode::Graph => {
-                if app.brain_graph.is_claim_path()
-                    || app
-                        .memories
-                        .get(app.memory_sel)
-                        .is_some_and(|memory| memory.source.app == "atlas")
-                {
+                if app.detail_claim() {
                     "claim path".into()
                 } else {
                     "recon path".into()
@@ -3786,12 +3793,14 @@ fn header_detail(app: &App) -> String {
         Some(ModuleId::Intel) => "bulletin board".into(),
         Some(ModuleId::Osint) => "lookup tools".into(),
         Some(ModuleId::Providers) => app.provider_page.title().to_string(),
-        Some(ModuleId::System) => {
+        Some(ModuleId::System) => "host".into(),
+        Some(ModuleId::Jobs) => format!("{} active", app.jobs.counts.active),
+        Some(ModuleId::Logs) => {
             let errors = app.error_count();
             if errors == 0 {
-                "host".into()
+                "events".into()
             } else {
-                format!("{errors} errors")
+                super::logs::count(errors as i64, "error")
             }
         }
     }
@@ -3808,7 +3817,7 @@ fn footer_line(app: &App) -> Paragraph<'static> {
         "Esc close · Ctrl+U/D scroll"
     } else {
         match (app.module, app.focus) {
-            (None, _) => "↑↓ open · 1–7 apps · Ctrl+K · ? help",
+            (None, _) => "↑↓ open · 1–9 apps · Ctrl+K · ? help",
             (Some(ModuleId::Intel), _) if app.intel_page == IntelPage::Briefing => {
                 "↑↓ scroll · Recon modes · Esc bulletin"
             }
@@ -3827,13 +3836,18 @@ fn footer_line(app: &App) -> Paragraph<'static> {
             }
             (Some(ModuleId::Recon), _) => "Tab next · Enter · Ctrl+K · Esc list",
             (Some(ModuleId::Brain), _) if app.brain_list_mode == BrainListMode::Graph => {
-                "Esc memories · Ctrl+K"
+                "Tab section · ↑↓ select · Enter open related · Esc back · Ctrl+K"
             }
             (Some(ModuleId::Atlas), _) if app.atlas_news || app.atlas_page == AtlasPage::Live => {
                 "Tab next · Enter · Ctrl+K · Esc history"
             }
-            (Some(ModuleId::System), _) => "↑↓ log · Enter fold · Ctrl+K · Esc home",
-            _ => "Tab next · 1–7 apps · Enter · Ctrl+K · Esc home",
+            (Some(ModuleId::Logs), _) if app.logs.back_to_job.is_some() => {
+                "↑↓ event · Enter fold · f follow · o job · Esc back to job"
+            }
+            (Some(ModuleId::Logs), _) => "↑↓ event · Enter fold · f follow · o job · Esc home",
+            (Some(ModuleId::Jobs), _) => "↑↓ job · Enter detail · l logs · r retry · c cancel · s status · Esc home",
+            (Some(ModuleId::System), _) => "Tab next · Enter · Ctrl+K · Esc home",
+            _ => "Tab next · 1–9 apps · Enter · Ctrl+K · Esc home",
         }
     };
     let status = status_segments(app);
@@ -3882,10 +3896,10 @@ fn status_segments(app: &App) -> String {
         if let Some(tool) = osint::registry().get(app.tool_sel) {
             parts.push(tool.name.to_string());
         }
-    } else if app.module == Some(ModuleId::System) {
+    } else if app.module == Some(ModuleId::Logs) {
         let errors = app.error_count();
         if errors > 0 {
-            parts.push(format!("{errors} errors"));
+            parts.push(super::logs::count(errors as i64, "error"));
         }
     }
     if parts.is_empty() {
@@ -3949,8 +3963,10 @@ const SLASH: &[(&str, &str)] = &[
     ("insights", "retry insight extraction"),
     ("home", "return home"),
     ("brain", "open Brain"),
-    ("osint", "open OSINT tools"),
-    ("providers", "open Providers"),
+    ("jobs", "open Jobs"),
+    ("logs", "open Logs"),
+    ("tools", "open Tools (alias osint)"),
+    ("models", "open Models (alias providers)"),
     ("system", "open System"),
     ("palette", "command palette"),
 ];
@@ -4358,7 +4374,19 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
             })
         })
         .collect::<Vec<_>>();
-    frame.render_widget(List::new(items).block(pane(" memories ")), layout.list);
+    let title = memory_list_title(app);
+    if items.is_empty() {
+        let (text, style) = memory_list_note(app);
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(style)
+                .block(pane(&title))
+                .wrap(Wrap { trim: true }),
+            layout.list,
+        );
+    } else {
+        frame.render_widget(List::new(items).block(pane(&title)), layout.list);
+    }
     let recalled = if matches!(app.focus, Target::Memory(_)) {
         if let Some(insight) = &app.selected_insight {
             memory_anchors_text(insight)
@@ -4376,6 +4404,48 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: true }),
         layout.recall,
     );
+}
+
+/// Memory list title: read failure first, then an active Find filter.
+fn memory_list_title(app: &App) -> String {
+    if app.memory_error.is_some() && !app.memories.is_empty() {
+        return " memories · read failed · showing last loaded list ".into();
+    }
+    if !app.brain_query.trim().is_empty() && app.memories_loaded {
+        return format!(
+            " memories · Find active · {} of {} ",
+            app.memories.len(),
+            app.memory_total
+        );
+    }
+    " memories ".into()
+}
+
+/// Empty-list message: loading, read failure, no memories, or no Find matches.
+pub(crate) fn memory_list_note(app: &App) -> (String, ratatui::style::Style) {
+    if let Some(err) = &app.memory_error {
+        return (
+            format!("Could not read memories: {err}\nThe error is in Logs. The list reloads on the next change."),
+            theme::error(),
+        );
+    }
+    if !app.memories_loaded {
+        return ("Loading memories…".into(), theme::dim());
+    }
+    let query = app.brain_query.trim();
+    if !query.is_empty() {
+        return (
+            format!(
+                "No memories match \"{query}\". Find is still active; clear it to see all {}.",
+                app.memory_total
+            ),
+            theme::dim(),
+        );
+    }
+    (
+        "No memories yet. Create one, or run Atlas or Recon to save insights.".into(),
+        theme::dim(),
+    )
 }
 
 pub(crate) fn memory_anchors_text(insight: &argos_osint_core::recon::InsightView) -> String {
@@ -4605,42 +4675,6 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
             );
         }
     }
-}
-
-fn log_rows(app: &App, width: usize) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    let mut rows = Vec::new();
-    for (index, entry) in app.log.iter().enumerate() {
-        let style = if index == app.log_sel {
-            theme::selected()
-        } else {
-            match entry.level.as_str() {
-                "error" => theme::error(),
-                "warn" => theme::warn(),
-                _ => theme::dim(),
-            }
-        };
-        let marker = if entry.detail.is_empty() {
-            String::new()
-        } else if app.log_open.contains(&entry.id) {
-            "▾ ".into()
-        } else {
-            "▸ ".into()
-        };
-        rows.push(Line::from(Span::styled(
-            fit(
-                &format!("{marker}{} {} {}", entry.at, entry.level, entry.text),
-                width,
-            ),
-            style,
-        )));
-        if app.log_open.contains(&entry.id) && !entry.detail.is_empty() {
-            for line in detail_rows(&entry.detail, width) {
-                rows.push(Line::from(Span::styled(line, theme::text())));
-            }
-        }
-    }
-    rows
 }
 
 fn atlas_live_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
@@ -6409,6 +6443,11 @@ fn draw_atlas_insights(frame: &mut Frame, app: &App, area: Rect) {
         .into_iter()
         .map(|line| Line::from(Span::styled(center_text(&line, width), theme::dim())))
         .collect();
+    // Fifth-phase row: saved/reused/indexed counts, never extraction counts.
+    let memories = app.atlas_stats.memories.line();
+    if !memories.is_empty() {
+        lines.insert(0, Line::from(Span::styled(center_text(&memories, width), theme::dim())));
+    }
     lines.extend(rows.into_iter().skip(start).take(room.max(1)).map(|line| {
         Line::from(Span::styled(center_text(&line, width), theme::text()))
     }));
@@ -6571,10 +6610,17 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
     frame.render_widget(Paragraph::new(lines).block(pane(" news cycle ")), cycles);
-    let buttons = button_areas(actions, 2);
+    let buttons = button_areas(actions, 4);
     let live = atlas_history_live_label(app);
     draw_button(frame, app, ButtonId::AtlasLive, &live, buttons[0]);
-    draw_button(frame, app, ButtonId::AtlasDelete, "Delete", buttons[1]);
+    if app.atlas_can_resume() {
+        draw_button(frame, app, ButtonId::AtlasResume, "Resume", buttons[1]);
+    } else {
+        // Dimmed: the selected cycle has nothing to resume (Enter explains why).
+        draw_button_state(frame, app, ButtonId::AtlasResume, "Resume", buttons[1], false);
+    }
+    draw_button(frame, app, ButtonId::AtlasRepair, "Repair memories", buttons[2]);
+    draw_button(frame, app, ButtonId::AtlasDelete, "Delete", buttons[3]);
 }
 
 /// Date on the left, pipeline state on the right.
@@ -6618,9 +6664,10 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
         atlas_insights::insight_stats_line(&stats.insights)
     );
     let header = "Country                         Tier   Temp   Volume  Articles  Share";
+    let memories = stats.memories.line();
     let mut lines = vec![
         Line::from(Span::styled(fit(&summary, width), theme::dim())),
-        Line::from(""),
+        Line::from(Span::styled(fit(&memories, width), theme::dim())),
         Line::from(Span::styled(header.to_string(), theme::dim())),
     ];
     let data: Vec<String> = if origins.is_empty() {
@@ -6758,12 +6805,17 @@ fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
         let (actions, _map, stats, cycles) = atlas_runs_areas(body);
         if contains(actions, x, y) {
-            let slots = button_areas(actions, 2);
-            return Some(Target::Button(if contains(slots[0], x, y) {
-                ButtonId::AtlasLive
-            } else {
-                ButtonId::AtlasDelete
-            }));
+            let slots = button_areas(actions, 4);
+            let buttons = [
+                ButtonId::AtlasLive,
+                ButtonId::AtlasResume,
+                ButtonId::AtlasRepair,
+                ButtonId::AtlasDelete,
+            ];
+            return slots
+                .iter()
+                .position(|slot| contains(*slot, x, y))
+                .map(|index| Target::Button(buttons[index]));
         }
         if contains(stats, x, y) {
             return Some(Target::AtlasCycleStats);
@@ -6792,45 +6844,84 @@ fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     None
 }
 
+/// Host lines for System (existing hardware profile fields only).
+pub(crate) fn system_host_lines(hw: &argos_osint_core::hardware::HardwareProfile) -> Vec<String> {
+    let mut lines = vec![hw.one_line()];
+    lines.push(format!("OS: {} · {}", hw.os, hw.arch));
+    if !hw.cpu_name.is_empty() {
+        lines.push(format!("CPU: {}", hw.cpu_name));
+    }
+    lines.push(format!(
+        "Cores: {} logical{}",
+        hw.logical_cores,
+        hw.physical_cores
+            .map(|n| format!(" · {n} physical"))
+            .unwrap_or_default()
+    ));
+    lines.push(format!(
+        "Memory: {:.1} GB total · {:.1} GB available",
+        hw.total_ram_gb, hw.available_ram_gb
+    ));
+    lines.push(format!("Backend: {}", hw.backend));
+    if let Some(err) = &hw.gpu_error {
+        lines.push(format!("GPU probe: {err}"));
+    }
+    if hw.disk_total_gb > 0.0 {
+        lines.push(format!(
+            "Disk: {:.0} GB total · {:.0} GB free",
+            hw.disk_total_gb, hw.disk_available_gb
+        ));
+    }
+    lines
+}
+
+/// Paths for System: configuration and database always; other data, index,
+/// and cache paths only when they exist.
+pub(crate) fn system_path_lines() -> Vec<String> {
+    use argos_osint_core::paths;
+    let mut lines = vec![
+        format!("Config: {}", paths::config_path().display()),
+        format!("Database: {}", paths::db_path().display()),
+    ];
+    let optional = [
+        ("Data", paths::home_dir()),
+        ("Memory index", paths::lancedb_dir()),
+        ("Credentials", paths::auth_path()),
+        ("Hardware cache", paths::hardware_cache_path()),
+    ];
+    for (label, path) in optional {
+        if path.exists() {
+            lines.push(format!("{label}: {}", path.display()));
+        }
+    }
+    lines
+}
+
 fn draw_system(frame: &mut Frame, app: &App, area: Rect) {
-    let (hardware, actions, log) = system_areas(area);
-    let body = format!(
-        "{}\nBackend: {}\nLogical cores: {}\nConfig: {}\nDatabase: {}",
-        app.hardware.one_line(),
-        app.hardware.backend,
-        app.hardware.logical_cores,
-        argos_osint_core::paths::config_path().display(),
-        argos_osint_core::paths::db_path().display()
-    );
-    frame.render_widget(
-        Paragraph::new(body)
-            .style(theme::text())
-            .block(pane(" host "))
-            .wrap(Wrap { trim: true }),
-        hardware,
-    );
-    let buttons = button_areas(actions, 2);
+    let (content, actions) = system_areas(area);
     draw_button(
         frame,
         app,
         ButtonId::RefreshHardware,
         "Refresh hardware",
-        buttons[0],
+        system_button(actions),
     );
-    draw_button(frame, app, ButtonId::ClearLog, "Clear log", buttons[1]);
-    let lines = if app.log.is_empty() {
-        vec![Line::from(Span::styled(
-            "No events yet. Failures from Recon, Brain, OSINT, and Providers are recorded here.",
-            theme::dim(),
-        ))]
-    } else {
-        log_rows(app, inset(log).width as usize)
-    };
+    let host = system_host_lines(&app.hardware);
+    let host_h = (host.len() as u16 + 2).min(content.height);
+    let rows = split_vertical(content, [Constraint::Length(host_h), Constraint::Min(0)]);
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(pane(" event log "))
-            .scroll((app.scrolls.log, 0)),
-        log,
+        Paragraph::new(host.join("\n"))
+            .style(theme::text())
+            .block(pane(" host "))
+            .wrap(Wrap { trim: true }),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(system_path_lines().join("\n"))
+            .style(theme::text())
+            .block(pane(" paths "))
+            .wrap(Wrap { trim: true }),
+        rows[1],
     );
 }
 
@@ -6918,15 +7009,17 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 
 fn help_text(app: &App) -> &'static str {
     match app.module {
-        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 OSINT · 6 Providers · 7 System\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
+        None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools · 8 Models · 9 System\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
         Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nThe mode button under the full article opens Verify / Explain / Assess Outlook / Full Assessment\nJobs pane tracks focus-brief background progress and recon reports\nEsc returns from briefing to bulletin, or from bulletin to home",
-        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to the System event log\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live and Delete sit between the map and those panes. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
+        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, Repair memories, and Delete sit between the map and those panes. Resume continues the selected cycle when it stopped while saving or indexing memories. Repair memories rechecks saved cycles and requeues missing memories or vectors (progress in Jobs). When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
-        Some(ModuleId::System) => "System\n\nRefresh hardware re-reads the host profile\nThe event log keeps errors, run stages, and tool results for 24 hours\n↑↓ select a line · Enter or click the arrow folds a tool result\nCtrl+U/Ctrl+D and the wheel scroll the log\nEsc returns home",
-        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe path sits above a summary of the graph\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nEsc returns to memories\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
-        Some(ModuleId::Providers) => "Providers\n\nEach account tab stores that provider only\nDefaults sets Recon and Synthesis separately\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
-        _ => "Controls\n\nTab moves between fields and buttons\n1–7 switch apps when not typing in a field\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
+        Some(ModuleId::System) => "System\n\nHost hardware and the paths Argos uses\nRefresh hardware re-reads the host profile\nData, index, and cache paths are listed only when they exist\nEvents moved to Logs; background work is in Jobs\nEsc returns home",
+        Some(ModuleId::Logs) => "Logs\n\nDurable events from every app and background worker, kept 24 hours\nThe header counts errors, warnings, and failures in the last hour\nFilter narrows by text. Level, App, and the job filter narrow further\n↑↓ select an event · Enter or click folds its detail\nf toggles live follow. Moving off the newest event pauses it\no or Open job shows the event's job in Jobs\nOpened from Jobs, Esc or Back to job returns there\nClear events removes events only; jobs, results, and memories stay\nCtrl+U/Ctrl+D and the wheel scroll the list",
+        Some(ModuleId::Jobs) => "Jobs\n\nBackground work with timing, attempts, and errors\nActive work is listed first, then recent history, then service workers\nStatus and App filter the table. Filter matches title, id, operation, or error\n↑↓ select a job · Enter opens its detail (full screen when narrow)\nl or View logs opens Logs filtered to the job and its phases\nRetry failed requeues only failed index or summary tasks; completed work is kept\nOpen source jumps to the Atlas cycle or investigation when there is one\nUnknown historic timing shows Unavailable\nEsc closes the detail, then returns home",
+        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe detail shows the path graph on top, Related on the left, and Summary on the right\nNarrow terminals stack Related above Summary; the focused one gets more room\nRelated lists other memories: linked ones (shared claim relation, source, entity, or investigation) first, then similar ones, which are not evidence\nTab moves between Back, the graph, Related, and Summary\n↑↓ select a related memory · Enter or click opens it, even when Find hides it\nEsc or Back returns to the previous memory, then to the list with its Find and selection\nThe list keeps its selection and Find when memories change elsewhere\nIf memories cannot be read, the last loaded list stays and the error is shown and logged\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
+        Some(ModuleId::Providers) => "Models\n\nEach account tab stores that provider only\nDefaults sets Recon and Synthesis separately\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
+        _ => "Controls\n\nTab moves between fields and buttons\n1–9 switch apps when not typing in a field\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }
 }
 

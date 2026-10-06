@@ -381,6 +381,7 @@ pub fn start_report_worker(
     on_event: impl FnMut(IntelReportEvent) + Send + 'static,
 ) {
     let db_path = db_path.to_path_buf();
+    let job = register_canonical(&db_path, &job_id, &article_title, cancel.clone());
     let runtime = JobRuntime {
         db_path,
         job_id,
@@ -397,13 +398,111 @@ pub fn start_report_worker(
         cancel,
     };
     tokio::spawn(async move {
-        let _ = worker::run_job_to_completion(runtime, on_event).await;
+        let db = runtime.db_path.clone();
+        let legacy = runtime.job_id.clone();
+        let outcome = worker::run_job_to_completion(runtime, on_event).await;
+        finish_canonical(job, &db, &legacy, outcome);
     });
+}
+
+/// Canonical registry job for an Intel Recon assessment. The legacy report
+/// job id is the run reference, so a restarted worker reuses the same row.
+fn register_canonical(
+    db: &Path,
+    legacy_id: &str,
+    title: &str,
+    cancel: Arc<AtomicBool>,
+) -> Option<crate::job_registry::JobHandle> {
+    use crate::job_registry::{begin_optional_with, job_for_run, JobSpec};
+    let existing = rusqlite::Connection::open(db)
+        .ok()
+        .and_then(|conn| job_for_run(&conn, "intel_recon", legacy_id).ok().flatten());
+    let mut spec = JobSpec::new("intel", "intel_recon", format!("Intel Recon · {title}"))
+        .run(legacy_id)
+        .resource(format!("intel_report:{legacy_id}"))
+        .cancellable();
+    if let Some(id) = existing {
+        spec = spec.with_id(id);
+    }
+    begin_optional_with(db, spec, cancel)
+}
+
+fn finish_canonical(
+    job: Option<crate::job_registry::JobHandle>,
+    db: &Path,
+    legacy_id: &str,
+    outcome: Result<()>,
+) {
+    use crate::job_registry::Finish;
+    let Some(job) = job else {
+        return;
+    };
+    let legacy = Store::open(db)
+        .ok()
+        .and_then(|store| store.intel_report_job(legacy_id).ok().flatten());
+    let finish = match (outcome, legacy) {
+        (Err(err), _) => Finish::failed("intel_recon", format!("{err:#}")),
+        (Ok(()), Some(row)) => match row.state.as_str() {
+            "completed" | "done" => Finish::Completed {
+                result_ref: format!("intel_report:{legacy_id}"),
+            },
+            "paused" => Finish::Paused {
+                summary: row.stage.clone(),
+            },
+            "cancelled" => Finish::Cancelled {
+                summary: row.error.clone(),
+            },
+            "partial" => Finish::Partial {
+                summary: if row.warning.is_empty() {
+                    row.stage.clone()
+                } else {
+                    row.warning.clone()
+                },
+            },
+            "failed" => Finish::failed("intel_recon", row.error.clone()),
+            other => Finish::Partial {
+                summary: format!("worker stopped with the report {other}"),
+            },
+        },
+        (Ok(()), None) => Finish::failed("intel_recon", "the report job was deleted"),
+    };
+    job.finish(finish);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intel_recon_links_its_legacy_job_to_one_canonical_registry_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        drop(Store::open(&db).unwrap());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let job = register_canonical(&db, "irj-1", "Port strike", cancel.clone()).unwrap();
+        let id = job.id().to_string();
+        // The legacy row is gone (deleted mid-run): failure, not success.
+        finish_canonical(Some(job), &db, "irj-1", Ok(()));
+        let store = Store::open(&db).unwrap();
+        let row = store.get_job(&id).unwrap().unwrap();
+        assert_eq!((row.app.as_str(), row.run_ref.as_str()), ("intel", "irj-1"));
+        assert_eq!(row.state, "failed");
+        // A restarted worker reuses the same canonical row.
+        let again = register_canonical(&db, "irj-1", "Port strike", cancel).unwrap();
+        assert_eq!(again.id(), id);
+        finish_canonical(Some(again), &db, "irj-1", Err(anyhow!("network down")));
+        let row = store.get_job(&id).unwrap().unwrap();
+        assert_eq!((row.state.as_str(), row.attempts_used), ("failed", 2));
+        let rows: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM argos_jobs WHERE run_ref='irj-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
 
     #[test]
     fn create_job_inserts_all_verify_sections() {

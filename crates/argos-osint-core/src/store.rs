@@ -13,6 +13,18 @@ use crate::brain::{
 };
 use crate::brain_lance::{self, BrainIndex};
 
+mod graph_summaries;
+mod publication;
+#[cfg(test)]
+pub(crate) use publication::fault as publication_fault;
+pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
+pub use publication::{
+    memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
+    MemoryChangeWatcher, PublicationReceipt, PublicationVerification, PublishOptions,
+    RejectedClaim, DELETED_REVISION, MEMORY_RECORD,
+};
+pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
+
 static IDS: AtomicU64 = AtomicU64::new(1);
 
 fn new_id() -> String {
@@ -27,10 +39,13 @@ pub struct GraphSummary {
     pub focus: String,
 }
 
-/// Schema version this build writes. 18 adds durable task/index-change tables
-/// (`argos_jobs`, `argos_tasks`, `argos_attempts`, `argos_index_changes`,
-/// `argos_derived_summaries`). 17 added `memory_embed_meta` and dropped sqlite-vec.
-pub const SCHEMA_VERSION: i64 = 18;
+/// Schema version this build writes. 19 adds (additively) job timing/routing
+/// columns, leased index-outbox columns, `argos_events`, Atlas extraction
+/// checkpoints/publication receipts and memory tombstones. 18 added durable
+/// task/index-change tables (`argos_jobs`, `argos_tasks`, `argos_attempts`,
+/// `argos_index_changes`, `argos_derived_summaries`). 17 added
+/// `memory_embed_meta` and dropped sqlite-vec.
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -144,6 +159,11 @@ impl Store {
         store.ensure_schema()?;
         store.restore_serving_vector_table();
         Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn conn_for_tests(&self) -> &Connection {
+        &self.conn
     }
 
     pub fn memory() -> Result<Self> {
@@ -435,6 +455,16 @@ impl Store {
                 crate::scheduler::migrate_scheduler(&self.conn)?;
                 let _ = crate::brain_lance::migrate_generations(&self.conn);
             }
+            // v19: additive job timing, pool routing, leased index outbox, events,
+            // Atlas checkpoints/receipts, tombstones. `migrate_tables` above already
+            // applied the idempotent additive step; this only records the version.
+            if version < 19 {
+                crate::tasks::migrate_additive(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 19)?;
+            }
+            // Additive, idempotent: revision-aware graph summary cache and
+            // the latest explanation diagnostic.
+            graph_summaries::migrate(&self.conn)?;
             Ok(())
         })();
         match result {
@@ -509,19 +539,59 @@ impl Store {
             created_at: chrono::Utc::now().to_rfc3339(),
             source,
         };
-        self.conn.execute(
-            "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                memory.id,
-                memory.text,
-                memory.category,
-                i64::from(memory.pinned),
-                memory.created_at,
-                serde_json::to_string(&memory.source)?
-            ],
-        )?;
-        self.index_upsert(std::slice::from_ref(&memory.id));
+        let source_json = serde_json::to_string(&memory.source)?;
+        self.write_then_index(|| {
+            self.conn.execute(
+                "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    memory.id,
+                    memory.text,
+                    memory.category,
+                    i64::from(memory.pinned),
+                    memory.created_at,
+                    source_json
+                ],
+            )?;
+            Ok(((), vec![memory.id.clone()]))
+        })?;
         Ok(memory)
+    }
+
+    /// Run a memory write, its durable index-outbox rows and the
+    /// memories-changed bump in one transaction, then attempt the queued work
+    /// immediately through the same leased tasks. `write` returns its value and
+    /// the memory ids whose index state it may have changed. Index failure never
+    /// fails the write; the outbox keeps the work. Inside a caller's transaction
+    /// it only adds statements (the caller commits; the pool indexes).
+    fn write_then_index<T>(&self, write: impl FnOnce() -> Result<(T, Vec<String>)>) -> Result<T> {
+        let own_tx = self.conn.is_autocommit();
+        if own_tx {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        }
+        let result = (|| -> Result<(T, Vec<crate::tasks::IndexEnqueue>)> {
+            let (value, ids) = write()?;
+            let queued = if ids.is_empty() {
+                Vec::new()
+            } else {
+                publication::bump_memories_changed(&self.conn)?;
+                self.enqueue_memory_index(&ids, None)?.0
+            };
+            Ok((value, queued))
+        })();
+        if !own_tx {
+            return result.map(|(value, _)| value);
+        }
+        match result {
+            Ok((value, queued)) => {
+                self.conn.execute_batch("COMMIT")?;
+                let _ = self.index_now(&queued);
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
     }
 
     /// Hybrid recall: Lance vector search blended with Jaccard ([`hybrid_recall`]),
@@ -626,6 +696,7 @@ impl Store {
                 brain_lance::clear_fingerprint(&self.conn)?;
                 index.rebuild(&rows)?;
                 brain_lance::write_fingerprint(&self.conn)?;
+                publication::record_index_states(&self.conn, &rows, &index.serving_table_name())?;
             } else {
                 // Do not block recall. Queue a durable rebuild and keep Jaccard until ready.
                 let now = chrono::Utc::now().to_rfc3339();
@@ -643,11 +714,24 @@ impl Store {
         } else {
             let have: HashSet<String> = index.ids()?.into_iter().collect();
             let want: HashSet<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
-            let missing: Vec<(String, String)> = rows
-                .iter()
-                .filter(|(id, _)| !have.contains(id))
-                .cloned()
-                .collect();
+            // Re-embed rows that are absent, or whose recorded revision is stale.
+            // Rows present without any recorded revision (written before revision
+            // tracking) are adopted as-is rather than re-embedded on the recall path.
+            let mut adopt: Vec<(String, String)> = Vec::new();
+            let mut missing: Vec<(String, String)> = Vec::new();
+            for (id, text) in &rows {
+                if !have.contains(id) {
+                    missing.push((id.clone(), text.clone()));
+                    continue;
+                }
+                match publication::indexed_revision(&self.conn, id)? {
+                    None => adopt.push((id.clone(), text.clone())),
+                    Some(rev) if rev != memory_revision(text) => {
+                        missing.push((id.clone(), text.clone()))
+                    }
+                    Some(_) => {}
+                }
+            }
             let stale: Vec<String> = have
                 .iter()
                 .filter(|id| !want.contains(id.as_str()))
@@ -655,6 +739,13 @@ impl Store {
                 .collect();
             index.upsert_texts(&missing)?;
             index.remove_many(&stale)?;
+            adopt.extend(missing);
+            if !adopt.is_empty() {
+                publication::record_index_states(&self.conn, &adopt, &index.serving_table_name())?;
+            }
+            for id in &stale {
+                publication::clear_index_state(&self.conn, id)?;
+            }
         }
         index.mark_ready();
         Ok(())
@@ -697,6 +788,7 @@ impl Store {
         let mut doomed: Vec<String> = Vec::new();
         let mut written: Vec<String> = Vec::new();
         let mut preserved = 0usize;
+        let mut queued = Vec::new();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<ArticleInsightCommit> {
             self.conn.execute(
@@ -848,6 +940,9 @@ impl Store {
                     params![left, right, relation],
                 )?;
             }
+            let mut touched = doomed.clone();
+            touched.extend(written.iter().cloned());
+            queued = self.queue_index_for(&touched)?;
             Ok(ArticleInsightCommit {
                 claims: committed,
                 preserved_user_edits: preserved,
@@ -856,8 +951,7 @@ impl Store {
         match result {
             Ok(outcome) => {
                 self.conn.execute_batch("COMMIT")?;
-                self.index_remove_missing(&doomed);
-                self.index_upsert(&written);
+                let _ = self.index_now(&queued);
                 Ok(outcome)
             }
             Err(err) => {
@@ -880,6 +974,7 @@ impl Store {
         brain_lance::clear_fingerprint(&self.conn)?;
         let memories = index.rebuild(&rows)?;
         brain_lance::write_fingerprint(&self.conn)?;
+        publication::record_index_states(&self.conn, &rows, &index.serving_table_name())?;
         index.mark_ready();
         Ok(ReindexReport {
             memories,
@@ -927,6 +1022,9 @@ impl Store {
             let progress = brain_lance::rebuild_generation_batched(&self.conn, index, &gen, &rows)?;
             done += 1;
             if progress.activated {
+                // Record what the activated generation holds: these rows' revisions.
+                // Rows whose text changed mid-rebuild are caught by verification.
+                publication::record_index_states(&self.conn, &rows, &index.serving_table_name())?;
                 index.mark_ready();
                 break;
             }
@@ -934,31 +1032,38 @@ impl Store {
         Ok(done)
     }
 
-    /// Index hook after memories were written or their text changed. Best effort.
-    pub(crate) fn index_upsert(&self, ids: &[String]) {
-        if ids.is_empty() || self.vectors.is_none() {
-            return;
-        }
-        let Some(index) = self.vector_index() else {
-            return;
+    /// Typed index upsert used by the reliable (outbox) path. Distinguishes
+    /// ready, pending, disabled and retryable/permanent failures; a missing
+    /// memory row means the memory was deleted, so its vector is removed instead
+    /// of resurrected.
+    pub fn try_index_upsert(&self, ids: &[String]) -> crate::tasks::IndexOutcome {
+        use crate::tasks::IndexOutcome;
+        let mut last = IndexOutcome::Ready {
+            revision: String::new(),
+            fingerprint: brain_lance::current_fingerprint(),
+            generation: String::new(),
         };
-        let result = self
-            .memory_texts(Some(ids))
-            .and_then(|rows| index.upsert_texts(&rows));
-        if let Err(err) = result {
-            brain_lance::note_error(&err);
-            index.mark_stale();
+        for id in ids {
+            let outcome = self.try_index_memory(id, "");
+            if !outcome.is_ready() {
+                return outcome;
+            }
+            last = outcome;
         }
+        last
     }
 
-    /// Index hook after memories may have been deleted: drops vectors for the ids
-    /// that are gone from SQLite. Best effort.
-    pub(crate) fn index_remove_missing(&self, ids: &[String]) {
-        if ids.is_empty() || self.vectors.is_none() {
-            return;
+    /// Typed removal of vectors whose memories are gone from SQLite.
+    pub fn try_index_remove_missing(&self, ids: &[String]) -> crate::tasks::IndexOutcome {
+        use crate::tasks::IndexOutcome;
+        if let Some(outcome) = self.index_unavailable() {
+            return outcome;
         }
         let Some(index) = self.vector_index() else {
-            return;
+            return IndexOutcome::RetryableFailure {
+                message: brain_lance::last_error()
+                    .unwrap_or_else(|| "vector index is not ready".into()),
+            };
         };
         let result = (|| -> Result<()> {
             let present: HashSet<String> = self
@@ -971,12 +1076,83 @@ impl Store {
                 .filter(|id| !present.contains(*id))
                 .cloned()
                 .collect();
-            index.remove_many(&gone)
+            index.remove_many(&gone)?;
+            for id in &gone {
+                publication::clear_index_state(&self.conn, id)?;
+            }
+            Ok(())
         })();
-        if let Err(err) = result {
-            brain_lance::note_error(&err);
-            index.mark_stale();
+        match result {
+            Ok(()) => IndexOutcome::Ready {
+                revision: String::new(),
+                fingerprint: brain_lance::current_fingerprint(),
+                generation: index.serving_table_name(),
+            },
+            Err(err) => {
+                brain_lance::note_error(&err);
+                index.mark_stale();
+                IndexOutcome::RetryableFailure {
+                    message: format!("{err:#}"),
+                }
+            }
         }
+    }
+
+    /// Drain generation rebuild batches with a typed outcome: a batch is
+    /// progress (`Pending`), only an activated (or absent) generation is `Ready`.
+    pub fn try_process_vector_rebuild(&self, max_batches: usize) -> crate::tasks::IndexOutcome {
+        use crate::tasks::IndexOutcome;
+        if let Some(outcome) = self.index_unavailable() {
+            return outcome;
+        }
+        match self.process_pending_vector_rebuild(max_batches) {
+            Ok(batches) => match self.rebuild_in_progress() {
+                Some(_) => IndexOutcome::Pending {
+                    reason: format!("rebuild progress: {batches} batch(es) this pass"),
+                },
+                None => IndexOutcome::Ready {
+                    revision: String::new(),
+                    fingerprint: brain_lance::current_fingerprint(),
+                    generation: self
+                        .vectors
+                        .as_deref()
+                        .map(|i| i.serving_table_name())
+                        .unwrap_or_default(),
+                },
+            },
+            Err(err) => IndexOutcome::RetryableFailure {
+                message: format!("{err:#}"),
+            },
+        }
+    }
+
+    /// `Some(Disabled)` when this store has no vector index at all.
+    fn index_unavailable(&self) -> Option<crate::tasks::IndexOutcome> {
+        if self.vectors.is_some() {
+            return None;
+        }
+        let reason = if crate::embed::enabled() {
+            "semantic indexing unavailable for this store (in-memory)"
+        } else {
+            "semantic indexing disabled (ARGOS_EMBED=0)"
+        };
+        Some(crate::tasks::IndexOutcome::Disabled {
+            reason: reason.into(),
+        })
+    }
+
+    /// Reason string when a shadow generation is still building.
+    fn rebuild_in_progress(&self) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT id FROM argos_index_generations WHERE state='building' ORDER BY created_at ASC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .map(|gen| format!("generation rebuild {gen} in progress"))
     }
 
     pub fn update_memory(
@@ -988,15 +1164,17 @@ impl Store {
     ) -> Result<bool> {
         let text = text.trim();
         anyhow::ensure!(!text.is_empty(), "memory text is empty");
-        let changed = self.conn.execute(
-            "UPDATE memories SET text=?1,category=?2,pinned=?3 WHERE id=?4",
-            params![text, normalize_category(category), i64::from(pinned), id],
-        )? > 0;
-        if changed {
+        self.write_then_index(|| {
+            let changed = self.conn.execute(
+                "UPDATE memories SET text=?1,category=?2,pinned=?3 WHERE id=?4",
+                params![text, normalize_category(category), i64::from(pinned), id],
+            )? > 0;
+            if !changed {
+                return Ok((false, Vec::new()));
+            }
             self.conn.execute("INSERT OR IGNORE INTO insight_user_edits(memory_id) SELECT memory_id FROM insight_claims WHERE memory_id=?1",[id])?;
-            self.index_upsert(&[id.to_string()]);
-        }
-        Ok(changed)
+            Ok((true, vec![id.to_string()]))
+        })
     }
 
     pub fn graph_summary(&self, memory_id: &str) -> Result<Option<GraphSummary>> {
@@ -1037,9 +1215,18 @@ impl Store {
         Ok(true)
     }
 
+    /// User deletion. Leaves a tombstone so retries/repair never recreate the
+    /// memory, and queues durable vector removal in the same transaction.
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
+        let mut queued = Vec::new();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<bool> {
+            let exists: i64 =
+                self.conn
+                    .query_row("SELECT COUNT(*) FROM memories WHERE id=?1", [id], |r| r.get(0))?;
+            if exists > 0 {
+                self.tombstone_memory(id, "user_delete")?;
+            }
             self.conn.execute("DELETE FROM insight_sources WHERE fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
             self.conn.execute("DELETE FROM insight_relations WHERE left_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1) OR right_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
             self.conn
@@ -1048,17 +1235,20 @@ impl Store {
                 "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
                 [id],
             )?;
-            Ok(self
+            let deleted = self
                 .conn
                 .execute("DELETE FROM memories WHERE id=?1", [id])?
-                > 0)
+                > 0;
+            if deleted {
+                queued = self.enqueue_memory_index(&[id.to_string()], None)?.0;
+                publication::bump_memories_changed(&self.conn)?;
+            }
+            Ok(deleted)
         })();
         match result {
             Ok(deleted) => {
                 self.conn.execute_batch("COMMIT")?;
-                if deleted {
-                    self.index_remove_missing(&[id.to_string()]);
-                }
+                let _ = self.index_now(&queued);
                 Ok(deleted)
             }
             Err(err) => {
@@ -1068,8 +1258,25 @@ impl Store {
         }
     }
 
+    /// Fetch one memory by id directly (independent of any list filter).
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
-        Ok(self.list_memories()?.into_iter().find(|m| m.id == id))
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id,text,category,pinned,created_at,source_json FROM memories WHERE id=?1",
+                [id],
+                memory_row,
+            )
+            .optional()?)
+    }
+
+    /// Durable removal work for memories deleted inside the caller's transaction.
+    fn queue_index_for(&self, ids: &[String]) -> Result<Vec<crate::tasks::IndexEnqueue>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        publication::bump_memories_changed(&self.conn)?;
+        Ok(self.enqueue_memory_index(ids, None)?.0)
     }
 
     pub fn atlas_insert_run(&self, id: &str, cursor_json: &str, stats_json: &str) -> Result<()> {
@@ -1170,6 +1377,7 @@ impl Store {
             return Ok(0);
         }
         let mut doomed: Vec<String> = Vec::new();
+        let mut queued = Vec::new();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<usize> {
             let removed = self.conn.execute(
@@ -1218,12 +1426,13 @@ impl Store {
                 }
             }
             let _ = removed;
+            queued = self.queue_index_for(&doomed)?;
             Ok(orphaned)
         })();
         match result {
             Ok(orphaned) => {
                 self.conn.execute_batch("COMMIT")?;
-                self.index_remove_missing(&doomed);
+                let _ = self.index_now(&queued);
                 Ok(orphaned)
             }
             Err(err) => {
@@ -1293,7 +1502,11 @@ impl Store {
                 .execute("DELETE FROM memories WHERE id=?1", [&memory_id])?;
             doomed.push(memory_id);
         }
-        self.index_remove_missing(&doomed);
+        // Inside the caller's transaction: queue durable removal; the index pool
+        // deletes vectors after commit (no Lance writes under the SQLite lock).
+        self.queue_index_for(&doomed)?;
+        // Checkpoints, receipts and repair status follow the run's retention.
+        publication::delete_run_memory_state(&self.conn, run_id)?;
         Ok(())
     }
 
@@ -1746,8 +1959,9 @@ impl Store {
         );
     }
 
-    /// Writes Atlas claims into the same Brain tables Recon reads.
-    /// `answer_id` is `atlas-{run_id}` and is not a Recon message.
+    /// Writes Atlas claims into the same Brain tables Recon reads, through the
+    /// transactional publisher ([`Self::publish_atlas_insights`]), and returns its
+    /// receipt. `answer_id` is `atlas-{run_id}` and is not a Recon message.
     pub fn persist_atlas_insights(
         &self,
         run_id: &str,
@@ -1755,173 +1969,29 @@ impl Store {
         relations: &[(String, String, String)],
         brief: &str,
         entity_path: &str,
-    ) -> Result<()> {
-        if claims.is_empty() {
-            return Ok(());
+    ) -> Result<PublicationReceipt> {
+        let _ = entity_path;
+        let receipt = self.publish_atlas_insights(
+            run_id,
+            claims,
+            relations,
+            brief,
+            &PublishOptions {
+                index_now: true,
+                ..Default::default()
+            },
+        )?;
+        if receipt.brief_memory_id.is_some() {
+            self.enqueue_summary_flush_best_effort(
+                crate::summarization::SummarizationMode::AtlasBrief,
+                &format!("atlas-brief-{run_id}"),
+                run_id,
+                brief.trim(),
+                "atlas",
+                800,
+            );
         }
-        let answer_id = atlas_answer_id(run_id);
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut written: Vec<String> = Vec::new();
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| -> Result<()> {
-            for claim in claims {
-                let entity = claim.entity.trim().to_ascii_lowercase();
-                let namespace = claim.namespace.trim().to_ascii_lowercase();
-                let predicate = claim.predicate.trim().to_ascii_lowercase();
-                let object = claim.object.trim().to_ascii_lowercase();
-                let sentence = claim.claim.trim();
-                if entity.is_empty()
-                    || namespace.is_empty()
-                    || predicate.is_empty()
-                    || object.is_empty()
-                    || sentence.is_empty()
-                    || claim.article_id.trim().is_empty()
-                {
-                    continue;
-                }
-                let fingerprint = insight_fingerprint(&namespace, &entity, &predicate, &object);
-                let existing: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-                        [&fingerprint],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if existing.is_none() {
-                    let memory_id = new_id();
-                    let source = MemorySource {
-                        app: "atlas".into(),
-                        conversation_id: run_id.into(),
-                        message_id: None,
-                        reference: Some(run_id.into()),
-                    };
-                    self.conn.execute(
-                        "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
-                        params![memory_id, sentence, now, serde_json::to_string(&source)?],
-                    )?;
-                    written.push(memory_id.clone());
-                    self.conn.execute(
-                        "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at,source_reliability,info_credibility,admiralty,rsp_status) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10,?11,?12,?13)",
-                        params![
-                            fingerprint,
-                            memory_id,
-                            entity,
-                            predicate,
-                            object,
-                            claim.topic.trim(),
-                            claim.classification.trim(),
-                            claim.confidence,
-                            now,
-                            claim.reliability.trim(),
-                            claim.info_credibility as i64,
-                            claim.admiralty.trim(),
-                            claim.rsp_status.trim(),
-                        ],
-                    )?;
-                    let mut stmt = self.conn.prepare(
-                        "SELECT fingerprint FROM insight_claims WHERE entity_id=?1 AND predicate=?2 AND fingerprint<>?3",
-                    )?;
-                    let others: Vec<String> = stmt
-                        .query_map(params![entity, predicate, fingerprint], |row| row.get(0))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    drop(stmt);
-                    for old in others {
-                        self.conn.execute(
-                            "INSERT OR IGNORE INTO insight_relations(left_fingerprint,right_fingerprint,relation) VALUES (?1,?2,'conflict_or_revision')",
-                            params![old, fingerprint],
-                        )?;
-                    }
-                }
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url,published_at) VALUES (?1,NULL,?2,?3,?4,?5,?6)",
-                    params![
-                        fingerprint,
-                        run_id,
-                        answer_id,
-                        claim.article_id.trim(),
-                        claim.source_url.trim(),
-                        claim.published_at.trim(),
-                    ],
-                )?;
-                self.conn.execute(
-                    "UPDATE insight_sources SET published_at=?1 WHERE fingerprint=?2 AND answer_id=?3 AND call_id=?4",
-                    params![
-                        claim.published_at.trim(),
-                        fingerprint,
-                        answer_id,
-                        claim.article_id.trim(),
-                    ],
-                )?;
-                self.conn.execute(
-                    "UPDATE insight_claims SET confidence=?1, source_reliability=?2, info_credibility=?3, admiralty=?4, rsp_status=?5, updated_at=?6 WHERE fingerprint=?7",
-                    params![
-                        claim.confidence,
-                        claim.reliability.trim(),
-                        claim.info_credibility as i64,
-                        claim.admiralty.trim(),
-                        claim.rsp_status.trim(),
-                        now,
-                        fingerprint,
-                    ],
-                )?;
-            }
-            for (left, right, relation) in relations {
-                if left.is_empty() || right.is_empty() || relation.is_empty() || left == right {
-                    continue;
-                }
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO insight_relations(left_fingerprint,right_fingerprint,relation) VALUES (?1,?2,?3)",
-                    params![left, right, relation],
-                )?;
-            }
-            let _ = entity_path;
-            let brief = brief.trim();
-            if !brief.is_empty() {
-                if let Some(memory_id) = atlas_brief_id(&self.conn, run_id)? {
-                    self.conn.execute(
-                        "UPDATE memories SET text=?1 WHERE id=?2",
-                        params![brief, memory_id],
-                    )?;
-                    written.push(memory_id);
-                } else {
-                    let memory_id = new_id();
-                    let source = MemorySource {
-                        app: "atlas".into(),
-                        conversation_id: run_id.into(),
-                        message_id: None,
-                        reference: Some(run_id.into()),
-                    };
-                    self.conn.execute(
-                        "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
-                        params![memory_id, brief, now, serde_json::to_string(&source)?],
-                    )?;
-                    written.push(memory_id);
-                }
-            }
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.conn.execute_batch("COMMIT")?;
-                self.index_upsert(&written);
-                if !brief.trim().is_empty() {
-                    self.enqueue_summary_flush_best_effort(
-                        crate::summarization::SummarizationMode::AtlasBrief,
-                        &format!("atlas-brief-{run_id}"),
-                        run_id,
-                        brief.trim(),
-                        "atlas",
-                        800,
-                    );
-                }
-                Ok(())
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        Ok(receipt)
     }
 }
 
@@ -1977,7 +2047,7 @@ fn repair_embed_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn atlas_answer_id(run_id: &str) -> String {
+pub(crate) fn atlas_answer_id(run_id: &str) -> String {
     format!("atlas-{run_id}")
 }
 
@@ -2010,7 +2080,7 @@ pub fn insight_fingerprint(namespace: &str, entity: &str, predicate: &str, objec
     serde_json::to_string(&(namespace, entity, predicate, object)).unwrap_or_default()
 }
 
-fn atlas_brief_id(conn: &Connection, run_id: &str) -> Result<Option<String>> {
+pub(crate) fn atlas_brief_id(conn: &Connection, run_id: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.source_json FROM memories m
          WHERE m.id NOT IN (SELECT memory_id FROM insight_claims)",
@@ -2092,8 +2162,9 @@ pub struct AtlasArticleRow {
     pub image_url: String,
 }
 
-/// One span-checked claim the Atlas cycle writes into Brain.
-#[derive(Clone, Debug, PartialEq)]
+/// One span-checked claim the Atlas cycle writes into Brain. Serializable so the
+/// validated extraction can be checkpointed before publication.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AtlasInsightClaim {
     pub fingerprint: String,
     pub entity: String,
@@ -2248,7 +2319,7 @@ mod tests {
             drop(Store::open(&path).unwrap());
             Connection::open(&path)
                 .unwrap()
-                .execute_batch("PRAGMA user_version=19")
+                .execute_batch(&format!("PRAGMA user_version={}", SCHEMA_VERSION + 1))
                 .unwrap();
             assert!(Store::open(&path).is_err());
         }

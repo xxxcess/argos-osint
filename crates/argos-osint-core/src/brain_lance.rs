@@ -485,6 +485,40 @@ impl BrainIndex {
         Ok(out)
     }
 
+    /// Exact id lookup in the serving table (a filter scan, not similarity):
+    /// which of `ids` currently have a vector row.
+    pub fn present_ids(&self, ids: &[String]) -> Result<std::collections::HashSet<String>> {
+        let mut out = std::collections::HashSet::new();
+        if ids.is_empty() || !self.exists() {
+            return Ok(out);
+        }
+        let table = self.table()?;
+        for chunk in ids.chunks(256) {
+            let filter = id_filter(chunk);
+            let table = table.clone();
+            let batches: Vec<RecordBatch> = block_on(async move {
+                Ok::<_, anyhow::Error>(
+                    table
+                        .query()
+                        .only_if(filter)
+                        .select(Select::columns(&["memory_id"]))
+                        .execute()
+                        .await?
+                        .try_collect()
+                        .await?,
+                )
+            })?;
+            for batch in &batches {
+                let col = batch
+                    .column_by_name("memory_id")
+                    .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+                    .ok_or_else(|| anyhow!("lookup result has no memory_id"))?;
+                out.extend((0..batch.num_rows()).map(|row| col.value(row).to_string()));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn count(&self) -> Result<usize> {
         if !self.exists() {
             return Ok(0);

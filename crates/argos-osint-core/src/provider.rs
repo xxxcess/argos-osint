@@ -798,7 +798,7 @@ async fn bearer_token(secret: &ProviderSecret) -> Result<Option<String>, String>
     Ok(None)
 }
 
-async fn authorize(
+pub(crate) async fn authorize(
     mut req: reqwest::RequestBuilder,
     secret: &ProviderSecret,
 ) -> Result<reqwest::RequestBuilder> {
@@ -837,12 +837,13 @@ pub async fn complete(
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
+        let headers = resp.headers().clone();
         let text = resp.text().await.unwrap_or_default();
         // Some local servers reject stream+tools. Retry once without streaming.
         if status.as_u16() == 400 || status.as_u16() == 404 {
             return complete_once(secret, messages, tools).await;
         }
-        return Err(anyhow!("provider {status}: {text}"));
+        return Err(typed_http_error(secret, &url, status.as_u16(), &headers, &text, "stream"));
     }
     let mut stream = resp.bytes_stream();
     let mut acc = SseAcc::default();
@@ -966,14 +967,36 @@ async fn complete_once(
     let req = authorize(client.post(&url).json(&body), secret).await?;
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
     let status = resp.status();
+    let headers = resp.headers().clone();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("provider {status}: {text}"));
+        return Err(typed_http_error(secret, &url, status.as_u16(), &headers, &text, "non_stream"));
     }
     parse_completion(&text)
 }
 
-fn chat_body(
+/// Non-success HTTP as a typed, redacted [`crate::provider_diag::ProviderFailure`]
+/// (its Display keeps the status and the provider's message).
+fn typed_http_error(
+    secret: &ProviderSecret,
+    url: &str,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+    transport: &str,
+) -> anyhow::Error {
+    anyhow::Error::new(crate::provider_diag::http_failure(
+        status,
+        headers,
+        body,
+        url,
+        &effective_kind(secret),
+        &secret.model,
+        transport,
+    ))
+}
+
+pub(crate) fn chat_body(
     secret: &ProviderSecret,
     messages: &[ChatMessage],
     tools: &[ToolSpec],

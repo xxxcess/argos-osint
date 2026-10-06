@@ -4,6 +4,9 @@ use anyhow::Result;
 use argos_osint_core::brain::{Memory, MemorySource, ScoredMemory};
 use argos_osint_core::hardware::{self, HardwareProfile};
 use argos_osint_core::paths;
+use argos_osint_core::related_memories::{RelatedLimits, RelatedMemory};
+use argos_osint_core::job_registry::{CancelRequest, JobSpec};
+use super::tracked;
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
@@ -36,16 +39,24 @@ pub enum ModuleId {
     Recon,
     Brain,
     Atlas,
+    Jobs,
+    Logs,
+    /// Displayed as "Tools"; the internal id and config keys stay `osint`.
     Osint,
+    /// Displayed as "Models"; the internal id and config keys stay `providers`.
     Providers,
     System,
 }
 impl ModuleId {
-    pub const ALL: [Self; 7] = [
+    /// Home and numeric order: 1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs ·
+    /// 6 Logs · 7 Tools · 8 Models · 9 System.
+    pub const ALL: [Self; 9] = [
         Self::Intel,
         Self::Atlas,
         Self::Brain,
         Self::Recon,
+        Self::Jobs,
+        Self::Logs,
         Self::Osint,
         Self::Providers,
         Self::System,
@@ -59,8 +70,10 @@ impl ModuleId {
             Self::Recon => "Recon",
             Self::Brain => "Brain",
             Self::Atlas => "Atlas",
-            Self::Osint => "OSINT",
-            Self::Providers => "Providers",
+            Self::Jobs => "Jobs",
+            Self::Logs => "Logs",
+            Self::Osint => "Tools",
+            Self::Providers => "Models",
             Self::System => "System",
         }
     }
@@ -70,11 +83,20 @@ impl ModuleId {
             Self::Recon => "View and Manage Investigations",
             Self::Brain => "View and Manage Memories",
             Self::Atlas => "Global News Cycles",
+            Self::Jobs => "Background work, timing, and retries",
+            Self::Logs => "Events, failures, and diagnostics",
             Self::Osint => "Configure public lookup tools",
             Self::Providers => "Accounts and model defaults",
-            Self::System => "Hardware, paths, and event log",
+            Self::System => "Hardware and paths",
         }
     }
+}
+
+/// Where a job's "Open source" action leads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobSource {
+    AtlasRun(usize),
+    ReconThread(String),
 }
 
 /// Live pipeline, or the list of past runs.
@@ -121,7 +143,6 @@ pub struct Scrolls {
     pub memories: u16,
     pub tools: u16,
     pub detail: u16,
-    pub log: u16,
     pub atlas_feed: u16,
     pub atlas_runs: u16,
     pub atlas_news: u16,
@@ -176,18 +197,6 @@ pub struct PaletteItem {
     pub label: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct LogLine {
-    pub id: u64,
-    /// Unix seconds. Lines older than 24 hours are dropped.
-    pub created: u64,
-    pub at: String,
-    pub level: String,
-    pub text: String,
-    /// Full tool result. Empty lines stay a single row.
-    pub detail: String,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderPage {
     Grok,
@@ -240,6 +249,8 @@ pub enum FieldId {
     NewsDataFallback,
     CurrentsKey,
     CurrentsFallback,
+    JobsSearch,
+    LogsSearch,
     ReconProvider,
     ReconModel,
     PickerProvider,
@@ -284,7 +295,7 @@ impl DefaultsRole {
         }
     }
 
-    /// The settings key the System event log names when this role changes.
+    /// The settings key the Logs entry names when this role changes.
     pub fn settings_key(self) -> &'static str {
         match self {
             DefaultsRole::Recon => "defaults.recon",
@@ -380,6 +391,10 @@ pub enum ButtonId {
     AtlasRuns,
     AtlasLive,
     AtlasDelete,
+    /// Resume the selected cycle (stopped in phase 4/5 or paused).
+    AtlasResume,
+    /// Start the "Repair Atlas memories" job.
+    AtlasRepair,
     AtlasNewsFeed,
     AtlasWorld,
     AtlasNews,
@@ -396,7 +411,31 @@ pub enum ButtonId {
     IntelJobRetry,
     CreateMemory,
     BrainBack,
+    /// Back in the memory detail history (or to the Brain list).
+    BrainDetailBack,
+    /// Summary failure card: toggle the sanitized cause chain and attempts.
+    SummaryDetails,
+    /// Summary failure card: Logs filtered to the failed job.
+    SummaryLogs,
+    /// Summary failure card: the failed job in Jobs.
+    SummaryJob,
+    /// Summary failure card: a fresh, linked execution.
+    SummaryRetry,
+    /// Summary failure card: Models → Defaults with Summarization selected.
+    SummaryModels,
+    /// Logs: clear durable events only (jobs, results, memories are kept).
     ClearLog,
+    JobsStatus,
+    JobsApp,
+    JobsViewLogs,
+    JobsRetry,
+    JobsCancel,
+    JobsOpenSource,
+    LogsLevel,
+    LogsApp,
+    LogsFollow,
+    LogsOpenJob,
+    LogsBack,
     GrokSignIn,
     GrokCheck,
     OpenAISignIn,
@@ -421,8 +460,12 @@ pub enum Target {
     ChatHeader(usize),
     ChatBody(usize),
     BrainMark(usize),
-    /// One System event-log row. Clicking it folds the entry when it has a detail.
+    /// One Logs event row. Clicking it folds the entry when it has a detail.
     LogLine(usize),
+    /// One Jobs table row.
+    JobRow(usize),
+    /// The Jobs detail panel (scroll focus).
+    JobDetail,
     /// One Atlas headline in the live feed.
     AtlasFeed(usize),
     /// One past Atlas run in the history list.
@@ -441,6 +484,12 @@ pub enum Target {
     IntelReconSection(usize),
     /// One line of the open recon or claim path.
     PathLine(usize),
+    /// The path graph section of the memory detail (scroll focus).
+    DetailPath,
+    /// One Related memory row in the memory detail.
+    RelatedRow(usize),
+    /// The Summary section of the memory detail (scroll focus).
+    DetailSummary,
     Choice(usize),
     CloseOverlay,
 }
@@ -496,8 +545,12 @@ enum WorkEvent {
         label: String,
     },
     GraphSummary {
+        report: Box<argos_osint_core::graph_explanation::ExplainReport>,
+    },
+    Related {
+        request: u64,
         memory_id: String,
-        outcome: std::result::Result<String, String>,
+        outcome: std::result::Result<Vec<RelatedMemory>, String>,
     },
     Atlas(atlas::AtlasEvent),
     AtlasDone {
@@ -569,11 +622,12 @@ pub struct App {
     pub chat_sel: usize,
     pub chat_follow: bool,
     pub overlay: Overlay,
-    pub log: Vec<LogLine>,
-    pub log_sel: usize,
-    pub log_open: HashSet<u64>,
-    pub log_browsing: bool,
-    log_seq: u64,
+    /// Logs dashboard (durable events).
+    pub logs: super::logs::LogsView,
+    /// Jobs dashboard.
+    pub jobs: super::jobs::JobsView,
+    /// Last dashboard refresh (throttles live updates).
+    dashboards_at: Option<Instant>,
     logged_calls: HashSet<String>,
     pub runs: Vec<recon::Run>,
     pub answer_memories: HashMap<String, Vec<Memory>>,
@@ -694,10 +748,21 @@ pub struct App {
     pub currents_fallback: String,
     pub brain_graph: recon::MemoryGraph,
     brain_graph_for: Option<String>,
-    /// Bounded related-evidence / why-matched labels for the open graph (spec §15).
-    pub brain_related_lines: Vec<String>,
+    /// Open memory detail (graph, Related, Summary), independent of `memory_sel`.
+    pub brain_detail: super::brain_detail::BrainDetail,
+    /// Total saved memories, to explain an active Find filter.
+    pub memory_total: usize,
+    /// Last memory-list read failure; the previous list stays on screen.
+    pub memory_error: Option<String>,
+    /// False until the first memory list read finished.
+    pub memories_loaded: bool,
     pub graph_summary: String,
     graph_summary_pending: Option<String>,
+    /// Request id of the newest graph explanation; older completions are ignored.
+    graph_summary_request: String,
+    /// Failed graph explanation for the open memory (inline card).
+    pub summary_failure: Option<super::summary_card::SummaryFailure>,
+    pub summary_details_open: bool,
     pub hits: Vec<ScoredMemory>,
     pub auth: AuthFile,
     pub settings: SettingsFile,
@@ -773,6 +838,7 @@ impl App {
             .map(|tool| store.tool_enabled(tool.id))
             .collect::<Result<Vec<_>>>()?;
         let memories = store.list_memories()?;
+        let memory_total = memories.len();
         let auth = AuthFile::load()?;
         let settings = SettingsFile::load()?;
         let recon_default = provider::role_secret(&auth, &settings, "recon")?;
@@ -841,11 +907,9 @@ impl App {
             chat_sel: 0,
             chat_follow: chat_scroll == 0,
             overlay: Overlay::None,
-            log: Vec::new(),
-            log_sel: 0,
-            log_open: HashSet::new(),
-            log_browsing: false,
-            log_seq: 0,
+            logs: crate::tui::logs::LogsView::default(),
+            jobs: crate::tui::jobs::JobsView::default(),
+            dashboards_at: None,
             logged_calls: HashSet::new(),
             runs: Vec::new(),
             answer_memories: HashMap::new(),
@@ -944,9 +1008,15 @@ impl App {
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
-            brain_related_lines: Vec::new(),
+            brain_detail: Default::default(),
+            memory_total,
+            memory_error: None,
+            memories_loaded: true,
             graph_summary: String::new(),
             graph_summary_pending: None,
+            graph_summary_request: String::new(),
+            summary_failure: None,
+            summary_details_open: false,
             hits: Vec::new(),
             auth,
             settings,
@@ -969,8 +1039,9 @@ impl App {
         Ok(app)
     }
 
+    /// Durable error events within retention (home badge, Logs header).
     pub fn error_count(&self) -> usize {
-        self.log.iter().filter(|line| line.level == "error").count()
+        self.logs.counts.error.max(0) as usize
     }
 
     pub fn running_thread(&self, id: &str) -> bool {
@@ -1002,42 +1073,129 @@ impl App {
         self.push_log_detail(level, text, "");
     }
 
+    /// Session log lines are durable events (Logs is their only view).
     fn push_log_detail(&mut self, level: &str, text: impl Into<String>, detail: impl Into<String>) {
-        self.prune_log();
-        let at_end = self.log.is_empty() || self.log_sel + 1 >= self.log.len();
-        self.log_seq = self.log_seq.saturating_add(1);
-        self.log.push(LogLine {
-            id: self.log_seq,
-            created: unix_now(),
-            at: log_stamp(),
-            level: level.into(),
-            text: text.into(),
-            detail: detail.into(),
-        });
-        if self.log.len() > 400 {
-            let extra = self.log.len() - 400;
-            for line in self.log.drain(0..extra) {
-                self.log_open.remove(&line.id);
-            }
+        let text = text.into();
+        let detail = detail.into();
+        let event = super::logs::session_event(level, &text, &detail);
+        if self.store.record_event(&event).is_ok() && level == "error" {
+            self.logs.counts.error += 1;
         }
-        if at_end || self.log_sel >= self.log.len() {
-            self.log_sel = self.log.len().saturating_sub(1);
+        if self.module == Some(ModuleId::Logs) {
+            self.dashboards_at = None;
         }
     }
 
-    /// Drops event-log lines older than 24 hours.
-    pub(crate) fn prune_log(&mut self) {
-        let now = unix_now();
-        let before = self.log.len();
-        self.log
-            .retain(|line| now.saturating_sub(line.created) < LOG_TTL_SECS);
-        if self.log.len() == before {
-            return;
+    /// Throttled live refresh for Jobs/Logs and the home error badge. Returns
+    /// true when something may have changed on screen.
+    pub(crate) fn tick_dashboards(&mut self) -> bool {
+        if self
+            .dashboards_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+        {
+            return false;
         }
-        let live: HashSet<u64> = self.log.iter().map(|line| line.id).collect();
-        self.log_open.retain(|id| live.contains(id));
-        if self.log_sel >= self.log.len() {
-            self.log_sel = self.log.len().saturating_sub(1);
+        let first = self.dashboards_at.is_none() && !self.logs.loaded;
+        self.dashboards_at = Some(Instant::now());
+        if first {
+            let _ = self.store.prune_events(super::logs::RETENTION_HOURS);
+        }
+        match self.module {
+            Some(ModuleId::Logs) => self.reload_logs(),
+            Some(ModuleId::Jobs) => self.reload_jobs(),
+            _ => self.logs.refresh_counts(&self.store),
+        }
+        true
+    }
+
+    pub(crate) fn reload_logs(&mut self) {
+        self.logs.reload(&self.store);
+        let (room, width) = super::logs::list_geometry(super::ui::body_rect(self));
+        self.logs.reveal(room, width);
+        let max = self.logs.scroll_max(room, width);
+        if self.logs.follow || self.logs.scroll > max {
+            self.logs.scroll = if self.logs.follow { max } else { self.logs.scroll.min(max) };
+        }
+    }
+
+    pub(crate) fn reload_jobs(&mut self) {
+        self.jobs.reload(&self.store);
+        let room = super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
+        super::jobs::reveal(&mut self.jobs, room);
+    }
+
+    /// Jobs → Logs prefiltered to the job and its descendants, keeping a
+    /// return path to the job.
+    fn view_job_logs(&mut self) -> Result<String> {
+        let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
+            return Ok("Select a job first".into());
+        };
+        self.logs.job = id.clone();
+        self.logs.back_to_job = Some(id.clone());
+        self.logs.follow = true;
+        self.logs.open.clear();
+        self.select(ModuleId::Logs.index());
+        Ok(format!("Logs for job {}", super::logs::short_id(&id)))
+    }
+
+    /// Logs → Jobs for a job id (selected event's job, or the return path).
+    fn open_job(&mut self, id: &str) -> Result<String> {
+        self.select(ModuleId::Jobs.index());
+        if self.jobs.focus_job(&self.store, id) {
+            let room = super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
+            super::jobs::reveal(&mut self.jobs, room);
+            self.set_focus(Target::JobRow(self.jobs.sel));
+            Ok(format!("Job {}", super::logs::short_id(id)))
+        } else {
+            Ok(format!(
+                "Job {} is no longer in history",
+                super::logs::short_id(id)
+            ))
+        }
+    }
+
+    fn leave_logs_to_job(&mut self) -> bool {
+        let Some(id) = self.logs.back_to_job.take() else {
+            return false;
+        };
+        self.logs.job.clear();
+        let opened = self.open_job(&id);
+        self.report(opened);
+        true
+    }
+
+    /// Where "Open source" leads for the selected job, when it is resolvable.
+    pub(crate) fn job_source(&self) -> Option<JobSource> {
+        let job = self.jobs.selected()?;
+        if job.app == "atlas" && !job.run_ref.is_empty() {
+            let index = self.atlas_runs.iter().position(|run| run.id == job.run_ref)?;
+            return Some(JobSource::AtlasRun(index));
+        }
+        let thread = job
+            .resource_ref
+            .strip_prefix("thread:")
+            .or_else(|| (job.app == "recon").then_some(job.run_ref.as_str()))
+            .filter(|id| !id.is_empty())?;
+        self.threads
+            .iter()
+            .any(|t| t.id == thread)
+            .then(|| JobSource::ReconThread(thread.to_string()))
+    }
+
+    fn open_job_source(&mut self) -> Result<String> {
+        match self.job_source() {
+            Some(JobSource::AtlasRun(index)) => {
+                self.select(ModuleId::Atlas.index());
+                self.atlas_run_sel = index.min(self.atlas_runs.len().saturating_sub(1));
+                self.set_focus(Target::AtlasHistory(self.atlas_run_sel));
+                Ok("Atlas cycle".into())
+            }
+            Some(JobSource::ReconThread(id)) => {
+                self.select(ModuleId::Recon.index());
+                self.open_thread_with_history(&id, true)?;
+                Ok("Investigation".into())
+            }
+            None => Ok("This job has no source to open".into()),
         }
     }
 
@@ -1057,8 +1215,10 @@ impl App {
             ("recon", "Open Recon"),
             ("brain", "Open Brain"),
             ("atlas", "Open Atlas"),
-            ("osint", "Open OSINT"),
-            ("providers", "Open Providers"),
+            ("jobs", "Open Jobs"),
+            ("logs", "Open Logs"),
+            ("tools", "Open Tools (osint)"),
+            ("models", "Open Models (providers)"),
             ("system", "Open System"),
             ("new", "New investigation"),
             ("sessions", "Investigation list"),
@@ -1067,7 +1227,7 @@ impl App {
             ("resume", "Resume remaining steps"),
             ("insights", "Toggle recall"),
             ("create-memory", "Create memory"),
-            ("clear-log", "Clear event log"),
+            ("clear-log", "Clear events in Logs"),
         ];
         items.retain(|(id, label)| {
             query.is_empty() || id.contains(&query) || label.to_ascii_lowercase().contains(&query)
@@ -1100,8 +1260,10 @@ impl App {
             "recon" => self.select(ModuleId::Recon.index()),
             "brain" => self.select(ModuleId::Brain.index()),
             "atlas" => self.select(ModuleId::Atlas.index()),
-            "osint" => self.select(ModuleId::Osint.index()),
-            "providers" => self.select(ModuleId::Providers.index()),
+            "jobs" => self.select(ModuleId::Jobs.index()),
+            "logs" => self.select(ModuleId::Logs.index()),
+            "tools" | "osint" => self.select(ModuleId::Osint.index()),
+            "models" | "providers" => self.select(ModuleId::Providers.index()),
             "system" => self.select(ModuleId::System.index()),
             "new" => {
                 let created = self.new_thread().map(|_| "New investigation".into());
@@ -1125,7 +1287,10 @@ impl App {
                 self.select(ModuleId::Brain.index());
                 self.activate_button(ButtonId::CreateMemory);
             }
-            "clear-log" => self.activate_button(ButtonId::ClearLog),
+            "clear-log" => {
+                self.select(ModuleId::Logs.index());
+                self.activate_button(ButtonId::ClearLog);
+            }
             _ => {}
         }
     }
@@ -1169,14 +1334,17 @@ impl App {
                 self.go_home();
                 Ok("Home".into())
             }
-            "brain" | "atlas" | "osint" | "providers" | "system" | "recon" | "intel" => {
+            "brain" | "atlas" | "osint" | "providers" | "tools" | "models" | "jobs" | "logs"
+            | "system" | "recon" | "intel" => {
                 let index = match name.as_str() {
                     "intel" => ModuleId::Intel.index(),
                     "atlas" => ModuleId::Atlas.index(),
                     "brain" => ModuleId::Brain.index(),
                     "recon" => ModuleId::Recon.index(),
-                    "osint" => ModuleId::Osint.index(),
-                    "providers" => ModuleId::Providers.index(),
+                    "jobs" => ModuleId::Jobs.index(),
+                    "logs" => ModuleId::Logs.index(),
+                    "tools" | "osint" => ModuleId::Osint.index(),
+                    "models" | "providers" => ModuleId::Providers.index(),
                     _ => ModuleId::System.index(),
                 };
                 self.select(index);
@@ -1234,6 +1402,19 @@ impl App {
             self.intel_page = IntelPage::Bulletin;
             self.load_intel();
         }
+        if self.module == Some(ModuleId::Brain) {
+            // Entering Brain picks up memories committed elsewhere.
+            self.reload_memories();
+        }
+        if self.module == Some(ModuleId::Logs) {
+            self.reload_logs();
+            self.dashboards_at = Some(Instant::now());
+        }
+        if self.module == Some(ModuleId::Jobs) {
+            self.atlas_runs = self.store.atlas_list_runs().unwrap_or_default();
+            self.reload_jobs();
+            self.dashboards_at = Some(Instant::now());
+        }
         self.status = format!("{} open", ModuleId::ALL[index].title());
         self.set_focus(match self.module {
             Some(ModuleId::Intel) if !self.intel_articles.is_empty() => {
@@ -1249,6 +1430,10 @@ impl App {
             Some(ModuleId::Atlas) => Target::Button(ButtonId::AtlasLive),
             Some(ModuleId::Osint) => Target::Field(FieldId::OsintSearch),
             Some(ModuleId::Providers) => Target::ProviderTab(self.provider_page),
+            Some(ModuleId::Jobs) if !self.jobs.rows.is_empty() => Target::JobRow(self.jobs.sel),
+            Some(ModuleId::Jobs) => Target::Field(FieldId::JobsSearch),
+            Some(ModuleId::Logs) if !self.logs.rows.is_empty() => Target::LogLine(self.logs.sel),
+            Some(ModuleId::Logs) => Target::Field(FieldId::LogsSearch),
             _ => Target::Button(ButtonId::RefreshHardware),
         });
     }
@@ -1261,6 +1446,8 @@ impl App {
             FieldId::BrainQuery => &self.brain_query,
             FieldId::ReconSearch => &self.recon_search,
             FieldId::IntelSearch => &self.intel_search,
+            FieldId::JobsSearch => &self.jobs.search,
+            FieldId::LogsSearch => &self.logs.search,
             FieldId::OsintSearch => &self.osint_search,
             FieldId::OsintInput => &self.osint_input,
             FieldId::FirecrawlKey => &self.firecrawl_key,
@@ -1303,6 +1490,8 @@ impl App {
             FieldId::BrainQuery => &mut self.brain_query,
             FieldId::ReconSearch => &mut self.recon_search,
             FieldId::IntelSearch => &mut self.intel_search,
+            FieldId::JobsSearch => &mut self.jobs.search,
+            FieldId::LogsSearch => &mut self.logs.search,
             FieldId::OsintSearch => &mut self.osint_search,
             FieldId::OsintInput => &mut self.osint_input,
             FieldId::FirecrawlKey => &mut self.firecrawl_key,
@@ -1343,7 +1532,6 @@ impl App {
         {
             self.flush_draft();
         }
-        self.log_browsing = false;
         self.focus = target;
         self.cursor = match target {
             Target::Field(field) => self.field(field).chars().count(),
@@ -2043,8 +2231,18 @@ impl App {
                 let article_id = article.id.clone();
                 let tx = self.work_tx.clone();
                 let cancel = Arc::new(AtomicBool::new(false));
+                let job = tracked::begin_cancellable(
+                    JobSpec::new(
+                        "intel",
+                        "article_body",
+                        format!("Article body · {}", title.chars().take(60).collect::<String>()),
+                    )
+                    .resource(format!("article:{article_id}")),
+                    cancel.clone(),
+                );
+                let stop = cancel.clone();
                 tokio::spawn(async move {
-                    let _ = intel_recon::fetch_article_body(
+                    let outcome = intel_recon::fetch_article_body(
                         &db,
                         &body_id,
                         &title,
@@ -2064,6 +2262,7 @@ impl App {
                         },
                     )
                     .await;
+                    tracked::finish(job, "intel", &outcome, Some(&stop));
                     let _ = article_id;
                 });
             }
@@ -2110,9 +2309,15 @@ impl App {
             .filter(|secret| provider::resolved_key(secret).is_some());
         let article_id = article.id.clone();
         let tx = self.work_tx.clone();
+        let job = tracked::begin(
+            JobSpec::new("intel", "recon_mode", "Recommend an Intel Recon mode")
+                .resource(format!("article:{article_id}")),
+        );
         tokio::spawn(async move {
             let mode =
                 intel_recon::classify_recon_mode(classifier.as_ref(), &input).await;
+            // Falls back to the default mode on its own; never an error.
+            tracked::finish(job, "classifier", &Ok::<(), String>(()), None);
             let _ = tx.send(WorkEvent::IntelReconMode { article_id, mode });
         });
     }
@@ -2594,7 +2799,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.atlas_feed_follow = true;
             self.scrolls.atlas_feed = 0;
         }
-        self.spawn_atlas(resume)?;
+        self.spawn_atlas(if resume {
+            atlas::LiveRun::Latest
+        } else {
+            atlas::LiveRun::Fresh
+        })?;
         if !resume {
             self.shift_atlas_auto_after_manual();
         }
@@ -2605,6 +2814,41 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         })
     }
 
+    /// Whether the selected history cycle can be resumed (paused, or stopped
+    /// in phase 4/5 with retained checkpoints) and nothing is running.
+    pub(crate) fn atlas_can_resume(&self) -> bool {
+        self.atlas_pause.is_none()
+            && self
+                .atlas_runs
+                .get(self.atlas_run_sel)
+                .is_some_and(atlas::resumable)
+    }
+
+    fn resume_atlas_run(&mut self) -> Result<String> {
+        let run = self
+            .atlas_runs
+            .get(self.atlas_run_sel)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Select a news cycle to resume"))?;
+        anyhow::ensure!(self.atlas_pause.is_none(), "Atlas is already running");
+        anyhow::ensure!(
+            atlas::resumable(&run),
+            "This cycle has nothing to resume"
+        );
+        self.spawn_atlas(atlas::LiveRun::Run(run.id.clone()))?;
+        self.push_log("info", format!("Atlas: resuming cycle {}", run.id));
+        Ok("Resuming cycle · progress in Atlas and Jobs".into())
+    }
+
+    fn start_atlas_repair(&mut self) -> Result<String> {
+        if super::atlas_actions::start_repair(paths::db_path()) {
+            self.push_log("info", "Atlas: Repair Atlas memories started");
+            Ok("Repair Atlas memories started · progress in Jobs".into())
+        } else {
+            Ok("Repair Atlas memories is already running".into())
+        }
+    }
+
     /// A manual start moves the next automatic run to 90 minutes from now.
     fn shift_atlas_auto_after_manual(&mut self) {
         if self.atlas_auto_next.is_some() {
@@ -2612,7 +2856,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
     }
 
-    fn spawn_atlas(&mut self, resume: bool) -> Result<()> {
+    fn spawn_atlas(&mut self, live: atlas::LiveRun) -> Result<()> {
+        let resume = live != atlas::LiveRun::Fresh;
         anyhow::ensure!(self.atlas_pause.is_none(), "Atlas is already running");
         let pause = Arc::new(AtomicBool::new(false));
         self.atlas_pause = Some(pause.clone());
@@ -2651,7 +2896,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 &pause,
                 &keys,
                 &user_agent,
-                resume,
+                live,
                 &feed,
                 classifier,
                 synthesizer,
@@ -2677,7 +2922,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             return Ok("Auto run on. Next pipeline in 90 minutes".into());
         }
         if tokio::runtime::Handle::try_current().is_ok() {
-            self.spawn_atlas(false)?;
+            self.spawn_atlas(atlas::LiveRun::Fresh)?;
             self.atlas_auto_started = true;
         }
         Ok("Auto run on. Pipeline started".into())
@@ -2705,7 +2950,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
         let start = self.take_atlas_auto_tick(now);
         if start {
-            if tokio::runtime::Handle::try_current().is_ok() && self.spawn_atlas(false).is_ok() {
+            if tokio::runtime::Handle::try_current().is_ok() && self.spawn_atlas(atlas::LiveRun::Fresh).is_ok() {
                 self.atlas_auto_started = true;
             }
         } else {
@@ -2772,6 +3017,15 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 if let Some(article) = self.atlas_articles.iter_mut().find(|item| item.id == id) {
                     article.category = category;
                 }
+            }
+            atlas::AtlasEvent::MemoriesChanged { .. } => {
+                // Durable publication committed: show the new memories now.
+                self.reload_memories();
+            }
+            atlas::AtlasEvent::MemoryProgress { indexed, required } => {
+                self.atlas_insight_progress = None;
+                self.atlas_status = format!("Indexing memories {indexed}/{required}");
+                self.status = self.atlas_status.clone();
             }
         }
     }
@@ -2842,11 +3096,17 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         let cancel = Arc::new(AtomicBool::new(false));
         self.osint_cancel = Some(cancel.clone());
         self.status = format!("Running {}", tool.name);
+        let job = tracked::begin_cancellable(
+            JobSpec::new("tools", "tool_run", format!("Run {}", tool.name)).tool(tool.id),
+            cancel.clone(),
+        );
+        let stop = cancel.clone();
         tokio::spawn(async move {
             let outcome = service
                 .manual_with_cancel(&tool_id, input, cancel)
                 .await
                 .map_err(|e| e.to_string());
+            tracked::finish(job, "tool", &outcome, Some(&stop));
             let _ = tx.send(WorkEvent::OsintDone { outcome });
         });
         Ok(())
@@ -2909,7 +3169,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     let _ = self.refresh_selected();
                 }
                 let _ = self.refresh_threads();
-                self.memories = self.filtered_memories();
+                self.reload_memories();
                 true
             }
             WorkEvent::OsintDone { outcome } => {
@@ -2977,38 +3237,16 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                             text
                         }
                     };
-                    self.memories = self.filtered_memories();
+                    self.reload_memories();
                 }
                 true
             }
-            WorkEvent::GraphSummary { memory_id, outcome } => {
-                if self.graph_summary_pending.as_deref() == Some(memory_id.as_str()) {
-                    self.graph_summary_pending = None;
-                }
-                let viewing = self.brain_list_mode == BrainListMode::Graph
-                    && self
-                        .memories
-                        .get(self.memory_sel)
-                        .is_some_and(|memory| memory.id == memory_id);
-                match outcome {
-                    Ok(text) => {
-                        if viewing {
-                            self.graph_summary = text;
-                            self.status = "Graph summary saved".into();
-                        }
-                    }
-                    Err(err) => {
-                        self.push_log("error", format!("Graph summary failed: {err}"));
-                        if viewing {
-                            self.graph_summary = format!(
-                                "Graph summary failed: {err}\n\nLeave and open this memory again to retry."
-                            );
-                            self.status = "Graph summary failed".into();
-                        }
-                    }
-                }
-                viewing
-            }
+            WorkEvent::GraphSummary { report } => self.on_graph_summary(*report),
+            WorkEvent::Related {
+                request,
+                memory_id,
+                outcome,
+            } => self.on_related(request, &memory_id, outcome),
             WorkEvent::Atlas(event) => {
                 self.on_atlas(event);
                 self.module == Some(ModuleId::Atlas)
@@ -3033,8 +3271,19 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                         self.atlas_status = message;
                     }
                 }
-                self.status = self.atlas_status.clone();
                 self.load_atlas();
+                // The stored run state is derived from extraction, publication
+                // and indexing; never report "completed" for a partial save.
+                if finished {
+                    if let Some(run) = self.atlas_runs.first() {
+                        self.atlas_state = run.state.clone();
+                        if run.state != "completed" && !run.note.is_empty() {
+                            self.atlas_status = run.note.clone();
+                        }
+                    }
+                }
+                self.status = self.atlas_status.clone();
+                self.reload_memories();
                 let automatic = self.atlas_auto_started;
                 if !paused {
                     self.atlas_auto_started = false;
@@ -3299,10 +3548,15 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
+        let job = tracked::begin(
+            JobSpec::new("models", "model_catalog", format!("Load {provider} models"))
+                .model(provider.clone(), String::new()),
+        );
         tokio::spawn(async move {
             let outcome = provider::verified_catalog(&secret)
                 .await
                 .map_err(|e| e.to_string());
+            tracked::finish(job, "provider", &outcome, None);
             let _ = tx.send(WorkEvent::CatalogDone {
                 role,
                 provider,
@@ -3503,9 +3757,16 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
         self.access_probe = true;
         let tx = self.work_tx.clone();
+        let job = tracked::begin(JobSpec::new(
+            "models",
+            "access_probe",
+            "Check subscription sign-ins",
+        ));
         tokio::spawn(async move {
             let grok = argos_osint_core::grok_oauth::check_login().await.is_ok();
             let openai = argos_osint_core::subscription::check_login().await.is_ok();
+            // Signed-out accounts are an answer, not a failure.
+            tracked::finish(job, "provider", &Ok::<(), String>(()), None);
             let _ = tx.send(WorkEvent::Access { grok, openai });
         });
     }
@@ -3550,12 +3811,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 reference: None,
             },
         )?;
-        self.memories = self.filtered_memories();
-        self.memory_sel = self
-            .memories
-            .iter()
-            .position(|item| item.id == memory.id)
-            .unwrap_or(0);
+        self.reload_memories_selecting(Some(memory.id.clone()));
         self.brain_insight.clear();
         self.brain_list_mode = BrainListMode::List;
         self.brain_graph_for = None;
@@ -3564,7 +3820,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         Ok("Insight saved with source".into())
     }
 
+    /// Graph of the selected list row (list mode only; the detail view owns its graph).
     fn sync_graph(&mut self) {
+        if self.brain_list_mode == BrainListMode::Graph {
+            return;
+        }
         let id = self
             .memories
             .get(self.memory_sel)
@@ -3578,94 +3838,122 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             Some(id) => self.store.graph_for_memory(id).unwrap_or_default(),
             None => recon::MemoryGraph::default(),
         };
-        self.brain_related_lines = self.related_evidence_labels();
     }
 
-    /// Bound related-evidence / why-matched labels for the Brain graph pane.
-    fn related_evidence_labels(&self) -> Vec<String> {
-        const MAX_SEMANTIC: usize = 3;
-        let Some(memory) = self.memories.get(self.memory_sel) else {
-            return Vec::new();
-        };
-        let mut factual = Vec::new();
-        for node in &self.brain_graph.nodes {
-            if node.kind != recon::GraphNodeKind::Evidence {
-                continue;
-            }
-            let supported = self.brain_graph.edges.iter().any(|edge| {
-                edge.to == node.id
-                    && matches!(
-                        edge.kind,
-                        recon::GraphEdgeKind::Supports | recon::GraphEdgeKind::DerivedFrom
-                    )
-            });
-            if supported {
-                factual.push((
-                    node.id.clone(),
-                    node.label.clone(),
-                    1.0_f32,
-                ));
-            }
-        }
-        let mut semantic = Vec::new();
-        if let Ok(hits) = self.store.recall(&memory.text, MAX_SEMANTIC + 2) {
-            for hit in hits {
-                if hit.memory.id == memory.id {
-                    continue;
-                }
-                let label = hit.memory.text.chars().take(72).collect::<String>();
-                semantic.push((hit.memory.id, label, hit.score));
-            }
-        }
-        let view = argos_osint_core::explore::related_evidence_view(factual, semantic, MAX_SEMANTIC);
-        let mut lines = Vec::new();
-        if !view.is_empty() {
-            lines.push("Related evidence".into());
-        }
-        for hit in view {
-            lines.push(format!(
-                "· {} — {} ({})",
-                hit.label.chars().take(56).collect::<String>(),
-                hit.why,
-                hit.edge_kind.as_str()
-            ));
-        }
-        lines
+    /// Claim mode follows the open detail memory's own provenance and graph.
+    pub(crate) fn detail_claim(&self) -> bool {
+        self.brain_graph.is_claim_path()
+            || self
+                .brain_detail
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.source.app == "atlas")
     }
 
-    fn filtered_memories(&self) -> Vec<Memory> {
+    /// Memories for the list plus the total, honoring Find. Errors are returned,
+    /// never turned into an empty list.
+    fn load_memory_list(&self) -> Result<(Vec<Memory>, usize)> {
+        if let Some(fault) = super::brain_detail::read_fault() {
+            anyhow::bail!(fault);
+        }
         let query = self.brain_query.trim();
-        let loaded = if query.is_empty() {
-            self.store.list_memories()
+        if query.is_empty() {
+            let list = self.store.list_memories()?;
+            let total = list.len();
+            Ok((list, total))
         } else {
-            self.store.search_memories(query)
-        };
-        loaded.unwrap_or_default()
+            let list = self.store.search_memories(query)?;
+            Ok((list, self.store.memory_count()?))
+        }
     }
 
-    fn reload_memories(&mut self) {
-        let shown = self.brain_graph_for.clone();
-        self.memories = self.filtered_memories();
-        if self.memories.is_empty() {
-            self.memory_sel = 0;
-        } else if self.memory_sel >= self.memories.len() {
-            self.memory_sel = self.memories.len() - 1;
+    pub(crate) fn reload_memories(&mut self) {
+        self.reload_memories_selecting(None);
+    }
+
+    /// Reload the Brain list, keeping the selected memory (by id), Find, and
+    /// scroll. A read failure keeps the last good list and reports the error.
+    fn reload_memories_selecting(&mut self, prefer: Option<String>) {
+        let selected = prefer.or_else(|| {
+            self.memories
+                .get(self.memory_sel)
+                .map(|memory| memory.id.clone())
+        });
+        match self.load_memory_list() {
+            Ok((list, total)) => {
+                self.memories = list;
+                self.memory_total = total;
+                self.memories_loaded = true;
+                if self.memory_error.take().is_some() {
+                    self.push_log("info", "Brain: memories readable again");
+                }
+            }
+            Err(err) => {
+                let message = err.to_string();
+                if self.memory_error.as_deref() != Some(message.as_str()) {
+                    self.push_log_detail(
+                        "error",
+                        "Brain: could not read memories",
+                        message.clone(),
+                    );
+                }
+                self.memory_error = Some(message);
+                self.status = "Could not read memories; showing the last loaded list".into();
+                return;
+            }
         }
-        let still = shown
+        let by_id = selected
             .as_ref()
-            .is_some_and(|id| self.memories.iter().any(|memory| &memory.id == id));
-        if self.brain_list_mode == BrainListMode::Graph && !still {
-            self.brain_list_mode = BrainListMode::List;
-            self.graph_summary.clear();
-            self.graph_summary_pending = None;
+            .and_then(|id| self.memories.iter().position(|memory| &memory.id == id));
+        self.memory_sel = match by_id {
+            Some(index) => index,
+            None => self.memory_sel.min(self.memories.len().saturating_sub(1)),
+        };
+        let room = super::ui::memory_room_for(self);
+        let max = self.memories.len().saturating_sub(room) as u16;
+        self.scrolls.memories = self.scrolls.memories.min(max);
+        super::ui::reveal_index(&mut self.scrolls.memories, self.memory_sel, room);
+        if matches!(self.focus, Target::Memory(_)) {
+            self.focus = if self.memories.is_empty() {
+                Target::Button(ButtonId::CreateMemory)
+            } else {
+                Target::Memory(self.memory_sel)
+            };
         }
-        self.brain_graph_for = None;
-        self.sync_graph();
-        self.sync_selected_insight();
+        if self.brain_list_mode == BrainListMode::Graph {
+            self.refresh_open_detail();
+        } else {
+            self.brain_graph_for = None;
+            self.sync_graph();
+            self.sync_selected_insight();
+        }
+    }
+
+    /// The open detail memory changed or vanished in another writer.
+    fn refresh_open_detail(&mut self) {
+        let Some(id) = self.brain_detail.memory_id().map(str::to_string) else {
+            return;
+        };
+        match self.store.get_memory(&id) {
+            Ok(Some(memory)) => self.brain_detail.memory = Some(memory),
+            Ok(None) => {
+                self.leave_brain_detail();
+                self.status = "The open memory was deleted".into();
+            }
+            Err(_) => {}
+        }
     }
 
     fn leave_brain_detail(&mut self) {
         self.brain_list_mode = BrainListMode::List;
+        self.brain_detail.memory = None;
+        self.brain_detail.history.clear();
+        self.brain_detail.related = Default::default();
+        self.graph_summary.clear();
+        self.summary_failure = None;
+        self.summary_details_open = false;
+        self.brain_graph_for = None;
+        self.sync_graph();
         self.set_focus(if self.memories.is_empty() {
             Target::Button(ButtonId::CreateMemory)
         } else {
@@ -3675,42 +3963,202 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     fn open_memory_graph(&mut self) {
-        let Some(memory) = self.memories.get(self.memory_sel).cloned() else {
+        let Some(id) = self.memories.get(self.memory_sel).map(|m| m.id.clone()) else {
             self.status = "No memory selected".into();
             return;
         };
+        self.open_memory_detail(&id);
+    }
+
+    fn detail_snapshot(&self) -> Option<super::brain_detail::DetailSnapshot> {
+        Some(super::brain_detail::DetailSnapshot {
+            memory_id: self.brain_detail.memory_id()?.to_string(),
+            related_sel: self.brain_detail.related.sel,
+            related_scroll: self.brain_detail.related.scroll,
+            path_scroll: self.scrolls.path,
+            summary_scroll: self.scrolls.summary,
+            focus: self.focus,
+        })
+    }
+
+    /// One transition for every memory link (Brain list, Related, others).
+    /// Fetches the destination by id, even when Find hides it. On failure the
+    /// current view stays intact. Returns whether the detail opened.
+    pub(crate) fn open_memory_detail(&mut self, memory_id: &str) -> bool {
+        let memory = match self.store.get_memory(memory_id) {
+            Ok(Some(memory)) => memory,
+            Ok(None) => {
+                self.reload_memories();
+                self.status = "That memory no longer exists; the list was refreshed".into();
+                return false;
+            }
+            Err(err) => {
+                self.status = format!("Could not open that memory: {err}");
+                return false;
+            }
+        };
+        let graph = match self.store.graph_for_memory(&memory.id) {
+            Ok(graph) => graph,
+            Err(err) => {
+                self.status = format!("Could not load that memory's graph: {err}");
+                return false;
+            }
+        };
+        if self.brain_list_mode == BrainListMode::Graph {
+            if let Some(snapshot) = self.detail_snapshot() {
+                if snapshot.memory_id != memory.id {
+                    self.brain_detail.push(snapshot);
+                }
+            }
+        } else {
+            self.brain_detail.history.clear();
+        }
+        self.show_detail(memory, graph, None);
+        true
+    }
+
+    fn show_detail(
+        &mut self,
+        memory: Memory,
+        graph: recon::MemoryGraph,
+        restore: Option<&super::brain_detail::DetailSnapshot>,
+    ) {
         self.brain_list_mode = BrainListMode::Graph;
-        self.scrolls.path = 0;
-        self.scrolls.summary = 0;
-        self.selected_insight = None;
-        self.brain_graph_for = None;
-        self.sync_graph();
+        self.brain_graph = graph;
+        self.brain_graph_for = Some(memory.id.clone());
+        self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
+        self.graph_summary.clear();
+        self.summary_failure = None;
+        self.summary_details_open = false;
+        self.scrolls.path = restore.map_or(0, |s| s.path_scroll);
+        self.scrolls.summary = restore.map_or(0, |s| s.summary_scroll);
+        self.brain_detail.memory = Some(memory.clone());
+        let request = self.brain_detail.begin_related(
+            restore.map_or(0, |s| s.related_sel),
+            restore.map_or(0, |s| s.related_scroll),
+        );
+        self.request_related(request, &memory.id);
         self.load_or_request_summary(&memory);
-        self.set_focus(Target::Home);
+        let focus = restore.map_or(Target::DetailPath, |s| s.focus);
+        self.set_focus(match focus {
+            Target::RelatedRow(_) if self.brain_detail.related.items.is_empty() => {
+                Target::DetailPath
+            }
+            Target::RelatedRow(_) => Target::RelatedRow(self.brain_detail.related.sel),
+            other => other,
+        });
+    }
+
+    /// Related items for `memory_id`: on a blocking worker in the live app, inline
+    /// otherwise. Late results for another request or memory are dropped.
+    fn request_related(&mut self, request: u64, memory_id: &str) {
+        let limits = RelatedLimits::default();
+        if let (Ok(_), Some(db)) = (tokio::runtime::Handle::try_current(), tracked::db_path()) {
+            let tx = self.work_tx.clone();
+            let memory_id = memory_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let outcome = Store::open(&db)
+                    .and_then(|store| store.related_memories(&memory_id, limits))
+                    .map_err(|err| err.to_string());
+                let _ = tx.send(WorkEvent::Related {
+                    request,
+                    memory_id,
+                    outcome,
+                });
+            });
+            return;
+        }
+        let outcome = self
+            .store
+            .related_memories(memory_id, limits)
+            .map_err(|err| err.to_string());
+        self.on_related(request, memory_id, outcome);
+    }
+
+    fn on_related(
+        &mut self,
+        request: u64,
+        memory_id: &str,
+        outcome: std::result::Result<Vec<RelatedMemory>, String>,
+    ) -> bool {
+        if !self.brain_detail.finish_related(request, memory_id, outcome) {
+            return false;
+        }
+        let area = super::ui::detail_areas(self).related;
+        super::brain_detail::reveal_related(&mut self.brain_detail.related, area);
+        if matches!(self.focus, Target::RelatedRow(_)) {
+            self.focus = if self.brain_detail.related.items.is_empty() {
+                Target::DetailPath
+            } else {
+                Target::RelatedRow(self.brain_detail.related.sel)
+            };
+        }
+        true
+    }
+
+    /// Back: the previous detail memory with its selection, focus, and scroll;
+    /// at the first detail, the Brain list with its Find and selection.
+    fn detail_back(&mut self) {
+        while let Some(snapshot) = self.brain_detail.history.pop() {
+            let Ok(Some(memory)) = self.store.get_memory(&snapshot.memory_id) else {
+                continue;
+            };
+            let graph = self
+                .store
+                .graph_for_memory(&memory.id)
+                .unwrap_or_default();
+            self.show_detail(memory, graph, Some(&snapshot));
+            self.status = "Back".into();
+            return;
+        }
+        self.leave_brain_detail();
+    }
+
+    /// Selection only; never navigates or starts a summary.
+    fn move_related(&mut self, delta: i32) {
+        let len = self.brain_detail.related.items.len();
+        if len == 0 {
+            return;
+        }
+        let next = (self.brain_detail.related.sel as i32 + delta).clamp(0, len as i32 - 1) as usize;
+        self.brain_detail.related.sel = next;
+        let area = super::ui::detail_areas(self).related;
+        super::brain_detail::reveal_related(&mut self.brain_detail.related, area);
+        self.set_focus(Target::RelatedRow(next));
+    }
+
+    fn open_selected_related(&mut self) {
+        let Some(id) = self
+            .brain_detail
+            .selected_related()
+            .map(|item| item.memory_id.clone())
+        else {
+            return;
+        };
+        if self.open_memory_detail(&id) {
+            self.status = "Related memory opened".into();
+        }
     }
 
     fn load_or_request_summary(&mut self, memory: &Memory) {
-        let claim = self.brain_graph.is_claim_path() || memory.source.app == "atlas";
+        self.request_summary(memory, false);
+    }
+
+    /// Graph explanation for the open memory: a valid cached summary, the
+    /// running execution, the saved failure (inside the retry cooldown), or a
+    /// new budgeted execution. `explicit` is Brain → Retry summary.
+    fn request_summary(&mut self, memory: &Memory, explicit: bool) {
+        use argos_osint_core::graph_explanation::{self as ge, Cached, ExplainRequest, Gate};
+        use argos_osint_core::provider_diag::{Category, ProviderFailure, Stage};
+        let claim = self.detail_claim();
         let title = if claim { "Claim path" } else { "Recon path" };
         let focus = recon::recon_path(&self.brain_graph)
             .bands
             .first()
             .map(|band| band.directive_id.clone())
             .unwrap_or_default();
-        match self.store.graph_summary(&memory.id) {
-            Ok(Some(saved)) if saved.focus == focus || focus.is_empty() => {
-                self.graph_summary = saved.summary;
-                self.status = title.into();
-                return;
-            }
-            Ok(Some(_)) | Ok(None) => {}
-            Err(err) => {
-                self.graph_summary = format!("Graph summary unavailable: {err}");
-                self.status = "Graph summary unavailable".into();
-                return;
-            }
-        }
         if self.brain_graph.is_empty() {
+            self.summary_failure = None;
             self.graph_summary = if claim {
                 "This memory has no claim path.".into()
             } else {
@@ -3720,45 +4168,221 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             return;
         }
         if self.graph_summary_pending.as_deref() == Some(memory.id.as_str()) {
-            self.graph_summary = "Writing graph summary…".into();
-            self.status = self.graph_summary.clone();
+            if !explicit {
+                self.graph_summary = self.summary_body(memory, "Writing graph summary…");
+            }
+            self.status = "Graph summary is already being written".into();
             return;
         }
         let secret = match provider::role_secret(&self.auth, &self.settings, "summarization") {
             Ok(secret) => secret,
             Err(err) => {
-                self.graph_summary = format!("Graph summary unavailable: {err}");
-                self.status = "Graph summary unavailable".into();
+                let failure = ProviderFailure::from_error(
+                    Stage::Configuration,
+                    Category::Configuration,
+                    err.as_ref(),
+                );
+                self.summary_failure = Some(super::summary_card::SummaryFailure::local(
+                    &memory.id, &failure,
+                ));
+                self.graph_summary = self.summary_body(memory, "");
+                self.status = "Graph summary unavailable · configure Summarization".into();
                 return;
             }
         };
-        let prompt = format!(
-            "Memory:\n{}\n\n{}",
-            memory.text,
-            recon::graph_brief(&self.brain_graph)
-        );
-        let system = summary_system(claim);
+        let retry_of = self
+            .summary_failure
+            .as_ref()
+            .filter(|f| f.memory_id == memory.id && !f.job_id.is_empty())
+            .map(|f| f.job_id.clone());
+        let req = ExplainRequest {
+            memory_id: memory.id.clone(),
+            memory_text: memory.text.clone(),
+            focus,
+            claim,
+            system: summary_system(claim),
+            graph_brief: recon::graph_brief(&self.brain_graph),
+            request_id: argos_osint_core::job_registry::new_job_id("graph-request"),
+            retry_of,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+        };
+        let key = req.key(&secret);
+        match ge::cached(&self.store, &memory.id, &key) {
+            Ok(Cached::Valid(text)) if !explicit => {
+                self.summary_failure = None;
+                self.graph_summary = text;
+                self.status = title.into();
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                self.push_log("warn", format!("Graph summary cache unreadable: {err:#}"));
+            }
+        }
+        match ge::gate(&self.store, &memory.id, &key, explicit) {
+            Gate::Running(_) => {
+                self.graph_summary = self.summary_body(memory, "Writing graph summary…");
+                self.status = "Graph summary is already being written".into();
+                return;
+            }
+            Gate::CoolingDown(rec) => {
+                self.summary_failure = Some(super::summary_card::SummaryFailure::from_record(&rec));
+                self.graph_summary = self.summary_body(memory, "");
+                self.status = "Graph summary failed · Retry summary to try again".into();
+                return;
+            }
+            Gate::Ready => {}
+        }
+        let (Ok(runtime), Some(db)) = (tokio::runtime::Handle::try_current(), tracked::db_path())
+        else {
+            self.graph_summary = self.summary_body(memory, "");
+            self.status = "Graph summary unavailable: no background runtime".into();
+            return;
+        };
+        self.summary_failure = None;
+        self.summary_details_open = false;
         self.graph_summary_pending = Some(memory.id.clone());
-        self.graph_summary = "Writing graph summary…".into();
-        self.status = self.graph_summary.clone();
-        let memory_id = memory.id.clone();
+        self.graph_summary_request = req.request_id.clone();
+        self.graph_summary = self.summary_body(memory, "Writing graph summary…");
+        self.status = if explicit {
+            "Retrying graph summary…".into()
+        } else {
+            "Writing graph summary…".into()
+        };
         let tx = self.work_tx.clone();
-        let db = paths::db_path();
-        tokio::spawn(async move {
-            let outcome = write_graph_summary(&secret, &system, &prompt)
-                .await
-                .and_then(|text| {
-                    let store = Store::open(&db)?;
-                    if !store.save_graph_summary(&memory_id, &text, &focus)? {
-                        anyhow::bail!("memory was deleted before the summary was saved");
-                    }
-                    Ok(text)
-                });
+        runtime.spawn(async move {
+            let opts = argos_osint_core::summarization::ExecOptions::for_secret(&secret);
+            let report = ge::explain(&db, &secret, &req, &opts, ge::Faults::default()).await;
             let _ = tx.send(WorkEvent::GraphSummary {
-                memory_id,
-                outcome: outcome.map_err(|err| err.to_string()),
+                report: Box::new(report),
             });
         });
+    }
+
+    /// Body of the summary pane when no current summary exists: an optional
+    /// status line, then the last valid summary (labeled as an earlier
+    /// result) or the deterministic basic explanation.
+    fn summary_body(&self, memory: &Memory, status: &str) -> String {
+        let mut out = String::new();
+        if !status.is_empty() {
+            out.push_str(&format!("_{status}_\n\n"));
+        }
+        match self.store.graph_summary_entry(&memory.id) {
+            Ok(Some(entry)) => {
+                out.push_str("_Earlier result — written before the evidence, memory text, focus, model or prompt last changed._\n\n");
+                out.push_str(&entry.summary);
+            }
+            _ => out.push_str(&argos_osint_core::graph_explanation::basic_explanation(
+                &self.brain_graph,
+                &memory.text,
+            )),
+        }
+        out
+    }
+
+    /// A finished graph explanation. The job, events and diagnostic record
+    /// were persisted before this was sent.
+    fn on_graph_summary(&mut self, report: argos_osint_core::graph_explanation::ExplainReport) -> bool {
+        use argos_osint_core::graph_explanation::ExplainOutcome;
+        let newest = report.request_id == self.graph_summary_request;
+        if newest && self.graph_summary_pending.as_deref() == Some(report.memory_id.as_str()) {
+            self.graph_summary_pending = None;
+        }
+        if let Some(err) = &report.logging_error {
+            self.push_log("warn", format!("Graph summary logging incomplete: {err}"));
+        }
+        let viewing = newest
+            && self.brain_list_mode == BrainListMode::Graph
+            && self.brain_detail.memory_id() == Some(report.memory_id.as_str());
+        if !viewing {
+            return false;
+        }
+        let memory = self.brain_detail.memory.clone();
+        match &report.outcome {
+            ExplainOutcome::Saved(text) => {
+                self.summary_failure = None;
+                self.summary_details_open = false;
+                self.graph_summary = text.clone();
+                self.status = "Graph summary saved".into();
+            }
+            ExplainOutcome::Superseded(why) => {
+                if let Some(memory) = &memory {
+                    self.graph_summary = self.summary_body(memory, "");
+                }
+                self.status = format!("Graph summary discarded: {why}");
+            }
+            ExplainOutcome::Failed(failure) => {
+                self.summary_failure = Some(super::summary_card::SummaryFailure::from_report(
+                    &report, failure,
+                ));
+                if let Some(memory) = &memory {
+                    self.graph_summary = self.summary_body(memory, "");
+                }
+                self.status = format!("Graph summary failed: {}", failure.category.reason());
+            }
+        }
+        true
+    }
+
+    /// Brain summary card actions.
+    fn activate_summary_card(&mut self, button: ButtonId) -> Result<String> {
+        let Some(failure) = self.summary_failure.clone() else {
+            return Ok("No summary failure".into());
+        };
+        match button {
+            ButtonId::SummaryDetails => {
+                self.summary_details_open = !self.summary_details_open;
+                self.scrolls.summary = 0;
+                Ok(if self.summary_details_open {
+                    "Summary failure details".into()
+                } else {
+                    "Details hidden".into()
+                })
+            }
+            ButtonId::SummaryLogs => {
+                self.logs.job = failure.job_id.clone();
+                self.logs.back_to_job = Some(failure.job_id.clone());
+                self.logs.open.clear();
+                self.logs.follow = false;
+                self.select(ModuleId::Logs.index());
+                self.logs.reload(&self.store);
+                if let Some(index) = self.logs.rows.iter().position(|row| row.id == failure.event_id) {
+                    self.logs.select(index);
+                    self.logs.open.insert(failure.event_id.clone());
+                    Ok(format!(
+                        "Logs for job {}",
+                        super::logs::short_id(&failure.job_id)
+                    ))
+                } else {
+                    // Events expire after the retention window; the job row and
+                    // the saved diagnostic (View details) keep the error summary.
+                    Ok(format!(
+                        "Log detail for job {} has expired (24 h retention) · the job keeps its error summary; Brain → View details keeps the cause chain",
+                        super::logs::short_id(&failure.job_id)
+                    ))
+                }
+            }
+            ButtonId::SummaryJob => self.open_job(&failure.job_id),
+            ButtonId::SummaryRetry => {
+                let Some(memory) = self.brain_detail.memory.clone() else {
+                    return Ok("Open a memory first".into());
+                };
+                self.request_summary(&memory, true);
+                Ok(self.status.clone())
+            }
+            ButtonId::SummaryModels => {
+                self.select(ModuleId::Providers.index());
+                self.provider_page = ProviderPage::Defaults;
+                if self.defaults_role != DefaultsRole::Summarization {
+                    self.defaults_role = DefaultsRole::Summarization;
+                    self.model_catalog.clear();
+                    self.catalog_for.clear();
+                }
+                self.set_focus(Target::Button(ButtonId::DefaultRole(DefaultsRole::Summarization)));
+                Ok("Models · Summarization".into())
+            }
+            _ => Ok(String::new()),
+        }
     }
 
     fn activate_button(&mut self, button: ButtonId) {
@@ -3778,6 +4402,15 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.leave_brain_detail();
                 return;
             }
+            ButtonId::SummaryDetails
+            | ButtonId::SummaryLogs
+            | ButtonId::SummaryJob
+            | ButtonId::SummaryRetry
+            | ButtonId::SummaryModels => self.activate_summary_card(button),
+            ButtonId::BrainDetailBack => {
+                self.detail_back();
+                return;
+            }
             ButtonId::Add => self.save_insight(),
             ButtonId::Pin => {
                 let Some(memory) = self.memories.get(self.memory_sel) else {
@@ -3787,7 +4420,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.store
                     .update_memory(&memory.id, &memory.text, &memory.category, !memory.pinned)
                     .map(|_| {
-                        self.memories = self.filtered_memories();
+                        self.reload_memories();
                         "Memory pin updated".into()
                     })
             }
@@ -3902,12 +4535,88 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 Ok("Atlas".into())
             }
             ButtonId::AtlasDelete => self.delete_atlas_run(),
+            ButtonId::AtlasResume => self.resume_atlas_run(),
+            ButtonId::AtlasRepair => self.start_atlas_repair(),
             ButtonId::ClearLog => {
-                self.log.clear();
-                self.log_open.clear();
-                self.log_sel = 0;
-                self.push_log("info", "Event log cleared");
-                Ok("Event log cleared".into())
+                // Scope: durable events only. Jobs, task results and memories stay.
+                let cleared = self.store.clear_events();
+                self.logs.open.clear();
+                self.logs.scroll = 0;
+                self.logs.follow = true;
+                self.push_log("info", "Events cleared (jobs, results, and memories kept)");
+                self.reload_logs();
+                cleared.map(|n| format!("Cleared {n} events"))
+            }
+            ButtonId::JobsStatus => {
+                self.jobs.cycle_status();
+                self.reload_jobs();
+                Ok(format!("Status: {}", self.jobs.status.label()))
+            }
+            ButtonId::JobsApp => {
+                self.jobs.cycle_app();
+                self.reload_jobs();
+                Ok("Jobs filtered".into())
+            }
+            ButtonId::JobsViewLogs => self.view_job_logs(),
+            ButtonId::JobsRetry => {
+                let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
+                    return;
+                };
+                let retried = self.store.retry_failed_tasks(&id);
+                self.reload_jobs();
+                retried.map(|n| {
+                    if n == 0 {
+                        "Nothing to retry".into()
+                    } else {
+                        format!("Retrying {n} failed task(s)")
+                    }
+                })
+            }
+            ButtonId::JobsCancel => {
+                let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
+                    return;
+                };
+                let requested = self.store.request_job_cancel(&id);
+                self.reload_jobs();
+                requested.map(|outcome| match outcome {
+                    CancelRequest::Requested => "Cancel requested · the job stops at its next safe point".into(),
+                    CancelRequest::NotCancellable => "This job cannot be cancelled safely".into(),
+                    CancelRequest::NotRunning => "This job is not running".into(),
+                    CancelRequest::Missing => "This job no longer exists".into(),
+                })
+            }
+            ButtonId::JobsOpenSource => self.open_job_source(),
+            ButtonId::LogsLevel => {
+                self.logs.level = self.logs.level.next();
+                self.reload_logs();
+                Ok(format!("Level: {}", self.logs.level.label()))
+            }
+            ButtonId::LogsApp => {
+                self.logs.cycle_app();
+                self.reload_logs();
+                Ok("Logs filtered".into())
+            }
+            ButtonId::LogsFollow => {
+                self.logs.follow = !self.logs.follow;
+                self.reload_logs();
+                Ok(format!(
+                    "Live follow {}",
+                    if self.logs.follow { "on" } else { "off" }
+                ))
+            }
+            ButtonId::LogsOpenJob => {
+                let Some(job) = self.logs.selected().map(|row| row.job_id.clone()) else {
+                    return;
+                };
+                if job.is_empty() {
+                    Ok("This event has no job".into())
+                } else {
+                    self.open_job(&job)
+                }
+            }
+            ButtonId::LogsBack => {
+                self.leave_logs_to_job();
+                return;
             }
             ButtonId::OsintAttach => {
                 let Some((call_id, _)) = &self.osint_result else {
@@ -4081,7 +4790,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     /// Saves one role's provider and model. Only `settings.toml` changes; credentials
-    /// stay where they are. The change is recorded in the System event log.
+    /// stay where they are. The change is recorded in Logs.
     fn save_role(&mut self, role: DefaultsRole) -> Result<String> {
         let provider = self.field(role.provider_field()).trim().to_string();
         let model = self.field(role.model_field()).trim().to_string();
@@ -4240,6 +4949,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         self.router_status = "Verifying OpenRouter connection…".into();
         self.status = self.router_status.clone();
         let tx = self.provider_tx.clone();
+        let job = tracked::begin(JobSpec::new(
+            "models",
+            "provider_verify",
+            "Verify OpenRouter connection",
+        ));
         tokio::spawn(async move {
             let result = provider::verified_catalog(&secret)
                 .await
@@ -4251,6 +4965,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     )
                 })
                 .map_err(|err| err.to_string());
+            tracked::finish(job, "provider", &result, None);
             let _ = tx.send(ProviderEvent::Finished {
                 page: ProviderPage::OpenRouter,
                 result,
@@ -4279,6 +4994,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
         self.status = status;
         let tx = self.provider_tx.clone();
+        let job = tracked::begin(JobSpec::new(
+            "models",
+            if login { "provider_login" } else { "provider_check" },
+            format!("{} {label} subscription", if login { "Sign in to" } else { "Check" }),
+        ));
         tokio::spawn(async move {
             let result = if page == ProviderPage::Grok {
                 let outcome = if login {
@@ -4320,6 +5040,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 };
                 outcome.map_err(|err| err.to_string())
             };
+            tracked::finish(job, "provider", &result, None);
             let _ = tx.send(ProviderEvent::Finished { page, result });
         });
     }
@@ -4445,6 +5166,14 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.set_focus(Target::AtlasCycleStats);
             }
             Target::PathLine(index) => self.activate_path_line(index),
+            Target::RelatedRow(index) => {
+                // A click opens the row under the pointer immediately.
+                if index < self.brain_detail.related.items.len() {
+                    self.brain_detail.related.sel = index;
+                    self.open_selected_related();
+                }
+            }
+            Target::DetailPath | Target::DetailSummary => self.set_focus(target),
             Target::AtlasArticle(index) => {
                 if self.atlas_articles.is_empty() {
                     return;
@@ -4463,13 +5192,18 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.open_intel_briefing();
             }
             Target::LogLine(index) => {
-                if self.log.is_empty() {
+                if self.logs.rows.is_empty() {
                     return;
                 }
-                self.log_sel = index.min(self.log.len() - 1);
-                self.log_browsing = true;
+                self.logs.select(index);
+                self.set_focus(Target::LogLine(self.logs.sel));
                 self.toggle_log();
             }
+            Target::JobRow(index) => {
+                self.jobs.select(index, &self.store);
+                self.set_focus(Target::JobRow(self.jobs.sel));
+            }
+            Target::JobDetail => self.set_focus(Target::JobDetail),
             Target::Choice(index) if self.overlay == Overlay::Palette => {
                 if let Some(id) = self.palette_items().get(index).map(|item| item.id.clone()) {
                     self.run_palette(&id);
@@ -4577,6 +5311,12 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         if self.focus == Target::Field(FieldId::IntelSearch) && self.module == Some(ModuleId::Intel)
         {
             self.load_intel();
+        }
+        if self.focus == Target::Field(FieldId::LogsSearch) {
+            self.reload_logs();
+        }
+        if self.focus == Target::Field(FieldId::JobsSearch) {
+            self.reload_jobs();
         }
     }
 
@@ -4959,11 +5699,18 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             KeyCode::Char(c)
                 if !self.field_focused()
                     && key.modifiers.is_empty()
-                    && matches!(c, '1' | '2' | '3' | '4' | '5' | '6' | '7') =>
+                    && c.is_ascii_digit()
+                    && c != '0' =>
             {
-                // Home-order apps: 1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 OSINT · 6 Providers · 7 System
+                // Home order: 1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs ·
+                // 7 Tools · 8 Models · 9 System
                 self.select((c as u8 - b'1') as usize);
             }
+            KeyCode::Char(c)
+                if !self.field_focused()
+                    && key.modifiers.is_empty()
+                    && matches!(self.module, Some(ModuleId::Logs) | Some(ModuleId::Jobs))
+                    && self.dashboard_key(c) => {}
             KeyCode::Char(c) if self.module.is_none() && matches!(c, 'j' | 'k') => {
                 self.move_vertical(if c == 'j' { 1 } else { -1 });
             }
@@ -5081,12 +5828,30 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             return;
         }
+        if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Graph {
+            self.detail_back();
+            return;
+        }
         if self.module == Some(ModuleId::Brain) && self.brain_list_mode != BrainListMode::List {
             self.leave_brain_detail();
             return;
         }
         if self.module == Some(ModuleId::Atlas) && self.atlas_news {
             self.show_atlas_world();
+            return;
+        }
+        if self.module == Some(ModuleId::Logs) && self.leave_logs_to_job() {
+            return;
+        }
+        if self.module == Some(ModuleId::Jobs)
+            && (self.jobs.detail_open || self.focus == Target::JobDetail)
+        {
+            self.jobs.detail_open = false;
+            self.set_focus(if self.jobs.rows.is_empty() {
+                Target::Field(FieldId::JobsSearch)
+            } else {
+                Target::JobRow(self.jobs.sel)
+            });
             return;
         }
         if self.module == Some(ModuleId::Atlas) && self.atlas_page == AtlasPage::Live {
@@ -5122,22 +5887,23 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     fn toggle_log(&mut self) {
-        let Some(line) = self.log.get(self.log_sel) else {
-            return;
-        };
-        if line.detail.is_empty() {
-            return;
+        if self.logs.toggle_open() {
+            let (room, width) = super::logs::list_geometry(super::ui::body_rect(self));
+            self.logs.reveal(room, width);
         }
-        let id = line.id;
-        if !self.log_open.insert(id) {
-            self.log_open.remove(&id);
-        }
-        super::ui::reveal_log(self);
     }
 
     fn on_enter(&mut self) {
-        if self.module == Some(ModuleId::System) && self.log_browsing {
+        if self.module == Some(ModuleId::Logs) && matches!(self.focus, Target::LogLine(_)) {
             self.toggle_log();
+            return;
+        }
+        if self.module == Some(ModuleId::Jobs) && matches!(self.focus, Target::JobRow(_)) {
+            // Narrow layouts swap the table for the detail; wide ones focus it.
+            if super::ui::body_rect(self).width < super::jobs::WIDE {
+                self.jobs.detail_open = true;
+            }
+            self.set_focus(Target::JobDetail);
             return;
         }
         match self.focus {
@@ -5146,6 +5912,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             Target::Field(_) => self.focus_next(false),
             Target::Transcript => self.enter_chat(),
             Target::Memory(_) => self.open_memory_graph(),
+            Target::RelatedRow(_) => self.open_selected_related(),
             Target::AtlasFeed(_) => self.open_atlas_article(),
             Target::AtlasHistory(_) => self.open_atlas_news(),
             Target::AtlasArticle(_) => self.open_saved_article(),
@@ -5169,6 +5936,25 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         }
     }
 
+    /// Single-key dashboard shortcuts (not typing in a field). Returns true
+    /// when the key was handled.
+    fn dashboard_key(&mut self, c: char) -> bool {
+        let button = match (self.module, c) {
+            (Some(ModuleId::Logs), 'f') => ButtonId::LogsFollow,
+            (Some(ModuleId::Logs), 'o') if self.logs.selected().is_some_and(|r| !r.job_id.is_empty()) => {
+                ButtonId::LogsOpenJob
+            }
+            (Some(ModuleId::Logs), 'v') => ButtonId::LogsLevel,
+            (Some(ModuleId::Jobs), 'l') if self.jobs.selected().is_some() => ButtonId::JobsViewLogs,
+            (Some(ModuleId::Jobs), 'r') if self.jobs.can_retry() => ButtonId::JobsRetry,
+            (Some(ModuleId::Jobs), 'c') if self.jobs.can_cancel() => ButtonId::JobsCancel,
+            (Some(ModuleId::Jobs), 's') => ButtonId::JobsStatus,
+            _ => return false,
+        };
+        self.activate_button(button);
+        true
+    }
+
     fn field_focused(&self) -> bool {
         matches!(self.focus, Target::Field(_))
     }
@@ -5182,6 +5968,16 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
 
     fn move_vertical(&mut self, delta: i32) {
         if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Graph {
+            match self.focus {
+                Target::RelatedRow(_) => self.move_related(delta),
+                Target::DetailSummary => {
+                    self.scrolls.summary = add_scroll(self.scrolls.summary, delta);
+                }
+                Target::DetailPath => {
+                    self.scrolls.path = add_scroll(self.scrolls.path, delta);
+                }
+                _ => {}
+            }
             return;
         }
         match self.focus {
@@ -5196,6 +5992,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             Target::Memory(_) => self.move_memory(delta),
             Target::Tool(_) => self.move_tool(delta),
+            Target::LogLine(_) => self.move_log(delta),
+            Target::JobRow(_) => self.move_job(delta),
+            Target::JobDetail => {
+                self.jobs.detail_scroll = add_scroll(self.jobs.detail_scroll, delta);
+            }
             _ => match self.module {
                 None => self.move_home(delta),
                 Some(ModuleId::Brain) if self.brain_list_mode == BrainListMode::Create => {}
@@ -5208,9 +6009,9 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                         .min(max);
                 }
                 Some(ModuleId::Intel) => self.move_intel(delta),
-                Some(ModuleId::System) => {
-                    super::ui::move_system_log(self, delta);
-                }
+                Some(ModuleId::System) => {}
+                Some(ModuleId::Logs) => self.move_log(delta),
+                Some(ModuleId::Jobs) => self.move_job(delta),
                 Some(ModuleId::Recon) if self.recon_chat => super::ui::move_chat(self, delta),
                 Some(ModuleId::Recon) => self.move_thread(delta),
                 Some(ModuleId::Providers) => {
@@ -5218,6 +6019,26 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 }
             },
         }
+    }
+
+    fn move_log(&mut self, delta: i32) {
+        if self.logs.rows.is_empty() {
+            return;
+        }
+        self.logs.move_by(delta);
+        let (room, width) = super::logs::list_geometry(super::ui::body_rect(self));
+        self.logs.reveal(room, width);
+        self.set_focus(Target::LogLine(self.logs.sel));
+    }
+
+    fn move_job(&mut self, delta: i32) {
+        if self.jobs.rows.is_empty() {
+            return;
+        }
+        self.jobs.move_by(delta, &self.store);
+        let room = super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
+        super::jobs::reveal(&mut self.jobs, room);
+        self.set_focus(Target::JobRow(self.jobs.sel));
     }
 
     fn move_home(&mut self, delta: i32) {
@@ -5484,16 +6305,6 @@ fn add_scroll(value: u16, delta: i32) -> u16 {
     (i32::from(value) + delta).clamp(0, i32::from(u16::MAX)) as u16
 }
 
-fn log_stamp() -> String {
-    let secs = unix_now();
-    format!(
-        "{:02}:{:02}:{:02}Z",
-        (secs / 3600) % 24,
-        (secs / 60) % 60,
-        secs % 60
-    )
-}
-
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5501,7 +6312,6 @@ pub(crate) fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-const LOG_TTL_SECS: u64 = 24 * 60 * 60;
 const ATLAS_AUTO_SECS: u64 = 90 * 60;
 
 fn atlas_countdown_visible(app: &App) -> bool {
@@ -5582,10 +6392,33 @@ pub async fn run(mut app: App) -> Result<()> {
     )?;
     let mut terminal: Terminal<ratatui::backend::CrosstermBackend<Stdout>> =
         Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
+    // Durable local workers (index outbox + summary flush), each claiming only
+    // its own pool. Stopped when dropped at the end of the session.
+    let _workers =
+        argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
+    // Process liveness for the job registry: jobs left running by a process
+    // that exited become interrupted; cross-process Cancel reaches this one.
+    let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
+    // One-time "Repair Atlas memories" reconciliation (resumes if interrupted).
+    argos_osint_core::atlas_memory::spawn_startup_reconciliation(paths::db_path());
+    // Committed memory changes from any writer (Atlas, Recon, Intel Recon, the
+    // index/repair workers, other processes) reload Brain, coalesced per poll.
+    let mut memory_watch = argos_osint_core::store::MemoryChangeWatcher::new(&app.store);
+    let mut memory_polled = std::time::Instant::now();
     let mut dirty = true;
     loop {
         if pump(&mut app) {
             dirty = true;
+        }
+        if app.tick_dashboards() {
+            dirty = true;
+        }
+        if memory_polled.elapsed() >= Duration::from_secs(1) {
+            memory_polled = std::time::Instant::now();
+            if memory_watch.poll(&app.store).is_some() {
+                app.reload_memories();
+                dirty = true;
+            }
         }
         if dirty {
             if let Ok(size) = terminal.size() {
@@ -5674,34 +6507,6 @@ fn summary_system(claim: bool) -> String {
 {detail}")
 }
 
-async fn write_graph_summary(secret: &ProviderSecret, system: &str, prompt: &str) -> Result<String> {
-    let messages = [
-        provider::ChatMessage {
-            role: "system".into(),
-            content: system.into(),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        },
-        provider::ChatMessage {
-            role: "user".into(),
-            content: prompt.into(),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        },
-    ];
-    let completion = provider::complete(secret, &messages, &[], |_| {}).await?;
-    let text = completion.content.trim().to_string();
-    argos_osint_core::summarization::validate_result(
-        argos_osint_core::summarization::SummarizationMode::GraphExplanation,
-        &text,
-        &[],
-    )
-    .map_err(|err| anyhow::anyhow!("{err}"))?;
-    if text.is_empty() {
-        return Err(completion.empty_error("summarization graph explanation"));
-    }
-    Ok(text)
-}
 
 fn work_event(thread_id: &str, event: recon::TurnEvent) -> WorkEvent {
     let thread_id = thread_id.to_string();
@@ -5821,11 +6626,9 @@ mod tests {
             chat_sel: 0,
             chat_follow: true,
             overlay: Overlay::None,
-            log: Vec::new(),
-            log_sel: 0,
-            log_open: HashSet::new(),
-            log_browsing: false,
-            log_seq: 0,
+            logs: crate::tui::logs::LogsView::default(),
+            jobs: crate::tui::jobs::JobsView::default(),
+            dashboards_at: None,
             logged_calls: HashSet::new(),
             runs: Vec::new(),
             answer_memories: HashMap::new(),
@@ -5924,9 +6727,15 @@ mod tests {
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
-            brain_related_lines: Vec::new(),
+            brain_detail: Default::default(),
+            memory_total: 0,
+            memory_error: None,
+            memories_loaded: true,
             graph_summary: String::new(),
             graph_summary_pending: None,
+            graph_summary_request: String::new(),
+            summary_failure: None,
+            summary_details_open: false,
             hits: Vec::new(),
             auth: AuthFile::default(),
             settings: SettingsFile::default(),
@@ -6020,7 +6829,7 @@ mod tests {
             .any(|target| matches!(target, Target::Field(FieldId::BrainInsight))));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.brain_list_mode, BrainListMode::Graph);
-        assert_eq!(app.focus, Target::Home);
+        assert_eq!(app.focus, Target::DetailPath, "detail opens with the graph section focused");
         assert!(app.brain_graph.is_empty());
         assert!(app.graph_summary.contains("no investigation graph"));
         assert!(app.graph_summary_pending.is_none());
@@ -6341,10 +7150,9 @@ mod tests {
         assert_eq!(app.settings.defaults.synthesis.model, "openrouter/free");
         assert_eq!(app.recon_model, "grok-4.6");
         assert_eq!(app.synthesis_model, "openrouter/free");
-        assert!(app
-            .log
+        assert!(events(&app)
             .iter()
-            .any(|line| line.text.starts_with("defaults.tool_picker:")));
+            .any(|line| line.message.starts_with("defaults.tool_picker:")));
         let saved = std::fs::read_to_string(&app.settings_path).unwrap();
         assert!(saved.contains("[defaults.tool_picker]"), "{saved}");
         assert!(saved.contains("typesafe/jev-1.13"));
@@ -6751,17 +7559,40 @@ mod tests {
         assert!(app.expanded.contains(&key));
     }
 
+    fn events(app: &App) -> Vec<argos_osint_core::events::EventRow> {
+        let mut rows = app
+            .store
+            .list_events(&Default::default(), 500)
+            .unwrap();
+        rows.reverse();
+        rows
+    }
+
     #[test]
-    fn system_log_records_errors_and_scrolls() {
+    fn logs_record_errors_durably_and_scroll() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 80, 24);
         for index in 0..40 {
             app.push_log("error", format!("lookup failed {index}"));
         }
+        assert_eq!(app.error_count(), 40, "home badge counts durable errors");
+        app.select(ModuleId::Logs.index());
+        assert_eq!(app.logs.rows.len(), 40);
+        assert!(app.logs.follow);
+        assert_eq!(app.logs.sel, 39, "live follow selects the newest event");
+        let bottom = app.logs.scroll;
+        assert!(bottom > 0, "follow keeps the newest event in view");
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert!(app.logs.scroll < bottom);
+        // System no longer shows or routes the event log.
         app.select(ModuleId::System.index());
-        assert_eq!(app.error_count(), 40);
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(app.scrolls.log > 0);
+        assert_eq!(
+            super::super::ui::focus_order(&app)
+                .into_iter()
+                .filter(|t| matches!(t, Target::Button(_)))
+                .collect::<Vec<_>>(),
+            vec![Target::Button(ButtonId::RefreshHardware)]
+        );
     }
 
     #[test]
@@ -6797,15 +7628,12 @@ mod tests {
         });
         app.note_finished_calls();
         app.note_finished_calls();
-        let logged: Vec<_> = app
-            .log
-            .iter()
-            .filter(|line| !line.detail.is_empty())
-            .collect();
+        let all = events(&app);
+        let logged: Vec<_> = all.iter().filter(|line| !line.details.is_empty()).collect();
         assert_eq!(logged.len(), 1);
-        assert!(logged[0].text.contains("cache"));
-        assert!(logged[0].text.contains("2 results"));
-        assert!(logged[0].detail.contains("Jane Roe role"));
+        assert!(logged[0].message.contains("cache"));
+        assert!(logged[0].message.contains("2 results"));
+        assert!(logged[0].details.contains("Jane Roe role"));
         app.module = Some(ModuleId::Recon);
         app.recon_chat = true;
         app.expanded.insert("tool:call-s1".into());
@@ -6814,7 +7642,7 @@ mod tests {
             .find(|block| block.key == "tool:call-s1")
             .expect("tool row")
             .body;
-        assert!(body.contains("System event log"));
+        assert!(body.contains("Full result is in Logs"));
         assert!(body.contains("cache"));
         assert!(body.contains("query: Jane Roe"));
         assert!(!body.contains("Jane Roe role"));
@@ -6824,36 +7652,1088 @@ mod tests {
             .expect("tool row")
             .title;
         assert!(title.contains("query=Jane Roe"), "{title}");
-        app.select(ModuleId::System.index());
+        app.select(ModuleId::Logs.index());
         let index = app
-            .log
+            .logs
+            .rows
             .iter()
-            .position(|line| !line.detail.is_empty())
+            .position(|line| !line.details.is_empty())
             .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.log_sel = index;
-        let id = app.log[index].id;
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.logs.select(index);
+        app.set_focus(Target::LogLine(index));
+        let id = app.logs.rows[index].id.clone();
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.log_open.contains(&id));
+        assert!(app.logs.open.contains(&id));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(!app.log_open.contains(&id));
+        assert!(!app.logs.open.contains(&id));
     }
 
     #[test]
-    fn event_log_entries_expire_after_a_day_and_a_click_folds_the_arrow() {
+    fn a_click_folds_an_event_and_incoming_entries_do_not_move_a_paused_list() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 100, 40);
         app.push_log_detail("info", "old lookup", "detail line");
-        app.log[0].created = unix_now().saturating_sub(LOG_TTL_SECS + 60);
         app.push_log_detail("info", "fresh lookup", "fresh detail");
-        app.prune_log();
-        assert_eq!(app.log.len(), 1);
-        assert!(app.log[0].text.contains("fresh"));
+        app.select(ModuleId::Logs.index());
+        let index = app
+            .logs
+            .rows
+            .iter()
+            .position(|row| row.message == "old lookup")
+            .unwrap();
+        let id = app.logs.rows[index].id.clone();
+        click(&mut app, Target::LogLine(index));
+        assert!(app.logs.open.contains(&id));
+        assert!(!app.logs.follow, "selecting an older event pauses follow");
+        app.push_log("info", "incoming while reading");
+        app.dashboards_at = None;
+        app.tick_dashboards();
+        assert_eq!(app.logs.selected().unwrap().id, id, "selection kept by id");
+        assert!(app.logs.open.contains(&id));
+        let sel = app.logs.sel;
+        click(&mut app, Target::LogLine(sel));
+        assert!(!app.logs.open.contains(&id));
+    }
+
+    fn render(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        app.screen = Rect::new(0, 0, width, height);
+        super::super::ui::normalize(app);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, app))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = buffer.area;
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn register(app: &App, id: &str, app_name: &str, title: &str) {
+        app.store
+            .register_job(
+                &argos_osint_core::tasks::NewJob {
+                    id: id.into(),
+                    kind: "user".into(),
+                    owner_scope: String::new(),
+                    input_revision: String::new(),
+                    deadline_at: String::new(),
+                },
+                &argos_osint_core::tasks::JobMeta {
+                    app: app_name.into(),
+                    operation: "test".into(),
+                    title: title.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    fn job_event(app: &App, job: &str, app_name: &str, severity: &str, message: &str, details: &str) {
+        app.store
+            .record_event(&argos_osint_core::events::NewEvent {
+                severity: Some(argos_osint_core::events::Severity::parse(severity)),
+                app: app_name.into(),
+                event_type: "test".into(),
+                message: message.into(),
+                details: details.into(),
+                job_id: job.into(),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn home_order_renames_and_nine_routes_agree() {
+        let rows = super::super::ui::home_rows(Rect::new(0, 0, 140, 50), 3);
+        type Group = (String, Vec<(String, String, usize)>);
+        let mut groups: Vec<Group> = Vec::new();
+        for row in rows {
+            match row.kind {
+                super::super::ui::HomeKind::Heading(title) => groups.push((title.into(), Vec::new())),
+                super::super::ui::HomeKind::Item { title, detail } => {
+                    if let Some(group) = groups.last_mut() {
+                        group.1.push((title, detail, row.target.unwrap()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let titles = |name: &str| -> Vec<String> {
+            groups
+                .iter()
+                .find(|(title, _)| title == name)
+                .unwrap()
+                .1
+                .iter()
+                .map(|(title, _, _)| title.clone())
+                .collect()
+        };
+        assert_eq!(titles("Applications"), ["Intel", "Atlas", "Brain", "Recon"]);
+        assert_eq!(titles("System"), ["Jobs", "Logs", "Tools", "Models", "System"]);
+        let all: Vec<usize> = groups.iter().flat_map(|g| g.1.iter().map(|i| i.2)).collect();
+        assert_eq!(all, (0..9).collect::<Vec<_>>(), "home targets follow numeric order");
+        let logs = &groups[1].1[1];
+        assert!(logs.1.contains("3 errors"), "error badge moved to Logs: {logs:?}");
+        assert!(!groups[1].1[4].1.contains("errors"));
+        // Display renames keep internal ids.
+        assert_eq!(ModuleId::Osint.title(), "Tools");
+        assert_eq!(ModuleId::Providers.title(), "Models");
+        assert_eq!(ModuleId::System.blurb(), "Hardware and paths");
+        // 1–9 from home.
+        for (index, module) in ModuleId::ALL.iter().enumerate() {
+            let mut app = app();
+            let digit = char::from(b'1' + index as u8);
+            app.handle_key(KeyEvent::new(KeyCode::Char(digit), KeyModifiers::NONE));
+            assert_eq!(app.module, Some(*module), "digit {digit}");
+        }
+        // Palette and slash aliases, old and new.
+        let mut app = app();
+        for (alias, module) in [
+            ("tools", ModuleId::Osint),
+            ("osint", ModuleId::Osint),
+            ("models", ModuleId::Providers),
+            ("providers", ModuleId::Providers),
+            ("jobs", ModuleId::Jobs),
+            ("logs", ModuleId::Logs),
+            ("system", ModuleId::System),
+        ] {
+            app.go_home();
+            app.run_palette(alias);
+            assert_eq!(app.module, Some(module), "palette {alias}");
+            app.go_home();
+            app.run_slash(&format!("/{alias}")).unwrap();
+            assert_eq!(app.module, Some(module), "slash {alias}");
+        }
+        let ids: Vec<String> = app.palette_items().into_iter().map(|i| i.id).collect();
+        for id in ["jobs", "logs", "tools", "models", "system", "clear-log"] {
+            assert!(ids.contains(&id.to_string()), "{id}");
+        }
+        // Help and the header agree with the order.
+        app.go_home();
+        app.overlay = Overlay::Help;
+        let mut app2 = app;
+        let text = buffer_text(&render(&mut app2, 160, 40));
+        assert!(text.contains("1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools"), "{text}");
+        assert!(text.contains("Models · 9 System"));
+        app2.overlay = Overlay::None;
+        app2.select(ModuleId::Jobs.index());
+        let header = buffer_text(&render(&mut app2, 160, 40));
+        let first = header.lines().next().unwrap();
+        let order = ["Intel", "Atlas", "Brain", "Recon", "Jobs", "Logs", "Tools", "Models", "System"];
+        let positions: Vec<usize> = order.iter().map(|label| first.find(label).unwrap()).collect();
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{first}");
+    }
+
+    #[test]
+    fn registered_operations_show_in_jobs_and_cancel_is_cooperative() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        let mut app = app();
+        app.store = Store::open(&db).unwrap();
+        app.screen = Rect::new(0, 0, 140, 40);
+        super::super::tracked::testing::use_db(Some(db.clone()));
+        // A tool run as the TUI registers it: durable before work starts.
+        let stop = Arc::new(AtomicBool::new(false));
+        let job = super::super::tracked::begin_cancellable(
+            JobSpec::new("tools", "tool_run", "Run WHOIS lookup").tool("whois"),
+            stop.clone(),
+        )
+        .expect("registered");
+        let id = job.id().to_string();
+        // A non-cancellable operation never offers Cancel.
+        let summary = super::super::tracked::begin(JobSpec::new("brain", "graph_summary", "Explain claim path"))
+            .expect("registered");
+        app.select(ModuleId::Jobs.index());
+        assert!(app.jobs.focus_job(&app.store, &id), "listed");
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains("Run WHOIS lookup") && text.contains("Explain claim path"), "{text}");
+        assert!(text.contains("Cancel"), "{text}");
+        assert!(app.jobs.selected().unwrap().active_now(chrono::Utc::now()).is_some(), "live active time");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(stop.load(Ordering::Relaxed), "the tool's own stop flag is set");
+        assert!(app.status.contains("Cancel requested"), "{}", app.status);
+        assert_eq!(app.jobs.selected().unwrap().state, "running", "not cancelled until it stops");
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains("Cancelling…"), "{text}");
+        assert!(!app.jobs.can_cancel(), "no second Cancel");
+
+        // The operation observes the flag and stops: cancelled, not failed.
+        super::super::tracked::finish(Some(job), "tool", &Err::<(), _>("stopped"), Some(&stop));
+        super::super::tracked::finish(Some(summary), "summary", &Ok::<(), String>(()), None);
+        app.reload_jobs();
+        let rows: HashMap<String, String> = app
+            .jobs
+            .rows
+            .iter()
+            .map(|r| (r.title.clone(), r.state.clone()))
+            .collect();
+        assert_eq!(rows["Run WHOIS lookup"], "cancelled");
+        assert_eq!(rows["Explain claim path"], "completed");
+        let summary_row = app.jobs.rows.iter().find(|r| r.title == "Explain claim path").unwrap();
+        assert!(!summary_row.cancellable);
+        super::super::tracked::testing::use_db(None);
+    }
+
+    #[test]
+    fn jobs_dashboard_navigates_to_logs_and_back_and_logs_open_jobs() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        register(&app, "job-a", "atlas", "Atlas news cycle");
+        app.store
+            .set_job_progress("job-a", "running", "Index and verify memories", 3, Some(5), "")
+            .unwrap();
+        register(&app, "job-b", "atlas", "Repair Atlas memories");
+        app.store
+            .set_job_progress("job-b", "completed", "done", 4, Some(4), "")
+            .unwrap();
+        job_event(&app, "job-a", "atlas", "info", "phase 5 started", "");
+        job_event(&app, "", "recon", "warn", "unrelated", "");
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+        assert_eq!(app.jobs.rows[0].id, "job-a", "active work first");
+        assert_eq!(app.focus, Target::JobRow(0));
+        assert!(app.jobs.detail.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.jobs.selected().unwrap().id, "job-b");
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains("Index and verify memories"), "{text}");
+        assert!(text.contains("View logs"));
+        assert!(!text.contains("Retry failed"), "no misleading Retry");
+
+        // Jobs → Logs prefiltered to the job, with a return path.
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Logs));
+        assert_eq!(app.logs.job, "job-a");
+        let messages: Vec<&str> = app.logs.rows.iter().map(|r| r.message.as_str()).collect();
+        assert_eq!(messages, ["phase 5 started"]);
+        app.set_focus(Target::LogLine(0));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+        assert_eq!(app.jobs.selected().unwrap().id, "job-a");
+        assert!(app.logs.job.is_empty() && app.logs.back_to_job.is_none());
+
+        // Logs → job for an event that carries one, even with Jobs filtered.
+        app.jobs.status = argos_osint_core::jobs_view::JobStatusFilter::Completed;
+        app.select(ModuleId::Logs.index());
+        assert_eq!(app.logs.rows.len(), 2, "unfiltered Logs keep app events");
+        let index = app.logs.rows.iter().position(|r| r.job_id == "job-a").unwrap();
+        click(&mut app, Target::LogLine(index));
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+        assert_eq!(app.jobs.selected().unwrap().id, "job-a");
+
+        // Narrow terminals switch to a single-panel detail.
+        app.screen = Rect::new(0, 0, 80, 30);
+        app.set_focus(Target::JobRow(app.jobs.sel));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.jobs.detail_open);
+        let narrow = buffer_text(&render(&mut app, 80, 30));
+        assert!(narrow.contains("detail") && !narrow.contains("Repair Atlas memories"), "{narrow}");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.jobs.detail_open);
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+    }
+
+    #[test]
+    fn system_shows_only_hardware_and_paths_and_logs_own_clear() {
+        let mut app = app();
         app.select(ModuleId::System.index());
-        click(&mut app, Target::LogLine(0));
-        assert!(app.log_open.contains(&app.log[0].id));
-        click(&mut app, Target::LogLine(0));
-        assert!(!app.log_open.contains(&app.log[0].id));
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("Refresh hardware"));
+        assert!(text.contains(" host ") && text.contains(" paths "));
+        assert!(text.contains("Database:") && text.contains("Config:"));
+        assert!(!text.contains("event log") && !text.contains("Clear"), "{text}");
+        click(&mut app, Target::Button(ButtonId::RefreshHardware));
+        assert_eq!(app.status, "Hardware refreshed");
+
+        register(&app, "job-c", "brain", "Graph summary");
+        job_event(&app, "job-c", "brain", "error", "summary failed", "HTTP 503");
+        app.select(ModuleId::Logs.index());
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("Clear events") && text.contains("kept 24 h"), "{text}");
+        click(&mut app, Target::Button(ButtonId::ClearLog));
+        assert!(app.status.starts_with("Cleared"), "{}", app.status);
+        assert!(
+            app.store.get_job("job-c").unwrap().is_some(),
+            "clearing events keeps jobs"
+        );
+    }
+
+    /// Writes cell dumps of the phase-5 screens for PNG rendering:
+    /// `ARGOS_SCREEN_DIR=/workspace/screens/atlas-memory cargo test -p argos-osint-bin dump_phase5_screens -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_phase5_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = app();
+        register(&app, "job-atlas-0412", "atlas", "Atlas news cycle · 04:12");
+        // Realistic timing: two finished index attempts and one still open.
+        app.store
+            .fixture_task_attempt("job-atlas-0412", "t-idx-1", "index_upsert", 600, Some(45))
+            .unwrap();
+        app.store
+            .fixture_task_attempt("job-atlas-0412", "t-idx-2", "index_upsert", 420, Some(38))
+            .unwrap();
+        app.store
+            .fixture_task_attempt("job-atlas-0412", "t-idx-3", "index_upsert", 192, None)
+            .unwrap();
+        app.store
+            .set_job_progress("job-atlas-0412", "running", "Index and verify memories", 41, Some(57), "")
+            .unwrap();
+        register(&app, "job-intel-77", "intel", "Intel Recon · Full assessment");
+        register(&app, "job-graph-19", "brain", "Graph summary · Northwind ferry");
+        app.store
+            .fixture_task_attempt("job-graph-19", "t-sum-1", "graph_explanation", 300, Some(12))
+            .unwrap();
+        app.store
+            .set_job_progress(
+                "job-graph-19",
+                "failed",
+                "explanation",
+                1,
+                Some(2),
+                "provider HTTP 503: upstream unavailable after 2 attempts",
+            )
+            .unwrap();
+        register(&app, "atlas-memory-repair", "atlas", "Repair Atlas memories");
+        app.store
+            .fixture_task_attempt("atlas-memory-repair", "t-rep-1", "index_rebuild", 3000, Some(21))
+            .unwrap();
+        app.store
+            .set_job_progress("atlas-memory-repair", "completed", "done", 12, Some(12), "")
+            .unwrap();
+        let _ = app.store.add_memory(
+            "Harbor tanker manifests list cargo",
+            "fact",
+            false,
+            MemorySource {
+                app: "test".into(),
+                conversation_id: "c".into(),
+                message_id: None,
+                reference: None,
+            },
+        );
+        job_event(&app, "job-atlas-0412", "atlas", "info", "Atlas: phase 4 published 57 memories (12 created, 45 reused)", "");
+        job_event(&app, "job-atlas-0412", "atlas", "info", "Atlas: phase 5 indexing 41/57 verified", "");
+        job_event(&app, "job-graph-19", "brain", "error", "Graph summary failed: provider HTTP 503", "stage: stream\nattempt 1: HTTP 503 upstream unavailable\nattempt 2: HTTP 503 upstream unavailable\nfallback: basic graph explanation");
+        job_event(&app, "", "recon", "info", "Recon turn complete", "");
+        job_event(&app, "", "atlas", "warn", "Atlas: GNews rate limit reached (HTTP 429)", "");
+        job_event(&app, "atlas-memory-repair", "atlas", "info", "Repair Atlas memories: 12 runs checked, 3 vectors requeued", "");
+        let mut shots: Vec<(&str, u16, u16)> = Vec::new();
+        let mut save = |app: &mut App, name: &str, width: u16, height: u16| {
+            let buffer = render(app, width, height);
+            let mut cells = Vec::new();
+            for y in 0..height {
+                let mut row = Vec::new();
+                for x in 0..width {
+                    let cell = &buffer[(x, y)];
+                    row.push(serde_json::json!({
+                        "s": cell.symbol(),
+                        "fg": format!("{:?}", cell.fg),
+                        "bg": format!("{:?}", cell.bg),
+                        "b": cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                        "u": cell.modifier.contains(ratatui::style::Modifier::UNDERLINED),
+                    }));
+                }
+                cells.push(row);
+            }
+            let json = serde_json::json!({"width": width, "height": height, "cells": cells});
+            std::fs::write(format!("{dir}/{name}.json"), json.to_string()).unwrap();
+            shots.push(("", width, height));
+        };
+        app.logs.refresh_counts(&app.store);
+        save(&mut app, "home", 140, 42);
+        app.select(ModuleId::Jobs.index());
+        save(&mut app, "jobs", 140, 40);
+        let failed = app.jobs.rows.iter().position(|r| r.id == "job-graph-19").unwrap();
+        click(&mut app, Target::JobRow(failed));
+        save(&mut app, "jobs-failed", 140, 40);
+        app.screen = Rect::new(0, 0, 80, 30);
+        app.set_focus(Target::JobRow(app.jobs.sel));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        save(&mut app, "jobs-narrow-detail", 80, 30);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.select(ModuleId::Logs.index());
+        let index = app.logs.rows.iter().position(|r| r.message.starts_with("Graph summary failed")).unwrap();
+        click(&mut app, Target::LogLine(index));
+        save(&mut app, "logs", 140, 40);
+        app.select(ModuleId::System.index());
+        click(&mut app, Target::Button(ButtonId::RefreshHardware));
+        save(&mut app, "system", 140, 40);
+        assert!(!shots.is_empty());
+    }
+
+    fn atlas_claim(
+        fingerprint: &str,
+        entity: &str,
+        claim: &str,
+        article: &str,
+    ) -> argos_osint_core::store::AtlasInsightClaim {
+        argos_osint_core::store::AtlasInsightClaim {
+            fingerprint: fingerprint.into(),
+            entity: entity.into(),
+            namespace: "org".into(),
+            predicate: "reported".into(),
+            object: claim.split(' ').next_back().unwrap_or("").into(),
+            topic: "Baltic shipping".into(),
+            claim: claim.into(),
+            classification: "fact".into(),
+            confidence: 0.82,
+            article_id: article.into(),
+            source_url: format!("https://news.example/{article}"),
+            published_at: "2026-10-05T04:12:00Z".into(),
+            reliability: "B".into(),
+            info_credibility: 2,
+            admiralty: "B2".into(),
+            rsp_status: String::new(),
+        }
+    }
+
+    /// One Atlas cycle with linked claims, plus a manual memory with similar
+    /// wording. Returns memory ids in claim order, then the manual one.
+    fn claim_fixture(app: &App) -> Vec<String> {
+        let store = &app.store;
+        store.atlas_insert_run("run-0412", "{}", "{}").unwrap();
+        for (id, title) in [
+            ("a1", "Northwind ferry halts Baltic crossings after engine fire"),
+            ("a2", "Baltic board eases ferry suspension"),
+        ] {
+            store
+                .atlas_upsert_article(&AtlasArticleRow {
+                    run_id: "run-0412".into(),
+                    id: id.into(),
+                    title: title.into(),
+                    description: String::new(),
+                    url: format!("https://news.example/{id}"),
+                    country: "LT".into(),
+                    source_name: "Baltic Wire".into(),
+                    source_domain: "news.example".into(),
+                    published_at: "2026-10-05T04:12:00Z".into(),
+                    provider: "gnews".into(),
+                    temperature: 0.5,
+                    category: "economic".into(),
+                    seen_at: "2026-10-05T04:12:00Z".into(),
+                    author: String::new(),
+                    image_url: String::new(),
+                })
+                .unwrap();
+        }
+        let texts = [
+            ("fp-1", "Northwind Ferries", "Northwind Ferries halted Baltic crossings after an engine fire", "a1"),
+            ("fp-2", "Klaipeda port", "Klaipeda port rerouted freight while Northwind crossings were halted", "a1"),
+            ("fp-3", "Northwind Ferries", "Northwind Ferries expects crossings to resume within a week", "a2"),
+            ("fp-4", "Baltic Shipping Board", "Baltic Shipping Board revised the halt to a partial suspension", "a2"),
+        ];
+        let claims: Vec<_> = texts
+            .iter()
+            .map(|(fp, entity, claim, article)| atlas_claim(fp, entity, claim, article))
+            .collect();
+        let receipt = store
+            .publish_atlas_insights("run-0412", &claims, &[], "", &Default::default())
+            .unwrap();
+        assert_eq!(receipt.claim_memory_ids.len(), 4, "{:?}", receipt.rejected);
+        // The board's revision relates to the original halt (stored fingerprints).
+        let fingerprint = |index: usize| receipt.claim_memory_ids[index].0.clone();
+        store
+            .publish_atlas_insights(
+                "run-0412",
+                &claims,
+                &[(fingerprint(3), fingerprint(0), "conflict_or_revision".into())],
+                "",
+                &Default::default(),
+            )
+            .unwrap();
+        store
+            .add_memory(
+                "Ferry crossings halted after an engine fire last winter",
+                "fact",
+                false,
+                MemorySource {
+                    app: "manual".into(),
+                    conversation_id: "notes".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        let all = store.list_memories().unwrap();
+        let find = |snippet: &str| {
+            all.iter()
+                .find(|memory| memory.text.contains(snippet))
+                .unwrap_or_else(|| panic!("memory for {snippet}"))
+                .id
+                .clone()
+        };
+        let ids = vec![
+            find("halted Baltic crossings after an engine fire"),
+            find("rerouted freight"),
+            find("resume within a week"),
+            find("partial suspension"),
+            find("last winter"),
+        ];
+        ids
+    }
+
+    #[test]
+    fn claim_detail_has_graph_above_related_left_summary_right_and_navigates_by_id() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let ids = claim_fixture(&app);
+        app.select(ModuleId::Brain.index());
+        // Find hides most targets; navigation must still reach them.
+        app.brain_query = "engine fire".into();
+        app.reload_memories();
+        assert!(app.memories.iter().all(|m| m.id != ids[3]), "target filtered out");
+        let row = app.memories.iter().position(|m| m.id == ids[0]).unwrap();
+        app.memory_sel = row;
+        app.set_focus(Target::Memory(row));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.brain_list_mode, BrainListMode::Graph);
+        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
+        assert!(app.detail_claim(), "Atlas provenance opens a claim path");
+
+        // Layout: graph above, Related left, Summary right, same row.
+        let areas = super::super::ui::detail_areas(&app);
+        assert!(!areas.stacked);
+        assert!(areas.path.y < areas.related.y);
+        assert_eq!(areas.related.y, areas.summary.y);
+        assert!(areas.related.x < areas.summary.x);
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains(" claim path ") && text.contains(" related ") && text.contains(" summary "), "{text}");
+        let path_rows: String = text
+            .lines()
+            .skip(areas.path.y as usize)
+            .take(areas.path.height as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!path_rows.contains("Related") && !path_rows.contains("Linked"), "no Related text in the graph pane: {path_rows}");
+
+        // Related: unique existing targets, self excluded, explicit before similar.
+        let items = app.brain_detail.related.items.clone();
+        let item_ids: Vec<&str> = items.iter().map(|i| i.memory_id.as_str()).collect();
+        assert!(!item_ids.contains(&ids[0].as_str()));
+        let mut unique = item_ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), item_ids.len());
+        // Claim relations rank first: the stored board revision, plus the
+        // conflict publication detects between the two Northwind claims.
+        let relations: Vec<&str> = items
+            .iter()
+            .take_while(|i| i.reason.starts_with("claim relation"))
+            .map(|i| i.memory_id.as_str())
+            .collect();
+        assert!(relations.contains(&ids[3].as_str()), "claim relation first: {items:?}");
+        assert!(relations.contains(&ids[2].as_str()), "{items:?}");
+        use argos_osint_core::related_memories::RelationKind;
+        let first_similar = items.iter().position(|i| i.kind == RelationKind::Similar);
+        if let Some(first) = first_similar {
+            assert!(items[..first].iter().all(|i| i.kind == RelationKind::Explicit));
+            assert!(items[first..].iter().all(|i| i.kind == RelationKind::Similar));
+        }
+        assert!(text.contains("Linked"));
+        let manual = items.iter().find(|i| i.memory_id == ids[4]).expect("similar manual memory");
+        assert_eq!(manual.kind, RelationKind::Similar);
+        assert!(text.contains("Similar · not evidence"), "{text}");
+
+        // Keyboard: Tab to Related, Down selects without navigating.
+        while !matches!(app.focus, Target::RelatedRow(_)) {
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.brain_detail.related.sel, 1);
+        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()), "selection alone does not navigate");
+        let target = items[1].memory_id.clone();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.brain_detail.memory_id(), Some(target.as_str()));
+        let entered_graph = app.brain_graph.clone();
+        assert!(app.brain_detail.related.items.iter().all(|i| i.memory_id != target));
+
+        // Back restores the previous memory, its Related selection and focus.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
+        assert_eq!(app.brain_detail.related.sel, 1);
+        assert_eq!(app.focus, Target::RelatedRow(1));
+
+        // Click on the same row opens the same target.
+        render(&mut app, 140, 40);
+        click(&mut app, Target::RelatedRow(1));
+        assert_eq!(app.brain_detail.memory_id(), Some(target.as_str()));
+        assert_eq!(app.brain_graph, entered_graph);
+        // The filtered-out claim-relation target opens too.
+        app.detail_back();
+        render(&mut app, 140, 40);
+        click(&mut app, Target::RelatedRow(0));
+        let first = items[0].memory_id.clone();
+        assert!(app.memories.iter().all(|m| m.id != first), "filtered out by Find");
+        assert_eq!(app.brain_detail.memory_id(), Some(first.as_str()));
+        assert_eq!(app.brain_query, "engine fire", "Find is preserved");
+
+        // Late related results for another request are rejected.
+        let stale = app.brain_detail.related.request - 1;
+        assert!(!app.on_related(stale, &first, Ok(Vec::new())));
+        assert!(!app.on_related(app.brain_detail.related.request, &ids[0], Ok(Vec::new())));
+        assert!(!app.brain_detail.related.items.is_empty());
+
+        // A deleted destination keeps the current view intact.
+        let (gone_row, gone) = app
+            .brain_detail
+            .related
+            .items
+            .iter()
+            .enumerate()
+            .find(|(_, i)| i.memory_id != ids[0])
+            .map(|(row, i)| (row, i.memory_id.clone()))
+            .unwrap();
+        app.store.delete_memory(&gone).unwrap();
+        render(&mut app, 140, 40);
+        app.brain_detail.related.sel = gone_row;
+        app.set_focus(Target::RelatedRow(gone_row));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.brain_detail.memory_id(), Some(first.as_str()));
+        assert!(app.status.contains("no longer exists"), "{}", app.status);
+
+        // Back all the way returns to the list with Find and selection intact.
+        for _ in 0..8 {
+            if app.brain_list_mode != BrainListMode::Graph {
+                break;
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        }
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert_eq!(app.brain_query, "engine fire");
+        assert_eq!(app.memories[app.memory_sel].id, ids[0]);
+    }
+
+    #[test]
+    fn narrow_claim_detail_stacks_related_above_summary_and_keeps_both_reachable() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 64, 32);
+        let ids = claim_fixture(&app);
+        app.select(ModuleId::Brain.index());
+        assert!(app.open_memory_detail(&ids[0]));
+        let areas = super::super::ui::detail_areas(&app);
+        assert!(areas.stacked);
+        assert!(areas.path.y < areas.related.y && areas.related.y < areas.summary.y);
+        assert!(areas.related.height >= 3 && areas.summary.height >= 3);
+        let text = buffer_text(&render(&mut app, 64, 32));
+        assert!(text.contains(" related ") && text.contains(" summary "), "{text}");
+        // The legend wraps instead of truncating on narrow widths.
+        assert!(text.contains("finding") && text.contains("source"), "{text}");
+        assert!(!text.contains("findin…"), "{text}");
+        // Focusing Summary gives it the larger share; Related stays visible.
+        app.set_focus(Target::DetailSummary);
+        let focused = super::super::ui::detail_areas(&app);
+        assert!(focused.summary.height > focused.related.height);
+        render(&mut app, 64, 32);
+        click(&mut app, Target::RelatedRow(0));
+        assert_ne!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
+        // Back on screen.
+        click(&mut app, Target::Button(ButtonId::BrainDetailBack));
+        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
+    }
+
+    #[test]
+    fn brain_refresh_keeps_selection_and_find_and_shows_read_errors() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 120, 34);
+        let add = |app: &App, text: &str| {
+            app.store
+                .add_memory(
+                    text,
+                    "fact",
+                    false,
+                    MemorySource {
+                        app: "manual".into(),
+                        conversation_id: "c".into(),
+                        message_id: None,
+                        reference: None,
+                    },
+                )
+                .unwrap()
+                .id
+        };
+        add(&app, "alpha one");
+        add(&app, "beta two");
+        let keep = add(&app, "alpha three");
+        // Entering Brain loads memories committed elsewhere.
+        app.select(ModuleId::Brain.index());
+        assert_eq!(app.memories.len(), 3);
+        let row = app.memories.iter().position(|m| m.id == keep).unwrap();
+        app.memory_sel = row;
+        app.set_focus(Target::Memory(row));
+        add(&app, "alpha four");
+        add(&app, "gamma five");
+        app.reload_memories();
+        assert_eq!(app.memories[app.memory_sel].id, keep, "selection follows the id");
+        assert_eq!(app.focus, Target::Memory(app.memory_sel));
+
+        // Find stays active; the title says it filters.
+        app.brain_query = "alpha".into();
+        app.reload_memories();
+        assert_eq!(app.memories[app.memory_sel].id, keep);
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("Find active · 3 of 5"), "{text}");
+        add(&app, "delta six");
+        app.reload_memories();
+        assert_eq!(app.brain_query, "alpha", "a hidden new memory does not clear Find");
+        assert_eq!(app.memory_total, 6);
+
+        // No matches is distinct from no memories.
+        app.brain_query = "zzz".into();
+        app.reload_memories();
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("No memories match") && text.contains("Find is still active"), "{text}");
+
+        // A read failure keeps the last good list and says so.
+        app.brain_query = "alpha".into();
+        app.reload_memories();
+        let shown = app.memories.clone();
+        super::super::brain_detail::testing::fail_reads(Some("disk I/O error"));
+        add(&app, "alpha seven");
+        app.reload_memories();
+        assert_eq!(app.memories, shown, "last good list kept");
+        assert_eq!(app.memory_error.as_deref(), Some("disk I/O error"));
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("read failed · showing last loaded list"), "{text}");
+        assert!(events(&app).iter().any(|e| e.message.contains("could not read memories")));
+        // With nothing loaded yet, the failure is shown instead of an empty list.
+        let mut fresh = super::tests::app();
+        fresh.screen = Rect::new(0, 0, 120, 34);
+        fresh.memories_loaded = false;
+        fresh.select(ModuleId::Brain.index());
+        let text = buffer_text(&render(&mut fresh, 120, 34));
+        assert!(text.contains("Could not read memories: disk I/O error"), "{text}");
+        super::super::brain_detail::testing::fail_reads(None);
+        app.reload_memories();
+        assert!(app.memory_error.is_none());
+        assert_eq!(app.memories.len(), 4);
+        let mut empty = super::tests::app();
+        empty.select(ModuleId::Brain.index());
+        let text = buffer_text(&render(&mut empty, 120, 34));
+        assert!(text.contains("No memories yet"), "{text}");
+    }
+
+    #[test]
+    fn atlas_history_resume_is_offered_only_for_resumable_cycles_and_repair_starts_once() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 44);
+        app.store
+            .atlas_insert_run("run-done", r#"{"phase":4,"chunk":0,"leg":"insights_done","country":0,"from":""}"#, "{}")
+            .unwrap();
+        app.store.atlas_set_state("run-done", "completed", "", true).unwrap();
+        app.store
+            .atlas_insert_run("run-stuck", r#"{"phase":5,"chunk":0,"leg":"index","country":0,"from":""}"#, "{}")
+            .unwrap();
+        app.store
+            .atlas_set_state("run-stuck", "partial", "0/3 indexed", true)
+            .unwrap();
+        app.select(ModuleId::Atlas.index());
+        let done = app.atlas_runs.iter().position(|r| r.id == "run-done").unwrap();
+        let stuck = app.atlas_runs.iter().position(|r| r.id == "run-stuck").unwrap();
+        app.atlas_run_sel = done;
+        assert!(!app.atlas_can_resume());
+        render(&mut app, 140, 44);
+        click(&mut app, Target::Button(ButtonId::AtlasResume));
+        assert!(app.status.contains("nothing to resume"), "{}", app.status);
+        app.atlas_run_sel = stuck;
+        assert!(app.atlas_can_resume(), "phase-5 partial cycle can resume");
+        let order = super::super::ui::focus_order(&app);
+        for button in [ButtonId::AtlasLive, ButtonId::AtlasResume, ButtonId::AtlasRepair, ButtonId::AtlasDelete] {
+            assert!(order.contains(&Target::Button(button)), "{button:?}");
+        }
+        let text = buffer_text(&render(&mut app, 140, 44));
+        assert!(text.contains("Repair memories") && text.contains("Resume"), "{text}");
+        click(&mut app, Target::Button(ButtonId::AtlasRepair));
+        assert_eq!(super::super::atlas_actions::testing::starts(), 1);
+        assert!(app.status.contains("Repair Atlas memories started"), "{}", app.status);
+        super::super::atlas_actions::testing::set_busy(true);
+        click(&mut app, Target::Button(ButtonId::AtlasRepair));
+        assert_eq!(super::super::atlas_actions::testing::starts(), 1);
+        assert!(app.status.contains("already running"), "{}", app.status);
+        super::super::atlas_actions::testing::set_busy(false);
+    }
+
+    /// Cell dumps of the Brain claim detail (normal + narrow) for PNG rendering.
+    #[test]
+    #[ignore]
+    fn dump_phase5b_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let ids = claim_fixture(&app);
+        app.select(ModuleId::Brain.index());
+        app.brain_query = "engine fire".into();
+        app.reload_memories();
+        assert!(app.open_memory_detail(&ids[0]));
+        // Fixture summary (the test app has no Summarization account).
+        app.graph_summary = "## Northwind halted Baltic crossings\n\nTwo **Baltic Wire** articles in cycle 04:12 support the halt. A later board decision **revises** it to a partial suspension, so the claim is a *dated fact*, not current status.\n\n- Evidence: 2 articles, 1 cycle\n- Related: 1 revision, 2 linked claims".into();
+        app.status = "Claim path".into();
+        while !matches!(app.focus, Target::RelatedRow(_)) {
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        dump_cells(&mut app, &dir, "brain-claim-detail", 140, 40);
+        app.screen = Rect::new(0, 0, 64, 32);
+        dump_cells(&mut app, &dir, "brain-claim-detail-narrow", 64, 32);
+    }
+
+    fn dump_cells(app: &mut App, dir: &str, name: &str, width: u16, height: u16) {
+        let buffer = render(app, width, height);
+        let mut cells = Vec::new();
+        for y in 0..height {
+            let mut row = Vec::new();
+            for x in 0..width {
+                let cell = &buffer[(x, y)];
+                row.push(serde_json::json!({
+                    "s": cell.symbol(),
+                    "fg": format!("{:?}", cell.fg),
+                    "bg": format!("{:?}", cell.bg),
+                    "b": cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                    "u": cell.modifier.contains(ratatui::style::Modifier::UNDERLINED),
+                }));
+            }
+            cells.push(row);
+        }
+        let json = serde_json::json!({"width": width, "height": height, "cells": cells});
+        std::fs::write(format!("{dir}/{name}.json"), json.to_string()).unwrap();
+    }
+
+    /// Phase 7 fixture: a claim memory whose Summarization role points at a
+    /// scripted local provider; jobs/events go to the test database.
+    struct SummaryFx {
+        _dir: tempfile::TempDir,
+        db: std::path::PathBuf,
+        rt: tokio::runtime::Runtime,
+        server: argos_osint_core::provider_attempt::mock::Server,
+        ids: Vec<String>,
+    }
+
+    fn summary_fixture(app: &mut App, script: Vec<argos_osint_core::provider_attempt::mock::Reply>) -> SummaryFx {
+        use argos_osint_core::provider_attempt::mock;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        app.store = Store::open(&db).unwrap();
+        super::super::tracked::testing::use_db(Some(db.clone()));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = rt.block_on(mock::serve(script));
+        app.auth.set_account(mock::secret(&server.base_url));
+        app.settings.defaults.summarization = argos_osint_core::provider::ModelAssignment {
+            provider: "openrouter".into(),
+            model: "mock-model".into(),
+        };
+        let ids = claim_fixture(app);
+        app.select(ModuleId::Brain.index());
+        app.reload_memories();
+        SummaryFx {
+            _dir: dir,
+            db,
+            rt,
+            server,
+            ids,
+        }
+    }
+
+    /// Pump work events until the pending graph summary settles.
+    fn settle_summary(app: &mut App, fx: &SummaryFx) {
+        for _ in 0..400 {
+            fx.rt.block_on(tokio::time::sleep(Duration::from_millis(25)));
+            pump(app);
+            if app.graph_summary_pending.is_none() {
+                return;
+            }
+        }
+        panic!("graph summary never finished: {}", app.status);
+    }
+
+    fn graph_jobs(fx: &SummaryFx) -> Vec<(String, String, String)> {
+        Store::open(&fx.db).unwrap().graph_explanation_jobs(&fx.ids[0]).unwrap()
+    }
+
+    const AUTH_401: &str = r#"{"error":{"message":"Incorrect API key provided: sk-mocksecretvalue12345","code":"invalid_api_key"}}"#;
+
+    #[test]
+    fn brain_summary_failure_card_explains_links_and_retries_in_place() {
+        use argos_osint_core::provider_attempt::mock::Reply;
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let fx = summary_fixture(&mut app, vec![Reply::Json(401, AUTH_401.into())]);
+        let _enter = fx.rt.enter();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        settle_summary(&mut app, &fx);
+        let failure = app.summary_failure.clone().expect("failure card");
+        assert!(failure.needs_config, "{failure:?}");
+        assert!(failure.guidance.as_deref().unwrap_or("").contains("Providers"));
+        assert_eq!(fx.server.hits(), 1, "auth errors are not retried");
+        assert!(!failure.event_id.is_empty() && !failure.job_id.is_empty());
+        assert!(app.graph_summary.contains(argos_osint_core::graph_explanation::BASIC_HEADING));
+        let text = buffer_text(&render(&mut app, 140, 40));
+        for want in ["AI summary failed", "View details", "View logs", "View job", "Retry summary", "Open Models"] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
+        assert!(!text.contains("sk-mocksecretvalue12345"));
+        assert!(!text.contains("Leave and open"));
+        let order = super::super::ui::focus_order(&app);
+        assert!(order.contains(&Target::Button(ButtonId::SummaryRetry)));
+
+        click(&mut app, Target::Button(ButtonId::SummaryDetails));
+        assert!(app.summary_details_open);
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains("Stage: response"), "{text}");
+        assert!(text.contains("HTTP 401"), "{text}");
+
+        // Reopening inside the cooldown shows the saved failure; no new job or request.
+        app.leave_brain_detail();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        assert!(app.graph_summary_pending.is_none());
+        assert!(app.summary_failure.as_ref().is_some_and(|f| f.from_record));
+        assert_eq!((graph_jobs(&fx).len(), fx.server.hits()), (1, 1));
+
+        // Retry: fresh budget, linked to the failed job, without leaving Brain.
+        render(&mut app, 140, 40);
+        click(&mut app, Target::Button(ButtonId::SummaryRetry));
+        assert_eq!(app.module, Some(ModuleId::Brain));
+        settle_summary(&mut app, &fx);
+        let jobs = graph_jobs(&fx);
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[1].2, jobs[0].0, "retry correlates to the failed job");
+        assert_eq!(fx.server.hits(), 2);
+        assert_eq!(app.module, Some(ModuleId::Brain));
+
+        // View logs: filtered to the job, failure event selected.
+        let failure = app.summary_failure.clone().unwrap();
+        render(&mut app, 140, 40);
+        click(&mut app, Target::Button(ButtonId::SummaryLogs));
+        assert_eq!(app.module, Some(ModuleId::Logs));
+        assert_eq!(app.logs.job, failure.job_id);
+        assert_eq!(app.logs.selected().map(|r| r.id.clone()), Some(failure.event_id.clone()));
+
+        // After the events expire (simulated by clearing them), the link says
+        // so; the job and the saved diagnostic keep the error summary.
+        app.store.clear_events().unwrap();
+        app.activate_button(ButtonId::SummaryLogs);
+        assert!(app.status.contains("expired"), "{}", app.status);
+        let rec = app.store.graph_explanation_record(&fx.ids[0]).unwrap().unwrap();
+        assert_eq!(rec.state, "failed");
+        assert!(rec.diagnostic_json.contains("invalid_api_key"));
+
+        // Open Models focuses the Summarization role.
+        app.activate_button(ButtonId::SummaryModels);
+        assert_eq!(app.module, Some(ModuleId::Providers));
+        assert_eq!(app.provider_page, ProviderPage::Defaults);
+        assert_eq!(app.defaults_role, DefaultsRole::Summarization);
+
+        // View job opens the failed job in Jobs.
+        app.activate_button(ButtonId::SummaryJob);
+        assert_eq!(app.module, Some(ModuleId::Jobs));
+        assert_eq!(app.jobs.selected().map(|j| j.id.clone()), Some(failure.job_id.clone()));
+
+        // The memory is untouched.
+        assert!(app.store.get_memory(&fx.ids[0]).unwrap().is_some());
+        super::super::tracked::testing::use_db(None);
+    }
+
+    #[test]
+    fn saved_summary_is_reused_until_its_inputs_change_then_shown_as_earlier() {
+        use argos_osint_core::provider_attempt::mock::{ok_json, Reply};
+        let good = "## Northwind **halted** Baltic crossings\n\nTwo Baltic Wire articles state the halt.";
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let fx = summary_fixture(&mut app, vec![ok_json(good, "stop"), Reply::Json(503, "{}".into())]);
+        let _enter = fx.rt.enter();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        settle_summary(&mut app, &fx);
+        assert_eq!(app.graph_summary, good);
+        assert!(app.summary_failure.is_none());
+        // Reopen: valid cache, no request.
+        app.leave_brain_detail();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        assert_eq!((app.graph_summary.as_str(), fx.server.hits()), (good, 1));
+        // Change the memory text: the old summary is only an earlier result.
+        let memory = app.store.get_memory(&fx.ids[0]).unwrap().unwrap();
+        app.store
+            .update_memory(&memory.id, &format!("{} (revised)", memory.text), &memory.category, memory.pinned)
+            .unwrap();
+        app.leave_brain_detail();
+        app.reload_memories();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        assert!(app.graph_summary.contains("Earlier result"), "{}", app.graph_summary);
+        settle_summary(&mut app, &fx);
+        assert!(app.summary_failure.is_some());
+        assert!(app.graph_summary.contains("Earlier result") && app.graph_summary.contains("Baltic Wire"));
+        assert_eq!(fx.server.hits(), 3, "503 retried once: 1 + 2 requests");
+        super::super::tracked::testing::use_db(None);
+    }
+
+    #[test]
+    fn late_summary_completions_are_ignored() {
+        use argos_osint_core::graph_explanation::{ExplainOutcome, ExplainReport};
+        let mut app = app();
+        app.graph_summary_request = "req-new".into();
+        app.graph_summary_pending = Some("m1".into());
+        let stale = ExplainReport {
+            request_id: "req-old".into(),
+            memory_id: "m1".into(),
+            job_id: "job-old".into(),
+            cache_key: String::new(),
+            outcome: ExplainOutcome::Saved("old text that must not appear".into()),
+            attempts: Vec::new(),
+            admission_wait_ms: 0,
+            fallback_reason: None,
+            event_id: String::new(),
+            logging_error: None,
+        };
+        assert!(!app.on_graph_summary(stale));
+        assert_eq!(app.graph_summary_pending.as_deref(), Some("m1"));
+        assert!(!app.graph_summary.contains("old text"));
+    }
+
+    /// Cell dumps of the Brain summary failure card for PNG rendering.
+    #[test]
+    #[ignore]
+    fn dump_phase7_screens() {
+        use argos_osint_core::provider_attempt::mock::Reply;
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let fx = summary_fixture(&mut app, vec![Reply::Json(401, AUTH_401.into())]);
+        let _enter = fx.rt.enter();
+        app.brain_query = "engine fire".into();
+        app.reload_memories();
+        assert!(app.open_memory_detail(&fx.ids[0]));
+        settle_summary(&mut app, &fx);
+        assert!(app.summary_failure.is_some());
+        render(&mut app, 140, 40);
+        app.set_focus(Target::Button(ButtonId::SummaryRetry));
+        dump_cells(&mut app, &dir, "brain-summary-failure", 140, 40);
+        click(&mut app, Target::Button(ButtonId::SummaryDetails));
+        dump_cells(&mut app, &dir, "brain-summary-failure-details", 140, 40);
+        super::super::tracked::testing::use_db(None);
     }
 
     #[test]
@@ -7870,17 +9750,15 @@ mod tests {
         app.on_work_event(WorkEvent::Atlas(atlas::AtlasEvent::Note(
             "GNews rate limit reached (HTTP 429). The free tier allows 100 requests a day.".into(),
         )));
-        assert!(app
-            .log
-            .iter()
-            .any(|line| { line.level == "error" && line.text.contains("rate limit") }));
+        assert!(events(&app).iter().any(|line| {
+            line.severity == "error" && line.app == "atlas" && line.message.contains("rate limit")
+        }));
         app.on_work_event(WorkEvent::Atlas(atlas::AtlasEvent::Note(
             "newsapi daily quota is spent".into(),
         )));
-        assert!(app
-            .log
+        assert!(events(&app)
             .iter()
-            .any(|line| { line.level == "info" && line.text.contains("quota") }));
+            .any(|line| { line.severity == "info" && line.message.contains("quota") }));
         let body = "{\n  \"status\": \"error\",\n  \"results\": {\n    \"message\": \"Access Denied! To use the latest endpoint you must upgrade.\"\n  }\n}";
         app.on_work_event(WorkEvent::Atlas(atlas::AtlasEvent::Fault(
             atlas::ProviderFault {
@@ -7890,28 +9768,22 @@ mod tests {
                 body: body.into(),
             },
         )));
-        let logged = app
-            .log
-            .iter()
-            .find(|line| line.text.contains("HTTP 422"))
+        let logged = events(&app)
+            .into_iter()
+            .find(|line| line.message.contains("HTTP 422"))
             .expect("fault line");
-        assert!(logged.detail.contains("you must upgrade"));
-        assert!(!logged.detail.is_empty());
-        app.module = Some(ModuleId::System);
-        app.log_sel = app
-            .log
+        assert!(logged.details.contains("you must upgrade"));
+        app.select(ModuleId::Logs.index());
+        let index = app
+            .logs
+            .rows
             .iter()
-            .position(|line| line.text.contains("HTTP 422"))
+            .position(|line| line.message.contains("HTTP 422"))
             .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.log_sel = app
-            .log
-            .iter()
-            .position(|line| line.text.contains("HTTP 422"))
-            .unwrap();
-        let id = app.log[app.log_sel].id;
+        app.logs.select(index);
+        app.set_focus(Target::LogLine(index));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.log_open.contains(&id));
+        assert!(app.logs.open.contains(&logged.id));
     }
 
     #[test]

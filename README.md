@@ -8,7 +8,7 @@ Argos is a terminal investigation workspace. It opens on **Home**. **Intel**, **
 cargo run -p argos-osint-bin
 ```
 
-From Home, ↑↓ select and Enter opens. `1` opens Intel, `2` Atlas, `3` Brain, `4` Recon, `5` OSINT, `6` Providers, and `7` System. Esc or the Home control leaves an app. `?` opens the shortcut card for the current screen.
+From Home, ↑↓ select and Enter opens. `1` opens Intel, `2` Atlas, `3` Brain, `4` Recon, `5` Jobs, `6` Logs, `7` Tools, `8` Models, `9` System. Esc or the Home control leaves an app. `?` opens the shortcut card for the current screen.
 
 Recon opens on a full-screen list of recent investigations. ↑↓ moves through that list and Enter opens the selected investigation as its own full-screen transcript. Esc from the transcript returns to the list; Esc from the list returns Home. In the transcript, Tab moves between the log and the prompt. Enter sends; Shift+Enter adds a line. While the transcript is focused, ↑↓ select a message, decision, or tool, and ←→ fold a decision or tool log. Enter toggles the selected fold. `f` opens the full text. Ctrl+U and Ctrl+D scroll the focused pane, and the mouse wheel scrolls the pane under the pointer. Ctrl+N starts an investigation and opens its transcript. In the transcript, when the cursor is not in a text field, Alt+Left and Alt+Right move through recently opened investigations. A click counts on release, so dragging across Home does not launch an app. Ctrl+C cancels a running turn, or clears a draft first. Press Ctrl+C or Ctrl+Q again within a second to quit when nothing else is pending.
 

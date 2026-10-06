@@ -34,6 +34,10 @@ const DOWNLOAD_TIMEOUT_SECS: u64 = 180;
 /// except in this crate's unit tests, which stay offline unless `ARGOS_EMBED=1`.
 pub fn enabled() -> bool {
     #[cfg(test)]
+    if testing::disabled() {
+        return false;
+    }
+    #[cfg(test)]
     if testing::active() {
         return true;
     }
@@ -105,6 +109,10 @@ pub fn warm_up() -> Result<()> {
 /// One normalized 384-d vector.
 pub fn embed_one(text: &str) -> Result<Vec<f32>> {
     #[cfg(test)]
+    if testing::failing() {
+        anyhow::bail!("injected embedding failure");
+    }
+    #[cfg(test)]
     if testing::active() {
         return Ok(testing::hash_embed(text));
     }
@@ -112,6 +120,10 @@ pub fn embed_one(text: &str) -> Result<Vec<f32>> {
 }
 
 pub fn embed_batch(texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    #[cfg(test)]
+    if testing::failing() {
+        anyhow::bail!("injected embedding failure");
+    }
     #[cfg(test)]
     if testing::active() {
         return Ok(texts.iter().map(|text| testing::hash_embed(text)).collect());
@@ -246,6 +258,36 @@ fn ensure_file(path: &Path, url: &str) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("no parent for {}", path.display()))?;
     std::fs::create_dir_all(dir)?;
+    // Downloads are user-visible jobs when the default state root exists.
+    let registry_db = crate::paths::db_path();
+    let job = registry_db
+        .is_file()
+        .then(|| {
+            crate::job_registry::begin_optional(
+                &registry_db,
+                crate::job_registry::JobSpec::new(
+                    "brain",
+                    "model_download",
+                    format!(
+                        "Download embedding model file {}",
+                        path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+                    ),
+                )
+                .resource(url.to_string()),
+            )
+        })
+        .flatten();
+    let result = download_file(path, url);
+    if let Some(job) = job {
+        job.finish(match &result {
+            Ok(()) => crate::job_registry::Finish::completed(),
+            Err(err) => crate::job_registry::Finish::failed("download", format!("{err:#}")),
+        });
+    }
+    result
+}
+
+fn download_file(path: &Path, url: &str) -> Result<()> {
     let url = url.to_string();
     let bytes = crate::brain_lance::block_on(async move {
         let client = reqwest::Client::builder()
@@ -271,6 +313,45 @@ pub(crate) mod testing {
 
     thread_local! {
         static FAKE: Cell<bool> = const { Cell::new(false) };
+        static FAIL: Cell<bool> = const { Cell::new(false) };
+        static DISABLED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn disabled() -> bool {
+        DISABLED.with(Cell::get)
+    }
+
+    /// Behaves like `ARGOS_EMBED=0` on this thread until the guard drops.
+    pub(crate) fn disable() -> DisableGuard {
+        DISABLED.with(|flag| flag.set(true));
+        DisableGuard
+    }
+
+    pub(crate) struct DisableGuard;
+
+    impl Drop for DisableGuard {
+        fn drop(&mut self) {
+            DISABLED.with(|flag| flag.set(false));
+        }
+    }
+
+    pub(crate) fn failing() -> bool {
+        FAIL.with(Cell::get)
+    }
+
+    /// Makes every embedding call on this thread fail until the guard drops
+    /// (fault injection for indexing tests).
+    pub(crate) fn fail() -> FailGuard {
+        FAIL.with(|flag| flag.set(true));
+        FailGuard
+    }
+
+    pub(crate) struct FailGuard;
+
+    impl Drop for FailGuard {
+        fn drop(&mut self) {
+            FAIL.with(|flag| flag.set(false));
+        }
     }
 
     pub(crate) fn active() -> bool {

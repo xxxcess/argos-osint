@@ -1,0 +1,9 @@
+{
+  "resolve_model_ids": "omit",
+  "runtime": "opencode",
+  "graphify": {
+    "enabled": true,
+    "graph_path": "graphify-out/graph.json",
+    "auto_update": false
+  }
+}

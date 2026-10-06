@@ -1,7 +1,7 @@
 # Atlas memory completion and System apps — implementation checklist
 
 Spec: `specs/argos-atlas-memory-system-apps-spec.md` (agent box copy), reviewed against `main` @ `44214c0`.
-Branch: `feat/atlas-memory-system-apps` · PR: (opened with phase 1)
+Branch: `feat/atlas-memory-system-apps` · PR: https://github.com/xxxcess/argos-osint/pull/37
 
 Work proceeds in the spec's §9 order, one phase per push. Status is honest:
 **Done** = implemented and covered by tests; **Partial** = some of the requirement landed;

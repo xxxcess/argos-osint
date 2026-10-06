@@ -37,7 +37,7 @@ pub(crate) mod fault {
     type Hook = Box<dyn Fn(&rusqlite::Connection)>;
 
     thread_local! {
-        static AFTER_WRITE: RefCell<Option<Hook>> = RefCell::new(None);
+        static AFTER_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
     }
 
     pub(crate) fn set_after_write(hook: impl Fn(&rusqlite::Connection) + 'static) {
@@ -46,6 +46,20 @@ pub(crate) mod fault {
 
     pub(crate) fn clear() {
         AFTER_WRITE.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    thread_local! {
+        static FAIL_PUBLISH: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// Make the next publications on this thread fail just before COMMIT
+    /// (after rows were written), exercising the rollback path.
+    pub(crate) fn fail_publish(message: Option<&str>) {
+        FAIL_PUBLISH.with(|slot| *slot.borrow_mut() = message.map(str::to_string));
+    }
+
+    pub(crate) fn publish_fault() -> Option<String> {
+        FAIL_PUBLISH.with(|slot| slot.borrow().clone())
     }
 
     pub(crate) fn fire(conn: &rusqlite::Connection) {
@@ -175,6 +189,19 @@ impl PublicationVerification {
             && self.brief_ok
             && self.reconciled
     }
+}
+
+/// Drop a run's checkpoints, publication receipts and repair status (run
+/// deletion and retention). Plain statements; joins the caller's transaction.
+pub(crate) fn delete_run_memory_state(conn: &Connection, run_id: &str) -> Result<()> {
+    for table in [
+        "argos_atlas_checkpoints",
+        "argos_atlas_publications",
+        "argos_atlas_repairs",
+    ] {
+        conn.execute(&format!("DELETE FROM {table} WHERE run_id=?1"), [run_id])?;
+    }
+    Ok(())
 }
 
 /// Current revision recorded as indexed for a memory.
@@ -857,6 +884,10 @@ impl Store {
             {
                 bump_memories_changed(&self.conn)?;
             }
+            #[cfg(test)]
+            if let Some(message) = fault::publish_fault() {
+                anyhow::bail!(message);
+            }
             Ok(())
         })();
         match result {
@@ -911,10 +942,10 @@ impl Store {
                 )
                 .optional()?;
             let row_ok = memory_text(&self.conn, memory_id)?.is_some();
-            if claim_memory.as_deref() != Some(memory_id.as_str()) || !row_ok {
-                if !out.missing_claim_memories.contains(memory_id) {
-                    out.missing_claim_memories.push(memory_id.clone());
-                }
+            if (claim_memory.as_deref() != Some(memory_id.as_str()) || !row_ok)
+                && !out.missing_claim_memories.contains(memory_id)
+            {
+                out.missing_claim_memories.push(memory_id.clone());
             }
             let linked: i64 = self.conn.query_row(
                 "SELECT COUNT(*) FROM insight_sources WHERE fingerprint=?1 AND run_id=?2 AND answer_id=?3",
@@ -1182,7 +1213,7 @@ mod tests {
             .vectors
             .as_deref()
             .unwrap()
-            .remove_many(&[lost.clone()])
+            .remove_many(std::slice::from_ref(&lost))
             .unwrap();
         let report = store
             .verify_memory_coverage(&receipt.affected_memory_ids)
@@ -1316,7 +1347,7 @@ mod tests {
             .vectors
             .as_deref()
             .unwrap()
-            .present_ids(&[id.clone()])
+            .present_ids(std::slice::from_ref(&id))
             .unwrap()
             .contains(&id));
         // Retrying the same run cannot recreate the deleted claim.
@@ -1478,7 +1509,7 @@ mod tests {
         assert!(hit[0].1 > 0.99, "{hit:?}");
         // Through the durable path the pending outcome requeues the same task.
         assert!(store
-            .verify_memory_coverage(&[memory.id.clone()])
+            .verify_memory_coverage(std::slice::from_ref(&memory.id))
             .unwrap()
             .complete());
     }

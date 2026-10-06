@@ -6409,6 +6409,11 @@ fn draw_atlas_insights(frame: &mut Frame, app: &App, area: Rect) {
         .into_iter()
         .map(|line| Line::from(Span::styled(center_text(&line, width), theme::dim())))
         .collect();
+    // Fifth-phase row: saved/reused/indexed counts, never extraction counts.
+    let memories = app.atlas_stats.memories.line();
+    if !memories.is_empty() {
+        lines.insert(0, Line::from(Span::styled(center_text(&memories, width), theme::dim())));
+    }
     lines.extend(rows.into_iter().skip(start).take(room.max(1)).map(|line| {
         Line::from(Span::styled(center_text(&line, width), theme::text()))
     }));
@@ -6618,9 +6623,10 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
         atlas_insights::insight_stats_line(&stats.insights)
     );
     let header = "Country                         Tier   Temp   Volume  Articles  Share";
+    let memories = stats.memories.line();
     let mut lines = vec![
         Line::from(Span::styled(fit(&summary, width), theme::dim())),
-        Line::from(""),
+        Line::from(Span::styled(fit(&memories, width), theme::dim())),
         Line::from(Span::styled(header.to_string(), theme::dim())),
     ];
     let data: Vec<String> = if origins.is_empty() {

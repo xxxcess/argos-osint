@@ -846,6 +846,7 @@ mod tests {
             ],
             scored: true,
             insights: Default::default(),
+            memories: Default::default(),
         };
         let heat = scored_heat(Some(&stats));
         assert_eq!(heat, vec![("us", 1, 1.0)]);

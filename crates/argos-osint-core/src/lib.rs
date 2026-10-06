@@ -2,6 +2,7 @@
 
 pub mod atlas;
 pub mod atlas_insights;
+pub mod atlas_memory;
 pub mod brain;
 pub mod brain_lance;
 pub mod grok_oauth;

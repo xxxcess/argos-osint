@@ -612,6 +612,13 @@ pub fn migrate_additive(conn: &Connection) -> Result<()> {
             PRIMARY KEY(memory_id, fingerprint)
         );
         CREATE INDEX IF NOT EXISTS argos_memory_tombstones_fp ON argos_memory_tombstones(fingerprint);
+        CREATE TABLE IF NOT EXISTS argos_atlas_repairs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            job_id TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS argos_memory_index_state (
             memory_id TEXT PRIMARY KEY,
             revision TEXT NOT NULL,
@@ -1204,15 +1211,7 @@ pub fn refresh_job_state(conn: &Connection, job_id: &str, now: &str) -> Result<(
         "completed"
     };
     let terminal = matches!(state, "completed" | "failed" | "partial" | "cancelled");
-    let (started, active, queue, retry_wait, attempts, latest_err_cat, latest_err): (
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    ) = conn.query_row(
+    let (started, active, queue, retry_wait, attempts, latest_err_cat, latest_err): JobTimingRow = conn.query_row(
         "SELECT MIN(NULLIF(started_at,'')), SUM(active_ms), MAX(queue_ms), SUM(retry_wait_ms), SUM(attempts),
             (SELECT error_category FROM argos_tasks WHERE job_id=?1 AND error_category<>'' ORDER BY updated_at DESC LIMIT 1),
             (SELECT error_message FROM argos_tasks WHERE job_id=?1 AND error_message<>'' ORDER BY updated_at DESC LIMIT 1)
@@ -1246,6 +1245,43 @@ pub fn refresh_job_state(conn: &Connection, job_id: &str, now: &str) -> Result<(
     )?;
     Ok(())
 }
+
+/// Update a task-less job's lifecycle and progress (e.g. a resumable repair
+/// that checkpoints its own cursor). `state` is a job state string.
+#[allow(clippy::too_many_arguments)]
+pub fn set_job_progress(
+    conn: &Connection,
+    job_id: &str,
+    state: &str,
+    phase: &str,
+    done: i64,
+    total: Option<i64>,
+    error_summary: &str,
+    now: &str,
+) -> Result<()> {
+    let terminal = matches!(state, "completed" | "failed" | "cancelled" | "partial");
+    conn.execute(
+        "UPDATE argos_jobs SET state=?2, phase=?3, progress_done=?4, progress_total=?5,
+            error_summary=?6, updated_at=?7, heartbeat_at=?7,
+            started_at=CASE WHEN started_at='' THEN ?7 ELSE started_at END,
+            finished_at=CASE WHEN ?8 THEN ?7 ELSE '' END
+         WHERE id=?1",
+        params![job_id, state, phase, done, total, error_summary, now, terminal],
+    )?;
+    Ok(())
+}
+
+/// Aggregated task timing for one job: started, active, queue, retry wait,
+/// attempts, latest error category, latest error message.
+type JobTimingRow = (
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
 
 /// Typed result of applying one index change. Only `Ready` acknowledges work.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

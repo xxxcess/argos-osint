@@ -34,6 +34,10 @@ const DOWNLOAD_TIMEOUT_SECS: u64 = 180;
 /// except in this crate's unit tests, which stay offline unless `ARGOS_EMBED=1`.
 pub fn enabled() -> bool {
     #[cfg(test)]
+    if testing::disabled() {
+        return false;
+    }
+    #[cfg(test)]
     if testing::active() {
         return true;
     }
@@ -280,6 +284,25 @@ pub(crate) mod testing {
     thread_local! {
         static FAKE: Cell<bool> = const { Cell::new(false) };
         static FAIL: Cell<bool> = const { Cell::new(false) };
+        static DISABLED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn disabled() -> bool {
+        DISABLED.with(Cell::get)
+    }
+
+    /// Behaves like `ARGOS_EMBED=0` on this thread until the guard drops.
+    pub(crate) fn disable() -> DisableGuard {
+        DISABLED.with(|flag| flag.set(true));
+        DisableGuard
+    }
+
+    pub(crate) struct DisableGuard;
+
+    impl Drop for DisableGuard {
+        fn drop(&mut self) {
+            DISABLED.with(|flag| flag.set(false));
+        }
     }
 
     pub(crate) fn failing() -> bool {

@@ -14,6 +14,8 @@ use crate::brain::{
 use crate::brain_lance::{self, BrainIndex};
 
 mod publication;
+#[cfg(test)]
+pub(crate) use publication::fault as publication_fault;
 pub use publication::{
     memory_revision, payload_revision, CoverageReport, PublicationReceipt, PublicationVerification,
     PublishOptions, RejectedClaim, DELETED_REVISION, MEMORY_RECORD,
@@ -1485,6 +1487,8 @@ impl Store {
         // Inside the caller's transaction: queue durable removal; the index pool
         // deletes vectors after commit (no Lance writes under the SQLite lock).
         self.queue_index_for(&doomed)?;
+        // Checkpoints, receipts and repair status follow the run's retention.
+        publication::delete_run_memory_state(&self.conn, run_id)?;
         Ok(())
     }
 
@@ -2025,7 +2029,7 @@ fn repair_embed_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn atlas_answer_id(run_id: &str) -> String {
+pub(crate) fn atlas_answer_id(run_id: &str) -> String {
     format!("atlas-{run_id}")
 }
 
@@ -2058,7 +2062,7 @@ pub fn insight_fingerprint(namespace: &str, entity: &str, predicate: &str, objec
     serde_json::to_string(&(namespace, entity, predicate, object)).unwrap_or_default()
 }
 
-fn atlas_brief_id(conn: &Connection, run_id: &str) -> Result<Option<String>> {
+pub(crate) fn atlas_brief_id(conn: &Connection, run_id: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.source_json FROM memories m
          WHERE m.id NOT IN (SELECT memory_id FROM insight_claims)",
@@ -2140,8 +2144,9 @@ pub struct AtlasArticleRow {
     pub image_url: String,
 }
 
-/// One span-checked claim the Atlas cycle writes into Brain.
-#[derive(Clone, Debug, PartialEq)]
+/// One span-checked claim the Atlas cycle writes into Brain. Serializable so the
+/// validated extraction can be checkpointed before publication.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AtlasInsightClaim {
     pub fingerprint: String,
     pub entity: String,

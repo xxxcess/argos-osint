@@ -241,6 +241,7 @@ impl WorkerPool {
         std::thread::Builder::new()
             .name("argos-index-pool".into())
             .spawn(move || {
+                let mut idle_loops = 0u32;
                 while !flag.load(Ordering::Relaxed) {
                     let Ok(conn) = Connection::open(&db_path) else {
                         std::thread::sleep(Duration::from_secs(2));
@@ -256,9 +257,16 @@ impl WorkerPool {
                     let now = chrono::Utc::now().to_rfc3339();
                     let _ = tasks::interrupt_expired_leases(&conn, &now);
                     if let Ok(store) = crate::store::Store::open(&db_path) {
-                        let _ = drain_index_once(&conn, &store, &owner, 16);
+                        let drained = drain_index_once(&conn, &store, &owner, 16).unwrap_or(0);
                         // Catch up generation rebuilds even without an explicit change row.
                         let _ = store.process_pending_vector_rebuild(2);
+                        // Atlas runs left partial/blocked by indexing reach their
+                        // verified status once this pool finishes their work.
+                        idle_loops += 1;
+                        if drained > 0 || idle_loops >= 60 {
+                            idle_loops = 0;
+                            let _ = crate::atlas_memory::refresh_incomplete_runs(&store, 8);
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(500));
                 }

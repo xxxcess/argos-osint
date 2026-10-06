@@ -2773,6 +2773,15 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     article.category = category;
                 }
             }
+            atlas::AtlasEvent::MemoriesChanged { .. } => {
+                // Durable publication committed: show the new memories now.
+                self.reload_memories();
+            }
+            atlas::AtlasEvent::MemoryProgress { indexed, required } => {
+                self.atlas_insight_progress = None;
+                self.atlas_status = format!("Indexing memories {indexed}/{required}");
+                self.status = self.atlas_status.clone();
+            }
         }
     }
 
@@ -3033,8 +3042,19 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                         self.atlas_status = message;
                     }
                 }
-                self.status = self.atlas_status.clone();
                 self.load_atlas();
+                // The stored run state is derived from extraction, publication
+                // and indexing; never report "completed" for a partial save.
+                if finished {
+                    if let Some(run) = self.atlas_runs.first() {
+                        self.atlas_state = run.state.clone();
+                        if run.state != "completed" && !run.note.is_empty() {
+                            self.atlas_status = run.note.clone();
+                        }
+                    }
+                }
+                self.status = self.atlas_status.clone();
+                self.reload_memories();
                 let automatic = self.atlas_auto_started;
                 if !paused {
                     self.atlas_auto_started = false;
@@ -5586,6 +5606,8 @@ pub async fn run(mut app: App) -> Result<()> {
     // its own pool. Stopped when dropped at the end of the session.
     let _workers =
         argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
+    // One-time "Repair Atlas memories" reconciliation (resumes if interrupted).
+    argos_osint_core::atlas_memory::spawn_startup_reconciliation(paths::db_path());
     let mut dirty = true;
     loop {
         if pump(&mut app) {

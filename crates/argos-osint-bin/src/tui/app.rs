@@ -4154,6 +4154,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             memory.text,
             recon::graph_brief(&self.brain_graph)
         );
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            self.graph_summary = "Graph summary unavailable: no background runtime".into();
+            self.status = "Graph summary unavailable".into();
+            return;
+        };
         let system = summary_system(claim);
         self.graph_summary_pending = Some(memory.id.clone());
         self.graph_summary = "Writing graph summary…".into();
@@ -4161,7 +4166,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         let memory_id = memory.id.clone();
         let tx = self.work_tx.clone();
         let db = paths::db_path();
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             let outcome = write_graph_summary(&secret, &system, &prompt)
                 .await
                 .and_then(|text| {
@@ -7810,6 +7815,440 @@ mod tests {
         click(&mut app, Target::Button(ButtonId::RefreshHardware));
         save(&mut app, "system", 140, 40);
         assert!(!shots.is_empty());
+    }
+
+    fn atlas_claim(
+        fingerprint: &str,
+        entity: &str,
+        claim: &str,
+        article: &str,
+    ) -> argos_osint_core::store::AtlasInsightClaim {
+        argos_osint_core::store::AtlasInsightClaim {
+            fingerprint: fingerprint.into(),
+            entity: entity.into(),
+            namespace: "org".into(),
+            predicate: "reported".into(),
+            object: claim.split(' ').last().unwrap_or("").into(),
+            topic: "Baltic shipping".into(),
+            claim: claim.into(),
+            classification: "fact".into(),
+            confidence: 0.82,
+            article_id: article.into(),
+            source_url: format!("https://news.example/{article}"),
+            published_at: "2026-10-05T04:12:00Z".into(),
+            reliability: "B".into(),
+            info_credibility: 2,
+            admiralty: "B2".into(),
+            rsp_status: String::new(),
+        }
+    }
+
+    /// One Atlas cycle with linked claims, plus a manual memory with similar
+    /// wording. Returns memory ids in claim order, then the manual one.
+    fn claim_fixture(app: &App) -> Vec<String> {
+        let store = &app.store;
+        store.atlas_insert_run("run-0412", "{}", "{}").unwrap();
+        for (id, title) in [
+            ("a1", "Northwind ferry halts Baltic crossings after engine fire"),
+            ("a2", "Baltic board eases ferry suspension"),
+        ] {
+            store
+                .atlas_upsert_article(&AtlasArticleRow {
+                    run_id: "run-0412".into(),
+                    id: id.into(),
+                    title: title.into(),
+                    description: String::new(),
+                    url: format!("https://news.example/{id}"),
+                    country: "LT".into(),
+                    source_name: "Baltic Wire".into(),
+                    source_domain: "news.example".into(),
+                    published_at: "2026-10-05T04:12:00Z".into(),
+                    provider: "gnews".into(),
+                    temperature: 0.5,
+                    category: "economic".into(),
+                    seen_at: "2026-10-05T04:12:00Z".into(),
+                    author: String::new(),
+                    image_url: String::new(),
+                })
+                .unwrap();
+        }
+        let texts = [
+            ("fp-1", "Northwind Ferries", "Northwind Ferries halted Baltic crossings after an engine fire", "a1"),
+            ("fp-2", "Klaipeda port", "Klaipeda port rerouted freight while Northwind crossings were halted", "a1"),
+            ("fp-3", "Northwind Ferries", "Northwind Ferries expects crossings to resume within a week", "a2"),
+            ("fp-4", "Baltic Shipping Board", "Baltic Shipping Board revised the halt to a partial suspension", "a2"),
+        ];
+        let claims: Vec<_> = texts
+            .iter()
+            .map(|(fp, entity, claim, article)| atlas_claim(fp, entity, claim, article))
+            .collect();
+        let receipt = store
+            .publish_atlas_insights("run-0412", &claims, &[], "", &Default::default())
+            .unwrap();
+        assert_eq!(receipt.claim_memory_ids.len(), 4, "{:?}", receipt.rejected);
+        // The board's revision relates to the original halt (stored fingerprints).
+        let fingerprint = |index: usize| receipt.claim_memory_ids[index].0.clone();
+        store
+            .publish_atlas_insights(
+                "run-0412",
+                &claims,
+                &[(fingerprint(3), fingerprint(0), "conflict_or_revision".into())],
+                "",
+                &Default::default(),
+            )
+            .unwrap();
+        store
+            .add_memory(
+                "Ferry crossings halted after an engine fire last winter",
+                "fact",
+                false,
+                MemorySource {
+                    app: "manual".into(),
+                    conversation_id: "notes".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        let all = store.list_memories().unwrap();
+        let find = |snippet: &str| {
+            all.iter()
+                .find(|memory| memory.text.contains(snippet))
+                .unwrap_or_else(|| panic!("memory for {snippet}"))
+                .id
+                .clone()
+        };
+        let ids = vec![
+            find("halted Baltic crossings after an engine fire"),
+            find("rerouted freight"),
+            find("resume within a week"),
+            find("partial suspension"),
+            find("last winter"),
+        ];
+        ids
+    }
+
+    #[test]
+    fn claim_detail_has_graph_above_related_left_summary_right_and_navigates_by_id() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let ids = claim_fixture(&app);
+        app.select(ModuleId::Brain.index());
+        // Find hides most targets; navigation must still reach them.
+        app.brain_query = "engine fire".into();
+        app.reload_memories();
+        assert!(app.memories.iter().all(|m| m.id != ids[3]), "target filtered out");
+        let row = app.memories.iter().position(|m| m.id == ids[0]).unwrap();
+        app.memory_sel = row;
+        app.set_focus(Target::Memory(row));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.brain_list_mode, BrainListMode::Graph);
+        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
+        assert!(app.detail_claim(), "Atlas provenance opens a claim path");
+
+        // Layout: graph above, Related left, Summary right, same row.
+        let areas = super::super::ui::detail_areas(&app);
+        assert!(!areas.stacked);
+        assert!(areas.path.y < areas.related.y);
+        assert_eq!(areas.related.y, areas.summary.y);
+        assert!(areas.related.x < areas.summary.x);
+        let text = buffer_text(&render(&mut app, 140, 40));
+        assert!(text.contains(" claim path ") && text.contains(" related ") && text.contains(" summary "), "{text}");
+        let path_rows: String = text
+            .lines()
+            .skip(areas.path.y as usize)
+            .take(areas.path.height as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!path_rows.contains("Related") && !path_rows.contains("Linked"), "no Related text in the graph pane: {path_rows}");
+
+        // Related: unique existing targets, self excluded, explicit before similar.
+        let items = app.brain_detail.related.items.clone();
+        let item_ids: Vec<&str> = items.iter().map(|i| i.memory_id.as_str()).collect();
+        assert!(!item_ids.contains(&ids[0].as_str()));
+        let mut unique = item_ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), item_ids.len());
+        // Claim relations rank first: the stored board revision, plus the
+        // conflict publication detects between the two Northwind claims.
+        let relations: Vec<&str> = items
+            .iter()
+            .take_while(|i| i.reason.starts_with("claim relation"))
+            .map(|i| i.memory_id.as_str())
+            .collect();
+        assert!(relations.contains(&ids[3].as_str()), "claim relation first: {items:?}");
+        assert!(relations.contains(&ids[2].as_str()), "{items:?}");
+        use argos_osint_core::related_memories::RelationKind;
+        let first_similar = items.iter().position(|i| i.kind == RelationKind::Similar);
+        if let Some(first) = first_similar {
+            assert!(items[..first].iter().all(|i| i.kind == RelationKind::Explicit));
+            assert!(items[first..].iter().all(|i| i.kind == RelationKind::Similar));
+        }
+        assert!(text.contains("Linked"));
+        let manual = items.iter().find(|i| i.memory_id == ids[4]).expect("similar manual memory");
+        assert_eq!(manual.kind, RelationKind::Similar);
+        assert!(text.contains("Similar · not evidence"), "{text}");
+
+        // Keyboard: Tab to Related, Down selects without navigating.
+        while !matches!(app.focus, Target::RelatedRow(_)) {
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.brain_detail.related.sel, 1);
+        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()), "selection alone does not navigate");
+        let target = items[1].memory_id.clone();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.brain_detail.memory_id(), Some(target.as_str()));
+        let entered_graph = app.brain_graph.clone();
+        assert!(app.brain_detail.related.items.iter().all(|i| i.memory_id != target));
+
+        // Back restores the previous memory, its Related selection and focus.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
+        assert_eq!(app.brain_detail.related.sel, 1);
+        assert_eq!(app.focus, Target::RelatedRow(1));
+
+        // Click on the same row opens the same target.
+        render(&mut app, 140, 40);
+        click(&mut app, Target::RelatedRow(1));
+        assert_eq!(app.brain_detail.memory_id(), Some(target.as_str()));
+        assert_eq!(app.brain_graph, entered_graph);
+        // The filtered-out claim-relation target opens too.
+        app.detail_back();
+        render(&mut app, 140, 40);
+        click(&mut app, Target::RelatedRow(0));
+        let first = items[0].memory_id.clone();
+        assert!(app.memories.iter().all(|m| m.id != first), "filtered out by Find");
+        assert_eq!(app.brain_detail.memory_id(), Some(first.as_str()));
+        assert_eq!(app.brain_query, "engine fire", "Find is preserved");
+
+        // Late related results for another request are rejected.
+        let stale = app.brain_detail.related.request - 1;
+        assert!(!app.on_related(stale, &first, Ok(Vec::new())));
+        assert!(!app.on_related(app.brain_detail.related.request, &ids[0], Ok(Vec::new())));
+        assert!(!app.brain_detail.related.items.is_empty());
+
+        // A deleted destination keeps the current view intact.
+        let (gone_row, gone) = app
+            .brain_detail
+            .related
+            .items
+            .iter()
+            .enumerate()
+            .find(|(_, i)| i.memory_id != ids[0])
+            .map(|(row, i)| (row, i.memory_id.clone()))
+            .unwrap();
+        app.store.delete_memory(&gone).unwrap();
+        render(&mut app, 140, 40);
+        app.brain_detail.related.sel = gone_row;
+        app.set_focus(Target::RelatedRow(gone_row));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.brain_detail.memory_id(), Some(first.as_str()));
+        assert!(app.status.contains("no longer exists"), "{}", app.status);
+
+        // Back all the way returns to the list with Find and selection intact.
+        for _ in 0..8 {
+            if app.brain_list_mode != BrainListMode::Graph {
+                break;
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        }
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert_eq!(app.brain_query, "engine fire");
+        assert_eq!(app.memories[app.memory_sel].id, ids[0]);
+    }
+
+    #[test]
+    fn narrow_claim_detail_stacks_related_above_summary_and_keeps_both_reachable() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 64, 32);
+        let ids = claim_fixture(&app);
+        app.select(ModuleId::Brain.index());
+        assert!(app.open_memory_detail(&ids[0]));
+        let areas = super::super::ui::detail_areas(&app);
+        assert!(areas.stacked);
+        assert!(areas.path.y < areas.related.y && areas.related.y < areas.summary.y);
+        assert!(areas.related.height >= 3 && areas.summary.height >= 3);
+        let text = buffer_text(&render(&mut app, 64, 32));
+        assert!(text.contains(" related ") && text.contains(" summary "), "{text}");
+        // Focusing Summary gives it the larger share; Related stays visible.
+        app.set_focus(Target::DetailSummary);
+        let focused = super::super::ui::detail_areas(&app);
+        assert!(focused.summary.height > focused.related.height);
+        render(&mut app, 64, 32);
+        click(&mut app, Target::RelatedRow(0));
+        assert_ne!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
+        // Back on screen.
+        click(&mut app, Target::Button(ButtonId::BrainDetailBack));
+        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
+    }
+
+    #[test]
+    fn brain_refresh_keeps_selection_and_find_and_shows_read_errors() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 120, 34);
+        let add = |app: &App, text: &str| {
+            app.store
+                .add_memory(
+                    text,
+                    "fact",
+                    false,
+                    MemorySource {
+                        app: "manual".into(),
+                        conversation_id: "c".into(),
+                        message_id: None,
+                        reference: None,
+                    },
+                )
+                .unwrap()
+                .id
+        };
+        add(&app, "alpha one");
+        add(&app, "beta two");
+        let keep = add(&app, "alpha three");
+        // Entering Brain loads memories committed elsewhere.
+        app.select(ModuleId::Brain.index());
+        assert_eq!(app.memories.len(), 3);
+        let row = app.memories.iter().position(|m| m.id == keep).unwrap();
+        app.memory_sel = row;
+        app.set_focus(Target::Memory(row));
+        add(&app, "alpha four");
+        add(&app, "gamma five");
+        app.reload_memories();
+        assert_eq!(app.memories[app.memory_sel].id, keep, "selection follows the id");
+        assert_eq!(app.focus, Target::Memory(app.memory_sel));
+
+        // Find stays active; the title says it filters.
+        app.brain_query = "alpha".into();
+        app.reload_memories();
+        assert_eq!(app.memories[app.memory_sel].id, keep);
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("Find active · 3 of 5"), "{text}");
+        add(&app, "delta six");
+        app.reload_memories();
+        assert_eq!(app.brain_query, "alpha", "a hidden new memory does not clear Find");
+        assert_eq!(app.memory_total, 6);
+
+        // No matches is distinct from no memories.
+        app.brain_query = "zzz".into();
+        app.reload_memories();
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("No memories match") && text.contains("Find is still active"), "{text}");
+
+        // A read failure keeps the last good list and says so.
+        app.brain_query = "alpha".into();
+        app.reload_memories();
+        let shown = app.memories.clone();
+        super::super::brain_detail::testing::fail_reads(Some("disk I/O error"));
+        add(&app, "alpha seven");
+        app.reload_memories();
+        assert_eq!(app.memories, shown, "last good list kept");
+        assert_eq!(app.memory_error.as_deref(), Some("disk I/O error"));
+        let text = buffer_text(&render(&mut app, 120, 34));
+        assert!(text.contains("read failed · showing last loaded list"), "{text}");
+        assert!(events(&app).iter().any(|e| e.message.contains("could not read memories")));
+        // With nothing loaded yet, the failure is shown instead of an empty list.
+        let mut fresh = super::tests::app();
+        fresh.screen = Rect::new(0, 0, 120, 34);
+        fresh.memories_loaded = false;
+        fresh.select(ModuleId::Brain.index());
+        let text = buffer_text(&render(&mut fresh, 120, 34));
+        assert!(text.contains("Could not read memories: disk I/O error"), "{text}");
+        super::super::brain_detail::testing::fail_reads(None);
+        app.reload_memories();
+        assert!(app.memory_error.is_none());
+        assert_eq!(app.memories.len(), 4);
+        let mut empty = super::tests::app();
+        empty.select(ModuleId::Brain.index());
+        let text = buffer_text(&render(&mut empty, 120, 34));
+        assert!(text.contains("No memories yet"), "{text}");
+    }
+
+    #[test]
+    fn atlas_history_resume_is_offered_only_for_resumable_cycles_and_repair_starts_once() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 44);
+        app.store
+            .atlas_insert_run("run-done", r#"{"phase":4,"chunk":0,"leg":"insights_done","country":0,"from":""}"#, "{}")
+            .unwrap();
+        app.store.atlas_set_state("run-done", "completed", "", true).unwrap();
+        app.store
+            .atlas_insert_run("run-stuck", r#"{"phase":5,"chunk":0,"leg":"index","country":0,"from":""}"#, "{}")
+            .unwrap();
+        app.store
+            .atlas_set_state("run-stuck", "partial", "0/3 indexed", true)
+            .unwrap();
+        app.select(ModuleId::Atlas.index());
+        let done = app.atlas_runs.iter().position(|r| r.id == "run-done").unwrap();
+        let stuck = app.atlas_runs.iter().position(|r| r.id == "run-stuck").unwrap();
+        app.atlas_run_sel = done;
+        assert!(!app.atlas_can_resume());
+        render(&mut app, 140, 44);
+        click(&mut app, Target::Button(ButtonId::AtlasResume));
+        assert!(app.status.contains("nothing to resume"), "{}", app.status);
+        app.atlas_run_sel = stuck;
+        assert!(app.atlas_can_resume(), "phase-5 partial cycle can resume");
+        let order = super::super::ui::focus_order(&app);
+        for button in [ButtonId::AtlasLive, ButtonId::AtlasResume, ButtonId::AtlasRepair, ButtonId::AtlasDelete] {
+            assert!(order.contains(&Target::Button(button)), "{button:?}");
+        }
+        let text = buffer_text(&render(&mut app, 140, 44));
+        assert!(text.contains("Repair memories") && text.contains("Resume"), "{text}");
+        click(&mut app, Target::Button(ButtonId::AtlasRepair));
+        assert_eq!(super::super::atlas_actions::testing::starts(), 1);
+        assert!(app.status.contains("Repair Atlas memories started"), "{}", app.status);
+        super::super::atlas_actions::testing::set_busy(true);
+        click(&mut app, Target::Button(ButtonId::AtlasRepair));
+        assert_eq!(super::super::atlas_actions::testing::starts(), 1);
+        assert!(app.status.contains("already running"), "{}", app.status);
+        super::super::atlas_actions::testing::set_busy(false);
+    }
+
+    /// Cell dumps of the Brain claim detail (normal + narrow) for PNG rendering.
+    #[test]
+    #[ignore]
+    fn dump_phase5b_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 140, 40);
+        let ids = claim_fixture(&app);
+        app.select(ModuleId::Brain.index());
+        app.brain_query = "engine fire".into();
+        app.reload_memories();
+        assert!(app.open_memory_detail(&ids[0]));
+        // Fixture summary (the test app has no Summarization account).
+        app.graph_summary = "## Northwind halted Baltic crossings\n\nTwo **Baltic Wire** articles in cycle 04:12 support the halt. A later board decision **revises** it to a partial suspension, so the claim is a *dated fact*, not current status.\n\n- Evidence: 2 articles, 1 cycle\n- Related: 1 revision, 2 linked claims".into();
+        while !matches!(app.focus, Target::RelatedRow(_)) {
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        dump_cells(&mut app, &dir, "brain-claim-detail", 140, 40);
+        app.screen = Rect::new(0, 0, 64, 32);
+        dump_cells(&mut app, &dir, "brain-claim-detail-narrow", 64, 32);
+    }
+
+    fn dump_cells(app: &mut App, dir: &str, name: &str, width: u16, height: u16) {
+        let buffer = render(app, width, height);
+        let mut cells = Vec::new();
+        for y in 0..height {
+            let mut row = Vec::new();
+            for x in 0..width {
+                let cell = &buffer[(x, y)];
+                row.push(serde_json::json!({
+                    "s": cell.symbol(),
+                    "fg": format!("{:?}", cell.fg),
+                    "bg": format!("{:?}", cell.bg),
+                    "b": cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                    "u": cell.modifier.contains(ratatui::style::Modifier::UNDERLINED),
+                }));
+            }
+            cells.push(row);
+        }
+        let json = serde_json::json!({"width": width, "height": height, "cells": cells});
+        std::fs::write(format!("{dir}/{name}.json"), json.to_string()).unwrap();
     }
 
     #[test]

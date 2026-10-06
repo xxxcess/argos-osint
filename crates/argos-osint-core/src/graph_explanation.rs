@@ -75,7 +75,7 @@ pub enum ExplainOutcome {
     Saved(String),
     /// The memory changed or was deleted meanwhile; nothing was published.
     Superseded(String),
-    Failed(ProviderFailure),
+    Failed(Box<ProviderFailure>),
 }
 
 /// Typed execution report.
@@ -125,7 +125,7 @@ pub enum Gate {
     /// An execution for this memory is already running.
     Running(String),
     /// The same inputs failed recently; show the failure instead.
-    CoolingDown(ExplanationRecord),
+    CoolingDown(Box<ExplanationRecord>),
 }
 
 pub fn gate(store: &Store, memory_id: &str, key: &SummaryKey, explicit_retry: bool) -> Gate {
@@ -149,7 +149,7 @@ pub fn gate(store: &Store, memory_id: &str, key: &SummaryKey, explicit_retry: bo
         })
         .unwrap_or(false);
     if recent {
-        Gate::CoolingDown(rec)
+        Gate::CoolingDown(Box::new(rec))
     } else {
         Gate::Ready
     }
@@ -196,6 +196,7 @@ fn open(db: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn event(
     db: &Path,
     severity: Severity,
@@ -397,13 +398,13 @@ pub async fn explain(
                     );
                     f.causes = crate::provider_diag::cause_chain(err.as_ref());
                     f.causes.insert(0, "summary could not be saved".into());
-                    ExplainOutcome::Failed(f)
+                    ExplainOutcome::Failed(Box::new(f))
                 }
             }
         }
-        None => ExplainOutcome::Failed(exec.failure.clone().unwrap_or_else(|| {
+        None => ExplainOutcome::Failed(Box::new(exec.failure.clone().unwrap_or_else(|| {
             ProviderFailure::new(Stage::Response, Category::Empty, "no summary produced")
-        })),
+        }))),
     };
     let mut event_id = String::new();
     record.attempts = exec.attempts.len() as i64;

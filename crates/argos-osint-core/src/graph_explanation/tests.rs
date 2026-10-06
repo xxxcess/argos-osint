@@ -1,7 +1,7 @@
 use super::*;
+use crate::brain::MemorySource;
 use crate::provider_attempt::mock::*;
 use crate::provider_attempt::Transport;
-use crate::brain::MemorySource;
 
 const GOOD: &str =
     "## Northwind **halted** Baltic crossings\n\nTwo articles state the halt directly.";

@@ -7,6 +7,10 @@
 //! carried an explicit completion indicator (`[DONE]` or a finish reason);
 //! partial text from a broken stream is measured and dropped.
 
+// `ProviderFailure` is a full diagnostic returned at most once per request;
+// boxing it would only add noise at every construction site.
+#![allow(clippy::result_large_err)]
+
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;

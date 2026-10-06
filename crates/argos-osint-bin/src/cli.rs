@@ -78,6 +78,11 @@ enum Command {
         #[command(subcommand)]
         command: DefaultsCommand,
     },
+    /// Atlas memory system management.
+    Atlas {
+        #[command(subcommand)]
+        command: AtlasCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -213,6 +218,28 @@ enum DefaultsCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum AtlasCommand {
+    /// Repair Atlas memories for a run, restoring from checkpoint or reconstructing receipt.
+    Repair {
+        #[arg(long, default_value = "")]
+        run_id: String,
+        /// Start from a specific page (default: 1).
+        #[arg(long, default_value_t = 1)]
+        page: usize,
+    },
+    /// Resume a paused/failed/blocked Atlas run from its stored receipt.
+    Resume {
+        #[arg(long)]
+        run_id: String,
+    },
+    /// Verify Atlas coverage for a run (check indexed memories vs required).
+    Verify {
+        #[arg(long, default_value = "")]
+        run_id: String,
+    },
+}
+
 pub async fn dispatch() -> Result<()> {
     match Cli::parse().command {
         None => tui::run(App::boot()?).await,
@@ -288,6 +315,7 @@ pub async fn dispatch() -> Result<()> {
         Some(Command::Recon { command }) => recon_command(command).await,
         Some(Command::Osint { command }) => osint_command(command).await,
         Some(Command::Defaults { command }) => defaults_command(command),
+        Some(Command::Atlas { command }) => atlas_command(command).await,
     }
 }
 
@@ -758,6 +786,79 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
     }
 }
 
+async fn atlas_command(command: AtlasCommand) -> Result<()> {
+    match command {
+        AtlasCommand::Repair { run_id, page } => {
+            let store = open_store()?;
+            let repair = argos_osint_core::atlas_memory::repair_run(&store, &run_id, None)?;
+            print_json(&serde_json::json!({
+                "run_id": run_id,
+                "page": page,
+                "repair": serde_json::json!({
+                    "run_id": repair.run_id,
+                    "status": repair.status,
+                    "restored_memory_ids": repair.restored_memory_ids,
+                    "requeued": repair.requeued,
+                    "required": repair.required,
+                    "indexed": repair.indexed,
+                    "unrecoverable": repair.unrecoverable,
+                    "reextract_available": repair.reextract_available,
+                    "detail": repair.detail,
+                })
+            }))
+        }
+        AtlasCommand::Resume { run_id } => {
+            let store = open_store()?;
+            let runs = store.atlas_list_runs()?;
+            let run = runs.into_iter().find(|r| r.id == run_id).ok_or_else(|| anyhow!("Atlas run {run_id} not found"))?;
+            store.atlas_set_state(&run_id, "running", "", false)?;
+            print_json(&serde_json::json!({
+                "run_id": run_id,
+                "state": "running",
+                "run": serde_json::json!({
+                    "id": run.id,
+                    "state": run.state,
+                    "phase": run.phase,
+                    "cursor_json": run.cursor_json,
+                    "stats_json": run.stats_json,
+                })
+            }))
+        }
+        AtlasCommand::Verify { run_id } => {
+            let store = open_store()?;
+            let receipt = store.atlas_publication_receipt(&run_id)?;
+            let receipt = match receipt {
+                Some(r) => r,
+                None => anyhow::bail!("No publication receipt found for run {run_id}; run may not have been published yet"),
+            };
+            let verification = store.verify_atlas_publication(&receipt)?;
+            print_json(&serde_json::json!({
+                "run_id": run_id,
+                "receipt": serde_json::json!({
+                    "run_id": receipt.run_id,
+                    "revision": receipt.revision,
+                    "input_claims": receipt.input_claims,
+                    "accepted_claims": receipt.accepted_claims,
+                    "created": receipt.created,
+                    "reused": receipt.reused,
+                    "repaired": receipt.repaired,
+                    "created_memory_ids": receipt.created_memory_ids,
+                    "reused_memory_ids": receipt.reused_memory_ids,
+                    "repaired_memory_ids": receipt.repaired_memory_ids,
+                    "queued_index_changes": receipt.queued_index_changes.len(),
+                }),
+                "verification": serde_json::json!({
+                    "reconciled": verification.reconciled,
+                    "coverage": serde_json::json!({
+                        "required": verification.coverage.required,
+                        "indexed": verification.coverage.indexed,
+                        "missing": verification.missing_claim_memories.len(),
+                    })
+                })
+            }))
+        }
+    }
+}
 async fn ask_thread(thread_id: &str, question: &str) -> Result<()> {
     let service = recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
     let run = service

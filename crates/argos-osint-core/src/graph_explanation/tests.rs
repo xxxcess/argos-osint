@@ -46,6 +46,7 @@ fn request(fx: &Fx, id: &str) -> ExplainRequest {
         graph_brief: "Investigation: Northwind\nClaim path".into(),
         request_id: id.into(),
         retry_of: None,
+        stop_flag: Arc::new(AtomicBool::new(false)),
     }
 }
 

@@ -4204,6 +4204,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             graph_brief: recon::graph_brief(&self.brain_graph),
             request_id: argos_osint_core::job_registry::new_job_id("graph-request"),
             retry_of,
+            stop_flag: Arc::new(AtomicBool::new(false)),
         };
         let key = req.key(&secret);
         match ge::cached(&self.store, &memory.id, &key) {

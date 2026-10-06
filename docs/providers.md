@@ -27,6 +27,77 @@ Firecrawl, SociaVault, and Hunter are the primary OSINT providers. Each has an A
 | SociaVault | profile, search, search users, user content, Google search | 44 one-credit routes. Followers/following and single-post routes are excluded. Google search is only a fallback after a weak Firecrawl search. |
 | Hunter | domain finder, email count, domain search, email finder, email verifier, company enrichment, email insight, person enrichment, combined enrichment | Read endpoints only. Inputs come from the prompt, Firecrawl, SociaVault, or earlier Hunter calls. `hunter_tech_lookup` is an alias for company enrichment. |
 
+## Typed provider diagnostics
+
+Provider diagnostics record every failed outbound request with structured information to distinguish configuration, authentication, and server issues:
+
+- **Stages**: `configuration`, `admission`, `connect`, `first_response`, `response`, `stream`, `parse`, `validation`, `persistence`
+- **Categories**: `auth`, `permission`, `invalid_model`, `configuration`, `malformed_request`, `unsupported_transport`, `rate_limited`, `server`, `timeout`, `network`, `stream_interrupted`, `premature_eof`, `sse_error`, `malformed_payload`, `token_limit`, `refused`, `empty`, `invalid_result`, `persistence`, `cancelled`
+- **Budgeted executor**: Limits outbound requests to 2 per execution (1 streaming, 1 non-streaming), with admission wait consuming no attempt, and non-retryable categories stopping after 1 request
+
+Diagnostics are used by the Brain summary failure card, the Jobs dashboard, and the provider_verify CLI command.
+
+## Budgeted executor
+
+The executor limits tool-picker requests to 2 per turn and governs retry budgets for every provider call:
+
+- 1 streaming request + 1 non-streaming fallback (or 2 streaming if provider refuses non-streaming)
+- Admission wait polls the provider slot without consuming an attempt
+- Non-retryable categories (auth, permission, model, configuration, malformed) stop after 1 request
+- Retryable categories respect `Retry-After` and shared backoff (capped)
+- Provider 429 and 503 defer picker calls and pick deterministic order when no primary tools remain
+
+The executor integrates with the revision-aware cache and graph explanation jobs, ensuring deterministic fallbacks when streaming fails.
+
+## Graph explanation integration
+
+Graph explanations use the same budgeted executor and run as durable jobs:
+
+- One job per memory per provider/model combination
+- Revision-aware cache with key: memory text revision + graph brief + focus + provider + model + prompt version
+- Cached results are reused until any input changes
+- Failures are persisted with diagnostics and don't remove memories or fail Atlas indexing
+
+The provider verification shows graph explanation stages (compact, evidence, synthesis) with their own failure categories and guidance.
+
+## Provider transport modes
+
+Two transport modes support tool picker requests:
+
+1. **Decisions transport** (`/alpha/decisions`): Used by Jev decisions models (`typesafe/jev-1.13`, `~typesafe/jev-latest`, or any id containing `/jev`)
+   - One choice question per request for each remaining tool
+   - Confidence probability becomes that pick's confidence
+   - Below 0.45 confidence triggers deterministic fallback
+
+2. **Chat transport**: Used by all other models
+   - One completion returning `{ "tool_id", "serves", "needs", "produces", "reason" }`
+   - Validated and repaired once
+   - Same budget of 2 requests per turn
+
+Both transports integrate with the admission system and respect provider slots.
+
+## Model roles and defaults
+
+Three roles configure models independently:
+
+- **Recon**: Questions and bindings
+- **Tool picker**: Tool order (decisions or chat transport based on model id)
+- **Synthesis**: Answers and evidence extraction
+
+Jev decisions models (`typesafe/jev-1.13`, `~typesafe/jev-latest`, `/jev*`) use the OpenRouter decisions transport. All other models use chat transport. The Tool picker defaults to OpenRouter `typesafe/jev-1.13` when both provider and model are empty.
+
+## Verification and testing
+
+Provider diagnostics are verified through:
+
+- Unit tests for every failure category and stage
+- Budgeted executor tests ensuring ≤2 requests
+- Admission wait tests confirming no attempt consumption
+- Cache invalidation tests for input changes
+- Graph explanation tests covering provider integration
+
+All diagnostics are written to events and shown in Jobs/Logs with redaction for security.
+
 NewsAPI and CourtListener (issue #29) are keyed context providers, not primary providers. NewsAPI uses `newsapi_api_key` or `NEWSAPI_API_KEY`, sent only as the `X-Api-Key` header to `newsapi.org`. CourtListener uses `courtlistener_api_token` or `COURTLISTENER_API_TOKEN`, sent only as `Authorization: Token <token>` (with `Accept: application/json`) to `www.courtlistener.com`. Neither key ever appears in a URL, tool input, cache key, plan, or stored body (a body that echoes the key is stored redacted). Both are listed at 0 credits; their budgets are per-turn call caps. Each also accepts a fallback key (`newsapi_api_key_fallback`, `courtlistener_api_token_fallback`, or `NEWSAPI_API_KEY_FALLBACK` and `COURTLISTENER_API_TOKEN_FALLBACK`) that is used after a rate or quota response. A 401 or 403 does not switch accounts.
 
 | Provider | Tools | Notes |

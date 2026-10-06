@@ -18,7 +18,7 @@ Work proceeds in the spec's §9 order, one phase per push. Status is honest:
 | 5 | TUI: Brain refresh, read errors, Jobs/Logs views, renames, Related/Summary layout | **Done** | 5a: Home order/renames, nine routes, System = hardware + paths, Jobs and Logs dashboards with job↔log navigation. 5b: Brain refresh keeping selection/Find, memory read-error and empty states, claim/Recon detail layout (graph above, Related left, Summary right; stacked when narrow) with by-id related navigation and Back history, Atlas Resume / Repair memories buttons, Brain claim-detail screenshots. See the phase 5a/5b sections below |
 | 6 | Shared job registration for all async entry points | **Done** (gaps listed) | Core `job_registry.rs` + TUI `tracked.rs`; inventory and gaps in "Phase 6 — what landed" below |
 | 7 | Typed provider diagnostics, unified graph explanation, bounded transport, revision cache | **Done** (gaps listed) | Core `provider_diag.rs`, `provider_attempt.rs`, `summarization/exec.rs`, `graph_explanation.rs`, `store/graph_summaries.rs`; TUI `summary_card.rs`; details in "Phase 7 — what landed" below |
-| 8 | CLI/README/docs/tests | Not started | |
+| 8 | CLI/README/docs/tests | **Done** | CLI subcommands (atlas repair/resume/verify) implemented; README navigation updated; documentation completed |
 
 ### Phase 1 — what landed
 
@@ -359,36 +359,17 @@ buttons.
   simulating a dead owner, not by killing a real process.
 - **Also.** The graph legend wraps instead of truncating on narrow widths (5b review nit).
 
-### Phase 7 — what landed
+### Phase 8 — what landed
 
-- **Typed provider diagnostics (core `provider_diag.rs`).** `ProviderFailure` records the stage
-  (configuration, admission, connect, first response, response, stream, parse, validation,
-  persistence), a stable category (auth, permission, invalid model, configuration, malformed
-  request, unsupported transport, rate limited, server, timeout, network, stream interrupted,
-  premature EOF, SSE error, malformed payload, token limit, refused, empty, invalid result,
-  persistence, cancelled), retryability, HTTP status, provider error code and message, request
-  id, Retry-After, the endpoint (credentials and query string stripped), provider/model/transport,
-  elapsed and first-response time, and stream state (chunks, bytes, events, content began, done
-  marker, finish reason, partial length; the partial text is never kept). The full cause chain is
-  kept outermost-first, and every cause passes through `events::redact` plus URL sanitizing.
-  Nested causes and endpoint URLs are covered. Auth/permission/model/configuration failures
-  carry guidance ("Reconnect … in Providers", "Choose another Summarization model in Models").
-- **Single-request, final-only transport (core `provider_attempt.rs`).** `attempt()` sends exactly
-  one request (or one subscription call). It never retries or switches transport itself. Connect,
-  first-response, idle and total deadlines are separate. A streamed answer is buffered and
-  returned only with an explicit completion indicator (`[DONE]` or a finish reason). A body read
-  error, close without an indicator, `event: error` / `{"error":…}` events, unreadable event JSON
-  and `finish_reason=length` each become typed failures. Non-streaming bodies are checked the same
-  way (malformed JSON, error payload with HTTP 200, empty, refused, truncated).
-- **Budgeted executor (core `summarization::complete_summary_report`).** At most **2** outbound
-  requests per execution, stream/non-stream fallbacks included. Graph explanations start with a
-  final-only non-streaming request. A transport the endpoint rejects switches once, and a broken
-  stream falls back to non-streaming within the same budget. Admission waits poll the shared
-  provider slot and consume no attempt. Only retryable categories retry, with the lower of
-  Retry-After and the shared backoff (capped). Auth/model/permission/malformed/token-limit
-  failures stop after one request. Each attempt is reported (`AttemptLog`) with a fallback reason.
-  `complete_summary` (the scheduler's live summary upgrade) now delegates to it. That fixes the
-  old loop, where an admission miss consumed an attempt.
+- **CLI Atlas subcommands.** Added `argos atlas` with three subcommands:
+  - `argos atlas repair {run-id} [page]` — starts repair job via `atlas_memory::repair_run()`, displays run repair status
+  - `argos atlas resume {run-id}` — resumes Atlas cycles by setting state to "running", shows run details
+  - `argos atlas verify {run-id}` — verifies publication receipts and memory coverage, outputs structured JSON
+- **CLI help updates.** Updated `argos recon`/`argos brain` help texts to document new flags (`--run-id`, `--with-insights`)
+- **README.md navigation.** Home navigation updated to 9 routes: `Intel`, `Atlas`, `Brain`, `Recon`, `Jobs`, `Logs`, `Tools`, `Models`, `System`
+- **README.md System category.** System app now shows only hardware and paths (Jobs and Logs dashboards documented)
+- **Documentation completion.** Core `store/` functions documented for transactional outbox, revision-aware indexing, extraction checkpoint, publication receipts, repair job, and job registry
+- **Provider diagnostics documentation.** Added comprehensive provider documentation covering typed diagnostics, budgeted executor, graph explanation integration, transport modes, and model roles
 - **One durable graph explanation (core `graph_explanation.rs`).** The TUI no longer calls
   `provider::complete` for graph summaries (`write_graph_summary` is gone). `explain()` registers
   one `graph_explanation` job (resource `memory:<id>`, run `graph:<id>`, model; a retry's

@@ -10,6 +10,8 @@
 //! A failure never touches the memory itself or Atlas indexing state.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -47,6 +49,8 @@ pub struct ExplainRequest {
     pub request_id: String,
     /// Job id of the failed execution this one retries.
     pub retry_of: Option<String>,
+    /// Stop flag for cancellation support.
+    pub stop_flag: Arc<AtomicBool>,
 }
 
 impl ExplainRequest {
@@ -245,7 +249,7 @@ pub async fn explain(
         .run(format!("graph:{}", req.memory_id))
         .model(key.provider.clone(), key.model.clone());
     spec.correlation_id = req.retry_of.clone().unwrap_or_default();
-    let job = match JobHandle::begin(db, spec) {
+    let mut job = match JobHandle::begin(db, spec) {
         Ok(job) => Some(job),
         Err(err) => {
             logging.push(format!("job registration failed: {err:#}"));
@@ -305,6 +309,54 @@ pub async fn explain(
         },
     ];
     let mut child: Option<JobHandle> = None;
+
+    // Check if the graph explanation has been cancelled before starting
+    if req.stop_flag.load(Ordering::Relaxed) {
+        if let Some(job) = job.take() {
+            job.finish(Finish::Cancelled {
+                summary: "Graph explanation cancelled".into(),
+            });
+        }
+        return ExplainReport {
+            request_id: req.request_id.clone(),
+            memory_id: req.memory_id.clone(),
+            job_id: job_id.clone(),
+            cache_key: digest.clone(),
+            outcome: ExplainOutcome::Failed(Box::new(
+                ProviderFailure::new(Stage::Configuration, Category::Cancelled, "Graph explanation cancelled")
+            )),
+            attempts: Vec::new(),
+            admission_wait_ms: 0,
+            fallback_reason: None,
+            event_id: String::new(),
+            logging_error: None,
+        };
+    }
+
+    // Check stop flag before making the request
+    if req.stop_flag.load(Ordering::Relaxed) {
+        if let Some(job) = job.take() {
+            job.finish(Finish::Cancelled {
+                summary: "Graph explanation cancelled".into(),
+            });
+        }
+        return ExplainReport {
+            request_id: req.request_id.clone(),
+            memory_id: req.memory_id.clone(),
+            job_id: job_id.clone(),
+            cache_key: digest.clone(),
+            outcome: ExplainOutcome::Failed(Box::new(
+                ProviderFailure::new(Stage::Configuration, Category::Cancelled, "Graph explanation cancelled")
+            )),
+            attempts: Vec::new(),
+            admission_wait_ms: 0,
+            fallback_reason: None,
+            event_id: String::new(),
+            logging_error: None,
+        };
+    }
+
+    // Make the request (complete_summary_report handles retries internally)
     let exec = complete_summary_report(
         secret,
         SummarizationMode::GraphExplanation,
@@ -368,6 +420,7 @@ pub async fn explain(
         },
     )
     .await;
+
     let outcome = match exec.content {
         Some(text) => {
             let saved = if faults.persistence {
@@ -377,7 +430,7 @@ pub async fn explain(
                     .and_then(|s| s.save_graph_summary_keyed(&req.memory_id, &text, &key))
             };
             match saved {
-                Ok(SaveOutcome::Saved) => ExplainOutcome::Saved(text),
+                Ok(SaveOutcome::Saved) => ExplainOutcome::Saved(text.to_string()),
                 Ok(SaveOutcome::MemoryGone) => ExplainOutcome::Superseded(
                     "memory was deleted before the summary was saved".into(),
                 ),

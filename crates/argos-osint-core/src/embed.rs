@@ -105,6 +105,10 @@ pub fn warm_up() -> Result<()> {
 /// One normalized 384-d vector.
 pub fn embed_one(text: &str) -> Result<Vec<f32>> {
     #[cfg(test)]
+    if testing::failing() {
+        anyhow::bail!("injected embedding failure");
+    }
+    #[cfg(test)]
     if testing::active() {
         return Ok(testing::hash_embed(text));
     }
@@ -112,6 +116,10 @@ pub fn embed_one(text: &str) -> Result<Vec<f32>> {
 }
 
 pub fn embed_batch(texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    #[cfg(test)]
+    if testing::failing() {
+        anyhow::bail!("injected embedding failure");
+    }
     #[cfg(test)]
     if testing::active() {
         return Ok(texts.iter().map(|text| testing::hash_embed(text)).collect());
@@ -271,6 +279,26 @@ pub(crate) mod testing {
 
     thread_local! {
         static FAKE: Cell<bool> = const { Cell::new(false) };
+        static FAIL: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn failing() -> bool {
+        FAIL.with(Cell::get)
+    }
+
+    /// Makes every embedding call on this thread fail until the guard drops
+    /// (fault injection for indexing tests).
+    pub(crate) fn fail() -> FailGuard {
+        FAIL.with(|flag| flag.set(true));
+        FailGuard
+    }
+
+    pub(crate) struct FailGuard;
+
+    impl Drop for FailGuard {
+        fn drop(&mut self) {
+            FAIL.with(|flag| flag.set(false));
+        }
     }
 
     pub(crate) fn active() -> bool {

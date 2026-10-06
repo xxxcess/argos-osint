@@ -611,7 +611,20 @@ pub fn migrate_additive(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL,
             PRIMARY KEY(memory_id, fingerprint)
         );
+        CREATE INDEX IF NOT EXISTS argos_memory_tombstones_fp ON argos_memory_tombstones(fingerprint);
+        CREATE TABLE IF NOT EXISTS argos_memory_index_state (
+            memory_id TEXT PRIMARY KEY,
+            revision TEXT NOT NULL,
+            fingerprint TEXT NOT NULL DEFAULT '',
+            generation TEXT NOT NULL DEFAULT '',
+            indexed_at TEXT NOT NULL
+        );
         ",
+    )?;
+    add_missing_columns(
+        conn,
+        "argos_memory_tombstones",
+        &[("run_ids", "TEXT NOT NULL DEFAULT '[]'")],
     )?;
     Ok(())
 }
@@ -764,7 +777,6 @@ pub fn claim_next_in(
     lease_secs: i64,
     now: &str,
 ) -> Result<Option<ClaimedTask>> {
-    let lease_until = lease_deadline(now, lease_secs);
     let pool_filter = if pools.is_empty() {
         String::new()
     } else {
@@ -775,23 +787,50 @@ pub fn claim_next_in(
             .join(",");
         format!("AND pool IN ({list})")
     };
+    let selector = format!(
+        "(SELECT id FROM argos_tasks
+            WHERE state IN ('queued','retry_scheduled')
+              AND (next_eligible_at='' OR next_eligible_at<=?3)
+              {pool_filter}
+            ORDER BY priority ASC, created_at ASC LIMIT 1)"
+    );
+    claim_with(conn, &selector, None, owner, lease_secs, now)
+}
+
+/// Atomically claim one specific task (e.g. optional immediate indexing of the
+/// exact outbox row a publisher just wrote). Ignores `next_eligible_at`, so an
+/// explicit attempt is possible; returns None when another owner holds it or it
+/// is already terminal.
+pub fn claim_task(
+    conn: &Connection,
+    task_id: &str,
+    owner: &str,
+    lease_secs: i64,
+    now: &str,
+) -> Result<Option<ClaimedTask>> {
+    claim_with(conn, "?4", Some(task_id), owner, lease_secs, now)
+}
+
+fn claim_with(
+    conn: &Connection,
+    selector: &str,
+    selector_param: Option<&str>,
+    owner: &str,
+    lease_secs: i64,
+    now: &str,
+) -> Result<Option<ClaimedTask>> {
+    let lease_until = lease_deadline(now, lease_secs);
     let sql = format!(
         "UPDATE argos_tasks SET state='running', lease_owner=?1, lease_until=?2,
             lease_epoch=lease_epoch+1, attempts=attempts+1, updated_at=?3, heartbeat_at=?3,
             started_at=CASE WHEN started_at='' THEN ?3 ELSE started_at END,
             blocked_reason=''
-         WHERE id = (
-            SELECT id FROM argos_tasks
-            WHERE state IN ('queued','retry_scheduled')
-              AND (next_eligible_at='' OR next_eligible_at<=?3)
-              {pool_filter}
-            ORDER BY priority ASC, created_at ASC LIMIT 1)
+         WHERE id = {selector}
            AND state IN ('queued','retry_scheduled')
          RETURNING id, job_id, operation, lease_epoch, attempts, max_attempts,
                    input_ref, input_hash, source_revision, created_at, retry_since, queue_ms"
     );
-    let row = conn
-        .query_row(&sql, params![owner, lease_until, now], |row| {
+    let map = |row: &rusqlite::Row<'_>| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -806,8 +845,15 @@ pub fn claim_next_in(
                 row.get::<_, String>(10)?,
                 row.get::<_, Option<i64>>(11)?,
             ))
-        })
-        .optional()?;
+    };
+    let row = match selector_param {
+        Some(param) => conn
+            .query_row(&sql, params![owner, lease_until, now, param], map)
+            .optional()?,
+        None => conn
+            .query_row(&sql, params![owner, lease_until, now], map)
+            .optional()?,
+    };
     let Some((id, job_id, operation, epoch, attempts, max_attempts, input_ref, input_hash, source_revision, created_at, retry_since, queue_ms)) =
         row
     else {

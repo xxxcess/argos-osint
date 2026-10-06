@@ -143,7 +143,7 @@ pub fn drain_index_once(
         let Some((claimed, work)) = tasks::claim_index_work(conn, owner, DEFAULT_LEASE_SECS, &now)? else {
             break;
         };
-        let mut outcome = apply_index_with(store, &work.record_kind, &work.record_id, &work.operation);
+        let mut outcome = store.apply_index_work(&work);
         if let tasks::IndexOutcome::Ready { revision, .. } = &mut outcome {
             if revision.is_empty() {
                 *revision = work.revision.clone();

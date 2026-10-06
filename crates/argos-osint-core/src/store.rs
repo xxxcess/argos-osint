@@ -13,9 +13,11 @@ use crate::brain::{
 };
 use crate::brain_lance::{self, BrainIndex};
 
+mod graph_summaries;
 mod publication;
 #[cfg(test)]
 pub(crate) use publication::fault as publication_fault;
+pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
 pub use publication::{
     memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
     MemoryChangeWatcher, PublicationReceipt, PublicationVerification, PublishOptions,
@@ -460,6 +462,9 @@ impl Store {
                 crate::tasks::migrate_additive(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 19)?;
             }
+            // Additive, idempotent: revision-aware graph summary cache and
+            // the latest explanation diagnostic.
+            graph_summaries::migrate(&self.conn)?;
             Ok(())
         })();
         match result {

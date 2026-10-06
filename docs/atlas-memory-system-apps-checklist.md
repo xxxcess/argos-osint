@@ -17,7 +17,7 @@ Work proceeds in the spec's §9 order, one phase per push. Status is honest:
 | 4 | Intel Recon / other memory mutation paths reuse publication + refresh | **Done** | See phase 4 below |
 | 5 | TUI: Brain refresh, read errors, Jobs/Logs views, renames, Related/Summary layout | **Done** | 5a: Home order/renames, nine routes, System = hardware + paths, Jobs and Logs dashboards with job↔log navigation. 5b: Brain refresh keeping selection/Find, memory read-error and empty states, claim/Recon detail layout (graph above, Related left, Summary right; stacked when narrow) with by-id related navigation and Back history, Atlas Resume / Repair memories buttons, Brain claim-detail screenshots. See the phase 5a/5b sections below |
 | 6 | Shared job registration for all async entry points | **Done** (gaps listed) | Core `job_registry.rs` + TUI `tracked.rs`; inventory and gaps in "Phase 6 — what landed" below |
-| 7 | Typed provider diagnostics, unified graph explanation, bounded transport, revision cache | Not started | |
+| 7 | Typed provider diagnostics, unified graph explanation, bounded transport, revision cache | **Done** (gaps listed) | Core `provider_diag.rs`, `provider_attempt.rs`, `summarization/exec.rs`, `graph_explanation.rs`, `store/graph_summaries.rs`; TUI `summary_card.rs`; details in "Phase 7 — what landed" below |
 | 8 | CLI/README/docs/tests | Not started | |
 
 ### Phase 1 — what landed
@@ -342,7 +342,7 @@ buttons.
 | Intel article body (fetch, fallback, insight replacement) | TUI | `article_body` | Yes |
 | Intel Recon mode recommendation | TUI | `recon_mode` | — |
 | Tool runs (Tools app) | TUI | `tool_run` with tool id | Yes |
-| Graph explanation (Brain) | TUI | `graph_summary` with memory + model (phase 7 adds diagnostics/budget) | — |
+| Graph explanation (Brain) | core `graph_explanation::explain` (launched by the TUI) | `graph_explanation` job + one `graph_explanation_attempt` child per outbound request (phase 7) | — (not cancellable; superseded results are discarded) |
 | Model catalog load, OpenRouter verify, subscription sign-in/check, access probe | TUI | `model_catalog`, `provider_verify`, `provider_login` / `provider_check`, `access_probe` | — |
 | Embedding model download | core `embed::ensure_file` | `model_download` (when the default state root exists) | — |
 | Index worker, summary flush worker | core `scheduler` | Service-health rows (`svc-local-index`, `svc-summary-flush`); their tasks carry the history | — |
@@ -358,6 +358,86 @@ buttons.
   queue time is 0 and retry wait applies only to task-backed jobs. Process exit is tested by
   simulating a dead owner, not by killing a real process.
 - **Also.** The graph legend wraps instead of truncating on narrow widths (5b review nit).
+
+### Phase 7 — what landed
+
+- **Typed provider diagnostics (core `provider_diag.rs`).** `ProviderFailure` records the stage
+  (configuration, admission, connect, first response, response, stream, parse, validation,
+  persistence), a stable category (auth, permission, invalid model, configuration, malformed
+  request, unsupported transport, rate limited, server, timeout, network, stream interrupted,
+  premature EOF, SSE error, malformed payload, token limit, refused, empty, invalid result,
+  persistence, cancelled), retryability, HTTP status, provider error code and message, request
+  id, Retry-After, the endpoint (credentials and query string stripped), provider/model/transport,
+  elapsed and first-response time, and stream state (chunks, bytes, events, content began, done
+  marker, finish reason, partial length; the partial text is never kept). The full cause chain is
+  kept outermost-first, and every cause passes through `events::redact` plus URL sanitizing.
+  Nested causes and endpoint URLs are covered. Auth/permission/model/configuration failures
+  carry guidance ("Reconnect … in Providers", "Choose another Summarization model in Models").
+- **Single-request, final-only transport (core `provider_attempt.rs`).** `attempt()` sends exactly
+  one request (or one subscription call). It never retries or switches transport itself. Connect,
+  first-response, idle and total deadlines are separate. A streamed answer is buffered and
+  returned only with an explicit completion indicator (`[DONE]` or a finish reason). A body read
+  error, close without an indicator, `event: error` / `{"error":…}` events, unreadable event JSON
+  and `finish_reason=length` each become typed failures. Non-streaming bodies are checked the same
+  way (malformed JSON, error payload with HTTP 200, empty, refused, truncated).
+- **Budgeted executor (core `summarization::complete_summary_report`).** At most **2** outbound
+  requests per execution, stream/non-stream fallbacks included. Graph explanations start with a
+  final-only non-streaming request. A transport the endpoint rejects switches once, and a broken
+  stream falls back to non-streaming within the same budget. Admission waits poll the shared
+  provider slot and consume no attempt. Only retryable categories retry, with the lower of
+  Retry-After and the shared backoff (capped). Auth/model/permission/malformed/token-limit
+  failures stop after one request. Each attempt is reported (`AttemptLog`) with a fallback reason.
+  `complete_summary` (the scheduler's live summary upgrade) now delegates to it. That fixes the
+  old loop, where an admission miss consumed an attempt.
+- **One durable graph explanation (core `graph_explanation.rs`).** The TUI no longer calls
+  `provider::complete` for graph summaries (`write_graph_summary` is gone). `explain()` registers
+  one `graph_explanation` job (resource `memory:<id>`, run `graph:<id>`, model; a retry's
+  correlation id is the failed job). Each outbound request is a `graph_explanation_attempt` child
+  job with a structured `graph_explanation.attempt` event. On failure, the
+  `graph_explanation.failed` error event (full sanitized failure, attempts, admission wait,
+  fallback reason) and the diagnostic record are written **before** the report returns, so the
+  UI is notified only after the logs exist. Logging errors are returned and disclosed in the
+  card and the log. Saved summaries, deleted/changed memories (superseded, nothing published)
+  and persistence failures (typed, stage `persistence`) are distinguished. A failure never
+  touches the memory or Atlas indexing state.
+- **Revision-aware cache (`store/graph_summaries.rs`, additive).** `memory_graph_summaries` gains
+  `cache_key`, `memory_revision`, `graph_revision`, `provider`, `model`, `prompt_version`. The key
+  is the memory text revision + graph brief (evidence) revision + focus + provider + model +
+  prompt version (with a system-prompt hash). A save is refused when the memory is gone or its
+  text revision changed since the request started. A row from other inputs is shown only as an
+  "Earlier result". New table `argos_graph_explanations` keeps the latest execution per memory
+  (state, category, reason, guidance, attempts, failure event id, sanitized diagnostic JSON). It
+  outlives event retention and drives the retry cooldown.
+- **Brain inline failure card (TUI `summary_card.rs`).** Replaces "Leave and open this memory
+  again to retry". It shows "⚠ AI summary failed · <reason>", guidance when a setting is wrong,
+  and the actions View details (sanitized cause chain, stage/category, endpoint, HTTP/provider
+  code, timing, stream state, every attempt), View logs (Logs filtered to the job with the failure
+  event selected and expanded; once events expire it says so and points at the job summary and
+  View details), View job, Retry summary (fresh 2-request budget, linked to the failed job,
+  stays in Brain) and Open Models (Models → Defaults with Summarization selected; only for
+  auth/model/configuration failures). Labels shorten only when they would need more than two
+  rows. Below the card: the last valid summary labeled "Earlier result", otherwise the
+  deterministic "Basic graph explanation — AI summary unavailable" built from the path. Card
+  buttons are in the focus order and hit-testable.
+- **Duplicates, cooldown, late results.** Reopening a memory reuses a valid cache. It shows
+  "already being written" while an execution runs (in-process pending + running job check), and
+  inside the 2-minute cooldown it shows the saved failure from the record without a new job or
+  request. Explicit Retry bypasses the cooldown but never a running execution. Completions carry
+  a request id, and older ids are ignored.
+- **Other completion callers.** `provider::complete` / `complete_once` now return a typed
+  `ProviderFailure` for non-success HTTP. Its Display keeps the status and the provider message,
+  so existing 429 detection still works, and the error downcasts for callers that want the
+  category. Their retry budgets are unchanged (1 request on a 429, tested).
+- **Screenshots** (mock provider returning 401 `invalid_api_key`, TestBackend → PNG):
+  `brain-summary-failure.png` (card, Retry focused) and `brain-summary-failure-details.png`
+  (details open), 140×40.
+- **Gaps (honest).** Graph explanations are not cancellable from Jobs: there is no stop flag, and
+  superseded results are discarded instead. The "earlier result" is the single stored row, not a
+  history of summaries. The deterministic fallback is shown but not cached as a summary. The
+  subscription (Codex CLI) transport has no stream state, and its errors are classified from
+  text. Jobs shows the terminal error summary after event expiry but does not itself label the
+  missing detail as expired; the Brain link does. Stream-only providers are not auto-detected:
+  the non-stream → stream switch happens only when the endpoint rejects non-streaming.
 
 ## §10 acceptance checks
 
@@ -378,8 +458,14 @@ buttons.
 | 13 | Home System category / nine routes | **Done** | Home: Applications = Intel, Atlas, Brain, Recon; System = Jobs, Logs, Tools, Models, System; digits 1–9, palette, slash (old `osint`/`providers` plus `tools`/`models`/`jobs`/`logs`), header tabs and help agree (`home_order_renames_and_nine_routes_agree`). Renames are display-only: `ModuleId::Osint`/`Providers` and config keys unchanged |
 | 14 | Tools/Models retain behavior; System hardware/paths only | **Done** | System shows host hardware + paths (config, database always; data, memory index, credentials, hardware cache when they exist) and a single Refresh hardware action; event log and Clear moved to Logs (`system_shows_only_hardware_and_paths_and_logs_own_clear`). Tools/Models screens are unchanged apart from titles |
 | 15 | Targeted tests / CI gates | Partial | Per-phase runs recorded below; real local Lance fixture (fake embedder) used for exact id/revision checks |
-| 16–22 | Graph-summary diagnostics, budget, cache, retry | Not started | Phase 7 |
-| 23–26 | Claim/Recon layout, Related navigation | **Done** (async edge partial) | Detail opens with the graph on top, Related left and Summary right on one row (≥68 cols below the graph), stacked Related-above-Summary when narrower with the focused pane taller; no Related text in the graph pane. Related is a selectable list from core `related_memories` (claim relations, shared source article/tool result, same entity, same investigation, then "Similar · not evidence"); unique, self excluded, each row resolves to an existing memory. ↑↓ selects, Enter/click opens by id even when Find hides the target, Esc/‹ Back restores the previous memory with its Related selection and focus, deleted targets keep the current view with a status message (`claim_detail_has_graph_above_related_left_summary_right_and_navigates_by_id`, `narrow_claim_detail_stacks_related_above_summary_and_keeps_both_reachable`, core `related_rows_are_unique_existing_memories_ranked_explicit_before_similar`). Related loads on a blocking task with request-id/memory-id rejection of stale results (tested by injecting late results); tests run the load inline, so a real-runtime rapid-navigation race is not exercised end to end. Summary failure card / retry text are phase 7 |
+| 16 | Stream failure before/after content: sanitized causes + transport metadata in Brain details and Jobs/Logs; partial never saved | **Done** | `premature_eof_before_and_after_content_is_typed` (content began / partial length, "discarded"), `partial_streamed_text_is_never_saved` (no summary row after two broken streams; attempt 2 is non-stream), `failure_is_durable_correlated_bounded_and_harmless` (job + 2 attempt children + failure event details + diagnostic record), TUI `brain_summary_failure_card_explains_links_and_retries_in_place` (details show stage/HTTP; Logs selects the failure event). Screenshot `brain-summary-failure-details.png` |
+| 17 | Premature EOF, SSE error, malformed payload, token limit, empty, persistence failure → correct stage and recovery | **Done** | `sse_error_malformed_and_token_limit_are_typed`, `partial_streamed_text_is_never_saved` (SSE error → retry → token limit, not retried further), `malformed_and_empty_results_fail_without_publishing`, `persistence_failure_is_typed_and_logged` (stage `persistence`, cause chain kept), `empty_then_valid_retries_once` |
+| 18 | ≤2 outbound requests incl. stream/non-stream fallbacks; admission contention consumes no attempt | **Done** | `never_more_than_two_requests_including_fallbacks` (persistent 503, stream→non-stream, unsupported→stream; server hit counts), `admission_contention_consumes_no_attempt` (saturated slot, 1 request, wait recorded), `failure_is_durable_correlated_bounded_and_harmless` |
+| 19 | Auth/model guidance; transient retry within budget; exhausted retries keep valid cache or labeled deterministic text with visible failure history | **Done** | `configuration_errors_send_one_request_and_carry_guidance`, `auth_failure_sends_one_request_gives_guidance_and_redacts`, TUI card shows guidance + Open Models; `saved_summary_is_reused_until_its_inputs_change_then_shown_as_earlier` (503 retried once, earlier result kept and labeled); basic explanation heading asserted in the TUI test; jobs/events/diagnostic record keep the history |
+| 20 | Retry without leaving Brain; away/back creates no duplicate jobs; cancelled/deleted/superseded requests cannot publish | **Done** (cancel N/A) | TUI test: reopen inside cooldown → 1 job / 1 request; Retry → 2nd job correlated to the 1st, module stays Brain. `reopening_respects_cooldown_and_running_jobs`, `late_completion_for_a_changed_or_deleted_memory_is_not_published`, TUI `late_summary_completions_are_ignored`. Graph explanations are not cancellable (gap) |
+| 21 | Evidence/text/focus/model/prompt change invalidates cache; failure never removes a memory or fails Atlas indexing | **Done** | `success_is_keyed_and_any_input_change_invalidates_it` (all five inputs), `failure_is_durable_correlated_bounded_and_harmless` (memory kept, no failed tasks), TUI earlier-result test |
+| 22 | Diagnostic links survive restart; after expiry Jobs keeps the error summary and expired detail is identified; redaction incl. nested causes and URLs | **Done** (Jobs label partial) | Diagnostic record + job row are durable (TUI reopen reads the record); after clearing events, View logs reports expired detail and the record keeps the cause chain (TUI test). `nested_causes_and_endpoints_are_kept_and_redacted`, `endpoint_strips_query_and_userinfo`, `http_errors_carry_status_code_and_redacted_message`, `auth_failure_sends_one_request_gives_guidance_and_redacts` (API key echoed by provider and URL userinfo absent from events and record), TUI screen has no key. Jobs itself does not label expired detail |
+| 23–26 | Claim/Recon layout, Related navigation | **Done** (async edge partial) | Detail opens with the graph on top, Related left and Summary right on one row (≥68 cols below the graph), stacked Related-above-Summary when narrower with the focused pane taller; no Related text in the graph pane. Related is a selectable list from core `related_memories` (claim relations, shared source article/tool result, same entity, same investigation, then "Similar · not evidence"); unique, self excluded, each row resolves to an existing memory. ↑↓ selects, Enter/click opens by id even when Find hides the target, Esc/‹ Back restores the previous memory with its Related selection and focus, deleted targets keep the current view with a status message (`claim_detail_has_graph_above_related_left_summary_right_and_navigates_by_id`, `narrow_claim_detail_stacks_related_above_summary_and_keeps_both_reachable`, core `related_rows_are_unique_existing_memories_ranked_explicit_before_similar`). Related loads on a blocking task with request-id/memory-id rejection of stale results (tested by injecting late results); tests run the load inline, so a real-runtime rapid-navigation race is not exercised end to end. Summary failure card and in-place Retry landed in phase 7 (§10 16–22) |
 
 ## Test log
 
@@ -413,3 +499,10 @@ buttons.
   argos-osint-bin` → 68 passed, 2 ignored (+1 `registered_operations_show_in_jobs_and_cancel_is_cooperative`;
   the narrow claim-detail test now also checks the legend). `cargo clippy --workspace
   --all-targets`: no new findings.
+- Phase 7: `ARGOS_EMBED=0 cargo test -p argos-osint-core --lib` → 453 passed, 0 failed, 5 ignored
+  (+20: 3 `provider_diag`, 5 `provider_attempt` incl. typed errors for existing `complete`
+  callers, 4 `summarization::exec`, 8 `graph_explanation` fault tests against a scripted local
+  provider). `ARGOS_EMBED=0 cargo test -p argos-osint-bin` → 71 passed, 3 ignored
+  (+3: failure card/links/retry/cooldown/expiry, earlier-result invalidation, late completions;
+  +1 ignored `dump_phase7_screens`). `cargo clippy -p argos-osint-core -p argos-osint-bin
+  --all-targets`: no findings in phase 7 files; remaining findings were already on `main`.

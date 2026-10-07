@@ -201,7 +201,8 @@ pub struct Settled {
 
 /// Category is the only significance filter. Every non-unk article is kept, at every tier.
 pub fn is_significant(category: &str) -> bool {
-    category_tag(category) != "unk"
+    let tag = category_tag(category);
+    tag != "unk" && tag != "failed" && tag != "ambiguous" && tag != "out_of_scope"
 }
 
 /// Significant articles ordered by tier, then temperature. Domain rank and provider count are ignored.
@@ -575,6 +576,7 @@ fn fit_cell(value: &str, width: usize) -> String {
 /// use that peer set for fact, inference, and link support.
 /// `progress` receives `(done, total)` work units as each extract step finishes.
 pub async fn extract(
+    run_id: &str,
     synthesis: &ProviderSecret,
     classifier: Option<&ProviderSecret>,
     articles: &[AtlasArticleRow],
@@ -605,15 +607,66 @@ pub async fn extract(
     let mut lead = Vec::new();
     let mut lead_dropped = 0u32;
     let mut extract_error = None;
-    for packet in significant.chunks(PACKET_LIMIT) {
+let mut completed_ids = std::collections::HashSet::new();
+    if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
+        let completed_units = store.atlas_get_unit_manifests(run_id, 4).unwrap_or_default();
+        for unit in &completed_units {
+            if unit.terminal_reason.is_none() {
+                completed_ids.insert(unit.unit_id.clone());
+            }
+        }
+    }
+
+    for (i, packet) in significant.chunks(PACKET_LIMIT).enumerate() {
+        let unit_id = format!("extract-lead-{i}");
+        if completed_ids.contains(&unit_id) {
+            done += 1;
+            progress(done, total);
+            continue;
+        }
+
         match ask_claims(synthesis, &lead_prompt(packet.len()), &packet_json(packet)?).await {
             Ok(raw) => {
                 let (kept, dropped) = accept_claims(packet, &raw, AcceptMode::Lead);
                 lead_dropped += dropped;
                 lead.extend(kept);
+                if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
+                    let _ = store.atlas_save_unit_manifest(&crate::atlas_work::UnitManifest {
+                        run_id: run_id.to_string(),
+                        unit_id,
+                        stage: 4,
+                        input_ids: packet.iter().map(|a| a.id.clone()).collect(),
+                        input_rev: String::new(),
+                        contract_version: "1".into(),
+                        dependency_ids: Vec::new(),
+                        is_required: true,
+                        output_refs: Vec::new(),
+                        effective_model: synthesis.model.clone(),
+                        attempt_history: vec![chrono::Utc::now().to_rfc3339()],
+                        next_eligible_at: None,
+                        terminal_reason: None,
+                    });
+                }
             }
             Err(err) => {
                 extract_error = Some(err.to_string());
+                if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
+                    let _ = store.atlas_save_unit_manifest(&crate::atlas_work::UnitManifest {
+                        run_id: run_id.to_string(),
+                        unit_id,
+                        stage: 4,
+                        input_ids: packet.iter().map(|a| a.id.clone()).collect(),
+                        input_rev: String::new(),
+                        contract_version: "1".into(),
+                        dependency_ids: Vec::new(),
+                        is_required: true,
+                        output_refs: Vec::new(),
+                        effective_model: synthesis.model.clone(),
+                        attempt_history: vec![chrono::Utc::now().to_rfc3339()],
+                        next_eligible_at: None,
+                        terminal_reason: Some(err.to_string()),
+                    });
+                }
             }
         }
         done += 1;
@@ -847,6 +900,9 @@ pub fn apply_peer_support(
             let body = format!("{} {}", peer.title, peer.description);
             let body_both =
                 contains_span(&body, &claim.entity) && contains_span(&body, &claim.object);
+            
+            // Assess specific passages rather than inflating verified truth.
+            // Strict claim-passage assessment sets support counts, but does not alter claim.classification or claim.confidence.
             if title_both {
                 title_support += 1;
             } else if body_both {
@@ -855,15 +911,6 @@ pub fn apply_peer_support(
         }
         claim.title_peers = title_support;
         claim.body_peers = body_support;
-        if title_support > 0 {
-            claim.classification = "fact".into();
-            claim.confidence = (claim.confidence + 0.15 * f64::from(title_support)).min(1.0);
-        } else if body_support > 0 {
-            if claim.classification != "fact" {
-                claim.classification = "inference".into();
-            }
-            claim.confidence = (claim.confidence + 0.08 * f64::from(body_support)).min(1.0);
-        }
     }
 }
 
@@ -1528,10 +1575,7 @@ fn parse_claims(text: &str) -> Result<Vec<RawClaim>> {
     {
         return Ok(vec![raw_claim(&value)]);
     }
-    // Empty object, missing claims, or a soft "nothing found" reply.
-    if value.get("claims").is_none() {
-        return Ok(Vec::new());
-    }
+
     Err(anyhow!("claims array missing"))
 }
 
@@ -1543,26 +1587,25 @@ fn parse_json_value(text: &str) -> Result<Value> {
         .trim_end_matches("```")
         .trim();
     if trimmed.is_empty() {
-        return Ok(serde_json::json!({"claims": []}));
+        return Err(anyhow::anyhow!("Empty extraction output"));
     }
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
         return Ok(value);
     }
     let Some(start) = trimmed.find(['{', '[']) else {
-        // Prose with no JSON object — treat as no claims for this packet.
-        return Ok(serde_json::json!({"claims": []}));
+        return Err(anyhow::anyhow!("No JSON object found in extraction output"));
     };
     let open = trimmed.as_bytes()[start];
     let close = if open == b'[' { ']' } else { '}' };
     let Some(end) = trimmed.rfind(close) else {
-        return Ok(serde_json::json!({"claims": []}));
+        return Err(anyhow::anyhow!("Incomplete JSON object in extraction output"));
     };
     if end < start {
-        return Ok(serde_json::json!({"claims": []}));
+        return Err(anyhow::anyhow!("Malformed JSON structure in extraction output"));
     }
     match serde_json::from_str(&trimmed[start..=end]) {
         Ok(value) => Ok(value),
-        Err(_) => Ok(serde_json::json!({"claims": []})),
+        Err(e) => Err(anyhow::anyhow!("Failed to parse JSON extraction output: {}", e)),
     }
 }
 
@@ -1851,8 +1894,9 @@ mod tests {
         assert!(related.iter().any(|article| article.id == "a2"));
         assert!(!related.iter().any(|article| article.id == "a3"));
         apply_peer_support(&mut claims, &articles, &[]);
-        assert_eq!(claims[0].classification, "fact");
-        assert!(claims[0].confidence > 0.5);
+        assert_eq!(claims[0].classification, "inference");
+        assert_eq!(claims[0].confidence, 0.5);
+        assert_eq!(claims[0].title_peers, 1);
     }
 
     #[test]
@@ -1899,8 +1943,9 @@ mod tests {
             article_ids: vec!["a3".into()],
         }];
         apply_peer_support(&mut claims, &articles, &peers);
-        assert_eq!(claims[0].classification, "fact");
-        assert!(claims[0].confidence > 0.5);
+        assert_eq!(claims[0].classification, "inference");
+        assert_eq!(claims[0].confidence, 0.5);
+        assert_eq!(claims[0].title_peers, 1);
     }
 
     #[test]
@@ -2443,10 +2488,12 @@ mod tests {
 
     #[test]
     fn claim_json_tolerates_empty_and_alternate_shapes() {
-        assert!(parse_claims("").unwrap().is_empty());
-        assert!(parse_claims("{}").unwrap().is_empty());
+        assert!(parse_claims("").is_err());
+        assert!(parse_claims("{}").is_err());
         assert!(parse_claims(r#"{"claims":null}"#).unwrap().is_empty());
-        assert!(parse_claims("no claims this time").unwrap().is_empty());
+        assert!(parse_claims("no claims this time").is_err());
+        assert!(parse_claims(r#"{"claims":[]}"#).unwrap().is_empty());
+        assert!(parse_claims(r#"[]"#).unwrap().is_empty());
         let bare = parse_claims(
             r#"[{"entity":"Cabinet","namespace":"org","predicate":"met","object":"union","topic":"stability","claim":"Cabinet met the union.","classification":"inference","confidence":0.7,"evidence_ids":["a1"]}]"#,
         )
@@ -2473,7 +2520,7 @@ mod tests {
             stt_model: None,
             device: None,
         };
-        let err = match extract(&secret, None, &[], &[], |_, _| {}).await {
+        let err = match extract("test-run", &secret, None, &[], &[], |_, _| {}).await {
             Ok(_) => panic!("a decisions model extracted claims"),
             Err(err) => err,
         };

@@ -79,8 +79,6 @@ pub async fn run_job_slice(
             &job.stage,
             job.sections_done,
             job.elements_done,
-            job.tool_calls_done,
-            &job.current_tool,
             &job.warning,
             &job.error,
         )?;
@@ -113,7 +111,7 @@ pub async fn run_job_slice(
             let store = Store::open(&runtime.db_path)?;
             run_inventory(&store, &job.investigation_id)
         }
-        "collect" => run_collect(&runtime, &job).await,
+        "collect" => run_collect(&runtime, &job, &task.id).await,
         "assess" => {
             let store = Store::open(&runtime.db_path)?;
             run_assess(&runtime, &store, &job, on_event)
@@ -148,8 +146,6 @@ pub async fn run_job_slice(
                 &format!("done {}", task.task_type),
                 done,
                 el_done,
-                job.tool_calls_done,
-                "",
                 &job.warning,
                 "",
             )?;
@@ -165,8 +161,6 @@ pub async fn run_job_slice(
                     "task failed",
                     job.sections_done,
                     job.elements_done,
-                    job.tool_calls_done,
-                    "",
                     &job.warning,
                     &err.to_string(),
                 )?;
@@ -230,6 +224,7 @@ fn run_inventory(store: &Store, investigation_id: &str) -> Result<String> {
 async fn run_collect(
     runtime: &JobRuntime,
     job: &super::persist::IntelReportJobRow,
+    task_id: &str,
 ) -> Result<String> {
     {
         let store = Store::open(&runtime.db_path)?;
@@ -267,6 +262,12 @@ async fn run_collect(
     let executor = crate::osint::Executor::new()?;
     let query = runtime.article_title.chars().take(80).collect::<String>();
     let ua = runtime.settings.osint_user_agent.clone();
+
+    let attempt_id = {
+        let store = Store::open(&runtime.db_path)?;
+        store.insert_report_attempt(&job.id, job.generation, task_id, "firecrawl_search")?
+    };
+
     let result = executor
         .run_configured(
             "firecrawl_search",
@@ -281,6 +282,9 @@ async fn run_collect(
         .await;
 
     let store = Store::open(&runtime.db_path)?;
+    let state = if result.is_ok() { "success" } else { "failed" };
+    let _ = store.finish_report_attempt(&job.id, &attempt_id, state);
+
     match result {
         Ok(res) if res.error.is_none() => {
             let items = crate::osint::results::extract_search_results(&res.observations);
@@ -317,8 +321,6 @@ async fn run_collect(
                 "collected",
                 job.sections_done,
                 job.elements_done,
-                job.tool_calls_done + 1,
-                "firecrawl_search",
                 &job.warning,
                 "",
             )?;
@@ -621,8 +623,6 @@ fn finalize_job_state(
         "finished",
         sections_done,
         el_done,
-        job.tool_calls_done,
-        "",
         &job.warning,
         &job.error,
     )?;
@@ -644,8 +644,6 @@ fn cancel_if_needed(store: &Store, job_id: &str) -> Result<()> {
                 "cancelled",
                 job.sections_done,
                 job.elements_done,
-                job.tool_calls_done,
-                "",
                 &job.warning,
                 "cancelled",
             )?;

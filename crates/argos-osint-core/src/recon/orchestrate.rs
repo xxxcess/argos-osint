@@ -2155,11 +2155,29 @@ pub(crate) fn recall_for_turn(
     thread_id: &str,
     question: &str,
 ) -> Result<(Vec<super::RecallInsight>, bool, BrainResourceSummary)> {
-    let text_hits = store.recall(question, 8)?;
+    let thread_entities = store.thread_entities(thread_id)?;
+    let query = crate::brain_query::BrainQuery {
+        current_question: question.to_string(),
+        confirmed_subjects: thread_entities.iter().map(|e| e.1.clone()).collect(),
+        candidate_limit: 20,
+        token_budget: 1500,
+        ..Default::default()
+    };
+    let policy = crate::brain_query::AdmissionPolicy { strict_mode: true, allow_background: false };
+    
+    let text_hits = store.recall(question, query.candidate_limit)?;
     let unfamiliar = super::brain_is_thin(&text_hits);
-    let mut recalled = store.recon_recall(&store.thread_entities(thread_id)?)?;
+    let mut recalled = store.recon_recall(&thread_entities)?;
     let subject = super::question_subject(question);
+    
+    let mut admitted_count = 0;
     for hit in &text_hits {
+        if admitted_count >= 6 {
+            break;
+        }
+        if !crate::brain_query::admit_memory(&query, &hit.memory, &policy) {
+            continue;
+        }
         if recalled.iter().any(|item| item.memory_id == hit.memory.id) {
             continue;
         }
@@ -2171,6 +2189,7 @@ pub(crate) fn recall_for_turn(
             updated_at: hit.memory.created_at.clone(),
             evidence_count: 0,
         });
+        admitted_count += 1;
     }
     let resources = brain_resources::summarize_for_recall(store, &recalled, question)?;
     Ok((recalled, unfamiliar, resources))

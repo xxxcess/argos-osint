@@ -271,7 +271,7 @@ pub fn create_report_job(
         }
     }
 
-    store.update_report_job(&job.id, "queued", "planned", 0, 0, 0, "", "", "")?;
+    store.update_report_job(&job.id, "queued", "planned", 0, 0, "", "")?;
     Ok(store.intel_report_job(&job.id)?.expect("job exists"))
 }
 
@@ -290,8 +290,6 @@ pub fn pause_job(store: &Store, job_id: &str) -> Result<()> {
         &job.stage,
         job.sections_done,
         job.elements_done,
-        job.tool_calls_done,
-        &job.current_tool,
         &job.warning,
         &job.error,
     )
@@ -308,8 +306,6 @@ pub fn resume_job(store: &Store, job_id: &str) -> Result<()> {
         &job.stage,
         job.sections_done,
         job.elements_done,
-        job.tool_calls_done,
-        &job.current_tool,
         &job.warning,
         &job.error,
     )
@@ -325,8 +321,6 @@ pub fn cancel_job(store: &Store, job_id: &str) -> Result<()> {
         "cancelled",
         job.sections_done,
         job.elements_done,
-        job.tool_calls_done,
-        "",
         &job.warning,
         "cancelled by user",
     )?;
@@ -354,8 +348,6 @@ pub fn retry_failed_tasks(store: &Store, job_id: &str) -> Result<usize> {
             "retrying",
             job.sections_done,
             job.elements_done,
-            job.tool_calls_done,
-            "",
             &job.warning,
             "",
         )?;

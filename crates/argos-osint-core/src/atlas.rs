@@ -189,6 +189,9 @@ pub fn category_tag(id: &str) -> &'static str {
         "information" => "information",
         "stability" => "stability",
         "technology" => "technology",
+        "ambiguous" => "ambiguous",
+        "out_of_scope" => "out_of_scope",
+        "failed" => "failed",
         _ => "unk",
     }
 }
@@ -1870,11 +1873,11 @@ where
                     Err(err) => {
                         if !noted {
                             emit(AtlasEvent::Note(format!(
-                                "Classifier could not tag an article ({err}). Untagged articles stay unk."
+                                "Classifier could not tag an article ({err})."
                             )));
                             noted = true;
                         }
-                        "unk".into()
+                        "failed".into()
                     }
                 };
                 let category = category_tag(&category).to_string();
@@ -1977,7 +1980,7 @@ where
                                 "WP:RSP source reliability index was not refreshed ({err})."
                             ))),
                         }
-                        atlas_insights::extract(
+                        atlas_insights::extract(&run_id, 
                             secret,
                             classifier.as_ref(),
                             &articles,

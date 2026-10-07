@@ -584,6 +584,40 @@ impl Store {
         Ok(max.unwrap_or(0) + 1)
     }
 
+    
+    pub fn insert_report_attempt(
+        &self,
+        job_id: &str,
+        generation: i64,
+        task_id: &str,
+        tool_id: &str,
+    ) -> Result<String> {
+        let id = new_row_id("atmpt");
+        self.conn.execute(
+            "INSERT INTO intel_report_attempts (id, job_id, generation, task_id, tool_id, state, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
+            rusqlite::params![id, job_id, generation, task_id, tool_id, now()],
+        )?;
+        // also increment tool_calls_done on the job
+        self.conn.execute(
+            "UPDATE intel_report_jobs SET tool_calls_done = tool_calls_done + 1, current_tool = ?2 WHERE id = ?1",
+            rusqlite::params![job_id, tool_id]
+        )?;
+        Ok(id)
+    }
+
+    pub fn finish_report_attempt(&self, job_id: &str, id: &str, state: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE intel_report_attempts SET state=?2, finished_at=?3 WHERE id=?1",
+            rusqlite::params![id, state, now()],
+        )?;
+        self.conn.execute(
+            "UPDATE intel_report_jobs SET current_tool = '' WHERE id = ?1",
+            rusqlite::params![job_id]
+        )?;
+        Ok(())
+    }
+
     pub fn update_report_job(
         &self,
         id: &str,
@@ -591,8 +625,6 @@ impl Store {
         stage: &str,
         sections_done: i64,
         elements_done: i64,
-        tool_calls_done: i64,
-        current_tool: &str,
         warning: &str,
         error: &str,
     ) -> Result<()> {
@@ -604,9 +636,9 @@ impl Store {
         self.conn.execute(
             "UPDATE intel_report_jobs SET
                 state=?2, stage=?3, sections_done=?4, elements_done=?5,
-                tool_calls_done=?6, current_tool=?7, warning=?8, error=?9,
-                updated_at=?10,
-                finished_at=CASE WHEN length(?11)>0 THEN ?11 ELSE finished_at END
+                warning=?6, error=?7,
+                updated_at=?8,
+                finished_at=CASE WHEN length(?9)>0 THEN ?9 ELSE finished_at END
              WHERE id=?1",
             params![
                 id,
@@ -614,8 +646,6 @@ impl Store {
                 stage,
                 sections_done,
                 elements_done,
-                tool_calls_done,
-                current_tool,
                 warning,
                 error,
                 now(),

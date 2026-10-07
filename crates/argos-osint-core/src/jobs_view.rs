@@ -100,6 +100,7 @@ pub struct JobRow {
     pub error_category: String,
     pub error_summary: String,
     pub correlation_id: String,
+    pub stage_coverage_json: String,
     /// Child jobs directly under this one.
     pub children: i64,
     /// Durable events correlated with this job or its descendants.
@@ -275,7 +276,7 @@ const JOB_COLUMNS: &str =
     j.progress_done, j.progress_total, j.created_at, j.queued_at, j.started_at, j.heartbeat_at,
     j.finished_at, j.active_ms, j.queue_ms, j.retry_wait_ms, j.attempts_used, j.attempt_cap,
     j.provider, j.model, j.tool, j.worker_owner, j.run_ref, j.resource_ref, j.result_ref,
-    j.error_category, j.error_summary, j.correlation_id,
+    j.error_category, j.error_summary, j.correlation_id, j.stage_coverage_json,
     (SELECT COUNT(*) FROM argos_jobs c WHERE c.parent_id = j.id),
     (SELECT COUNT(*) FROM argos_events e WHERE e.job_id = j.id
         OR e.job_id IN (SELECT c.id FROM argos_jobs c WHERE c.parent_id = j.id)),
@@ -317,13 +318,14 @@ fn job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         error_category: r.get(27)?,
         error_summary: r.get(28)?,
         correlation_id: r.get(29)?,
-        children: r.get(30)?,
-        events: r.get(31)?,
-        attempt_rows: r.get(32)?,
-        open_attempt_started: r.get(33)?,
-        active_since: r.get(34)?,
-        cancel_requested: r.get(35)?,
-        cancellable: r.get(36)?,
+        stage_coverage_json: r.get(30)?,
+        children: r.get(31)?,
+        events: r.get(32)?,
+        attempt_rows: r.get(33)?,
+        open_attempt_started: r.get(34)?,
+        active_since: r.get(35)?,
+        cancel_requested: r.get(36)?,
+        cancellable: r.get(37)?,
     })
 }
 
@@ -626,6 +628,10 @@ impl Store {
     pub fn retry_failed_tasks(&self, id: &str) -> Result<usize> {
         retry_failed_tasks(&self.conn, id)
     }
+    pub fn set_job_stage_coverage(&self, job_id: &str, coverage_json: &str) -> Result<()> {
+        crate::tasks::set_job_stage_coverage(&self.conn, job_id, coverage_json)
+    }
+
 
     pub fn job_apps(&self) -> Result<Vec<String>> {
         job_apps(&self.conn)

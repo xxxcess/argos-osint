@@ -850,6 +850,7 @@ impl Store {
                             "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
                             params![memory_id, sentence, now, source_json],
                         )?;
+                        self.conn.execute("INSERT INTO memory_metadata (memory_id, memory_kind) VALUES (?1, 'atomic_claim') ON CONFLICT(memory_id) DO UPDATE SET memory_kind=excluded.memory_kind", params![memory_id])?;
                         self.conn.execute(
                             "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at,source_reliability,info_credibility,admiralty,rsp_status) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10,?11,?12,?13)",
                             params![

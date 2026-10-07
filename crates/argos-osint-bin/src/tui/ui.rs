@@ -62,7 +62,7 @@ fn composer_height(area: Rect, app: &App) -> u16 {
     let input_lines = app.input.split('\n').count().max(1) as u16;
     let base_box_h = if area.height >= 26 { 3 } else { 2 };
     let box_h = (input_lines + 1).max(base_box_h).min(5);
-    box_h + 1
+    box_h
 }
 
 /// Module body for the current screen (shared by dashboards for layout maths).
@@ -79,6 +79,7 @@ fn chrome(area: Rect, app: &App) -> Chrome {
     let composer_h = composer_height(area, app);
     let header_h = TAB_H;
     let tab_strip_h = 0;
+    let footer_h = if composer_h > 0 { 0 } else { 1 };
     let rows = split_vertical(
         area,
         [
@@ -86,7 +87,7 @@ fn chrome(area: Rect, app: &App) -> Chrome {
             Constraint::Length(tab_strip_h),
             Constraint::Min(0),
             Constraint::Length(composer_h),
-            Constraint::Length(1),
+            Constraint::Length(footer_h),
         ],
     );
     let tabs = header_tabs(rows[0], app.module);
@@ -4675,7 +4676,7 @@ pub(crate) fn recon_composer_areas(area: Rect) -> HomeComposerAreas {
     let composer_width = area.width;
     let composer_x = area.x;
 
-    let box_h = area.height.saturating_sub(1).max(2);
+    let box_h = area.height.max(2);
     let box_rect = Rect {
         x: composer_x,
         y: area.y,
@@ -4714,8 +4715,8 @@ pub(crate) fn recon_composer_areas(area: Rect) -> HomeComposerAreas {
     let guidance_rect = Rect {
         x: composer_x,
         y: area.y.saturating_add(box_h),
-        width: composer_width,
-        height: 1,
+        width: 0,
+        height: 0,
     };
 
     HomeComposerAreas {
@@ -4739,14 +4740,21 @@ fn composer_prompt_text<'a>(
     cursor: usize,
     is_focused: bool,
     blink_on: bool,
+    is_home: bool,
 ) -> Text<'a> {
+    let placeholder = if is_home {
+        "Ask anything... e.g. \"What is known about example.org?\""
+    } else {
+        "Ask a follow-up... e.g. \"Dig deeper into the latest findings\""
+    };
+
     if input.is_empty() {
         if is_focused {
             if blink_on {
                 Text::from(Line::from(vec![
                     Span::styled("█ ", theme::card_accent()),
                     Span::styled(
-                        "Ask anything... e.g. \"What is known about example.org?\"",
+                        placeholder,
                         theme::card_dim(),
                     ),
                 ]))
@@ -4754,14 +4762,14 @@ fn composer_prompt_text<'a>(
                 Text::from(Line::from(vec![
                     Span::styled("  ", theme::card_dim()),
                     Span::styled(
-                        "Ask anything... e.g. \"What is known about example.org?\"",
+                        placeholder,
                         theme::card_dim(),
                     ),
                 ]))
             }
         } else {
             Text::from(Line::from(vec![Span::styled(
-                "Ask anything... e.g. \"What is known about example.org?\"",
+                placeholder,
                 theme::card_dim(),
             )]))
         }
@@ -4887,9 +4895,10 @@ pub(crate) fn draw_composer(
         };
         let is_focused = app.focus == Target::Field(FieldId::Composer);
         let blink_on = cursor_blink_visible();
-        let prompt_text = composer_prompt_text(&app.input, app.cursor, is_focused, blink_on);
+        let prompt_text = composer_prompt_text(&app.input, app.cursor, is_focused, blink_on, is_home);
+        let alignment = if is_home { Alignment::Center } else { Alignment::Left };
         frame.render_widget(
-            Paragraph::new(prompt_text).alignment(Alignment::Center),
+            Paragraph::new(prompt_text).alignment(alignment),
             prompt_rect,
         );
 
@@ -4905,7 +4914,7 @@ pub(crate) fn draw_composer(
             } else {
                 &app.synthesis_model
             };
-            let meta_line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled("Recon", theme::card_accent().add_modifier(Modifier::BOLD)),
                 Span::styled(" · ", theme::card_dim()),
                 Span::styled(
@@ -4917,9 +4926,17 @@ pub(crate) fn draw_composer(
                     format!("Synthesis: {synth_m}"),
                     Style::default().fg(theme::WARN).bg(theme::SURFACE),
                 ),
-            ]);
+            ];
+            if !is_home {
+                spans.push(Span::styled(" · ", theme::card_dim()));
+                spans.push(Span::styled(
+                    "Enter send · Shift+Enter newline · /commands · Tab transcript · Esc list",
+                    theme::card_dim(),
+                ));
+            }
+            let meta_line = Line::from(spans);
             frame.render_widget(
-                Paragraph::new(meta_line).alignment(Alignment::Center),
+                Paragraph::new(meta_line).alignment(alignment),
                 areas.metadata,
             );
 
@@ -4933,9 +4950,10 @@ pub(crate) fn draw_composer(
             } else {
                 "[ Send ↵ ]"
             };
+            let send_alignment = if is_home { Alignment::Right } else { Alignment::Left };
             frame.render_widget(
                 Paragraph::new(action_label)
-                    .alignment(Alignment::Right)
+                    .alignment(send_alignment)
                     .style(send_style),
                 areas.send,
             );
@@ -4945,14 +4963,16 @@ pub(crate) fn draw_composer(
         let guidance_text = if is_home {
             "Enter to start · Shift+Enter / Ctrl+J for newline"
         } else {
-            "Enter to send · Shift+Enter / Ctrl+J for newline"
+            "" // Already merged into composer footer
         };
-        frame.render_widget(
-            Paragraph::new(guidance_text)
-                .alignment(Alignment::Center)
-                .style(theme::dim()),
-            areas.guidance,
-        );
+        if !guidance_text.is_empty() {
+            frame.render_widget(
+                Paragraph::new(guidance_text)
+                    .alignment(Alignment::Center)
+                    .style(theme::dim()),
+                areas.guidance,
+            );
+        }
     }
 }
 
@@ -5192,7 +5212,18 @@ fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(String::new());
     lines.push(format!("Evidence calls · {}", app.calls.len()));
     let memories: usize = app.answer_memories.values().map(Vec::len).sum();
-    lines.push(format!("Linked memories · {memories}"));
+    lines.push(String::new());
+    lines.push("Brain context controls:".to_string());
+    lines.push(" [x] Strict   [ ] Balanced   [ ] Exploratory".to_string());
+    lines.push(" [x] All time [ ] Date range".to_string());
+    lines.push(" [ ] Include background".to_string());
+    lines.push(String::new());
+    lines.push(format!("▼ Memories used ({memories})"));
+    for mem_list in app.answer_memories.values() {
+        for mem in mem_list {
+            lines.push(format!("  • {} (Admitted: strict query match)", clip_chars(&mem.text, 35)));
+        }
+    }
     frame.render_widget(
         Paragraph::new(lines.join("\n"))
             .style(theme::dim())
@@ -6631,16 +6662,22 @@ fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
                 format!("{mode} r{} · {}", job.revision, job.state),
                 style.add_modifier(Modifier::BOLD),
             )));
+            let tools_str = if job.tool_calls_done == -1 {
+                "Tool usage unavailable".to_string()
+            } else if job.tool_calls_done == 0 && (job.state == "completed" || job.state == "partial" || job.state == "failed") {
+                "0 calls used · reused evidence".to_string()
+            } else {
+                format!("Tools: {} calls used · {} budget", job.tool_calls_done, job.tool_calls_allowance)
+            };
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  {} · sec {}/{} · el {}/{} · tools {}/{}",
+                    "  {} · sec {}/{} · el {}/{} · {}",
                     job.stage,
                     job.sections_done,
                     job.sections_total,
                     job.elements_done,
                     job.elements_total,
-                    job.tool_calls_done,
-                    job.tool_calls_allowance
+                    tools_str
                 ),
                 theme::dim(),
             )));
@@ -8017,7 +8054,7 @@ fn popup_text(app: &App) -> String {
     match &app.overlay {
         Overlay::Help => {
             let mut lines = vec![
-                format!("{} commands", app.module.map_or("Home", ModuleId::title)),
+                format!("# {} commands", app.module.map_or("Home", ModuleId::title)),
                 String::new(),
             ];
             for command in super::commands::matching("", app.module) {
@@ -8030,15 +8067,15 @@ fn popup_text(app: &App) -> String {
                 let shortcut = if command.shortcut.is_empty() {
                     String::new()
                 } else {
-                    format!(" · {}", command.shortcut)
+                    format!(" (`{}`)", command.shortcut)
                 };
                 lines.push(format!(
-                    "{}{} — {}",
+                    "- **{}**{} — {}",
                     command.label, shortcut, command.description
                 ));
             }
             lines.push(String::new());
-            lines.push(help_text(app).to_string());
+            lines.push(help_text(app).replace('\n', "  \n"));
             lines.join("\n")
         }
         Overlay::Block { title, body } => format!("{title}\n\n{body}"),
@@ -8147,6 +8184,10 @@ fn cover(frame: &mut Frame, area: Rect) {
 }
 
 fn popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    if matches!(&app.overlay, Overlay::Help) {
+        let md = super::markdown::markdown_lines(&popup_text(app), width.max(1));
+        return md.into_iter().map(md_line_to_line).collect();
+    }
     let center_table =
         matches!(&app.overlay, Overlay::Block { title, .. } if title.starts_with("Run "));
     let mut in_table = false;

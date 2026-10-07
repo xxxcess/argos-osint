@@ -1,0 +1,21 @@
+--- crates/argos-osint-core/src/schema_intel_recon.sql
++++ crates/argos-osint-core/src/schema_intel_recon.sql
+@@ -102,6 +102,18 @@
+ CREATE INDEX IF NOT EXISTS intel_report_tasks_lease
+   ON intel_report_tasks(status, lease_until);
+ 
++CREATE TABLE IF NOT EXISTS intel_report_attempts (
++  id TEXT PRIMARY KEY,
++  job_id TEXT NOT NULL REFERENCES intel_report_jobs(id) ON DELETE CASCADE,
++  generation INTEGER NOT NULL,
++  task_id TEXT NOT NULL REFERENCES intel_report_tasks(id) ON DELETE CASCADE,
++  tool_id TEXT NOT NULL,
++  state TEXT NOT NULL,
++  started_at TEXT NOT NULL,
++  finished_at TEXT NOT NULL DEFAULT ''
++);
++CREATE INDEX IF NOT EXISTS intel_report_attempts_job ON intel_report_attempts(job_id, generation);
++
+ CREATE TABLE IF NOT EXISTS intel_report_sections (
+   id TEXT PRIMARY KEY,
+   job_id TEXT NOT NULL REFERENCES intel_report_jobs(id) ON DELETE CASCADE,

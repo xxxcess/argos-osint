@@ -477,6 +477,7 @@ pub fn migrate_additive(conn: &Connection) -> Result<()> {
             ("active_ms", "INTEGER"),
             ("queue_ms", "INTEGER"),
             ("retry_wait_ms", "INTEGER"),
+            ("stage_coverage_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("attempts_used", "INTEGER NOT NULL DEFAULT 0"),
             ("attempt_cap", "INTEGER NOT NULL DEFAULT 0"),
             ("provider", "TEXT NOT NULL DEFAULT ''"),
@@ -2339,4 +2340,13 @@ mod tests {
         assert_eq!(work.operation, "index_rebuild");
         assert_eq!(claimed.operation, "index_rebuild");
     }
+}
+
+
+pub fn set_job_stage_coverage(conn: &Connection, job_id: &str, coverage_json: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE argos_jobs SET stage_coverage_json=?2, updated_at=?3 WHERE id=?1",
+        rusqlite::params![job_id, coverage_json, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
 }

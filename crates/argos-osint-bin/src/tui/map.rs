@@ -64,14 +64,14 @@ fn mercator_y(lat: f64) -> f64 {
     (1.0 - (lat.tan() + 1.0 / lat.cos()).ln() / PI) / 2.0
 }
 
-/// Pixels across the whole world. Zoom 0 fits 360° into the canvas width.
-fn world_scale(zoom: u8, width: usize) -> f64 {
-    width as f64 * f64::from(1_u16 << zoom.min(4))
+/// Pixels across the whole world. Zoom 0 fits 360° into the canvas width and height.
+fn world_scale(zoom: u8, width: f64, height: f64) -> f64 {
+    (width / 2.0).min(height) * f64::from(1_u16 << zoom.min(4))
 }
 
 /// World view is drawn a little smaller than the canvas so land has room around it.
-fn world_view_scale(width: usize) -> f64 {
-    world_scale(0, width) * 0.82
+fn world_view_scale(width: f64, height: f64) -> f64 {
+    world_scale(0, width, height) * 0.82
 }
 
 /// Center and scale that place the country's outline in the middle of the view.
@@ -123,10 +123,11 @@ fn country_fit(code: &str, width: f64, height: f64) -> Option<(f64, f64, f64)> {
     // Smaller ones may come in closer so the shape is still readable.
     let large = lon_span >= 18.0 || (max_lat - min_lat) >= 12.0;
     let margin = if large { 0.42 } else { 0.5 };
-    let scale_x = width * margin / (lon_span / 360.0);
+    let scale_x = width * margin / (lon_span / 180.0);
     let scale_y = height * margin / merc_span;
-    let closest = if large { width * 2.2 } else { width * 4.0 };
-    let scale = scale_x.min(scale_y).clamp(width, closest);
+    let min_dim = (width / 2.0).min(height);
+    let closest = if large { min_dim * 2.2 } else { min_dim * 4.0 };
+    let scale = scale_x.min(scale_y).clamp(min_dim, closest);
     Some((center_lon, center_lat, scale))
 }
 
@@ -173,11 +174,11 @@ fn project(
     width: f64,
     height: f64,
 ) -> (f64, f64) {
-    let mut dx = (lon - center_lon) / 360.0;
-    if dx > 0.5 {
-        dx -= 1.0;
-    } else if dx < -0.5 {
-        dx += 1.0;
+    let mut dx = (lon - center_lon) / 180.0;
+    if dx > 1.0 {
+        dx -= 2.0;
+    } else if dx < -1.0 {
+        dx += 2.0;
     }
     let dy = mercator_y(lat) - mercator_y(center_lat);
     (width / 2.0 + dx * scale, height / 2.0 + dy * scale)
@@ -469,7 +470,7 @@ pub fn draw_world_map(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         .atlas_focus
         .as_deref()
         .and_then(|code| country_fit(code, width_f, height_f))
-        .unwrap_or((0.0, 15.0, world_view_scale(width)));
+        .unwrap_or((0.0, 15.0, world_view_scale(width_f, height_f)));
     let mut temps = vec![None; land::CODES.len()];
     for (country, _, temp) in &heat {
         if let Some(index) = land_index(country) {
@@ -680,7 +681,7 @@ pub fn draw_country_mini_map(
     let width_f = width as f64;
     let height_f = height as f64;
     let (center_lon, center_lat, scale) =
-        country_fit(&code, width_f, height_f).unwrap_or((0.0, 15.0, world_view_scale(width)));
+        country_fit(&code, width_f, height_f).unwrap_or((0.0, 15.0, world_view_scale(width_f, height_f)));
     let focus_id = land_index(&code).map(|index| (index as u8).saturating_add(1));
     let mut grid = vec![0_u8; width * height];
     let width_i = width as i32;
@@ -858,7 +859,7 @@ mod tests {
         let width = 240.0;
         let height = 80.0;
         let (lon, lat, scale) = country_fit("us", width, height).unwrap();
-        assert!(scale < world_scale(2, width as usize));
+        assert!(scale < world_scale(2, width, height));
         assert!(lon < -60.0 && lon > -170.0);
         assert!(lat > 20.0 && lat < 70.0);
         for (plon, plat) in [(-124.0, 47.0), (-68.0, 44.0), (-98.0, 28.0), (-80.0, 35.0)] {

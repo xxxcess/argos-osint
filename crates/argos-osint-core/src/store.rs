@@ -39,7 +39,7 @@ pub struct GraphSummary {
 
 /// Schema version this build writes. 20 adds the unified investigation
 /// harness tables (tasks, dependencies, passages, assessments, events, stream parts).
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -461,7 +461,22 @@ impl Store {
                     .execute_batch(include_str!("schema_investigation_harness.sql"))?;
                 self.conn.pragma_update(None, "user_version", 20)?;
             }
+            if version < 21 {
+                self.conn
+                    .execute_batch(include_str!("schema_atlas_recall.sql"))?;
+                self.conn.pragma_update(None, "user_version", 21)?;
+            }
+if version < 22 {
+                self.conn.execute_batch(
+                    "UPDATE intel_report_jobs
+                     SET tool_calls_done = -1
+                     WHERE state IN ('completed', 'failed', 'partial', 'cancelled')
+                       AND tool_calls_done = 0;"
+                )?;
+                self.conn.pragma_update(None, "user_version", 22)?;
+            }
             // Additive, idempotent: revision-aware graph summary cache and
+
             // the latest explanation diagnostic.
             graph_summaries::migrate(&self.conn)?;
             Ok(())
@@ -1302,6 +1317,65 @@ impl Store {
         Ok(())
     }
 
+
+    pub fn atlas_save_unit_manifest(&self, manifest: &crate::atlas_work::UnitManifest) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO atlas_work_units (
+                run_id, unit_id, stage, input_ids, input_rev, contract_version,
+                dependency_ids, is_required, output_refs, effective_model, attempt_history,
+                next_eligible_at, terminal_reason
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                manifest.run_id,
+                manifest.unit_id,
+                manifest.stage,
+                serde_json::to_string(&manifest.input_ids).unwrap_or_default(),
+                manifest.input_rev,
+                manifest.contract_version,
+                serde_json::to_string(&manifest.dependency_ids).unwrap_or_default(),
+                manifest.is_required,
+                serde_json::to_string(&manifest.output_refs).unwrap_or_default(),
+                manifest.effective_model,
+                serde_json::to_string(&manifest.attempt_history).unwrap_or_default(),
+                manifest.next_eligible_at,
+                manifest.terminal_reason
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn atlas_get_unit_manifests(&self, run_id: &str, stage: i32) -> Result<Vec<crate::atlas_work::UnitManifest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT unit_id, stage, input_ids, input_rev, contract_version, dependency_ids, is_required, output_refs, effective_model, attempt_history, next_eligible_at, terminal_reason
+             FROM atlas_work_units WHERE run_id = ?1 AND stage = ?2"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![run_id, stage], |row| {
+            let input_ids: String = row.get(2)?;
+            let dependency_ids: String = row.get(5)?;
+            let output_refs: String = row.get(7)?;
+            let attempt_history: String = row.get(9)?;
+            Ok(crate::atlas_work::UnitManifest {
+                run_id: run_id.to_string(),
+                unit_id: row.get(0)?,
+                stage: row.get(1)?,
+                input_ids: serde_json::from_str(&input_ids).unwrap_or_default(),
+                input_rev: row.get(3)?,
+                contract_version: row.get(4)?,
+                dependency_ids: serde_json::from_str(&dependency_ids).unwrap_or_default(),
+                is_required: row.get(6)?,
+                output_refs: serde_json::from_str(&output_refs).unwrap_or_default(),
+                effective_model: row.get(8)?,
+                attempt_history: serde_json::from_str(&attempt_history).unwrap_or_default(),
+                next_eligible_at: row.get(10)?,
+                terminal_reason: row.get(11)?,
+            })
+        })?;
+        let mut manifests = Vec::new();
+        for row in rows {
+            manifests.push(row?);
+        }
+        Ok(manifests)
+    }
     pub fn atlas_set_state(&self, id: &str, state: &str, note: &str, finished: bool) -> Result<()> {
         let finished_at = if finished {
             chrono::Utc::now().to_rfc3339()

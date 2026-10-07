@@ -1503,6 +1503,9 @@ fn http() -> Result<reqwest::Client> {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SettingsFile {
+    /// User preference; `None` preserves the default visible Recon context pane.
+    #[serde(default)]
+    pub tui_recon_context: Option<bool>,
     #[serde(default)]
     pub model: String,
     #[serde(default)]

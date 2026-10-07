@@ -1,6 +1,6 @@
 //! Layout, chat transcript, and mouse hit areas for the Argos terminal shell.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::markdown::{self, Piece, Tone};
+use super::recon_parts::InvestigationPart;
 
 use super::app::{
     intel_category_short, intel_day_button_label, is_picker_field, unix_now, App, AtlasPage,
@@ -83,7 +84,7 @@ fn chrome(area: Rect, app: &App) -> Chrome {
             Constraint::Length(1),
         ],
     );
-    let tabs = header_tabs(rows[0]);
+    let tabs = header_tabs(rows[0], app.module);
     let home = tabs.first().map(|(_, rect)| *rect).unwrap_or_default();
     Chrome {
         header: rows[0],
@@ -94,25 +95,19 @@ fn chrome(area: Rect, app: &App) -> Chrome {
     }
 }
 
-fn header_tabs(area: Rect) -> Vec<(Option<ModuleId>, Rect)> {
-    let mut labels = vec!["argos".to_string()];
-    labels.extend(
-        ModuleId::ALL
-            .iter()
-            .map(|module| module.title().to_string()),
-    );
+fn header_tabs(area: Rect, active: Option<ModuleId>) -> Vec<(Option<ModuleId>, Rect)> {
+    let mut labels = vec![(None, "Argos".to_string())];
+    if let Some(module) = active {
+        labels.push((Some(module), module.title().to_string()));
+    }
     let mut x = area.x;
     let mut out = Vec::new();
-    for (index, label) in labels.iter().enumerate() {
-        let width = (label.len() as u16 + 4).min(area.width.saturating_sub(x - area.x));
+    for (module, label) in labels {
+        let width = (label.len() as u16 + if module.is_none() { 4 } else { 2 })
+            .min(area.width.saturating_sub(x - area.x));
         if width < 2 {
             break;
         }
-        let module = if index == 0 {
-            None
-        } else {
-            Some(ModuleId::ALL[index - 1])
-        };
         out.push((
             module,
             Rect {
@@ -248,6 +243,14 @@ fn dashboard_areas(area: Rect) -> (Rect, Rect, Rect) {
 fn chat_areas(area: Rect) -> (Rect, Rect) {
     let rows = split_vertical(area, [Constraint::Min(0), Constraint::Length(ACTION_H)]);
     (rows[0], rows[1])
+}
+
+fn recon_workspace(app: &App, area: Rect) -> (Rect, Option<Rect>) {
+    if !app.recon_context_enabled || area.width < 110 {
+        return (area, None);
+    }
+    let panes = split_horizontal(area, [Constraint::Min(74), Constraint::Length(30)]);
+    (panes[0], Some(panes[1]))
 }
 
 struct OsintLayout {
@@ -655,6 +658,7 @@ fn visible_tools(app: &App) -> Vec<(usize, &'static osint::ToolDefinition)> {
 
 #[derive(Clone, Debug)]
 pub struct ChatBlock {
+    pub part: InvestigationPart,
     pub key: String,
     pub title: String,
     pub body: String,
@@ -671,12 +675,23 @@ pub fn chat_blocks(app: &App) -> Vec<ChatBlock> {
 fn build_blocks(app: &App) -> Vec<ChatBlock> {
     let mut blocks = Vec::new();
     let mut used = HashSet::new();
+    let runs_by_turn: HashMap<&str, &recon::Run> = app.runs.iter().map(|run| (run.turn_id.as_str(), run)).collect();
+    let runs_by_id: HashMap<&str, &recon::Run> = app.runs.iter().map(|run| (run.id.as_str(), run)).collect();
+    let answered: HashSet<&str> = app.messages.iter().filter(|message| message.role == "assistant")
+        .filter_map(|message| message.run_id.as_deref()).collect();
+    let mut calls_by_run: HashMap<&str, Vec<(usize, &recon::Call)>> = HashMap::new();
+    for (index, call) in app.calls.iter().enumerate() {
+        if let Some(run_id) = call.run_id.as_deref() {
+            calls_by_run.entry(run_id).or_default().push((index, call));
+        }
+    }
     // One live answer per open thread. It is appended after every tool row so a plan-log
     // refresh or a late call cannot push the text the user is reading off the bottom.
     let mut live: Option<ChatBlock> = None;
     for (index, message) in app.messages.iter().enumerate() {
         if message.role == "user" {
             blocks.push(ChatBlock {
+                part: InvestigationPart::UserQuery,
                 key: format!("user:{}", message.id),
                 title: "You".into(),
                 body: message.content.clone(),
@@ -684,22 +699,54 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                 message_index: Some(index),
                 has_memory: false,
             });
-            if let Some(run) = app.runs.iter().find(|run| run.turn_id == message.id) {
+            if let Some(run) = runs_by_turn.get(message.id.as_str()).copied() {
                 blocks.push(plan_block(
                     run,
                     &app.calls,
                     app.expanded.contains(&format!("plan:{}", run.id)),
                 ));
-                for (call_index, call) in app.calls.iter().enumerate() {
-                    if call.run_id.as_deref() == Some(run.id.as_str()) {
-                        used.insert(call_index);
-                        blocks.push(tool_block(app, call));
+                if !app.expanded.contains(&format!("plan:{}", run.id)) {
+                    if let Some(error) = run.error.as_deref().filter(|error| !error.is_empty()) {
+                        blocks.push(ChatBlock {
+                            part: InvestigationPart::Status,
+                            key: format!("status:error:{}", run.id),
+                            title: format!("! Plan error · {}", clip_chars(error, 160)),
+                            body: String::new(),
+                            collapsible: false,
+                            message_index: None,
+                            has_memory: false,
+                        });
                     }
                 }
-                let answered = app.messages.iter().any(|item| {
-                    item.role == "assistant" && item.run_id.as_deref() == Some(run.id.as_str())
-                });
-                if !answered && app.running_thread(&run.thread_id) {
+                if app.expanded.contains(&format!("plan:{}", run.id)) {
+                    if let Some(plan) = run.plan_json.as_deref().and_then(|raw| serde_json::from_str::<Plan>(raw).ok()) {
+                        if !plan.directives.is_empty() {
+                            let key = format!("plan-details:{}", run.id);
+                            let body = if app.expanded.contains(&key) {
+                                question_plan_lines(run, &plan, &app.calls).join("\n")
+                            } else {
+                                String::new()
+                            };
+                            blocks.push(ChatBlock {
+                                part: InvestigationPart::PlanDiagnostics,
+                                key,
+                                title: "Plan details · picker, bindings, and execution notes".into(),
+                                body,
+                                collapsible: true,
+                                message_index: None,
+                                has_memory: false,
+                            });
+                        }
+                    }
+                }
+                if let Some(calls) = calls_by_run.get(run.id.as_str()) {
+                    for &(call_index, call) in calls {
+                        used.insert(call_index);
+                        blocks.push(tool_block(app, call, call_index));
+                    }
+                }
+                let has_answer = answered.contains(run.id.as_str());
+                if !has_answer && app.running_thread(&run.thread_id) {
                     let stage = app.stage_label(&run.thread_id);
                     let deadline = app.deadline_label(&run.thread_id);
                     let title = if deadline.is_empty() {
@@ -708,6 +755,7 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                         format!("· {stage} · {deadline}")
                     };
                     blocks.push(ChatBlock {
+                        part: InvestigationPart::Status,
                         key: format!("status:{}", run.id),
                         title,
                         body: String::new(),
@@ -716,9 +764,10 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                         has_memory: false,
                     });
                 }
-                if !answered {
+                if !has_answer {
                     if let Some((title, body)) = app.live_bubble(&run.thread_id) {
                         live = Some(ChatBlock {
+                            part: InvestigationPart::StreamingSynthesis,
                             key: format!("stream:{}", run.id),
                             title,
                             body,
@@ -736,6 +785,7 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                 .map(|items| !items.is_empty())
                 .unwrap_or(false);
             blocks.push(ChatBlock {
+                part: InvestigationPart::Synthesis,
                 key: format!("assistant:{}", message.id),
                 title: "Recon".into(),
                 body: message.content.clone(),
@@ -743,11 +793,42 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                 message_index: Some(index),
                 has_memory: memories,
             });
+            if let Some(run) = message.run_id.as_deref().and_then(|id| runs_by_id.get(id).copied())
+            {
+                if let Some(plan) = run
+                    .plan_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Plan>(raw).ok())
+                {
+                    if !plan.directives.is_empty() {
+                        blocks.push(ChatBlock {
+                            part: InvestigationPart::DirectiveAssessment,
+                            key: format!("status:coverage:{}", message.id),
+                            title: coverage_summary(&plan, &message.content),
+                            body: String::new(),
+                            collapsible: false,
+                            message_index: None,
+                            has_memory: false,
+                        });
+                    }
+                }
+                let memory_count = app.answer_memories.get(&message.id).map_or(0, Vec::len);
+                let call_count = calls_by_run.get(run.id.as_str()).map_or(0, Vec::len);
+                blocks.push(ChatBlock {
+                    part: InvestigationPart::TurnSummary,
+                    key: format!("status:summary:{}", message.id),
+                    title: format!("Investigation · {} · {call_count} evidence calls · {memory_count} linked memories", run.state),
+                    body: String::new(),
+                    collapsible: false,
+                    message_index: None,
+                    has_memory: false,
+                });
+            }
         }
     }
     for (call_index, call) in app.calls.iter().enumerate() {
         if used.insert(call_index) {
-            blocks.push(tool_block(app, call));
+            blocks.push(tool_block(app, call, call_index));
         }
     }
     if let Some(block) = live {
@@ -756,55 +837,58 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
     blocks
 }
 
+fn coverage_summary(plan: &Plan, answer: &str) -> String {
+    let mut met = 0;
+    let mut partial = 0;
+    let mut not_met = 0;
+    let mut unassessed = Vec::new();
+    for directive in &plan.directives {
+        let prefix = format!("{}:", directive.id.to_ascii_lowercase());
+        let assessment = answer.lines().find_map(|line| {
+            let line = line.trim().to_ascii_lowercase();
+            line.strip_prefix(&prefix).map(|tail| tail.trim().to_string())
+        });
+        match assessment.as_deref() {
+            Some(text) if text.starts_with("partly met") || text.starts_with("partially met") => partial += 1,
+            Some(text) if text.starts_with("not met") => not_met += 1,
+            Some(text) if text.starts_with("met") => met += 1,
+            _ => unassessed.push(directive.id.to_uppercase()),
+        }
+    }
+    let mut parts = vec![format!("Coverage · {met} met · {partial} partial · {not_met} not met")];
+    if !unassessed.is_empty() {
+        parts.push(format!("{} unassessed", unassessed.join(", ")));
+    }
+    parts.join(" · ")
+}
+
 fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock {
     let plan = run
         .plan_json
         .as_deref()
         .and_then(|raw| serde_json::from_str::<Plan>(raw).ok());
     let title = match &plan {
-        Some(plan) if !plan.directives.is_empty() => {
-            let transport = if plan.picker_transport.is_empty() {
-                "picking"
-            } else {
-                plan.picker_transport.as_str()
-            };
-            let mode = argos_osint_core::intel_recon::ReportMode::parse(&plan.report_mode)
-                .map(|mode| format!(" · {}", mode.title()))
-                .unwrap_or_default();
-            format!(
-                "Recon log · tool picker ({transport}){mode} · {}",
-                clip_chars(&plan.directives[0].goal, 64)
-            )
-        }
         Some(plan) => {
-            let label = if plan.strategy.is_empty() {
-                "Recon log"
-            } else {
-                strategy_label(&plan.strategy)
-            };
-            let rationale = clip_chars(
-                if plan.strategy_rationale.is_empty() {
-                    if plan.objective.is_empty() {
-                        "Recon log"
-                    } else {
-                        plan.objective.as_str()
-                    }
-                } else {
-                    plan.strategy_rationale.as_str()
-                },
-                72,
-            );
-            format!("Recon log · {label} · {rationale}")
+            let mut parts = vec![format!("{} Plan", if plan.planning_mode == "tool_picker_fallback" { "!" } else { "◆" })];
+            if plan.planning_mode == "tool_picker_fallback" {
+                parts.push("deterministic fallback".into());
+            }
+            if !plan.directives.is_empty() {
+                parts.push(format!("{} directives", plan.directives.len()));
+            }
+            parts.push(format!("{} tools", plan.calls.len()));
+            if let Some(mode) = argos_osint_core::intel_recon::ReportMode::parse(&plan.report_mode) {
+                parts.push(mode.title().into());
+            }
+            parts.join(" · ")
         }
-        None => "Recon log · waiting for a plan".into(),
+        None => "◌ Plan · selecting tools".into(),
     };
     let body = if !open {
         String::new()
     } else {
         match plan {
-            Some(plan) if !plan.directives.is_empty() => {
-                question_plan_lines(run, &plan, calls).join("\n")
-            }
+            Some(plan) if !plan.directives.is_empty() => plan_summary_lines(run, &plan, calls).join("\n"),
             Some(plan) => {
                 let mut lines = Vec::new();
                 if !plan.objective.is_empty() {
@@ -898,6 +982,7 @@ fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock 
         }
     };
     ChatBlock {
+        part: InvestigationPart::Plan,
         key: format!("plan:{}", run.id),
         title,
         body,
@@ -907,10 +992,43 @@ fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock 
     }
 }
 
-/// Decision row for a question-driven turn: the three derived questions, the tool
-/// picker and its model snapshot, the ordered tools with dependencies and the questions
-/// they serve, the inputs bound for each step, and any fallback requests. Pick
-/// probabilities stay in `plan_json` (`recon show`); they are not rendered here.
+/// Analyst-facing plan content. Execution state stays separate from directive support.
+fn plan_summary_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push("Directives · evidence assessment pending".into());
+    for directive in &plan.directives {
+        lines.push(format!("  {}  {}  ○ unassessed", directive.id.to_uppercase(), directive.goal));
+    }
+    if !plan.calls.is_empty() {
+        lines.push(String::new());
+        lines.push("Collection strategy".into());
+    }
+    for (index, step) in plan.calls.iter().enumerate() {
+        let name = osint::definition(&step.tool_id)
+            .map(|tool| tool.name)
+            .unwrap_or(step.tool_id.as_str());
+        let state = matching_call(calls, step)
+            .map(|call| call.status.as_str())
+            .unwrap_or(step.status.as_str());
+        let state = if state.is_empty() { "pending" } else { state };
+        let serves = if step.reason.is_empty() { String::new() } else { format!(" · {}", step.reason) };
+        let depends = if step.depends_on.is_empty() { String::new() } else { format!(" · after {}", step.depends_on.join(", ")) };
+        lines.push(format!("  {}  {name}{serves}{depends} · {state}", index + 1));
+    }
+    if !plan.fallback_requests.is_empty() {
+        lines.push(String::new());
+        lines.push("Fallbacks".into());
+        for fallback in &plan.fallback_requests {
+            lines.push(format!("  · {}", clip_chars(fallback, 100)));
+        }
+    }
+    if let Some(error) = run.error.as_deref().filter(|error| !error.is_empty()) {
+        lines.push(format!("Run error: {}", clip_chars(error, 160)));
+    }
+    lines
+}
+
+/// Picker, binding, and input details exposed by the secondary disclosure.
 fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> Vec<String> {
     let mut lines = Vec::new();
     if !plan.report_mode.is_empty() {
@@ -1055,6 +1173,13 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> 
             lines.push(format!("   {note}"));
         }
     }
+    if !plan.picks.is_empty() {
+        lines.push("Picker decisions:".into());
+        for pick in &plan.picks {
+            let confidence = pick.confidence.map(|value| format!(" · p={value:.2}")).unwrap_or_default();
+            lines.push(format!("   {}. {} · {}{confidence}", pick.position, pick.tool_id, pick.outcome));
+        }
+    }
     if !plan.fallback_requests.is_empty() {
         lines.push("Fallback requests:".into());
         for request in &plan.fallback_requests {
@@ -1167,11 +1292,25 @@ pub fn tool_result_log(call: &recon::Call) -> Option<ToolLog> {
     })
 }
 
-fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
+fn tool_block(app: &App, call: &recon::Call, call_index: usize) -> ChatBlock {
     let name = osint::definition(&call.tool_id)
         .map(|tool| tool.name)
         .unwrap_or(call.tool_id.as_str());
     let key = format!("tool:{}", call.id);
+    let state = match call.status.as_str() {
+        "completed" => "✓ complete",
+        "no_results" => "○ no results",
+        "failed" | "timeout" => "✗ failed",
+        "cancelled" => "− cancelled",
+        _ => "◌ running",
+    };
+    let count = call
+        .result
+        .as_ref()
+        .and_then(|result| result_count(&result.observations))
+        .map(|count| format!(" · {count} results"))
+        .unwrap_or_default();
+    let title = format!("{state} · E{} · {name}{count}", call_index + 1);
     let cache = call
         .result
         .as_ref()
@@ -1185,8 +1324,9 @@ fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
     };
     if !app.expanded.contains(&key) {
         return ChatBlock {
+            part: InvestigationPart::ToolActivity,
             key,
-            title: format!("{name} · {}{cache}{inputs}", call.status),
+            title,
             body: String::new(),
             collapsible: true,
             message_index: None,
@@ -1206,8 +1346,9 @@ fn tool_block(app: &App, call: &recon::Call) -> ChatBlock {
     }
     lines.push("Full result is in Logs.".into());
     ChatBlock {
+        part: InvestigationPart::ToolActivity,
         key,
-        title: format!("{name} · {}{inputs}", call.status),
+        title: format!("{title}{cache}{inputs}"),
         body: lines.join("\n"),
         collapsible: true,
         message_index: None,
@@ -1467,8 +1608,12 @@ fn disclosure_pieces(
         .map(|(text, _)| text.chars().count())
         .unwrap_or(0);
     let label_room = width.saturating_sub(marker_width + suffix_width).max(1);
-    let heading = if label.starts_with("Recon log") {
+    let heading = if label.starts_with("! Plan") {
         Tone::Warn
+    } else if label.starts_with('✓') {
+        Tone::Success
+    } else if label.starts_with('✗') {
+        Tone::Error
     } else {
         Tone::Accent
     };
@@ -1665,7 +1810,7 @@ fn rows_for(app: &App, blocks: &[ChatBlock], width: usize) -> Vec<ChatRow> {
     let width = width.max(1);
     let mut rows = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
-        if block.key.starts_with("user:") {
+        if block.part == InvestigationPart::UserQuery {
             if index > 0 {
                 rows.push(row(index, false, false, false, RowFace::Plain, Vec::new()));
             }
@@ -1684,7 +1829,7 @@ fn rows_for(app: &App, blocks: &[ChatBlock], width: usize) -> Vec<ChatRow> {
             }
             continue;
         }
-        if block.key.starts_with("assistant:") {
+        if block.part == InvestigationPart::Synthesis {
             if index > 0 {
                 rows.push(row(index, false, false, false, RowFace::Plain, Vec::new()));
             }
@@ -1720,7 +1865,7 @@ fn rows_for(app: &App, blocks: &[ChatBlock], width: usize) -> Vec<ChatRow> {
             }
             continue;
         }
-        if block.key.starts_with("status:") {
+        if matches!(block.part, InvestigationPart::Status | InvestigationPart::DirectiveAssessment | InvestigationPart::TurnSummary) {
             let mut pieces = vec![Piece {
                 text: block.title.clone(),
                 tone: Tone::Dim,
@@ -1729,7 +1874,7 @@ fn rows_for(app: &App, blocks: &[ChatBlock], width: usize) -> Vec<ChatRow> {
             rows.push(row(index, true, false, false, RowFace::Plain, pieces));
             continue;
         }
-        if block.key.starts_with("stream:") {
+        if block.part == InvestigationPart::StreamingSynthesis {
             if index > 0 {
                 rows.push(row(index, false, false, false, RowFace::Plain, Vec::new()));
             }
@@ -1791,7 +1936,7 @@ fn transcript_rect(app: &App) -> Rect {
     if app.module != Some(ModuleId::Recon) || !app.recon_chat {
         return Rect::default();
     }
-    inset(chat_areas(body).0)
+    inset(recon_workspace(app, chat_areas(body).0).0)
 }
 
 fn chat_view(app: &App) -> (Rect, u16, Vec<ChatRow>) {
@@ -2988,7 +3133,7 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
     }
     let layout = chrome(app.screen, app);
     if contains(layout.header, x, y) {
-        for (module, rect) in header_tabs(layout.header) {
+        for (module, rect) in header_tabs(layout.header, app.module) {
             if contains(rect, x, y) {
                 return Some(match module {
                     None => Target::Home,
@@ -3688,6 +3833,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.module.is_some() {
         draw_header(frame, app, &layout);
     }
+    if area.width < 40 || area.height < 12 {
+        frame.render_widget(
+            Paragraph::new("Resize terminal to at least 40×12\nCtrl+K commands · ? help · Ctrl+Q quit")
+                .style(theme::dim())
+                .wrap(Wrap { trim: false }),
+            layout.body,
+        );
+        frame.render_widget(footer_line(app), layout.footer);
+        if app.overlay != Overlay::None {
+            draw_overlay(frame, app);
+        }
+        return;
+    }
     match app.module {
         None => draw_home(frame, app, layout.body),
         Some(ModuleId::Intel) => draw_intel(frame, app, layout.body),
@@ -3719,10 +3877,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_header(frame: &mut Frame, app: &App, layout: &Chrome) {
     let mut spans = Vec::new();
     let mut used = 0u16;
-    for (module, rect) in header_tabs(layout.header) {
+    for (module, rect) in header_tabs(layout.header, app.module) {
         used = used.max(rect.x + rect.width - layout.header.x);
         let label = match module {
-            None => "argos",
+            None => "Argos",
             Some(id) => id.title(),
         };
         let active = match module {
@@ -3743,19 +3901,35 @@ fn draw_header(frame: &mut Frame, app: &App, layout: &Chrome) {
         } else {
             theme::dim()
         };
-        spans.push(Span::styled(format!("│ {label} │"), style));
+        spans.push(Span::styled(
+            if module.is_none() {
+                format!("{label}  › ")
+            } else {
+                format!("{label}  ")
+            },
+            style,
+        ));
     }
     let detail = header_detail(app);
+    let activity = if app.jobs.counts.active > 0 {
+        format!("◌ {} active", app.jobs.counts.active)
+    } else {
+        String::new()
+    };
     let room = layout.header.width.saturating_sub(used.saturating_add(1)) as usize;
-    if room > 4 && !detail.is_empty() {
+    let detail_room = room.saturating_sub(activity.chars().count().saturating_add(2));
+    if detail_room > 4 && !detail.is_empty() {
         spans.push(Span::styled(
-            format!(
-                " {:>width$}",
-                fit(&detail, room.saturating_sub(1)),
-                width = room
-            ),
+            format!("› {}", fit(&detail, detail_room.saturating_sub(2))),
             theme::dim(),
         ));
+    }
+    if !activity.is_empty() && room >= activity.chars().count().saturating_add(2) {
+        let content_width: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+        let pad = (layout.header.width as usize)
+            .saturating_sub(content_width.saturating_add(activity.chars().count()));
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(activity, theme::accent()));
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(theme::text()),
@@ -3830,7 +4004,7 @@ fn footer_line(app: &App) -> Paragraph<'static> {
             (
                 Some(ModuleId::Recon),
                 Target::Transcript | Target::ChatHeader(_) | Target::ChatBody(_),
-            ) => "↑↓ select · ←→ fold · Enter toggle · Tab prompt",
+            ) => "↑↓ select · ←→ fold · o source · Enter toggle · Tab prompt",
             (Some(ModuleId::Recon), _) if !app.recon_chat => {
                 "↑↓ open · Ctrl+N new · Ctrl+K · Esc home"
             }
@@ -4100,9 +4274,13 @@ fn draw_recon_dashboard(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_recon_chat(frame: &mut Frame, app: &App, area: Rect) {
-    let (transcript, run_actions) = chat_areas(area);
+    let (workspace, run_actions) = chat_areas(area);
+    let (transcript, context) = recon_workspace(app, workspace);
     frame.render_widget(pane(" transcript "), transcript);
     draw_transcript(frame, app, transcript);
+    if let Some(context) = context {
+        draw_recon_context(frame, app, context);
+    }
     let run_buttons = button_areas(run_actions, 3);
     draw_button(frame, app, ButtonId::CancelRun, "Cancel", run_buttons[0]);
     draw_button(frame, app, ButtonId::ResumeRun, "Resume", run_buttons[1]);
@@ -4112,6 +4290,36 @@ fn draw_recon_chat(frame: &mut Frame, app: &App, area: Rect) {
         ButtonId::RetryInsights,
         recall_label(app),
         run_buttons[2],
+    );
+}
+
+fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
+    let mut lines = vec!["Investigation".to_string(), String::new()];
+    if let Some(thread) = app.threads.iter().find(|thread| Some(&thread.id) == app.selected_thread.as_ref()) {
+        lines.push(clip_chars(&thread.title, 27));
+    }
+    if !app.recon_stage.is_empty() {
+        lines.push(format!("Stage · {}", app.recon_stage));
+    }
+    lines.push(String::new());
+    if let Some(run) = app.runs.last() {
+        if let Some(plan) = run.plan_json.as_deref().and_then(|raw| serde_json::from_str::<Plan>(raw).ok()) {
+            lines.push(format!("Directives · {}", plan.directives.len()));
+            for directive in plan.directives.iter().take(5) {
+                lines.push(format!("{}  {}", directive.id.to_uppercase(), clip_chars(&directive.goal, 23)));
+            }
+        }
+    }
+    lines.push(String::new());
+    lines.push(format!("Evidence calls · {}", app.calls.len()));
+    let memories: usize = app.answer_memories.values().map(Vec::len).sum();
+    lines.push(format!("Linked memories · {memories}"));
+    frame.render_widget(
+        Paragraph::new(lines.join("\n"))
+            .style(theme::dim())
+            .block(Block::default().borders(Borders::LEFT).border_style(theme::dim()))
+            .wrap(Wrap { trim: false }),
+        area,
     );
 }
 
@@ -6928,7 +7136,22 @@ fn draw_system(frame: &mut Frame, app: &App, area: Rect) {
 
 fn popup_text(app: &App) -> String {
     match &app.overlay {
-        Overlay::Help => help_text(app).to_string(),
+        Overlay::Help => {
+            let mut lines = vec![format!("{} commands", app.module.map_or("Home", ModuleId::title)), String::new()];
+            for command in super::commands::matching("", app.module) {
+                if command.module.is_some() && command.module != app.module {
+                    continue;
+                }
+                if command.category == "Navigation" && command.id != "home" {
+                    continue;
+                }
+                let shortcut = if command.shortcut.is_empty() { String::new() } else { format!(" · {}", command.shortcut) };
+                lines.push(format!("{}{} — {}", command.label, shortcut, command.description));
+            }
+            lines.push(String::new());
+            lines.push(help_text(app).to_string());
+            lines.join("\n")
+        },
         Overlay::Block { title, body } => format!("{title}\n\n{body}"),
         Overlay::Memories { message_id } => memory_popup(app, message_id),
         Overlay::Choice(_) => {
@@ -7014,7 +7237,7 @@ fn help_text(app: &App) -> &'static str {
         Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nThe mode button under the full article opens Verify / Explain / Assess Outlook / Full Assessment\nJobs pane tracks focus-brief background progress and recon reports\nEsc returns from briefing to bulletin, or from bulletin to home",
         Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, Repair memories, and Delete sit between the map and those panes. Resume continues the selected cycle when it stopped while saving or indexing memories. Repair memories rechecks saved cycles and requeues missing memories or vectors (progress in Jobs). When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
-        Some(ModuleId::Recon) => "Recon chat\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between the transcript and the prompt\n↑↓ select a message, recon log, or tool\n←→ or h/l fold the selected recon log or tool\nEnter toggles that fold · f opens the full text\n◉ brain opens the memories Synthesis used\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
+        Some(ModuleId::Recon) => "Recon investigation\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between transcript and prompt\n↑↓ select a query, plan, evidence activity, or answer\n←→ or h/l fold the selected Plan or activity\nEnter toggles that fold · o inspects the captured source · f opens full text\n◉ brain opens memories used by Synthesis\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "Profile\n\nInspect host hardware and Argos storage\nRefresh hardware re-reads the host profile\nData, index, and cache paths are listed only when they exist\nEvents moved to Logs; background work is in Jobs\nEsc returns home",
         Some(ModuleId::Logs) => "Logs\n\nDurable events from every app and background worker, kept 24 hours\nThe header counts errors, warnings, and failures in the last hour\nFilter narrows by text. Level, App, and the job filter narrow further\n↑↓ select an event · Enter or click folds its detail\nf toggles live follow. Moving off the newest event pauses it\no or Open job shows the event's job in Jobs\nOpened from Jobs, Esc or Back to job returns there\nClear events removes events only; jobs, results, and memories stay\nCtrl+U/Ctrl+D and the wheel scroll the list",
         Some(ModuleId::Jobs) => "Jobs\n\nBackground work with timing, attempts, and errors\nActive work is listed first, then recent history, then service workers\nStatus and App filter the table. Filter matches title, id, operation, or error\n↑↓ select a job · Enter opens its detail (full screen when narrow)\nl or View logs opens Logs filtered to the job and its phases\nRetry failed requeues only failed index or summary tasks; completed work is kept\nOpen source jumps to the Atlas cycle or investigation when there is one\nUnknown historic timing shows Unavailable\nEsc closes the detail, then returns home",
@@ -7138,9 +7361,19 @@ fn draw_palette(frame: &mut Frame, app: &App) {
     {
         let selected = index == app.palette_sel;
         let mark = if selected { "▸ " } else { "  " };
+        let hint = if !item.enabled {
+            item.disabled_reason.clone()
+        } else if item.shortcut.is_empty() {
+            item.description.clone()
+        } else {
+            format!("{} · {}", item.shortcut, item.description)
+        };
+        let label = format!("{mark}{}  ·  {hint}", item.label);
         frame.render_widget(
-            Paragraph::new(fit(&format!("{mark}{}", item.label), inner.width as usize)).style(
-                if selected {
+            Paragraph::new(fit(&label, inner.width as usize)).style(
+                if !item.enabled {
+                    theme::card_dim()
+                } else if selected {
                     theme::selected()
                 } else {
                     theme::card_text()
@@ -7410,6 +7643,21 @@ mod tests {
     use argos_osint_core::recon::{Binding, Call, Directive, PickRecord, PlanCall};
 
     #[test]
+    fn coverage_only_counts_explicit_assessments() {
+        let plan = Plan {
+            directives: vec![
+                Directive { id: "d1".into(), ..Default::default() },
+                Directive { id: "d2".into(), ..Default::default() },
+                Directive { id: "d3".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let summary = coverage_summary(&plan, "D1: met [call-a]\nD2: partly met [call-b]\nD3: still being assessed");
+        assert!(summary.contains("1 met · 1 partial · 0 not met"));
+        assert!(summary.contains("D3 unassessed"));
+    }
+
+    #[test]
     fn decision_row_shows_directives_picker_order_bindings_and_fallbacks() {
         let directive = |id: &str, goal: &str, targets: &[&str]| Directive {
             id: id.into(),
@@ -7565,10 +7813,14 @@ mod tests {
         assert!(
             block
                 .title
-                .starts_with("Recon log · tool picker (decisions) · Explain ·"),
+                .starts_with("◆ Plan · 3 directives · 2 tools · Explain"),
             "{}",
             block.title
         );
+        assert!(block.body.contains("Collection strategy"));
+        assert!(block.body.contains("○ unassessed"));
+        assert!(!block.body.contains("Tool picker: decisions"));
+        let details = question_plan_lines(&run, &plan, &calls).join("\n");
         for needle in [
             "Report mode: Explain",
             "Directives (fallback set):",
@@ -7589,14 +7841,12 @@ mod tests {
             "s1 firecrawl_search: rules found 1; Recon model added 0",
             "Fallback requests:",
         ] {
-            assert!(block.body.contains(needle), "missing {needle:?} in\n{}", block.body);
+            assert!(details.contains(needle), "missing {needle:?} in\n{details}");
         }
+        assert!(details.contains("p=0.87"), "picker confidence remains in details");
+        assert!(!block.body.contains("p=0.87"), "picker confidence stays out of the main Plan");
         assert!(
-            !block.body.contains("0.87"),
-            "probabilities stay out of the row"
-        );
-        assert!(
-            !block.body.contains("Jane Roe role"),
+            !details.contains("Jane Roe role"),
             "raw observations stay out of the decision row"
         );
         let logged = tool_result_log(&calls[0]).unwrap();

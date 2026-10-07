@@ -20,6 +20,7 @@ pub enum Tone {
     Link,
     Warn,
     Error,
+    Success,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +48,7 @@ pub fn style(tone: Tone) -> Style {
         Tone::Link => theme::accent().add_modifier(Modifier::UNDERLINED),
         Tone::Warn => theme::warn(),
         Tone::Error => theme::error(),
+        Tone::Success => Style::default().fg(theme::GREEN).bg(theme::BG),
     }
 }
 

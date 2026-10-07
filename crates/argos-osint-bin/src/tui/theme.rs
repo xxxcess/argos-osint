@@ -1,21 +1,23 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders};
 
-pub const BG: Color = Color::Rgb(6, 14, 22);
-pub const SURFACE: Color = Color::Rgb(10, 22, 32);
-pub const BORDER: Color = Color::Rgb(28, 72, 92);
-pub const ACCENT: Color = Color::Rgb(72, 214, 196);
-pub const GREEN: Color = Color::Rgb(64, 210, 130);
-pub const TEXT: Color = Color::Rgb(214, 232, 236);
-pub const DIM: Color = Color::Rgb(120, 150, 162);
-pub const MUTED: Color = Color::Rgb(78, 104, 116);
-pub const SELECT: Color = Color::Rgb(14, 92, 72);
-pub const WARN: Color = Color::Rgb(232, 176, 96);
-pub const RED: Color = Color::Rgb(232, 112, 104);
+// Semantic colors shared by every app. The aliases keep existing widgets on one
+// palette while their layouts are migrated to the quieter shell.
+pub const BG: Color = Color::Rgb(20, 20, 20);
+pub const SURFACE: Color = Color::Rgb(30, 30, 30);
+pub const BORDER: Color = Color::Rgb(83, 83, 83);
+pub const ACCENT: Color = Color::Rgb(135, 191, 255);
+pub const GREEN: Color = Color::Rgb(152, 195, 121);
+pub const TEXT: Color = Color::Rgb(232, 232, 232);
+pub const DIM: Color = Color::Rgb(181, 181, 181);
+pub const MUTED: Color = Color::Rgb(145, 145, 145);
+pub const SELECT: Color = Color::Rgb(48, 48, 48);
+pub const WARN: Color = Color::Rgb(229, 192, 123);
+pub const RED: Color = Color::Rgb(240, 138, 138);
 /// Raised band behind a user prompt, the same role as Grok Build's `bg_light` prompt band.
-pub const USER_BAND: Color = Color::Rgb(12, 36, 44);
+pub const USER_BAND: Color = SURFACE;
 /// Fenced code background, quieter than the user band.
-pub const CODE_BG: Color = Color::Rgb(10, 28, 36);
+pub const CODE_BG: Color = Color::Rgb(37, 37, 37);
 
 pub fn panel(title: &str) -> Block<'static> {
     Block::default()
@@ -66,7 +68,7 @@ pub fn user_message() -> Style {
 
 pub fn selected() -> Style {
     Style::default()
-        .fg(GREEN)
+        .fg(TEXT)
         .bg(SELECT)
         .add_modifier(Modifier::BOLD)
 }

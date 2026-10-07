@@ -195,6 +195,11 @@ pub enum Overlay {
 pub struct PaletteItem {
     pub id: String,
     pub label: String,
+    pub description: String,
+    pub shortcut: String,
+    pub category: String,
+    pub enabled: bool,
+    pub disabled_reason: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -617,6 +622,7 @@ pub struct App {
     deadlines: HashMap<String, String>,
     /// False on the investigation list. True when a transcript fills the screen.
     pub recon_chat: bool,
+    pub recon_context_enabled: bool,
     pub scrolls: Scrolls,
     pub expanded: HashSet<String>,
     pub chat_sel: usize,
@@ -899,6 +905,7 @@ impl App {
             live_answers: HashMap::new(),
             deadlines: HashMap::new(),
             recon_chat: false,
+            recon_context_enabled: settings.tui_recon_context.unwrap_or(true),
             scrolls: Scrolls {
                 chat: chat_scroll,
                 ..Scrolls::default()
@@ -1208,36 +1215,30 @@ impl App {
     }
 
     pub fn palette_items(&self) -> Vec<PaletteItem> {
-        let query = self.palette_query.trim().to_ascii_lowercase();
-        let mut items = vec![
-            ("home", "Home"),
-            ("intel", "Open Intel"),
-            ("recon", "Open Recon"),
-            ("brain", "Open Brain"),
-            ("atlas", "Open Atlas"),
-            ("jobs", "Open Jobs"),
-            ("logs", "Open Logs"),
-            ("tools", "Open Tools (osint)"),
-            ("models", "Open Models (providers)"),
-            ("system", "Open System"),
-            ("profile", "Open Profile"),
-            ("new", "New investigation"),
-            ("sessions", "Investigation list"),
-            ("help", "Shortcuts"),
-            ("cancel", "Cancel running turn"),
-            ("resume", "Resume remaining steps"),
-            ("insights", "Toggle recall"),
-            ("create-memory", "Create memory"),
-            ("clear-log", "Clear events in Logs"),
-        ];
-        items.retain(|(id, label)| {
-            query.is_empty() || id.contains(&query) || label.to_ascii_lowercase().contains(&query)
-        });
-        items
+        super::commands::matching(&self.palette_query, self.module)
             .into_iter()
-            .map(|(id, label)| PaletteItem {
-                id: id.into(),
-                label: label.into(),
+            .filter(|command| command.module.is_none() || command.module == self.module)
+            .map(|command| PaletteItem {
+                id: command.id.into(),
+                label: command.label.into(),
+                description: command.description.into(),
+                shortcut: command.shortcut.into(),
+                category: command.category.into(),
+                enabled: match command.id {
+                    "cancel" => self.selected_thread.as_ref().is_some_and(|id| self.running_thread(id)),
+                    "resume" => self.runs.iter().any(|run| matches!(run.state.as_str(), "interrupted" | "failed"))
+                        && self.selected_thread.as_ref().is_some_and(|id| !self.running_thread(id)),
+                    "evidence" => super::ui::chat_blocks(self).get(self.chat_sel)
+                        .and_then(|block| block.key.strip_prefix("tool:"))
+                        .is_some_and(|id| self.calls.iter().any(|call| call.id == id && call.result.is_some())),
+                    _ => true,
+                },
+                disabled_reason: match command.id {
+                    "cancel" => "No running turn".into(),
+                    "resume" => "No interrupted or failed run to resume".into(),
+                    "evidence" => "Select a completed evidence activity".into(),
+                    _ => String::new(),
+                },
             })
             .collect()
     }
@@ -1250,6 +1251,53 @@ impl App {
         self.overlay = Overlay::Palette;
         self.palette_query.clear();
         self.palette_sel = 0;
+        self.scrolls.popup = 0;
+    }
+
+    fn open_selected_evidence(&mut self) {
+        if self.module != Some(ModuleId::Recon) || !self.recon_chat {
+            self.status = "Open an investigation to inspect evidence".into();
+            return;
+        }
+        let blocks = super::ui::chat_blocks(self);
+        let Some(call_id) = blocks
+            .get(self.chat_sel)
+            .and_then(|block| block.key.strip_prefix("tool:"))
+        else {
+            self.status = "Select an evidence activity row first".into();
+            return;
+        };
+        let Some((index, call)) = self.calls.iter().enumerate().find(|(_, call)| call.id == call_id) else {
+            self.status = "The captured source is no longer available".into();
+            return;
+        };
+        let Some(result) = call.result.as_ref() else {
+            self.status = "The selected call has no captured result yet".into();
+            return;
+        };
+        let name = osint::definition(&call.tool_id)
+            .map(|tool| tool.name)
+            .unwrap_or(call.tool_id.as_str());
+        let observations = serde_json::to_string_pretty(&result.observations)
+            .unwrap_or_else(|_| "Captured observations unavailable".into());
+        let observations: String = observations
+            .chars()
+            .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+            .take(12_000)
+            .collect();
+        let source: String = if result.source_url.is_empty() { "Unavailable" } else { &result.source_url }
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(500)
+            .collect();
+        let retrieved: String = result.retrieved_at.chars().filter(|ch| !ch.is_control()).take(80).collect();
+        self.overlay = Overlay::Block {
+            title: format!("Evidence E{} · {name}", index + 1),
+            body: format!(
+                "Captured source: {source}\nRetrieved: {}\nExecution: {}\nAssessment: unassessed\nCall: {}\n\n{}",
+                retrieved, call.status, call.id, observations
+            ),
+        };
         self.scrolls.popup = 0;
     }
 
@@ -1281,9 +1329,17 @@ impl App {
                 self.overlay = Overlay::Help;
                 self.scrolls.popup = 0;
             }
+            "palette" => self.open_palette(),
             "cancel" => self.activate_button(ButtonId::CancelRun),
             "resume" => self.activate_button(ButtonId::ResumeRun),
             "insights" => self.activate_button(ButtonId::RetryInsights),
+            "evidence" => self.open_selected_evidence(),
+            "context" => {
+                self.recon_context_enabled = !self.recon_context_enabled;
+                self.settings.tui_recon_context = Some(self.recon_context_enabled);
+                let saved = self.save_settings().map(|_| format!("Investigation context {}", if self.recon_context_enabled { "shown" } else { "hidden" }));
+                self.report(saved);
+            }
             "create-memory" => {
                 self.select(ModuleId::Brain.index());
                 self.activate_button(ButtonId::CreateMemory);
@@ -1292,6 +1348,34 @@ impl App {
                 self.select(ModuleId::Logs.index());
                 self.activate_button(ButtonId::ClearLog);
             }
+            "brain-pin" => self.activate_button(ButtonId::Pin),
+            "brain-back" => self.activate_button(ButtonId::BrainDetailBack),
+            "brain-summary-retry" => self.activate_button(ButtonId::SummaryRetry),
+            "brain-summary-logs" => self.activate_button(ButtonId::SummaryLogs),
+            "brain-summary-job" => self.activate_button(ButtonId::SummaryJob),
+            "brain-summary-model" => self.activate_button(ButtonId::SummaryModels),
+            "jobs-logs" => self.activate_button(ButtonId::JobsViewLogs),
+            "jobs-retry" => self.activate_button(ButtonId::JobsRetry),
+            "jobs-cancel" => self.activate_button(ButtonId::JobsCancel),
+            "jobs-source" => self.activate_button(ButtonId::JobsOpenSource),
+            "jobs-status" => self.activate_button(ButtonId::JobsStatus),
+            "jobs-app" => self.activate_button(ButtonId::JobsApp),
+            "logs-follow" => self.activate_button(ButtonId::LogsFollow),
+            "logs-job" => self.activate_button(ButtonId::LogsOpenJob),
+            "logs-back" => self.activate_button(ButtonId::LogsBack),
+            "logs-level" => self.activate_button(ButtonId::LogsLevel),
+            "logs-app" => self.activate_button(ButtonId::LogsApp),
+            "atlas-history" => self.activate_button(ButtonId::AtlasRuns),
+            "atlas-live" => self.activate_button(ButtonId::AtlasLive),
+            "atlas-run" => self.activate_button(ButtonId::AtlasRun),
+            "atlas-auto" => self.activate_button(ButtonId::AtlasAuto),
+            "atlas-resume" => self.activate_button(ButtonId::AtlasResume),
+            "atlas-repair" => self.activate_button(ButtonId::AtlasRepair),
+            "intel-search" => self.set_focus(Target::Field(FieldId::IntelSearch)),
+            "intel-recon" => self.activate_button(ButtonId::IntelReports),
+            "intel-refresh" => self.activate_button(ButtonId::IntelBodyRefresh),
+            "intel-retry" => self.activate_button(ButtonId::IntelBodyRetry),
+            "intel-job" => self.activate_button(ButtonId::IntelJobOpen),
             _ => {}
         }
     }
@@ -5207,7 +5291,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             Target::JobDetail => self.set_focus(Target::JobDetail),
             Target::Choice(index) if self.overlay == Overlay::Palette => {
-                if let Some(id) = self.palette_items().get(index).map(|item| item.id.clone()) {
+                if let Some(id) = self.palette_items().get(index).filter(|item| item.enabled).map(|item| item.id.clone()) {
                     self.run_palette(&id);
                 }
             }
@@ -5241,6 +5325,33 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             .unwrap_or(value.len());
         value.insert(byte, character);
         self.cursor += 1;
+        self.after_field_edit();
+    }
+
+    fn edit_paste(&mut self, pasted: &str) {
+        let Target::Field(field) = self.focus else {
+            return;
+        };
+        if is_picker_field(field) || self.overlay != Overlay::None {
+            return;
+        }
+        let multiline = field == FieldId::Composer;
+        let sanitized: String = pasted
+            .chars()
+            .filter(|ch| *ch == '\n' && multiline || !ch.is_control())
+            .collect();
+        if sanitized.is_empty() {
+            return;
+        }
+        let cursor = self.cursor.min(self.field(field).chars().count());
+        let value = self.field_mut(field);
+        let byte = value
+            .char_indices()
+            .nth(cursor)
+            .map(|(byte, _)| byte)
+            .unwrap_or(value.len());
+        value.insert_str(byte, &sanitized);
+        self.cursor = cursor + sanitized.chars().count();
         self.after_field_edit();
     }
 
@@ -5458,7 +5569,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 }
                 KeyCode::Enter => {
                     if let Some(item) = self.palette_items().get(self.palette_sel).cloned() {
-                        self.run_palette(&item.id);
+                        if item.enabled {
+                            self.run_palette(&item.id);
+                        } else {
+                            self.status = item.disabled_reason;
+                        }
                     }
                 }
                 KeyCode::Backspace => {
@@ -5680,6 +5795,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 super::ui::fold_chat(self, true);
             }
             KeyCode::Char('e') if self.transcript_focused() => super::ui::toggle_chat(self),
+            KeyCode::Char('o') if self.transcript_focused() => self.open_selected_evidence(),
             KeyCode::Char('f') if self.transcript_focused() => {
                 super::ui::open_block(self, self.chat_sel);
             }
@@ -6481,6 +6597,10 @@ pub async fn run(mut app: App) -> Result<()> {
                     }
                     dirty = true;
                 }
+                Event::Paste(text) => {
+                    app.edit_paste(&text);
+                    dirty = true;
+                }
                 Event::Mouse(mouse) => {
                     app.handle_mouse(mouse);
                     dirty |= mouse_dirties(mouse.kind);
@@ -6623,6 +6743,7 @@ mod tests {
             live_answers: HashMap::new(),
             deadlines: HashMap::new(),
             recon_chat: false,
+            recon_context_enabled: true,
             scrolls: Scrolls::default(),
             expanded: HashSet::new(),
             chat_sel: 0,
@@ -6774,6 +6895,34 @@ mod tests {
         for character in text.chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
+    }
+
+    #[test]
+    fn multiline_paste_stays_in_composer_and_does_not_run_shortcuts() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.set_focus(Target::Field(FieldId::Composer));
+        app.edit_paste("Who? /new 123\nSearch evidence");
+        assert_eq!(app.input, "Who? /new 123\nSearch evidence");
+        assert_eq!(app.module, Some(ModuleId::Recon));
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn unavailable_palette_action_stays_visible_and_does_not_execute() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.overlay = Overlay::Palette;
+        app.palette_query = "cancel".into();
+        let item = app.palette_items().into_iter().find(|item| item.id == "cancel").unwrap();
+        assert!(!item.enabled);
+        assert_eq!(item.disabled_reason, "No running turn");
+        app.palette_sel = 0;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.overlay, Overlay::Palette);
+        assert!(!app.palette_items().iter().any(|item| item.id == "jobs-retry"));
     }
 
     #[test]
@@ -7654,6 +7803,18 @@ mod tests {
             .expect("tool row")
             .title;
         assert!(title.contains("query=Jane Roe"), "{title}");
+        assert!(title.contains("E1"), "{title}");
+        app.chat_sel = 0;
+        app.open_selected_evidence();
+        if let Overlay::Block { title, body } = &app.overlay {
+            assert!(title.contains("E1"));
+            assert!(body.contains("https://example.test/jane"));
+            assert!(body.contains("Jane Roe role"));
+            assert!(body.contains("Assessment: unassessed"));
+        } else {
+            panic!("expected captured source inspector");
+        }
+        app.overlay = Overlay::None;
         app.select(ModuleId::Logs.index());
         let index = app
             .logs
@@ -7719,6 +7880,26 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn recon_context_hides_on_narrow_screen_without_changing_preference() {
+        let mut app = app();
+        let dir = tempfile::tempdir().unwrap();
+        app.settings_path = dir.path().join("config.toml");
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        let wide = buffer_text(&render(&mut app, 130, 32));
+        assert!(wide.contains("Evidence calls"));
+        let narrow = buffer_text(&render(&mut app, 80, 24));
+        assert!(!narrow.contains("Evidence calls"));
+        assert!(app.recon_context_enabled);
+        app.run_palette("context");
+        assert!(!app.recon_context_enabled);
+        let saved = std::fs::read_to_string(&app.settings_path).unwrap();
+        assert!(saved.contains("tui_recon_context = false"));
+        let wide_hidden = buffer_text(&render(&mut app, 130, 32));
+        assert!(!wide_hidden.contains("Evidence calls"));
     }
 
     fn register(app: &App, id: &str, app_name: &str, title: &str) {
@@ -7819,9 +8000,14 @@ mod tests {
             assert_eq!(app.module, Some(module), "slash {alias}");
         }
         let ids: Vec<String> = app.palette_items().into_iter().map(|i| i.id).collect();
-        for id in ["jobs", "logs", "tools", "models", "system", "profile", "clear-log"] {
+        for id in ["jobs", "logs", "tools", "models", "profile"] {
             assert!(ids.contains(&id.to_string()), "{id}");
         }
+        app.select(ModuleId::Logs.index());
+        assert!(app.palette_items().iter().any(|item| item.id == "clear-log"));
+        app.palette_query = "system".into();
+        assert!(app.palette_items().iter().any(|item| item.id == "profile"));
+        app.palette_query.clear();
         // Help and the header agree with the order.
         app.go_home();
         app.overlay = Overlay::Help;
@@ -7833,9 +8019,8 @@ mod tests {
         app2.select(ModuleId::Jobs.index());
         let header = buffer_text(&render(&mut app2, 160, 40));
         let first = header.lines().next().unwrap();
-        let order = ["Intel", "Atlas", "Brain", "Recon", "Jobs", "Logs", "Tools", "Models", "Profile"];
-        let positions: Vec<usize> = order.iter().map(|label| first.find(label).unwrap()).collect();
-        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{first}");
+        assert!(first.contains("Argos  › Jobs  ›"), "{first}");
+        assert!(!first.contains("Intel"), "{first}");
     }
 
     #[test]

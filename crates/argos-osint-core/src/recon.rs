@@ -932,7 +932,7 @@ impl Store {
         self.calls("WHERE origin='manual' AND (?1='' OR tool_id=?1)", "")
     }
     fn calls(&self, filter: &str, key: &str) -> Result<Vec<Call>> {
-        let sql=format!("SELECT id,tool_id,run_id,thread_id,turn_id,origin,inputs_json,status,attempts,result_json,started_at,completed_at FROM osint_calls {filter} ORDER BY started_at");
+        let sql=format!("SELECT id,tool_id,run_id,thread_id,turn_id,origin,inputs_json,status,attempts,result_json,started_at,completed_at FROM osint_calls {filter} ORDER BY started_at,id");
         let mut s = self.conn.prepare(&sql)?;
         let rows = s.query_map([key], |r| {
             let input: String = r.get(6)?;

@@ -1,0 +1,492 @@
+//! Application-level command metadata shared by discovery surfaces.
+
+use super::app::ModuleId;
+
+#[derive(Clone, Copy)]
+pub struct CommandDefinition {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub shortcut: &'static str,
+    pub category: &'static str,
+    pub module: Option<ModuleId>,
+    pub aliases: &'static [&'static str],
+}
+
+const fn local(
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    shortcut: &'static str,
+    category: &'static str,
+    module: ModuleId,
+) -> CommandDefinition {
+    CommandDefinition {
+        id,
+        label,
+        description,
+        shortcut,
+        category,
+        module: Some(module),
+        aliases: &[],
+    }
+}
+
+pub const COMMANDS: &[CommandDefinition] = &[
+    CommandDefinition {
+        id: "home",
+        label: "Home",
+        description: "Open the application launcher",
+        shortcut: "Esc",
+        category: "Navigation",
+        module: None,
+        aliases: &["/home"],
+    },
+    CommandDefinition {
+        id: "intel",
+        label: "Open Intel",
+        description: "Review briefings and articles",
+        shortcut: "1",
+        category: "Navigation",
+        module: None,
+        aliases: &["/intel"],
+    },
+    CommandDefinition {
+        id: "atlas",
+        label: "Open Atlas",
+        description: "Monitor news cycles",
+        shortcut: "2",
+        category: "Navigation",
+        module: None,
+        aliases: &["/atlas"],
+    },
+    CommandDefinition {
+        id: "brain",
+        label: "Open Brain",
+        description: "Explore saved intelligence",
+        shortcut: "3",
+        category: "Navigation",
+        module: None,
+        aliases: &["/brain"],
+    },
+    CommandDefinition {
+        id: "recon",
+        label: "Open Recon",
+        description: "Investigate a question",
+        shortcut: "4",
+        category: "Navigation",
+        module: None,
+        aliases: &["/recon"],
+    },
+    CommandDefinition {
+        id: "jobs",
+        label: "Open Jobs",
+        description: "Inspect background work",
+        shortcut: "5",
+        category: "Navigation",
+        module: None,
+        aliases: &["/jobs"],
+    },
+    CommandDefinition {
+        id: "logs",
+        label: "Open Logs",
+        description: "Inspect durable events",
+        shortcut: "6",
+        category: "Navigation",
+        module: None,
+        aliases: &["/logs"],
+    },
+    CommandDefinition {
+        id: "tools",
+        label: "Open Tools",
+        description: "Browse and run OSINT tools",
+        shortcut: "7",
+        category: "Navigation",
+        module: None,
+        aliases: &["osint", "/tools"],
+    },
+    CommandDefinition {
+        id: "models",
+        label: "Open Models",
+        description: "Configure AI role defaults",
+        shortcut: "8",
+        category: "Navigation",
+        module: None,
+        aliases: &["providers", "/models"],
+    },
+    CommandDefinition {
+        id: "profile",
+        label: "Open Profile",
+        description: "Inspect host and storage",
+        shortcut: "9",
+        category: "Navigation",
+        module: None,
+        aliases: &["system", "/profile"],
+    },
+    CommandDefinition {
+        id: "help",
+        label: "Shortcuts",
+        description: "Show contextual help",
+        shortcut: "?",
+        category: "Global",
+        module: None,
+        aliases: &["/help"],
+    },
+    CommandDefinition {
+        id: "palette",
+        label: "Command palette",
+        description: "Find an application action",
+        shortcut: "Ctrl+K",
+        category: "Global",
+        module: None,
+        aliases: &["/palette"],
+    },
+    CommandDefinition {
+        id: "new",
+        label: "New investigation",
+        description: "Start a Recon investigation",
+        shortcut: "Ctrl+N",
+        category: "Investigation",
+        module: Some(ModuleId::Recon),
+        aliases: &["/new"],
+    },
+    CommandDefinition {
+        id: "sessions",
+        label: "Investigation list",
+        description: "Return to Recon history",
+        shortcut: "Esc",
+        category: "Investigation",
+        module: Some(ModuleId::Recon),
+        aliases: &["/sessions"],
+    },
+    CommandDefinition {
+        id: "cancel",
+        label: "Cancel running turn",
+        description: "Stop the current Recon run",
+        shortcut: "Ctrl+C",
+        category: "Investigation",
+        module: Some(ModuleId::Recon),
+        aliases: &["/cancel"],
+    },
+    CommandDefinition {
+        id: "resume",
+        label: "Resume remaining steps",
+        description: "Continue a resumable Recon run",
+        shortcut: "",
+        category: "Investigation",
+        module: Some(ModuleId::Recon),
+        aliases: &["/resume"],
+    },
+    CommandDefinition {
+        id: "insights",
+        label: "Retry insights",
+        description: "Retry or toggle memory publication",
+        shortcut: "",
+        category: "Investigation",
+        module: Some(ModuleId::Recon),
+        aliases: &["/insights"],
+    },
+    CommandDefinition {
+        id: "evidence",
+        label: "Open evidence source",
+        description: "Inspect the selected call's captured source",
+        shortcut: "o",
+        category: "Investigation",
+        module: Some(ModuleId::Recon),
+        aliases: &[],
+    },
+    CommandDefinition {
+        id: "context",
+        label: "Toggle investigation context",
+        description: "Show or hide the wide-screen context pane",
+        shortcut: "",
+        category: "Investigation",
+        module: Some(ModuleId::Recon),
+        aliases: &[],
+    },
+    CommandDefinition {
+        id: "create-memory",
+        label: "Create memory",
+        description: "Save a Brain memory",
+        shortcut: "",
+        category: "Brain",
+        module: Some(ModuleId::Brain),
+        aliases: &[],
+    },
+    CommandDefinition {
+        id: "clear-log",
+        label: "Clear events in Logs",
+        description: "Remove durable event rows",
+        shortcut: "",
+        category: "Logs",
+        module: Some(ModuleId::Logs),
+        aliases: &[],
+    },
+    local(
+        "brain-pin",
+        "Pin or unpin memory",
+        "Keep this memory easy to find",
+        "p",
+        "Brain",
+        ModuleId::Brain,
+    ),
+    local(
+        "brain-back",
+        "Back from memory",
+        "Return to the previous memory or list",
+        "Esc",
+        "Brain",
+        ModuleId::Brain,
+    ),
+    local(
+        "brain-summary-retry",
+        "Retry summary",
+        "Start a new summary attempt",
+        "",
+        "Brain",
+        ModuleId::Brain,
+    ),
+    local(
+        "brain-summary-logs",
+        "Open summary Logs",
+        "Inspect the summary failure",
+        "",
+        "Brain",
+        ModuleId::Brain,
+    ),
+    local(
+        "brain-summary-job",
+        "Open summary Job",
+        "Inspect the background operation",
+        "",
+        "Brain",
+        ModuleId::Brain,
+    ),
+    local(
+        "brain-summary-model",
+        "Configure Summarization",
+        "Open Models role defaults",
+        "",
+        "Brain",
+        ModuleId::Brain,
+    ),
+    local(
+        "jobs-logs",
+        "View job logs",
+        "Open Logs filtered to the selected job",
+        "l",
+        "Jobs",
+        ModuleId::Jobs,
+    ),
+    local(
+        "jobs-retry",
+        "Retry failed job",
+        "Retry an eligible failed operation",
+        "r",
+        "Jobs",
+        ModuleId::Jobs,
+    ),
+    local(
+        "jobs-cancel",
+        "Cancel job",
+        "Request cooperative cancellation",
+        "c",
+        "Jobs",
+        ModuleId::Jobs,
+    ),
+    local(
+        "jobs-source",
+        "Open job source",
+        "Navigate to the source artifact",
+        "o",
+        "Jobs",
+        ModuleId::Jobs,
+    ),
+    local(
+        "jobs-status",
+        "Cycle job status",
+        "Change the status filter",
+        "s",
+        "Jobs",
+        ModuleId::Jobs,
+    ),
+    local(
+        "jobs-app",
+        "Cycle job app",
+        "Change the application filter",
+        "a",
+        "Jobs",
+        ModuleId::Jobs,
+    ),
+    local(
+        "logs-follow",
+        "Toggle follow",
+        "Follow or pause new events",
+        "f",
+        "Logs",
+        ModuleId::Logs,
+    ),
+    local(
+        "logs-job",
+        "Open related job",
+        "Open the selected event's job",
+        "o",
+        "Logs",
+        ModuleId::Logs,
+    ),
+    local(
+        "logs-back",
+        "Back to job",
+        "Return to the initiating job",
+        "Esc",
+        "Logs",
+        ModuleId::Logs,
+    ),
+    local(
+        "logs-level",
+        "Cycle log level",
+        "Change the severity filter",
+        "",
+        "Logs",
+        ModuleId::Logs,
+    ),
+    local(
+        "logs-app",
+        "Cycle log app",
+        "Change the application filter",
+        "",
+        "Logs",
+        ModuleId::Logs,
+    ),
+    local(
+        "atlas-history",
+        "Atlas History",
+        "Open saved news cycles",
+        "",
+        "Atlas",
+        ModuleId::Atlas,
+    ),
+    local(
+        "atlas-live",
+        "Atlas Live",
+        "Open the active pipeline",
+        "",
+        "Atlas",
+        ModuleId::Atlas,
+    ),
+    local(
+        "atlas-run",
+        "Run Atlas",
+        "Start a news cycle",
+        "",
+        "Atlas",
+        ModuleId::Atlas,
+    ),
+    local(
+        "atlas-auto",
+        "Toggle Atlas Auto",
+        "Schedule or stop automatic cycles",
+        "",
+        "Atlas",
+        ModuleId::Atlas,
+    ),
+    local(
+        "atlas-resume",
+        "Resume Atlas cycle",
+        "Continue the selected interrupted cycle",
+        "",
+        "Atlas",
+        ModuleId::Atlas,
+    ),
+    local(
+        "atlas-repair",
+        "Repair Atlas memories",
+        "Requeue missing saved memories or vectors",
+        "",
+        "Atlas",
+        ModuleId::Atlas,
+    ),
+    local(
+        "intel-search",
+        "Search Intel",
+        "Focus the article search field",
+        "/",
+        "Intel",
+        ModuleId::Intel,
+    ),
+    local(
+        "intel-recon",
+        "Open report configuration",
+        "Choose an Intel report mode",
+        "",
+        "Intel",
+        ModuleId::Intel,
+    ),
+    local(
+        "intel-refresh",
+        "Refresh article",
+        "Retrieve a fresh article body",
+        "",
+        "Intel",
+        ModuleId::Intel,
+    ),
+    local(
+        "intel-retry",
+        "Retry article retrieval",
+        "Retry a failed article body request",
+        "",
+        "Intel",
+        ModuleId::Intel,
+    ),
+    local(
+        "intel-job",
+        "Open background report job",
+        "Inspect article work in Jobs",
+        "",
+        "Intel",
+        ModuleId::Intel,
+    ),
+];
+
+pub fn matching(query: &str, current: Option<ModuleId>) -> Vec<&'static CommandDefinition> {
+    let query = query.trim().to_ascii_lowercase();
+    let mut commands: Vec<_> = COMMANDS
+        .iter()
+        .filter(|command| {
+            query.is_empty()
+                || [
+                    command.id,
+                    command.label,
+                    command.description,
+                    command.category,
+                ]
+                .iter()
+                .any(|text| text.to_ascii_lowercase().contains(&query))
+                || command.aliases.iter().any(|alias| alias.contains(&query))
+        })
+        .collect();
+    commands.sort_by_key(|command| match command.module {
+        Some(module) if Some(module) == current => 0,
+        None if command.category == "Navigation" => 1,
+        None => 2,
+        _ => 3,
+    });
+    commands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_app_actions_rank_first_and_legacy_aliases_search() {
+        let commands = matching("", Some(ModuleId::Recon));
+        assert_eq!(commands.first().map(|command| command.id), Some("new"));
+        assert!(matching("system", None)
+            .iter()
+            .any(|command| command.id == "profile"));
+        assert!(matching("/sessions", Some(ModuleId::Recon))
+            .iter()
+            .any(|command| command.id == "sessions"));
+    }
+}

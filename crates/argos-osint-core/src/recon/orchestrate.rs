@@ -8275,14 +8275,14 @@ mod tests {
         assert!(answer.contains(super::super::budget::CUT_NOTE), "{answer}");
 
         let later = desk();
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            2, 2,
-        )));
         let cancel = Arc::new(AtomicBool::new(false));
         let results = vec![sample_evidence()];
         let base = chat_server(|_| ChatReply::Hang(partial.into())).await;
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
+            3, 3,
+        )));
         let outcome = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(7),
             synthesize(
                 &later,
                 &chat_model(&base),

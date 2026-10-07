@@ -287,6 +287,7 @@ pub fn parse_final_json(text: &str) -> Result<Completion, ProviderFailure> {
         .unwrap_or(Value::Null);
     let completion = Completion {
         content: provider::message_text(&msg),
+        reasoning: provider::message_reasoning(&msg),
         tool_calls: Vec::new(),
         finish_reason: v
             .pointer("/choices/0/finish_reason")
@@ -322,6 +323,18 @@ fn check_final(c: Completion, state: Option<&StreamState>) -> Result<Completion,
         if let Some(refusal) = c.refusal.as_deref().filter(|r| !r.trim().is_empty()) {
             let mut f = ProviderFailure::new(stage, Category::Refused, "model refused");
             f.provider_message = Some(crate::provider_diag::sanitize(refusal));
+            return Err(f);
+        }
+        if !c.reasoning.trim().is_empty() {
+            let mut f = ProviderFailure::new(
+                stage,
+                Category::Empty,
+                format!(
+                    "reasoning-only completion without answer text (finish_reason={})",
+                    c.finish_reason.as_deref().unwrap_or("none")
+                ),
+            );
+            f.stream.finish_reason = c.finish_reason.clone();
             return Err(f);
         }
         let mut f = ProviderFailure::new(
@@ -430,13 +443,9 @@ async fn read_stream(
             ),
         ));
     }
-    let content = if acc.content.trim().is_empty() {
-        acc.reasoning.clone()
-    } else {
-        acc.content.clone()
-    };
     let completion = Completion {
-        content,
+        content: acc.content,
+        reasoning: acc.reasoning,
         tool_calls: Vec::new(),
         finish_reason: state.finish_reason.clone(),
         refusal: acc.refusal.clone(),
@@ -832,6 +841,36 @@ mod tests {
         assert_eq!(r.outcome.unwrap().content, "Hello graph");
         let (r, hits) = run(ok_json("Final", "stop"), Transport::NonStream).await;
         assert_eq!((r.outcome.unwrap().content.as_str(), hits), ("Final", 1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reasoning_only_stream_and_json_do_not_promote_to_answer() {
+        let json_reasoning = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Internal deliberation"
+                }
+            }]
+        })
+        .to_string();
+        let (r, _) = run(Reply::Json(200, json_reasoning), Transport::NonStream).await;
+        let err = r.outcome.unwrap_err();
+        assert_eq!(err.category, Category::Empty);
+        assert!(err.message.contains("reasoning-only completion"));
+
+        let stream_reasoning = vec![
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Deliberating\"}}]}\n\n"
+                .to_string(),
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".to_string(),
+            "data: [DONE]\n\n".to_string(),
+        ];
+        let (r, _) = run(Reply::Sse(stream_reasoning), Transport::Stream).await;
+        let err = r.outcome.unwrap_err();
+        assert_eq!(err.category, Category::Empty);
+        assert!(err.message.contains("reasoning-only completion"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

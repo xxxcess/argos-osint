@@ -12,4 +12,10 @@ pub enum InvestigationPart {
     Synthesis,
     DirectiveAssessment,
     TurnSummary,
+    // Unified investigation harness parts:
+    RoleDecision,
+    GateValidation,
+    Handoff,
+    EvidencePassage,
+    Thinking,
 }

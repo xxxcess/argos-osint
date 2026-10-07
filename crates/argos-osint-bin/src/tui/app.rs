@@ -281,6 +281,14 @@ pub enum FieldId {
     ClassifierModel,
     SummarizationProvider,
     SummarizationModel,
+    EvidenceCuratorProvider,
+    EvidenceCuratorModel,
+    EntityResolverProvider,
+    EntityResolverModel,
+    ClaimAssessorProvider,
+    ClaimAssessorModel,
+    InvestigationControllerProvider,
+    InvestigationControllerModel,
     RouterKey,
     RouterEndpoint,
     Composer,
@@ -294,15 +302,23 @@ pub enum DefaultsRole {
     Synthesis,
     Classifier,
     Summarization,
+    EvidenceCurator,
+    EntityResolver,
+    ClaimAssessor,
+    InvestigationController,
 }
 
 impl DefaultsRole {
-    pub const ALL: [DefaultsRole; 5] = [
+    pub const ALL: [DefaultsRole; 9] = [
         DefaultsRole::Recon,
         DefaultsRole::ToolPicker,
         DefaultsRole::Synthesis,
         DefaultsRole::Classifier,
         DefaultsRole::Summarization,
+        DefaultsRole::EvidenceCurator,
+        DefaultsRole::EntityResolver,
+        DefaultsRole::ClaimAssessor,
+        DefaultsRole::InvestigationController,
     ];
 
     pub fn label(self) -> &'static str {
@@ -312,6 +328,10 @@ impl DefaultsRole {
             DefaultsRole::Synthesis => "Synthesis",
             DefaultsRole::Classifier => "Classifier",
             DefaultsRole::Summarization => "Summarization",
+            DefaultsRole::EvidenceCurator => "Evidence curator",
+            DefaultsRole::EntityResolver => "Entity resolver",
+            DefaultsRole::ClaimAssessor => "Claim assessor",
+            DefaultsRole::InvestigationController => "Controller",
         }
     }
 
@@ -323,6 +343,10 @@ impl DefaultsRole {
             DefaultsRole::Synthesis => "defaults.synthesis",
             DefaultsRole::Classifier => "defaults.classifier",
             DefaultsRole::Summarization => "defaults.summarization",
+            DefaultsRole::EvidenceCurator => "defaults.evidence_curator",
+            DefaultsRole::EntityResolver => "defaults.entity_resolver",
+            DefaultsRole::ClaimAssessor => "defaults.claim_assessor",
+            DefaultsRole::InvestigationController => "defaults.investigation_controller",
         }
     }
 
@@ -333,6 +357,10 @@ impl DefaultsRole {
             DefaultsRole::Synthesis => FieldId::SynthesisProvider,
             DefaultsRole::Classifier => FieldId::ClassifierProvider,
             DefaultsRole::Summarization => FieldId::SummarizationProvider,
+            DefaultsRole::EvidenceCurator => FieldId::EvidenceCuratorProvider,
+            DefaultsRole::EntityResolver => FieldId::EntityResolverProvider,
+            DefaultsRole::ClaimAssessor => FieldId::ClaimAssessorProvider,
+            DefaultsRole::InvestigationController => FieldId::InvestigationControllerProvider,
         }
     }
 
@@ -343,6 +371,10 @@ impl DefaultsRole {
             DefaultsRole::Synthesis => FieldId::SynthesisModel,
             DefaultsRole::Classifier => FieldId::ClassifierModel,
             DefaultsRole::Summarization => FieldId::SummarizationModel,
+            DefaultsRole::EvidenceCurator => FieldId::EvidenceCuratorModel,
+            DefaultsRole::EntityResolver => FieldId::EntityResolverModel,
+            DefaultsRole::ClaimAssessor => FieldId::ClaimAssessorModel,
+            DefaultsRole::InvestigationController => FieldId::InvestigationControllerModel,
         }
     }
 
@@ -353,6 +385,10 @@ impl DefaultsRole {
             DefaultsRole::Synthesis => ButtonId::SaveSynthesis,
             DefaultsRole::Classifier => ButtonId::SaveClassifier,
             DefaultsRole::Summarization => ButtonId::SaveSummarization,
+            DefaultsRole::EvidenceCurator => ButtonId::SaveEvidenceCurator,
+            DefaultsRole::EntityResolver => ButtonId::SaveEntityResolver,
+            DefaultsRole::ClaimAssessor => ButtonId::SaveClaimAssessor,
+            DefaultsRole::InvestigationController => ButtonId::SaveInvestigationController,
         }
     }
 
@@ -366,6 +402,18 @@ impl DefaultsRole {
             }
             FieldId::SummarizationProvider | FieldId::SummarizationModel => {
                 Some(DefaultsRole::Summarization)
+            }
+            FieldId::EvidenceCuratorProvider | FieldId::EvidenceCuratorModel => {
+                Some(DefaultsRole::EvidenceCurator)
+            }
+            FieldId::EntityResolverProvider | FieldId::EntityResolverModel => {
+                Some(DefaultsRole::EntityResolver)
+            }
+            FieldId::ClaimAssessorProvider | FieldId::ClaimAssessorModel => {
+                Some(DefaultsRole::ClaimAssessor)
+            }
+            FieldId::InvestigationControllerProvider | FieldId::InvestigationControllerModel => {
+                Some(DefaultsRole::InvestigationController)
             }
             _ => None,
         }
@@ -383,6 +431,10 @@ pub enum ButtonId {
     SaveSynthesis,
     SaveClassifier,
     SaveSummarization,
+    SaveEvidenceCurator,
+    SaveEntityResolver,
+    SaveClaimAssessor,
+    SaveInvestigationController,
     DefaultRole(DefaultsRole),
     RefreshModels,
     #[allow(dead_code)]
@@ -730,6 +782,15 @@ pub struct App {
     pub classifier_model: String,
     pub summarization_provider: String,
     pub summarization_model: String,
+    pub evidence_curator_provider: String,
+    pub evidence_curator_model: String,
+    pub entity_resolver_provider: String,
+    pub entity_resolver_model: String,
+    pub claim_assessor_provider: String,
+    pub claim_assessor_model: String,
+    pub investigation_controller_provider: String,
+    pub investigation_controller_model: String,
+    pub show_thinking: bool,
     pub defaults_role: DefaultsRole,
     pub model_catalog: Vec<ListedModel>,
     pub catalog_for: String,
@@ -849,7 +910,7 @@ pub struct App {
     pub hardware: HardwareProfile,
     auth_path: PathBuf,
     settings_path: PathBuf,
-    store: Store,
+    pub store: Store,
     provider_tx: UnboundedSender<ProviderEvent>,
     provider_rx: UnboundedReceiver<ProviderEvent>,
     work_tx: UnboundedSender<WorkEvent>,
@@ -926,6 +987,11 @@ impl App {
         let synthesis_default = provider::role_secret(&auth, &settings, "synthesis")?;
         let classifier_default = provider::role_secret(&auth, &settings, "classifier")?;
         let summarization_default = provider::role_secret(&auth, &settings, "summarization")?;
+        let curator_default = provider::role_secret(&auth, &settings, "evidence_curator")?;
+        let resolver_default = provider::role_secret(&auth, &settings, "entity_resolver")?;
+        let assessor_default = provider::role_secret(&auth, &settings, "claim_assessor")?;
+        let controller_default =
+            provider::role_secret(&auth, &settings, "investigation_controller")?;
         let router = provider::account_secret(&auth, "openrouter");
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
@@ -1043,6 +1109,15 @@ impl App {
             classifier_model: classifier_default.model,
             summarization_provider: provider::effective_kind(&summarization_default),
             summarization_model: summarization_default.model,
+            evidence_curator_provider: provider::effective_kind(&curator_default),
+            evidence_curator_model: curator_default.model,
+            entity_resolver_provider: provider::effective_kind(&resolver_default),
+            entity_resolver_model: resolver_default.model,
+            claim_assessor_provider: provider::effective_kind(&assessor_default),
+            claim_assessor_model: assessor_default.model,
+            investigation_controller_provider: provider::effective_kind(&controller_default),
+            investigation_controller_model: controller_default.model,
+            show_thinking: false,
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),
@@ -1894,6 +1969,64 @@ impl App {
                 self.go_home();
                 Ok("Home".into())
             }
+            "thinking" => {
+                self.show_thinking = !self.show_thinking;
+                self.input.clear();
+                Ok(if self.show_thinking {
+                    "Thinking disclosure enabled".into()
+                } else {
+                    "Thinking disclosure collapsed".into()
+                })
+            }
+            "details" => {
+                let id = self.selected_thread.clone().unwrap_or_default();
+                let has_expanded = self
+                    .expanded
+                    .iter()
+                    .any(|k| k.starts_with(&id) || k.starts_with("plan:"));
+                if has_expanded {
+                    self.expanded
+                        .retain(|k| !k.starts_with(&id) && !k.starts_with("plan:"));
+                    self.input.clear();
+                    Ok("Details collapsed".into())
+                } else {
+                    if let Some(run) = self.runs.last() {
+                        self.expanded.insert(format!("plan:{}", run.id));
+                    }
+                    self.input.clear();
+                    Ok("Details expanded".into())
+                }
+            }
+            "trace" => {
+                self.input.clear();
+                let id = self.selected_thread.clone().unwrap_or_default();
+                let count = self
+                    .store
+                    .list_investigation_events(&id)
+                    .map(|e| e.len())
+                    .unwrap_or(0);
+                Ok(format!("Trace: {count} events logged"))
+            }
+            "directives" => {
+                self.input.clear();
+                let id = self.selected_thread.clone().unwrap_or_default();
+                let count = self
+                    .store
+                    .list_investigation_tasks(&id)
+                    .map(|t| t.len())
+                    .unwrap_or(0);
+                Ok(format!("Directives / tasks: {count}"))
+            }
+            "evidence" => {
+                self.input.clear();
+                let id = self.selected_thread.clone().unwrap_or_default();
+                let count = self
+                    .store
+                    .list_evidence_passages(&id)
+                    .map(|p| p.len())
+                    .unwrap_or(0);
+                Ok(format!("Evidence passages: {count}"))
+            }
             "brain" | "atlas" | "osint" | "providers" | "tools" | "models" | "jobs" | "logs"
             | "system" | "profile" | "recon" | "intel" => {
                 let index = match name.as_str() {
@@ -2038,6 +2171,14 @@ impl App {
             FieldId::ClassifierModel => &self.classifier_model,
             FieldId::SummarizationProvider => &self.summarization_provider,
             FieldId::SummarizationModel => &self.summarization_model,
+            FieldId::EvidenceCuratorProvider => &self.evidence_curator_provider,
+            FieldId::EvidenceCuratorModel => &self.evidence_curator_model,
+            FieldId::EntityResolverProvider => &self.entity_resolver_provider,
+            FieldId::EntityResolverModel => &self.entity_resolver_model,
+            FieldId::ClaimAssessorProvider => &self.claim_assessor_provider,
+            FieldId::ClaimAssessorModel => &self.claim_assessor_model,
+            FieldId::InvestigationControllerProvider => &self.investigation_controller_provider,
+            FieldId::InvestigationControllerModel => &self.investigation_controller_model,
             FieldId::RouterKey => &self.router_key,
             FieldId::RouterEndpoint => &self.router_endpoint,
             FieldId::Composer => &self.input,
@@ -2082,6 +2223,14 @@ impl App {
             FieldId::ClassifierModel => &mut self.classifier_model,
             FieldId::SummarizationProvider => &mut self.summarization_provider,
             FieldId::SummarizationModel => &mut self.summarization_model,
+            FieldId::EvidenceCuratorProvider => &mut self.evidence_curator_provider,
+            FieldId::EvidenceCuratorModel => &mut self.evidence_curator_model,
+            FieldId::EntityResolverProvider => &mut self.entity_resolver_provider,
+            FieldId::EntityResolverModel => &mut self.entity_resolver_model,
+            FieldId::ClaimAssessorProvider => &mut self.claim_assessor_provider,
+            FieldId::ClaimAssessorModel => &mut self.claim_assessor_model,
+            FieldId::InvestigationControllerProvider => &mut self.investigation_controller_provider,
+            FieldId::InvestigationControllerModel => &mut self.investigation_controller_model,
             FieldId::RouterKey => &mut self.router_key,
             FieldId::RouterEndpoint => &mut self.router_endpoint,
             FieldId::Composer => &mut self.input,
@@ -5275,6 +5424,12 @@ impl App {
             ButtonId::SaveSynthesis => self.save_role(DefaultsRole::Synthesis),
             ButtonId::SaveClassifier => self.save_role(DefaultsRole::Classifier),
             ButtonId::SaveSummarization => self.save_role(DefaultsRole::Summarization),
+            ButtonId::SaveEvidenceCurator => self.save_role(DefaultsRole::EvidenceCurator),
+            ButtonId::SaveEntityResolver => self.save_role(DefaultsRole::EntityResolver),
+            ButtonId::SaveClaimAssessor => self.save_role(DefaultsRole::ClaimAssessor),
+            ButtonId::SaveInvestigationController => {
+                self.save_role(DefaultsRole::InvestigationController)
+            }
             ButtonId::AtlasNewsFeed => {
                 self.open_atlas_news();
                 return;
@@ -5446,6 +5601,10 @@ impl App {
                 DefaultsRole::Synthesis => "synthesis",
                 DefaultsRole::Classifier => "classifier",
                 DefaultsRole::Summarization => "summarization",
+                DefaultsRole::EvidenceCurator => "evidence_curator",
+                DefaultsRole::EntityResolver => "entity_resolver",
+                DefaultsRole::ClaimAssessor => "claim_assessor",
+                DefaultsRole::InvestigationController => "investigation_controller",
             })
             .ok_or_else(|| anyhow::anyhow!("unknown role"))?;
         let before = format!("{} / {}", assignment.provider, assignment.model);
@@ -5485,6 +5644,10 @@ impl App {
                     format!("Summarization: {after}")
                 }
             }
+            DefaultsRole::EvidenceCurator => format!("Evidence curator: {after}"),
+            DefaultsRole::EntityResolver => format!("Entity resolver: {after}"),
+            DefaultsRole::ClaimAssessor => format!("Claim assessor: {after}"),
+            DefaultsRole::InvestigationController => format!("Controller: {after}"),
         })
     }
 
@@ -7454,6 +7617,15 @@ mod tests {
             classifier_model: String::new(),
             summarization_provider: String::new(),
             summarization_model: String::new(),
+            evidence_curator_provider: String::new(),
+            evidence_curator_model: String::new(),
+            entity_resolver_provider: String::new(),
+            entity_resolver_model: String::new(),
+            claim_assessor_provider: String::new(),
+            claim_assessor_model: String::new(),
+            investigation_controller_provider: String::new(),
+            investigation_controller_model: String::new(),
+            show_thinking: false,
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
             catalog_for: String::new(),

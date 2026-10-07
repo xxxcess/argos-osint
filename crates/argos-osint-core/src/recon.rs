@@ -983,6 +983,13 @@ impl Store {
         Ok(self.conn.execute("UPDATE osint_calls SET status=?1,attempts=attempts+1,result_json=?2,completed_at=?3 WHERE id=?4 AND status IN ('queued','running') AND (thread_id IS NULL OR thread_id IN (SELECT id FROM recon_threads WHERE deleted=0))",params![result.status,serde_json::to_string(result)?,now(),call_id])?>0)
     }
     pub fn cache_get(&self, key: &str) -> Result<Option<ToolResult>> {
+        self.cache_get_fresh(key, None)
+    }
+    pub fn cache_get_fresh(
+        &self,
+        key: &str,
+        freshness_cutoff: Option<&str>,
+    ) -> Result<Option<ToolResult>> {
         let raw: Option<String> = self
             .conn
             .query_row(
@@ -991,7 +998,18 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
-        Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))
+        let Some(res): Option<ToolResult> = raw.and_then(|r| serde_json::from_str(&r).ok()) else {
+            return Ok(None);
+        };
+        if let Some(cutoff) = freshness_cutoff {
+            if !cutoff.is_empty()
+                && !res.retrieved_at.is_empty()
+                && res.retrieved_at.as_str() < cutoff
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(res))
     }
     pub fn record_strategy(
         &self,

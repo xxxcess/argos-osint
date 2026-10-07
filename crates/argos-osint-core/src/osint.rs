@@ -18,9 +18,15 @@ pub(crate) mod atlas_news;
 mod news_legal;
 #[cfg(test)]
 pub(crate) use news_legal::fixture;
+pub mod contracts;
 mod providers;
+pub mod results;
 pub mod source_eval;
 pub mod wikipedia_rsp;
+pub use contracts::{
+    compact_capability_catalog, picker_candidates, ArgumentBuilderContract, CompactToolCapability,
+    IntelligenceCategory, PickerCandidate,
+};
 pub use news_legal::{
     context_kind, COURTLISTENER_RATE_LIMIT, COURTLISTENER_SPACING, LEGAL_TOOLS, NEWS_TOOLS,
 };
@@ -28,6 +34,10 @@ pub use providers::{
     batch_urls, map_rank, select_route, sociavault_account_platforms, sociavault_endpoint_hint,
     sociavault_platforms, sociavault_routes, webmail_host, RouteInput, SociaVaultRoute,
     BATCH_SCRAPE_DEFAULT_URLS, BATCH_SCRAPE_MAX_URLS, SOCIAVAULT_ROUTES, SOCIAVAULT_TOOLS,
+};
+pub use results::{
+    classify_output_quality, extract_observation_items, extract_search_results,
+    normalize_tool_result, NormalizedToolResult, OutputQuality, SearchResultItem,
 };
 pub use source_eval::{
     best_credibility, information_credibility, scale_confidence, AdmiraltyCode, CredibilityInputs,

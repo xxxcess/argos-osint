@@ -37,13 +37,9 @@ pub struct GraphSummary {
     pub focus: String,
 }
 
-/// Schema version this build writes. 19 adds (additively) job timing/routing
-/// columns, leased index-outbox columns, `argos_events`, Atlas extraction
-/// checkpoints/publication receipts and memory tombstones. 18 added durable
-/// task/index-change tables (`argos_jobs`, `argos_tasks`, `argos_attempts`,
-/// `argos_index_changes`, `argos_derived_summaries`). 17 added
-/// `memory_embed_meta` and dropped sqlite-vec.
-pub const SCHEMA_VERSION: i64 = 19;
+/// Schema version this build writes. 20 adds the unified investigation
+/// harness tables (tasks, dependencies, passages, assessments, events, stream parts).
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -458,6 +454,12 @@ impl Store {
             if version < 19 {
                 crate::tasks::migrate_additive(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 19)?;
+            }
+            // v20: unified investigation harness tasks, dependencies, passages, assessments, events, stream parts.
+            if version < 20 {
+                self.conn
+                    .execute_batch(include_str!("schema_investigation_harness.sql"))?;
+                self.conn.pragma_update(None, "user_version", 20)?;
             }
             // Additive, idempotent: revision-aware graph summary cache and
             // the latest explanation diagnostic.

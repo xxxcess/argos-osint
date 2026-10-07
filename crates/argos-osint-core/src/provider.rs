@@ -41,6 +41,7 @@ pub struct ToolSpec {
 #[derive(Clone, Debug, Default)]
 pub struct Completion {
     pub content: String,
+    pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     /// OpenAI-compatible `choices[0].finish_reason` when the provider sent one.
     pub finish_reason: Option<String>,
@@ -49,9 +50,11 @@ pub struct Completion {
 }
 
 impl Completion {
-    /// True when there is neither answer text nor a tool call.
+    /// True when there is neither answer text, reasoning, nor a tool call.
     pub fn is_empty(&self) -> bool {
-        self.content.trim().is_empty() && self.tool_calls.is_empty()
+        self.content.trim().is_empty()
+            && self.reasoning.trim().is_empty()
+            && self.tool_calls.is_empty()
     }
 
     /// Error used when a completion that should contain text is blank.
@@ -341,6 +344,24 @@ pub struct RoleDefaults {
     /// Evidence compression and source-grounded views. Empty inherits Synthesis.
     #[serde(default)]
     pub summarization: ModelAssignment,
+    /// Source-linked passages, observations, dates. Empty inherits Recon.
+    #[serde(default)]
+    pub evidence_curator: ModelAssignment,
+    /// Identity bindings and conflict resolution. Empty inherits Classifier.
+    #[serde(default)]
+    pub entity_resolver: ModelAssignment,
+    /// Per-claim verification and citation evaluation. Empty inherits Synthesis.
+    #[serde(default)]
+    pub claim_assessor: ModelAssignment,
+    /// Checkpoints, next-task decisions, stopping conditions. Empty inherits Recon.
+    #[serde(default)]
+    pub investigation_controller: ModelAssignment,
+    /// Default model for finite decision roles and semantic gates. Seeded to OpenRouter Jev.
+    #[serde(default)]
+    pub decision_model: ModelAssignment,
+    /// Optional compatible fallback for decision roles.
+    #[serde(default)]
+    pub decision_fallback: Option<ModelAssignment>,
 }
 
 /// Pinned default for the tool picker. The `~typesafe/jev-latest` alias is accepted
@@ -368,11 +389,18 @@ pub fn picker_transport(model: &str) -> &'static str {
 /// Canonical role name, or `None` for an unknown role.
 pub fn role_name(role: &str) -> Option<&'static str> {
     match role.trim().to_ascii_lowercase().as_str() {
-        "recon" => Some("recon"),
+        "recon" | "planner" => Some("recon"),
         "synthesis" => Some("synthesis"),
         "tool-picker" | "tool_picker" | "toolpicker" | "picker" => Some("tool_picker"),
         "classifier" => Some("classifier"),
         "summarization" | "summary" | "summariser" | "summarizer" => Some("summarization"),
+        "evidence_curator" | "evidence-curator" | "curator" => Some("evidence_curator"),
+        "entity_resolver" | "entity-resolver" | "resolver" => Some("entity_resolver"),
+        "claim_assessor" | "claim-assessor" | "assessor" => Some("claim_assessor"),
+        "investigation_controller" | "investigation-controller" | "controller" => {
+            Some("investigation_controller")
+        }
+        "decision_model" | "decision-model" | "decision" => Some("decision_model"),
         _ => None,
     }
 }
@@ -384,7 +412,13 @@ impl RoleDefaults {
             "synthesis" => Some(&self.synthesis),
             "classifier" => Some(&self.classifier),
             "summarization" => Some(&self.summarization),
-            _ => Some(&self.tool_picker),
+            "tool_picker" => Some(&self.tool_picker),
+            "evidence_curator" => Some(&self.evidence_curator),
+            "entity_resolver" => Some(&self.entity_resolver),
+            "claim_assessor" => Some(&self.claim_assessor),
+            "investigation_controller" => Some(&self.investigation_controller),
+            "decision_model" => Some(&self.decision_model),
+            _ => None,
         }
     }
 
@@ -394,8 +428,89 @@ impl RoleDefaults {
             "synthesis" => Some(&mut self.synthesis),
             "classifier" => Some(&mut self.classifier),
             "summarization" => Some(&mut self.summarization),
-            _ => Some(&mut self.tool_picker),
+            "tool_picker" => Some(&mut self.tool_picker),
+            "evidence_curator" => Some(&mut self.evidence_curator),
+            "entity_resolver" => Some(&mut self.entity_resolver),
+            "claim_assessor" => Some(&mut self.claim_assessor),
+            "investigation_controller" => Some(&mut self.investigation_controller),
+            "decision_model" => Some(&mut self.decision_model),
+            _ => None,
         }
+    }
+
+    /// Returns the resolved assignment for a role, along with the role it inherited from (if inherited).
+    pub fn resolve_role(&self, role: &str) -> (ModelAssignment, Option<&'static str>) {
+        let is_empty =
+            |a: &ModelAssignment| a.provider.trim().is_empty() && a.model.trim().is_empty();
+        match role_name(role).unwrap_or("recon") {
+            "evidence_curator" => {
+                if is_empty(&self.evidence_curator) {
+                    (self.recon.clone(), Some("recon"))
+                } else {
+                    (self.evidence_curator.clone(), None)
+                }
+            }
+            "entity_resolver" => {
+                if is_empty(&self.entity_resolver) {
+                    (self.classifier.clone(), Some("classifier"))
+                } else {
+                    (self.entity_resolver.clone(), None)
+                }
+            }
+            "claim_assessor" => {
+                if is_empty(&self.claim_assessor) {
+                    (self.synthesis.clone(), Some("synthesis"))
+                } else {
+                    (self.claim_assessor.clone(), None)
+                }
+            }
+            "investigation_controller" => {
+                if is_empty(&self.investigation_controller) {
+                    (self.recon.clone(), Some("recon"))
+                } else {
+                    (self.investigation_controller.clone(), None)
+                }
+            }
+            "summarization" => {
+                if is_empty(&self.summarization) {
+                    (self.synthesis.clone(), Some("synthesis"))
+                } else {
+                    (self.summarization.clone(), None)
+                }
+            }
+            "decision_model" => {
+                if is_empty(&self.decision_model) {
+                    (
+                        ModelAssignment {
+                            provider: TOOL_PICKER_PROVIDER.into(),
+                            model: TOOL_PICKER_MODEL.into(),
+                        },
+                        Some("tool_picker"),
+                    )
+                } else {
+                    (self.decision_model.clone(), None)
+                }
+            }
+            "recon" => (self.recon.clone(), None),
+            "synthesis" => (self.synthesis.clone(), None),
+            "classifier" => (self.classifier.clone(), None),
+            "tool_picker" => (self.tool_picker.clone(), None),
+            _ => (self.recon.clone(), None),
+        }
+    }
+
+    /// Seeds the default decision model if unset.
+    pub fn seed_decision_model(&mut self) -> bool {
+        if self.decision_model.provider.trim().is_empty()
+            && self.decision_model.model.trim().is_empty()
+        {
+            self.decision_model = ModelAssignment {
+                provider: TOOL_PICKER_PROVIDER.into(),
+                model: TOOL_PICKER_MODEL.into(),
+            };
+            return true;
+        }
+        false
     }
 
     /// When Summarization is unset, copy Synthesis so existing installs inherit.
@@ -910,6 +1025,34 @@ impl DecisionAnswer {
             .and_then(|choice| self.probabilities.get(choice).copied())
             .or(self.confidence)
     }
+
+    /// Whether the probability distribution is mathematically valid within numeric tolerance.
+    pub fn is_valid_distribution(&self, tolerance: f64) -> bool {
+        if self.probabilities.len() <= 1 {
+            return true;
+        }
+        let mut sum = 0.0;
+        for prob in self.probabilities.values() {
+            if !prob.is_finite() || *prob < 0.0 {
+                return false;
+            }
+            sum += *prob;
+        }
+        (sum - 1.0).abs() <= tolerance
+    }
+
+    /// Whether an ordinal score is within range.
+    pub fn is_valid_score(&self, min: i64, max: i64) -> bool {
+        self.score
+            .is_some_and(|s| s.is_finite() && s.round() as i64 >= min && s.round() as i64 <= max)
+    }
+
+    /// Whether a noul (yes/no) output is valid.
+    pub fn is_valid_noul(&self) -> bool {
+        self.noul
+            .is_some_and(|n| n.is_finite() && (0.0..=1.0).contains(&n))
+            || self.choice.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -937,6 +1080,13 @@ pub fn parse_decisions(text: &str) -> Result<DecisionsResponse> {
     let mut response: DecisionsResponse =
         serde_json::from_value(value.clone()).context("decisions response")?;
     response.cost = value.pointer("/usage/cost").and_then(Value::as_f64);
+    for (qid, ans) in &response.answers {
+        if !ans.is_valid_distribution(0.05) {
+            return Err(anyhow!(
+                "question '{qid}' has invalid probability distribution"
+            ));
+        }
+    }
     Ok(response)
 }
 
@@ -1061,16 +1211,13 @@ fn tool_json(t: &ToolSpec) -> Value {
 }
 
 /// Pulls assistant text from a chat-completions message object.
-///
-/// Prefer `content` (string or multipart text parts). When that is empty — common
-/// for OpenRouter / reasoning models that only fill `reasoning_content` or
-/// `reasoning` — fold that reasoning text into the answer so callers such as
-/// Brain graph summaries still see the Markdown they asked for.
+/// Returns ONLY content; reasoning is kept separate in [`message_reasoning`].
 pub fn message_text(msg: &Value) -> String {
-    let content = value_text(msg.get("content"));
-    if !content.trim().is_empty() {
-        return content;
-    }
+    value_text(msg.get("content"))
+}
+
+/// Pulls assistant reasoning from a chat-completions message object.
+pub fn message_reasoning(msg: &Value) -> String {
     for key in ["reasoning_content", "reasoning"] {
         let text = value_text(msg.get(key));
         if !text.trim().is_empty() {
@@ -1126,6 +1273,7 @@ pub fn parse_completion(text: &str) -> Result<Completion> {
         .cloned()
         .unwrap_or(Value::Null);
     let content = message_text(&msg);
+    let reasoning = message_reasoning(&msg);
     let refusal = msg
         .get("refusal")
         .and_then(|c| c.as_str())
@@ -1162,6 +1310,7 @@ pub fn parse_completion(text: &str) -> Result<Completion> {
     }
     let completion = Completion {
         content,
+        reasoning,
         tool_calls,
         finish_reason,
         refusal,
@@ -1189,13 +1338,9 @@ impl SseAcc {
     }
 
     fn into_completion(self) -> Completion {
-        let content = if !self.content.trim().is_empty() {
-            self.content
-        } else {
-            self.reasoning
-        };
         Completion {
-            content,
+            content: self.content,
+            reasoning: self.reasoning,
             tool_calls: self.tool_calls,
             finish_reason: self.finish_reason,
             refusal: self.refusal,
@@ -1234,13 +1379,10 @@ impl SseAcc {
             self.content.push_str(&text);
             emitted = Some(text);
         }
-        // Reasoning-only models stream here with an empty content field.
+        // Reasoning channel: accumulate separately, do not leak into answer deltas
         for key in ["reasoning_content", "reasoning"] {
             if let Some(text) = delta_text(delta, key) {
                 self.reasoning.push_str(&text);
-                if emitted.is_none() {
-                    emitted = Some(text);
-                }
             }
         }
         if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
@@ -1697,6 +1839,7 @@ impl SettingsFile {
             let mut settings = Self::default();
             settings.defaults.seed_tool_picker();
             settings.defaults.seed_classifier();
+            settings.defaults.seed_decision_model();
             settings.defaults.inherit_summarization_from_synthesis();
             settings
         };
@@ -1735,6 +1878,7 @@ impl SettingsFile {
             migrated = true;
         }
         let mutated = settings.defaults.seed_classifier()
+            | settings.defaults.seed_decision_model()
             | settings.defaults.inherit_summarization_from_synthesis();
         if mutated {
             migrated = true;
@@ -2110,7 +2254,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_completion_folds_reasoning_content_when_content_is_empty() {
+    fn parse_completion_separates_reasoning_content() {
         let raw = serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
@@ -2122,9 +2266,12 @@ mod tests {
             }]
         })
         .to_string();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let msg = v.pointer("/choices/0/message").unwrap();
+        assert_eq!(message_text(msg), "");
         let completion = parse_completion(&raw).unwrap();
-        assert!(completion.content.starts_with("## Entity"));
-        assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(completion.content, "");
+        assert!(completion.reasoning.starts_with("## Entity"));
     }
 
     #[test]
@@ -2138,7 +2285,9 @@ mod tests {
             }]
         })
         .to_string();
-        assert_eq!(parse_completion(&raw).unwrap().content, "Visible answer");
+        let completion = parse_completion(&raw).unwrap();
+        assert_eq!(completion.content, "Visible answer");
+        assert_eq!(completion.reasoning, "Hidden chain of thought");
     }
 
     #[test]
@@ -2177,7 +2326,7 @@ mod tests {
     }
 
     #[test]
-    fn sse_acc_folds_reasoning_deltas_into_content() {
+    fn sse_acc_separates_reasoning_deltas_from_content() {
         let mut acc = SseAcc::default();
         let line1 = format!(
             "data: {}",
@@ -2187,10 +2336,11 @@ mod tests {
             "data: {}",
             serde_json::json!({"choices":[{"delta":{"reasoning":" body"},"finish_reason":"stop"}]})
         );
-        assert!(acc.push_line(&line1).is_some());
-        assert!(acc.push_line(&line2).is_some());
+        assert!(acc.push_line(&line1).is_none());
+        assert!(acc.push_line(&line2).is_none());
         let completion = acc.into_completion();
-        assert_eq!(completion.content, "## Heading body");
+        assert_eq!(completion.content, "");
+        assert_eq!(completion.reasoning, "## Heading body");
         assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
     }
 
@@ -2269,14 +2419,15 @@ mod tests {
             tool_calls: Vec::new(),
         }];
         let completion = complete(&secret, &messages, &[], |_| {}).await.unwrap();
+        assert_eq!(completion.content, "");
         assert!(
-            completion.content.contains("## Graph"),
+            completion.reasoning.contains("## Graph"),
             "got {:?}",
-            completion.content
+            completion.reasoning
         );
     }
 
-    /// Streaming path: reasoning deltas only (no content field).
+    /// Streaming path: reasoning deltas separated from content deltas.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn complete_stream_of_reasoning_deltas_yields_text() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2298,8 +2449,8 @@ mod tests {
                 }
             }
             let event1 =
-                serde_json::json!({"choices":[{"delta":{"reasoning_content":"## Claim"}}]});
-            let event2 = serde_json::json!({"choices":[{"delta":{"reasoning_content":" paragraph"},"finish_reason":"stop"}]});
+                serde_json::json!({"choices":[{"delta":{"reasoning_content":"## Claim thought"}}]});
+            let event2 = serde_json::json!({"choices":[{"delta":{"content":"Final answer text"},"finish_reason":"stop"}]});
             let body = format!("data: {event1}\n\ndata: {event2}\n\ndata: [DONE]\n\n");
             let reply = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -2327,8 +2478,10 @@ mod tests {
         let completion = complete(&secret, &messages, &[], |d| deltas.push_str(d))
             .await
             .expect("complete stream");
-        assert_eq!(completion.content, "## Claim paragraph");
-        assert!(deltas.contains("## Claim"), "{deltas}");
+        assert_eq!(completion.content, "Final answer text");
+        assert_eq!(completion.reasoning, "## Claim thought");
+        assert_eq!(deltas, "Final answer text");
+        assert!(!deltas.contains("Claim thought"), "{deltas}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

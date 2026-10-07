@@ -879,6 +879,15 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
             blocks.push(tool_block(app, call, call_index));
         }
     }
+    if let Some(thread_id) = &app.selected_thread {
+        if let Ok(events) = app.store.list_investigation_events(thread_id) {
+            for event in events {
+                blocks.push(super::investigation_trace::event_to_chat_block(
+                    &event, None,
+                ));
+            }
+        }
+    }
     if let Some(block) = live {
         blocks.push(block);
     }
@@ -1869,7 +1878,13 @@ fn ensure_frame(app: &App) {
 }
 
 fn expanded(app: &App, block: &ChatBlock) -> bool {
-    !block.collapsible || app.expanded.contains(&block.key)
+    if !block.collapsible {
+        return true;
+    }
+    if block.part == InvestigationPart::Thinking {
+        return app.show_thinking || app.expanded.contains(&block.key);
+    }
+    app.expanded.contains(&block.key)
 }
 
 fn row(
@@ -1946,6 +1961,44 @@ fn rows_for(app: &App, blocks: &[ChatBlock], width: usize) -> Vec<ChatRow> {
                         },
                     ],
                 ));
+            }
+            continue;
+        }
+        if block.part == InvestigationPart::Thinking {
+            let open = expanded(app, block);
+            let indicator = if open { "▼ " } else { "▶ " };
+            let mut pieces = vec![Piece {
+                text: format!("{indicator}{}", block.title),
+                tone: Tone::Dim,
+            }];
+            clip_pieces(&mut pieces, width);
+            rows.push(row(index, true, false, true, RowFace::Plain, pieces));
+            if open && !block.body.is_empty() {
+                for pieces in markdown::plain_lines(&block.body, width, 2) {
+                    rows.push(row(index, false, false, false, RowFace::Plain, pieces));
+                }
+            }
+            continue;
+        }
+        if matches!(
+            block.part,
+            InvestigationPart::RoleDecision
+                | InvestigationPart::GateValidation
+                | InvestigationPart::Handoff
+                | InvestigationPart::EvidencePassage
+        ) {
+            let open = expanded(app, block);
+            let indicator = if open { "▼ " } else { "▶ " };
+            let mut pieces = vec![Piece {
+                text: format!("{indicator}{}", block.title),
+                tone: Tone::Dim,
+            }];
+            clip_pieces(&mut pieces, width);
+            rows.push(row(index, true, false, true, RowFace::Plain, pieces));
+            if open && !block.body.is_empty() {
+                for pieces in markdown::plain_lines(&block.body, width, 2) {
+                    rows.push(row(index, false, false, false, RowFace::Plain, pieces));
+                }
             }
             continue;
         }
@@ -5540,13 +5593,17 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
                 )
             };
             let note = format!("{note}{transport}");
-            frame.render_widget(
-                Paragraph::new(note)
-                    .style(theme::dim())
-                    .scroll((app.scrolls.detail, 0))
-                    .wrap(Wrap { trim: true }),
-                models[5],
-            );
+            if models[5].height >= 8 {
+                super::model_roles::draw_model_roles_view(frame, app, models[5]);
+            } else {
+                frame.render_widget(
+                    Paragraph::new(note)
+                        .style(theme::dim())
+                        .scroll((app.scrolls.detail, 0))
+                        .wrap(Wrap { trim: true }),
+                    models[5],
+                );
+            }
         }
     }
 }

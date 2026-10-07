@@ -79,11 +79,7 @@ partly met, or not met, with citations.",
 }
 
 fn normalize_chat_mode(mode: ReportMode) -> ReportMode {
-    if mode == ReportMode::FullAssessment {
-        ReportMode::Explain
-    } else {
-        mode
-    }
+    mode
 }
 
 fn chat_section_titles(mode: ReportMode) -> Vec<&'static str> {
@@ -116,7 +112,11 @@ establish who is involved, what happened when, and how entities connect."
 disconfirming evidence. Prefer recent news and monitoring tools that support or refute \
 conditional outlooks; avoid speculative tools that cannot ground indicators."
         }
-        ReportMode::FullAssessment => unreachable!("normalized away"),
+        ReportMode::FullAssessment => {
+            "Shared collection to verify core assertions and explain the larger situation, \
+reconciling baseline facts before evaluating competing scenarios and outlook indicators. \
+Integrate primary reporting, actor relationships, and forward-looking triggers without duplicate collection."
+        }
     };
     format!(
         "Recon mode: {} — {}.\n\

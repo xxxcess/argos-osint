@@ -283,38 +283,33 @@ async fn run_collect(
     let store = Store::open(&runtime.db_path)?;
     match result {
         Ok(res) if res.error.is_none() => {
-            if let Some(items) = res.observations.as_array() {
-                for item in items.iter().take(5) {
-                    let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    let snippet = item
-                        .get("snippet")
-                        .or_else(|| item.get("description"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if snippet.is_empty() {
-                        continue;
-                    }
-                    let stance = if url == runtime.article_url {
-                        "mention"
-                    } else {
-                        "support"
-                    };
-                    store.insert_evidence(
-                        &job.investigation_id,
-                        url,
-                        "",
-                        snippet,
-                        "search",
-                        "[]",
-                        "",
-                        "",
-                        stance,
-                        "firecrawl_search",
-                        "firecrawl_search",
-                        "",
-                        "search snippet; not full article",
-                    )?;
+            let items = crate::osint::results::extract_search_results(&res.observations);
+            for item in items.iter().take(5) {
+                let url = item.url.as_str();
+                let snippet = item.snippet.as_str();
+                if snippet.is_empty() {
+                    continue;
                 }
+                let stance = if url == runtime.article_url {
+                    "mention"
+                } else {
+                    "support"
+                };
+                store.insert_evidence(
+                    &job.investigation_id,
+                    url,
+                    "",
+                    snippet,
+                    "search",
+                    "[]",
+                    "",
+                    "",
+                    stance,
+                    "firecrawl_search",
+                    "firecrawl_search",
+                    "",
+                    "search snippet; not full article",
+                )?;
             }
             store.update_report_job(
                 &job.id,
@@ -337,6 +332,37 @@ async fn run_collect(
     }
 }
 
+fn claim_relevant_evidence<'a>(
+    claim_id: &str,
+    claim_text: &str,
+    evidence: &'a [super::persist::IntelEvidenceRow],
+) -> Vec<&'a super::persist::IntelEvidenceRow> {
+    let claim_lower = claim_text.to_ascii_lowercase();
+    let words: Vec<&str> = claim_lower
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| w.len() >= 4)
+        .collect();
+
+    evidence
+        .iter()
+        .filter(|ev| {
+            if !ev.claim_ids_json.is_empty()
+                && ev.claim_ids_json != "[]"
+                && ev.claim_ids_json.contains(claim_id)
+            {
+                return true;
+            }
+            if words.is_empty() {
+                return false;
+            }
+            let excerpt_lower = ev.excerpt.to_ascii_lowercase();
+            let matches = words.iter().filter(|&&w| excerpt_lower.contains(w)).count();
+            matches >= 2.min(words.len())
+        })
+        .collect()
+}
+
 fn run_assess(
     runtime: &JobRuntime,
     store: &Store,
@@ -348,20 +374,22 @@ fn run_assess(
     let mut updates = Vec::new();
 
     for el in &elements {
-        let stance = if evidence.is_empty() {
+        let matching = claim_relevant_evidence(&el.id, &el.original_text, &evidence);
+        let stance = if matching.is_empty() {
             "unresolved"
-        } else if evidence.iter().any(|e| e.stance == "support") {
-            "supported"
-        } else if evidence.iter().any(|e| e.stance == "contradict") {
+        } else if matching.iter().any(|e| e.stance == "contradict") {
             "disputed"
+        } else if matching.iter().any(|e| e.stance == "support") {
+            "supported"
         } else {
             "unresolved"
         };
         let rationale = match stance {
-            "supported" => "Corroborating evidence present in retained sources.",
+            "supported" => "Corroborating evidence present in retained sources for this claim.",
             "disputed" => "Contrary evidence present; not treated as confirmed.",
-            _ => "No independent corroboration located; unresolved.",
+            _ => "No independent corroboration located for this specific claim; unresolved.",
         };
+        let matching_ids: Vec<&str> = matching.iter().map(|e| e.id.as_str()).collect();
         store.update_element_assessment(
             &el.id,
             if stance == "unresolved" {
@@ -372,7 +400,7 @@ fn run_assess(
             stance,
             rationale,
             "",
-            &json!(evidence.iter().map(|e| &e.id).collect::<Vec<_>>()).to_string(),
+            &json!(matching_ids).to_string(),
         )?;
 
         let (entity, predicate, object) = split_claim_triple(&el.original_text, &el.fingerprint);

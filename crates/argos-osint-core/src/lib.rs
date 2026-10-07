@@ -27,6 +27,7 @@ pub mod graph_explanation;
 pub mod grok_oauth;
 pub mod hardware;
 pub mod intel_recon;
+pub mod investigation;
 pub mod iso3166;
 pub mod job_registry;
 pub mod jobs_view;

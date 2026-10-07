@@ -3,10 +3,49 @@
   "model": "google/gemini-3.8-flash",
   "small_model": "google/gemini-3.5-flash-lite",
   "default_agent": "plan",
+  "providers": {
+    "google": {
+      "settings": {
+        "headerTimeout": 180000
+      },
+      "models": {
+        "gemini-3.1-pro-preview-custom-tools": {
+          "settings": {
+            "reasoningEffort": "high"
+          },
+          "body": {
+            "generationConfig": {
+              "thinkingConfig": {
+                "thinkingBudget": -1
+              }
+            }
+          }
+        },
+        "gemini-3.1-pro-preview": {
+          "settings": {
+            "reasoningEffort": "high"
+          },
+          "body": {
+            "generationConfig": {
+              "thinkingConfig": {
+                "thinkingBudget": -1
+              }
+            }
+          }
+        },
+        "gemini-3.8-flash": {
+          "settings": {
+            "reasoningEffort": "high"
+          }
+        }
+      }
+    }
+  },
   "agent": {
     "build": {
       "mode": "primary",
       "model": "google/gemini-3.1-pro-preview-custom-tools",
+      "variant": "high",
       "permission": {
         "edit": "allow",
         "bash": "allow"
@@ -15,6 +54,7 @@
     "plan": {
       "mode": "primary",
       "model": "google/gemini-3.1-pro-preview",
+      "variant": "high",
       "permission": {
         "edit": "deny",
         "bash": "deny"
@@ -30,7 +70,8 @@
     },
     "compaction": {
       "mode": "primary",
-      "model": "google/gemini-3.8-flash"
+      "model": "google/gemini-3.8-flash",
+      "variant": "high"
     }
   }
 }

@@ -7395,16 +7395,22 @@ pub async fn run(mut app: App) -> Result<()> {
         }
         let busy =
             !app.running.is_empty() || app.osint_cancel.is_some() || app.provider_pending.is_some();
+        let composer_focused = app.focus == Target::Field(FieldId::Composer);
         let mut wait = atlas_poll_wait(
             &app,
             Duration::from_millis(if dirty {
                 90
             } else if busy {
                 80
+            } else if composer_focused {
+                250
             } else {
                 400
             }),
         );
+        if composer_focused {
+            wait = wait.min(Duration::from_millis(250));
+        }
         if atlas_countdown_visible(&app) {
             wait = wait.min(until_next_second());
         }
@@ -7421,7 +7427,8 @@ pub async fn run(mut app: App) -> Result<()> {
             {
                 app.flush_draft();
             }
-            if atlas_countdown_visible(&app)
+            if composer_focused
+                || atlas_countdown_visible(&app)
                 || atlas_extracting_visible(&app)
                 || intel_body_loading_visible(&app)
                 || intel_insights_loading_visible(&app)

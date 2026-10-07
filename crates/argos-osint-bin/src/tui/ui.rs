@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
@@ -55,12 +55,14 @@ pub(crate) struct Chrome {
     pub(crate) home: Rect,
 }
 
-fn composer_height(app: &App) -> u16 {
+fn composer_height(area: Rect, app: &App) -> u16 {
     if app.module != Some(ModuleId::Recon) || !app.recon_chat {
         return 0;
     }
-    let rows = app.input.split('\n').count().max(1) as u16;
-    rows.clamp(1, 4)
+    let input_lines = app.input.split('\n').count().max(1) as u16;
+    let base_box_h = if area.height >= 26 { 3 } else { 2 };
+    let box_h = (input_lines + 1).max(base_box_h).min(5);
+    box_h + 1
 }
 
 /// Module body for the current screen (shared by dashboards for layout maths).
@@ -74,7 +76,7 @@ pub(crate) fn detail_areas(app: &App) -> super::brain_detail::DetailAreas {
 }
 
 fn chrome(area: Rect, app: &App) -> Chrome {
-    let composer_h = composer_height(app);
+    let composer_h = composer_height(area, app);
     let header_h = TAB_H;
     let tab_strip_h = 0;
     let rows = split_vertical(
@@ -148,9 +150,8 @@ pub(super) fn button_areas(area: Rect, count: usize) -> Vec<Rect> {
 }
 
 fn composer_parts(area: Rect) -> (Rect, Rect) {
-    let send = 8.min(area.width / 5);
-    let parts = split_horizontal(area, [Constraint::Min(8), Constraint::Length(send.max(6))]);
-    (parts[0], parts[1])
+    let areas = recon_composer_areas(area);
+    (areas.input, areas.send)
 }
 
 struct BrainList {
@@ -478,13 +479,62 @@ fn home_line(app: &App, x: u16, y: u16) -> Option<usize> {
         .and_then(|row| row.target)
 }
 
-pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
+pub(crate) struct HomeLayoutMetrics {
+    pub(crate) top_pad: u16,
+    pub(crate) box_y: u16,
+    pub(crate) box_h: u16,
+    pub(crate) guidance_y: u16,
+    pub(crate) apps_y: u16,
+    pub(crate) composer_width: u16,
+    pub(crate) composer_x: u16,
+}
+
+pub(crate) fn home_layout_metrics(area: Rect) -> HomeLayoutMetrics {
     let is_wide = area.width as usize >= logo_width();
     let title_count = if is_wide { 6 } else { 1 };
-    let above_title = if area.height >= 36 { 1 } else { 0 };
+    let composer_width = if is_wide {
+        (logo_width() as u16).min(area.width.saturating_sub(4))
+    } else {
+        area.width.saturating_sub(4).max(40).min(area.width)
+    };
+    let composer_x = area.x + (area.width.saturating_sub(composer_width)) / 2;
+
+    let box_h = if area.height >= 26 { 3 } else { 2 };
+    let composer_total_h = box_h + 1; // box_h + 1 guidance (label removed)
+    let apps_h = 12; // 1 heading + 4 apps + 1 gap + 1 heading + 5 apps
+
+    let (gap_title_to_composer, gap_composer_to_apps) =
+        if area.height >= 34 { (2, 2) } else { (1, 1) };
+
+    let content_h =
+        title_count + gap_title_to_composer + composer_total_h + gap_composer_to_apps + apps_h;
+    let top_pad = area.height.saturating_sub(content_h) / 2;
+
+    let title_y = area.y.saturating_add(top_pad);
+    let title_end_y = title_y.saturating_add(title_count);
+    let box_y = title_end_y.saturating_add(gap_title_to_composer);
+    let guidance_y = box_y.saturating_add(box_h);
+    let apps_y = guidance_y
+        .saturating_add(1)
+        .saturating_add(gap_composer_to_apps);
+
+    HomeLayoutMetrics {
+        top_pad,
+        box_y,
+        box_h,
+        guidance_y,
+        apps_y,
+        composer_width,
+        composer_x,
+    }
+}
+
+pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
+    let metrics = home_layout_metrics(area);
+    let is_wide = area.width as usize >= logo_width();
 
     let mut rows = Vec::new();
-    for _ in 0..above_title {
+    for _ in 0..metrics.top_pad {
         rows.push(gap_row());
     }
 
@@ -493,18 +543,6 @@ pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
     } else {
         rows.push(center_row(HomeKind::Heading("ARGOS OSINT")));
     }
-
-    let gap_title_to_composer = if area.height >= 34 { 2 } else { 1 };
-    let composer_h = if area.height >= 26 { 3 } else { 2 };
-    // Composer takes: 1 (label) + composer_h (box) + 1 (guidance) = composer_h + 2
-    let gap_composer_to_apps = gap_title_to_composer + 2;
-
-    let apps_y = area.y
-        + above_title as u16
-        + title_count as u16
-        + gap_title_to_composer as u16
-        + (composer_h as u16 + 2)
-        + gap_composer_to_apps as u16;
 
     let mut app_rows = Vec::new();
     home_group(
@@ -537,7 +575,7 @@ pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
     }
 
     for (index, row) in app_rows.iter_mut().enumerate() {
-        row.y = apps_y.saturating_add(index as u16);
+        row.y = metrics.apps_y.saturating_add(index as u16);
     }
 
     rows.extend(app_rows);
@@ -3297,7 +3335,7 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
         }
     }
     if app.module.is_none() {
-        let areas = home_composer_areas(layout.body, app);
+        let areas = home_composer_areas(layout.body);
         if contains(areas.send, x, y) {
             return Some(Target::Button(ButtonId::Send));
         }
@@ -3306,7 +3344,7 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
         }
         return home_line(app, x, y).map(Target::App);
     }
-    if composer_height(app) > 0 && contains(layout.composer, x, y) {
+    if layout.composer.height > 0 && contains(layout.composer, x, y) {
         let (_field, send) = composer_parts(layout.composer);
         return Some(if contains(send, x, y) {
             Target::Button(ButtonId::Send)
@@ -3592,10 +3630,8 @@ fn system_button(actions: Rect) -> Rect {
 fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
     let layout = chrome(app.screen, app);
     match field {
-        FieldId::Composer if app.module.is_none() => {
-            Some(home_composer_areas(layout.body, app).input)
-        }
-        FieldId::Composer if composer_height(app) > 0 => Some(composer_parts(layout.composer).0),
+        FieldId::Composer if app.module.is_none() => Some(home_composer_areas(layout.body).input),
+        FieldId::Composer if layout.composer.height > 0 => Some(composer_parts(layout.composer).0),
         FieldId::ReconSearch if app.module == Some(ModuleId::Recon) && !app.recon_chat => {
             Some(dashboard_areas(layout.body).0)
         }
@@ -4033,10 +4069,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
             super::jobs::draw(frame, app, layout.body, app.job_source().is_some())
         }
     }
-    if composer_height(app) > 0 {
-        let (field, send) = composer_parts(layout.composer);
-        draw_field(frame, app, FieldId::Composer, "ask", field);
-        draw_button(frame, app, ButtonId::Send, "Send", send);
+    if layout.composer.height > 0 {
+        let areas = recon_composer_areas(layout.composer);
+        draw_composer(frame, app, &areas, false);
         if app.input.starts_with('/') && app.focus == Target::Field(FieldId::Composer) {
             draw_slash_hint(frame, app, layout.body);
         }
@@ -4571,7 +4606,6 @@ const SLASH: &[(&str, &str)] = &[
 ];
 
 pub(crate) struct HomeComposerAreas {
-    pub label: Rect,
     pub input: Rect,
     pub metadata: Rect,
     pub send: Rect,
@@ -4579,75 +4613,346 @@ pub(crate) struct HomeComposerAreas {
     pub box_rect: Rect,
 }
 
-pub(crate) fn home_composer_areas(area: Rect, _app: &App) -> HomeComposerAreas {
-    let is_wide = area.width as usize >= logo_width();
-    let title_count = if is_wide { 6 } else { 1 };
-    let above_title = if area.height >= 36 { 1 } else { 0 };
-    let gap_title_to_composer = if area.height >= 34 { 2 } else { 1 };
+pub(crate) fn home_composer_areas(area: Rect) -> HomeComposerAreas {
+    let metrics = home_layout_metrics(area);
 
-    let width = if is_wide {
-        (logo_width() as u16).min(area.width.saturating_sub(4))
-    } else {
-        area.width.saturating_sub(4).max(40)
-    };
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-
-    let title_end_y = area.y + above_title as u16 + title_count as u16;
-    let label_y = title_end_y + gap_title_to_composer as u16;
-    let label_rect = Rect {
-        x,
-        y: label_y,
-        width,
-        height: 1,
-    };
-
-    let box_y = label_y.saturating_add(1);
-    let box_h = if area.height >= 26 { 3 } else { 2 };
     let box_rect = Rect {
-        x,
-        y: box_y,
-        width,
-        height: box_h,
+        x: metrics.composer_x,
+        y: metrics.box_y,
+        width: metrics.composer_width,
+        height: metrics.box_h,
     };
 
-    let input_h = if box_h >= 3 { 2 } else { 1 };
+    let input_h = if metrics.box_h >= 3 { 2 } else { 1 };
     let input_rect = Rect {
-        x,
-        y: box_y,
-        width,
+        x: metrics.composer_x,
+        y: metrics.box_y,
+        width: metrics.composer_width,
         height: input_h,
     };
 
-    let meta_y = box_y.saturating_add(box_h.saturating_sub(1));
-    let send_w = 14.min(width / 3).max(10);
-    let meta_w = width.saturating_sub(send_w);
+    let meta_y = metrics
+        .box_y
+        .saturating_add(metrics.box_h.saturating_sub(1));
+    let send_w = 14.min(metrics.composer_width / 3).max(10);
+    let meta_w = metrics.composer_width.saturating_sub(send_w);
     let metadata_rect = Rect {
-        x,
+        x: metrics.composer_x,
         y: meta_y,
-        width: meta_w,
+        width: if metrics.composer_width >= 60 {
+            metrics.composer_width
+        } else {
+            meta_w
+        },
         height: 1,
     };
     let send_rect = Rect {
-        x: x.saturating_add(meta_w),
+        x: metrics
+            .composer_x
+            .saturating_add(metrics.composer_width.saturating_sub(send_w)),
         y: meta_y,
         width: send_w,
         height: 1,
     };
 
     let guidance_rect = Rect {
-        x,
-        y: box_y.saturating_add(box_h),
-        width,
+        x: metrics.composer_x,
+        y: metrics.guidance_y,
+        width: metrics.composer_width,
         height: 1,
     };
 
     HomeComposerAreas {
-        label: label_rect,
         input: input_rect,
         metadata: metadata_rect,
         send: send_rect,
         guidance: guidance_rect,
         box_rect,
+    }
+}
+
+pub(crate) fn recon_composer_areas(area: Rect) -> HomeComposerAreas {
+    let composer_width = area.width;
+    let composer_x = area.x;
+
+    let box_h = area.height.saturating_sub(1).max(2);
+    let box_rect = Rect {
+        x: composer_x,
+        y: area.y,
+        width: composer_width,
+        height: box_h,
+    };
+
+    let input_h = box_h.saturating_sub(1).max(1);
+    let input_rect = Rect {
+        x: composer_x,
+        y: area.y,
+        width: composer_width,
+        height: input_h,
+    };
+
+    let meta_y = area.y.saturating_add(box_h.saturating_sub(1));
+    let send_w = 14.min(composer_width / 3).max(10);
+    let meta_w = composer_width.saturating_sub(send_w);
+    let metadata_rect = Rect {
+        x: composer_x,
+        y: meta_y,
+        width: if composer_width >= 60 {
+            composer_width
+        } else {
+            meta_w
+        },
+        height: 1,
+    };
+    let send_rect = Rect {
+        x: composer_x.saturating_add(composer_width.saturating_sub(send_w)),
+        y: meta_y,
+        width: send_w,
+        height: 1,
+    };
+
+    let guidance_rect = Rect {
+        x: composer_x,
+        y: area.y.saturating_add(box_h),
+        width: composer_width,
+        height: 1,
+    };
+
+    HomeComposerAreas {
+        input: input_rect,
+        metadata: metadata_rect,
+        send: send_rect,
+        guidance: guidance_rect,
+        box_rect,
+    }
+}
+
+pub(crate) fn cursor_blink_visible() -> bool {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_millis() / 500) % 2 == 0)
+        .unwrap_or(true)
+}
+
+fn composer_prompt_text<'a>(
+    input: &'a str,
+    cursor: usize,
+    is_focused: bool,
+    blink_on: bool,
+) -> Text<'a> {
+    if input.is_empty() {
+        if is_focused {
+            if blink_on {
+                Text::from(Line::from(vec![
+                    Span::styled("█ ", theme::card_accent()),
+                    Span::styled(
+                        "Ask anything... e.g. \"What is known about example.org?\"",
+                        theme::card_dim(),
+                    ),
+                ]))
+            } else {
+                Text::from(Line::from(vec![
+                    Span::styled("  ", theme::card_dim()),
+                    Span::styled(
+                        "Ask anything... e.g. \"What is known about example.org?\"",
+                        theme::card_dim(),
+                    ),
+                ]))
+            }
+        } else {
+            Text::from(Line::from(vec![Span::styled(
+                "Ask anything... e.g. \"What is known about example.org?\"",
+                theme::card_dim(),
+            )]))
+        }
+    } else if !input.contains('\n') {
+        let cursor_pos = cursor.min(input.len());
+        let (before, after) = input.split_at(cursor_pos);
+        let mut spans = Vec::new();
+        if !before.is_empty() {
+            spans.push(Span::styled(before.to_string(), theme::card_text()));
+        }
+        if is_focused {
+            if let Some(ch) = after.chars().next() {
+                let mut ch_buf = [0; 4];
+                let ch_str = ch.encode_utf8(&mut ch_buf);
+                if blink_on {
+                    spans.push(Span::styled(
+                        ch_str.to_string(),
+                        Style::default()
+                            .bg(theme::ACCENT)
+                            .fg(theme::BG)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    spans.push(Span::styled(ch_str.to_string(), theme::card_text()));
+                }
+                let rest = &after[ch.len_utf8()..];
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_string(), theme::card_text()));
+                }
+            } else if blink_on {
+                spans.push(Span::styled("█", theme::card_accent()));
+            } else {
+                spans.push(Span::styled(" ", theme::card_text()));
+            }
+        } else if !after.is_empty() {
+            spans.push(Span::styled(after.to_string(), theme::card_text()));
+        }
+        Text::from(Line::from(spans))
+    } else {
+        let cursor_pos = cursor.min(input.len());
+        let mut lines = Vec::new();
+        let mut current_pos = 0;
+        for line in input.split('\n') {
+            let line_len = line.len();
+            let line_end = current_pos + line_len;
+            if is_focused && cursor_pos >= current_pos && cursor_pos <= line_end {
+                let offset_in_line = cursor_pos - current_pos;
+                let (before, after) = line.split_at(offset_in_line);
+                let mut spans = Vec::new();
+                if !before.is_empty() {
+                    spans.push(Span::styled(before.to_string(), theme::card_text()));
+                }
+                if let Some(ch) = after.chars().next() {
+                    let mut ch_buf = [0; 4];
+                    let ch_str = ch.encode_utf8(&mut ch_buf);
+                    if blink_on {
+                        spans.push(Span::styled(
+                            ch_str.to_string(),
+                            Style::default()
+                                .bg(theme::ACCENT)
+                                .fg(theme::BG)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    } else {
+                        spans.push(Span::styled(ch_str.to_string(), theme::card_text()));
+                    }
+                    let rest = &after[ch.len_utf8()..];
+                    if !rest.is_empty() {
+                        spans.push(Span::styled(rest.to_string(), theme::card_text()));
+                    }
+                } else if blink_on {
+                    spans.push(Span::styled("█", theme::card_accent()));
+                } else {
+                    spans.push(Span::styled(" ", theme::card_text()));
+                }
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    line.to_string(),
+                    theme::card_text(),
+                )));
+            }
+            current_pos = line_end + 1;
+        }
+        Text::from(lines)
+    }
+}
+
+pub(crate) fn draw_composer(
+    frame: &mut Frame,
+    app: &App,
+    areas: &HomeComposerAreas,
+    is_home: bool,
+) {
+    let screen_h = frame.area().height;
+    if areas.box_rect.y < screen_h {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme::SURFACE)),
+            areas.box_rect,
+        );
+
+        let stripe_style = Style::default().fg(theme::ACCENT).bg(theme::SURFACE);
+        for row in 0..areas.box_rect.height {
+            let row_y = areas.box_rect.y + row;
+            if row_y < screen_h {
+                frame.render_widget(
+                    Paragraph::new("▌").style(stripe_style),
+                    Rect {
+                        x: areas.box_rect.x,
+                        y: row_y,
+                        width: 1,
+                        height: 1,
+                    },
+                );
+            }
+        }
+
+        let prompt_rect = Rect {
+            x: areas.box_rect.x.saturating_add(2),
+            y: areas.box_rect.y,
+            width: areas.box_rect.width.saturating_sub(4),
+            height: areas.input.height,
+        };
+        let is_focused = app.focus == Target::Field(FieldId::Composer);
+        let blink_on = cursor_blink_visible();
+        let prompt_text = composer_prompt_text(&app.input, app.cursor, is_focused, blink_on);
+        frame.render_widget(
+            Paragraph::new(prompt_text).alignment(Alignment::Center),
+            prompt_rect,
+        );
+
+        let meta_y = areas.box_rect.y + areas.box_rect.height.saturating_sub(1);
+        if meta_y < screen_h {
+            let recon_m = if app.recon_model.is_empty() {
+                "default"
+            } else {
+                &app.recon_model
+            };
+            let synth_m = if app.synthesis_model.is_empty() {
+                "default"
+            } else {
+                &app.synthesis_model
+            };
+            let meta_line = Line::from(vec![
+                Span::styled("Recon", theme::card_accent().add_modifier(Modifier::BOLD)),
+                Span::styled(" · ", theme::card_dim()),
+                Span::styled(
+                    recon_m.to_string(),
+                    theme::card_text().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" · ", theme::card_dim()),
+                Span::styled(
+                    format!("Synthesis: {synth_m}"),
+                    Style::default().fg(theme::WARN).bg(theme::SURFACE),
+                ),
+            ]);
+            frame.render_widget(
+                Paragraph::new(meta_line).alignment(Alignment::Center),
+                areas.metadata,
+            );
+
+            let send_style = if app.focus == Target::Button(ButtonId::Send) {
+                theme::selected()
+            } else {
+                theme::card_dim()
+            };
+            let action_label = if is_home {
+                "[ Start ↵ ]"
+            } else {
+                "[ Send ↵ ]"
+            };
+            frame.render_widget(
+                Paragraph::new(action_label)
+                    .alignment(Alignment::Right)
+                    .style(send_style),
+                areas.send,
+            );
+        }
+    }
+    if areas.guidance.y < screen_h {
+        let guidance_text = if is_home {
+            "Enter to start · Shift+Enter / Ctrl+J for newline"
+        } else {
+            "Enter to send · Shift+Enter / Ctrl+J for newline"
+        };
+        frame.render_widget(
+            Paragraph::new(guidance_text)
+                .alignment(Alignment::Center)
+                .style(theme::dim()),
+            areas.guidance,
+        );
     }
 }
 
@@ -4695,146 +5000,8 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // Home composer
-    let areas = home_composer_areas(area, app);
-    if areas.label.y < area.y.saturating_add(area.height) {
-        frame.render_widget(
-            Paragraph::new("Recon")
-                .alignment(Alignment::Center)
-                .style(theme::accent().add_modifier(Modifier::BOLD)),
-            areas.label,
-        );
-    }
-    if areas.box_rect.y < area.y.saturating_add(area.height) {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(theme::SURFACE)),
-            areas.box_rect,
-        );
-
-        let stripe_style = Style::default().fg(theme::ACCENT).bg(theme::SURFACE);
-        for row in 0..areas.box_rect.height {
-            let row_y = areas.box_rect.y + row;
-            if row_y < area.y.saturating_add(area.height) {
-                frame.render_widget(
-                    Paragraph::new("▌").style(stripe_style),
-                    Rect {
-                        x: areas.box_rect.x,
-                        y: row_y,
-                        width: 1,
-                        height: 1,
-                    },
-                );
-            }
-        }
-
-        let prompt_rect = Rect {
-            x: areas.box_rect.x.saturating_add(2),
-            y: areas.box_rect.y,
-            width: areas.box_rect.width.saturating_sub(4),
-            height: 1,
-        };
-        let is_focused = app.focus == Target::Field(FieldId::Composer);
-        let prompt_line = if app.input.is_empty() {
-            if is_focused {
-                Line::from(vec![
-                    Span::styled("█ ", theme::card_accent()),
-                    Span::styled(
-                        "Ask anything... e.g. \"What is known about example.org?\"",
-                        theme::card_dim(),
-                    ),
-                ])
-            } else {
-                Line::from(vec![Span::styled(
-                    "Ask anything... e.g. \"What is known about example.org?\"",
-                    theme::card_dim(),
-                )])
-            }
-        } else {
-            let cursor_pos = app.cursor.min(app.input.len());
-            let (before, after) = app.input.split_at(cursor_pos);
-            let mut spans = Vec::new();
-            if !before.is_empty() {
-                spans.push(Span::styled(before.to_string(), theme::card_text()));
-            }
-            if is_focused {
-                if let Some(ch) = after.chars().next() {
-                    let mut ch_buf = [0; 4];
-                    let ch_str = ch.encode_utf8(&mut ch_buf);
-                    spans.push(Span::styled(
-                        ch_str.to_string(),
-                        Style::default()
-                            .bg(theme::ACCENT)
-                            .fg(theme::BG)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    let rest = &after[ch.len_utf8()..];
-                    if !rest.is_empty() {
-                        spans.push(Span::styled(rest.to_string(), theme::card_text()));
-                    }
-                } else {
-                    spans.push(Span::styled("█", theme::card_accent()));
-                }
-            } else if !after.is_empty() {
-                spans.push(Span::styled(after.to_string(), theme::card_text()));
-            }
-            Line::from(spans)
-        };
-        frame.render_widget(
-            Paragraph::new(prompt_line).alignment(Alignment::Center),
-            prompt_rect,
-        );
-
-        let meta_y = areas.box_rect.y + areas.box_rect.height.saturating_sub(1);
-        if meta_y < area.y.saturating_add(area.height) {
-            let recon_m = if app.recon_model.is_empty() {
-                "default"
-            } else {
-                &app.recon_model
-            };
-            let synth_m = if app.synthesis_model.is_empty() {
-                "default"
-            } else {
-                &app.synthesis_model
-            };
-            let meta_line = Line::from(vec![
-                Span::styled("Recon", theme::card_accent().add_modifier(Modifier::BOLD)),
-                Span::styled(" · ", theme::card_dim()),
-                Span::styled(
-                    recon_m.to_string(),
-                    theme::card_text().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" · ", theme::card_dim()),
-                Span::styled(
-                    format!("Synthesis: {synth_m}"),
-                    Style::default().fg(theme::WARN).bg(theme::SURFACE),
-                ),
-            ]);
-            let meta_rect = areas.metadata;
-            frame.render_widget(
-                Paragraph::new(meta_line).alignment(Alignment::Center),
-                meta_rect,
-            );
-
-            let send_style = if app.focus == Target::Button(ButtonId::Send) {
-                theme::selected()
-            } else {
-                theme::card_dim()
-            };
-            frame.render_widget(
-                Paragraph::new("[ Start ↵ ]")
-                    .alignment(Alignment::Right)
-                    .style(send_style),
-                areas.send,
-            );
-        }
-    }
-    if areas.guidance.y < area.y.saturating_add(area.height) {
-        frame.render_widget(
-            Paragraph::new("Enter to start · Shift+Enter / Ctrl+J for newline")
-                .alignment(Alignment::Center)
-                .style(theme::dim()),
-            areas.guidance,
-        );
-    }
+    let areas = home_composer_areas(area);
+    draw_composer(frame, app, &areas, true);
     if app.input.starts_with('/') && app.focus == Target::Field(FieldId::Composer) {
         draw_slash_hint(frame, app, area);
     }
@@ -8675,6 +8842,81 @@ mod tests {
                 || matches!(&row.kind, HomeKind::Logo(_)))
                 && row.center
         }));
+    }
+
+    #[test]
+    fn home_composer_and_all_content_centered_vertically_and_horizontally() {
+        let area = Rect::new(0, 0, 120, 40);
+        let areas = home_composer_areas(area);
+
+        // 1. Compose box is horizontally centered
+        assert_eq!(areas.box_rect.x, (area.width - areas.box_rect.width) / 2);
+        assert_eq!(areas.guidance.x, areas.box_rect.x);
+        assert_eq!(areas.metadata.x, areas.box_rect.x);
+        assert_eq!(areas.metadata.width, areas.box_rect.width);
+
+        // 2. Compose box is vertically positioned near the screen center
+        let box_mid_y = areas.box_rect.y + areas.box_rect.height / 2;
+        let screen_mid_y = area.height / 2;
+        assert!(
+            (box_mid_y as i32 - screen_mid_y as i32).abs() <= 4,
+            "composer box mid ({box_mid_y}) should be close to screen mid ({screen_mid_y})"
+        );
+
+        // 3. Balanced top and bottom padding across entire page
+        let rows = home_rows(area, 0);
+        let first_logo_row = rows
+            .iter()
+            .find(|r| matches!(r.kind, HomeKind::Logo(_)))
+            .expect("logo row should exist in wide mode");
+        let last_app_row = rows
+            .iter()
+            .rfind(|r| r.target.is_some())
+            .expect("last app row should exist");
+
+        let top_pad = first_logo_row.y - area.y;
+        let bottom_pad = (area.y + area.height).saturating_sub(last_app_row.y + 1);
+        assert!(
+            (top_pad as i32 - bottom_pad as i32).abs() <= 2,
+            "top padding ({top_pad}) and bottom padding ({bottom_pad}) should be balanced"
+        );
+
+        // 4. Content below composer (apps column) is horizontally centered
+        let column = rows
+            .iter()
+            .filter(|r| !r.center)
+            .map(home_row_width)
+            .max()
+            .unwrap_or(0) as u16;
+        let expected_left = area.x + (area.width - column) / 2;
+        assert!(expected_left > 0);
+        assert_eq!(expected_left, (area.width - column) / 2);
+
+        // 5. Verify narrow terminal mode (80x24) centers without overflowing
+        let narrow_area = Rect::new(0, 0, 80, 24);
+        let narrow_metrics = home_layout_metrics(narrow_area);
+        let narrow_rows = home_rows(narrow_area, 0);
+        assert!(narrow_metrics.top_pad <= 3);
+        let narrow_last_y = narrow_rows.last().map(|r| r.y).unwrap_or(0);
+        let narrow_bottom_pad = narrow_area.height.saturating_sub(narrow_last_y + 1);
+        assert!(
+            (narrow_metrics.top_pad as i32 - narrow_bottom_pad as i32).abs() <= 1,
+            "narrow mode top and bottom padding should be balanced"
+        );
+        assert!(
+            narrow_last_y < narrow_area.height,
+            "all rows must fit within height 24, last y was {narrow_last_y}"
+        );
+
+        // 6. Cursor blink is available
+        let _ = cursor_blink_visible();
+
+        // 7. Verify recon_composer_areas is full width
+        let recon_area = Rect::new(0, 30, 100, 4);
+        let recon_areas = recon_composer_areas(recon_area);
+        assert_eq!(recon_areas.box_rect.x, recon_area.x);
+        assert_eq!(recon_areas.box_rect.width, recon_area.width);
+        assert_eq!(recon_areas.guidance.width, recon_area.width);
     }
 
     #[test]

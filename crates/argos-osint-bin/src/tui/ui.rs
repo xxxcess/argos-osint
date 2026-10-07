@@ -45,13 +45,14 @@ fn split_horizontal(area: Rect, constraints: impl IntoIterator<Item = Constraint
         .to_vec()
 }
 
-struct Chrome {
-    header: Rect,
-    body: Rect,
-    composer: Rect,
-    footer: Rect,
+pub(crate) struct Chrome {
+    pub(crate) header: Rect,
+    pub(crate) tab_strip: Rect,
+    pub(crate) body: Rect,
+    pub(crate) composer: Rect,
+    pub(crate) footer: Rect,
     #[allow(dead_code)]
-    home: Rect,
+    pub(crate) home: Rect,
 }
 
 fn composer_height(app: &App) -> u16 {
@@ -74,11 +75,17 @@ pub(crate) fn detail_areas(app: &App) -> super::brain_detail::DetailAreas {
 
 fn chrome(area: Rect, app: &App) -> Chrome {
     let composer_h = composer_height(app);
-    let header_h = if app.module.is_none() { 0 } else { TAB_H };
+    let header_h = TAB_H;
+    let tab_strip_h = if app.module.is_none() || app.module == Some(ModuleId::Recon) {
+        1
+    } else {
+        0
+    };
     let rows = split_vertical(
         area,
         [
             Constraint::Length(header_h),
+            Constraint::Length(tab_strip_h),
             Constraint::Min(0),
             Constraint::Length(composer_h),
             Constraint::Length(1),
@@ -88,9 +95,10 @@ fn chrome(area: Rect, app: &App) -> Chrome {
     let home = tabs.first().map(|(_, rect)| *rect).unwrap_or_default();
     Chrome {
         header: rows[0],
-        body: rows[1],
-        composer: rows[2],
-        footer: rows[3],
+        tab_strip: rows[1],
+        body: rows[2],
+        composer: rows[3],
+        footer: rows[4],
         home,
     }
 }
@@ -495,12 +503,15 @@ pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
         ],
         errors,
     );
-    let spare = (area.height as usize)
-        .saturating_sub(rows.len())
-        .min(HOME_LOGO_GAP);
-    // Top pad is half the old even split; mid gap stays; leftover spare is bottom room.
-    let above = spare / 4;
-    let below = spare / 2;
+    let (above, below) = if area.height >= 36 {
+        (2, 2)
+    } else if area.height >= 30 {
+        (1, 2)
+    } else if area.height >= 24 {
+        (1, 1)
+    } else {
+        (0, 1)
+    };
     for _ in 0..below {
         rows.insert(menu_at, gap_row());
     }
@@ -557,7 +568,11 @@ fn gap_row() -> HomeRow {
 
 fn module_detail(module: ModuleId, errors: usize) -> String {
     if module == ModuleId::Logs && errors > 0 {
-        format!("{} · {}", module.blurb(), super::logs::count(errors as i64, "error"))
+        format!(
+            "{} · {}",
+            module.blurb(),
+            super::logs::count(errors as i64, "error")
+        )
     } else {
         module.blurb().to_string()
     }
@@ -578,9 +593,6 @@ fn line_width(line: &Line<'_>) -> usize {
         .map(|span| span.content.chars().count())
         .sum()
 }
-
-/// Cap on spare blank rows around the wordmark (top / mid / unused bottom).
-const HOME_LOGO_GAP: usize = 28;
 
 /// ANSI Shadow wordmark. The right-edge and baseline strokes are the shade.
 const LOGO: [&str; 6] = [
@@ -675,10 +687,19 @@ pub fn chat_blocks(app: &App) -> Vec<ChatBlock> {
 fn build_blocks(app: &App) -> Vec<ChatBlock> {
     let mut blocks = Vec::new();
     let mut used = HashSet::new();
-    let runs_by_turn: HashMap<&str, &recon::Run> = app.runs.iter().map(|run| (run.turn_id.as_str(), run)).collect();
-    let runs_by_id: HashMap<&str, &recon::Run> = app.runs.iter().map(|run| (run.id.as_str(), run)).collect();
-    let answered: HashSet<&str> = app.messages.iter().filter(|message| message.role == "assistant")
-        .filter_map(|message| message.run_id.as_deref()).collect();
+    let runs_by_turn: HashMap<&str, &recon::Run> = app
+        .runs
+        .iter()
+        .map(|run| (run.turn_id.as_str(), run))
+        .collect();
+    let runs_by_id: HashMap<&str, &recon::Run> =
+        app.runs.iter().map(|run| (run.id.as_str(), run)).collect();
+    let answered: HashSet<&str> = app
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .filter_map(|message| message.run_id.as_deref())
+        .collect();
     let mut calls_by_run: HashMap<&str, Vec<(usize, &recon::Call)>> = HashMap::new();
     for (index, call) in app.calls.iter().enumerate() {
         if let Some(run_id) = call.run_id.as_deref() {
@@ -719,7 +740,11 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                     }
                 }
                 if app.expanded.contains(&format!("plan:{}", run.id)) {
-                    if let Some(plan) = run.plan_json.as_deref().and_then(|raw| serde_json::from_str::<Plan>(raw).ok()) {
+                    if let Some(plan) = run
+                        .plan_json
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<Plan>(raw).ok())
+                    {
                         if !plan.directives.is_empty() {
                             let key = format!("plan-details:{}", run.id);
                             let body = if app.expanded.contains(&key) {
@@ -730,7 +755,8 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                             blocks.push(ChatBlock {
                                 part: InvestigationPart::PlanDiagnostics,
                                 key,
-                                title: "Plan details · picker, bindings, and execution notes".into(),
+                                title: "Plan details · picker, bindings, and execution notes"
+                                    .into(),
                                 body,
                                 collapsible: true,
                                 message_index: None,
@@ -793,7 +819,10 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                 message_index: Some(index),
                 has_memory: memories,
             });
-            if let Some(run) = message.run_id.as_deref().and_then(|id| runs_by_id.get(id).copied())
+            if let Some(run) = message
+                .run_id
+                .as_deref()
+                .and_then(|id| runs_by_id.get(id).copied())
             {
                 if let Some(plan) = run
                     .plan_json
@@ -846,16 +875,21 @@ fn coverage_summary(plan: &Plan, answer: &str) -> String {
         let prefix = format!("{}:", directive.id.to_ascii_lowercase());
         let assessment = answer.lines().find_map(|line| {
             let line = line.trim().to_ascii_lowercase();
-            line.strip_prefix(&prefix).map(|tail| tail.trim().to_string())
+            line.strip_prefix(&prefix)
+                .map(|tail| tail.trim().to_string())
         });
         match assessment.as_deref() {
-            Some(text) if text.starts_with("partly met") || text.starts_with("partially met") => partial += 1,
+            Some(text) if text.starts_with("partly met") || text.starts_with("partially met") => {
+                partial += 1
+            }
             Some(text) if text.starts_with("not met") => not_met += 1,
             Some(text) if text.starts_with("met") => met += 1,
             _ => unassessed.push(directive.id.to_uppercase()),
         }
     }
-    let mut parts = vec![format!("Coverage · {met} met · {partial} partial · {not_met} not met")];
+    let mut parts = vec![format!(
+        "Coverage · {met} met · {partial} partial · {not_met} not met"
+    )];
     if !unassessed.is_empty() {
         parts.push(format!("{} unassessed", unassessed.join(", ")));
     }
@@ -869,7 +903,14 @@ fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock 
         .and_then(|raw| serde_json::from_str::<Plan>(raw).ok());
     let title = match &plan {
         Some(plan) => {
-            let mut parts = vec![format!("{} Plan", if plan.planning_mode == "tool_picker_fallback" { "!" } else { "◆" })];
+            let mut parts = vec![format!(
+                "{} Plan",
+                if plan.planning_mode == "tool_picker_fallback" {
+                    "!"
+                } else {
+                    "◆"
+                }
+            )];
             if plan.planning_mode == "tool_picker_fallback" {
                 parts.push("deterministic fallback".into());
             }
@@ -877,7 +918,8 @@ fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock 
                 parts.push(format!("{} directives", plan.directives.len()));
             }
             parts.push(format!("{} tools", plan.calls.len()));
-            if let Some(mode) = argos_osint_core::intel_recon::ReportMode::parse(&plan.report_mode) {
+            if let Some(mode) = argos_osint_core::intel_recon::ReportMode::parse(&plan.report_mode)
+            {
                 parts.push(mode.title().into());
             }
             parts.join(" · ")
@@ -888,7 +930,9 @@ fn plan_block(run: &recon::Run, calls: &[recon::Call], open: bool) -> ChatBlock 
         String::new()
     } else {
         match plan {
-            Some(plan) if !plan.directives.is_empty() => plan_summary_lines(run, &plan, calls).join("\n"),
+            Some(plan) if !plan.directives.is_empty() => {
+                plan_summary_lines(run, &plan, calls).join("\n")
+            }
             Some(plan) => {
                 let mut lines = Vec::new();
                 if !plan.objective.is_empty() {
@@ -997,7 +1041,11 @@ fn plan_summary_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> V
     let mut lines = Vec::new();
     lines.push("Directives · evidence assessment pending".into());
     for directive in &plan.directives {
-        lines.push(format!("  {}  {}  ○ unassessed", directive.id.to_uppercase(), directive.goal));
+        lines.push(format!(
+            "  {}  {}  ○ unassessed",
+            directive.id.to_uppercase(),
+            directive.goal
+        ));
     }
     if !plan.calls.is_empty() {
         lines.push(String::new());
@@ -1011,9 +1059,20 @@ fn plan_summary_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> V
             .map(|call| call.status.as_str())
             .unwrap_or(step.status.as_str());
         let state = if state.is_empty() { "pending" } else { state };
-        let serves = if step.reason.is_empty() { String::new() } else { format!(" · {}", step.reason) };
-        let depends = if step.depends_on.is_empty() { String::new() } else { format!(" · after {}", step.depends_on.join(", ")) };
-        lines.push(format!("  {}  {name}{serves}{depends} · {state}", index + 1));
+        let serves = if step.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", step.reason)
+        };
+        let depends = if step.depends_on.is_empty() {
+            String::new()
+        } else {
+            format!(" · after {}", step.depends_on.join(", "))
+        };
+        lines.push(format!(
+            "  {}  {name}{serves}{depends} · {state}",
+            index + 1
+        ));
     }
     if !plan.fallback_requests.is_empty() {
         lines.push(String::new());
@@ -1176,8 +1235,14 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> 
     if !plan.picks.is_empty() {
         lines.push("Picker decisions:".into());
         for pick in &plan.picks {
-            let confidence = pick.confidence.map(|value| format!(" · p={value:.2}")).unwrap_or_default();
-            lines.push(format!("   {}. {} · {}{confidence}", pick.position, pick.tool_id, pick.outcome));
+            let confidence = pick
+                .confidence
+                .map(|value| format!(" · p={value:.2}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "   {}. {} · {}{confidence}",
+                pick.position, pick.tool_id, pick.outcome
+            ));
         }
     }
     if !plan.fallback_requests.is_empty() {
@@ -1865,7 +1930,12 @@ fn rows_for(app: &App, blocks: &[ChatBlock], width: usize) -> Vec<ChatRow> {
             }
             continue;
         }
-        if matches!(block.part, InvestigationPart::Status | InvestigationPart::DirectiveAssessment | InvestigationPart::TurnSummary) {
+        if matches!(
+            block.part,
+            InvestigationPart::Status
+                | InvestigationPart::DirectiveAssessment
+                | InvestigationPart::TurnSummary
+        ) {
             let mut pieces = vec![Piece {
                 text: block.title.clone(),
                 tone: Tone::Dim,
@@ -2556,7 +2626,6 @@ pub(super) fn detail_rows(detail: &str, width: usize) -> Vec<String> {
     rows
 }
 
-
 fn popup_max(app: &App) -> u16 {
     let room = inset(popup_area(app.screen)).height.max(1) as usize;
     popup_text(app).lines().count().saturating_sub(room) as u16
@@ -2721,6 +2790,7 @@ pub fn atlas_feed_room_for(app: &App) -> usize {
     atlas_feed_room(app)
 }
 
+#[allow(dead_code)]
 pub fn atlas_news_room_for(app: &App) -> usize {
     atlas_news_room(app)
 }
@@ -2788,10 +2858,14 @@ pub fn focus_order(app: &App) -> Vec<Target> {
         return vec![Target::CloseOverlay];
     }
     match app.module {
-        None => (0..ModuleId::ALL.len()).map(Target::App).collect(),
+        None => vec![
+            Target::Tab(app.tab_sel),
+            Target::App(app.launcher_sel),
+            Target::Field(FieldId::Composer),
+            Target::Button(ButtonId::Send),
+        ],
         Some(ModuleId::Recon) if app.recon_chat => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
+            let mut order = vec![Target::Tab(app.tab_sel)];
             order.push(Target::Transcript);
             order.extend(
                 [
@@ -2806,8 +2880,7 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             order
         }
         Some(ModuleId::Recon) => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
+            let mut order = vec![Target::Tab(app.tab_sel)];
             order.extend([
                 Target::Field(FieldId::ReconSearch),
                 Target::Button(ButtonId::NewThread),
@@ -2851,9 +2924,7 @@ pub fn focus_order(app: &App) -> Vec<Target> {
                 _ => {
                     order.push(Target::Button(ButtonId::CreateMemory));
                     order.push(Target::Field(FieldId::BrainQuery));
-                    order.extend(
-                        [ButtonId::Pin, ButtonId::Delete].map(Target::Button),
-                    );
+                    order.extend([ButtonId::Pin, ButtonId::Delete].map(Target::Button));
                     if !app.memories.is_empty() {
                         order.push(Target::Memory(app.memory_sel));
                     }
@@ -2941,7 +3012,11 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             let mut order = vec![Target::Home];
             order.extend((0..ModuleId::ALL.len()).map(Target::App));
             order.push(Target::Field(FieldId::LogsSearch));
-            order.extend(super::logs::buttons(&app.logs).into_iter().map(Target::Button));
+            order.extend(
+                super::logs::buttons(&app.logs)
+                    .into_iter()
+                    .map(Target::Button),
+            );
             if !app.logs.rows.is_empty() {
                 order.push(Target::LogLine(app.logs.sel));
             }
@@ -3147,7 +3222,19 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
             }
         }
     }
+    if layout.tab_strip.height > 0 && contains(layout.tab_strip, x, y) {
+        if let Some(target) = tab_strip_hit(app, layout.tab_strip, x, y) {
+            return Some(target);
+        }
+    }
     if app.module.is_none() {
+        let areas = home_composer_areas(layout.body, app);
+        if contains(areas.send, x, y) {
+            return Some(Target::Button(ButtonId::Send));
+        }
+        if contains(areas.input, x, y) {
+            return Some(Target::Field(FieldId::Composer));
+        }
         return home_line(app, x, y).map(Target::App);
     }
     if composer_height(app) > 0 && contains(layout.composer, x, y) {
@@ -3274,11 +3361,7 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     }
     if contains(layout.actions, x, y) {
         let buttons = button_areas(layout.actions, 3);
-        let ids = [
-            ButtonId::CreateMemory,
-            ButtonId::Pin,
-            ButtonId::Delete,
-        ];
+        let ids = [ButtonId::CreateMemory, ButtonId::Pin, ButtonId::Delete];
         return buttons
             .iter()
             .position(|rect| contains(*rect, x, y))
@@ -3433,6 +3516,9 @@ fn system_button(actions: Rect) -> Rect {
 fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
     let layout = chrome(app.screen, app);
     match field {
+        FieldId::Composer if app.module.is_none() => {
+            Some(home_composer_areas(layout.body, app).input)
+        }
         FieldId::Composer if composer_height(app) > 0 => Some(composer_parts(layout.composer).0),
         FieldId::ReconSearch if app.module == Some(ModuleId::Recon) && !app.recon_chat => {
             Some(dashboard_areas(layout.body).0)
@@ -3646,6 +3732,12 @@ pub(super) fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &s
             "Choose".to_string()
         } else if focused {
             String::new()
+        } else if field == FieldId::Composer {
+            if app.module.is_none() {
+                "What would you like to investigate?".to_string()
+            } else {
+                "Ask a question or /help".to_string()
+            }
         } else if field == FieldId::BrainQuery {
             format!("{} memories", app.memories.len())
         } else if field == FieldId::IntelSearch {
@@ -3830,14 +3922,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     frame.render_widget(Paragraph::new("").style(theme::text()), area);
     let layout = chrome(area, app);
-    if app.module.is_some() {
+    if layout.header.height > 0 {
         draw_header(frame, app, &layout);
+    }
+    if layout.tab_strip.height > 0 {
+        draw_tab_strip(frame, app, layout.tab_strip);
     }
     if area.width < 40 || area.height < 12 {
         frame.render_widget(
-            Paragraph::new("Resize terminal to at least 40×12\nCtrl+K commands · ? help · Ctrl+Q quit")
-                .style(theme::dim())
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(
+                "Resize terminal to at least 40×12\nCtrl+K commands · ? help · Ctrl+Q quit",
+            )
+            .style(theme::dim())
+            .wrap(Wrap { trim: false }),
             layout.body,
         );
         frame.render_widget(footer_line(app), layout.footer);
@@ -3937,6 +4034,231 @@ fn draw_header(frame: &mut Frame, app: &App, layout: &Chrome) {
     );
 }
 
+pub(crate) struct TabStripItem {
+    pub target: Target,
+    pub close_target: Option<Target>,
+    pub rect: Rect,
+    pub close_rect: Option<Rect>,
+    pub label: String,
+    pub active: bool,
+    pub focused: bool,
+    pub close_focused: bool,
+    pub indicator: Option<&'static str>,
+}
+
+pub(crate) fn tab_strip_layout(area: Rect, app: &App) -> Vec<TabStripItem> {
+    if area.height == 0 || area.width < 10 {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    let mut x = area.x;
+
+    // 1. Home Tab (permanent, first, not closable)
+    let home_w = 8.min(area.width);
+    let home_active = app.module.is_none() && app.tab_sel == 0;
+    let home_focused = app.focus == Target::Tab(0);
+    items.push(TabStripItem {
+        target: Target::Tab(0),
+        close_target: None,
+        rect: Rect {
+            x,
+            y: area.y,
+            width: home_w,
+            height: 1,
+        },
+        close_rect: None,
+        label: "Home".into(),
+        active: home_active,
+        focused: home_focused,
+        close_focused: false,
+        indicator: None,
+    });
+    x = x.saturating_add(home_w);
+
+    // 2. Open investigation tabs with overflow
+    let plus_w = 4u16;
+    let overflow_reserve = 9u16;
+    let total_tabs = app.tab_ids.len();
+    let avail = area.width.saturating_sub(x - area.x + plus_w);
+    let tab_w = 20u16.min(avail);
+
+    if total_tabs > 0 && tab_w >= 10 {
+        let max_visible = (avail as usize) / (tab_w as usize);
+        let (start, end, show_overflow) = if total_tabs <= max_visible {
+            (0, total_tabs, false)
+        } else {
+            let visible_cap = (avail.saturating_sub(overflow_reserve) as usize) / (tab_w as usize);
+            let visible_cap = visible_cap.max(1);
+            let active_idx = if app.tab_sel > 0 { app.tab_sel - 1 } else { 0 };
+            let start = if active_idx >= visible_cap {
+                active_idx + 1 - visible_cap
+            } else {
+                0
+            };
+            let end = (start + visible_cap).min(total_tabs);
+            (start, end, true)
+        };
+
+        for idx in start..end {
+            let thread_id = &app.tab_ids[idx];
+            let visual_idx = idx + 1;
+            let title = app
+                .threads
+                .iter()
+                .find(|t| &t.id == thread_id)
+                .map(|t| t.title.as_str())
+                .unwrap_or("Investigation");
+            let is_active = (app.module == Some(ModuleId::Recon) || app.module.is_none())
+                && app.tab_sel == visual_idx;
+            let is_focused = app.focus == Target::Tab(visual_idx);
+            let is_close_focused = app.focus == Target::TabClose(visual_idx);
+
+            let indicator = if app.running_thread(thread_id) {
+                Some("◌")
+            } else if app.tab_unreads.contains(thread_id) {
+                Some("●")
+            } else if app
+                .thread_states
+                .get(thread_id)
+                .is_some_and(|s| s == "failed" || s == "interrupted")
+            {
+                Some("×")
+            } else {
+                None
+            };
+
+            let this_tab_w = tab_w.min(area.width.saturating_sub(x - area.x + plus_w));
+            if this_tab_w < 6 {
+                break;
+            }
+            let close_w = 2u16;
+            let body_w = this_tab_w.saturating_sub(close_w);
+
+            items.push(TabStripItem {
+                target: Target::Tab(visual_idx),
+                close_target: Some(Target::TabClose(visual_idx)),
+                rect: Rect {
+                    x,
+                    y: area.y,
+                    width: body_w,
+                    height: 1,
+                },
+                close_rect: Some(Rect {
+                    x: x.saturating_add(body_w),
+                    y: area.y,
+                    width: close_w,
+                    height: 1,
+                }),
+                label: title.into(),
+                active: is_active,
+                focused: is_focused,
+                close_focused: is_close_focused,
+                indicator,
+            });
+            x = x.saturating_add(this_tab_w);
+        }
+
+        // 3. Overflow indicator
+        if show_overflow {
+            let hidden_count = total_tabs.saturating_sub(end - start);
+            let of_w = overflow_reserve.min(area.width.saturating_sub(x - area.x + plus_w));
+            if of_w >= 4 {
+                items.push(TabStripItem {
+                    target: Target::TabOverflow,
+                    close_target: None,
+                    rect: Rect {
+                        x,
+                        y: area.y,
+                        width: of_w,
+                        height: 1,
+                    },
+                    close_rect: None,
+                    label: format!("›› ({hidden_count})"),
+                    active: false,
+                    focused: app.focus == Target::TabOverflow,
+                    close_focused: false,
+                    indicator: None,
+                });
+                x = x.saturating_add(of_w);
+            }
+        }
+    }
+
+    // 4. Plus action [+]
+    if area.width.saturating_sub(x - area.x) >= plus_w {
+        items.push(TabStripItem {
+            target: Target::TabPlus,
+            close_target: None,
+            rect: Rect {
+                x,
+                y: area.y,
+                width: plus_w,
+                height: 1,
+            },
+            close_rect: None,
+            label: "+".into(),
+            active: false,
+            focused: app.focus == Target::TabPlus,
+            close_focused: false,
+            indicator: None,
+        });
+    }
+
+    items
+}
+
+pub(crate) fn draw_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let items = tab_strip_layout(area, app);
+    for item in items {
+        let style = if item.focused {
+            theme::selected()
+        } else if item.active {
+            theme::accent().add_modifier(Modifier::BOLD)
+        } else {
+            theme::dim()
+        };
+
+        let ind_str = item.indicator.map(|i| format!("{i} ")).unwrap_or_default();
+        let display_label = if item.rect.width > 4 {
+            let room = (item.rect.width as usize).saturating_sub(ind_str.chars().count() + 2);
+            format!(" [{}{}]", ind_str, fit(&item.label, room))
+        } else {
+            format!(" [{}]", item.label)
+        };
+
+        frame.render_widget(
+            Paragraph::new(Span::styled(display_label, style)),
+            item.rect,
+        );
+
+        if let (Some(close_rect), Some(_)) = (item.close_rect, item.close_target) {
+            let close_style = if item.close_focused {
+                theme::selected()
+            } else {
+                theme::dim()
+            };
+            frame.render_widget(Paragraph::new(Span::styled("× ", close_style)), close_rect);
+        }
+    }
+}
+
+pub(crate) fn tab_strip_hit(app: &App, area: Rect, x: u16, y: u16) -> Option<Target> {
+    for item in tab_strip_layout(area, app) {
+        if let (Some(close_target), Some(close_rect)) = (item.close_target, item.close_rect) {
+            if contains(close_rect, x, y) {
+                return Some(close_target);
+            }
+        }
+        if contains(item.rect, x, y) {
+            return Some(item.target);
+        }
+    }
+    None
+}
+
 fn header_detail(app: &App) -> String {
     match app.module {
         None => String::new(),
@@ -4019,7 +4341,9 @@ fn footer_line(app: &App) -> Paragraph<'static> {
                 "↑↓ event · Enter fold · f follow · o job · Esc back to job"
             }
             (Some(ModuleId::Logs), _) => "↑↓ event · Enter fold · f follow · o job · Esc home",
-            (Some(ModuleId::Jobs), _) => "↑↓ job · Enter detail · l logs · r retry · c cancel · s status · Esc home",
+            (Some(ModuleId::Jobs), _) => {
+                "↑↓ job · Enter detail · l logs · r retry · c cancel · s status · Esc home"
+            }
             (Some(ModuleId::System), _) => "Tab next · Enter · Ctrl+K · Esc home",
             _ => "Tab next · 1–9 apps · Enter · Ctrl+K · Esc home",
         }
@@ -4146,6 +4470,81 @@ const SLASH: &[(&str, &str)] = &[
     ("palette", "command palette"),
 ];
 
+pub(crate) struct HomeComposerAreas {
+    pub label: Rect,
+    pub input: Rect,
+    pub metadata: Rect,
+    pub send: Rect,
+    pub guidance: Rect,
+}
+
+pub(crate) fn home_composer_areas(area: Rect, app: &App) -> HomeComposerAreas {
+    let rows = home_rows(area, app.error_count());
+    let last_app_y = rows
+        .iter()
+        .filter_map(|r| r.target.map(|_| r.y))
+        .max()
+        .unwrap_or(area.y);
+
+    let content_width = rows
+        .iter()
+        .filter(|row| !row.center)
+        .map(home_row_width)
+        .max()
+        .unwrap_or(0) as u16;
+    let width = content_width
+        .clamp(56, 96)
+        .min(area.width.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+
+    let y = last_app_y.saturating_add(2); // 1-2 rows after apps
+    let label_rect = Rect {
+        x,
+        y,
+        width,
+        height: 1,
+    };
+
+    let input_h = if area.height >= 24 { 3 } else { 1 };
+    let input_rect = Rect {
+        x,
+        y: y.saturating_add(1),
+        width,
+        height: input_h,
+    };
+
+    let meta_y = input_rect.y.saturating_add(input_rect.height);
+    let send_w = 22.min(width / 3).max(12);
+    let meta_w = width.saturating_sub(send_w);
+    let metadata_rect = Rect {
+        x,
+        y: meta_y,
+        width: meta_w,
+        height: 1,
+    };
+    let send_rect = Rect {
+        x: x.saturating_add(meta_w),
+        y: meta_y,
+        width: send_w,
+        height: 1,
+    };
+
+    let guidance_rect = Rect {
+        x,
+        y: meta_y.saturating_add(1),
+        width,
+        height: 1,
+    };
+
+    HomeComposerAreas {
+        label: label_rect,
+        input: input_rect,
+        metadata: metadata_rect,
+        send: send_rect,
+        guidance: guidance_rect,
+    }
+}
+
 fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
     let rows = home_rows(area, app.error_count());
     let column = rows
@@ -4156,11 +4555,11 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or(0) as u16;
     let column = column.min(area.width);
     let left = area.x + area.width.saturating_sub(column) / 2;
-    for row in rows {
+    for row in &rows {
         if row.y >= area.y.saturating_add(area.height) {
             break;
         }
-        let line = home_line_text(&row, app.launcher_sel);
+        let line = home_line_text(row, app.launcher_sel);
         if line.is_none() {
             continue;
         }
@@ -4187,6 +4586,51 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
             }),
             rect,
         );
+    }
+
+    // Home composer
+    let areas = home_composer_areas(area, app);
+    if areas.label.y < area.y.saturating_add(area.height) {
+        frame.render_widget(
+            Paragraph::new("New investigation").style(theme::accent().add_modifier(Modifier::BOLD)),
+            areas.label,
+        );
+    }
+    if areas.input.y < area.y.saturating_add(area.height) {
+        draw_field(frame, app, FieldId::Composer, "", areas.input);
+    }
+    if areas.metadata.y < area.y.saturating_add(area.height) {
+        let recon_m = if app.recon_model.is_empty() {
+            "default"
+        } else {
+            &app.recon_model
+        };
+        let synth_m = if app.synthesis_model.is_empty() {
+            "default"
+        } else {
+            &app.synthesis_model
+        };
+        let meta_text = format!("Recon: {recon_m} · Synthesis: {synth_m}");
+        frame.render_widget(
+            Paragraph::new(meta_text).style(theme::dim()),
+            areas.metadata,
+        );
+        draw_button(
+            frame,
+            app,
+            ButtonId::Send,
+            "Start investigation",
+            areas.send,
+        );
+    }
+    if areas.guidance.y < area.y.saturating_add(area.height) {
+        frame.render_widget(
+            Paragraph::new("Enter to start · Shift+Enter / Ctrl+J for newline").style(theme::dim()),
+            areas.guidance,
+        );
+    }
+    if app.input.starts_with('/') && app.focus == Target::Field(FieldId::Composer) {
+        draw_slash_hint(frame, app, area);
     }
 }
 
@@ -4295,7 +4739,11 @@ fn draw_recon_chat(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = vec!["Investigation".to_string(), String::new()];
-    if let Some(thread) = app.threads.iter().find(|thread| Some(&thread.id) == app.selected_thread.as_ref()) {
+    if let Some(thread) = app
+        .threads
+        .iter()
+        .find(|thread| Some(&thread.id) == app.selected_thread.as_ref())
+    {
         lines.push(clip_chars(&thread.title, 27));
     }
     if !app.recon_stage.is_empty() {
@@ -4303,10 +4751,18 @@ fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
     }
     lines.push(String::new());
     if let Some(run) = app.runs.last() {
-        if let Some(plan) = run.plan_json.as_deref().and_then(|raw| serde_json::from_str::<Plan>(raw).ok()) {
+        if let Some(plan) = run
+            .plan_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Plan>(raw).ok())
+        {
             lines.push(format!("Directives · {}", plan.directives.len()));
             for directive in plan.directives.iter().take(5) {
-                lines.push(format!("{}  {}", directive.id.to_uppercase(), clip_chars(&directive.goal, 23)));
+                lines.push(format!(
+                    "{}  {}",
+                    directive.id.to_uppercase(),
+                    clip_chars(&directive.goal, 23)
+                ));
             }
         }
     }
@@ -4317,7 +4773,11 @@ fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines.join("\n"))
             .style(theme::dim())
-            .block(Block::default().borders(Borders::LEFT).border_style(theme::dim()))
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT)
+                    .border_style(theme::dim()),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -4574,8 +5034,7 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
                 ),
                 inner_w,
             );
-            let selected =
-                matches!(app.focus, Target::Memory(_)) && index == app.memory_sel;
+            let selected = matches!(app.focus, Target::Memory(_)) && index == app.memory_sel;
             ListItem::new(format!("{title}\n{source}")).style(if selected {
                 theme::selected()
             } else {
@@ -4692,7 +5151,11 @@ fn source_anchor_label(source: &argos_osint_core::recon::InsightSource) -> Strin
         } else {
             format!("thread {thread}")
         }
-    } else if let Some(url) = source.source_url.as_deref().filter(|url| !url.trim().is_empty()) {
+    } else if let Some(url) = source
+        .source_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+    {
         url.to_string()
     } else if let Some(run) = source.run_id.as_deref().filter(|id| !id.is_empty()) {
         if source.call_id.is_empty() {
@@ -5040,7 +5503,11 @@ fn recall_label(app: &App) -> &'static str {
         .as_ref()
         .and_then(|id| app.threads.iter().find(|thread| &thread.id == id))
         .is_some_and(|thread| thread.recall_insights);
-    if on { "recall: on" } else { "recall: off" }
+    if on {
+        "recall: on"
+    } else {
+        "recall: off"
+    }
 }
 
 fn atlas_run_label(app: &App) -> &'static str {
@@ -5135,8 +5602,10 @@ fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(list_block, list);
     if app.intel_articles.is_empty() {
         frame.render_widget(
-            Paragraph::new(" No classified articles for this day. Run Atlas, or pick another day. ")
-                .style(theme::dim()),
+            Paragraph::new(
+                " No classified articles for this day. Run Atlas, or pick another day. ",
+            )
+            .style(theme::dim()),
             list_inner,
         );
         return;
@@ -5313,7 +5782,13 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
 
     let right_rows = intel_briefing_right_rows(app, right);
     if insights_loading {
-        draw_intel_section_loading(frame, right_rows[0], " confidence ", "Updating confidence", app);
+        draw_intel_section_loading(
+            frame,
+            right_rows[0],
+            " confidence ",
+            "Updating confidence",
+            app,
+        );
     } else {
         draw_intel_confidence(frame, app, right_rows[0]);
     }
@@ -5551,9 +6026,7 @@ fn stroke_clipped_box(frame: &mut Frame, viewport: Rect, area: AbsRect, title: &
                     break;
                 }
                 if x >= vis.x && x < vis.x.saturating_add(vis.width) {
-                    buf[(x, row)]
-                        .set_char(ch)
-                        .set_style(title_style);
+                    buf[(x, row)].set_char(ch).set_style(title_style);
                 }
                 x = x.saturating_add(1);
             }
@@ -5563,10 +6036,7 @@ fn stroke_clipped_box(frame: &mut Frame, viewport: Rect, area: AbsRect, title: &
     let bottom_visible = top_clip.saturating_add(vis.height) >= area.height;
     if bottom_visible {
         let row = bottom as u16;
-        if bottom >= 0
-            && row >= viewport.y
-            && row < viewport.y.saturating_add(viewport.height)
-        {
+        if bottom >= 0 && row >= viewport.y && row < viewport.y.saturating_add(viewport.height) {
             for x in vis.x..vis.x.saturating_add(vis.width) {
                 let ch = if x == left {
                     '└'
@@ -5767,11 +6237,7 @@ fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Focus-brief background task rows: full article fetch, insight re-extract, mode classify.
@@ -5801,16 +6267,14 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
             body.quality.as_str()
         };
         let title = format!("Full article · {quality}");
-        let detail = if !message.is_empty()
-            && !message.eq_ignore_ascii_case(&title)
-            && !insights_running
-        {
-            Some(message.to_string())
-        } else if !body.quality_rationale.trim().is_empty() && quality != "complete" {
-            Some(body.quality_rationale.clone())
-        } else {
-            None
-        };
+        let detail =
+            if !message.is_empty() && !message.eq_ignore_ascii_case(&title) && !insights_running {
+                Some(message.to_string())
+            } else if !body.quality_rationale.trim().is_empty() && quality != "complete" {
+                Some(body.quality_rationale.clone())
+            } else {
+                None
+            };
         (title, detail)
     } else if !message.is_empty() {
         (message.to_string(), None)
@@ -5827,7 +6291,10 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
         body_style.add_modifier(Modifier::BOLD),
     )));
     if let Some(detail) = body_detail {
-        lines.push(Line::from(Span::styled(format!("  {detail}"), theme::dim())));
+        lines.push(Line::from(Span::styled(
+            format!("  {detail}"),
+            theme::dim(),
+        )));
     }
 
     // Insight re-extract from cleaned body.
@@ -5851,12 +6318,14 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
         insights_style.add_modifier(Modifier::BOLD),
     )));
     if let Some(detail) = insights_detail {
-        lines.push(Line::from(Span::styled(format!("  {detail}"), theme::dim())));
+        lines.push(Line::from(Span::styled(
+            format!("  {detail}"),
+            theme::dim(),
+        )));
     }
 
     // Classifier-recommended recon mode.
-    let mode_pending = app.intel_mode_classifying
-        && app.intel_recon_recommended_for == article.id;
+    let mode_pending = app.intel_mode_classifying && app.intel_recon_recommended_for == article.id;
     let mode_label = if mode_pending {
         format!("{} Classifying recon mode", loading_spinner_frame())
     } else {
@@ -5904,7 +6373,10 @@ fn draw_intel_confidence(frame: &mut Frame, app: &App, area: Rect) {
         .map(|row| {
             Line::from(Span::styled(
                 row,
-                Style::default().fg(color).bg(theme::BG).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(color)
+                    .bg(theme::BG)
+                    .add_modifier(Modifier::BOLD),
             ))
         })
         .collect();
@@ -5968,13 +6440,7 @@ fn grade_ascii_lines(grade: &str) -> Vec<String> {
         return vec!["?".into(); 6];
     }
     (0..6)
-        .map(|row| {
-            glyphs
-                .iter()
-                .map(|g| g[row])
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
+        .map(|row| glyphs.iter().map(|g| g[row]).collect::<Vec<_>>().join(" "))
         .collect()
 }
 
@@ -6036,14 +6502,7 @@ fn ansi_shadow_glyph(ch: char) -> Option<[&'static str; 6]> {
             "╚██████╔╝",
             " ╚═════╝ ",
         ],
-        '1' => [
-            " ██╗",
-            "███║",
-            "╚██║",
-            " ██║",
-            " ██║",
-            " ╚═╝",
-        ],
+        '1' => [" ██╗", "███║", "╚██║", " ██║", " ██║", " ╚═╝"],
         '2' => [
             "██████╗ ",
             "╚════██╗",
@@ -6127,9 +6586,7 @@ fn intel_source_evaluation(app: &App) -> IntelSourceEval {
         best_credibility, wikipedia_rsp, InformationCredibility, SourceReliability,
     };
     let article = app.intel_articles.get(app.intel_sel);
-    let domain = article
-        .map(|row| row.source_domain.as_str())
-        .unwrap_or("");
+    let domain = article.map(|row| row.source_domain.as_str()).unwrap_or("");
     let (reliability, entry) = match wikipedia_rsp::cached_index() {
         Some(index) => match index.lookup_domain(domain) {
             Some(entry) => (entry.status.reliability(), Some(entry.clone())),
@@ -6193,7 +6650,11 @@ fn intel_source_evaluation(app: &App) -> IntelSourceEval {
     }
 }
 
-fn draw_intel_tags(frame: &mut Frame, article: &argos_osint_core::store::AtlasArticleRow, area: Rect) {
+fn draw_intel_tags(
+    frame: &mut Frame,
+    article: &argos_osint_core::store::AtlasArticleRow,
+    area: Rect,
+) {
     let block = pane(" tags ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -6357,13 +6818,7 @@ fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app
 }
 
 /// Centered loading card over a briefing side pane (extracted / confidence).
-fn draw_intel_section_loading(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    phase: &str,
-    app: &App,
-) {
+fn draw_intel_section_loading(frame: &mut Frame, area: Rect, title: &str, phase: &str, app: &App) {
     let block = pane(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -6389,12 +6844,7 @@ fn intel_insights_progress_detail(app: &App) -> Option<String> {
 }
 
 /// Popup card: bordered block horizontally and vertically centered in `area`.
-fn draw_centered_loading_card(
-    frame: &mut Frame,
-    area: Rect,
-    label: &str,
-    detail: Option<&str>,
-) {
+fn draw_centered_loading_card(frame: &mut Frame, area: Rect, label: &str, detail: Option<&str>) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -6422,14 +6872,12 @@ fn draw_centered_loading_card(
         height: card_h,
     };
     frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
-                    .style(theme::text()),
-            ),
+        Paragraph::new(lines).alignment(Alignment::Center).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
+                .style(theme::text()),
+        ),
         card,
     );
 }
@@ -6542,10 +6990,7 @@ fn intel_brief_reports_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                     lines.push(md_line_to_line(line));
                 }
             } else if section.status == "running" {
-                lines.push(Line::from(Span::styled(
-                    "  synthesizing…",
-                    theme::dim(),
-                )));
+                lines.push(Line::from(Span::styled("  synthesizing…", theme::dim())));
             }
         }
         lines.push(Line::from(""));
@@ -6631,10 +7076,7 @@ fn draw_atlas_insights(frame: &mut Frame, app: &App, area: Rect) {
             width: inner.width,
             height: height.min(inner.height),
         };
-        frame.render_widget(
-            Paragraph::new(lines).alignment(Alignment::Center),
-            centered,
-        );
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), centered);
         return;
     }
     let width = inset(area).width as usize;
@@ -6655,11 +7097,17 @@ fn draw_atlas_insights(frame: &mut Frame, app: &App, area: Rect) {
     // Fifth-phase row: saved/reused/indexed counts, never extraction counts.
     let memories = app.atlas_stats.memories.line();
     if !memories.is_empty() {
-        lines.insert(0, Line::from(Span::styled(center_text(&memories, width), theme::dim())));
+        lines.insert(
+            0,
+            Line::from(Span::styled(center_text(&memories, width), theme::dim())),
+        );
     }
-    lines.extend(rows.into_iter().skip(start).take(room.max(1)).map(|line| {
-        Line::from(Span::styled(center_text(&line, width), theme::text()))
-    }));
+    lines.extend(
+        rows.into_iter()
+            .skip(start)
+            .take(room.max(1))
+            .map(|line| Line::from(Span::styled(center_text(&line, width), theme::text()))),
+    );
     frame.render_widget(
         Paragraph::new(lines)
             .block(pane(" insights "))
@@ -6740,11 +7188,7 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
         let empty = line == "No country statistics yet.";
         lines.push(Line::from(Span::styled(
             center_text(&line, width),
-            if empty {
-                theme::dim()
-            } else {
-                theme::text()
-            },
+            if empty { theme::dim() } else { theme::text() },
         )));
     }
     frame.render_widget(
@@ -6813,9 +7257,7 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
             .iter()
             .enumerate()
             .skip(app.scrolls.atlas_runs as usize)
-            .map(|(index, run)| {
-                news_cycle_line(run, width, index == app.atlas_run_sel)
-            })
+            .map(|(index, run)| news_cycle_line(run, width, index == app.atlas_run_sel))
             .collect()
     };
     frame.render_widget(Paragraph::new(lines).block(pane(" news cycle ")), cycles);
@@ -6826,14 +7268,31 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
         draw_button(frame, app, ButtonId::AtlasResume, "Resume", buttons[1]);
     } else {
         // Dimmed: the selected cycle has nothing to resume (Enter explains why).
-        draw_button_state(frame, app, ButtonId::AtlasResume, "Resume", buttons[1], false);
+        draw_button_state(
+            frame,
+            app,
+            ButtonId::AtlasResume,
+            "Resume",
+            buttons[1],
+            false,
+        );
     }
-    draw_button(frame, app, ButtonId::AtlasRepair, "Repair memories", buttons[2]);
+    draw_button(
+        frame,
+        app,
+        ButtonId::AtlasRepair,
+        "Repair memories",
+        buttons[2],
+    );
     draw_button(frame, app, ButtonId::AtlasDelete, "Delete", buttons[3]);
 }
 
 /// Date on the left, pipeline state on the right.
-fn news_cycle_line(run: &argos_osint_core::store::AtlasRunRow, width: usize, selected: bool) -> Line<'static> {
+fn news_cycle_line(
+    run: &argos_osint_core::store::AtlasRunRow,
+    width: usize,
+    selected: bool,
+) -> Line<'static> {
     let style = if selected {
         theme::selected()
     } else {
@@ -6846,10 +7305,7 @@ fn news_cycle_line(run: &argos_osint_core::store::AtlasRunRow, width: usize, sel
         .saturating_sub(when.chars().count())
         .saturating_sub(status.chars().count());
     if gap == 0 {
-        return Line::from(Span::styled(
-            fit(&format!("{when} {status}"), width),
-            style,
-        ));
+        return Line::from(Span::styled(fit(&format!("{when} {status}"), width), style));
     }
     Line::from(vec![
         Span::styled(when, style),
@@ -6913,10 +7369,7 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
             },
         )));
     }
-    frame.render_widget(
-        Paragraph::new(lines).block(pane(" stats ")),
-        area,
-    );
+    frame.render_widget(Paragraph::new(lines).block(pane(" stats ")), area);
 }
 
 fn draw_map_or_hold(frame: &mut Frame, app: &App, area: Rect) {
@@ -7137,7 +7590,10 @@ fn draw_system(frame: &mut Frame, app: &App, area: Rect) {
 fn popup_text(app: &App) -> String {
     match &app.overlay {
         Overlay::Help => {
-            let mut lines = vec![format!("{} commands", app.module.map_or("Home", ModuleId::title)), String::new()];
+            let mut lines = vec![
+                format!("{} commands", app.module.map_or("Home", ModuleId::title)),
+                String::new(),
+            ];
             for command in super::commands::matching("", app.module) {
                 if command.module.is_some() && command.module != app.module {
                     continue;
@@ -7145,13 +7601,20 @@ fn popup_text(app: &App) -> String {
                 if command.category == "Navigation" && command.id != "home" {
                     continue;
                 }
-                let shortcut = if command.shortcut.is_empty() { String::new() } else { format!(" · {}", command.shortcut) };
-                lines.push(format!("{}{} — {}", command.label, shortcut, command.description));
+                let shortcut = if command.shortcut.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", command.shortcut)
+                };
+                lines.push(format!(
+                    "{}{} — {}",
+                    command.label, shortcut, command.description
+                ));
             }
             lines.push(String::new());
             lines.push(help_text(app).to_string());
             lines.join("\n")
-        },
+        }
         Overlay::Block { title, body } => format!("{title}\n\n{body}"),
         Overlay::Memories { message_id } => memory_popup(app, message_id),
         Overlay::Choice(_) => {
@@ -7370,15 +7833,13 @@ fn draw_palette(frame: &mut Frame, app: &App) {
         };
         let label = format!("{mark}{}  ·  {hint}", item.label);
         frame.render_widget(
-            Paragraph::new(fit(&label, inner.width as usize)).style(
-                if !item.enabled {
-                    theme::card_dim()
-                } else if selected {
-                    theme::selected()
-                } else {
-                    theme::card_text()
-                },
-            ),
+            Paragraph::new(fit(&label, inner.width as usize)).style(if !item.enabled {
+                theme::card_dim()
+            } else if selected {
+                theme::selected()
+            } else {
+                theme::card_text()
+            }),
             Rect {
                 x: inner.x,
                 y: inner.y + 1 + (index - start) as u16,
@@ -7402,8 +7863,8 @@ fn intel_recon_popup_layout(area: Rect, app: &App) -> IntelReconPopupLayout {
         inner,
         [
             Constraint::Length(ACTION_H), // mode tabs
-            Constraint::Length(3),       // description
-            Constraint::Min(4),          // section toggles
+            Constraint::Length(3),        // description
+            Constraint::Min(4),           // section toggles
             Constraint::Length(ACTION_H), // start
         ],
     );
@@ -7548,13 +8009,7 @@ fn draw_intel_recon_popup(frame: &mut Frame, app: &App) {
         );
     }
 
-    draw_button(
-        frame,
-        app,
-        ButtonId::IntelReconStart,
-        "Start",
-        layout.start,
-    );
+    draw_button(frame, app, ButtonId::IntelReconStart, "Start", layout.start);
 }
 
 fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
@@ -7564,6 +8019,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
         ChoiceKind::Provider => format!(" {} provider ", app.defaults_role.label()),
         ChoiceKind::Model => format!(" {} model ", app.defaults_role.label()),
         ChoiceKind::IntelDay => " news cycle day ".into(),
+        ChoiceKind::Investigation => " switch investigation ".into(),
     };
     frame.render_widget(Paragraph::new("").block(theme::card(&title)), area);
     let inner = inset(area);
@@ -7591,6 +8047,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
             ChoiceKind::Model => "No models for this account yet.",
             ChoiceKind::IntelDay => "No Atlas news-cycle days yet.",
             ChoiceKind::Provider => "No connected account yet. Local is always listed.",
+            ChoiceKind::Investigation => "No investigations yet.",
         };
         frame.render_widget(
             Paragraph::new(empty).style(theme::card_dim()),
@@ -7646,13 +8103,25 @@ mod tests {
     fn coverage_only_counts_explicit_assessments() {
         let plan = Plan {
             directives: vec![
-                Directive { id: "d1".into(), ..Default::default() },
-                Directive { id: "d2".into(), ..Default::default() },
-                Directive { id: "d3".into(), ..Default::default() },
+                Directive {
+                    id: "d1".into(),
+                    ..Default::default()
+                },
+                Directive {
+                    id: "d2".into(),
+                    ..Default::default()
+                },
+                Directive {
+                    id: "d3".into(),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
-        let summary = coverage_summary(&plan, "D1: met [call-a]\nD2: partly met [call-b]\nD3: still being assessed");
+        let summary = coverage_summary(
+            &plan,
+            "D1: met [call-a]\nD2: partly met [call-b]\nD3: still being assessed",
+        );
         assert!(summary.contains("1 met · 1 partial · 0 not met"));
         assert!(summary.contains("D3 unassessed"));
     }
@@ -7843,8 +8312,14 @@ mod tests {
         ] {
             assert!(details.contains(needle), "missing {needle:?} in\n{details}");
         }
-        assert!(details.contains("p=0.87"), "picker confidence remains in details");
-        assert!(!block.body.contains("p=0.87"), "picker confidence stays out of the main Plan");
+        assert!(
+            details.contains("p=0.87"),
+            "picker confidence remains in details"
+        );
+        assert!(
+            !block.body.contains("p=0.87"),
+            "picker confidence stays out of the main Plan"
+        );
         assert!(
             !details.contains("Jane Roe role"),
             "raw observations stay out of the decision row"
@@ -7911,9 +8386,17 @@ mod tests {
         let rows = home_rows(area, 0);
         let logo_at = rows
             .iter()
-            .position(|row| matches!(row.kind, HomeKind::Logo(_) | HomeKind::Heading("ARGOS OSINT")))
+            .position(|row| {
+                matches!(
+                    row.kind,
+                    HomeKind::Logo(_) | HomeKind::Heading("ARGOS OSINT")
+                )
+            })
             .unwrap();
-        assert!(logo_at <= 7, "top pad should be half the old even split, got {logo_at}");
+        assert!(
+            logo_at <= 7,
+            "top pad should be half the old even split, got {logo_at}"
+        );
         let headings: Vec<_> = rows
             .iter()
             .filter_map(|row| match row.kind {
@@ -7927,13 +8410,11 @@ mod tests {
             .filter_map(|row| row.target.map(|index| ModuleId::ALL[index]))
             .take(3)
             .collect();
-        assert_eq!(
-            apps,
-            [ModuleId::Intel, ModuleId::Atlas, ModuleId::Brain]
-        );
+        assert_eq!(apps, [ModuleId::Intel, ModuleId::Atlas, ModuleId::Brain]);
         assert!(rows.iter().any(|row| {
-            matches!(&row.kind, HomeKind::Logo(_)) && row.center
-                || matches!(row.kind, HomeKind::Heading("ARGOS OSINT")) && row.center
+            (matches!(row.kind, HomeKind::Heading("ARGOS OSINT"))
+                || matches!(&row.kind, HomeKind::Logo(_)))
+                && row.center
         }));
     }
 

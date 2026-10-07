@@ -4,8 +4,8 @@
 //! connections, promote inferences to facts, call tools, or decide that a
 //! directive is satisfied.
 
-use serde::{Deserialize, Serialize};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
 use crate::provider::ChatMessage;
 use crate::secrets::ProviderSecret;
@@ -174,7 +174,11 @@ pub fn system_prompt(mode: SummarizationMode) -> &'static str {
 }
 
 /// Reject empty or malformed model output for a mode.
-pub fn validate_result(mode: SummarizationMode, content: &str, known_ids: &[String]) -> Result<(), String> {
+pub fn validate_result(
+    mode: SummarizationMode,
+    content: &str,
+    known_ids: &[String],
+) -> Result<(), String> {
     let text = content.trim();
     if text.is_empty() {
         return Err("empty summarization output".into());
@@ -244,7 +248,10 @@ pub fn fallback_excerpt(text: &str, budget: usize) -> String {
 }
 
 /// Look up a cached derived summary by the request cache key fields.
-pub fn cache_get(conn: &Connection, req: &SummaryRequest) -> Result<Option<SummaryResult>, anyhow::Error> {
+pub fn cache_get(
+    conn: &Connection,
+    req: &SummaryRequest,
+) -> Result<Option<SummaryResult>, anyhow::Error> {
     let focus_hash = sha_hex(&req.focus);
     let row: Option<(String, String, String, i64, String)> = conn
         .query_row(
@@ -256,7 +263,10 @@ pub fn cache_get(conn: &Connection, req: &SummaryRequest) -> Result<Option<Summa
             params![
                 req.mode.as_str(),
                 req.sources.first().map(|s| s.id.as_str()).unwrap_or(""),
-                req.sources.first().map(|s| s.revision.as_str()).unwrap_or(""),
+                req.sources
+                    .first()
+                    .map(|s| s.revision.as_str())
+                    .unwrap_or(""),
                 focus_hash,
                 req.budget_chars as i64,
                 req.model,
@@ -281,7 +291,11 @@ pub fn cache_get(conn: &Connection, req: &SummaryRequest) -> Result<Option<Summa
     Ok(Some(SummaryResult {
         content,
         source_refs,
-        source_hash: req.sources.first().map(|s| s.hash.clone()).unwrap_or_default(),
+        source_hash: req
+            .sources
+            .first()
+            .map(|s| s.hash.clone())
+            .unwrap_or_default(),
         model,
         prompt_version: req.prompt_version.clone(),
         coverage,
@@ -290,12 +304,20 @@ pub fn cache_get(conn: &Connection, req: &SummaryRequest) -> Result<Option<Summa
 }
 
 /// Persist a derived summary for later cache hits.
-pub fn cache_put(conn: &Connection, req: &SummaryRequest, result: &SummaryResult) -> Result<(), anyhow::Error> {
+pub fn cache_put(
+    conn: &Connection,
+    req: &SummaryRequest,
+    result: &SummaryResult,
+) -> Result<(), anyhow::Error> {
     let now = chrono::Utc::now().to_rfc3339();
     let id = format!("sum-{}", req.cache_key());
     let focus_hash = sha_hex(&req.focus);
     let source_id = req.sources.first().map(|s| s.id.as_str()).unwrap_or("");
-    let source_revision = req.sources.first().map(|s| s.revision.as_str()).unwrap_or("");
+    let source_revision = req
+        .sources
+        .first()
+        .map(|s| s.revision.as_str())
+        .unwrap_or("");
     let source_hash = req.sources.first().map(|s| s.hash.as_str()).unwrap_or("");
     conn.execute(
         "INSERT INTO argos_derived_summaries(
@@ -349,7 +371,10 @@ pub fn persist_flush_request(conn: &Connection, req: &SummaryRequest) -> anyhow:
     Ok(())
 }
 
-pub fn load_flush_request(conn: &Connection, cache_key: &str) -> anyhow::Result<Option<SummaryRequest>> {
+pub fn load_flush_request(
+    conn: &Connection,
+    cache_key: &str,
+) -> anyhow::Result<Option<SummaryRequest>> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS argos_summary_flush_requests (
             cache_key TEXT PRIMARY KEY,
@@ -381,16 +406,14 @@ pub fn try_live_summary_upgrade(
     let Some(req) = load_flush_request(conn, cache_key)? else {
         anyhow::bail!("flush request missing for {cache_key}");
     };
-    let cached = cache_get(conn, &req)?.unwrap_or_else(|| {
-        SummaryResult {
-            content: String::new(),
-            source_refs: Vec::new(),
-            source_hash: String::new(),
-            model: "deterministic".into(),
-            prompt_version: req.prompt_version.clone(),
-            coverage: CoverageMeta::default(),
-            fallback: true,
-        }
+    let cached = cache_get(conn, &req)?.unwrap_or_else(|| SummaryResult {
+        content: String::new(),
+        source_refs: Vec::new(),
+        source_hash: String::new(),
+        model: "deterministic".into(),
+        prompt_version: req.prompt_version.clone(),
+        coverage: CoverageMeta::default(),
+        fallback: true,
     });
     if !cached.fallback {
         return Ok((cached, "already_upgraded"));
@@ -398,8 +421,7 @@ pub fn try_live_summary_upgrade(
     let Some(secret) = secret else {
         return Ok((cached, "cached_deterministic_no_secret"));
     };
-    let upgraded =
-        crate::brain_lance::block_on(complete_summary(secret, &req, cached.clone()));
+    let upgraded = crate::brain_lance::block_on(complete_summary(secret, &req, cached.clone()));
     cache_put(conn, &req, &upgraded)?;
     let outcome = if upgraded.fallback {
         "llm_fallback"
@@ -450,14 +472,14 @@ pub fn deterministic_tool_observation(
     if let Some(err) = observation.get("error") {
         meta["error"] = err.clone();
     }
-    if let Some(total) = observation.get("total").or_else(|| observation.get("count")) {
+    if let Some(total) = observation
+        .get("total")
+        .or_else(|| observation.get("count"))
+    {
         meta["count"] = total.clone();
     }
     let preview = crate::summarization::fallback_excerpt(&observation.to_string(), budget);
-    let content = format!(
-        "tool={tool_id} call={call_id} status={status}\n{}",
-        preview
-    );
+    let content = format!("tool={tool_id} call={call_id} status={status}\n{}", preview);
     SummaryResult {
         content,
         source_refs: vec![call_id.into()],
@@ -497,7 +519,11 @@ pub fn deterministic_atlas_brief(lines: &[String]) -> SummaryResult {
 }
 
 /// Concise article description fallback (keeps original when short).
-pub fn deterministic_article_description(title: &str, description: &str, budget: usize) -> SummaryResult {
+pub fn deterministic_article_description(
+    title: &str,
+    description: &str,
+    budget: usize,
+) -> SummaryResult {
     let src = if description.trim().is_empty() {
         title.to_string()
     } else {
@@ -509,7 +535,9 @@ pub fn deterministic_article_description(title: &str, description: &str, budget:
         source_refs: Vec::new(),
         source_hash: sha_hex(&src),
         model: "deterministic".into(),
-        prompt_version: SummarizationMode::ArticleDescription.prompt_version().into(),
+        prompt_version: SummarizationMode::ArticleDescription
+            .prompt_version()
+            .into(),
         coverage: CoverageMeta {
             partial: src.chars().count() > budget,
             omitted: Vec::new(),
@@ -538,7 +566,11 @@ pub fn deterministic_report_context(label: &str, text: &str, budget: usize) -> S
 }
 
 /// SectionDigest from completed markdown (does not alter conclusions).
-pub fn deterministic_section_digest(section_key: &str, markdown: &str, budget: usize) -> SummaryResult {
+pub fn deterministic_section_digest(
+    section_key: &str,
+    markdown: &str,
+    budget: usize,
+) -> SummaryResult {
     let content = fallback_excerpt(markdown, budget.max(120));
     SummaryResult {
         content,
@@ -684,7 +716,11 @@ pub async fn complete_summary(
         Some(text) => SummaryResult {
             content: text,
             source_refs: known,
-            source_hash: req.sources.first().map(|s| s.hash.clone()).unwrap_or_default(),
+            source_hash: req
+                .sources
+                .first()
+                .map(|s| s.hash.clone())
+                .unwrap_or_default(),
             model: secret.model.clone(),
             prompt_version: req.prompt_version.clone(),
             coverage: CoverageMeta::default(),
@@ -693,7 +729,6 @@ pub async fn complete_summary(
         None => fallback,
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -753,11 +788,13 @@ mod tests {
 
     #[test]
     fn fallbacks_are_non_empty() {
-        assert_eq!(fallback_title("who runs Example Org today?"), "who runs Example Org today?");
+        assert_eq!(
+            fallback_title("who runs Example Org today?"),
+            "who runs Example Org today?"
+        );
         assert!(fallback_excerpt("abcdefghij", 6).ends_with('…'));
     }
 }
-
 
 #[cfg(test)]
 mod service_tests {
@@ -841,20 +878,32 @@ mod service_tests {
 
     #[test]
     fn all_remaining_mode_fallbacks_non_empty() {
-        assert!(!deterministic_tool_observation("news", "call-1", "ok", &serde_json::json!({"a":1}), 100)
-            .content
-            .is_empty());
-        assert!(!deterministic_atlas_brief(&["Claim one.".into(), "Claim two.".into()])
-            .content
-            .is_empty());
-        assert!(!deterministic_article_description("Title", "Long description text here", 40)
-            .content
-            .is_empty());
+        assert!(!deterministic_tool_observation(
+            "news",
+            "call-1",
+            "ok",
+            &serde_json::json!({"a":1}),
+            100
+        )
+        .content
+        .is_empty());
+        assert!(
+            !deterministic_atlas_brief(&["Claim one.".into(), "Claim two.".into()])
+                .content
+                .is_empty()
+        );
+        assert!(
+            !deterministic_article_description("Title", "Long description text here", 40)
+                .content
+                .is_empty()
+        );
         assert!(!deterministic_report_context("body", &"x".repeat(500), 80)
             .content
             .is_empty());
-        assert!(!deterministic_section_digest("bluf", "# BLUF\n\nJudgment here.", 40)
-            .content
-            .is_empty());
+        assert!(
+            !deterministic_section_digest("bluf", "# BLUF\n\nJudgment here.", 40)
+                .content
+                .is_empty()
+        );
     }
 }

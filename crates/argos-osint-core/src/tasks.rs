@@ -279,7 +279,10 @@ impl ProviderAdmission {
     /// Record a shared cooldown for this account (e.g. after HTTP 429).
     pub fn note_rate_limit(&mut self, account: &str, cooldown: Duration) {
         let until = Instant::now() + cooldown;
-        let slot = self.cooldown_until.entry(account.to_string()).or_insert(until);
+        let slot = self
+            .cooldown_until
+            .entry(account.to_string())
+            .or_insert(until);
         if until > *slot {
             *slot = until;
         }
@@ -850,20 +853,20 @@ fn claim_with(
                    input_ref, input_hash, source_revision, created_at, retry_since, queue_ms"
     );
     let map = |row: &rusqlite::Row<'_>| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
-                row.get::<_, Option<i64>>(11)?,
-            ))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, Option<i64>>(11)?,
+        ))
     };
     let row = match selector_param {
         Some(param) => conn
@@ -873,8 +876,20 @@ fn claim_with(
             .query_row(&sql, params![owner, lease_until, now], map)
             .optional()?,
     };
-    let Some((id, job_id, operation, epoch, attempts, max_attempts, input_ref, input_hash, source_revision, created_at, retry_since, queue_ms)) =
-        row
+    let Some((
+        id,
+        job_id,
+        operation,
+        epoch,
+        attempts,
+        max_attempts,
+        input_ref,
+        input_hash,
+        source_revision,
+        created_at,
+        retry_since,
+        queue_ms,
+    )) = row
     else {
         return Ok(None);
     };
@@ -919,7 +934,12 @@ fn claim_with(
 }
 
 /// Claim the next ready task from any pool, returning its id (legacy helper).
-pub fn claim_next(conn: &Connection, owner: &str, lease_secs: i64, now: &str) -> Result<Option<String>> {
+pub fn claim_next(
+    conn: &Connection,
+    owner: &str,
+    lease_secs: i64,
+    now: &str,
+) -> Result<Option<String>> {
     Ok(claim_next_in(conn, &[], owner, lease_secs, now)?.map(|c| c.id))
 }
 
@@ -942,7 +962,12 @@ fn finish_attempt(
 
 /// Complete a claimed task. Returns false (and changes nothing) when the lease
 /// was lost to another owner/epoch.
-pub fn complete_claimed(conn: &Connection, claimed: &ClaimedTask, result_ref: &str, now: &str) -> Result<bool> {
+pub fn complete_claimed(
+    conn: &Connection,
+    claimed: &ClaimedTask,
+    result_ref: &str,
+    now: &str,
+) -> Result<bool> {
     let duration = ms_between(&claimed.started_at, now).unwrap_or(0);
     let n = conn.execute(
         "UPDATE argos_tasks SET state='completed', result_ref=?1, lease_owner='', lease_until='',
@@ -1002,7 +1027,14 @@ pub fn fail_claimed(
         "UPDATE argos_attempts SET retry_decision=?1 WHERE id=?2",
         params![if retry { "retry" } else { "give_up" }, claimed.attempt_id],
     )?;
-    finish_attempt(conn, claimed, "failed", error.category.as_str(), &message, now)?;
+    finish_attempt(
+        conn,
+        claimed,
+        "failed",
+        error.category.as_str(),
+        &message,
+        now,
+    )?;
     let _ = refresh_job_state(conn, &claimed.job_id, now);
     Ok(Some(state))
 }
@@ -1010,7 +1042,12 @@ pub fn fail_claimed(
 /// Park a claimed task because required configuration is missing (e.g.
 /// embeddings disabled). The attempt is refunded: nothing was tried.
 /// [`resume_blocked`] requeues it once the configuration is available.
-pub fn block_claimed(conn: &Connection, claimed: &ClaimedTask, reason: &str, now: &str) -> Result<bool> {
+pub fn block_claimed(
+    conn: &Connection,
+    claimed: &ClaimedTask,
+    reason: &str,
+    now: &str,
+) -> Result<bool> {
     let n = conn.execute(
         "UPDATE argos_tasks SET state='paused', blocked_reason=?1, attempts=MAX(attempts-1,0),
             lease_owner='', lease_until='', updated_at=?2
@@ -1020,14 +1057,27 @@ pub fn block_claimed(conn: &Connection, claimed: &ClaimedTask, reason: &str, now
     if n == 0 {
         return Ok(false);
     }
-    finish_attempt(conn, claimed, "blocked", ErrorCategory::ConfigurationMissing.as_str(), reason, now)?;
+    finish_attempt(
+        conn,
+        claimed,
+        "blocked",
+        ErrorCategory::ConfigurationMissing.as_str(),
+        reason,
+        now,
+    )?;
     let _ = refresh_job_state(conn, &claimed.job_id, now);
     Ok(true)
 }
 
 /// Requeue a claimed task that made progress but is not done (e.g. one rebuild
 /// batch). Progress is not failure: the attempt is refunded.
-pub fn requeue_claimed(conn: &Connection, claimed: &ClaimedTask, delay: Duration, note: &str, now: &str) -> Result<bool> {
+pub fn requeue_claimed(
+    conn: &Connection,
+    claimed: &ClaimedTask,
+    delay: Duration,
+    note: &str,
+    now: &str,
+) -> Result<bool> {
     let duration = ms_between(&claimed.started_at, now).unwrap_or(0);
     let next = (parse_ts(now).unwrap_or_else(chrono::Utc::now)
         + chrono::Duration::from_std(delay).unwrap_or_default())
@@ -1036,7 +1086,15 @@ pub fn requeue_claimed(conn: &Connection, claimed: &ClaimedTask, delay: Duration
         "UPDATE argos_tasks SET state='queued', next_eligible_at=?1, attempts=MAX(attempts-1,0),
             lease_owner='', lease_until='', updated_at=?2, active_ms=active_ms+?3, result_ref=?4
          WHERE id=?5 AND lease_owner=?6 AND lease_epoch=?7 AND state='running'",
-        params![next, now, duration, note, claimed.id, claimed.owner, claimed.epoch],
+        params![
+            next,
+            now,
+            duration,
+            note,
+            claimed.id,
+            claimed.owner,
+            claimed.epoch
+        ],
     )?;
     if n == 0 {
         return Ok(false);
@@ -1108,7 +1166,14 @@ pub fn fail_or_retry(
     }
 }
 
-pub fn renew_lease(conn: &Connection, id: &str, owner: &str, epoch: i64, lease_secs: i64, now: &str) -> Result<bool> {
+pub fn renew_lease(
+    conn: &Connection,
+    id: &str,
+    owner: &str,
+    epoch: i64,
+    lease_secs: i64,
+    now: &str,
+) -> Result<bool> {
     let lease_until = lease_deadline(now, lease_secs);
     let n = conn.execute(
         "UPDATE argos_tasks SET lease_until=?1, updated_at=?2, heartbeat_at=?2
@@ -1129,14 +1194,23 @@ pub fn interrupt_expired_leases(conn: &Connection, now: &str) -> Result<usize> {
         )?;
         let rows = stmt
             .query_map([now], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
     let mut recovered = 0usize;
     for (id, job_id, epoch, attempts, max_attempts, operation) in expired {
-        let cap = operation_kind(&operation).attempt_cap().min(max_attempts.max(1) as u32) as i64;
+        let cap = operation_kind(&operation)
+            .attempt_cap()
+            .min(max_attempts.max(1) as u32) as i64;
         let next_state = if attempts >= cap { "failed" } else { "queued" };
         let n = conn.execute(
             "UPDATE argos_tasks SET state=?1, lease_owner='', lease_until='', updated_at=?2,
@@ -1169,7 +1243,9 @@ pub fn interrupt_expired_leases(conn: &Connection, now: &str) -> Result<usize> {
 /// requires every task to succeed; a mix of completed and failed is `partial`.
 pub fn refresh_job_state(conn: &Connection, job_id: &str, now: &str) -> Result<()> {
     let kind: Option<String> = conn
-        .query_row("SELECT kind FROM argos_jobs WHERE id=?1", [job_id], |r| r.get(0))
+        .query_row("SELECT kind FROM argos_jobs WHERE id=?1", [job_id], |r| {
+            r.get(0)
+        })
         .optional()?;
     let Some(kind) = kind else {
         return Ok(());
@@ -1181,27 +1257,35 @@ pub fn refresh_job_state(conn: &Connection, job_id: &str, now: &str) -> Result<(
         )?;
         return Ok(());
     }
-    let (total, running, queued, retrying, paused, completed, failed, cancelled): (i64, i64, i64, i64, i64, i64, i64, i64) =
-        conn.query_row(
-            "SELECT COUNT(*),
+    let (total, running, queued, retrying, paused, completed, failed, cancelled): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = conn.query_row(
+        "SELECT COUNT(*),
                 SUM(state='running'), SUM(state='queued'), SUM(state='retry_scheduled'),
                 SUM(state='paused'), SUM(state='completed'), SUM(state IN ('failed')),
                 SUM(state IN ('cancelled','superseded'))
              FROM argos_tasks WHERE job_id=?1",
-            [job_id],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                    r.get::<_, Option<i64>>(4)?.unwrap_or(0),
-                    r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                    r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                    r.get::<_, Option<i64>>(7)?.unwrap_or(0),
-                ))
-            },
-        )?;
+        [job_id],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(7)?.unwrap_or(0),
+            ))
+        },
+    )?;
     if total == 0 {
         return Ok(());
     }
@@ -1286,7 +1370,17 @@ pub fn set_job_progress(
             active_since=CASE WHEN ?9 THEN ''
                 WHEN active_since='' AND worker_owner<>'' THEN ?7 ELSE active_since END
          WHERE id=?1",
-        params![job_id, state, phase, done, total, error_summary, now, terminal, stopped],
+        params![
+            job_id,
+            state,
+            phase,
+            done,
+            total,
+            error_summary,
+            now,
+            terminal,
+            stopped
+        ],
     )?;
     Ok(())
 }
@@ -1314,11 +1408,19 @@ pub enum IndexOutcome {
         generation: String,
     },
     /// Progress was made but the work is not complete (e.g. one rebuild batch).
-    Pending { reason: String },
+    Pending {
+        reason: String,
+    },
     /// Semantic indexing is intentionally disabled (`ARGOS_EMBED=0`) or unavailable for this store.
-    Disabled { reason: String },
-    RetryableFailure { message: String },
-    PermanentFailure { message: String },
+    Disabled {
+        reason: String,
+    },
+    RetryableFailure {
+        message: String,
+    },
+    PermanentFailure {
+        message: String,
+    },
 }
 
 impl IndexOutcome {
@@ -1337,7 +1439,8 @@ impl IndexOutcome {
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| format!("{{\"status\":\"{}\"}}", self.label()))
+        serde_json::to_string(self)
+            .unwrap_or_else(|_| format!("{{\"status\":\"{}\"}}", self.label()))
     }
 }
 
@@ -1345,7 +1448,13 @@ impl IndexOutcome {
 pub const INDEX_SERVICE_JOB: &str = "svc-local-index";
 
 /// Ensure a service-health job row exists for a long-lived worker.
-pub fn ensure_service_job(conn: &Connection, id: &str, app: &str, title: &str, now: &str) -> Result<()> {
+pub fn ensure_service_job(
+    conn: &Connection,
+    id: &str,
+    app: &str,
+    title: &str,
+    now: &str,
+) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO argos_jobs(id,kind,owner_scope,input_revision,state,created_at,updated_at,deadline_at,app,operation,title,queued_at)
          VALUES (?1,'service',?2,'','running',?3,?3,'',?2,'service',?4,?3)",
@@ -1482,7 +1591,9 @@ pub fn adopt_untracked_index_changes(conn: &Connection, now: &str) -> Result<usi
              WHERE task_id='' AND state IN ('pending','running') ORDER BY seq LIMIT 256",
         )?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
@@ -1609,7 +1720,10 @@ pub fn finish_index_work(
             "pending",
             requeue_claimed(conn, claimed, Duration::from_secs(1), reason, now)?,
         ),
-        IndexOutcome::Disabled { reason } => ("blocked", block_claimed(conn, claimed, reason_key(reason), now)?),
+        IndexOutcome::Disabled { reason } => (
+            "blocked",
+            block_claimed(conn, claimed, reason_key(reason), now)?,
+        ),
         IndexOutcome::RetryableFailure { message } => {
             let state = fail_claimed(
                 conn,
@@ -1664,7 +1778,10 @@ fn reason_key(reason: &str) -> &str {
 
 /// Legacy batch claim: atomically leases pending rows one at a time and returns
 /// only rows this call actually claimed.
-pub fn claim_index_changes(conn: &Connection, limit: usize) -> Result<Vec<(i64, String, String, String)>> {
+pub fn claim_index_changes(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<(i64, String, String, String)>> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut out = Vec::new();
     for _ in 0..limit {
@@ -1719,18 +1836,46 @@ mod tests {
     fn summarization_gets_two_attempts_other_llm_three() {
         assert_eq!(OperationKind::Summarization.attempt_cap(), 2);
         assert_eq!(OperationKind::OtherLlm.attempt_cap(), 3);
-        assert!(can_retry(OperationKind::Summarization, 1, ErrorCategory::RateLimit));
-        assert!(!can_retry(OperationKind::Summarization, 2, ErrorCategory::RateLimit));
-        assert!(can_retry(OperationKind::OtherLlm, 2, ErrorCategory::TemporaryNetwork));
-        assert!(!can_retry(OperationKind::OtherLlm, 3, ErrorCategory::TemporaryNetwork));
-        assert!(!can_retry(OperationKind::OtherLlm, 1, ErrorCategory::AuthOrQuota));
+        assert!(can_retry(
+            OperationKind::Summarization,
+            1,
+            ErrorCategory::RateLimit
+        ));
+        assert!(!can_retry(
+            OperationKind::Summarization,
+            2,
+            ErrorCategory::RateLimit
+        ));
+        assert!(can_retry(
+            OperationKind::OtherLlm,
+            2,
+            ErrorCategory::TemporaryNetwork
+        ));
+        assert!(!can_retry(
+            OperationKind::OtherLlm,
+            3,
+            ErrorCategory::TemporaryNetwork
+        ));
+        assert!(!can_retry(
+            OperationKind::OtherLlm,
+            1,
+            ErrorCategory::AuthOrQuota
+        ));
     }
 
     #[test]
     fn index_change_claim_and_complete() {
         let conn = mem();
         let now = chrono::Utc::now().to_rfc3339();
-        enqueue_index_change(&conn, "memory_index", "generation", "count=99", "rebuild", &now).unwrap();
+        enqueue_index_change(
+            &conn,
+            "memory_index",
+            "generation",
+            "count=99",
+            "rebuild",
+            &now,
+        )
+        .unwrap();
         let batch = claim_index_changes(&conn, 10).unwrap();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].3, "index_rebuild");
@@ -1819,8 +1964,11 @@ mod tests {
         .unwrap();
         assert_eq!(state, TaskState::RetryScheduled);
         // Force eligible.
-        conn.execute("UPDATE argos_tasks SET next_eligible_at='' WHERE id=?1", [&id])
-            .unwrap();
+        conn.execute(
+            "UPDATE argos_tasks SET next_eligible_at='' WHERE id=?1",
+            [&id],
+        )
+        .unwrap();
         let id2 = claim_next(&conn, "worker-a", 30, &now).unwrap().unwrap();
         assert_eq!(id2, "task-1");
         let state = fail_or_retry(
@@ -1923,9 +2071,13 @@ mod tests {
         job(&conn, "j", &now);
         task(&conn, "t-atlas", "j", "atlas_publish", &now);
         enqueue_index_change(&conn, "memory", "m1", "r1", "upsert", &now).unwrap();
-        assert!(claim_next_in(&conn, &[POOL_SUMMARY], "sum", 30, &now).unwrap().is_none());
+        assert!(claim_next_in(&conn, &[POOL_SUMMARY], "sum", 30, &now)
+            .unwrap()
+            .is_none());
         task(&conn, "t-sum", "j", "atlas_brief", &now);
-        let got = claim_next_in(&conn, &[POOL_SUMMARY], "sum", 30, &now).unwrap().unwrap();
+        let got = claim_next_in(&conn, &[POOL_SUMMARY], "sum", 30, &now)
+            .unwrap()
+            .unwrap();
         assert_eq!(got.id, "t-sum");
         // The other rows are untouched and still claimable by their own pools.
         let states: Vec<String> = conn
@@ -1938,7 +2090,10 @@ mod tests {
         assert!(states.iter().all(|s| s == "queued"), "{states:?}");
         assert!(claim_index_work(&conn, "idx", 30, &now).unwrap().is_some());
         assert_eq!(
-            claim_next_in(&conn, &[POOL_ATLAS], "atl", 30, &now).unwrap().unwrap().id,
+            claim_next_in(&conn, &[POOL_ATLAS], "atl", 30, &now)
+                .unwrap()
+                .unwrap()
+                .id,
             "t-atlas"
         );
     }
@@ -1960,19 +2115,35 @@ mod tests {
         // Lease expires; another process recovers and re-claims at a new epoch.
         let later = (chrono::Utc::now() + chrono::Duration::seconds(120)).to_rfc3339();
         assert_eq!(interrupt_expired_leases(&b, &later).unwrap(), 1);
-        let reclaimed = claim_next_in(&b, &[POOL_LLM], "proc-b", 30, &later).unwrap().unwrap();
+        let reclaimed = claim_next_in(&b, &[POOL_LLM], "proc-b", 30, &later)
+            .unwrap()
+            .unwrap();
         assert!(reclaimed.epoch > claimed.epoch);
         assert!(!complete_claimed(&a, &claimed, "stale", &later).unwrap());
-        assert!(fail_claimed(&a, &claimed, OperationKind::OtherLlm, &TaskError::new(ErrorCategory::Timeout, "x"), &later)
-            .unwrap()
-            .is_none());
+        assert!(fail_claimed(
+            &a,
+            &claimed,
+            OperationKind::OtherLlm,
+            &TaskError::new(ErrorCategory::Timeout, "x"),
+            &later
+        )
+        .unwrap()
+        .is_none());
         assert!(complete_claimed(&b, &reclaimed, "ok", &later).unwrap());
         let (state, result): (String, String) = a
-            .query_row("SELECT state, result_ref FROM argos_tasks WHERE id='t1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row(
+                "SELECT state, result_ref FROM argos_tasks WHERE id='t1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!((state.as_str(), result.as_str()), ("completed", "ok"));
         let expired: String = a
-            .query_row("SELECT outcome FROM argos_attempts WHERE task_id='t1' AND worker_epoch=?1", [claimed.epoch], |r| r.get(0))
+            .query_row(
+                "SELECT outcome FROM argos_attempts WHERE task_id='t1' AND worker_epoch=?1",
+                [claimed.epoch],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(expired, "lease_expired");
     }
@@ -1985,7 +2156,9 @@ mod tests {
         let mut t = chrono::Utc::now();
         for round in 0..3 {
             let ts = t.to_rfc3339();
-            let (claimed, _work) = claim_index_work(&conn, "w", 30, &ts).unwrap().expect("claimable");
+            let (claimed, _work) = claim_index_work(&conn, "w", 30, &ts)
+                .unwrap()
+                .expect("claimable");
             assert_eq!(claimed.attempt, round + 1);
             t += chrono::Duration::seconds(120);
             assert_eq!(interrupt_expired_leases(&conn, &t.to_rfc3339()).unwrap(), 1);
@@ -1997,18 +2170,33 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!((task_state.as_str(), row_state.as_str()), ("failed", "failed"));
+        assert_eq!(
+            (task_state.as_str(), row_state.as_str()),
+            ("failed", "failed")
+        );
     }
 
     #[test]
     fn index_outbox_coalesces_and_rolls_back_with_its_transaction() {
         let conn = mem();
         let now = chrono::Utc::now().to_rfc3339();
-        let a = enqueue_index_work(&conn, "memory", "m1", "r1", "h1", "upsert", None, &now).unwrap();
-        let b = enqueue_index_work(&conn, "memory", "m1", "r1", "h1", "index_upsert", None, &now).unwrap();
+        let a =
+            enqueue_index_work(&conn, "memory", "m1", "r1", "h1", "upsert", None, &now).unwrap();
+        let b = enqueue_index_work(
+            &conn,
+            "memory",
+            "m1",
+            "r1",
+            "h1",
+            "index_upsert",
+            None,
+            &now,
+        )
+        .unwrap();
         assert!(a.created && !b.created);
         assert_eq!(a.seq, b.seq);
-        let c = enqueue_index_work(&conn, "memory", "m1", "r2", "h2", "upsert", None, &now).unwrap();
+        let c =
+            enqueue_index_work(&conn, "memory", "m1", "r2", "h2", "upsert", None, &now).unwrap();
         assert!(c.created, "a new revision is new work");
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         enqueue_index_work(&conn, "memory", "m9", "r1", "h", "upsert", None, &now).unwrap();
@@ -2040,7 +2228,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
-        assert_eq!((state.as_str(), attempts, reason.as_str(), row.as_str()), ("paused", 0, EMBEDDINGS_DISABLED, "blocked"));
+        assert_eq!(
+            (state.as_str(), attempts, reason.as_str(), row.as_str()),
+            ("paused", 0, EMBEDDINGS_DISABLED, "blocked")
+        );
         assert!(claim_index_work(&conn, "w", 30, &now).unwrap().is_none());
         assert_eq!(resume_blocked(&conn, EMBEDDINGS_DISABLED, &now).unwrap(), 1);
         let (claimed, work) = claim_index_work(&conn, "w", 30, &now).unwrap().unwrap();
@@ -2051,7 +2242,11 @@ mod tests {
         };
         assert!(finish_index_work(&conn, &claimed, &work, &ready, &now).unwrap());
         let (state, fp): (String, String) = conn
-            .query_row("SELECT state, fingerprint FROM argos_index_changes", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row(
+                "SELECT state, fingerprint FROM argos_index_changes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!((state.as_str(), fp.as_str()), ("completed", "fp"));
     }
@@ -2074,7 +2269,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "retry_scheduled");
-        assert!(result.is_empty(), "error text must not be a completion result: {result}");
+        assert!(
+            result.is_empty(),
+            "error text must not be a completion result: {result}"
+        );
         assert_eq!(cat, "index_failure");
         assert_eq!(row, "pending");
     }
@@ -2089,10 +2287,21 @@ mod tests {
         task(&conn, "b", "j", "synthesis", &created);
         let start = (t0 + chrono::Duration::milliseconds(1500)).to_rfc3339();
         let end = (t0 + chrono::Duration::milliseconds(4000)).to_rfc3339();
-        let ca = claim_next_in(&conn, &[POOL_LLM], "w", 30, &start).unwrap().unwrap();
+        let ca = claim_next_in(&conn, &[POOL_LLM], "w", 30, &start)
+            .unwrap()
+            .unwrap();
         assert!(complete_claimed(&conn, &ca, "ok", &end).unwrap());
-        let cb = claim_next_in(&conn, &[POOL_LLM], "w", 30, &start).unwrap().unwrap();
-        fail_claimed(&conn, &cb, OperationKind::OtherLlm, &TaskError::new(ErrorCategory::AuthOrQuota, "401"), &end).unwrap();
+        let cb = claim_next_in(&conn, &[POOL_LLM], "w", 30, &start)
+            .unwrap()
+            .unwrap();
+        fail_claimed(
+            &conn,
+            &cb,
+            OperationKind::OtherLlm,
+            &TaskError::new(ErrorCategory::AuthOrQuota, "401"),
+            &end,
+        )
+        .unwrap();
         let (state, active, queue, finished, err): (String, Option<i64>, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT state, active_ms, queue_ms, finished_at, error_category FROM argos_jobs WHERE id='j'",

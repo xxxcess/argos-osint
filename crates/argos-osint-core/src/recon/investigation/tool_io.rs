@@ -3236,8 +3236,12 @@ mod tests {
                 ..Binding::default()
             },
         ];
-        let (args, _, missing) =
-            bind_arguments("firecrawl_scrape", &bindings, "Did a marine kill someone?", None);
+        let (args, _, missing) = bind_arguments(
+            "firecrawl_scrape",
+            &bindings,
+            "Did a marine kill someone?",
+            None,
+        );
         assert!(missing.is_empty());
         assert_eq!(args["url"], json!("https://www.usatoday.com/marine"));
     }

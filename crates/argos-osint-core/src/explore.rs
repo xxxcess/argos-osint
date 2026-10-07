@@ -79,10 +79,13 @@ pub fn tool_candidates_with_fallback(
     limit: usize,
 ) -> Vec<ToolCandidate> {
     let mut out = ranked;
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out.truncate(limit.max(1));
-    let have: std::collections::HashSet<String> =
-        out.iter().map(|c| c.tool_id.clone()).collect();
+    let have: std::collections::HashSet<String> = out.iter().map(|c| c.tool_id.clone()).collect();
     for tool_id in full_eligible_catalog {
         if have.contains(tool_id) {
             continue;

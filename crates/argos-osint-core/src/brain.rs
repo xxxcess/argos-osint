@@ -428,9 +428,15 @@ mod tests {
         assert_eq!(ids[0], "sem");
         assert!(ids.contains(&"both") && ids.contains(&"lex"));
         assert!(!ids.contains(&"noise"), "below the semantic floor");
-        assert!(!ids.contains(&"gone"), "vector ids missing from SQLite are dropped");
+        assert!(
+            !ids.contains(&"gone"),
+            "vector ids missing from SQLite are dropped"
+        );
         let both = ranked.iter().find(|h| h.memory.id == "both").unwrap().score;
-        assert!(both > 0.6, "agreement adds a bonus over the vector score: {both}");
+        assert!(
+            both > 0.6,
+            "agreement adds a bonus over the vector score: {both}"
+        );
         // No vector hits: identical to Jaccard recall.
         assert_eq!(
             hybrid_recall(&all, "harbor cargo", &[], 3),

@@ -402,7 +402,8 @@ impl RoleDefaults {
     pub fn inherit_summarization_from_synthesis(&mut self) -> bool {
         if self.summarization.provider.trim().is_empty()
             && self.summarization.model.trim().is_empty()
-            && (!self.synthesis.provider.trim().is_empty() || !self.synthesis.model.trim().is_empty())
+            && (!self.synthesis.provider.trim().is_empty()
+                || !self.synthesis.model.trim().is_empty())
         {
             self.summarization = self.synthesis.clone();
             return true;
@@ -665,10 +666,9 @@ pub fn role_secret(
     settings: &SettingsFile,
     role: &str,
 ) -> Result<ProviderSecret> {
-    let assignment = settings
-        .defaults
-        .role(role)
-        .ok_or_else(|| anyhow!("role must be recon, tool-picker, synthesis, classifier, or summarization"))?;
+    let assignment = settings.defaults.role(role).ok_or_else(|| {
+        anyhow!("role must be recon, tool-picker, synthesis, classifier, or summarization")
+    })?;
     // Summarization inherits Synthesis when both of its fields are empty.
     let assignment = if role_name(role) == Some("summarization")
         && assignment.provider.trim().is_empty()
@@ -843,7 +843,14 @@ pub async fn complete(
         if status.as_u16() == 400 || status.as_u16() == 404 {
             return complete_once(secret, messages, tools).await;
         }
-        return Err(typed_http_error(secret, &url, status.as_u16(), &headers, &text, "stream"));
+        return Err(typed_http_error(
+            secret,
+            &url,
+            status.as_u16(),
+            &headers,
+            &text,
+            "stream",
+        ));
     }
     let mut stream = resp.bytes_stream();
     let mut acc = SseAcc::default();
@@ -970,7 +977,14 @@ async fn complete_once(
     let headers = resp.headers().clone();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(typed_http_error(secret, &url, status.as_u16(), &headers, &text, "non_stream"));
+        return Err(typed_http_error(
+            secret,
+            &url,
+            status.as_u16(),
+            &headers,
+            &text,
+            "non_stream",
+        ));
     }
     parse_completion(&text)
 }
@@ -2095,7 +2109,6 @@ mod tests {
         assert_eq!(response.cost, Some(0.00002));
     }
 
-
     #[test]
     fn parse_completion_folds_reasoning_content_when_content_is_empty() {
         let raw = serde_json::json!({
@@ -2263,7 +2276,7 @@ mod tests {
         );
     }
 
-        /// Streaming path: reasoning deltas only (no content field).
+    /// Streaming path: reasoning deltas only (no content field).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn complete_stream_of_reasoning_deltas_yields_text() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2284,7 +2297,8 @@ mod tests {
                     break;
                 }
             }
-            let event1 = serde_json::json!({"choices":[{"delta":{"reasoning_content":"## Claim"}}]});
+            let event1 =
+                serde_json::json!({"choices":[{"delta":{"reasoning_content":"## Claim"}}]});
             let event2 = serde_json::json!({"choices":[{"delta":{"reasoning_content":" paragraph"},"finish_reason":"stop"}]});
             let body = format!("data: {event1}\n\ndata: {event2}\n\ndata: [DONE]\n\n");
             let reply = format!(
@@ -2317,7 +2331,7 @@ mod tests {
         assert!(deltas.contains("## Claim"), "{deltas}");
     }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn complete_errors_with_finish_reason_when_response_is_empty() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

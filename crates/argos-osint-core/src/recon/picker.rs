@@ -916,15 +916,19 @@ fn state(request: &PickRequest<'_>) -> Value {
                     "keyed": true,
                 }));
             }
-            request.catalog.iter().find(|entry| &entry.id == id).map(|entry| {
-                json!({
-                    "id": entry.id,
-                    "category": entry.category,
-                    "description": entry.description,
-                    "inputs": entry.inputs,
-                    "keyed": entry.keyed,
+            request
+                .catalog
+                .iter()
+                .find(|entry| &entry.id == id)
+                .map(|entry| {
+                    json!({
+                        "id": entry.id,
+                        "category": entry.category,
+                        "description": entry.description,
+                        "inputs": entry.inputs,
+                        "keyed": entry.keyed,
+                    })
                 })
-            })
         })
         .collect();
     let dependencies: Vec<Value> = investigation::dependencies()
@@ -1113,10 +1117,7 @@ mod tests {
     #[test]
     fn merge_semantic_keeps_catalog_fallback() {
         let ranked = vec![("newsapi_search".into(), 0.9)];
-        let eligible = vec![
-            "newsapi_search".into(),
-            "courtlistener_search".into(),
-        ];
+        let eligible = vec!["newsapi_search".into(), "courtlistener_search".into()];
         let out = super::merge_semantic_with_catalog_fallback(&ranked, &eligible, 1);
         assert!(out.contains(&"courtlistener_search".into()));
     }

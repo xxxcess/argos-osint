@@ -189,13 +189,21 @@ impl Embedder {
             Ok(tract_ndarray::Array2::from_shape_vec((1, len), values)?.into())
         };
         let columns = [
-            encoding.get_ids().iter().map(|v| i64::from(*v)).collect::<Vec<_>>(),
+            encoding
+                .get_ids()
+                .iter()
+                .map(|v| i64::from(*v))
+                .collect::<Vec<_>>(),
             encoding
                 .get_attention_mask()
                 .iter()
                 .map(|v| i64::from(*v))
                 .collect(),
-            encoding.get_type_ids().iter().map(|v| i64::from(*v)).collect(),
+            encoding
+                .get_type_ids()
+                .iter()
+                .map(|v| i64::from(*v))
+                .collect(),
         ];
         let mut inputs: Vec<Option<TValue>> = vec![None; self.inputs];
         for (slot, values) in columns.into_iter().enumerate() {
@@ -297,7 +305,12 @@ fn download_file(path: &Path, url: &str) -> Result<()> {
         let response = client.get(&url).send().await?.error_for_status()?;
         anyhow::Ok(response.bytes().await?.to_vec())
     })
-    .with_context(|| format!("download {} (set ARGOS_EMBED=0 to skip embeddings)", path.display()))?;
+    .with_context(|| {
+        format!(
+            "download {} (set ARGOS_EMBED=0 to skip embeddings)",
+            path.display()
+        )
+    })?;
     anyhow::ensure!(!bytes.is_empty(), "empty download for {}", path.display());
     let tmp = path.with_extension("part");
     std::fs::write(&tmp, &bytes)?;
@@ -407,7 +420,10 @@ mod tests {
         assert!(!flag_enabled(Some(" off ")));
         assert!(!flag_enabled(Some("FALSE")));
         assert!(flag_enabled(Some("1")));
-        assert!(!flag_enabled(None), "unit tests stay offline unless ARGOS_EMBED=1");
+        assert!(
+            !flag_enabled(None),
+            "unit tests stay offline unless ARGOS_EMBED=1"
+        );
     }
 
     /// Downloads the model; run with `ARGOS_EMBED=1 cargo test -- --ignored`.
@@ -423,6 +439,11 @@ mod tests {
         let c = embed_one("Quarterly tax filings are due in April").unwrap();
         assert_eq!(a.len(), DIM);
         let dot = |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
-        assert!(dot(&a, &b) > dot(&a, &c) + 0.2, "{} vs {}", dot(&a, &b), dot(&a, &c));
+        assert!(
+            dot(&a, &b) > dot(&a, &c) + 0.2,
+            "{} vs {}",
+            dot(&a, &b),
+            dot(&a, &c)
+        );
     }
 }

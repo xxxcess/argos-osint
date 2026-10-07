@@ -68,7 +68,10 @@ pub fn apply_recon_directive_coverage(
         for part in reason.split(|c: char| c == ',' || c.is_whitespace()) {
             let id = part.trim();
             if id.starts_with('d') && id.len() <= 3 && id[1..].chars().all(|c| c.is_ascii_digit()) {
-                by_dir.entry(id.to_string()).or_default().push(call_id.clone());
+                by_dir
+                    .entry(id.to_string())
+                    .or_default()
+                    .push(call_id.clone());
             }
         }
     }
@@ -80,7 +83,6 @@ pub fn apply_recon_directive_coverage(
         .collect();
     (coverage, gaps)
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventGroup {
@@ -191,7 +193,8 @@ pub fn compare_claims(a: &str, b: &str) -> ClaimRelation {
         return ClaimRelation::Negation;
     }
     let planned = |s: &str| s.contains("will ") || s.contains(" plan") || s.contains("scheduled");
-    let done = |s: &str| s.contains(" completed") || s.contains(" finished") || s.contains(" signed");
+    let done =
+        |s: &str| s.contains(" completed") || s.contains(" finished") || s.contains(" signed");
     if (planned(&na) && done(&nb)) || (planned(&nb) && done(&na)) {
         return ClaimRelation::PlannedVsCompleted;
     }
@@ -207,7 +210,13 @@ pub fn compare_claims(a: &str, b: &str) -> ClaimRelation {
 fn normalize_claim(s: &str) -> String {
     s.to_ascii_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -266,7 +275,10 @@ mod tests {
 
     #[test]
     fn coverage_requires_cited_evidence_not_similarity() {
-        let dirs = vec![("D1".into(), "find CEO".into()), ("D2".into(), "find HQ".into())];
+        let dirs = vec![
+            ("D1".into(), "find CEO".into()),
+            ("D2".into(), "find HQ".into()),
+        ];
         let ev = vec![("D1".into(), vec!["call-1".into()])];
         let cov = directive_coverage(&dirs, &ev);
         assert!(cov[0].covered);
@@ -277,13 +289,28 @@ mod tests {
     #[test]
     fn event_grouping_keeps_separate_days_apart() {
         let articles = vec![
-            ("a1".into(), "Geneva hosts peace talks".into(), "2026-10-01".into()),
-            ("a2".into(), "Peace talks hosted in Geneva".into(), "2026-10-01".into()),
-            ("a3".into(), "Geneva hosts peace talks".into(), "2026-10-05".into()),
+            (
+                "a1".into(),
+                "Geneva hosts peace talks".into(),
+                "2026-10-01".into(),
+            ),
+            (
+                "a2".into(),
+                "Peace talks hosted in Geneva".into(),
+                "2026-10-01".into(),
+            ),
+            (
+                "a3".into(),
+                "Geneva hosts peace talks".into(),
+                "2026-10-05".into(),
+            ),
         ];
         let groups = group_atlas_events(&articles);
         assert_eq!(groups.len(), 2);
-        let same_day = groups.iter().find(|g| g.event_key.starts_with("2026-10-01")).unwrap();
+        let same_day = groups
+            .iter()
+            .find(|g| g.event_key.starts_with("2026-10-01"))
+            .unwrap();
         assert_eq!(same_day.article_ids.len(), 2);
     }
 
@@ -315,7 +342,10 @@ mod tests {
     }
     #[test]
     fn recon_coverage_needs_call_ids() {
-        let dirs = vec![("d1".into(), "Confirm identity".into()), ("d2".into(), "Find accounts".into())];
+        let dirs = vec![
+            ("d1".into(), "Confirm identity".into()),
+            ("d2".into(), "Find accounts".into()),
+        ];
         let calls = vec![
             ("d1".into(), "call-1".into(), "completed".into()),
             ("d2".into(), "".into(), "completed".into()), // no call id → uncovered
@@ -326,5 +356,4 @@ mod tests {
         assert_eq!(gaps.len(), 1);
         assert!(gaps[0].starts_with("d2:"));
     }
-
 }

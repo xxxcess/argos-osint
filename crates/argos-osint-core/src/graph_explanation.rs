@@ -322,9 +322,11 @@ pub async fn explain(
             memory_id: req.memory_id.clone(),
             job_id: job_id.clone(),
             cache_key: digest.clone(),
-            outcome: ExplainOutcome::Failed(Box::new(
-                ProviderFailure::new(Stage::Configuration, Category::Cancelled, "Graph explanation cancelled")
-            )),
+            outcome: ExplainOutcome::Failed(Box::new(ProviderFailure::new(
+                Stage::Configuration,
+                Category::Cancelled,
+                "Graph explanation cancelled",
+            ))),
             attempts: Vec::new(),
             admission_wait_ms: 0,
             fallback_reason: None,
@@ -345,9 +347,11 @@ pub async fn explain(
             memory_id: req.memory_id.clone(),
             job_id: job_id.clone(),
             cache_key: digest.clone(),
-            outcome: ExplainOutcome::Failed(Box::new(
-                ProviderFailure::new(Stage::Configuration, Category::Cancelled, "Graph explanation cancelled")
-            )),
+            outcome: ExplainOutcome::Failed(Box::new(ProviderFailure::new(
+                Stage::Configuration,
+                Category::Cancelled,
+                "Graph explanation cancelled",
+            ))),
             attempts: Vec::new(),
             admission_wait_ms: 0,
             fallback_reason: None,

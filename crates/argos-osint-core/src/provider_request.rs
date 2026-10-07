@@ -66,7 +66,10 @@ pub fn categorize_http(status: u16, body: &str) -> ErrorCategory {
             }
         }
         408 | 504 => ErrorCategory::Timeout,
-        400 if lower.contains("context") || lower.contains("token") || lower.contains("too long") => {
+        400 if lower.contains("context")
+            || lower.contains("token")
+            || lower.contains("too long") =>
+        {
             ErrorCategory::ContextLimit
         }
         400 if lower.contains("unsupported") || lower.contains("not supported") => {
@@ -100,7 +103,10 @@ mod tests {
             categorize_http(400, "context length exceeded"),
             ErrorCategory::ContextLimit
         );
-        assert_eq!(categorize_http(503, "upstream"), ErrorCategory::TemporaryNetwork);
+        assert_eq!(
+            categorize_http(503, "upstream"),
+            ErrorCategory::TemporaryNetwork
+        );
     }
 
     #[test]
@@ -109,7 +115,6 @@ mod tests {
         assert!(retry_after_delay(Some("nope")).is_none());
     }
 }
-
 
 /// Outcome of a bounded provider attempt loop owned by the shared policy.
 #[derive(Clone, Debug)]

@@ -1,19 +1,19 @@
 //! App state and keyboard routing for the Argos terminal shell.
 
+use super::tracked;
 use anyhow::Result;
 use argos_osint_core::brain::{Memory, MemorySource, ScoredMemory};
 use argos_osint_core::hardware::{self, HardwareProfile};
-use argos_osint_core::paths;
-use argos_osint_core::related_memories::{RelatedLimits, RelatedMemory};
-use argos_osint_core::job_registry::{CancelRequest, JobSpec};
-use super::tracked;
-use argos_osint_core::provider::{self, ListedModel, SettingsFile};
-use argos_osint_core::secrets::{AuthFile, ProviderSecret};
-use argos_osint_core::store::Store;
-use argos_osint_core::store::{AtlasArticleClaim, AtlasArticleRow, AtlasRunRow};
 use argos_osint_core::intel_recon::{
     self, ArticleBodyRow, IntelReportJobRow, IntelReportSectionRow, ReportMode, ReportScope,
 };
+use argos_osint_core::job_registry::{CancelRequest, JobSpec};
+use argos_osint_core::paths;
+use argos_osint_core::provider::{self, ListedModel, SettingsFile};
+use argos_osint_core::related_memories::{RelatedLimits, RelatedMemory};
+use argos_osint_core::secrets::{AuthFile, ProviderSecret};
+use argos_osint_core::store::Store;
+use argos_osint_core::store::{AtlasArticleClaim, AtlasArticleRow, AtlasRunRow};
 use argos_osint_core::{atlas, osint, recon};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -21,6 +21,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 use ratatui::Terminal;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -90,6 +91,19 @@ impl ModuleId {
             Self::System => "Inspect host hardware and Argos storage",
         }
     }
+}
+
+/// Launch state machine for Home composer submissions
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchState {
+    /// User is editing the investigation prompt
+    Editable,
+    /// Submission attempt in progress (validation running)
+    Accepting,
+    /// Submission accepted, investigation created and pending run
+    Accepted,
+    /// Submission failed validation/persistence, draft preserved for user to fix
+    RecoverableFailure,
 }
 
 /// Where a job's "Open source" action leads.
@@ -165,6 +179,7 @@ pub enum ChoiceKind {
     Provider,
     Model,
     IntelDay,
+    Investigation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -497,6 +512,25 @@ pub enum Target {
     DetailSummary,
     Choice(usize),
     CloseOverlay,
+    Tab(usize),
+    TabClose(usize),
+    TabPlus,
+    TabOverflow,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct HomeDraftState {
+    pub prompt: String,
+    pub cursor: usize,
+    pub scroll: usize,
+    pub report_mode: Option<ReportMode>,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct SessionTabsState {
+    pub open_thread_ids: Vec<String>,
+    pub last_active_id: Option<String>,
+    pub recently_closed: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -623,6 +657,8 @@ pub struct App {
     /// False on the investigation list. True when a transcript fills the screen.
     pub recon_chat: bool,
     pub recon_context_enabled: bool,
+    /// Whether the thread draft has unsaved changes
+    draft_dirty: bool,
     pub scrolls: Scrolls,
     pub expanded: HashSet<String>,
     pub chat_sel: usize,
@@ -640,7 +676,44 @@ pub struct App {
     quit_arm: Option<Instant>,
     esc_arm: Option<Instant>,
     press: Option<(u16, u16, Option<Target>)>,
-    draft_dirty: bool,
+    /// Whether the Home draft has unsaved changes
+    home_draft_dirty: bool,
+    /// The current content of the Home draft (investigation prompt)
+    home_draft: String,
+    /// Cursor position in the Home draft
+    home_draft_cursor: usize,
+    /// Scroll position in the Home draft (for future multi-line support)
+    home_draft_scroll: usize,
+    /// Report mode for the Home draft (optional)
+    home_draft_report_mode: Option<ReportMode>,
+    /// Whether the Home draft is currently being submitted (prevents duplicate submissions)
+    home_draft_submitting: bool,
+    /// Submission token for duplicate prevention (None when not submitting)
+    #[allow(dead_code)]
+    home_draft_submission_token: Option<u64>,
+    /// Last timestamp when Home draft was saved (for debouncing)
+    #[allow(dead_code)]
+    home_draft_last_saved: Option<Instant>,
+    /// Tab strip state: ordered list of open investigation tab IDs (Thread.id)
+    /// The first position (index 0) is reserved for the permanent Home tab
+    pub tab_ids: Vec<String>,
+    /// Index of the currently selected tab in tab_ids (0 = Home, 1+ = investigations)
+    pub tab_sel: usize,
+    /// Timestamp of the last active investigation (for ordering tabs)
+    /// Map of thread_id -> last_active_timestamp
+    pub tab_last_active: HashMap<String, Instant>,
+    /// History of recently closed tab IDs (for reopen feature, max 20)
+    pub tab_recently_closed: Vec<String>,
+    pub tab_unreads: HashSet<String>,
+    /// Launch state machine for Home composer submissions
+    pub launch_state: LaunchState,
+    /// Tracks if user has explicitly navigated away during launch acceptance
+    /// to prevent focus theft
+    #[allow(dead_code)]
+    pub launch_navigated_away: bool,
+    /// Timestamp of the last explicit user navigation action
+    #[allow(dead_code)]
+    pub last_user_nav_action: Option<Instant>,
     pub frame: RefCell<super::ui::FrameCache>,
     pub thread_history: Vec<String>,
     pub history_pos: usize,
@@ -924,7 +997,37 @@ impl App {
             esc_arm: None,
             press: None,
             draft_dirty: false,
+            home_draft_dirty: false,
+            // The current content of the Home draft (investigation prompt)
+            home_draft: String::new(),
+            // Cursor position in the Home draft
+            home_draft_cursor: 0,
+            // Scroll position in the Home draft (for future multi-line support)
+            home_draft_scroll: 0,
+            // Report mode for the Home draft (optional)
+            home_draft_report_mode: None,
+            // Whether the Home draft is currently being submitted (prevents duplicate submissions)
+            home_draft_submitting: false,
+            // Submission token for duplicate prevention (None when not submitting)
+            home_draft_submission_token: None,
+            // Last timestamp when Home draft was saved (for debouncing)
+            home_draft_last_saved: None,
             frame: RefCell::new(super::ui::FrameCache::default()),
+            // Tab strip state: ordered list of open investigation tab IDs (Thread.id)
+            tab_ids: Vec::new(),
+            // Index of the currently selected tab in tab_ids (0 = Home, 1+ = investigations)
+            tab_sel: 0,
+            // Timestamp of the last active investigation (for ordering tabs)
+            tab_last_active: HashMap::new(),
+            // History of recently closed tab IDs (for reopen feature, max 20)
+            tab_recently_closed: Vec::new(),
+            tab_unreads: HashSet::new(),
+            // Launch state machine for Home composer submissions
+            launch_state: LaunchState::Editable,
+            // Tracks if user has explicitly navigated away during launch acceptance
+            launch_navigated_away: false,
+            // Timestamp of the last explicit user navigation action
+            last_user_nav_action: None,
             thread_history: Vec::new(),
             history_pos: 0,
             running: HashMap::new(),
@@ -1036,9 +1139,15 @@ impl App {
             work_tx,
             work_rx,
         };
+
         let _ = app.store.atlas_park_running();
         app.load_atlas();
         app.atlas_auto_next = app.store.atlas_auto_next().ok().flatten();
+        app.load_home_draft();
+        app.load_session_tabs();
+        if app.module.is_none() {
+            app.set_focus(Target::Field(FieldId::Composer));
+        }
         app.push_log("info", "Argos ready");
         if app.selected_thread.is_some() {
             let _ = app.refresh_selected();
@@ -1121,7 +1230,11 @@ impl App {
         self.logs.reveal(room, width);
         let max = self.logs.scroll_max(room, width);
         if self.logs.follow || self.logs.scroll > max {
-            self.logs.scroll = if self.logs.follow { max } else { self.logs.scroll.min(max) };
+            self.logs.scroll = if self.logs.follow {
+                max
+            } else {
+                self.logs.scroll.min(max)
+            };
         }
     }
 
@@ -1175,7 +1288,10 @@ impl App {
     pub(crate) fn job_source(&self) -> Option<JobSource> {
         let job = self.jobs.selected()?;
         if job.app == "atlas" && !job.run_ref.is_empty() {
-            let index = self.atlas_runs.iter().position(|run| run.id == job.run_ref)?;
+            let index = self
+                .atlas_runs
+                .iter()
+                .position(|run| run.id == job.run_ref)?;
             return Some(JobSource::AtlasRun(index));
         }
         let thread = job
@@ -1206,12 +1322,307 @@ impl App {
         }
     }
 
-    fn go_home(&mut self) {
+    pub fn go_home(&mut self) {
         self.flush_draft();
+        let _ = self.flush_home_draft();
         self.overlay = Overlay::None;
         self.module = None;
-        self.set_focus(Target::App(self.launcher_sel));
+        self.tab_sel = 0;
+        self.load_home_draft();
+        self.set_focus(Target::Field(FieldId::Composer));
         self.status = "Home".into();
+    }
+
+    /// Returns true if the given tab index corresponds to the Home tab
+    pub fn is_home_tab(&self, tab_index: usize) -> bool {
+        tab_index == 0
+    }
+
+    /// Returns the Thread ID for the given tab index, or None if it's the Home tab
+    pub fn tab_to_thread_id(&self, tab_index: usize) -> Option<String> {
+        if self.is_home_tab(tab_index) {
+            None
+        } else {
+            let adjusted_index = tab_index - 1; // Subtract 1 for Home tab
+            self.tab_ids.get(adjusted_index).cloned()
+        }
+    }
+
+    /// Returns the tab index for the given Thread ID, or None if not found or if it's the Home tab
+    pub fn thread_id_to_tab(&self, thread_id: &str) -> Option<usize> {
+        self.tab_ids
+            .iter()
+            .position(|id| id == thread_id)
+            .map(|index| index + 1) // Add 1 for Home tab offset
+    }
+
+    /// Opens an investigation tab for the given thread ID
+    pub fn open_investigation_tab(&mut self, thread_id: &str) -> Result<()> {
+        if let Some(tab_index) = self.thread_id_to_tab(thread_id) {
+            self.tab_sel = tab_index;
+        } else {
+            self.tab_ids.push(thread_id.to_string());
+            self.tab_sel = self.tab_ids.len(); // Index of the newly added tab (plus Home tab offset)
+        }
+        self.tab_unreads.remove(thread_id);
+        self.tab_last_active
+            .insert(thread_id.to_string(), Instant::now());
+        self.save_session_tabs();
+        Ok(())
+    }
+
+    /// Closes the tab at the given index
+    pub fn close_tab(&mut self, tab_index: usize) -> Result<Option<String>> {
+        if self.is_home_tab(tab_index) || tab_index > self.tab_ids.len() {
+            return Ok(None);
+        }
+
+        let adjusted_index = tab_index - 1; // Subtract 1 for Home tab offset
+        let thread_id = self.tab_ids.remove(adjusted_index);
+        self.tab_last_active.remove(&thread_id);
+
+        // Add to recently closed history (limit to 20, deduplicated)
+        self.tab_recently_closed.retain(|id| id != &thread_id);
+        self.tab_recently_closed.push(thread_id.clone());
+        if self.tab_recently_closed.len() > 20 {
+            self.tab_recently_closed.remove(0);
+        }
+
+        let was_active = tab_index == self.tab_sel;
+        if was_active {
+            if self.tab_ids.is_empty() {
+                self.tab_sel = 0;
+                self.go_home();
+            } else if tab_index <= self.tab_ids.len() {
+                self.tab_sel = tab_index;
+                let next_id = self.tab_ids[tab_index - 1].clone();
+                self.enter_investigation(&next_id)?;
+            } else {
+                self.tab_sel = self.tab_ids.len();
+                let next_id = self.tab_ids[self.tab_sel - 1].clone();
+                self.enter_investigation(&next_id)?;
+            }
+        } else if tab_index < self.tab_sel {
+            self.tab_sel = self.tab_sel.saturating_sub(1);
+        }
+
+        self.save_session_tabs();
+
+        if self.running_thread(&thread_id) {
+            self.status = "Tab closed; investigation continues in Jobs".into();
+        }
+
+        Ok(Some(thread_id))
+    }
+
+    /// Reopens the most recently closed tab
+    pub fn reopen_closed_tab(&mut self) -> Result<()> {
+        while let Some(thread_id) = self.tab_recently_closed.pop() {
+            if self.store.get_thread(&thread_id).ok().flatten().is_some() {
+                self.open_investigation_tab(&thread_id)?;
+                self.enter_investigation(&thread_id)?;
+                self.status = "Investigation tab reopened".into();
+                return Ok(());
+            }
+        }
+        self.status = "No closed investigations to reopen".into();
+        Ok(())
+    }
+
+    /// Switch to a tab by its visual index (0 = Home, 1+ = investigation)
+    pub fn switch_tab(&mut self, tab_index: usize) -> Result<()> {
+        if tab_index == 0 {
+            self.tab_sel = 0;
+            self.go_home();
+            Ok(())
+        } else if let Some(id) = self.tab_to_thread_id(tab_index) {
+            self.tab_sel = tab_index;
+            self.enter_investigation(&id)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Selects the next tab in the strip
+    pub fn next_tab(&mut self) -> Result<()> {
+        let total = self.tab_ids.len() + 1;
+        if total <= 1 {
+            return Ok(());
+        }
+        let next = (self.tab_sel + 1) % total;
+        self.switch_tab(next)
+    }
+
+    /// Selects the previous tab in the strip
+    pub fn prev_tab(&mut self) -> Result<()> {
+        let total = self.tab_ids.len() + 1;
+        if total <= 1 {
+            return Ok(());
+        }
+        let prev = if self.tab_sel == 0 {
+            total - 1
+        } else {
+            self.tab_sel - 1
+        };
+        self.switch_tab(prev)
+    }
+
+    /// Loads session tabs from SQLite app_state
+    pub fn load_session_tabs(&mut self) {
+        if let Ok(Some(json)) = self.store.app_state_get("recon_session_tabs") {
+            if !json.is_empty() {
+                if let Ok(state) = serde_json::from_str::<SessionTabsState>(&json) {
+                    let valid_tabs: Vec<String> = state
+                        .open_thread_ids
+                        .into_iter()
+                        .filter(|id| self.store.get_thread(id).ok().flatten().is_some())
+                        .collect();
+                    self.tab_ids = valid_tabs;
+                    self.tab_recently_closed = state.recently_closed;
+                    if self.module == Some(ModuleId::Recon) {
+                        if let Some(last_id) = state.last_active_id {
+                            if let Some(tab_idx) = self.thread_id_to_tab(&last_id) {
+                                self.tab_sel = tab_idx;
+                            }
+                        }
+                    } else {
+                        self.tab_sel = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Saves session tabs to SQLite app_state
+    pub fn save_session_tabs(&self) {
+        let state = SessionTabsState {
+            open_thread_ids: self.tab_ids.clone(),
+            last_active_id: self.selected_thread.clone(),
+            recently_closed: self.tab_recently_closed.clone(),
+        };
+        if let Ok(json) = serde_json::to_string(&state) {
+            let _ = self.store.app_state_set("recon_session_tabs", &json);
+        }
+    }
+
+    /// Loads Home draft from SQLite app_state
+    pub fn load_home_draft(&mut self) {
+        if let Ok(Some(json)) = self.store.app_state_get("home_recon_draft") {
+            if !json.is_empty() {
+                if let Ok(state) = serde_json::from_str::<HomeDraftState>(&json) {
+                    self.home_draft = state.prompt;
+                    self.home_draft_cursor = state.cursor;
+                    self.home_draft_scroll = state.scroll;
+                    self.home_draft_report_mode = state.report_mode;
+                    if self.module.is_none() {
+                        self.input = self.home_draft.clone();
+                        self.cursor = self.home_draft_cursor;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clears the Home draft in memory and durable storage
+    pub fn clear_home_draft(&mut self) {
+        self.home_draft.clear();
+        self.home_draft_cursor = 0;
+        self.home_draft_scroll = 0;
+        self.home_draft_dirty = false;
+        if self.module.is_none() {
+            self.input.clear();
+            self.cursor = 0;
+        }
+        let _ = self.store.app_state_set("home_recon_draft", "");
+    }
+
+    /// Opens the investigation switcher overlay
+    pub fn open_investigation_switcher(&mut self) {
+        let mut items = Vec::new();
+        for id in &self.tab_ids {
+            let title = self
+                .threads
+                .iter()
+                .find(|t| &t.id == id)
+                .map(|t| t.title.as_str())
+                .unwrap_or("Investigation");
+            let running = if self.running_thread(id) {
+                " (running)"
+            } else {
+                ""
+            };
+            items.push(ChoiceItem {
+                id: id.clone(),
+                label: format!("{title}{running}"),
+            });
+        }
+        for thread in &self.threads {
+            if !self.tab_ids.contains(&thread.id) {
+                items.push(ChoiceItem {
+                    id: thread.id.clone(),
+                    label: format!("{} (closed)", thread.title),
+                });
+            }
+        }
+        self.choice_items = items;
+        self.choice_sel = 0;
+        self.overlay = Overlay::Choice(ChoiceKind::Investigation);
+    }
+
+    /// Launches a new investigation from the Home composer
+    pub fn launch_home_investigation(&mut self) -> Result<()> {
+        if self.home_draft_submitting {
+            return Ok(());
+        }
+        let question = self.input.trim().to_string();
+        if question.is_empty() {
+            return Ok(());
+        }
+        self.home_draft_submitting = true;
+        self.launch_state = LaunchState::Accepting;
+
+        // Generate deterministic title from first non-empty line of prompt (up to 80 chars)
+        let title_line = question
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("New investigation");
+        let title: String = title_line.trim().chars().take(80).collect();
+        let title = if title.is_empty() {
+            "New investigation".to_string()
+        } else {
+            title
+        };
+
+        // Atomic persistence: create thread
+        let thread = match self.store.new_thread(&title) {
+            Ok(t) => t,
+            Err(e) => {
+                self.home_draft_submitting = false;
+                self.launch_state = LaunchState::RecoverableFailure;
+                return Err(e);
+            }
+        };
+        self.threads.insert(0, thread.clone());
+        self.thread_sel = 0;
+
+        // Open investigation tab
+        let _ = self.open_investigation_tab(&thread.id);
+
+        // Consume Home draft
+        self.clear_home_draft();
+        self.home_draft_submitting = false;
+        self.launch_state = LaunchState::Accepted;
+
+        // Check navigation intent: if user stayed on Home, navigate immediately to Recon
+        if self.module.is_none() {
+            self.enter_investigation(&thread.id)?;
+        } else {
+            self.status = "Investigation started — Open".into();
+        }
+
+        // Start investigation run asynchronously
+        self.send_recon_query(&thread.id, &question)?;
+        Ok(())
     }
 
     pub fn palette_items(&self) -> Vec<PaletteItem> {
@@ -1225,12 +1636,27 @@ impl App {
                 shortcut: command.shortcut.into(),
                 category: command.category.into(),
                 enabled: match command.id {
-                    "cancel" => self.selected_thread.as_ref().is_some_and(|id| self.running_thread(id)),
-                    "resume" => self.runs.iter().any(|run| matches!(run.state.as_str(), "interrupted" | "failed"))
-                        && self.selected_thread.as_ref().is_some_and(|id| !self.running_thread(id)),
-                    "evidence" => super::ui::chat_blocks(self).get(self.chat_sel)
+                    "cancel" => self
+                        .selected_thread
+                        .as_ref()
+                        .is_some_and(|id| self.running_thread(id)),
+                    "resume" => {
+                        self.runs
+                            .iter()
+                            .any(|run| matches!(run.state.as_str(), "interrupted" | "failed"))
+                            && self
+                                .selected_thread
+                                .as_ref()
+                                .is_some_and(|id| !self.running_thread(id))
+                    }
+                    "evidence" => super::ui::chat_blocks(self)
+                        .get(self.chat_sel)
                         .and_then(|block| block.key.strip_prefix("tool:"))
-                        .is_some_and(|id| self.calls.iter().any(|call| call.id == id && call.result.is_some())),
+                        .is_some_and(|id| {
+                            self.calls
+                                .iter()
+                                .any(|call| call.id == id && call.result.is_some())
+                        }),
                     _ => true,
                 },
                 disabled_reason: match command.id {
@@ -1267,7 +1693,12 @@ impl App {
             self.status = "Select an evidence activity row first".into();
             return;
         };
-        let Some((index, call)) = self.calls.iter().enumerate().find(|(_, call)| call.id == call_id) else {
+        let Some((index, call)) = self
+            .calls
+            .iter()
+            .enumerate()
+            .find(|(_, call)| call.id == call_id)
+        else {
             self.status = "The captured source is no longer available".into();
             return;
         };
@@ -1285,12 +1716,21 @@ impl App {
             .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
             .take(12_000)
             .collect();
-        let source: String = if result.source_url.is_empty() { "Unavailable" } else { &result.source_url }
+        let source: String = if result.source_url.is_empty() {
+            "Unavailable"
+        } else {
+            &result.source_url
+        }
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(500)
+        .collect();
+        let retrieved: String = result
+            .retrieved_at
             .chars()
             .filter(|ch| !ch.is_control())
-            .take(500)
+            .take(80)
             .collect();
-        let retrieved: String = result.retrieved_at.chars().filter(|ch| !ch.is_control()).take(80).collect();
         self.overlay = Overlay::Block {
             title: format!("Evidence E{} · {name}", index + 1),
             body: format!(
@@ -1315,10 +1755,35 @@ impl App {
             "models" | "providers" => self.select(ModuleId::Providers.index()),
             "system" | "profile" => self.select(ModuleId::System.index()),
             "new" => {
-                let created = self.new_thread().map(|_| "New investigation".into());
-                self.report(created);
-                self.module = Some(ModuleId::Recon);
-                self.launcher_sel = ModuleId::Recon.index();
+                self.go_home();
+                self.set_focus(Target::Field(FieldId::Composer));
+            }
+            "focus-home-composer" => {
+                self.go_home();
+                self.set_focus(Target::Field(FieldId::Composer));
+            }
+            "switch-investigation" => self.open_investigation_switcher(),
+            "next-tab" => {
+                let _ = self.next_tab();
+            }
+            "prev-tab" => {
+                let _ = self.prev_tab();
+            }
+            "close-tab" => {
+                if self.tab_sel > 0 {
+                    let _ = self.close_tab(self.tab_sel);
+                }
+            }
+            "reopen-tab" => {
+                let _ = self.reopen_closed_tab();
+            }
+            "rename-investigation" => {
+                if self.selected_thread.is_some() {
+                    self.recon_chat = false;
+                    self.input = ":rename ".into();
+                    self.cursor = 8;
+                    self.set_focus(Target::Field(FieldId::Composer));
+                }
             }
             "sessions" => {
                 self.module = Some(ModuleId::Recon);
@@ -1337,7 +1802,16 @@ impl App {
             "context" => {
                 self.recon_context_enabled = !self.recon_context_enabled;
                 self.settings.tui_recon_context = Some(self.recon_context_enabled);
-                let saved = self.save_settings().map(|_| format!("Investigation context {}", if self.recon_context_enabled { "shown" } else { "hidden" }));
+                let saved = self.save_settings().map(|_| {
+                    format!(
+                        "Investigation context {}",
+                        if self.recon_context_enabled {
+                            "shown"
+                        } else {
+                            "hidden"
+                        }
+                    )
+                });
                 self.report(saved);
             }
             "create-memory" => {
@@ -1466,6 +1940,7 @@ impl App {
 
     fn select(&mut self, index: usize) {
         self.flush_draft();
+        let _ = self.flush_home_draft();
         self.launcher_sel = index;
         self.module = Some(ModuleId::ALL[index]);
         if self.module == Some(ModuleId::Recon) {
@@ -1616,7 +2091,11 @@ impl App {
         if self.focus == Target::Field(FieldId::Composer)
             && target != Target::Field(FieldId::Composer)
         {
-            self.flush_draft();
+            if self.module == Some(ModuleId::Recon) {
+                self.flush_draft();
+            } else if self.module.is_none() {
+                let _ = self.flush_home_draft();
+            }
         }
         self.focus = target;
         self.cursor = match target {
@@ -1708,11 +2187,17 @@ impl App {
         self.open_thread_with_history(id, true)
     }
 
-    fn enter_investigation(&mut self, id: &str) -> Result<()> {
+    pub fn enter_investigation(&mut self, id: &str) -> Result<()> {
+        if self.module.is_none() {
+            let _ = self.flush_home_draft();
+        }
         self.open_thread(id)?;
         self.recon_chat = true;
         self.module = Some(ModuleId::Recon);
         self.set_focus(Target::Field(FieldId::Composer));
+        self.open_investigation_tab(id)?;
+        self.tab_unreads.remove(id);
+        self.save_session_tabs();
         Ok(())
     }
 
@@ -1748,6 +2233,11 @@ impl App {
             self.thread_history.push(id.into());
             self.history_pos = self.thread_history.len().saturating_sub(1);
         }
+
+        if record {
+            let _ = self.open_investigation_tab(id);
+        }
+
         Ok(())
     }
 
@@ -1756,6 +2246,47 @@ impl App {
         self.enter_investigation(&thread.id)?;
         self.input.clear();
         self.set_focus(Target::Field(FieldId::Composer));
+        Ok(())
+    }
+
+    fn send_recon_query(&mut self, tid: &str, question: &str) -> Result<()> {
+        anyhow::ensure!(
+            !self.running.contains_key(tid),
+            "This thread already has a running turn"
+        );
+        if self.selected_thread.as_deref() == Some(tid) {
+            self.input.clear();
+            self.cursor = 0;
+            self.store
+                .save_draft(tid, "", i64::from(self.scrolls.chat))?;
+            self.live_answers.remove(tid);
+            self.chat_follow = true;
+        }
+        let service =
+            recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
+        let tx = self.work_tx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let tid_owned = tid.to_string();
+        self.running.insert(tid_owned.clone(), cancel.clone());
+        self.recon_stage = "starting".into();
+        let question_owned = question.to_string();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                let progress_tx = tx.clone();
+                let thread_id = tid_owned.clone();
+                let outcome = service
+                    .ask(&tid_owned, &question_owned, cancel, move |event| {
+                        let _ = progress_tx.send(work_event(&thread_id, event));
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::ReconDone {
+                    thread_id: tid_owned,
+                    outcome,
+                });
+            });
+        }
         Ok(())
     }
 
@@ -1768,38 +2299,7 @@ impl App {
             self.new_thread()?;
         }
         let tid = self.selected_thread.clone().unwrap();
-        anyhow::ensure!(
-            !self.running.contains_key(&tid),
-            "This thread already has a running turn"
-        );
-        self.input.clear();
-        self.cursor = 0;
-        self.store
-            .save_draft(&tid, "", i64::from(self.scrolls.chat))?;
-        self.live_answers.remove(&tid);
-        self.chat_follow = true;
-        let service =
-            recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
-        let tx = self.work_tx.clone();
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.running.insert(tid.clone(), cancel.clone());
-        self.recon_stage = "starting".into();
-        tokio::spawn(async move {
-            let progress_tx = tx.clone();
-            let thread_id = tid.clone();
-            let outcome = service
-                .ask(&tid, &question, cancel, move |event| {
-                    let _ = progress_tx.send(work_event(&thread_id, event));
-                })
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string());
-            let _ = tx.send(WorkEvent::ReconDone {
-                thread_id: tid,
-                outcome,
-            });
-        });
-        Ok(())
+        self.send_recon_query(&tid, &question)
     }
 
     fn resume_recon(&mut self) -> Result<()> {
@@ -2044,11 +2544,7 @@ impl App {
             Vec::new()
         } else {
             self.store
-                .atlas_articles_for_intel(
-                    &self.intel_category,
-                    &self.intel_day,
-                    &self.intel_search,
-                )
+                .atlas_articles_for_intel(&self.intel_category, &self.intel_day, &self.intel_search)
                 .unwrap_or_default()
         };
         self.intel_sel = kept_id
@@ -2189,15 +2685,14 @@ impl App {
                     .to_ascii_lowercase()
                     .contains("insight")
             {
-                self.intel_body_message =
-                    "Re-extracting insights from full article…".into();
+                self.intel_body_message = "Re-extracting insights from full article…".into();
             }
             return;
         }
-        if self.intel_body_running.contains(&article.id) {
-            if self.intel_body_message.trim().is_empty() {
-                self.intel_body_message = "Retrieving full article…".into();
-            }
+        if self.intel_body_running.contains(&article.id)
+            && self.intel_body_message.trim().is_empty()
+        {
+            self.intel_body_message = "Retrieving full article…".into();
         }
     }
 
@@ -2249,7 +2744,8 @@ impl App {
             }
             return;
         }
-        let outcome = match intel_recon::enqueue_article_body(&self.store, &article, force_refresh) {
+        let outcome = match intel_recon::enqueue_article_body(&self.store, &article, force_refresh)
+        {
             Ok(outcome) => outcome,
             Err(err) => {
                 self.intel_body_message = err.to_string();
@@ -2273,7 +2769,8 @@ impl App {
                 reason,
                 ..
             } => {
-                self.intel_body_message = format!("Unavailable · retry after {retry_after}. {reason}");
+                self.intel_body_message =
+                    format!("Unavailable · retry after {retry_after}. {reason}");
                 self.intel_body = self
                     .store
                     .article_body_for_article(&article.id)
@@ -2321,7 +2818,10 @@ impl App {
                     JobSpec::new(
                         "intel",
                         "article_body",
-                        format!("Article body · {}", title.chars().take(60).collect::<String>()),
+                        format!(
+                            "Article body · {}",
+                            title.chars().take(60).collect::<String>()
+                        ),
                     )
                     .resource(format!("article:{article_id}")),
                     cancel.clone(),
@@ -2336,11 +2836,7 @@ impl App {
                         keys,
                         synthesis,
                         classifier,
-                        if ua.trim().is_empty() {
-                            None
-                        } else {
-                            Some(ua)
-                        },
+                        if ua.trim().is_empty() { None } else { Some(ua) },
                         force_refresh,
                         cancel,
                         |event| {
@@ -2400,22 +2896,21 @@ impl App {
                 .resource(format!("article:{article_id}")),
         );
         tokio::spawn(async move {
-            let mode =
-                intel_recon::classify_recon_mode(classifier.as_ref(), &input).await;
+            let mode = intel_recon::classify_recon_mode(classifier.as_ref(), &input).await;
             // Falls back to the default mode on its own; never an error.
             tracked::finish(job, "classifier", &Ok::<(), String>(()), None);
             let _ = tx.send(WorkEvent::IntelReconMode { article_id, mode });
         });
     }
 
-pub(crate) fn intel_recon_mode(&self) -> ReportMode {
+    pub(crate) fn intel_recon_mode(&self) -> ReportMode {
         ReportMode::all()
             .get(self.intel_recon_tab)
             .copied()
             .unwrap_or(ReportMode::Verify)
     }
 
-pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) -> bool {
+    pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) -> bool {
         self.intel_recon_enabled
             .get(mode.as_str())
             .map(|set| set.contains(key))
@@ -2502,12 +2997,14 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.status = "Enable at least one section".into();
             return;
         }
-        let mut scope = ReportScope::default();
-        scope.sections = intel_recon::section_plan(mode)
-            .into_iter()
-            .filter(|section| enabled.contains(section.key))
-            .map(|section| section.key.to_string())
-            .collect();
+        let scope = ReportScope {
+            sections: intel_recon::section_plan(mode)
+                .into_iter()
+                .filter(|section| enabled.contains(section.key))
+                .map(|section| section.key.to_string())
+                .collect(),
+            ..Default::default()
+        };
         self.overlay = Overlay::None;
         self.scrolls.popup = 0;
         self.start_intel_report(mode, scope);
@@ -2519,8 +3016,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.status = "No article selected".into();
             return;
         };
-        let job = match intel_recon::create_report_job(&self.store, &article, mode, &scope, false)
-        {
+        let job = match intel_recon::create_report_job(&self.store, &article, mode, &scope, false) {
             Ok(job) => job,
             Err(err) => {
                 self.status = format!("Recon failed: {err}");
@@ -2773,9 +3269,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             .atlas_list_runs()
             .ok()
             .and_then(|runs| runs.into_iter().find(|run| run.id == run_id))
-            .and_then(|run| {
-                (run.started_at.len() >= 10).then(|| run.started_at[..10].to_string())
-            })
+            .and_then(|run| (run.started_at.len() >= 10).then(|| run.started_at[..10].to_string()))
     }
 
     fn delete_atlas_run(&mut self) -> Result<String> {
@@ -2917,10 +3411,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Select a news cycle to resume"))?;
         anyhow::ensure!(self.atlas_pause.is_none(), "Atlas is already running");
-        anyhow::ensure!(
-            atlas::resumable(&run),
-            "This cycle has nothing to resume"
-        );
+        anyhow::ensure!(atlas::resumable(&run), "This cycle has nothing to resume");
         self.spawn_atlas(atlas::LiveRun::Run(run.id.clone()))?;
         self.push_log("info", format!("Atlas: resuming cycle {}", run.id));
         Ok("Resuming cycle · progress in Atlas and Jobs".into())
@@ -3022,7 +3513,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     /// When the saved trigger is due, move it forward by 90 minutes.
     /// Returns whether a pipeline should start.
     fn take_atlas_auto_tick(&mut self, now: u64) -> bool {
-        if !self.atlas_auto_next.is_some_and(|next| now >= next) {
+        if self.atlas_auto_next.is_none_or(|next| now < next) {
             return false;
         }
         self.persist_atlas_auto(Some(now.saturating_add(ATLAS_AUTO_SECS)));
@@ -3031,12 +3522,14 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
 
     fn poll_atlas_auto(&mut self) -> bool {
         let now = unix_now();
-        if !self.atlas_auto_next.is_some_and(|next| now >= next) {
+        if self.atlas_auto_next.is_none_or(|next| now < next) {
             return false;
         }
         let start = self.take_atlas_auto_tick(now);
         if start {
-            if tokio::runtime::Handle::try_current().is_ok() && self.spawn_atlas(atlas::LiveRun::Fresh).is_ok() {
+            if tokio::runtime::Handle::try_current().is_ok()
+                && self.spawn_atlas(atlas::LiveRun::Fresh).is_ok()
+            {
                 self.atlas_auto_started = true;
             }
         } else {
@@ -3223,6 +3716,10 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             WorkEvent::ReconDone { thread_id, outcome } => {
                 self.running.remove(&thread_id);
+                if self.selected_thread.as_deref() != Some(&thread_id) {
+                    self.tab_unreads.insert(thread_id.clone());
+                }
+
                 // A saved answer replaces the bubble. A failed turn that never stored one
                 // keeps the text that was already streaming, instead of blanking it when
                 // the recon log picks up the run error.
@@ -3396,7 +3893,10 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                         self.intel_body_message = message;
                     }
                     intel_recon::BodyFetchEvent::Attempt {
-                        tool_id, state, reason, ..
+                        tool_id,
+                        state,
+                        reason,
+                        ..
                     } => {
                         self.intel_body_message = if reason.is_empty() {
                             format!("{tool_id} · {state}")
@@ -3828,6 +4328,12 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     Target::IntelArticle(self.intel_sel)
                 });
             }
+            Overlay::Choice(ChoiceKind::Investigation) => {
+                let thread_id = item.id.clone();
+                let _ = self.enter_investigation(&thread_id);
+                let _ = self.open_investigation_tab(&thread_id);
+                self.status = format!("Switched to investigation: {}", item.label);
+            }
             _ => return,
         }
         self.overlay = Overlay::None;
@@ -4167,7 +4673,10 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         memory_id: &str,
         outcome: std::result::Result<Vec<RelatedMemory>, String>,
     ) -> bool {
-        if !self.brain_detail.finish_related(request, memory_id, outcome) {
+        if !self
+            .brain_detail
+            .finish_related(request, memory_id, outcome)
+        {
             return false;
         }
         let area = super::ui::detail_areas(self).related;
@@ -4189,10 +4698,7 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             let Ok(Some(memory)) = self.store.get_memory(&snapshot.memory_id) else {
                 continue;
             };
-            let graph = self
-                .store
-                .graph_for_memory(&memory.id)
-                .unwrap_or_default();
+            let graph = self.store.graph_for_memory(&memory.id).unwrap_or_default();
             self.show_detail(memory, graph, Some(&snapshot));
             self.status = "Back".into();
             return;
@@ -4368,7 +4874,10 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
 
     /// A finished graph explanation. The job, events and diagnostic record
     /// were persisted before this was sent.
-    fn on_graph_summary(&mut self, report: argos_osint_core::graph_explanation::ExplainReport) -> bool {
+    fn on_graph_summary(
+        &mut self,
+        report: argos_osint_core::graph_explanation::ExplainReport,
+    ) -> bool {
         use argos_osint_core::graph_explanation::ExplainOutcome;
         let newest = report.request_id == self.graph_summary_request;
         if newest && self.graph_summary_pending.as_deref() == Some(report.memory_id.as_str()) {
@@ -4432,7 +4941,12 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.logs.follow = false;
                 self.select(ModuleId::Logs.index());
                 self.logs.reload(&self.store);
-                if let Some(index) = self.logs.rows.iter().position(|row| row.id == failure.event_id) {
+                if let Some(index) = self
+                    .logs
+                    .rows
+                    .iter()
+                    .position(|row| row.id == failure.event_id)
+                {
                     self.logs.select(index);
                     self.logs.open.insert(failure.event_id.clone());
                     Ok(format!(
@@ -4464,7 +4978,9 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                     self.model_catalog.clear();
                     self.catalog_for.clear();
                 }
-                self.set_focus(Target::Button(ButtonId::DefaultRole(DefaultsRole::Summarization)));
+                self.set_focus(Target::Button(ButtonId::DefaultRole(
+                    DefaultsRole::Summarization,
+                )));
                 Ok("Models · Summarization".into())
             }
             _ => Ok(String::new()),
@@ -4532,6 +5048,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 self.store.deletion_consequences(&id).and_then(|removed| {
                     let removed = removed.len();
                     self.store.delete_thread(&id, true)?;
+                    self.tab_ids.retain(|tid| tid != &id);
+                    self.tab_recently_closed.retain(|tid| tid != &id);
+                    self.tab_last_active.remove(&id);
+                    self.tab_unreads.remove(&id);
+                    self.save_session_tabs();
                     self.selected_thread = None;
                     self.messages.clear();
                     self.input.clear();
@@ -4665,7 +5186,9 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 let requested = self.store.request_job_cancel(&id);
                 self.reload_jobs();
                 requested.map(|outcome| match outcome {
-                    CancelRequest::Requested => "Cancel requested · the job stops at its next safe point".into(),
+                    CancelRequest::Requested => {
+                        "Cancel requested · the job stops at its next safe point".into()
+                    }
                     CancelRequest::NotCancellable => "This job cannot be cancelled safely".into(),
                     CancelRequest::NotRunning => "This job is not running".into(),
                     CancelRequest::Missing => "This job no longer exists".into(),
@@ -4931,7 +5454,13 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 provider::picker_transport(&model)
             ),
             DefaultsRole::Summarization => {
-                let inherited = self.settings.defaults.summarization.provider.trim().is_empty()
+                let inherited = self
+                    .settings
+                    .defaults
+                    .summarization
+                    .provider
+                    .trim()
+                    .is_empty()
                     && self.settings.defaults.summarization.model.trim().is_empty();
                 if inherited {
                     format!("Summarization: {after} (inherits Synthesis)")
@@ -5082,8 +5611,15 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         let tx = self.provider_tx.clone();
         let job = tracked::begin(JobSpec::new(
             "models",
-            if login { "provider_login" } else { "provider_check" },
-            format!("{} {label} subscription", if login { "Sign in to" } else { "Check" }),
+            if login {
+                "provider_login"
+            } else {
+                "provider_check"
+            },
+            format!(
+                "{} {label} subscription",
+                if login { "Sign in to" } else { "Check" }
+            ),
         ));
         tokio::spawn(async move {
             let result = if page == ProviderPage::Grok {
@@ -5291,7 +5827,12 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             Target::JobDetail => self.set_focus(Target::JobDetail),
             Target::Choice(index) if self.overlay == Overlay::Palette => {
-                if let Some(id) = self.palette_items().get(index).filter(|item| item.enabled).map(|item| item.id.clone()) {
+                if let Some(id) = self
+                    .palette_items()
+                    .get(index)
+                    .filter(|item| item.enabled)
+                    .map(|item| item.id.clone())
+                {
                     self.run_palette(&id);
                 }
             }
@@ -5301,6 +5842,20 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             Target::CloseOverlay => {
                 self.overlay = Overlay::None;
                 self.scrolls.popup = 0;
+            }
+            Target::Tab(index) => {
+                let _ = self.switch_tab(index);
+                self.set_focus(target);
+            }
+            Target::TabClose(index) => {
+                let _ = self.close_tab(index);
+            }
+            Target::TabPlus => {
+                self.go_home();
+                self.set_focus(Target::Field(FieldId::Composer));
+            }
+            Target::TabOverflow => {
+                self.open_investigation_switcher();
             }
         }
     }
@@ -5465,6 +6020,20 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     }
 
     fn submit(&mut self) {
+        if self.module.is_none() {
+            let input = self.input.trim().to_string();
+            if input.is_empty() {
+                return;
+            }
+            if input.starts_with('/') {
+                let result = self.run_slash(&input);
+                self.report(result);
+                return;
+            }
+            let result = self.launch_home_investigation();
+            self.report(result.map(|_| "Investigation started".into()));
+            return;
+        }
         if self.module != Some(ModuleId::Recon) {
             return;
         }
@@ -5501,6 +6070,11 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 .inspect(|c| c.store(true, Ordering::Relaxed));
             let removed = self.store.deletion_consequences(&id)?.len();
             self.store.delete_thread(&id, true)?;
+            self.tab_ids.retain(|tid| tid != &id);
+            self.tab_recently_closed.retain(|tid| tid != &id);
+            self.tab_last_active.remove(&id);
+            self.tab_unreads.remove(&id);
+            self.save_session_tabs();
             self.selected_thread = None;
             self.messages.clear();
             self.recon_chat = false;
@@ -5698,10 +6272,21 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             return true;
         }
         if ctrl && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N')) {
-            let created = self.new_thread().map(|_| "New investigation".into());
-            self.report(created);
-            self.module = Some(ModuleId::Recon);
-            self.launcher_sel = ModuleId::Recon.index();
+            self.go_home();
+            self.set_focus(Target::Field(FieldId::Composer));
+            return true;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('w') | KeyCode::Char('W')) {
+            if self.tab_sel > 0 {
+                let _ = self.close_tab(self.tab_sel);
+            }
+            return true;
+        }
+        if ctrl
+            && key.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
+        {
+            let _ = self.reopen_closed_tab();
             return true;
         }
         if ctrl && key.code == KeyCode::Char('o') && self.module == Some(ModuleId::Brain) {
@@ -5716,16 +6301,10 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
         {
             if self.field_focused() {
                 self.move_word(if key.code == KeyCode::Left { -1 } else { 1 });
-            } else if self.module == Some(ModuleId::Recon) {
-                let next = if key.code == KeyCode::Left {
-                    self.history_pos.saturating_sub(1)
-                } else {
-                    (self.history_pos + 1).min(self.thread_history.len().saturating_sub(1))
-                };
-                if let Some(id) = self.thread_history.get(next).cloned() {
-                    self.history_pos = next;
-                    let _ = self.open_thread_with_history(&id, false);
-                }
+            } else if key.code == KeyCode::Left {
+                let _ = self.prev_tab();
+            } else {
+                let _ = self.next_tab();
             }
             return true;
         }
@@ -5746,6 +6325,14 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             }
             return true;
         }
+        if ctrl
+            && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('J'))
+            && self.focus == Target::Field(FieldId::Composer)
+        {
+            self.edit_char('\n');
+            self.persist_draft();
+            return true;
+        }
         if matches!(key.code, KeyCode::Char('?')) && !self.field_focused() {
             self.overlay = if self.overlay == Overlay::Help {
                 Overlay::None
@@ -5760,6 +6347,40 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             KeyCode::Enter => self.on_enter(),
             KeyCode::Backspace => self.edit_backspace(),
             KeyCode::Delete => self.edit_delete(),
+            KeyCode::Left | KeyCode::Char('h')
+                if matches!(
+                    self.focus,
+                    Target::Tab(_) | Target::TabPlus | Target::TabOverflow
+                ) =>
+            {
+                match self.focus {
+                    Target::Tab(i) if i > 0 => self.set_focus(Target::Tab(i - 1)),
+                    Target::TabPlus => self.set_focus(Target::Tab(self.tab_ids.len())),
+                    Target::TabOverflow => self.set_focus(Target::TabPlus),
+                    _ => {}
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l')
+                if matches!(
+                    self.focus,
+                    Target::Tab(_) | Target::TabPlus | Target::TabOverflow
+                ) =>
+            {
+                match self.focus {
+                    Target::Tab(i) if i < self.tab_ids.len() => self.set_focus(Target::Tab(i + 1)),
+                    Target::Tab(_) => self.set_focus(Target::TabPlus),
+                    Target::TabPlus => self.set_focus(Target::TabOverflow),
+                    _ => {}
+                }
+            }
+            KeyCode::Char(' ')
+                if matches!(
+                    self.focus,
+                    Target::Tab(_) | Target::TabPlus | Target::TabOverflow
+                ) =>
+            {
+                self.on_enter();
+            }
             KeyCode::Left if self.field_focused() => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Right if self.field_focused() => {
                 if let Target::Field(field) = self.focus {
@@ -5929,6 +6550,13 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
             self.activate_target(Target::CloseOverlay);
             return;
         }
+        if self.module.is_none() {
+            if self.focus == Target::Field(FieldId::Composer) {
+                self.set_focus(Target::App(self.launcher_sel));
+                return;
+            }
+            return;
+        }
         if self.focus == Target::Field(FieldId::Composer) && !self.input.trim().is_empty() {
             let now = Instant::now();
             if self
@@ -6059,7 +6687,9 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     fn dashboard_key(&mut self, c: char) -> bool {
         let button = match (self.module, c) {
             (Some(ModuleId::Logs), 'f') => ButtonId::LogsFollow,
-            (Some(ModuleId::Logs), 'o') if self.logs.selected().is_some_and(|r| !r.job_id.is_empty()) => {
+            (Some(ModuleId::Logs), 'o')
+                if self.logs.selected().is_some_and(|r| !r.job_id.is_empty()) =>
+            {
                 ButtonId::LogsOpenJob
             }
             (Some(ModuleId::Logs), 'v') => ButtonId::LogsLevel,
@@ -6123,8 +6753,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 Some(ModuleId::Atlas) => self.move_atlas(delta),
                 Some(ModuleId::Intel) if self.intel_page == IntelPage::Briefing => {
                     let max = super::ui::intel_brief_scroll_max(self);
-                    self.scrolls.intel_brief = add_scroll(self.scrolls.intel_brief, delta * 3)
-                        .min(max);
+                    self.scrolls.intel_brief =
+                        add_scroll(self.scrolls.intel_brief, delta * 3).min(max);
                 }
                 Some(ModuleId::Intel) => self.move_intel(delta),
                 Some(ModuleId::System) => {}
@@ -6263,6 +6893,8 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
     fn persist_draft(&mut self) {
         if self.module == Some(ModuleId::Recon) && self.focus == Target::Field(FieldId::Composer) {
             self.draft_dirty = true;
+        } else if self.module.is_none() && self.focus == Target::Field(FieldId::Composer) {
+            self.persist_home_draft();
         }
     }
 
@@ -6276,6 +6908,34 @@ pub(crate) fn intel_recon_section_enabled(&self, mode: ReportMode, key: &str) ->
                 .store
                 .save_draft(id, &self.input, i64::from(self.scrolls.chat));
         }
+    }
+
+    /// Marks the Home draft as having unsaved changes
+    fn persist_home_draft(&mut self) {
+        self.home_draft = self.input.clone();
+        self.home_draft_cursor = self.cursor;
+        self.home_draft_dirty = true;
+    }
+
+    /// Flushes the Home draft to persistent storage
+    fn flush_home_draft(&mut self) -> Result<()> {
+        if self.module.is_none() && self.focus == Target::Field(FieldId::Composer) {
+            self.persist_home_draft();
+        }
+        if !self.home_draft_dirty {
+            return Ok(());
+        }
+        self.home_draft_dirty = false;
+        let state = HomeDraftState {
+            prompt: self.home_draft.clone(),
+            cursor: self.home_draft_cursor,
+            scroll: self.home_draft_scroll,
+            report_mode: self.home_draft_report_mode,
+        };
+        if let Ok(json) = serde_json::to_string(&state) {
+            let _ = self.store.app_state_set("home_recon_draft", &json);
+        }
+        Ok(())
     }
 
     fn focus_next(&mut self, reverse: bool) {
@@ -6512,8 +7172,7 @@ pub async fn run(mut app: App) -> Result<()> {
         Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
     // Durable local workers (index outbox + summary flush), each claiming only
     // its own pool. Stopped when dropped at the end of the session.
-    let _workers =
-        argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
+    let _workers = argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
     // Process liveness for the job registry: jobs left running by a process
     // that exited become interrupted; cross-process Cancel reaches this one.
     let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
@@ -6576,7 +7235,10 @@ pub async fn run(mut app: App) -> Result<()> {
             wait = wait.min(Duration::from_millis(80));
         }
         if !event::poll(wait)? {
-            if app.draft_dirty {
+            if app.module == Some(ModuleId::Recon)
+                && app.focus == Target::Field(FieldId::Composer)
+                && app.draft_dirty
+            {
                 app.flush_draft();
             }
             if atlas_countdown_visible(&app)
@@ -6624,11 +7286,12 @@ fn summary_system(claim: bool) -> String {
     } else {
         "The recon path already keeps only the directive this insight rests on, with the subjects and evidence that contributed to it. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how that directive and the contributing evidence support the relation, and why the concluding insight is a fact or an inference. A fact rests on a tool result that states the relation. An inference is drawn when the evidence does not state it directly. Use only the graph and the memory. Do not mention directives that are absent from the recon path. Do not invent sources or outcomes. No bullet list."
     };
-    format!("{mode}
+    format!(
+        "{mode}
 
-{detail}")
+{detail}"
+    )
 }
-
 
 fn work_event(thread_id: &str, event: recon::TurnEvent) -> WorkEvent {
     let thread_id = thread_id.to_string();
@@ -6866,6 +7529,22 @@ mod tests {
             auth_path: PathBuf::new(),
             settings_path: PathBuf::new(),
             store: Store::memory().unwrap(),
+            home_draft_dirty: false,
+            home_draft: String::new(),
+            home_draft_cursor: 0,
+            home_draft_scroll: 0,
+            home_draft_report_mode: None,
+            home_draft_submitting: false,
+            home_draft_submission_token: None,
+            home_draft_last_saved: None,
+            tab_ids: Vec::new(),
+            tab_sel: 0,
+            tab_last_active: HashMap::new(),
+            tab_recently_closed: Vec::new(),
+            tab_unreads: HashSet::new(),
+            launch_state: LaunchState::Editable,
+            launch_navigated_away: false,
+            last_user_nav_action: None,
             provider_tx,
             provider_rx,
             work_tx,
@@ -6916,13 +7595,20 @@ mod tests {
         app.module = Some(ModuleId::Recon);
         app.overlay = Overlay::Palette;
         app.palette_query = "cancel".into();
-        let item = app.palette_items().into_iter().find(|item| item.id == "cancel").unwrap();
+        let item = app
+            .palette_items()
+            .into_iter()
+            .find(|item| item.id == "cancel")
+            .unwrap();
         assert!(!item.enabled);
         assert_eq!(item.disabled_reason, "No running turn");
         app.palette_sel = 0;
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.overlay, Overlay::Palette);
-        assert!(!app.palette_items().iter().any(|item| item.id == "jobs-retry"));
+        assert!(!app
+            .palette_items()
+            .iter()
+            .any(|item| item.id == "jobs-retry"));
     }
 
     #[test]
@@ -6980,7 +7666,11 @@ mod tests {
             .any(|target| matches!(target, Target::Field(FieldId::BrainInsight))));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.brain_list_mode, BrainListMode::Graph);
-        assert_eq!(app.focus, Target::DetailPath, "detail opens with the graph section focused");
+        assert_eq!(
+            app.focus,
+            Target::DetailPath,
+            "detail opens with the graph section focused"
+        );
         assert!(app.brain_graph.is_empty());
         assert!(app.graph_summary.contains("no investigation graph"));
         assert!(app.graph_summary_pending.is_none());
@@ -7013,9 +7703,18 @@ mod tests {
             ModuleId::Intel.blurb(),
             "Review intelligence briefings and investigate emerging stories"
         );
-        assert_eq!(ModuleId::Atlas.blurb(), "Map and track the global news cycle");
-        assert_eq!(ModuleId::Brain.blurb(), "Recall and explore connected intelligence");
-        assert_eq!(ModuleId::Recon.blurb(), "Run evidence-driven OSINT investigations");
+        assert_eq!(
+            ModuleId::Atlas.blurb(),
+            "Map and track the global news cycle"
+        );
+        assert_eq!(
+            ModuleId::Brain.blurb(),
+            "Recall and explore connected intelligence"
+        );
+        assert_eq!(
+            ModuleId::Recon.blurb(),
+            "Run evidence-driven OSINT investigations"
+        );
     }
 
     #[test]
@@ -7564,7 +8263,8 @@ mod tests {
         ] {
             assert!(hit(&app, target), "home is missing {target:?}");
         }
-        assert!(!hit(&app, Target::Field(FieldId::Composer)));
+        assert!(hit(&app, Target::Field(FieldId::Composer)));
+        assert!(hit(&app, Target::Button(ButtonId::Send)));
         app.select(ModuleId::Brain.index());
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
@@ -7711,10 +8411,7 @@ mod tests {
     }
 
     fn events(app: &App) -> Vec<argos_osint_core::events::EventRow> {
-        let mut rows = app
-            .store
-            .list_events(&Default::default(), 500)
-            .unwrap();
+        let mut rows = app.store.list_events(&Default::default(), 500).unwrap();
         rows.reverse();
         rows
     }
@@ -7922,7 +8619,14 @@ mod tests {
             .unwrap();
     }
 
-    fn job_event(app: &App, job: &str, app_name: &str, severity: &str, message: &str, details: &str) {
+    fn job_event(
+        app: &App,
+        job: &str,
+        app_name: &str,
+        severity: &str,
+        message: &str,
+        details: &str,
+    ) {
         app.store
             .record_event(&argos_osint_core::events::NewEvent {
                 severity: Some(argos_osint_core::events::Severity::parse(severity)),
@@ -7943,7 +8647,9 @@ mod tests {
         let mut groups: Vec<Group> = Vec::new();
         for row in rows {
             match row.kind {
-                super::super::ui::HomeKind::Heading(title) => groups.push((title.into(), Vec::new())),
+                super::super::ui::HomeKind::Heading(title) => {
+                    groups.push((title.into(), Vec::new()))
+                }
                 super::super::ui::HomeKind::Item { title, detail } => {
                     if let Some(group) = groups.last_mut() {
                         group.1.push((title, detail, row.target.unwrap()));
@@ -7963,16 +8669,32 @@ mod tests {
                 .collect()
         };
         assert_eq!(titles("Applications"), ["Intel", "Atlas", "Brain", "Recon"]);
-        assert_eq!(titles("System"), ["Jobs", "Logs", "Tools", "Models", "Profile"]);
-        let all: Vec<usize> = groups.iter().flat_map(|g| g.1.iter().map(|i| i.2)).collect();
-        assert_eq!(all, (0..9).collect::<Vec<_>>(), "home targets follow numeric order");
+        assert_eq!(
+            titles("System"),
+            ["Jobs", "Logs", "Tools", "Models", "Profile"]
+        );
+        let all: Vec<usize> = groups
+            .iter()
+            .flat_map(|g| g.1.iter().map(|i| i.2))
+            .collect();
+        assert_eq!(
+            all,
+            (0..9).collect::<Vec<_>>(),
+            "home targets follow numeric order"
+        );
         let logs = &groups[1].1[1];
-        assert!(logs.1.contains("3 errors"), "error badge moved to Logs: {logs:?}");
+        assert!(
+            logs.1.contains("3 errors"),
+            "error badge moved to Logs: {logs:?}"
+        );
         assert!(!groups[1].1[4].1.contains("errors"));
         // Display renames keep internal ids.
         assert_eq!(ModuleId::Osint.title(), "Tools");
         assert_eq!(ModuleId::Providers.title(), "Models");
-        assert_eq!(ModuleId::System.blurb(), "Inspect host hardware and Argos storage");
+        assert_eq!(
+            ModuleId::System.blurb(),
+            "Inspect host hardware and Argos storage"
+        );
         // 1–9 from home.
         for (index, module) in ModuleId::ALL.iter().enumerate() {
             let mut app = app();
@@ -8004,7 +8726,10 @@ mod tests {
             assert!(ids.contains(&id.to_string()), "{id}");
         }
         app.select(ModuleId::Logs.index());
-        assert!(app.palette_items().iter().any(|item| item.id == "clear-log"));
+        assert!(app
+            .palette_items()
+            .iter()
+            .any(|item| item.id == "clear-log"));
         app.palette_query = "system".into();
         assert!(app.palette_items().iter().any(|item| item.id == "profile"));
         app.palette_query.clear();
@@ -8013,7 +8738,10 @@ mod tests {
         app.overlay = Overlay::Help;
         let mut app2 = app;
         let text = buffer_text(&render(&mut app2, 160, 40));
-        assert!(text.contains("1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools"), "{text}");
+        assert!(
+            text.contains("1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools"),
+            "{text}"
+        );
         assert!(text.contains("Models · 9 Profile"));
         app2.overlay = Overlay::None;
         app2.select(ModuleId::Jobs.index());
@@ -8040,19 +8768,40 @@ mod tests {
         .expect("registered");
         let id = job.id().to_string();
         // A non-cancellable operation never offers Cancel.
-        let summary = super::super::tracked::begin(JobSpec::new("brain", "graph_summary", "Explain claim path"))
-            .expect("registered");
+        let summary = super::super::tracked::begin(JobSpec::new(
+            "brain",
+            "graph_summary",
+            "Explain claim path",
+        ))
+        .expect("registered");
         app.select(ModuleId::Jobs.index());
         assert!(app.jobs.focus_job(&app.store, &id), "listed");
         let text = buffer_text(&render(&mut app, 140, 40));
-        assert!(text.contains("Run WHOIS lookup") && text.contains("Explain claim path"), "{text}");
+        assert!(
+            text.contains("Run WHOIS lookup") && text.contains("Explain claim path"),
+            "{text}"
+        );
         assert!(text.contains("Cancel"), "{text}");
-        assert!(app.jobs.selected().unwrap().active_now(chrono::Utc::now()).is_some(), "live active time");
+        assert!(
+            app.jobs
+                .selected()
+                .unwrap()
+                .active_now(chrono::Utc::now())
+                .is_some(),
+            "live active time"
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert!(stop.load(Ordering::Relaxed), "the tool's own stop flag is set");
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "the tool's own stop flag is set"
+        );
         assert!(app.status.contains("Cancel requested"), "{}", app.status);
-        assert_eq!(app.jobs.selected().unwrap().state, "running", "not cancelled until it stops");
+        assert_eq!(
+            app.jobs.selected().unwrap().state,
+            "running",
+            "not cancelled until it stops"
+        );
         let text = buffer_text(&render(&mut app, 140, 40));
         assert!(text.contains("Cancelling…"), "{text}");
         assert!(!app.jobs.can_cancel(), "no second Cancel");
@@ -8069,7 +8818,12 @@ mod tests {
             .collect();
         assert_eq!(rows["Run WHOIS lookup"], "cancelled");
         assert_eq!(rows["Explain claim path"], "completed");
-        let summary_row = app.jobs.rows.iter().find(|r| r.title == "Explain claim path").unwrap();
+        let summary_row = app
+            .jobs
+            .rows
+            .iter()
+            .find(|r| r.title == "Explain claim path")
+            .unwrap();
         assert!(!summary_row.cancellable);
         super::super::tracked::testing::use_db(None);
     }
@@ -8080,7 +8834,14 @@ mod tests {
         app.screen = Rect::new(0, 0, 140, 40);
         register(&app, "job-a", "atlas", "Atlas news cycle");
         app.store
-            .set_job_progress("job-a", "running", "Index and verify memories", 3, Some(5), "")
+            .set_job_progress(
+                "job-a",
+                "running",
+                "Index and verify memories",
+                3,
+                Some(5),
+                "",
+            )
             .unwrap();
         register(&app, "job-b", "atlas", "Repair Atlas memories");
         app.store
@@ -8117,7 +8878,12 @@ mod tests {
         app.jobs.status = argos_osint_core::jobs_view::JobStatusFilter::Completed;
         app.select(ModuleId::Logs.index());
         assert_eq!(app.logs.rows.len(), 2, "unfiltered Logs keep app events");
-        let index = app.logs.rows.iter().position(|r| r.job_id == "job-a").unwrap();
+        let index = app
+            .logs
+            .rows
+            .iter()
+            .position(|r| r.job_id == "job-a")
+            .unwrap();
         click(&mut app, Target::LogLine(index));
         app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert_eq!(app.module, Some(ModuleId::Jobs));
@@ -8129,7 +8895,10 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.jobs.detail_open);
         let narrow = buffer_text(&render(&mut app, 80, 30));
-        assert!(narrow.contains("detail") && !narrow.contains("Repair Atlas memories"), "{narrow}");
+        assert!(
+            narrow.contains("detail") && !narrow.contains("Repair Atlas memories"),
+            "{narrow}"
+        );
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.jobs.detail_open);
         assert_eq!(app.module, Some(ModuleId::Jobs));
@@ -8143,15 +8912,28 @@ mod tests {
         assert!(text.contains("Refresh hardware"));
         assert!(text.contains(" host ") && text.contains(" paths "));
         assert!(text.contains("Database:") && text.contains("Config:"));
-        assert!(!text.contains("event log") && !text.contains("Clear"), "{text}");
+        assert!(
+            !text.contains("event log") && !text.contains("Clear"),
+            "{text}"
+        );
         click(&mut app, Target::Button(ButtonId::RefreshHardware));
         assert_eq!(app.status, "Hardware refreshed");
 
         register(&app, "job-c", "brain", "Graph summary");
-        job_event(&app, "job-c", "brain", "error", "summary failed", "HTTP 503");
+        job_event(
+            &app,
+            "job-c",
+            "brain",
+            "error",
+            "summary failed",
+            "HTTP 503",
+        );
         app.select(ModuleId::Logs.index());
         let text = buffer_text(&render(&mut app, 120, 34));
-        assert!(text.contains("Clear events") && text.contains("kept 24 h"), "{text}");
+        assert!(
+            text.contains("Clear events") && text.contains("kept 24 h"),
+            "{text}"
+        );
         click(&mut app, Target::Button(ButtonId::ClearLog));
         assert!(app.status.starts_with("Cleared"), "{}", app.status);
         assert!(
@@ -8182,12 +8964,35 @@ mod tests {
             .fixture_task_attempt("job-atlas-0412", "t-idx-3", "index_upsert", 192, None)
             .unwrap();
         app.store
-            .set_job_progress("job-atlas-0412", "running", "Index and verify memories", 41, Some(57), "")
+            .set_job_progress(
+                "job-atlas-0412",
+                "running",
+                "Index and verify memories",
+                41,
+                Some(57),
+                "",
+            )
             .unwrap();
-        register(&app, "job-intel-77", "intel", "Intel Recon · Full assessment");
-        register(&app, "job-graph-19", "brain", "Graph summary · Northwind ferry");
+        register(
+            &app,
+            "job-intel-77",
+            "intel",
+            "Intel Recon · Full assessment",
+        );
+        register(
+            &app,
+            "job-graph-19",
+            "brain",
+            "Graph summary · Northwind ferry",
+        );
         app.store
-            .fixture_task_attempt("job-graph-19", "t-sum-1", "graph_explanation", 300, Some(12))
+            .fixture_task_attempt(
+                "job-graph-19",
+                "t-sum-1",
+                "graph_explanation",
+                300,
+                Some(12),
+            )
             .unwrap();
         app.store
             .set_job_progress(
@@ -8199,9 +9004,20 @@ mod tests {
                 "provider HTTP 503: upstream unavailable after 2 attempts",
             )
             .unwrap();
-        register(&app, "atlas-memory-repair", "atlas", "Repair Atlas memories");
+        register(
+            &app,
+            "atlas-memory-repair",
+            "atlas",
+            "Repair Atlas memories",
+        );
         app.store
-            .fixture_task_attempt("atlas-memory-repair", "t-rep-1", "index_rebuild", 3000, Some(21))
+            .fixture_task_attempt(
+                "atlas-memory-repair",
+                "t-rep-1",
+                "index_rebuild",
+                3000,
+                Some(21),
+            )
             .unwrap();
         app.store
             .set_job_progress("atlas-memory-repair", "completed", "done", 12, Some(12), "")
@@ -8217,12 +9033,40 @@ mod tests {
                 reference: None,
             },
         );
-        job_event(&app, "job-atlas-0412", "atlas", "info", "Atlas: phase 4 published 57 memories (12 created, 45 reused)", "");
-        job_event(&app, "job-atlas-0412", "atlas", "info", "Atlas: phase 5 indexing 41/57 verified", "");
+        job_event(
+            &app,
+            "job-atlas-0412",
+            "atlas",
+            "info",
+            "Atlas: phase 4 published 57 memories (12 created, 45 reused)",
+            "",
+        );
+        job_event(
+            &app,
+            "job-atlas-0412",
+            "atlas",
+            "info",
+            "Atlas: phase 5 indexing 41/57 verified",
+            "",
+        );
         job_event(&app, "job-graph-19", "brain", "error", "Graph summary failed: provider HTTP 503", "stage: stream\nattempt 1: HTTP 503 upstream unavailable\nattempt 2: HTTP 503 upstream unavailable\nfallback: basic graph explanation");
         job_event(&app, "", "recon", "info", "Recon turn complete", "");
-        job_event(&app, "", "atlas", "warn", "Atlas: GNews rate limit reached (HTTP 429)", "");
-        job_event(&app, "atlas-memory-repair", "atlas", "info", "Repair Atlas memories: 12 runs checked, 3 vectors requeued", "");
+        job_event(
+            &app,
+            "",
+            "atlas",
+            "warn",
+            "Atlas: GNews rate limit reached (HTTP 429)",
+            "",
+        );
+        job_event(
+            &app,
+            "atlas-memory-repair",
+            "atlas",
+            "info",
+            "Repair Atlas memories: 12 runs checked, 3 vectors requeued",
+            "",
+        );
         let mut shots: Vec<(&str, u16, u16)> = Vec::new();
         let mut save = |app: &mut App, name: &str, width: u16, height: u16| {
             let buffer = render(app, width, height);
@@ -8249,7 +9093,12 @@ mod tests {
         save(&mut app, "home", 140, 42);
         app.select(ModuleId::Jobs.index());
         save(&mut app, "jobs", 140, 40);
-        let failed = app.jobs.rows.iter().position(|r| r.id == "job-graph-19").unwrap();
+        let failed = app
+            .jobs
+            .rows
+            .iter()
+            .position(|r| r.id == "job-graph-19")
+            .unwrap();
         click(&mut app, Target::JobRow(failed));
         save(&mut app, "jobs-failed", 140, 40);
         app.screen = Rect::new(0, 0, 80, 30);
@@ -8258,7 +9107,12 @@ mod tests {
         save(&mut app, "jobs-narrow-detail", 80, 30);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.select(ModuleId::Logs.index());
-        let index = app.logs.rows.iter().position(|r| r.message.starts_with("Graph summary failed")).unwrap();
+        let index = app
+            .logs
+            .rows
+            .iter()
+            .position(|r| r.message.starts_with("Graph summary failed"))
+            .unwrap();
         click(&mut app, Target::LogLine(index));
         save(&mut app, "logs", 140, 40);
         app.select(ModuleId::System.index());
@@ -8299,7 +9153,10 @@ mod tests {
         let store = &app.store;
         store.atlas_insert_run("run-0412", "{}", "{}").unwrap();
         for (id, title) in [
-            ("a1", "Northwind ferry halts Baltic crossings after engine fire"),
+            (
+                "a1",
+                "Northwind ferry halts Baltic crossings after engine fire",
+            ),
             ("a2", "Baltic board eases ferry suspension"),
         ] {
             store
@@ -8323,10 +9180,30 @@ mod tests {
                 .unwrap();
         }
         let texts = [
-            ("fp-1", "Northwind Ferries", "Northwind Ferries halted Baltic crossings after an engine fire", "a1"),
-            ("fp-2", "Klaipeda port", "Klaipeda port rerouted freight while Northwind crossings were halted", "a1"),
-            ("fp-3", "Northwind Ferries", "Northwind Ferries expects crossings to resume within a week", "a2"),
-            ("fp-4", "Baltic Shipping Board", "Baltic Shipping Board revised the halt to a partial suspension", "a2"),
+            (
+                "fp-1",
+                "Northwind Ferries",
+                "Northwind Ferries halted Baltic crossings after an engine fire",
+                "a1",
+            ),
+            (
+                "fp-2",
+                "Klaipeda port",
+                "Klaipeda port rerouted freight while Northwind crossings were halted",
+                "a1",
+            ),
+            (
+                "fp-3",
+                "Northwind Ferries",
+                "Northwind Ferries expects crossings to resume within a week",
+                "a2",
+            ),
+            (
+                "fp-4",
+                "Baltic Shipping Board",
+                "Baltic Shipping Board revised the halt to a partial suspension",
+                "a2",
+            ),
         ];
         let claims: Vec<_> = texts
             .iter()
@@ -8342,7 +9219,11 @@ mod tests {
             .publish_atlas_insights(
                 "run-0412",
                 &claims,
-                &[(fingerprint(3), fingerprint(0), "conflict_or_revision".into())],
+                &[(
+                    fingerprint(3),
+                    fingerprint(0),
+                    "conflict_or_revision".into(),
+                )],
                 "",
                 &Default::default(),
             )
@@ -8387,7 +9268,10 @@ mod tests {
         // Find hides most targets; navigation must still reach them.
         app.brain_query = "engine fire".into();
         app.reload_memories();
-        assert!(app.memories.iter().all(|m| m.id != ids[3]), "target filtered out");
+        assert!(
+            app.memories.iter().all(|m| m.id != ids[3]),
+            "target filtered out"
+        );
         let row = app.memories.iter().position(|m| m.id == ids[0]).unwrap();
         app.memory_sel = row;
         app.set_focus(Target::Memory(row));
@@ -8403,14 +9287,22 @@ mod tests {
         assert_eq!(areas.related.y, areas.summary.y);
         assert!(areas.related.x < areas.summary.x);
         let text = buffer_text(&render(&mut app, 140, 40));
-        assert!(text.contains(" claim path ") && text.contains(" related ") && text.contains(" summary "), "{text}");
+        assert!(
+            text.contains(" claim path ")
+                && text.contains(" related ")
+                && text.contains(" summary "),
+            "{text}"
+        );
         let path_rows: String = text
             .lines()
             .skip(areas.path.y as usize)
             .take(areas.path.height as usize)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!path_rows.contains("Related") && !path_rows.contains("Linked"), "no Related text in the graph pane: {path_rows}");
+        assert!(
+            !path_rows.contains("Related") && !path_rows.contains("Linked"),
+            "no Related text in the graph pane: {path_rows}"
+        );
 
         // Related: unique existing targets, self excluded, explicit before similar.
         let items = app.brain_detail.related.items.clone();
@@ -8427,16 +9319,26 @@ mod tests {
             .take_while(|i| i.reason.starts_with("claim relation"))
             .map(|i| i.memory_id.as_str())
             .collect();
-        assert!(relations.contains(&ids[3].as_str()), "claim relation first: {items:?}");
+        assert!(
+            relations.contains(&ids[3].as_str()),
+            "claim relation first: {items:?}"
+        );
         assert!(relations.contains(&ids[2].as_str()), "{items:?}");
         use argos_osint_core::related_memories::RelationKind;
         let first_similar = items.iter().position(|i| i.kind == RelationKind::Similar);
         if let Some(first) = first_similar {
-            assert!(items[..first].iter().all(|i| i.kind == RelationKind::Explicit));
-            assert!(items[first..].iter().all(|i| i.kind == RelationKind::Similar));
+            assert!(items[..first]
+                .iter()
+                .all(|i| i.kind == RelationKind::Explicit));
+            assert!(items[first..]
+                .iter()
+                .all(|i| i.kind == RelationKind::Similar));
         }
         assert!(text.contains("Linked"));
-        let manual = items.iter().find(|i| i.memory_id == ids[4]).expect("similar manual memory");
+        let manual = items
+            .iter()
+            .find(|i| i.memory_id == ids[4])
+            .expect("similar manual memory");
         assert_eq!(manual.kind, RelationKind::Similar);
         assert!(text.contains("Similar · not evidence"), "{text}");
 
@@ -8446,12 +9348,21 @@ mod tests {
         }
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.brain_detail.related.sel, 1);
-        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()), "selection alone does not navigate");
+        assert_eq!(
+            app.brain_detail.memory_id(),
+            Some(ids[0].as_str()),
+            "selection alone does not navigate"
+        );
         let target = items[1].memory_id.clone();
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.brain_detail.memory_id(), Some(target.as_str()));
         let entered_graph = app.brain_graph.clone();
-        assert!(app.brain_detail.related.items.iter().all(|i| i.memory_id != target));
+        assert!(app
+            .brain_detail
+            .related
+            .items
+            .iter()
+            .all(|i| i.memory_id != target));
 
         // Back restores the previous memory, its Related selection and focus.
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -8469,7 +9380,10 @@ mod tests {
         render(&mut app, 140, 40);
         click(&mut app, Target::RelatedRow(0));
         let first = items[0].memory_id.clone();
-        assert!(app.memories.iter().all(|m| m.id != first), "filtered out by Find");
+        assert!(
+            app.memories.iter().all(|m| m.id != first),
+            "filtered out by Find"
+        );
         assert_eq!(app.brain_detail.memory_id(), Some(first.as_str()));
         assert_eq!(app.brain_query, "engine fire", "Find is preserved");
 
@@ -8521,9 +9435,15 @@ mod tests {
         assert!(areas.path.y < areas.related.y && areas.related.y < areas.summary.y);
         assert!(areas.related.height >= 3 && areas.summary.height >= 3);
         let text = buffer_text(&render(&mut app, 64, 32));
-        assert!(text.contains(" related ") && text.contains(" summary "), "{text}");
+        assert!(
+            text.contains(" related ") && text.contains(" summary "),
+            "{text}"
+        );
         // The legend wraps instead of truncating on narrow widths.
-        assert!(text.contains("finding") && text.contains("source"), "{text}");
+        assert!(
+            text.contains("finding") && text.contains("source"),
+            "{text}"
+        );
         assert!(!text.contains("findin…"), "{text}");
         // Focusing Summary gives it the larger share; Related stays visible.
         app.set_focus(Target::DetailSummary);
@@ -8569,7 +9489,10 @@ mod tests {
         add(&app, "alpha four");
         add(&app, "gamma five");
         app.reload_memories();
-        assert_eq!(app.memories[app.memory_sel].id, keep, "selection follows the id");
+        assert_eq!(
+            app.memories[app.memory_sel].id, keep,
+            "selection follows the id"
+        );
         assert_eq!(app.focus, Target::Memory(app.memory_sel));
 
         // Find stays active; the title says it filters.
@@ -8580,14 +9503,20 @@ mod tests {
         assert!(text.contains("Find active · 3 of 5"), "{text}");
         add(&app, "delta six");
         app.reload_memories();
-        assert_eq!(app.brain_query, "alpha", "a hidden new memory does not clear Find");
+        assert_eq!(
+            app.brain_query, "alpha",
+            "a hidden new memory does not clear Find"
+        );
         assert_eq!(app.memory_total, 6);
 
         // No matches is distinct from no memories.
         app.brain_query = "zzz".into();
         app.reload_memories();
         let text = buffer_text(&render(&mut app, 120, 34));
-        assert!(text.contains("No memories match") && text.contains("Find is still active"), "{text}");
+        assert!(
+            text.contains("No memories match") && text.contains("Find is still active"),
+            "{text}"
+        );
 
         // A read failure keeps the last good list and says so.
         app.brain_query = "alpha".into();
@@ -8599,15 +9528,23 @@ mod tests {
         assert_eq!(app.memories, shown, "last good list kept");
         assert_eq!(app.memory_error.as_deref(), Some("disk I/O error"));
         let text = buffer_text(&render(&mut app, 120, 34));
-        assert!(text.contains("read failed · showing last loaded list"), "{text}");
-        assert!(events(&app).iter().any(|e| e.message.contains("could not read memories")));
+        assert!(
+            text.contains("read failed · showing last loaded list"),
+            "{text}"
+        );
+        assert!(events(&app)
+            .iter()
+            .any(|e| e.message.contains("could not read memories")));
         // With nothing loaded yet, the failure is shown instead of an empty list.
         let mut fresh = super::tests::app();
         fresh.screen = Rect::new(0, 0, 120, 34);
         fresh.memories_loaded = false;
         fresh.select(ModuleId::Brain.index());
         let text = buffer_text(&render(&mut fresh, 120, 34));
-        assert!(text.contains("Could not read memories: disk I/O error"), "{text}");
+        assert!(
+            text.contains("Could not read memories: disk I/O error"),
+            "{text}"
+        );
         super::super::brain_detail::testing::fail_reads(None);
         app.reload_memories();
         assert!(app.memory_error.is_none());
@@ -8623,18 +9560,36 @@ mod tests {
         let mut app = app();
         app.screen = Rect::new(0, 0, 140, 44);
         app.store
-            .atlas_insert_run("run-done", r#"{"phase":4,"chunk":0,"leg":"insights_done","country":0,"from":""}"#, "{}")
+            .atlas_insert_run(
+                "run-done",
+                r#"{"phase":4,"chunk":0,"leg":"insights_done","country":0,"from":""}"#,
+                "{}",
+            )
             .unwrap();
-        app.store.atlas_set_state("run-done", "completed", "", true).unwrap();
         app.store
-            .atlas_insert_run("run-stuck", r#"{"phase":5,"chunk":0,"leg":"index","country":0,"from":""}"#, "{}")
+            .atlas_set_state("run-done", "completed", "", true)
+            .unwrap();
+        app.store
+            .atlas_insert_run(
+                "run-stuck",
+                r#"{"phase":5,"chunk":0,"leg":"index","country":0,"from":""}"#,
+                "{}",
+            )
             .unwrap();
         app.store
             .atlas_set_state("run-stuck", "partial", "0/3 indexed", true)
             .unwrap();
         app.select(ModuleId::Atlas.index());
-        let done = app.atlas_runs.iter().position(|r| r.id == "run-done").unwrap();
-        let stuck = app.atlas_runs.iter().position(|r| r.id == "run-stuck").unwrap();
+        let done = app
+            .atlas_runs
+            .iter()
+            .position(|r| r.id == "run-done")
+            .unwrap();
+        let stuck = app
+            .atlas_runs
+            .iter()
+            .position(|r| r.id == "run-stuck")
+            .unwrap();
         app.atlas_run_sel = done;
         assert!(!app.atlas_can_resume());
         render(&mut app, 140, 44);
@@ -8643,14 +9598,26 @@ mod tests {
         app.atlas_run_sel = stuck;
         assert!(app.atlas_can_resume(), "phase-5 partial cycle can resume");
         let order = super::super::ui::focus_order(&app);
-        for button in [ButtonId::AtlasLive, ButtonId::AtlasResume, ButtonId::AtlasRepair, ButtonId::AtlasDelete] {
+        for button in [
+            ButtonId::AtlasLive,
+            ButtonId::AtlasResume,
+            ButtonId::AtlasRepair,
+            ButtonId::AtlasDelete,
+        ] {
             assert!(order.contains(&Target::Button(button)), "{button:?}");
         }
         let text = buffer_text(&render(&mut app, 140, 44));
-        assert!(text.contains("Repair memories") && text.contains("Resume"), "{text}");
+        assert!(
+            text.contains("Repair memories") && text.contains("Resume"),
+            "{text}"
+        );
         click(&mut app, Target::Button(ButtonId::AtlasRepair));
         assert_eq!(super::super::atlas_actions::testing::starts(), 1);
-        assert!(app.status.contains("Repair Atlas memories started"), "{}", app.status);
+        assert!(
+            app.status.contains("Repair Atlas memories started"),
+            "{}",
+            app.status
+        );
         super::super::atlas_actions::testing::set_busy(true);
         click(&mut app, Target::Button(ButtonId::AtlasRepair));
         assert_eq!(super::super::atlas_actions::testing::starts(), 1);
@@ -8715,7 +9682,10 @@ mod tests {
         ids: Vec<String>,
     }
 
-    fn summary_fixture(app: &mut App, script: Vec<argos_osint_core::provider_attempt::mock::Reply>) -> SummaryFx {
+    fn summary_fixture(
+        app: &mut App,
+        script: Vec<argos_osint_core::provider_attempt::mock::Reply>,
+    ) -> SummaryFx {
         use argos_osint_core::provider_attempt::mock;
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("argos.db");
@@ -8747,7 +9717,8 @@ mod tests {
     /// Pump work events until the pending graph summary settles.
     fn settle_summary(app: &mut App, fx: &SummaryFx) {
         for _ in 0..400 {
-            fx.rt.block_on(tokio::time::sleep(Duration::from_millis(25)));
+            fx.rt
+                .block_on(tokio::time::sleep(Duration::from_millis(25)));
             pump(app);
             if app.graph_summary_pending.is_none() {
                 return;
@@ -8757,7 +9728,10 @@ mod tests {
     }
 
     fn graph_jobs(fx: &SummaryFx) -> Vec<(String, String, String)> {
-        Store::open(&fx.db).unwrap().graph_explanation_jobs(&fx.ids[0]).unwrap()
+        Store::open(&fx.db)
+            .unwrap()
+            .graph_explanation_jobs(&fx.ids[0])
+            .unwrap()
     }
 
     const AUTH_401: &str = r#"{"error":{"message":"Incorrect API key provided: sk-mocksecretvalue12345","code":"invalid_api_key"}}"#;
@@ -8773,12 +9747,25 @@ mod tests {
         settle_summary(&mut app, &fx);
         let failure = app.summary_failure.clone().expect("failure card");
         assert!(failure.needs_config, "{failure:?}");
-        assert!(failure.guidance.as_deref().unwrap_or("").contains("Providers"));
+        assert!(failure
+            .guidance
+            .as_deref()
+            .unwrap_or("")
+            .contains("Providers"));
         assert_eq!(fx.server.hits(), 1, "auth errors are not retried");
         assert!(!failure.event_id.is_empty() && !failure.job_id.is_empty());
-        assert!(app.graph_summary.contains(argos_osint_core::graph_explanation::BASIC_HEADING));
+        assert!(app
+            .graph_summary
+            .contains(argos_osint_core::graph_explanation::BASIC_HEADING));
         let text = buffer_text(&render(&mut app, 140, 40));
-        for want in ["AI summary failed", "View details", "View logs", "View job", "Retry summary", "Open Models"] {
+        for want in [
+            "AI summary failed",
+            "View details",
+            "View logs",
+            "View job",
+            "Retry summary",
+            "Open Models",
+        ] {
             assert!(text.contains(want), "missing {want}: {text}");
         }
         assert!(!text.contains("sk-mocksecretvalue12345"));
@@ -8816,14 +9803,21 @@ mod tests {
         click(&mut app, Target::Button(ButtonId::SummaryLogs));
         assert_eq!(app.module, Some(ModuleId::Logs));
         assert_eq!(app.logs.job, failure.job_id);
-        assert_eq!(app.logs.selected().map(|r| r.id.clone()), Some(failure.event_id.clone()));
+        assert_eq!(
+            app.logs.selected().map(|r| r.id.clone()),
+            Some(failure.event_id.clone())
+        );
 
         // After the events expire (simulated by clearing them), the link says
         // so; the job and the saved diagnostic keep the error summary.
         app.store.clear_events().unwrap();
         app.activate_button(ButtonId::SummaryLogs);
         assert!(app.status.contains("expired"), "{}", app.status);
-        let rec = app.store.graph_explanation_record(&fx.ids[0]).unwrap().unwrap();
+        let rec = app
+            .store
+            .graph_explanation_record(&fx.ids[0])
+            .unwrap()
+            .unwrap();
         assert_eq!(rec.state, "failed");
         assert!(rec.diagnostic_json.contains("invalid_api_key"));
 
@@ -8836,7 +9830,10 @@ mod tests {
         // View job opens the failed job in Jobs.
         app.activate_button(ButtonId::SummaryJob);
         assert_eq!(app.module, Some(ModuleId::Jobs));
-        assert_eq!(app.jobs.selected().map(|j| j.id.clone()), Some(failure.job_id.clone()));
+        assert_eq!(
+            app.jobs.selected().map(|j| j.id.clone()),
+            Some(failure.job_id.clone())
+        );
 
         // The memory is untouched.
         assert!(app.store.get_memory(&fx.ids[0]).unwrap().is_some());
@@ -8846,10 +9843,14 @@ mod tests {
     #[test]
     fn saved_summary_is_reused_until_its_inputs_change_then_shown_as_earlier() {
         use argos_osint_core::provider_attempt::mock::{ok_json, Reply};
-        let good = "## Northwind **halted** Baltic crossings\n\nTwo Baltic Wire articles state the halt.";
+        let good =
+            "## Northwind **halted** Baltic crossings\n\nTwo Baltic Wire articles state the halt.";
         let mut app = app();
         app.screen = Rect::new(0, 0, 140, 40);
-        let fx = summary_fixture(&mut app, vec![ok_json(good, "stop"), Reply::Json(503, "{}".into())]);
+        let fx = summary_fixture(
+            &mut app,
+            vec![ok_json(good, "stop"), Reply::Json(503, "{}".into())],
+        );
         let _enter = fx.rt.enter();
         assert!(app.open_memory_detail(&fx.ids[0]));
         settle_summary(&mut app, &fx);
@@ -8862,15 +9863,27 @@ mod tests {
         // Change the memory text: the old summary is only an earlier result.
         let memory = app.store.get_memory(&fx.ids[0]).unwrap().unwrap();
         app.store
-            .update_memory(&memory.id, &format!("{} (revised)", memory.text), &memory.category, memory.pinned)
+            .update_memory(
+                &memory.id,
+                &format!("{} (revised)", memory.text),
+                &memory.category,
+                memory.pinned,
+            )
             .unwrap();
         app.leave_brain_detail();
         app.reload_memories();
         assert!(app.open_memory_detail(&fx.ids[0]));
-        assert!(app.graph_summary.contains("Earlier result"), "{}", app.graph_summary);
+        assert!(
+            app.graph_summary.contains("Earlier result"),
+            "{}",
+            app.graph_summary
+        );
         settle_summary(&mut app, &fx);
         assert!(app.summary_failure.is_some());
-        assert!(app.graph_summary.contains("Earlier result") && app.graph_summary.contains("Baltic Wire"));
+        assert!(
+            app.graph_summary.contains("Earlier result")
+                && app.graph_summary.contains("Baltic Wire")
+        );
         assert_eq!(fx.server.hits(), 3, "503 retried once: 1 + 2 requests");
         super::super::tracked::testing::use_db(None);
     }
@@ -9496,9 +10509,7 @@ mod tests {
     fn brain_article_source_opens_intel_brief() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 120, 42);
-        app.store
-            .atlas_insert_run("run-brain", "{}", "{}")
-            .unwrap();
+        app.store.atlas_insert_run("run-brain", "{}", "{}").unwrap();
         app.store
             .atlas_upsert_article(&AtlasArticleRow {
                 run_id: "run-brain".into(),
@@ -9888,7 +10899,10 @@ mod tests {
         let painted = screen_text(&terminal);
         assert!(painted.contains("Extracting insights"), "{painted}");
         assert!(painted.contains("3 / 12"), "{painted}");
-        assert!(!painted.contains("No insights extracted for this cycle."), "{painted}");
+        assert!(
+            !painted.contains("No insights extracted for this cycle."),
+            "{painted}"
+        );
         app.atlas_status = "Pipeline complete".into();
         app.atlas_insight_progress = None;
         app.atlas_pause = None;
@@ -10186,6 +11200,160 @@ mod tests {
         assert!(app.atlas_articles.is_empty());
         assert!(app.atlas_focus.is_none());
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn single_action_launch_from_home() {
+        let mut app = app();
+        app.tab_ids.clear();
+        app.module = None;
+        app.input = "Investigate supply chain disruptions in Baltic ports".into();
+        app.home_draft = app.input.clone();
+
+        app.launch_home_investigation().unwrap();
+
+        assert_eq!(app.module, Some(ModuleId::Recon));
+        assert!(app.selected_thread.is_some());
+        let thread_id = app.selected_thread.clone().unwrap();
+
+        assert_eq!(app.tab_ids.len(), 1);
+        assert_eq!(app.tab_ids[0], thread_id);
+        assert_eq!(app.tab_sel, 1);
+
+        let thread = app.store.get_thread(&thread_id).unwrap().unwrap();
+        assert_eq!(
+            thread.title,
+            "Investigate supply chain disruptions in Baltic ports"
+        );
+
+        assert!(app.home_draft.is_empty());
+        assert!(!app.home_draft_submitting);
+        assert_eq!(app.launch_state, LaunchState::Accepted);
+    }
+
+    #[test]
+    fn duplicate_submission_prevention() {
+        let mut app = app();
+        app.tab_ids.clear();
+        app.module = None;
+        app.input = "Investigate supply chain".into();
+        app.home_draft = app.input.clone();
+        app.home_draft_submitting = true;
+
+        app.launch_home_investigation().unwrap();
+        assert!(app.selected_thread.is_none());
+        assert_eq!(app.tab_ids.len(), 0);
+    }
+
+    #[test]
+    fn draft_isolation_and_persistence() {
+        let mut app = app();
+        app.tab_ids.clear();
+        app.module = None;
+        app.input = "Draft prompt on home".into();
+        app.focus = Target::Field(FieldId::Composer);
+
+        app.persist_home_draft();
+        app.flush_home_draft().unwrap();
+
+        let thread = app.store.new_thread("Test Inv").unwrap();
+        app.selected_thread = Some(thread.id.clone());
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.input = "Recon follow-up draft".into();
+        app.cursor = 20;
+
+        app.switch_tab(0).unwrap();
+        assert_eq!(app.module, None);
+        assert_eq!(app.input, "Draft prompt on home");
+    }
+
+    #[test]
+    fn session_tabs_open_close_reopen() {
+        let mut app = app();
+        app.tab_ids.clear();
+        let t1 = app.store.new_thread("Investigation 1").unwrap().id;
+        let t2 = app.store.new_thread("Investigation 2").unwrap().id;
+        let t3 = app.store.new_thread("Investigation 3").unwrap().id;
+
+        app.open_investigation_tab(&t1).unwrap();
+        app.open_investigation_tab(&t2).unwrap();
+        app.open_investigation_tab(&t3).unwrap();
+
+        assert_eq!(app.tab_ids, vec![t1.clone(), t2.clone(), t3.clone()]);
+        assert_eq!(app.tab_sel, 3);
+
+        // Deduplication
+        app.open_investigation_tab(&t2).unwrap();
+        assert_eq!(app.tab_ids.len(), 3);
+        assert_eq!(app.tab_sel, 2);
+
+        // Close active tab t2: selects next tab (t3)
+        app.close_tab(2).unwrap();
+        assert_eq!(app.tab_ids, vec![t1.clone(), t3.clone()]);
+        assert_eq!(app.tab_recently_closed, vec![t2.clone()]);
+
+        // Reopen closed tab: restores t2
+        app.reopen_closed_tab().unwrap();
+        assert!(app.tab_ids.contains(&t2));
+        assert!(app.tab_recently_closed.is_empty());
+    }
+
+    #[test]
+    fn keyboard_navigation_esc_and_shortcuts() {
+        let mut app = app();
+        app.tab_ids = vec![String::new()];
+        app.module = None;
+        app.focus = Target::Field(FieldId::Composer);
+
+        // Esc leaves composer for app launcher
+        app.on_esc();
+        assert_eq!(app.focus, Target::App(app.launcher_sel));
+
+        // Digits outside text field switch apps
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Intel));
+
+        // Ctrl+N routes back to Home draft
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(app.module, None);
+        assert_eq!(app.focus, Target::Field(FieldId::Composer));
+
+        // While focused in composer, typing digit '2' appends '2' to input
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert_eq!(app.input, "2");
+    }
+
+    #[test]
+    fn tab_strip_render_and_hit_test() {
+        let mut app = app();
+        app.tab_ids.clear();
+        let t1 = app.store.new_thread("Investigation 1").unwrap().id;
+        app.open_investigation_tab(&t1).unwrap();
+
+        app.screen = Rect::new(0, 0, 100, 30);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+
+        assert!(hit(&app, Target::Tab(0)));
+        assert!(hit(&app, Target::Tab(1)));
+        assert!(hit(&app, Target::TabPlus));
+        assert!(hit(&app, Target::Field(FieldId::Composer)));
+        assert!(hit(&app, Target::Button(ButtonId::Send)));
+
+        let order = super::super::ui::focus_order(&app);
+        assert_eq!(
+            order,
+            vec![
+                Target::Tab(app.tab_sel),
+                Target::App(app.launcher_sel),
+                Target::Field(FieldId::Composer),
+                Target::Button(ButtonId::Send)
+            ]
+        );
     }
 
     fn hit(app: &App, target: Target) -> bool {

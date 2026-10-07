@@ -8,22 +8,20 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::brain::{
-    hybrid_recall, normalize_category, recall, Memory, MemorySource, ScoredMemory,
-};
+use crate::brain::{hybrid_recall, normalize_category, recall, Memory, MemorySource, ScoredMemory};
 use crate::brain_lance::{self, BrainIndex};
 
 mod graph_summaries;
 mod publication;
+pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
 #[cfg(test)]
 pub(crate) use publication::fault as publication_fault;
-pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
+pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
 pub use publication::{
     memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
     MemoryChangeWatcher, PublicationReceipt, PublicationVerification, PublishOptions,
     RejectedClaim, DELETED_REVISION, MEMORY_RECORD,
 };
-pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
 
 static IDS: AtomicU64 = AtomicU64::new(1);
 
@@ -72,7 +70,6 @@ pub struct ReindexReport {
     pub lance_dir: std::path::PathBuf,
     pub fingerprint: String,
 }
-
 
 /// Re-rank memory hits using passage hybrid scores for long texts.
 fn boost_with_passage_hybrid(
@@ -650,7 +647,9 @@ impl Store {
                 }
             }
             Some(ids) => {
-                let mut stmt = self.conn.prepare("SELECT id,text FROM memories WHERE id=?1")?;
+                let mut stmt = self
+                    .conn
+                    .prepare("SELECT id,text FROM memories WHERE id=?1")?;
                 for id in ids {
                     if let Some(row) = stmt
                         .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -685,10 +684,9 @@ impl Store {
     /// sync barrier. Incremental id reconciliation still runs when the serving
     /// generation is compatible.
     pub fn ensure_memory_vectors(&self) -> Result<()> {
-        let index = self
-            .vectors
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("Brain vectors are off (ARGOS_EMBED=0 or in-memory store)"))?;
+        let index = self.vectors.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Brain vectors are off (ARGOS_EMBED=0 or in-memory store)")
+        })?;
         crate::embed::warm_up()?;
         let rows = self.memory_texts(None)?;
         if !index.exists() || !brain_lance::fingerprint_matches(&self.conn)? {
@@ -700,7 +698,8 @@ impl Store {
             } else {
                 // Do not block recall. Queue a durable rebuild and keep Jaccard until ready.
                 let now = chrono::Utc::now().to_rfc3339();
-                let gen = crate::brain_lance::begin_generation(&self.conn, rows.len()).unwrap_or_default();
+                let gen = crate::brain_lance::begin_generation(&self.conn, rows.len())
+                    .unwrap_or_default();
                 let _ = crate::tasks::enqueue_index_change(
                     &self.conn,
                     "memory_index",
@@ -964,10 +963,9 @@ impl Store {
     /// Drops and rebuilds the Lance table from every memory, then writes the
     /// fingerprint. Backs `argos memories reindex`.
     pub fn reindex_memory_vectors(&self) -> Result<ReindexReport> {
-        let index = self
-            .vectors
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("Brain vectors are off (ARGOS_EMBED=0); nothing to reindex"))?;
+        let index = self.vectors.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Brain vectors are off (ARGOS_EMBED=0); nothing to reindex")
+        })?;
         crate::embed::warm_up()?;
         index.mark_stale();
         let rows = self.memory_texts(None)?;
@@ -1223,7 +1221,9 @@ impl Store {
         let result = (|| -> Result<bool> {
             let exists: i64 =
                 self.conn
-                    .query_row("SELECT COUNT(*) FROM memories WHERE id=?1", [id], |r| r.get(0))?;
+                    .query_row("SELECT COUNT(*) FROM memories WHERE id=?1", [id], |r| {
+                        r.get(0)
+                    })?;
             if exists > 0 {
                 self.tombstone_memory(id, "user_delete")?;
             }
@@ -1942,7 +1942,11 @@ impl Store {
         let deterministic = crate::summarization::SummaryResult {
             content: text.to_string(),
             source_refs: vec![source_id.into()],
-            source_hash: req.sources.first().map(|s| s.hash.clone()).unwrap_or_default(),
+            source_hash: req
+                .sources
+                .first()
+                .map(|s| s.hash.clone())
+                .unwrap_or_default(),
             model: "deterministic".into(),
             prompt_version: mode.prompt_version().into(),
             coverage: crate::summarization::CoverageMeta {
@@ -2024,7 +2028,11 @@ fn repair_embed_tables(conn: &Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if has_vec > 0 && conn.execute_batch("DROP TABLE IF EXISTS memory_vec").is_err() {
+    if has_vec > 0
+        && conn
+            .execute_batch("DROP TABLE IF EXISTS memory_vec")
+            .is_err()
+    {
         // A vec0 virtual table cannot be dropped without the sqlite-vec module
         // ("no such module: vec0"). Remove its schema row directly instead.
         conn.execute_batch(
@@ -2042,7 +2050,10 @@ fn repair_embed_tables(conn: &Connection) -> Result<()> {
         rows.collect::<rusqlite::Result<_>>()?
     };
     for name in shadows {
-        conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\"", name.replace('"', "\"\"")))?;
+        conn.execute_batch(&format!(
+            "DROP TABLE IF EXISTS \"{}\"",
+            name.replace('"', "\"\"")
+        ))?;
     }
     Ok(())
 }
@@ -2336,14 +2347,29 @@ mod tests {
             let store = Store::open(&path).unwrap();
             assert!(!store.vectors_enabled());
             store
-                .add_memory("Prefers markdown documents with source urls", "fact", false, src())
+                .add_memory(
+                    "Prefers markdown documents with source urls",
+                    "fact",
+                    false,
+                    src(),
+                )
                 .unwrap();
             store
                 .add_memory("The kettle is in the galley", "fact", false, src())
                 .unwrap();
             let hits = store.recall("markdown source documents", 2).unwrap();
-            assert_eq!(hits, recall(&store.list_memories().unwrap(), "markdown source documents", 2));
-            assert!(!dir.path().join("memory_lancedb").exists(), "no Lance dir without embedding");
+            assert_eq!(
+                hits,
+                recall(
+                    &store.list_memories().unwrap(),
+                    "markdown source documents",
+                    2
+                )
+            );
+            assert!(
+                !dir.path().join("memory_lancedb").exists(),
+                "no Lance dir without embedding"
+            );
             assert!(store.reindex_memory_vectors().is_err());
         }
 
@@ -2365,7 +2391,10 @@ mod tests {
             if crate::embed::enabled() {
                 return;
             }
-            assert_eq!(hits[0].score, recall(&store.list_memories().unwrap(), "harbor manifests", 3)[0].score);
+            assert_eq!(
+                hits[0].score,
+                recall(&store.list_memories().unwrap(), "harbor manifests", 3)[0].score
+            );
         }
 
         #[test]
@@ -2376,8 +2405,12 @@ mod tests {
             let store = Store::open(&path).unwrap();
             let lance = dir.path().join("memory_lancedb");
             assert!(!lance.exists(), "opening a store does not touch Lance");
-            let a = store.add_memory("Harbor tanker manifests list cargo", "fact", false, src()).unwrap();
-            let b = store.add_memory("Night desk shift starts at nine", "fact", false, src()).unwrap();
+            let a = store
+                .add_memory("Harbor tanker manifests list cargo", "fact", false, src())
+                .unwrap();
+            let b = store
+                .add_memory("Night desk shift starts at nine", "fact", false, src())
+                .unwrap();
             let report = store.reindex_memory_vectors().unwrap();
             assert_eq!(report.memories, 2);
             assert_eq!(report.lance_dir, lance);
@@ -2395,15 +2428,24 @@ mod tests {
             assert_eq!(index.ids().unwrap(), vec![a.id.clone()]);
             // Write hook through a reopened store (shared index handle).
             let reopened = Store::open(&path).unwrap();
-            let c = reopened.add_memory("Galley kettle inventory", "fact", false, src()).unwrap();
+            let c = reopened
+                .add_memory("Galley kettle inventory", "fact", false, src())
+                .unwrap();
             assert_eq!(index.count().unwrap(), 2);
             // Update hook re-embeds the new text.
-            reopened.update_memory(&c.id, "Northwind ferry timetable", "fact", false).unwrap();
+            reopened
+                .update_memory(&c.id, "Northwind ferry timetable", "fact", false)
+                .unwrap();
             let hit = index.search("northwind ferry timetable", 1).unwrap();
             assert_eq!(hit[0].0, c.id);
             assert!(hit[0].1 > 0.99);
             assert_eq!(
-                reopened.find_similar_memory("Northwind ferry timetable", brain_lance::DUPLICATE_THRESHOLD).map(|h| h.0),
+                reopened
+                    .find_similar_memory(
+                        "Northwind ferry timetable",
+                        brain_lance::DUPLICATE_THRESHOLD
+                    )
+                    .map(|h| h.0),
                 Some(c.id.clone())
             );
             // Hybrid recall through the Store.
@@ -2417,10 +2459,16 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("argos.db");
             let store = Store::open(&path).unwrap();
-            let a = store.add_memory("Harbor tanker manifests", "fact", false, src()).unwrap();
+            let a = store
+                .add_memory("Harbor tanker manifests", "fact", false, src())
+                .unwrap();
             let lance = dir.path().join("memory_lancedb");
             let index = BrainIndex::shared(&lance);
-            assert_eq!(index.ids().unwrap(), vec![a.id.clone()], "first write builds the index");
+            assert_eq!(
+                index.ids().unwrap(),
+                vec![a.id.clone()],
+                "first write builds the index"
+            );
             // Simulate a model change plus a stray vector.
             index
                 .upsert_vectors(&[("ghost".into(), crate::embed::embed_one("ghost").unwrap())])
@@ -2431,7 +2479,11 @@ mod tests {
                 .unwrap();
             index.mark_stale();
             store.ensure_memory_vectors().unwrap();
-            assert_eq!(index.ids().unwrap(), vec![a.id.clone()], "rebuilt from SQLite");
+            assert_eq!(
+                index.ids().unwrap(),
+                vec![a.id.clone()],
+                "rebuilt from SQLite"
+            );
             assert!(brain_lance::fingerprint_matches(&store.conn).unwrap());
             // Drift with a matching fingerprint: a memory written behind the index's back.
             store
@@ -2452,7 +2504,9 @@ mod tests {
             let _fake = testing::fake();
             let dir = tempfile::tempdir().unwrap();
             let store = Store::open(&dir.path().join("argos.db")).unwrap();
-            let m = store.add_memory("Harbor tanker manifests", "fact", false, src()).unwrap();
+            let m = store
+                .add_memory("Harbor tanker manifests", "fact", false, src())
+                .unwrap();
             let hits = store.recall("tanker manifests", 3).unwrap();
             assert_eq!(hits[0].memory.id, m.id);
             assert!(store.vectors.as_ref().unwrap().is_ready());
@@ -2463,8 +2517,13 @@ mod tests {
             let _fake = testing::fake();
             let dir = tempfile::tempdir().unwrap();
             let store = Store::open(&dir.path().join("argos.db")).unwrap();
-            let m = store.add_memory("Harbor tanker manifests", "fact", false, src()).unwrap();
-            assert_eq!(store.recall("tanker manifests", 3).unwrap()[0].memory.id, m.id);
+            let m = store
+                .add_memory("Harbor tanker manifests", "fact", false, src())
+                .unwrap();
+            assert_eq!(
+                store.recall("tanker manifests", 3).unwrap()[0].memory.id,
+                m.id
+            );
             assert!(store.vectors.as_ref().unwrap().is_ready());
         }
 
@@ -2479,26 +2538,58 @@ mod tests {
             }
             let dir = tempfile::tempdir().unwrap();
             let index = BrainIndex::new(&dir.path().join("memory_lancedb"));
-            index.upsert("m-ship", "The vessel docked at the harbor at dawn").unwrap();
-            index.upsert("m-tax", "Quarterly tax filings are due in April").unwrap();
-            let hits = index.search("ship arrived in port this morning", 2).unwrap();
+            index
+                .upsert("m-ship", "The vessel docked at the harbor at dawn")
+                .unwrap();
+            index
+                .upsert("m-tax", "Quarterly tax filings are due in April")
+                .unwrap();
+            let hits = index
+                .search("ship arrived in port this morning", 2)
+                .unwrap();
             assert_eq!(hits[0].0, "m-ship", "{hits:?}");
             assert!(hits[0].1 > hits[1].1);
             assert_eq!(
-                index.find_similar("The vessel docked at the harbor at dawn", brain_lance::DUPLICATE_THRESHOLD).unwrap().map(|h| h.0),
+                index
+                    .find_similar(
+                        "The vessel docked at the harbor at dawn",
+                        brain_lance::DUPLICATE_THRESHOLD
+                    )
+                    .unwrap()
+                    .map(|h| h.0),
                 Some("m-ship".to_string())
             );
 
             // Through the Store: a paraphrase with no shared words is recalled.
             let store = Store::open(&dir.path().join("store").join("argos.db")).unwrap();
-            let ship = store.add_memory("The vessel docked at the harbor at dawn", "fact", false, src()).unwrap();
-            store.add_memory("Quarterly tax filings are due in April", "fact", false, src()).unwrap();
-            let hits = store.recall("ship arrived in port this morning", 3).unwrap();
+            let ship = store
+                .add_memory(
+                    "The vessel docked at the harbor at dawn",
+                    "fact",
+                    false,
+                    src(),
+                )
+                .unwrap();
+            store
+                .add_memory(
+                    "Quarterly tax filings are due in April",
+                    "fact",
+                    false,
+                    src(),
+                )
+                .unwrap();
+            let hits = store
+                .recall("ship arrived in port this morning", 3)
+                .unwrap();
             assert_eq!(hits[0].memory.id, ship.id, "{hits:?}");
             assert!(
-                recall(&store.list_memories().unwrap(), "ship arrived in port this morning", 3)
-                    .iter()
-                    .all(|hit| hit.memory.id != ship.id),
+                recall(
+                    &store.list_memories().unwrap(),
+                    "ship arrived in port this morning",
+                    3
+                )
+                .iter()
+                .all(|hit| hit.memory.id != ship.id),
                 "Jaccard alone cannot find the paraphrase"
             );
         }

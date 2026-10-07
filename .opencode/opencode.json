@@ -1,51 +1,13 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "google/gemini-3.8-flash",
-  "small_model": "google/gemini-3.5-flash-lite",
+  "model": "openrouter/nemotron-3-super-120b-a12b:free",
+  "small_model": "openrouter/north-mini-code:free",
   "default_agent": "plan",
-  "providers": {
-    "google": {
-      "settings": {
-        "headerTimeout": 180000
-      },
-      "models": {
-        "gemini-3.1-pro-preview-custom-tools": {
-          "settings": {
-            "reasoningEffort": "high"
-          },
-          "body": {
-            "generationConfig": {
-              "thinkingConfig": {
-                "thinkingBudget": -1
-              }
-            }
-          }
-        },
-        "gemini-3.1-pro-preview": {
-          "settings": {
-            "reasoningEffort": "high"
-          },
-          "body": {
-            "generationConfig": {
-              "thinkingConfig": {
-                "thinkingBudget": -1
-              }
-            }
-          }
-        },
-        "gemini-3.8-flash": {
-          "settings": {
-            "reasoningEffort": "high"
-          }
-        }
-      }
-    }
-  },
   "agent": {
     "build": {
       "mode": "primary",
-      "model": "google/gemini-3.1-pro-preview-custom-tools",
-      "variant": "high",
+      "model": "openrouter/nemotron-3-super-120b-a12b:free",
+      "variant": "medium",
       "permission": {
         "edit": "allow",
         "bash": "allow"
@@ -53,7 +15,7 @@
     },
     "plan": {
       "mode": "primary",
-      "model": "google/gemini-3.1-pro-preview",
+      "model": "openrouter/nemotron-3-ultra-550b-a55b:free",
       "variant": "high",
       "permission": {
         "edit": "deny",
@@ -62,7 +24,7 @@
     },
     "explore": {
       "mode": "subagent",
-      "model": "google/gemini-3.5-flash-lite",
+      "model": "openrouter/north-mini-code:free",
       "permission": {
         "edit": "deny",
         "bash": "allow"
@@ -70,7 +32,7 @@
     },
     "compaction": {
       "mode": "primary",
-      "model": "google/gemini-3.8-flash",
+      "model": "openrouter/nemotron-3-ultra-550b-a55b:free",
       "variant": "high"
     }
   }

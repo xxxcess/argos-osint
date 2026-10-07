@@ -67,7 +67,9 @@ impl ClockSet {
 
     /// Sequential tool steps accumulate; independent steps may overlap up to capacity.
     pub fn sequential_tool_budget(timeouts: &[Duration]) -> Duration {
-        timeouts.iter().fold(Duration::ZERO, |acc, d| acc.saturating_add(*d))
+        timeouts
+            .iter()
+            .fold(Duration::ZERO, |acc, d| acc.saturating_add(*d))
     }
 
     pub fn overlapping_tool_budget(timeouts: &[Duration], capacity: usize) -> Duration {
@@ -107,7 +109,10 @@ mod tests {
             Duration::from_secs(40),
             Duration::from_secs(40),
         ];
-        assert_eq!(ClockSet::sequential_tool_budget(&t), Duration::from_secs(160));
+        assert_eq!(
+            ClockSet::sequential_tool_budget(&t),
+            Duration::from_secs(160)
+        );
         let overlap = ClockSet::overlapping_tool_budget(&t, 4);
         assert!(overlap <= Duration::from_secs(160));
         assert!(overlap >= Duration::from_secs(40));

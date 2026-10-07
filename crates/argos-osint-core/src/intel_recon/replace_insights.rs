@@ -148,7 +148,13 @@ mod tests {
         let art = article("run-1", "art-1");
         store.atlas_upsert_article(&art).unwrap();
         store
-            .persist_atlas_insights("run-1", &[claim("art-1", "geneva", "hosts", "talks")], &[], "", "")
+            .persist_atlas_insights(
+                "run-1",
+                &[claim("art-1", "geneva", "hosts", "talks")],
+                &[],
+                "",
+                "",
+            )
             .unwrap();
         // Shared support from another article on a second claim.
         let shared = claim("art-2", "leaders", "meet", "border");
@@ -199,7 +205,13 @@ mod tests {
         let art = article("run-1", "art-1");
         store.atlas_upsert_article(&art).unwrap();
         store
-            .persist_atlas_insights("run-1", &[claim("art-1", "geneva", "hosts", "talks")], &[], "", "")
+            .persist_atlas_insights(
+                "run-1",
+                &[claim("art-1", "geneva", "hosts", "talks")],
+                &[],
+                "",
+                "",
+            )
             .unwrap();
         let bad = AtlasInsightClaim {
             entity: String::new(),
@@ -207,7 +219,10 @@ mod tests {
         };
         assert!(validate_staged_claims(&[bad], "art-1").is_err());
         assert_eq!(
-            store.atlas_claims_for_article("run-1", "art-1").unwrap().len(),
+            store
+                .atlas_claims_for_article("run-1", "art-1")
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -219,7 +234,13 @@ mod tests {
         let art = article("run-1", "art-1");
         store.atlas_upsert_article(&art).unwrap();
         store
-            .persist_atlas_insights("run-1", &[claim("art-1", "geneva", "hosts", "talks")], &[], "", "")
+            .persist_atlas_insights(
+                "run-1",
+                &[claim("art-1", "geneva", "hosts", "talks")],
+                &[],
+                "",
+                "",
+            )
             .unwrap();
         let outcome = store
             .commit_article_insight_replacement("run-1", "art-1", &[], &[])
@@ -238,7 +259,13 @@ mod tests {
         let art = article("run-1", "art-1");
         store.atlas_upsert_article(&art).unwrap();
         store
-            .persist_atlas_insights("run-1", &[claim("art-1", "geneva", "hosts", "talks")], &[], "", "")
+            .persist_atlas_insights(
+                "run-1",
+                &[claim("art-1", "geneva", "hosts", "talks")],
+                &[],
+                "",
+                "",
+            )
             .unwrap();
         let memory_id: String = store
             .conn
@@ -282,7 +309,13 @@ mod tests {
         let art = article("run-1", "art-1");
         store.atlas_upsert_article(&art).unwrap();
         store
-            .persist_atlas_insights("run-1", &[claim("art-1", "geneva", "hosts", "talks")], &[], "", "")
+            .persist_atlas_insights(
+                "run-1",
+                &[claim("art-1", "geneva", "hosts", "talks")],
+                &[],
+                "",
+                "",
+            )
             .unwrap();
         *seen.lock().unwrap() = store
             .atlas_claims_for_article("run-1", "art-1")
@@ -291,7 +324,10 @@ mod tests {
         // Simulate "extract failed" by not calling commit.
         assert_eq!(*seen.lock().unwrap(), 1);
         assert_eq!(
-            store.atlas_claims_for_article("run-1", "art-1").unwrap().len(),
+            store
+                .atlas_claims_for_article("run-1", "art-1")
+                .unwrap()
+                .len(),
             1
         );
     }

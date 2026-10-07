@@ -494,10 +494,9 @@ fn defaults_command(command: DefaultsCommand) -> Result<()> {
                 ),
                 "unknown provider"
             );
-            let target = settings
-                .defaults
-                .role_mut(&role)
-                .ok_or_else(|| anyhow!("role must be recon, tool-picker, synthesis, classifier, or summarization"))?;
+            let target = settings.defaults.role_mut(&role).ok_or_else(|| {
+                anyhow!("role must be recon, tool-picker, synthesis, classifier, or summarization")
+            })?;
             target.provider = kind;
             target.model = model.trim().into();
             settings.save()?;
@@ -810,7 +809,10 @@ async fn atlas_command(command: AtlasCommand) -> Result<()> {
         AtlasCommand::Resume { run_id } => {
             let store = open_store()?;
             let runs = store.atlas_list_runs()?;
-            let run = runs.into_iter().find(|r| r.id == run_id).ok_or_else(|| anyhow!("Atlas run {run_id} not found"))?;
+            let run = runs
+                .into_iter()
+                .find(|r| r.id == run_id)
+                .ok_or_else(|| anyhow!("Atlas run {run_id} not found"))?;
             store.atlas_set_state(&run_id, "running", "", false)?;
             print_json(&serde_json::json!({
                 "run_id": run_id,

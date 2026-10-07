@@ -165,8 +165,7 @@ where
     let ann_hits: Vec<Vec<String>> = (0..queries.len()).map(|i| ann(i)).collect();
     let ann_ms = t_ann.elapsed().as_secs_f64() * 1000.0;
     for (e, a) in exact_hits.iter().zip(ann_hits.iter()) {
-        let truth: std::collections::HashSet<&str> =
-            e.iter().take(k).map(|s| s.as_str()).collect();
+        let truth: std::collections::HashSet<&str> = e.iter().take(k).map(|s| s.as_str()).collect();
         if truth.is_empty() {
             recall_sum += 1.0;
             continue;
@@ -474,7 +473,10 @@ mod tests {
         let vectors = vec![("p-sem".into(), 0.82_f32), ("p-both".into(), 0.7)];
         let hits = hybrid_passage_candidates("harbor ship arrivals", &passages, &vectors, 3);
         assert_eq!(hits.len(), 3);
-        let both = hits.iter().find(|h| h.passage_id == "p-both").expect("agreement hit");
+        let both = hits
+            .iter()
+            .find(|h| h.passage_id == "p-both")
+            .expect("agreement hit");
         assert!(both.why.contains("agreement"), "{}", both.why);
         assert!(both.lexical > 0.0 && both.semantic > 0.0);
         // Exact-only policy: vector-only paraphrase still eligible without ANN.
@@ -483,7 +485,12 @@ mod tests {
         // Agreement bonus must beat pure lexical of the same query overlap when
         // semantic is present on the agreement candidate.
         let lex_only = hits.iter().find(|h| h.passage_id == "p-lex").unwrap();
-        assert!(both.score >= lex_only.score, "both={} lex={}", both.score, lex_only.score);
+        assert!(
+            both.score >= lex_only.score,
+            "both={} lex={}",
+            both.score,
+            lex_only.score
+        );
     }
 
     #[test]
@@ -496,8 +503,7 @@ mod tests {
             80,
             10,
         );
-        let covered =
-            hybrid_with_identifier_coverage("noise", &passages, &[], "ID-99-ZZ", 1);
+        let covered = hybrid_with_identifier_coverage("noise", &passages, &[], "ID-99-ZZ", 1);
         assert_eq!(covered.len(), 1);
         assert!(covered[0].text.contains("ID-99-ZZ"));
     }

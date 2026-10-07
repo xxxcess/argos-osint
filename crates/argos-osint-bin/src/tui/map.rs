@@ -283,6 +283,7 @@ fn ring_pixels(
 }
 
 /// Drop edges that wrap across the map. Those spans tear a large country's fill.
+#[allow(clippy::too_many_arguments)]
 fn paint_ring(
     grid: &mut [u8],
     ring: &[(i16, i16)],

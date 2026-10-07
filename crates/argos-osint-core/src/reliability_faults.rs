@@ -9,8 +9,8 @@ mod tests {
     use crate::provider_request::execute_with_retries;
     use crate::recon::clocks::ClockSet;
     use crate::summarization::{
-        cache_get, cache_put, deterministic_follow_up, SummaryRequest, SummarySource,
-        SummarizationMode,
+        cache_get, cache_put, deterministic_follow_up, SummarizationMode, SummaryRequest,
+        SummarySource,
     };
     use crate::tasks::{
         can_retry, claim_next, enqueue_job, enqueue_task, migrate_tables, note_shared_rate_limit,
@@ -25,15 +25,12 @@ mod tests {
     #[tokio::test]
     async fn mock_provider_summarization_retries_then_gives_up() {
         let hits = AtomicU32::new(0);
-        let out: crate::provider_request::AttemptOutcome<()> = execute_with_retries(
-            "fault-summ",
-            OperationKind::Summarization,
-            || async {
+        let out: crate::provider_request::AttemptOutcome<()> =
+            execute_with_retries("fault-summ", OperationKind::Summarization, || async {
                 hits.fetch_add(1, Ordering::SeqCst);
                 Err(ErrorCategory::Timeout) as Result<(), ErrorCategory>
-            },
-        )
-        .await;
+            })
+            .await;
         assert!(out.value.is_none());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
         assert_eq!(out.attempts_used, 2);
@@ -43,15 +40,12 @@ mod tests {
     #[tokio::test]
     async fn mock_provider_other_llm_allows_three_attempts() {
         let hits = AtomicU32::new(0);
-        let out: crate::provider_request::AttemptOutcome<()> = execute_with_retries(
-            "fault-other",
-            OperationKind::OtherLlm,
-            || async {
+        let out: crate::provider_request::AttemptOutcome<()> =
+            execute_with_retries("fault-other", OperationKind::OtherLlm, || async {
                 hits.fetch_add(1, Ordering::SeqCst);
                 Err(ErrorCategory::RateLimit) as Result<(), ErrorCategory>
-            },
-        )
-        .await;
+            })
+            .await;
         assert!(out.value.is_none());
         assert_eq!(hits.load(Ordering::SeqCst), 3);
     }

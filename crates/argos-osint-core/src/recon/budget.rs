@@ -282,7 +282,11 @@ impl TurnClock {
     #[cfg(test)]
     pub fn age(&mut self, by: Duration) {
         self.started = self.started.checked_sub(by).unwrap_or(self.started);
-        self.clocks.started = self.clocks.started.checked_sub(by).unwrap_or(self.clocks.started);
+        self.clocks.started = self
+            .clocks
+            .started
+            .checked_sub(by)
+            .unwrap_or(self.clocks.started);
         if let Some(at) = self.tools_started {
             self.tools_started = Some(at.checked_sub(by).unwrap_or(at));
         }
@@ -398,12 +402,10 @@ impl TurnClock {
     pub fn note_foreground_transition(&mut self) -> Option<&'static str> {
         if self.continuation() == TurnContinuation::Background && !self.foreground_notified {
             self.foreground_notified = true;
-            self.pending
-                .push("Continuing in background".into());
+            self.pending.push("Continuing in background".into());
             Some("Continuing in background")
         } else if self.continuation() == TurnContinuation::Exhausted {
-            self.pending
-                .push("Paused: limit reached".into());
+            self.pending.push("Paused: limit reached".into());
             Some("Paused: limit reached")
         } else {
             None

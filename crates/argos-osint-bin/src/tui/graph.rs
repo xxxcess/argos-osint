@@ -124,12 +124,19 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     let legend_h = legend_height(app, area);
     let legend_area = Rect {
         x: inner.x,
-        y: inner.y.saturating_add(inner.height.saturating_sub(legend_h)),
+        y: inner
+            .y
+            .saturating_add(inner.height.saturating_sub(legend_h)),
         width: inner.width,
         height: legend_h,
     };
     let path_area = path_content(area, legend_h);
-    let mut title = if claim { " claim path " } else { " recon path " }.to_string();
+    let mut title = if claim {
+        " claim path "
+    } else {
+        " recon path "
+    }
+    .to_string();
     if app.focus == Target::DetailPath {
         title.push_str("· focused ");
     }
@@ -239,12 +246,7 @@ fn summary_lines(text: &str, width: usize) -> Vec<Line<'static>> {
 
 fn legend_parts(app: &App, claim: bool) -> Vec<String> {
     let mut parts = Vec::new();
-    let present = |kind: GraphNodeKind| {
-        app.brain_graph
-            .nodes
-            .iter()
-            .any(|node| node.kind == kind)
-    };
+    let present = |kind: GraphNodeKind| app.brain_graph.nodes.iter().any(|node| node.kind == kind);
     let push = |parts: &mut Vec<String>, kind: GraphNodeKind, name: &str| {
         if present(kind) {
             parts.push(format!("{} {name}", glyph(kind)));
@@ -281,11 +283,7 @@ pub(crate) fn path_lines(graph: &MemoryGraph) -> Vec<PathLine> {
         .find(|node| node.kind == GraphNodeKind::Investigation)
     {
         lines.push(PathLine {
-            text: format!(
-                "{}  {}",
-                glyph(investigation.kind),
-                investigation.label
-            ),
+            text: format!("{}  {}", glyph(investigation.kind), investigation.label),
             article_id: String::new(),
             run_id: String::new(),
         });
@@ -304,10 +302,7 @@ pub(crate) fn path_lines(graph: &MemoryGraph) -> Vec<PathLine> {
             .filter(|line| !line.is_empty())
             .unwrap_or(band.directive_label.as_str());
         lines.push(PathLine {
-            text: format!(
-                "{branch} {}  {caption}",
-                glyph(GraphNodeKind::Directive)
-            ),
+            text: format!("{branch} {}  {caption}", glyph(GraphNodeKind::Directive)),
             article_id: String::new(),
             run_id: String::new(),
         });

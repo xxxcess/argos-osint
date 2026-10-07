@@ -140,7 +140,8 @@ pub fn drain_index_once(
     let mut done = 0usize;
     for _ in 0..max {
         let now = chrono::Utc::now().to_rfc3339();
-        let Some((claimed, work)) = tasks::claim_index_work(conn, owner, DEFAULT_LEASE_SECS, &now)? else {
+        let Some((claimed, work)) = tasks::claim_index_work(conn, owner, DEFAULT_LEASE_SECS, &now)?
+        else {
             break;
         };
         let mut outcome = store.apply_index_work(&work);
@@ -171,8 +172,13 @@ pub fn drain_summary_flush(
     let mut done = 0usize;
     for _ in 0..8 {
         let now = chrono::Utc::now().to_rfc3339();
-        let Some(claimed) =
-            tasks::claim_next_in(conn, &[tasks::POOL_SUMMARY], owner, DEFAULT_LEASE_SECS, &now)?
+        let Some(claimed) = tasks::claim_next_in(
+            conn,
+            &[tasks::POOL_SUMMARY],
+            owner,
+            DEFAULT_LEASE_SECS,
+            &now,
+        )?
         else {
             break;
         };
@@ -180,13 +186,20 @@ pub fn drain_summary_flush(
         // upgrade); storage errors are not provider errors and are not retried
         // blindly. No error text is ever stored as a completion result.
         let result = match crate::summarization::load_flush_request(conn, &claimed.input_hash) {
-            Ok(Some(_)) => crate::summarization::try_live_summary_upgrade(conn, secret, &claimed.input_hash)
-                .map_err(|err| tasks::TaskError::new(tasks::ErrorCategory::Unknown, format!("{err:#}"))),
+            Ok(Some(_)) => {
+                crate::summarization::try_live_summary_upgrade(conn, secret, &claimed.input_hash)
+                    .map_err(|err| {
+                        tasks::TaskError::new(tasks::ErrorCategory::Unknown, format!("{err:#}"))
+                    })
+            }
             Ok(None) => Err(tasks::TaskError::new(
                 tasks::ErrorCategory::Unknown,
                 format!("flush request missing for {}", claimed.input_hash),
             )),
-            Err(err) => Err(tasks::TaskError::new(tasks::ErrorCategory::Unknown, format!("{err:#}"))),
+            Err(err) => Err(tasks::TaskError::new(
+                tasks::ErrorCategory::Unknown,
+                format!("{err:#}"),
+            )),
         };
         let finished = chrono::Utc::now().to_rfc3339();
         match result {
@@ -194,7 +207,13 @@ pub fn drain_summary_flush(
                 tasks::complete_claimed(conn, &claimed, tag, &finished)?;
             }
             Err(error) => {
-                tasks::fail_claimed(conn, &claimed, OperationKind::Summarization, &error, &finished)?;
+                tasks::fail_claimed(
+                    conn,
+                    &claimed,
+                    OperationKind::Summarization,
+                    &error,
+                    &finished,
+                )?;
             }
         }
         done += 1;
@@ -206,7 +225,6 @@ pub fn drain_summary_flush(
 pub fn drain_summary_flush_cached(conn: &Connection, owner: &str) -> Result<usize> {
     drain_summary_flush(conn, owner, None)
 }
-
 
 fn load_summarization_secret() -> Option<crate::secrets::ProviderSecret> {
     let auth = crate::secrets::AuthFile::load().ok()?;
@@ -364,7 +382,10 @@ mod tests {
 
     #[test]
     fn operation_kind_maps_summarization_modes() {
-        assert_eq!(operation_kind("page_evidence"), OperationKind::Summarization);
+        assert_eq!(
+            operation_kind("page_evidence"),
+            OperationKind::Summarization
+        );
         assert_eq!(operation_kind("synthesis"), OperationKind::OtherLlm);
     }
 
@@ -525,7 +546,8 @@ mod tests {
     fn index_drain_on_store_without_vectors_blocks_honestly() {
         let store = crate::store::Store::memory().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
-        tasks::enqueue_index_change(store.conn_for_tests(), "memory", "m1", "r1", "upsert", &now).unwrap();
+        tasks::enqueue_index_change(store.conn_for_tests(), "memory", "m1", "r1", "upsert", &now)
+            .unwrap();
         let n = drain_index_once(store.conn_for_tests(), &store, "w", 4).unwrap();
         assert_eq!(n, 1);
         let (state, outcome): (String, String) = store

@@ -75,12 +75,14 @@ where
         Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| runtime().block_on(future))
         }
-        Ok(_) => std::thread::scope(|scope| {
-            match scope.spawn(|| runtime().block_on(future)).join() {
-                Ok(output) => output,
-                Err(panic) => std::panic::resume_unwind(panic),
-            }
-        }),
+        Ok(_) => {
+            std::thread::scope(
+                |scope| match scope.spawn(|| runtime().block_on(future)).join() {
+                    Ok(output) => output,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                },
+            )
+        }
     }
 }
 
@@ -123,7 +125,11 @@ pub fn write_fingerprint(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO memory_embed_meta(key,value,updated_at) VALUES (?1,?2,?3)
          ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        params![META_KEY, current_fingerprint(), chrono::Utc::now().to_rfc3339()],
+        params![
+            META_KEY,
+            current_fingerprint(),
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -633,7 +639,6 @@ impl BrainIndex {
     }
 }
 
-
 /// Durable generation metadata for automatic rebuilds (spec §9.2).
 pub fn migrate_generations(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     conn.execute_batch(
@@ -667,7 +672,10 @@ pub fn migrate_generations(conn: &rusqlite::Connection) -> anyhow::Result<()> {
 }
 
 /// Start a new generation without dropping the serving table.
-pub fn begin_generation(conn: &rusqlite::Connection, source_count: usize) -> anyhow::Result<String> {
+pub fn begin_generation(
+    conn: &rusqlite::Connection,
+    source_count: usize,
+) -> anyhow::Result<String> {
     migrate_generations(conn)?;
     let id = format!("gen-{}", chrono::Utc::now().timestamp_millis());
     let now = chrono::Utc::now().to_rfc3339();
@@ -750,17 +758,13 @@ pub fn activate_generation(
                 let _ = index.drop_table(prev);
             }
         }
-        if old != table_name
-            && old != TABLE
-            && Some(old.as_str()) != previous_table.as_deref()
-        {
+        if old != table_name && old != TABLE && Some(old.as_str()) != previous_table.as_deref() {
             let _ = index.drop_table(&old);
         }
         index.mark_ready();
     }
     Ok(())
 }
-
 
 const GENERATION_BATCH: usize = 64;
 
@@ -838,7 +842,6 @@ pub struct GenerationProgress {
     pub activated: bool,
 }
 
-
 pub fn serving_generation(conn: &rusqlite::Connection) -> anyhow::Result<Option<String>> {
     migrate_generations(conn)?;
     let id = conn
@@ -850,7 +853,6 @@ pub fn serving_generation(conn: &rusqlite::Connection) -> anyhow::Result<Option<
         .optional()?;
     Ok(id)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -937,7 +939,10 @@ mod tests {
         let id = begin_generation(&conn, 10).unwrap();
         assert!(serving_generation(&conn).unwrap().is_none());
         activate_generation(&conn, &id, None).unwrap();
-        assert_eq!(serving_generation(&conn).unwrap().as_deref(), Some(id.as_str()));
+        assert_eq!(
+            serving_generation(&conn).unwrap().as_deref(),
+            Some(id.as_str())
+        );
         assert!(fingerprint_matches(&conn).unwrap());
     }
 
@@ -951,7 +956,8 @@ mod tests {
         assert!(!fingerprint_matches(&conn).unwrap());
         write_fingerprint(&conn).unwrap();
         assert!(fingerprint_matches(&conn).unwrap());
-        conn.execute("UPDATE memory_embed_meta SET value='old'", []).unwrap();
+        conn.execute("UPDATE memory_embed_meta SET value='old'", [])
+            .unwrap();
         assert!(!fingerprint_matches(&conn).unwrap());
     }
     #[test]
@@ -964,25 +970,27 @@ mod tests {
         )
         .unwrap();
         let index = BrainIndex::shared(&lance);
-        index
-            .upsert_vectors(&[("legacy".into(), unit(1))])
-            .unwrap();
+        index.upsert_vectors(&[("legacy".into(), unit(1))]).unwrap();
         assert_eq!(index.serving_table_name(), TABLE);
         let id = begin_generation(&conn, 2).unwrap();
         let building = generation_table_name(&conn, &id).unwrap();
         assert!(building.starts_with(&format!("{TABLE}__")));
         // Offline: write vectors into the shadow table the same way batched rebuild does.
         index
-            .upsert_vectors_into(
-                &building,
-                &[("m1".into(), unit(3)), ("m2".into(), unit(4))],
-            )
+            .upsert_vectors_into(&building, &[("m1".into(), unit(3)), ("m2".into(), unit(4))])
             .unwrap();
-        assert_eq!(index.serving_table_name(), TABLE, "serving unchanged while building");
+        assert_eq!(
+            index.serving_table_name(),
+            TABLE,
+            "serving unchanged while building"
+        );
         assert!(index.table_exists_named(&building) || index.ids().is_ok());
         activate_generation(&conn, &id, Some(&index)).unwrap();
         assert_eq!(index.serving_table_name(), building);
-        assert_eq!(serving_generation(&conn).unwrap().as_deref(), Some(id.as_str()));
+        assert_eq!(
+            serving_generation(&conn).unwrap().as_deref(),
+            Some(id.as_str())
+        );
         let ids = index.ids().unwrap();
         assert!(
             ids.contains(&"m1".to_string()) && ids.contains(&"m2".to_string()),
@@ -991,15 +999,12 @@ mod tests {
         assert!(!ids.contains(&"legacy".to_string()));
     }
 
-
     #[test]
     fn ensure_ann_index_respects_exact_policy() {
         let dir = tempfile::tempdir().unwrap();
         let index = BrainIndex::new(&dir.path().join("lance"));
         for i in 0..40 {
-            index
-                .upsert_vectors(&[(format!("m{i}"), unit(i))])
-                .unwrap();
+            index.upsert_vectors(&[(format!("m{i}"), unit(i))]).unwrap();
         }
         assert!(!index
             .ensure_ann_index(crate::evidence::AnnPolicy::ExactSearch)
@@ -1026,5 +1031,4 @@ mod tests {
         let hits = index.search_vector(&q, 5).unwrap();
         assert!(!hits.is_empty());
     }
-
 }

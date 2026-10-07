@@ -549,7 +549,10 @@ mod tests {
         let picks = summary.scrape_picks();
         assert_eq!(picks.len(), 3);
         assert!(picks.iter().all(|item| item.kind != "video_link"));
-        assert_eq!(summary.scrape_pick_ids(), vec!["brain_scrape:0", "brain_scrape:1", "brain_scrape:2"]);
+        assert_eq!(
+            summary.scrape_pick_ids(),
+            vec!["brain_scrape:0", "brain_scrape:1", "brain_scrape:2"]
+        );
         let hit = summary.scrape_pick("brain_scrape:0").unwrap();
         assert!(hit.value.contains("usatoday.com"));
         assert!(summary

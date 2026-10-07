@@ -289,11 +289,8 @@ async fn model_synthesize(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let body_digest = crate::summarization::deterministic_report_context(
-        "body",
-        &input.body_excerpt,
-        3000,
-    );
+    let body_digest =
+        crate::summarization::deterministic_report_context("body", &input.body_excerpt, 3000);
     if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
         let req = crate::summarization::flush_request(
             crate::summarization::SummarizationMode::ReportContext,

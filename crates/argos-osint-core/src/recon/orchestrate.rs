@@ -13,8 +13,7 @@ use serde_json::{json, Value};
 
 use super::{
     brain_resources::{self, BrainResourceSummary},
-    investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan,
-    PlanCall,
+    investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan, PlanCall,
     Run, Store,
 };
 use crate::{
@@ -509,11 +508,7 @@ fn apply_order(
                     json!({"url": url}),
                     Vec::new(),
                     vec![format!("url={url} (binding {evidence})")],
-                    vec![(
-                        "url".into(),
-                        json!(url),
-                        format!("binding {evidence}"),
-                    )],
+                    vec![("url".into(), json!(url), format!("binding {evidence}"))],
                     true,
                     record
                         .map(|record| record.reason.clone())
@@ -745,8 +740,7 @@ async fn execute_ordered(
                         .into_iter()
                         .next()
                         .and_then(|line| {
-                            line.split_once(" — ")
-                                .map(|(_, reason)| reason.to_string())
+                            line.split_once(" — ").map(|(_, reason)| reason.to_string())
                         })
                         .unwrap_or_else(|| "the local credit allowance blocked this call".into()),
                 ),
@@ -2220,7 +2214,6 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
     Ok(content)
 }
 
-
 /// Drops citations, the evidence trailer, and repeated article lines, then keeps the
 /// lead findings and the D1–D5 lines within [`PRIOR_SYNTHESIS_CHARS`].
 /// Deterministic FollowUpContext fallback when Summarization is unavailable.
@@ -2243,7 +2236,6 @@ fn compact_prior_synthesis(raw: &str) -> String {
     let clipped = clip_at_word(&joined, PRIOR_SYNTHESIS_CHARS);
     crate::summarization::deterministic_follow_up(&clipped, PRIOR_SYNTHESIS_CHARS).content
 }
-
 
 fn directive_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
@@ -3212,8 +3204,8 @@ async fn model_json(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::PickRecord;
+    use super::*;
     use std::time::Duration;
 
     /// `recall_for_turn` stays sync and runs inside the async Recon turn; with the
@@ -3526,7 +3518,12 @@ mod tests {
             bindings: bindings.clone(),
             ..Plan::default()
         };
-        apply_order(&mut plan, &ordered, PERSON, &BrainResourceSummary::default());
+        apply_order(
+            &mut plan,
+            &ordered,
+            PERSON,
+            &BrainResourceSummary::default(),
+        );
         let step = |id: &str| {
             plan.calls
                 .iter()
@@ -5508,13 +5505,10 @@ mod tests {
         );
         let bindings = investigation::question_bindings(ACME);
         let empty_brain = BrainResourceSummary::default();
-        let opening =
-            picker::offered_candidates(&catalog, &[], &bindings, ACME, &empty_brain);
+        let opening = picker::offered_candidates(&catalog, &[], &bindings, ACME, &empty_brain);
         assert!(opening.contains(&"firecrawl_search".to_string()));
         assert!(
-            opening
-                .iter()
-                .all(|id| picker::is_primary_pick(id)),
+            opening.iter().all(|id| picker::is_primary_pick(id)),
             "{opening:?}"
         );
         assert!(!opening.contains(&"sociavault_google_search".to_string()));
@@ -5536,10 +5530,14 @@ mod tests {
         );
         // An IP prompt opens gap-fillers at once.
         let ip = investigation::question_bindings("Who is behind 8.8.8.8?");
-        assert!(
-            picker::offered_candidates(&catalog, &[], &ip, "Who is behind 8.8.8.8?", &empty_brain)
-                .contains(&"shodan_internetdb".to_string())
-        );
+        assert!(picker::offered_candidates(
+            &catalog,
+            &[],
+            &ip,
+            "Who is behind 8.8.8.8?",
+            &empty_brain
+        )
+        .contains(&"shodan_internetdb".to_string()));
         assert_eq!(picker::MAX_PICKS, 13, "at most 13 tools in one turn");
     }
 
@@ -6405,7 +6403,12 @@ mod tests {
             bindings: resources.bindings(),
             ..Plan::default()
         };
-        apply_order(&mut plan, &ordered, "Did a US marine kill someone in Japan?", &resources);
+        apply_order(
+            &mut plan,
+            &ordered,
+            "Did a US marine kill someone in Japan?",
+            &resources,
+        );
         assert_eq!(plan.calls.len(), 2);
         assert_eq!(plan.calls[0].tool_id, "firecrawl_scrape");
         assert!(plan.calls[0].bound);

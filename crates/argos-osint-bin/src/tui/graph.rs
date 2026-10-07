@@ -140,6 +140,7 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     if app.focus == Target::DetailPath {
         title.push_str("· focused ");
     }
+    app.layout.borrow_mut().register(Target::DetailPath, area);
     frame.render_widget(panel(&title), area);
     frame.render_widget(
         Paragraph::new(painted)
@@ -180,6 +181,7 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     } else {
         " summary "
     };
+    app.layout.borrow_mut().register(Target::DetailSummary, area);
     let Some(failure) = &app.summary_failure else {
         frame.render_widget(
             Paragraph::new(summary_lines(text, width))

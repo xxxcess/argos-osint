@@ -175,6 +175,7 @@ pub struct Scrolls {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Hash)]
 pub enum ChoiceKind {
     Provider,
     Model,
@@ -218,6 +219,7 @@ pub struct PaletteItem {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Hash)]
 pub enum ProviderPage {
     Grok,
     OpenAI,
@@ -244,6 +246,7 @@ pub enum BrainListMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Hash)]
 pub enum FieldId {
     BrainApp,
     BrainConversation,
@@ -296,6 +299,7 @@ pub enum FieldId {
 
 /// The model role the Defaults tab is editing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Hash)]
 pub enum DefaultsRole {
     Recon,
     ToolPicker,
@@ -421,6 +425,7 @@ impl DefaultsRole {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Hash)]
 pub enum ButtonId {
     Send,
     Add,
@@ -520,6 +525,7 @@ pub enum ButtonId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Hash)]
 pub enum Target {
     App(usize),
     Home,
@@ -664,6 +670,46 @@ struct LiveAnswer {
     shown: String,
     note: String,
     painted: Option<Instant>,
+}
+
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FocusEntry {
+    pub target: Target,
+    pub rect: ratatui::layout::Rect,
+    pub scope: usize,
+    pub scrollable: bool,
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct LayoutRegistry {
+    pub entries: Vec<FocusEntry>,
+    pub scopes: Vec<ratatui::layout::Rect>,
+    pub current_scope: usize,
+}
+
+impl LayoutRegistry {
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.scopes.clear();
+        self.current_scope = 0;
+    }
+    
+    pub fn push_scope(&mut self, rect: ratatui::layout::Rect) -> usize {
+        let id = self.scopes.len();
+        self.scopes.push(rect);
+        self.current_scope = id;
+        id
+    }
+    
+    pub fn register(&mut self, target: Target, rect: ratatui::layout::Rect) {
+        self.entries.push(FocusEntry {
+            target,
+            rect,
+            scope: self.current_scope,
+            scrollable: false,
+        });
+    }
 }
 
 pub struct App {
@@ -815,6 +861,7 @@ pub struct App {
     pub focus: Target,
     pub cursor: usize,
     pub screen: Rect,
+    pub layout: std::cell::RefCell<LayoutRegistry>,
     pub status: String,
     pub memories: Vec<Memory>,
     pub selected_insight: Option<recon::InsightView>,
@@ -1142,6 +1189,7 @@ impl App {
             focus: Target::App(0),
             cursor: 0,
             screen: Rect::default(),
+            layout: std::cell::RefCell::new(LayoutRegistry::default()),
             status: "ready".into(),
             memories,
             selected_insight: None,

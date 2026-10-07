@@ -2946,259 +2946,22 @@ fn run_delete_rect(popup: Rect) -> Rect {
 }
 
 pub fn focus_order(app: &App) -> Vec<Target> {
-    if app.overlay != Overlay::None {
-        if atlas_run_card(app) {
-            return vec![
-                Target::Button(ButtonId::AtlasNewsFeed),
-                Target::Button(ButtonId::AtlasDelete),
-                Target::CloseOverlay,
-            ];
-        }
-        if app.overlay == Overlay::IntelRecon {
-            let mut order: Vec<Target> = ReportMode::all()
-                .into_iter()
-                .enumerate()
-                .map(|(index, _)| Target::IntelReconTab(index))
-                .collect();
-            let sections = argos_osint_core::intel_recon::section_plan(app.intel_recon_mode());
-            order.extend((0..sections.len()).map(Target::IntelReconSection));
-            order.push(Target::Button(ButtonId::IntelReconStart));
-            order.push(Target::CloseOverlay);
-            return order;
-        }
-        return vec![Target::CloseOverlay];
-    }
-    match app.module {
-        None => vec![
-            Target::Tab(app.tab_sel),
-            Target::App(app.launcher_sel),
-            Target::Field(FieldId::Composer),
-            Target::Button(ButtonId::Send),
-        ],
-        Some(ModuleId::Recon) if app.recon_chat => {
-            let mut order = vec![Target::Home, Target::App(ModuleId::Recon.index())];
-            order.push(Target::Transcript);
-            order.push(Target::Button(ButtonId::RetryInsights));
-            if app.can_resume_recon() {
-                order.push(Target::Button(ButtonId::ResumeRun));
-            }
-            order.push(Target::Button(ButtonId::CancelRun));
-            order.push(Target::Field(FieldId::Composer));
-            order.push(Target::Button(ButtonId::Send));
-            order
-        }
-        Some(ModuleId::Recon) => {
-            let mut order = vec![Target::Home, Target::App(ModuleId::Recon.index())];
-            order.extend([
-                Target::Field(FieldId::ReconSearch),
-                Target::Button(ButtonId::DeleteThread),
-            ]);
-            if !app.threads.is_empty() {
-                order.push(Target::Thread(app.thread_sel));
-            }
-            order
-        }
-        Some(ModuleId::Brain) => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            match app.brain_list_mode {
-                BrainListMode::Graph => {
-                    order.push(Target::Button(ButtonId::BrainDetailBack));
-                    order.push(Target::DetailPath);
-                    if !app.brain_detail.related.items.is_empty() {
-                        order.push(Target::RelatedRow(app.brain_detail.related.sel));
-                    }
-                    order.push(Target::DetailSummary);
-                    if let Some(failure) = &app.summary_failure {
-                        order.extend(
-                            super::summary_card::actions(failure)
-                                .into_iter()
-                                .map(Target::Button),
-                        );
-                    }
-                }
-                BrainListMode::Create => {
-                    order.extend(
-                        [
-                            FieldId::BrainApp,
-                            FieldId::BrainConversation,
-                            FieldId::BrainInsight,
-                        ]
-                        .map(Target::Field),
-                    );
-                    order.extend([ButtonId::Add, ButtonId::BrainBack].map(Target::Button));
-                }
-                _ => {
-                    order.push(Target::Button(ButtonId::CreateMemory));
-                    order.push(Target::Field(FieldId::BrainQuery));
-                    order.extend([ButtonId::Pin, ButtonId::Delete].map(Target::Button));
-                    if !app.memories.is_empty() {
-                        order.push(Target::Memory(app.memory_sel));
-                    }
-                }
-            }
-            order
-        }
-        Some(ModuleId::Osint) => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            order.push(Target::Field(FieldId::OsintSearch));
-            if !visible_tools(app).is_empty() {
-                order.push(Target::Tool(app.tool_sel));
-            }
-            if let Some(slot) = api_key_slot(app) {
-                order.push(Target::Field(slot.field));
-                order.push(Target::Field(slot.fallback));
-                order.push(Target::Button(slot.button));
-            }
-            order.push(Target::Field(FieldId::OsintInput));
-            order.extend(
-                [
-                    ButtonId::OsintRun,
-                    ButtonId::OsintCancel,
-                    ButtonId::OsintToggle,
-                    ButtonId::OsintRaw,
-                    ButtonId::OsintAttach,
-                    ButtonId::OsintStartRecon,
-                    ButtonId::OsintPrev,
-                    ButtonId::OsintNext,
-                ]
-                .map(Target::Button),
-            );
-            order
-        }
-        Some(ModuleId::Providers) => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            order.extend(ProviderPage::ALL.map(Target::ProviderTab));
-            match app.provider_page {
-                ProviderPage::Grok => {
-                    order.extend([ButtonId::GrokSignIn, ButtonId::GrokCheck].map(Target::Button));
-                }
-                ProviderPage::OpenAI => {
-                    order.extend(
-                        [ButtonId::OpenAISignIn, ButtonId::OpenAICheck].map(Target::Button),
-                    );
-                }
-                ProviderPage::OpenRouter => {
-                    order.push(Target::Field(FieldId::RouterKey));
-                    order.extend(
-                        [
-                            ButtonId::RouterSave,
-                            ButtonId::RouterVerify,
-                            ButtonId::RouterAdvanced,
-                        ]
-                        .map(Target::Button),
-                    );
-                    if app.router_advanced {
-                        order.push(Target::Field(FieldId::RouterEndpoint));
-                    }
-                }
-                ProviderPage::Defaults => {
-                    order.extend(
-                        DefaultsRole::ALL.map(|role| Target::Button(ButtonId::DefaultRole(role))),
-                    );
-                    let role = app.defaults_role;
-                    order.extend([
-                        Target::Field(role.provider_field()),
-                        Target::Field(role.model_field()),
-                        Target::Button(role.save_button()),
-                    ]);
-                    order.push(Target::Button(ButtonId::RefreshModels));
-                }
-            }
-            order
-        }
-        Some(ModuleId::System) => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            order.push(Target::Button(ButtonId::RefreshHardware));
-            order
-        }
-        Some(ModuleId::Logs) => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            order.push(Target::Field(FieldId::LogsSearch));
-            order.extend(
-                super::logs::buttons(&app.logs)
-                    .into_iter()
-                    .map(Target::Button),
-            );
-            if !app.logs.rows.is_empty() {
-                order.push(Target::LogLine(app.logs.sel));
-            }
-            order
-        }
-        Some(ModuleId::Jobs) => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            order.push(Target::Field(FieldId::JobsSearch));
-            order.extend(
-                super::jobs::buttons(&app.jobs, app.job_source().is_some())
-                    .into_iter()
-                    .map(Target::Button),
-            );
-            if !app.jobs.rows.is_empty() {
-                order.push(Target::JobRow(app.jobs.sel));
-                order.push(Target::JobDetail);
-            }
-            order
-        }
-        Some(ModuleId::Atlas) => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            if app.atlas_page == AtlasPage::Runs {
-                if app.atlas_news {
-                    order.push(Target::Button(ButtonId::AtlasWorld));
-                    order.push(Target::Button(ButtonId::AtlasNews));
-                    if !app.atlas_articles.is_empty() {
-                        order.push(Target::AtlasArticle(app.atlas_article_sel));
-                    }
-                } else {
-                    order.push(Target::Button(ButtonId::AtlasLive));
-                    order.push(Target::Button(ButtonId::AtlasResume));
-                    order.push(Target::Button(ButtonId::AtlasRepair));
-                    order.push(Target::Button(ButtonId::AtlasDelete));
-                    order.push(Target::AtlasCycleStats);
-                    if !app.atlas_runs.is_empty() {
-                        order.push(Target::AtlasHistory(app.atlas_run_sel));
-                    }
-                }
-            } else {
-                order.extend([
-                    Target::Button(ButtonId::AtlasRuns),
-                    Target::Button(ButtonId::AtlasAuto),
-                    Target::Button(ButtonId::AtlasRun),
-                ]);
-                if !app.atlas_feed.is_empty() {
-                    order.push(Target::AtlasFeed(app.atlas_feed_sel));
-                }
-            }
-            order
-        }
-        Some(ModuleId::Intel) => {
-            let mut order = vec![Target::Home];
-            order.extend((0..ModuleId::ALL.len()).map(Target::App));
-            if app.intel_page == IntelPage::Briefing {
-                order.push(Target::Button(ButtonId::IntelBodyRefresh));
-                order.push(Target::Button(ButtonId::IntelReports));
-                order.push(Target::Button(ButtonId::IntelJobOpen));
-                order.push(Target::Button(ButtonId::IntelJobPause));
-                order.push(Target::Button(ButtonId::IntelJobResume));
-                order.push(Target::Button(ButtonId::IntelJobCancel));
-                order.push(Target::Button(ButtonId::IntelJobRetry));
-                order.push(Target::Button(ButtonId::IntelBodyRetry));
-            } else {
-                order.extend((0..INTEL_CATEGORIES.len()).map(Target::IntelTab));
-                order.push(Target::Button(ButtonId::IntelDay));
-                order.push(Target::Field(FieldId::IntelSearch));
-                if !app.intel_articles.is_empty() {
-                    order.push(Target::IntelArticle(app.intel_sel));
-                }
-            }
-            order
+    let registry = app.layout.borrow();
+    let mut entries = registry.entries.clone();
+    entries.retain(|e| e.scope == registry.current_scope);
+    entries.sort_by_key(|e| (e.rect.y, e.rect.x));
+
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        if seen.insert(entry.target) {
+            order.push(entry.target);
         }
     }
+    if app.overlay != Overlay::None && !seen.contains(&Target::CloseOverlay) {
+        order.push(Target::CloseOverlay);
+    }
+    order
 }
 
 pub fn choice_list_room(app: &App) -> usize {
@@ -3261,115 +3024,13 @@ pub fn choice_hits(app: &App) -> Vec<(usize, Rect)> {
 }
 
 pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
-    if app.overlay != Overlay::None {
-        if app.overlay == Overlay::IntelRecon {
-            let popup = intel_recon_popup_area(app.screen);
-            let close = Rect {
-                x: popup.x + popup.width.saturating_sub(8),
-                y: popup.y,
-                width: 8.min(popup.width),
-                height: 1,
-            };
-            if contains(close, x, y) || !contains(popup, x, y) {
-                return Some(Target::CloseOverlay);
-            }
-            let layout = intel_recon_popup_layout(popup, app);
-            for (index, rect) in layout.tabs.into_iter().enumerate() {
-                if contains(rect, x, y) {
-                    return Some(Target::IntelReconTab(index));
-                }
-            }
-            for (index, rect) in layout.sections.into_iter().enumerate() {
-                if contains(rect, x, y) {
-                    return Some(Target::IntelReconSection(index));
-                }
-            }
-            if contains(layout.start, x, y) {
-                return Some(Target::Button(ButtonId::IntelReconStart));
-            }
-            return None;
-        }
-        let popup = popup_area(app.screen);
-        let close = Rect {
-            x: popup.x + popup.width.saturating_sub(8),
-            y: popup.y,
-            width: 8.min(popup.width),
-            height: 1,
-        };
-        if atlas_run_card(app) && contains(run_news_rect(popup), x, y) {
-            return Some(Target::Button(ButtonId::AtlasNewsFeed));
-        }
-        if atlas_run_card(app) && contains(run_delete_rect(popup), x, y) {
-            return Some(Target::Button(ButtonId::AtlasDelete));
-        }
-        if contains(close, x, y) || !contains(popup, x, y) {
-            return Some(Target::CloseOverlay);
-        }
-        if matches!(app.overlay, Overlay::Choice(_) | Overlay::Palette) {
-            return choice_hits(app)
-                .into_iter()
-                .find(|(_, rect)| contains(*rect, x, y))
-                .map(|(index, _)| Target::Choice(index));
-        }
-        return None;
-    }
-    let layout = chrome(app.screen, app);
-    if contains(layout.header, x, y) {
-        if app.module.is_none() {
-            if let Some(target) = tab_strip_hit(app, layout.header, x, y) {
-                return Some(target);
-            }
-        } else {
-            for (module, rect) in header_tabs(layout.header, app.module) {
-                if contains(rect, x, y) {
-                    return Some(match module {
-                        None => Target::Home,
-                        Some(id) => Target::App(
-                            ModuleId::ALL
-                                .iter()
-                                .position(|item| *item == id)
-                                .unwrap_or(0),
-                        ),
-                    });
-                }
-            }
+    let registry = app.layout.borrow();
+    for entry in registry.entries.iter().rev() {
+        if entry.scope == registry.current_scope && contains(entry.rect, x, y) {
+            return Some(entry.target);
         }
     }
-    if app.module.is_none() {
-        let areas = home_composer_areas(layout.body);
-        if contains(areas.send, x, y) {
-            return Some(Target::Button(ButtonId::Send));
-        }
-        if contains(areas.input, x, y) {
-            return Some(Target::Field(FieldId::Composer));
-        }
-        return home_line(app, x, y).map(Target::App);
-    }
-    if layout.composer.height > 0 && contains(layout.composer, x, y) {
-        let (_field, send) = composer_parts(layout.composer);
-        return Some(if contains(send, x, y) {
-            Target::Button(ButtonId::Send)
-        } else {
-            Target::Field(FieldId::Composer)
-        });
-    }
-    if !contains(layout.body, x, y) {
-        return None;
-    }
-    match app.module {
-        Some(ModuleId::Intel) => intel_hit(app, layout.body, x, y),
-        Some(ModuleId::Recon) => recon_hit(app, layout.body, x, y),
-        Some(ModuleId::Brain) => brain_hit(app, layout.body, x, y),
-        Some(ModuleId::Osint) => osint_hit(app, layout.body, x, y),
-        Some(ModuleId::Atlas) => atlas_hit(app, layout.body, x, y),
-        Some(ModuleId::Providers) => provider_hit(app, layout.body, x, y),
-        Some(ModuleId::System) => system_hit(app, layout.body, x, y),
-        Some(ModuleId::Logs) => super::logs::hit(app, layout.body, x, y),
-        Some(ModuleId::Jobs) => {
-            super::jobs::hit(app, layout.body, x, y, app.job_source().is_some())
-        }
-        None => None,
-    }
+    None
 }
 
 fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
@@ -3795,6 +3456,7 @@ fn field_value_area(area: Rect) -> Rect {
 }
 
 pub(super) fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &str, area: Rect) {
+    app.layout.borrow_mut().register(Target::Field(field), area);
     if area.width < 2 || area.height == 0 {
         return;
     }
@@ -3957,6 +3619,7 @@ pub(super) fn draw_button_state(
     if area.width < 2 || area.height < 2 {
         return;
     }
+    app.layout.borrow_mut().register(Target::Button(button), area);
     let selected = active || app.focus == Target::Button(button);
     let border = if selected {
         theme::accent()
@@ -4032,6 +3695,8 @@ pub(super) fn pane(title: &str) -> Block<'static> {
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
+    app.layout.borrow_mut().clear();
+    app.layout.borrow_mut().clear();
     let area = frame.area();
     frame.render_widget(Paragraph::new("").style(theme::text()), area);
     let layout = chrome(area, app);

@@ -308,6 +308,30 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
     let view = &app.brain_detail.related;
     let focused = matches!(app.focus, Target::RelatedRow(_));
     let width = inner(area).width as usize;
+
+    let inner_area = inner(area);
+    let mut current_y = inner_area.y;
+    for (i, row) in related_rows(view).into_iter().enumerate() {
+        if i < view.scroll as usize {
+            continue;
+        }
+        if current_y >= inner_area.y + inner_area.height {
+            break;
+        }
+        if let RelRow::Title(index) | RelRow::Reason(index) = row {
+            app.layout.borrow_mut().register(
+                Target::RelatedRow(index),
+                Rect {
+                    x: inner_area.x,
+                    y: current_y,
+                    width: inner_area.width,
+                    height: 1,
+                },
+            );
+        }
+        current_y += 1;
+    }
+
     let lines: Vec<Line> = related_rows(view)
         .into_iter()
         .map(|row| match row {
@@ -361,6 +385,7 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
 
 /// One-line strip above the graph: Back, mode, title, history depth.
 pub fn draw_nav(frame: &mut Frame, app: &App, areas: &DetailAreas, claim: bool) {
+    app.layout.borrow_mut().register(Target::Button(ButtonId::BrainDetailBack), areas.back);
     let back_style = if app.focus == Target::Button(ButtonId::BrainDetailBack) {
         theme::selected()
     } else {

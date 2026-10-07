@@ -512,6 +512,23 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect) {
             .scroll((scroll, 0)),
         a.list,
     );
+    
+    let inner = inset(a.list);
+    if view.error.is_none() && !view.rows.is_empty() {
+        let start_line = view.scroll as usize;
+        let room = inner.height as usize;
+        for line_idx in start_line..(start_line + room) {
+            if let Some(index) = view.index_at_line(line_idx, width) {
+                let screen_y = inner.y + (line_idx - start_line) as u16;
+                app.layout.borrow_mut().register(Target::LogLine(index), Rect {
+                    x: inner.x,
+                    y: screen_y,
+                    width: inner.width,
+                    height: 1,
+                });
+            }
+        }
+    }
 }
 
 pub fn hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {

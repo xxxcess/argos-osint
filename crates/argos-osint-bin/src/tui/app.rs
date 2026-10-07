@@ -385,6 +385,7 @@ pub enum ButtonId {
     SaveSummarization,
     DefaultRole(DefaultsRole),
     RefreshModels,
+    #[allow(dead_code)]
     NewThread,
     DeleteThread,
     CancelRun,
@@ -2302,6 +2303,20 @@ impl App {
         self.send_recon_query(&tid, &question)
     }
 
+    pub fn can_resume_recon(&self) -> bool {
+        let Some(tid) = &self.selected_thread else {
+            return false;
+        };
+        if self.running.contains_key(tid) {
+            return false;
+        }
+        self.store
+            .latest_resumable_run(tid)
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
     fn resume_recon(&mut self) -> Result<()> {
         let tid = self
             .selected_thread
@@ -2321,21 +2336,23 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         self.live_answers.remove(&tid);
         self.running.insert(tid.clone(), cancel.clone());
-        tokio::spawn(async move {
-            let progress_tx = tx.clone();
-            let thread_id = tid.clone();
-            let outcome = service
-                .resume(&run.id, cancel, move |event| {
-                    let _ = progress_tx.send(work_event(&thread_id, event));
-                })
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string());
-            let _ = tx.send(WorkEvent::ReconDone {
-                thread_id: tid,
-                outcome,
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                let progress_tx = tx.clone();
+                let thread_id = tid.clone();
+                let outcome = service
+                    .resume(&run.id, cancel, move |event| {
+                        let _ = progress_tx.send(work_event(&thread_id, event));
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::ReconDone {
+                    thread_id: tid,
+                    outcome,
+                });
             });
-        });
+        }
         Ok(())
     }
 
@@ -7755,7 +7772,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
         assert_eq!(app.module, Some(ModuleId::Recon));
         // Recon opens onto a search field; leave it so digits switch apps again.
-        app.set_focus(Target::Button(ButtonId::NewThread));
+        app.set_focus(Target::Button(ButtonId::DeleteThread));
         app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
         assert_eq!(app.module, Some(ModuleId::Atlas));
         app.select(ModuleId::Intel.index());
@@ -8200,7 +8217,6 @@ mod tests {
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
             Target::Field(FieldId::ReconSearch),
-            Target::Button(ButtonId::NewThread),
             Target::Button(ButtonId::DeleteThread),
         ] {
             assert!(
@@ -8210,12 +8226,12 @@ mod tests {
                 "dashboard is missing {target:?}"
             );
         }
+        assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
         assert!(!hit(&app, Target::Button(ButtonId::Send)));
         app.recon_chat = true;
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
             Target::Button(ButtonId::CancelRun),
-            Target::Button(ButtonId::ResumeRun),
             Target::Button(ButtonId::RetryInsights),
             Target::Button(ButtonId::Send),
         ] {
@@ -8226,6 +8242,18 @@ mod tests {
                 "chat is missing {target:?}"
             );
         }
+        assert!(!hit(&app, Target::Button(ButtonId::ResumeRun)));
+        let t = app.store.new_thread("Test Thread").unwrap();
+        app.selected_thread = Some(t.id.clone());
+        let run = app
+            .store
+            .new_run(&t.id, "turn-1", "recon-m", "synth-m")
+            .unwrap();
+        app.store
+            .set_run(&run.id, "interrupted", "interrupted", None, None)
+            .unwrap();
+        terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
+        assert!(hit(&app, Target::Button(ButtonId::ResumeRun)));
         assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
         app.select(ModuleId::Osint.index());
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
@@ -8276,7 +8304,8 @@ mod tests {
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
         assert!(hit(&app, Target::Field(FieldId::ReconSearch)));
-        assert!(hit(&app, Target::Button(ButtonId::NewThread)));
+        assert!(hit(&app, Target::Button(ButtonId::DeleteThread)));
+        assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
         assert!(!hit(&app, Target::Field(FieldId::Composer)));
         app.recon_chat = true;
         terminal
@@ -8747,7 +8776,7 @@ mod tests {
         app2.select(ModuleId::Jobs.index());
         let header = buffer_text(&render(&mut app2, 160, 40));
         let first = header.lines().next().unwrap();
-        assert!(first.contains("Argos  › Jobs  ›"), "{first}");
+        assert!(first.contains("[Home] > Jobs >"), "{first}");
         assert!(!first.contains("Intel"), "{first}");
     }
 

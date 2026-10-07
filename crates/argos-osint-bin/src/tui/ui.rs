@@ -76,11 +76,7 @@ pub(crate) fn detail_areas(app: &App) -> super::brain_detail::DetailAreas {
 fn chrome(area: Rect, app: &App) -> Chrome {
     let composer_h = composer_height(app);
     let header_h = TAB_H;
-    let tab_strip_h = if app.module.is_none() || app.module == Some(ModuleId::Recon) {
-        1
-    } else {
-        0
-    };
+    let tab_strip_h = 0;
     let rows = split_vertical(
         area,
         [
@@ -104,14 +100,14 @@ fn chrome(area: Rect, app: &App) -> Chrome {
 }
 
 fn header_tabs(area: Rect, active: Option<ModuleId>) -> Vec<(Option<ModuleId>, Rect)> {
-    let mut labels = vec![(None, "Argos".to_string())];
+    let mut labels = vec![(None, "[Home]".to_string())];
     if let Some(module) = active {
         labels.push((Some(module), module.title().to_string()));
     }
     let mut x = area.x;
     let mut out = Vec::new();
     for (module, label) in labels {
-        let width = (label.len() as u16 + if module.is_none() { 4 } else { 2 })
+        let width = (label.len() as u16 + if module.is_none() { 3 } else { 2 })
             .min(area.width.saturating_sub(x - area.x));
         if width < 2 {
             break;
@@ -259,6 +255,16 @@ fn recon_workspace(app: &App, area: Rect) -> (Rect, Option<Rect>) {
     }
     let panes = split_horizontal(area, [Constraint::Min(74), Constraint::Length(30)]);
     (panes[0], Some(panes[1]))
+}
+
+fn recon_chat_areas(app: &App, body: Rect) -> (Rect, Option<Rect>, Option<Rect>) {
+    let (transcript, context) = recon_workspace(app, body);
+    if context.is_some() {
+        (transcript, context, None)
+    } else {
+        let (workspace, run_actions) = chat_areas(body);
+        (workspace, None, Some(run_actions))
+    }
 }
 
 struct OsintLayout {
@@ -473,14 +479,36 @@ fn home_line(app: &App, x: u16, y: u16) -> Option<usize> {
 }
 
 pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
-    let mut rows = if area.width as usize >= logo_width() {
-        logo_rows()
+    let is_wide = area.width as usize >= logo_width();
+    let title_count = if is_wide { 6 } else { 1 };
+    let above_title = if area.height >= 36 { 1 } else { 0 };
+
+    let mut rows = Vec::new();
+    for _ in 0..above_title {
+        rows.push(gap_row());
+    }
+
+    if is_wide {
+        rows.extend(logo_rows());
     } else {
-        vec![center_row(HomeKind::Heading("ARGOS OSINT"))]
-    };
-    let menu_at = rows.len();
+        rows.push(center_row(HomeKind::Heading("ARGOS OSINT")));
+    }
+
+    let gap_title_to_composer = if area.height >= 34 { 2 } else { 1 };
+    let composer_h = if area.height >= 26 { 3 } else { 2 };
+    // Composer takes: 1 (label) + composer_h (box) + 1 (guidance) = composer_h + 2
+    let gap_composer_to_apps = gap_title_to_composer + 2;
+
+    let apps_y = area.y
+        + above_title as u16
+        + title_count as u16
+        + gap_title_to_composer as u16
+        + (composer_h as u16 + 2)
+        + gap_composer_to_apps as u16;
+
+    let mut app_rows = Vec::new();
     home_group(
-        &mut rows,
+        &mut app_rows,
         "Applications",
         &[
             ModuleId::Intel,
@@ -490,9 +518,9 @@ pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
         ],
         errors,
     );
-    rows.push(gap_row());
+    app_rows.push(gap_row());
     home_group(
-        &mut rows,
+        &mut app_rows,
         "System",
         &[
             ModuleId::Jobs,
@@ -503,28 +531,19 @@ pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
         ],
         errors,
     );
-    let (above, below) = if area.height >= 36 {
-        (2, 2)
-    } else if area.height >= 30 {
-        (1, 2)
-    } else if area.height >= 24 {
-        (1, 1)
-    } else {
-        (0, 1)
-    };
-    for _ in 0..below {
-        rows.insert(menu_at, gap_row());
-    }
-    for _ in 0..above {
-        rows.insert(0, gap_row());
-    }
-    let limit = area.height as usize;
-    if rows.len() > limit {
-        rows.truncate(limit);
-    }
+
     for (index, row) in rows.iter_mut().enumerate() {
         row.y = area.y.saturating_add(index as u16);
     }
+
+    for (index, row) in app_rows.iter_mut().enumerate() {
+        row.y = apps_y.saturating_add(index as u16);
+    }
+
+    rows.extend(app_rows);
+
+    let max_y = area.y.saturating_add(area.height);
+    rows.retain(|r| r.y < max_y);
     rows
 }
 
@@ -2006,7 +2025,7 @@ fn transcript_rect(app: &App) -> Rect {
     if app.module != Some(ModuleId::Recon) || !app.recon_chat {
         return Rect::default();
     }
-    inset(recon_workspace(app, chat_areas(body).0).0)
+    inset(recon_chat_areas(app, body).0)
 }
 
 fn chat_view(app: &App) -> (Rect, u16, Vec<ChatRow>) {
@@ -2460,7 +2479,7 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
     let body = chrome(app.screen, app).body;
     match app.module {
         Some(ModuleId::Recon) if app.recon_chat => {
-            let (transcript, _) = chat_areas(body);
+            let (transcript, _, _) = recon_chat_areas(app, body);
             if contains(transcript, x, y) {
                 Region::Chat
             } else {
@@ -2865,25 +2884,21 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             Target::Button(ButtonId::Send),
         ],
         Some(ModuleId::Recon) if app.recon_chat => {
-            let mut order = vec![Target::Tab(app.tab_sel)];
+            let mut order = vec![Target::Home, Target::App(ModuleId::Recon.index())];
             order.push(Target::Transcript);
-            order.extend(
-                [
-                    ButtonId::CancelRun,
-                    ButtonId::ResumeRun,
-                    ButtonId::RetryInsights,
-                ]
-                .map(Target::Button),
-            );
+            order.push(Target::Button(ButtonId::RetryInsights));
+            if app.can_resume_recon() {
+                order.push(Target::Button(ButtonId::ResumeRun));
+            }
+            order.push(Target::Button(ButtonId::CancelRun));
             order.push(Target::Field(FieldId::Composer));
             order.push(Target::Button(ButtonId::Send));
             order
         }
         Some(ModuleId::Recon) => {
-            let mut order = vec![Target::Tab(app.tab_sel)];
+            let mut order = vec![Target::Home, Target::App(ModuleId::Recon.index())];
             order.extend([
                 Target::Field(FieldId::ReconSearch),
-                Target::Button(ButtonId::NewThread),
                 Target::Button(ButtonId::DeleteThread),
             ]);
             if !app.threads.is_empty() {
@@ -3208,23 +3223,24 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
     }
     let layout = chrome(app.screen, app);
     if contains(layout.header, x, y) {
-        for (module, rect) in header_tabs(layout.header, app.module) {
-            if contains(rect, x, y) {
-                return Some(match module {
-                    None => Target::Home,
-                    Some(id) => Target::App(
-                        ModuleId::ALL
-                            .iter()
-                            .position(|item| *item == id)
-                            .unwrap_or(0),
-                    ),
-                });
+        if app.module.is_none() {
+            if let Some(target) = tab_strip_hit(app, layout.header, x, y) {
+                return Some(target);
             }
-        }
-    }
-    if layout.tab_strip.height > 0 && contains(layout.tab_strip, x, y) {
-        if let Some(target) = tab_strip_hit(app, layout.tab_strip, x, y) {
-            return Some(target);
+        } else {
+            for (module, rect) in header_tabs(layout.header, app.module) {
+                if contains(rect, x, y) {
+                    return Some(match module {
+                        None => Target::Home,
+                        Some(id) => Target::App(
+                            ModuleId::ALL
+                                .iter()
+                                .position(|item| *item == id)
+                                .unwrap_or(0),
+                        ),
+                    });
+                }
+            }
         }
     }
     if app.module.is_none() {
@@ -3266,16 +3282,25 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
 
 fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     if app.recon_chat {
-        let (transcript, run_actions) = chat_areas(body);
-        if contains(run_actions, x, y) {
-            let areas = button_areas(run_actions, 3);
-            return Some(Target::Button(if contains(areas[0], x, y) {
-                ButtonId::CancelRun
-            } else if contains(areas[1], x, y) {
-                ButtonId::ResumeRun
-            } else {
-                ButtonId::RetryInsights
-            }));
+        let (transcript, context, bottom_actions) = recon_chat_areas(app, body);
+        if let Some(context_area) = context {
+            for (btn_id, rect, _) in recon_context_buttons(context_area, app) {
+                if contains(rect, x, y) {
+                    return Some(Target::Button(btn_id));
+                }
+            }
+        } else if let Some(run_actions) = bottom_actions {
+            let mut buttons = vec![ButtonId::RetryInsights];
+            if app.can_resume_recon() {
+                buttons.push(ButtonId::ResumeRun);
+            }
+            buttons.push(ButtonId::CancelRun);
+            let areas = button_areas(run_actions, buttons.len());
+            for (i, id) in buttons.into_iter().enumerate() {
+                if contains(areas[i], x, y) {
+                    return Some(Target::Button(id));
+                }
+            }
         }
         if contains(transcript, x, y) {
             return chat_spots(app)
@@ -3296,12 +3321,10 @@ fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
     }
     if contains(actions, x, y) {
-        let areas = button_areas(actions, 2);
-        return Some(Target::Button(if contains(areas[0], x, y) {
-            ButtonId::NewThread
-        } else {
-            ButtonId::DeleteThread
-        }));
+        let areas = button_areas(actions, 1);
+        if contains(areas[0], x, y) {
+            return Some(Target::Button(ButtonId::DeleteThread));
+        }
     }
     None
 }
@@ -3972,12 +3995,36 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_header(frame: &mut Frame, app: &App, layout: &Chrome) {
+    if app.module.is_none() {
+        draw_tab_strip(frame, app, layout.header);
+        let activity = if app.jobs.counts.active > 0 {
+            format!("◌ {} active", app.jobs.counts.active)
+        } else {
+            String::new()
+        };
+        if !activity.is_empty() {
+            let act_len = activity.chars().count() as u16;
+            if layout.header.width > act_len + 2 {
+                let act_rect = Rect {
+                    x: layout.header.x + layout.header.width.saturating_sub(act_len + 1),
+                    y: layout.header.y,
+                    width: act_len + 1,
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(activity, theme::accent())),
+                    act_rect,
+                );
+            }
+        }
+        return;
+    }
     let mut spans = Vec::new();
     let mut used = 0u16;
     for (module, rect) in header_tabs(layout.header, app.module) {
         used = used.max(rect.x + rect.width - layout.header.x);
         let label = match module {
-            None => "Argos",
+            None => "[Home]",
             Some(id) => id.title(),
         };
         let active = match module {
@@ -4000,9 +4047,9 @@ fn draw_header(frame: &mut Frame, app: &App, layout: &Chrome) {
         };
         spans.push(Span::styled(
             if module.is_none() {
-                format!("{label}  › ")
+                format!("{label} > ")
             } else {
-                format!("{label}  ")
+                format!("{label} ")
             },
             style,
         ));
@@ -4017,7 +4064,7 @@ fn draw_header(frame: &mut Frame, app: &App, layout: &Chrome) {
     let detail_room = room.saturating_sub(activity.chars().count().saturating_add(2));
     if detail_room > 4 && !detail.is_empty() {
         spans.push(Span::styled(
-            format!("› {}", fit(&detail, detail_room.saturating_sub(2))),
+            format!("> {}", fit(&detail, detail_room.saturating_sub(2))),
             theme::dim(),
         ));
     }
@@ -4476,45 +4523,50 @@ pub(crate) struct HomeComposerAreas {
     pub metadata: Rect,
     pub send: Rect,
     pub guidance: Rect,
+    pub box_rect: Rect,
 }
 
-pub(crate) fn home_composer_areas(area: Rect, app: &App) -> HomeComposerAreas {
-    let rows = home_rows(area, app.error_count());
-    let last_app_y = rows
-        .iter()
-        .filter_map(|r| r.target.map(|_| r.y))
-        .max()
-        .unwrap_or(area.y);
+pub(crate) fn home_composer_areas(area: Rect, _app: &App) -> HomeComposerAreas {
+    let is_wide = area.width as usize >= logo_width();
+    let title_count = if is_wide { 6 } else { 1 };
+    let above_title = if area.height >= 36 { 1 } else { 0 };
+    let gap_title_to_composer = if area.height >= 34 { 2 } else { 1 };
 
-    let content_width = rows
-        .iter()
-        .filter(|row| !row.center)
-        .map(home_row_width)
-        .max()
-        .unwrap_or(0) as u16;
-    let width = content_width
-        .clamp(56, 96)
-        .min(area.width.saturating_sub(4));
+    let width = if is_wide {
+        (logo_width() as u16).min(area.width.saturating_sub(4))
+    } else {
+        area.width.saturating_sub(4).max(40)
+    };
     let x = area.x + (area.width.saturating_sub(width)) / 2;
 
-    let y = last_app_y.saturating_add(2); // 1-2 rows after apps
+    let title_end_y = area.y + above_title as u16 + title_count as u16;
+    let label_y = title_end_y + gap_title_to_composer as u16;
     let label_rect = Rect {
         x,
-        y,
+        y: label_y,
         width,
         height: 1,
     };
 
-    let input_h = if area.height >= 24 { 3 } else { 1 };
+    let box_y = label_y.saturating_add(1);
+    let box_h = if area.height >= 26 { 3 } else { 2 };
+    let box_rect = Rect {
+        x,
+        y: box_y,
+        width,
+        height: box_h,
+    };
+
+    let input_h = if box_h >= 3 { 2 } else { 1 };
     let input_rect = Rect {
         x,
-        y: y.saturating_add(1),
+        y: box_y,
         width,
         height: input_h,
     };
 
-    let meta_y = input_rect.y.saturating_add(input_rect.height);
-    let send_w = 22.min(width / 3).max(12);
+    let meta_y = box_y.saturating_add(box_h.saturating_sub(1));
+    let send_w = 14.min(width / 3).max(10);
     let meta_w = width.saturating_sub(send_w);
     let metadata_rect = Rect {
         x,
@@ -4531,7 +4583,7 @@ pub(crate) fn home_composer_areas(area: Rect, app: &App) -> HomeComposerAreas {
 
     let guidance_rect = Rect {
         x,
-        y: meta_y.saturating_add(1),
+        y: box_y.saturating_add(box_h),
         width,
         height: 1,
     };
@@ -4542,6 +4594,7 @@ pub(crate) fn home_composer_areas(area: Rect, app: &App) -> HomeComposerAreas {
         metadata: metadata_rect,
         send: send_rect,
         guidance: guidance_rect,
+        box_rect,
     }
 }
 
@@ -4592,40 +4645,140 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
     let areas = home_composer_areas(area, app);
     if areas.label.y < area.y.saturating_add(area.height) {
         frame.render_widget(
-            Paragraph::new("New investigation").style(theme::accent().add_modifier(Modifier::BOLD)),
+            Paragraph::new("Recon")
+                .alignment(Alignment::Center)
+                .style(theme::accent().add_modifier(Modifier::BOLD)),
             areas.label,
         );
     }
-    if areas.input.y < area.y.saturating_add(area.height) {
-        draw_field(frame, app, FieldId::Composer, "", areas.input);
-    }
-    if areas.metadata.y < area.y.saturating_add(area.height) {
-        let recon_m = if app.recon_model.is_empty() {
-            "default"
-        } else {
-            &app.recon_model
-        };
-        let synth_m = if app.synthesis_model.is_empty() {
-            "default"
-        } else {
-            &app.synthesis_model
-        };
-        let meta_text = format!("Recon: {recon_m} · Synthesis: {synth_m}");
+    if areas.box_rect.y < area.y.saturating_add(area.height) {
         frame.render_widget(
-            Paragraph::new(meta_text).style(theme::dim()),
-            areas.metadata,
+            Block::default().style(Style::default().bg(theme::SURFACE)),
+            areas.box_rect,
         );
-        draw_button(
-            frame,
-            app,
-            ButtonId::Send,
-            "Start investigation",
-            areas.send,
+
+        let stripe_style = Style::default().fg(theme::ACCENT).bg(theme::SURFACE);
+        for row in 0..areas.box_rect.height {
+            let row_y = areas.box_rect.y + row;
+            if row_y < area.y.saturating_add(area.height) {
+                frame.render_widget(
+                    Paragraph::new("▌").style(stripe_style),
+                    Rect {
+                        x: areas.box_rect.x,
+                        y: row_y,
+                        width: 1,
+                        height: 1,
+                    },
+                );
+            }
+        }
+
+        let prompt_rect = Rect {
+            x: areas.box_rect.x.saturating_add(2),
+            y: areas.box_rect.y,
+            width: areas.box_rect.width.saturating_sub(4),
+            height: 1,
+        };
+        let is_focused = app.focus == Target::Field(FieldId::Composer);
+        let prompt_line = if app.input.is_empty() {
+            if is_focused {
+                Line::from(vec![
+                    Span::styled("█ ", theme::card_accent()),
+                    Span::styled(
+                        "Ask anything... e.g. \"What is known about example.org?\"",
+                        theme::card_dim(),
+                    ),
+                ])
+            } else {
+                Line::from(vec![Span::styled(
+                    "Ask anything... e.g. \"What is known about example.org?\"",
+                    theme::card_dim(),
+                )])
+            }
+        } else {
+            let cursor_pos = app.cursor.min(app.input.len());
+            let (before, after) = app.input.split_at(cursor_pos);
+            let mut spans = Vec::new();
+            if !before.is_empty() {
+                spans.push(Span::styled(before.to_string(), theme::card_text()));
+            }
+            if is_focused {
+                if let Some(ch) = after.chars().next() {
+                    let mut ch_buf = [0; 4];
+                    let ch_str = ch.encode_utf8(&mut ch_buf);
+                    spans.push(Span::styled(
+                        ch_str.to_string(),
+                        Style::default()
+                            .bg(theme::ACCENT)
+                            .fg(theme::BG)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    let rest = &after[ch.len_utf8()..];
+                    if !rest.is_empty() {
+                        spans.push(Span::styled(rest.to_string(), theme::card_text()));
+                    }
+                } else {
+                    spans.push(Span::styled("█", theme::card_accent()));
+                }
+            } else if !after.is_empty() {
+                spans.push(Span::styled(after.to_string(), theme::card_text()));
+            }
+            Line::from(spans)
+        };
+        frame.render_widget(
+            Paragraph::new(prompt_line).alignment(Alignment::Center),
+            prompt_rect,
         );
+
+        let meta_y = areas.box_rect.y + areas.box_rect.height.saturating_sub(1);
+        if meta_y < area.y.saturating_add(area.height) {
+            let recon_m = if app.recon_model.is_empty() {
+                "default"
+            } else {
+                &app.recon_model
+            };
+            let synth_m = if app.synthesis_model.is_empty() {
+                "default"
+            } else {
+                &app.synthesis_model
+            };
+            let meta_line = Line::from(vec![
+                Span::styled("Recon", theme::card_accent().add_modifier(Modifier::BOLD)),
+                Span::styled(" · ", theme::card_dim()),
+                Span::styled(
+                    recon_m.to_string(),
+                    theme::card_text().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" · ", theme::card_dim()),
+                Span::styled(
+                    format!("Synthesis: {synth_m}"),
+                    Style::default().fg(theme::WARN).bg(theme::SURFACE),
+                ),
+            ]);
+            let meta_rect = areas.metadata;
+            frame.render_widget(
+                Paragraph::new(meta_line).alignment(Alignment::Center),
+                meta_rect,
+            );
+
+            let send_style = if app.focus == Target::Button(ButtonId::Send) {
+                theme::selected()
+            } else {
+                theme::card_dim()
+            };
+            frame.render_widget(
+                Paragraph::new("[ Start ↵ ]")
+                    .alignment(Alignment::Right)
+                    .style(send_style),
+                areas.send,
+            );
+        }
     }
     if areas.guidance.y < area.y.saturating_add(area.height) {
         frame.render_widget(
-            Paragraph::new("Enter to start · Shift+Enter / Ctrl+J for newline").style(theme::dim()),
+            Paragraph::new("Enter to start · Shift+Enter / Ctrl+J for newline")
+                .alignment(Alignment::Center)
+                .style(theme::dim()),
             areas.guidance,
         );
     }
@@ -4706,38 +4859,88 @@ fn draw_recon_dashboard(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(List::new(items).block(pane(" investigations ")), list);
-    let thread_buttons = button_areas(actions, 2);
-    draw_button(frame, app, ButtonId::NewThread, "New", thread_buttons[0]);
+    let thread_buttons = button_areas(actions, 1);
     draw_button(
         frame,
         app,
         ButtonId::DeleteThread,
         "Delete",
-        thread_buttons[1],
+        thread_buttons[0],
     );
 }
 
+pub(crate) fn recon_context_buttons(area: Rect, app: &App) -> Vec<(ButtonId, Rect, &'static str)> {
+    let mut defs = vec![(ButtonId::RetryInsights, recall_label(app))];
+    if app.can_resume_recon() {
+        defs.push((ButtonId::ResumeRun, "Resume"));
+    }
+    defs.push((ButtonId::CancelRun, "Cancel"));
+
+    let count = defs.len() as u16;
+    if count == 0 || area.width < 4 || area.height < count * 2 {
+        return Vec::new();
+    }
+    let btn_h = if area.height >= count * 3 + 4 { 3 } else { 2 };
+    let total_h = count * btn_h;
+    let start_y = area.y + area.height.saturating_sub(total_h);
+    let btn_x = area.x.saturating_add(1);
+    let btn_w = area.width.saturating_sub(1);
+
+    defs.into_iter()
+        .enumerate()
+        .map(|(i, (id, label))| {
+            let rect = Rect {
+                x: btn_x,
+                y: start_y + (i as u16) * btn_h,
+                width: btn_w,
+                height: btn_h,
+            };
+            (id, rect, label)
+        })
+        .collect()
+}
+
 fn draw_recon_chat(frame: &mut Frame, app: &App, area: Rect) {
-    let (workspace, run_actions) = chat_areas(area);
-    let (transcript, context) = recon_workspace(app, workspace);
+    let (transcript, context, bottom_actions) = recon_chat_areas(app, area);
     frame.render_widget(pane(" transcript "), transcript);
     draw_transcript(frame, app, transcript);
     if let Some(context) = context {
         draw_recon_context(frame, app, context);
+    } else if let Some(run_actions) = bottom_actions {
+        let mut buttons = vec![(ButtonId::RetryInsights, recall_label(app))];
+        if app.can_resume_recon() {
+            buttons.push((ButtonId::ResumeRun, "Resume"));
+        }
+        buttons.push((ButtonId::CancelRun, "Cancel"));
+        let count = buttons.len();
+        let run_buttons = button_areas(run_actions, count);
+        for (i, (id, label)) in buttons.into_iter().enumerate() {
+            draw_button(frame, app, id, label, run_buttons[i]);
+        }
     }
-    let run_buttons = button_areas(run_actions, 3);
-    draw_button(frame, app, ButtonId::CancelRun, "Cancel", run_buttons[0]);
-    draw_button(frame, app, ButtonId::ResumeRun, "Resume", run_buttons[1]);
-    draw_button(
-        frame,
-        app,
-        ButtonId::RetryInsights,
-        recall_label(app),
-        run_buttons[2],
-    );
 }
 
 fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
+    let buttons = recon_context_buttons(area, app);
+    let info_h = if let Some((_, first_rect, _)) = buttons.first() {
+        first_rect.y.saturating_sub(area.y)
+    } else {
+        area.height
+    };
+    let info_area = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y,
+        width: area.width.saturating_sub(1),
+        height: info_h,
+    };
+
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::LEFT)
+            .border_style(theme::dim()),
+        area,
+    );
+
     let mut lines = vec!["Investigation".to_string(), String::new()];
     if let Some(thread) = app
         .threads
@@ -4773,14 +4976,13 @@ fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines.join("\n"))
             .style(theme::dim())
-            .block(
-                Block::default()
-                    .borders(Borders::LEFT)
-                    .border_style(theme::dim()),
-            )
             .wrap(Wrap { trim: false }),
-        area,
+        info_area,
     );
+
+    for (id, rect, label) in buttons {
+        draw_button(frame, app, id, label, rect);
+    }
 }
 
 fn draw_transcript(frame: &mut Frame, app: &App, _area: Rect) {

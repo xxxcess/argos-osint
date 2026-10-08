@@ -1260,6 +1260,8 @@ pub struct RunInput<'a> {
     pub classifier: Option<ProviderSecret>,
     /// Synthesis account. Extracts claims. A decisions model is not used here.
     pub synthesizer: Option<ProviderSecret>,
+    /// Ordered synthesis fallbacks tried after primary retries.
+    pub synthesizer_fallbacks: &'a [ProviderSecret],
     /// Resume this run instead of the latest one (targeted re-extraction or a
     /// phase-5 retry of an older cycle). Only used when `resume` is true.
     pub run_id: Option<&'a str>,
@@ -1272,8 +1274,10 @@ pub fn resumable(run: &AtlasRunRow) -> bool {
         return true;
     }
     let cursor = parse_cursor(&run.cursor_json);
-    matches!(run.state.as_str(), "failed" | "partial" | "blocked")
-        && (cursor.phase == 5 || (cursor.phase == 4 && cursor.leg != "insights_done"))
+    matches!(
+        run.state.as_str(),
+        "failed" | "partial" | "blocked" | "waiting"
+    ) && (cursor.phase == 5 || (cursor.phase == 4 && cursor.leg != "insights_done"))
 }
 
 /// Phase names shown as child jobs of an Atlas cycle.
@@ -1424,6 +1428,12 @@ where
         Ok(Stop::Finished) => match run_state() {
             Some((state, _)) if state == "completed" => Finish::completed(),
             Some((state, note)) if state == "failed" => Finish::failed("atlas", note),
+            Some((state, note)) if state == "waiting" => Finish::Waiting {
+                summary: if note.is_empty() { state } else { note },
+            },
+            Some((state, note)) if state == "blocked" => Finish::Blocked {
+                summary: if note.is_empty() { state } else { note },
+            },
             Some((state, note)) => Finish::Partial {
                 summary: if note.is_empty() {
                     state
@@ -1465,6 +1475,7 @@ where
         feed,
         classifier,
         synthesizer,
+        synthesizer_fallbacks,
         run_id: resume_id,
     } = input;
     let store = Store::open(db_path)?;
@@ -1909,6 +1920,12 @@ where
     if cursor.phase == 4 && cursor.leg == "insights_done" {
         cursor = phase5_cursor(&cursor);
     }
+    // Partial phase-5 resume still retries missing required extraction.
+    if cursor.phase == 5 && atlas_insights::required_extraction_incomplete(&store, &run_id) {
+        cursor.phase = 4;
+        cursor.leg = "insights".into();
+        save(&store, &run_id, &cursor, &stats)?;
+    }
 
     if cursor.phase == 4 && cursor.leg != "publish" {
         track(4);
@@ -1920,142 +1937,161 @@ where
             ..Default::default()
         };
         let articles = store.atlas_list_articles(&run_id)?;
+        let extraction_incomplete = atlas_insights::required_extraction_incomplete(&store, &run_id);
         if let Some(checkpoint) = atlas_memory::load_checkpoint(&store, &run_id)? {
-            // Crash after the checkpoint commit: never rerun a successful extraction.
-            stats.insights = checkpoint.stats.clone();
-            stats.memories.extracted = checkpoint.claims.len() as u32;
-            stats.memories.extraction = if checkpoint.partial {
-                StepState::Partial
+            if !checkpoint.partial && !extraction_incomplete {
+                // Crash after a complete checkpoint: never rerun a successful extraction.
+                stats.insights = checkpoint.stats.clone();
+                stats.memories.extracted = checkpoint.claims.len() as u32;
+                stats.memories.extraction = StepState::Completed;
             } else {
-                StepState::Completed
+                // Old Partial flag is not authoritative; retry failed packets.
+                stats.insights = checkpoint.stats.clone();
+                stats.memories.extracted = checkpoint.claims.len() as u32;
+                stats.memories.extraction = StepState::Running;
+            }
+        }
+        if matches!(
+            stats.memories.extraction,
+            StepState::Pending | StepState::Running
+        ) {
+            let resume = if extraction_incomplete {
+                None
+            } else {
+                atlas_insights::resume_stats(
+                    &store,
+                    &run_id,
+                    &articles,
+                    &stats.origins,
+                    &stats.insights,
+                )?
             };
-        } else if let Some(existing) = atlas_insights::resume_stats(
-            &store,
-            &run_id,
-            &articles,
-            &stats.origins,
-            &stats.insights,
-        )? {
-            // Published by an older build without a checkpoint: verify in phase 5.
-            stats.memories.extracted = existing.claims;
-            stats.insights = existing;
-            stats.memories.extraction = StepState::Completed;
-            stats.memories.publication = StepState::Completed;
-            cursor = phase5_cursor(&cursor);
-        } else if let Some(secret) = synthesizer.as_ref() {
-            if provider::is_decisions_model(&secret.model) {
-                if articles.is_empty() {
-                    stats.memories.extraction = StepState::Skipped;
-                } else {
-                    emit(AtlasEvent::Note(
+            if let Some(existing) = resume {
+                // Published by an older build without a checkpoint: verify in phase 5.
+                stats.memories.extracted = existing.claims;
+                stats.insights = existing;
+                stats.memories.extraction = StepState::Completed;
+                stats.memories.publication = StepState::Completed;
+                cursor = phase5_cursor(&cursor);
+            } else if let Some(secret) = synthesizer.as_ref() {
+                if provider::is_decisions_model(&secret.model) {
+                    if articles.is_empty() {
+                        stats.memories.extraction = StepState::Skipped;
+                    } else {
+                        emit(AtlasEvent::Note(
                         "Synthesis is a decisions model, so no claims were extracted. Choose a chat model for Synthesis."
                             .into(),
                     ));
-                    stats.memories.extraction = StepState::Blocked;
-                    stats.memories.detail =
-                        "Synthesis is a decisions model; choose a chat model".into();
-                }
-            } else {
-                emit(AtlasEvent::Status("Extracting insights".into()));
-                #[cfg(test)]
-                let mocked = atlas_memory::testing::take_extraction();
-                #[cfg(not(test))]
-                let mocked: Option<Result<atlas_insights::Extraction>> = None;
-                let extracted = match mocked {
-                    Some(result) => result,
-                    None => {
-                        let stored_rsp = store
-                            .app_state_get(crate::osint::wikipedia_rsp::APP_STATE_KEY)
-                            .ok()
-                            .flatten();
-                        match refresh_rsp_index(stored_rsp, user_agent.clone()).await {
-                            Ok(Some(json)) => {
-                                let _ = store.app_state_set(
-                                    crate::osint::wikipedia_rsp::APP_STATE_KEY,
-                                    &json,
-                                );
+                        stats.memories.extraction = StepState::Blocked;
+                        stats.memories.detail =
+                            "Synthesis is a decisions model; choose a chat model".into();
+                    }
+                } else {
+                    emit(AtlasEvent::Status("Extracting insights".into()));
+                    #[cfg(test)]
+                    let mocked = atlas_memory::testing::take_extraction();
+                    #[cfg(not(test))]
+                    let mocked: Option<Result<atlas_insights::Extraction>> = None;
+                    let extracted = match mocked {
+                        Some(result) => result,
+                        None => {
+                            let stored_rsp = store
+                                .app_state_get(crate::osint::wikipedia_rsp::APP_STATE_KEY)
+                                .ok()
+                                .flatten();
+                            match refresh_rsp_index(stored_rsp, user_agent.clone()).await {
+                                Ok(Some(json)) => {
+                                    let _ = store.app_state_set(
+                                        crate::osint::wikipedia_rsp::APP_STATE_KEY,
+                                        &json,
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(err) => emit(AtlasEvent::Note(format!(
+                                    "WP:RSP source reliability index was not refreshed ({err})."
+                                ))),
                             }
-                            Ok(None) => {}
-                            Err(err) => emit(AtlasEvent::Note(format!(
-                                "WP:RSP source reliability index was not refreshed ({err})."
-                            ))),
+                            atlas_insights::extract(
+                                db_path,
+                                &run_id,
+                                secret,
+                                synthesizer_fallbacks,
+                                classifier.as_ref(),
+                                &articles,
+                                &stats.origins,
+                                false,
+                                |done, total| {
+                                    emit(AtlasEvent::InsightProgress { done, total });
+                                },
+                            )
+                            .await
                         }
-                        atlas_insights::extract(
-                            &run_id,
-                            secret,
-                            classifier.as_ref(),
-                            &articles,
-                            &stats.origins,
-                            |done, total| {
-                                emit(AtlasEvent::InsightProgress { done, total });
-                            },
-                        )
-                        .await
-                    }
-                };
-                match extracted {
-                    Ok(extraction) => {
-                        let mut notes = Vec::new();
-                        if let Some(err) = &extraction.extract_error {
-                            notes.push(format!("Some insight packets were skipped ({err})."));
+                    };
+                    match extracted {
+                        Ok(extraction) => {
+                            let mut notes = Vec::new();
+                            if let Some(err) = &extraction.extract_error {
+                                notes.push(format!("Some insight packets were skipped ({err})."));
+                            }
+                            if let Some(err) = &extraction.peer_error {
+                                notes.push(format!(
+                                    "Classifier peer matching failed; using overlap ({err})."
+                                ));
+                            }
+                            if let Some(err) = &extraction.context_error {
+                                notes.push(format!("Context claims were not extracted ({err})."));
+                            }
+                            notes.extend(extraction.warnings.iter().cloned());
+                            notes.extend(extraction.diagnostics.iter().cloned());
+                            for note in &notes {
+                                emit(AtlasEvent::Note(note.clone()));
+                            }
+                            let partial = extraction.extract_error.is_some();
+                            let settled = &extraction.settled;
+                            let checkpoint = atlas_memory::save_checkpoint(
+                                &store,
+                                &run_id,
+                                atlas_memory::CheckpointInput {
+                                    claims: &settled.claims,
+                                    relations: &settled.relations,
+                                    brief: &settled.brief,
+                                    entity_path: &settled.entity_path,
+                                    stats: &settled.stats,
+                                    partial,
+                                    notes,
+                                },
+                            )?;
+                            stats.insights = extraction.settled.stats;
+                            stats.memories.revision = checkpoint.revision;
+                            stats.memories.extracted = checkpoint.claims.len() as u32;
+                            stats.memories.extraction = if partial {
+                                StepState::Partial
+                            } else {
+                                StepState::Completed
+                            };
+                            if partial {
+                                stats.memories.detail = "some insight packets failed".into();
+                            }
                         }
-                        if let Some(err) = &extraction.peer_error {
-                            notes.push(format!(
-                                "Classifier peer matching failed; using overlap ({err})."
-                            ));
+                        Err(err) => {
+                            emit(AtlasEvent::Note(format!(
+                                "Insights were not extracted ({err})."
+                            )));
+                            stats.memories.extraction = StepState::Failed;
+                            stats.memories.detail = format!("insights were not extracted ({err})");
                         }
-                        if let Some(err) = &extraction.context_error {
-                            notes.push(format!("Context claims were not extracted ({err})."));
-                        }
-                        for note in &notes {
-                            emit(AtlasEvent::Note(note.clone()));
-                        }
-                        let partial = extraction.extract_error.is_some()
-                            || extraction.context_error.is_some();
-                        let settled = &extraction.settled;
-                        let checkpoint = atlas_memory::save_checkpoint(
-                            &store,
-                            &run_id,
-                            atlas_memory::CheckpointInput {
-                                claims: &settled.claims,
-                                relations: &settled.relations,
-                                brief: &settled.brief,
-                                entity_path: &settled.entity_path,
-                                stats: &settled.stats,
-                                partial,
-                                notes,
-                            },
-                        )?;
-                        stats.insights = extraction.settled.stats;
-                        stats.memories.revision = checkpoint.revision;
-                        stats.memories.extracted = checkpoint.claims.len() as u32;
-                        stats.memories.extraction = if partial {
-                            StepState::Partial
-                        } else {
-                            StepState::Completed
-                        };
-                        if partial {
-                            stats.memories.detail = "some insight packets failed".into();
-                        }
-                    }
-                    Err(err) => {
-                        emit(AtlasEvent::Note(format!(
-                            "Insights were not extracted ({err})."
-                        )));
-                        stats.memories.extraction = StepState::Failed;
-                        stats.memories.detail = format!("insights were not extracted ({err})");
                     }
                 }
+            } else if articles.is_empty() {
+                stats.memories.extraction = StepState::Skipped;
+            } else {
+                emit(AtlasEvent::Note(
+                    "Synthesis is not configured. No insights extracted.".into(),
+                ));
+                stats.memories.extraction = StepState::Blocked;
+                stats.memories.detail = "Synthesis is not configured".into();
             }
-        } else if articles.is_empty() {
-            stats.memories.extraction = StepState::Skipped;
-        } else {
-            emit(AtlasEvent::Note(
-                "Synthesis is not configured. No insights extracted.".into(),
-            ));
-            stats.memories.extraction = StepState::Blocked;
-            stats.memories.detail = "Synthesis is not configured".into();
-        }
+        } // pending/running extraction
         match stats.memories.extraction {
             StepState::Completed | StepState::Partial if cursor.phase == 4 => {
                 cursor.leg = "publish".into();
@@ -2188,11 +2224,44 @@ fn finish(
     stats: &RunStats,
     emit: &mut impl FnMut(AtlasEvent),
 ) -> Result<Stop> {
-    let outcome = stats.memories.outcome();
-    let note = stats.memories.note();
-    store.atlas_set_state(run_id, outcome.as_state(), &note, true)?;
+    let work = store
+        .atlas_get_all_unit_manifests(run_id)
+        .unwrap_or_default();
+    let packet_outcome = crate::atlas_work::reduce_cycle_outcome(&work);
+    let mut outcome = stats.memories.outcome();
+    if matches!(
+        packet_outcome,
+        crate::atlas_work::CycleOutcome::CompletedWithWarnings(_)
+    ) && outcome == atlas_memory::CycleOutcome::Completed
+    {
+        // Optional packet failures stay completed-with-warnings in the note.
+    }
+    if packet_outcome == crate::atlas_work::CycleOutcome::Partial
+        && outcome == atlas_memory::CycleOutcome::Completed
+    {
+        outcome = atlas_memory::CycleOutcome::Partial;
+    }
+    let mut note = stats.memories.note();
+    if let crate::atlas_work::CycleOutcome::CompletedWithWarnings(warnings) = packet_outcome {
+        if !warnings.is_empty() {
+            note = format!("{note} · {}", warnings.join("; "));
+        }
+    }
+    store.atlas_set_state(
+        run_id,
+        outcome.as_state(),
+        &note,
+        matches!(
+            outcome,
+            atlas_memory::CycleOutcome::Completed
+                | atlas_memory::CycleOutcome::Partial
+                | atlas_memory::CycleOutcome::Blocked
+                | atlas_memory::CycleOutcome::Failed
+        ),
+    )?;
     let status = match outcome {
         atlas_memory::CycleOutcome::Completed => "Pipeline complete".to_string(),
+        atlas_memory::CycleOutcome::Waiting => "Pipeline waiting on remaining work".into(),
         atlas_memory::CycleOutcome::Partial => "Pipeline finished with incomplete work".into(),
         atlas_memory::CycleOutcome::Blocked => "Pipeline blocked by configuration".into(),
         atlas_memory::CycleOutcome::Failed => "Pipeline failed".into(),
@@ -2417,6 +2486,7 @@ pub async fn run_live(
     feed: &[FeedArticle],
     classifier: Option<ProviderSecret>,
     synthesizer: Option<ProviderSecret>,
+    synthesizer_fallbacks: &[ProviderSecret],
     emit: impl FnMut(AtlasEvent) + Send,
 ) -> Result<Stop> {
     let client = reqwest::Client::builder()
@@ -2434,6 +2504,7 @@ pub async fn run_live(
             feed,
             classifier,
             synthesizer,
+            synthesizer_fallbacks,
             run_id: match &live {
                 LiveRun::Run(id) => Some(id.as_str()),
                 _ => None,
@@ -2534,6 +2605,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: Some(secret),
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             move |event| {
@@ -2770,6 +2842,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             |_| {},
@@ -2807,6 +2880,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             |_| {},
@@ -2890,6 +2964,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             |_| {},
@@ -2978,6 +3053,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             |_| {},
@@ -3151,6 +3227,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             move |event| {
@@ -3233,6 +3310,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             move |event| {
@@ -3322,6 +3400,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             |_| {},
@@ -3382,6 +3461,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             |_| {},

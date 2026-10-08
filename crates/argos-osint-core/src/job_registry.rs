@@ -7,7 +7,7 @@
 //! and every handle reaches a terminal or recoverable state:
 //!
 //! - an explicit [`JobHandle::finish`] (completed, partial, failed, paused,
-//!   cancelled);
+//!   waiting, blocked, cancelled);
 //! - `Drop` without finishing (panic, abort, early return) records a failure;
 //! - a process that exits is detected by [`recover_orphans`] through the
 //!   per-process heartbeat row, and its open jobs become interrupted failures.
@@ -123,6 +123,14 @@ pub enum Finish {
     Paused {
         summary: String,
     },
+    /// Eligible work remains (background retries, indexing). Not terminal.
+    Waiting {
+        summary: String,
+    },
+    /// Required configuration is missing. Not terminal; resume after the fix.
+    Blocked {
+        summary: String,
+    },
     Cancelled {
         summary: String,
     },
@@ -148,6 +156,8 @@ impl Finish {
             Self::Partial { .. } => "partial",
             Self::Failed { .. } => "failed",
             Self::Paused { .. } => "paused",
+            Self::Waiting { .. } => "waiting",
+            Self::Blocked { .. } => "blocked",
             Self::Cancelled { .. } => "cancelled",
         }
     }
@@ -376,11 +386,13 @@ impl JobHandle {
                 (category.clone(), summary.clone(), String::new())
             }
             Finish::Paused { summary } => (String::new(), summary.clone(), String::new()),
+            Finish::Waiting { summary } => (String::new(), summary.clone(), String::new()),
+            Finish::Blocked { summary } => ("blocked".into(), summary.clone(), String::new()),
             Finish::Cancelled { summary } => ("cancelled".into(), summary.clone(), String::new()),
         };
         let summary = events::redact(&summary);
         let state = outcome.state();
-        let terminal = state != "paused";
+        let terminal = !matches!(state, "paused" | "waiting" | "blocked");
         let _ = conn.execute(
             "UPDATE argos_jobs SET state=?2, updated_at=?3, heartbeat_at=?3, active_since='',
                 active_ms=?4, finished_at=CASE WHEN ?5 THEN ?3 ELSE '' END,
@@ -403,6 +415,8 @@ impl JobHandle {
             Finish::Partial { summary } => (Severity::Warn, format!("Partial: {summary}")),
             Finish::Failed { summary, .. } => (Severity::Error, format!("Failed: {summary}")),
             Finish::Paused { .. } => (Severity::Info, "Paused".to_string()),
+            Finish::Waiting { summary } => (Severity::Info, format!("Waiting: {summary}")),
+            Finish::Blocked { summary } => (Severity::Warn, format!("Blocked: {summary}")),
             Finish::Cancelled { .. } => (Severity::Warn, "Cancelled".to_string()),
         };
         let _ = events::record_event(
@@ -794,6 +808,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "no duplicate top-level rows");
+    }
+
+    #[test]
+    fn waiting_and_blocked_are_not_terminal() {
+        let (_dir, path) = db();
+        let waiting_spec = JobSpec::new("atlas", "atlas_cycle", "waiting cycle");
+        let waiting_id = waiting_spec.id.clone();
+        JobHandle::begin(&path, waiting_spec)
+            .unwrap()
+            .finish(Finish::Waiting {
+                summary: "indexing continues".into(),
+            });
+        let waiting = row(&path, &waiting_id);
+        assert_eq!(waiting.state, "waiting");
+        assert!(waiting.finished_at.is_empty(), "waiting is not terminal");
+
+        let blocked_spec = JobSpec::new("atlas", "atlas_cycle", "blocked cycle");
+        let blocked_id = blocked_spec.id.clone();
+        JobHandle::begin(&path, blocked_spec)
+            .unwrap()
+            .finish(Finish::Blocked {
+                summary: "embeddings disabled".into(),
+            });
+        let blocked = row(&path, &blocked_id);
+        assert_eq!(blocked.state, "blocked");
+        assert!(blocked.finished_at.is_empty(), "blocked is not terminal");
     }
 
     #[test]

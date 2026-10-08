@@ -100,7 +100,7 @@ async fn failure_is_durable_correlated_bounded_and_harmless() {
         panic!("{:?}", report.outcome)
     };
     assert_eq!(f.category, Category::Server);
-    assert_eq!((report.requests(), hits), (2, 2));
+    assert_eq!((report.requests(), hits), (4, 4));
     // One job, two attempt children, all failed and linked.
     let state: String = conn(&fx)
         .query_row(
@@ -116,7 +116,7 @@ async fn failure_is_durable_correlated_bounded_and_harmless() {
             "SELECT COUNT(*) FROM argos_jobs WHERE parent_id=?1 AND state='failed'",
             &report.job_id
         ),
-        2
+        4
     );
     // The failure event exists before the report is returned and carries details.
     assert!(!report.event_id.is_empty());
@@ -135,10 +135,10 @@ async fn failure_is_durable_correlated_bounded_and_harmless() {
         .graph_explanation_record(&fx.memory_id)
         .unwrap()
         .unwrap();
-    assert_eq!((rec.state.as_str(), rec.attempts), ("failed", 2));
+    assert_eq!((rec.state.as_str(), rec.attempts), ("failed", 4));
     let lines = record_detail_lines(&rec).join("\n");
-    assert!(lines.contains("Requests: 2 of 2"), "{lines}");
-    assert!(lines.contains("Attempt 2"), "{lines}");
+    assert!(lines.contains("Requests: 4 of 4"), "{lines}");
+    assert!(lines.contains("Attempt 4"), "{lines}");
     // Nothing destructive: memory kept, nothing published, no failed index work.
     assert!(store.get_memory(&fx.memory_id).unwrap().is_some());
     assert!(store.graph_summary_entry(&fx.memory_id).unwrap().is_none());
@@ -166,7 +166,7 @@ async fn partial_streamed_text_is_never_saved() {
         Faults::default(),
     )
     .await;
-    assert_eq!(hits, 2);
+    assert_eq!(hits, 4);
     assert!(
         matches!(report.outcome, ExplainOutcome::Failed(_)),
         "{:?}",
@@ -224,7 +224,7 @@ async fn malformed_and_empty_results_fail_without_publishing() {
         Faults::default(),
     )
     .await;
-    assert_eq!(hits, 2);
+    assert_eq!(hits, 4);
     assert_eq!(
         report.attempts[0].failure.as_ref().unwrap().category,
         Category::MalformedPayload
@@ -354,7 +354,7 @@ async fn late_completion_for_a_changed_or_deleted_memory_is_not_published() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auth_failure_sends_one_request_gives_guidance_and_redacts() {
+async fn auth_failure_consumes_primary_budget_gives_guidance_and_redacts() {
     let fx = fixture();
     let body = r#"{"error":{"message":"Incorrect API key sk-mocksecretvalue12345","code":"invalid_api_key"}}"#;
     let server = serve(vec![Reply::Json(401, body.into())]).await;
@@ -368,7 +368,7 @@ async fn auth_failure_sends_one_request_gives_guidance_and_redacts() {
         Faults::default(),
     )
     .await;
-    assert_eq!(server.hits(), 1);
+    assert_eq!(server.hits(), 4);
     let ExplainOutcome::Failed(f) = &report.outcome else {
         panic!()
     };

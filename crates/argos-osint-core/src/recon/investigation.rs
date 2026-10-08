@@ -3265,6 +3265,8 @@ pub use directives::context_targets;
 use tool_io::coordinates_in_text;
 #[cfg(test)]
 pub use tool_io::prompt_dates;
+#[allow(unused_imports)]
+pub use tool_io::SearchQueryArtifact;
 pub use tool_io::{
     accept_bindings, bind_arguments, catalog_inputs, consumers_of, dependencies, dependency,
     domains_in, input_kinds, known_kind, output_kinds, packages_in, per_platform_targets, pickable,

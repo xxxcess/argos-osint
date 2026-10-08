@@ -48,7 +48,14 @@ impl JobStatusFilter {
     fn states(self) -> &'static [&'static str] {
         match self {
             Self::All => &[],
-            Self::Active => &["running", "queued", "retry_scheduled", "paused"],
+            Self::Active => &[
+                "running",
+                "queued",
+                "retry_scheduled",
+                "paused",
+                "waiting",
+                "blocked",
+            ],
             Self::Retrying => &["retry_scheduled"],
             Self::Failed => &["failed", "partial", "cancelled"],
             Self::Completed => &["completed"],
@@ -119,7 +126,7 @@ impl JobRow {
     pub fn is_active(&self) -> bool {
         matches!(
             self.state.as_str(),
-            "running" | "queued" | "retry_scheduled" | "paused"
+            "running" | "queued" | "retry_scheduled" | "paused" | "waiting" | "blocked"
         )
     }
 
@@ -135,6 +142,7 @@ impl JobRow {
             "queued" => "queued",
             "retry_scheduled" => "retry wait",
             "paused" => "paused",
+            "waiting" => "waiting",
             "completed" => "completed",
             "partial" => "partial",
             "failed" => "failed",
@@ -363,7 +371,7 @@ pub fn list_jobs(conn: &Connection, filter: &JobFilter, limit: usize) -> Result<
         args.push(Box::new(filter.since.clone()));
     }
     sql.push_str(
-        " ORDER BY CASE WHEN j.state IN ('running','queued','retry_scheduled','paused') AND j.kind <> 'service' THEN 0
+        " ORDER BY CASE WHEN j.state IN ('running','queued','retry_scheduled','paused','waiting','blocked') AND j.kind <> 'service' THEN 0
                         WHEN j.kind = 'service' THEN 2 ELSE 1 END,
                    j.updated_at DESC, j.id
           LIMIT ?",
@@ -382,7 +390,7 @@ pub fn job_counts(conn: &Connection) -> Result<JobCounts> {
     let since = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
     Ok(conn.query_row(
         "SELECT
-            IFNULL(SUM(state IN ('running','paused')),0),
+            IFNULL(SUM(state IN ('running','paused','waiting','blocked')),0),
             IFNULL(SUM(state='queued'),0),
             IFNULL(SUM(state='retry_scheduled'),0),
             IFNULL(SUM(state IN ('failed','partial')),0),

@@ -16,7 +16,7 @@ use crate::provider::{ModelAssignment, RoleDefaults};
 #[test]
 fn test_all_catalog_tools_mapped_to_categories() {
     let reg = registry();
-    assert_eq!(reg.len(), 59, "Catalog must contain exactly 59 tools");
+    assert_eq!(reg.len(), 61, "Catalog must contain exactly 61 tools");
 
     for tool in reg {
         let cat = IntelligenceCategory::for_tool(tool.id);
@@ -176,14 +176,17 @@ fn test_role_defaults_inheritance_hierarchy() {
         recon: ModelAssignment {
             provider: "grok".into(),
             model: "grok-4.6".into(),
+            ..Default::default()
         },
         synthesis: ModelAssignment {
             provider: "openai".into(),
             model: "gpt-4.5".into(),
+            ..Default::default()
         },
         classifier: ModelAssignment {
             provider: "openrouter".into(),
             model: "typesafe/jev-1.13".into(),
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -221,6 +224,7 @@ fn test_role_defaults_inheritance_hierarchy() {
     defaults.evidence_curator = ModelAssignment {
         provider: "local".into(),
         model: "mistral-7b".into(),
+        ..Default::default()
     };
     let (curator_explicit, parent) = defaults.resolve_role("evidence_curator");
     assert_eq!(parent, None);

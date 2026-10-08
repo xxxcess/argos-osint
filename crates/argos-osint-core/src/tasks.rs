@@ -2,9 +2,8 @@
 //!
 //! One scheduler owns admission, retries, leases and lifecycle. Workflow code
 //! (Recon, Atlas, Intel Recon, Summarization) submits jobs; this module records
-//! attempts and enforces the unified retry policy (Summarization: 2 total
-//! attempts; other LLM ops: 3) and the shared two-concurrent-LLM-requests cap
-//! per provider/account.
+//! attempts and enforces the unified retry policy (primary: 4 total attempts)
+//! and the shared two-concurrent-LLM-requests cap per provider/account.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -15,9 +14,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Default total provider attempts for Summarization tasks (first try counts).
-pub const SUMMARIZATION_ATTEMPTS: u32 = 2;
+/// Shared chain: primary is initial + 3 retries.
+pub const SUMMARIZATION_ATTEMPTS: u32 = crate::provider_chain::PRIMARY_ATTEMPTS;
 /// Default total provider attempts for other retry-eligible LLM operations.
-pub const DEFAULT_LLM_ATTEMPTS: u32 = 3;
+pub const DEFAULT_LLM_ATTEMPTS: u32 = crate::provider_chain::PRIMARY_ATTEMPTS;
 /// Shared concurrent LLM requests per provider/account across all roles.
 pub const DEFAULT_PROVIDER_CONCURRENCY: usize = 2;
 
@@ -1842,9 +1842,9 @@ mod tests {
     }
 
     #[test]
-    fn summarization_gets_two_attempts_other_llm_three() {
-        assert_eq!(OperationKind::Summarization.attempt_cap(), 2);
-        assert_eq!(OperationKind::OtherLlm.attempt_cap(), 3);
+    fn summarization_gets_four_attempts_other_llm_four() {
+        assert_eq!(OperationKind::Summarization.attempt_cap(), 4);
+        assert_eq!(OperationKind::OtherLlm.attempt_cap(), 4);
         assert!(can_retry(
             OperationKind::Summarization,
             1,
@@ -1852,7 +1852,7 @@ mod tests {
         ));
         assert!(!can_retry(
             OperationKind::Summarization,
-            2,
+            4,
             ErrorCategory::RateLimit
         ));
         assert!(can_retry(
@@ -1862,7 +1862,7 @@ mod tests {
         ));
         assert!(!can_retry(
             OperationKind::OtherLlm,
-            3,
+            4,
             ErrorCategory::TemporaryNetwork
         ));
         assert!(!can_retry(

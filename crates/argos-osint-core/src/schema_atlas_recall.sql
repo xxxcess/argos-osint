@@ -12,6 +12,9 @@ CREATE TABLE IF NOT EXISTS atlas_work_units (
     attempt_history TEXT NOT NULL,
     next_eligible_at TEXT,
     terminal_reason TEXT,
+    output_json TEXT NOT NULL DEFAULT '',
+    disposition TEXT NOT NULL DEFAULT '',
+    receipt_json TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (run_id, unit_id)
 );
 

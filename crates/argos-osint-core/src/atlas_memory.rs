@@ -73,6 +73,7 @@ impl StepState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CycleOutcome {
     Completed,
+    Waiting,
     Partial,
     Blocked,
     Failed,
@@ -83,6 +84,7 @@ impl CycleOutcome {
     pub fn as_state(self) -> &'static str {
         match self {
             Self::Completed => "completed",
+            Self::Waiting => "waiting",
             Self::Partial => "partial",
             Self::Blocked => "blocked",
             Self::Failed => "failed",
@@ -132,9 +134,16 @@ impl MemoryPhase {
         if self.extraction == Blocked || self.indexing == Blocked {
             return CycleOutcome::Blocked;
         }
+        if matches!(self.extraction, Pending | Running)
+            || matches!(self.publication, Pending | Running)
+            || matches!(self.indexing, Pending | Running)
+        {
+            return CycleOutcome::Waiting;
+        }
         if self.extraction == Partial
             || self.publication == Partial
-            || matches!(self.indexing, Partial | Failed)
+            || self.indexing == Partial
+            || self.indexing == Failed
         {
             return CycleOutcome::Partial;
         }
@@ -142,7 +151,7 @@ impl MemoryPhase {
     }
 
     /// Dedicated fifth-phase progress row, e.g.
-    /// "Memories: 18 created · 4 reused · 22/22 indexed".
+    /// "Memories: 18 new claims · 4 reused · 0 brief · 22/22 index ready".
     pub fn line(&self) -> String {
         use StepState::*;
         if !self.started() {
@@ -172,20 +181,27 @@ impl MemoryPhase {
             }
             return line;
         }
-        let mut parts = vec![
-            format!("{} created", self.created),
-            format!("{} reused", self.reused),
-        ];
+        let mut parts = vec![format!("{} new claims", self.created)];
+        if self.reused > 0 {
+            parts.push(format!("{} reused", self.reused));
+        }
         if self.repaired > 0 {
             parts.push(format!("{} repaired", self.repaired));
         }
         if self.rejected > 0 {
             parts.push(format!("{} rejected", self.rejected));
         }
+        parts.push(if self.brief {
+            "1 brief".into()
+        } else {
+            "0 brief".into()
+        });
         match self.indexing {
             Blocked => parts.push(INDEXING_DISABLED_LINE.into()),
-            Pending | Running => parts.push(format!("indexing {}/{}", self.indexed, self.required)),
-            _ => parts.push(format!("{}/{} indexed", self.indexed, self.required)),
+            Pending | Running => {
+                parts.push(format!("{}/{} index ready", self.indexed, self.required))
+            }
+            _ => parts.push(format!("{}/{} index ready", self.indexed, self.required)),
         }
         format!("Memories: {}", parts.join(" · "))
     }
@@ -247,7 +263,8 @@ impl MemoryPhase {
         } else if coverage.complete() {
             StepState::Completed
         } else {
-            StepState::Partial
+            // Eligible index work remains; background retries continue.
+            StepState::Running
         };
         if !verification.memories_ok() {
             if matches!(self.publication, StepState::Completed | StepState::Skipped) {
@@ -265,7 +282,7 @@ impl MemoryPhase {
             );
         } else if self.indexing == StepState::Blocked {
             self.detail = INDEXING_DISABLED_LINE.into();
-        } else if self.indexing == StepState::Partial {
+        } else if matches!(self.indexing, StepState::Running | StepState::Pending) {
             self.detail = format!(
                 "{} of {} memories not yet indexed; retries continue in the background",
                 self.pending, self.required
@@ -624,7 +641,7 @@ pub fn refresh_run_indexing(store: &Store, run_id: &str) -> Result<Option<Memory
 pub fn refresh_incomplete_runs(store: &Store, limit: usize) -> Result<usize> {
     let ids: Vec<String> = {
         let mut stmt = store.conn.prepare(
-            "SELECT id FROM atlas_runs WHERE state IN ('partial','blocked') AND phase=5
+            "SELECT id FROM atlas_runs WHERE state IN ('partial','blocked','waiting') AND phase=5
              ORDER BY started_at DESC LIMIT ?1",
         )?;
         let rows = stmt
@@ -1259,6 +1276,8 @@ mod tests {
             extract_error: partial.then(|| "packet 2 timed out".to_string()),
             peer_error: None,
             context_error: None,
+            warnings: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -1337,6 +1356,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: synth,
+                synthesizer_fallbacks: &[],
                 run_id: Some(RUN),
             },
             move |event| sink.lock().unwrap().push(event),
@@ -1397,7 +1417,10 @@ mod tests {
         assert_eq!((m.extracted, m.accepted, m.created, m.reused), (2, 2, 2, 0));
         assert!(m.brief);
         assert_eq!((m.indexed, m.required), (3, 3));
-        assert_eq!(m.line(), "Memories: 2 created · 0 reused · 3/3 indexed");
+        assert_eq!(
+            m.line(),
+            "Memories: 2 new claims · 1 brief · 3/3 index ready"
+        );
         // Visible in the same session (SQLite list), brief counted separately.
         assert_eq!(atlas_memory_count(&store), 3);
         assert!(ran.events.iter().any(
@@ -1493,10 +1516,10 @@ mod tests {
         assert_eq!(ran.stop, Stop::Finished);
         let store = Store::open(&path).unwrap();
         let (state, note, stats, cursor) = run_state(&store);
-        assert_eq!(state, "partial");
-        assert_eq!(stats.memories.indexing, StepState::Partial);
+        assert_eq!(state, "waiting");
+        assert_eq!(stats.memories.indexing, StepState::Running);
         assert_eq!((stats.memories.indexed, stats.memories.required), (0, 3));
-        assert!(note.contains("0/3 indexed"), "{note}");
+        assert!(note.contains("0/3 index ready"), "{note}");
         assert_eq!(
             atlas_memory_count(&store),
             3,
@@ -1506,12 +1529,12 @@ mod tests {
         // Jobs: one cycle job (partial) with the phase 4 and 5 children.
         let jobs = cycle_jobs(&store);
         assert_eq!(jobs.len(), 3, "{jobs:?}");
-        assert_eq!(jobs[0].1, "partial", "{jobs:?}");
+        assert_eq!(jobs[0].1, "waiting", "{jobs:?}");
         assert_eq!(
             &jobs[1..],
             &[
                 (format!("{}-p4", jobs[0].0), "completed".into(), 1),
-                (format!("{}-p5", jobs[0].0), "partial".into(), 1),
+                (format!("{}-p5", jobs[0].0), "waiting".into(), 1),
             ]
         );
         drop(failing);
@@ -1565,7 +1588,7 @@ mod tests {
         }
         testing::clear();
         let store = Store::open(&path).unwrap();
-        assert_eq!(run_state(&store).0, "partial");
+        assert_eq!(run_state(&store).0, "waiting");
         // Index pool drains the durable outbox (retries are due immediately here).
         store
             .conn
@@ -1580,7 +1603,7 @@ mod tests {
         assert_eq!(phase.indexing, StepState::Completed);
         let (state, note, _, _) = run_state(&store);
         assert_eq!(state, "completed");
-        assert!(note.contains("3/3 indexed"), "{note}");
+        assert!(note.contains("3/3 index ready"), "{note}");
     }
 
     #[tokio::test]
@@ -1754,6 +1777,7 @@ mod tests {
                 feed: &[],
                 classifier: None,
                 synthesizer: None,
+                synthesizer_fallbacks: &[],
                 run_id: None,
             },
             |_| {},
@@ -1805,7 +1829,7 @@ mod tests {
         let (state, note, stats, _) = run_state(&store);
         assert_eq!(state, "completed");
         assert_eq!((stats.memories.indexed, stats.memories.required), (3, 3));
-        assert!(note.contains("3/3 indexed"), "{note}");
+        assert!(note.contains("3/3 index ready"), "{note}");
     }
 
     // ---- Repair Atlas memories -------------------------------------------
@@ -2099,7 +2123,7 @@ mod tests {
         };
         assert_eq!(
             phase.line(),
-            "Memories: 18 created · 4 reused · 22/22 indexed"
+            "Memories: 18 new claims · 4 reused · 0 brief · 22/22 index ready"
         );
         assert_eq!(phase.outcome(), CycleOutcome::Completed);
         phase.indexing = StepState::Blocked;

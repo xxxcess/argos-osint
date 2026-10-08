@@ -4007,7 +4007,7 @@ struct Streamed {
 
 /// Streams one completion. While text arrives, only the hard ceiling and a 60s idle gap
 /// stop it. Before the first token (and for the non-streaming repair call) `limit` applies.
-/// A provider that rejects streaming returns the whole answer at once with no error.
+/// Streaming is one-shot; a provider that rejects it returns that error.
 #[allow(clippy::too_many_arguments)]
 async fn await_completion(
     secret: &crate::secrets::ProviderSecret,

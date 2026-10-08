@@ -47,14 +47,15 @@ impl IntelligenceCategory {
     pub fn for_tool(tool_id: &str) -> Option<Self> {
         let tool = canonical_tool_id(tool_id);
         match tool {
-            // Web discovery (7)
+            // Web discovery (8)
             "firecrawl_search"
             | "firecrawl_scrape"
             | "firecrawl_map"
             | "firecrawl_batch_scrape"
             | "firecrawl_crawl"
             | "firecrawl_extract"
-            | "sociavault_google_search" => Some(Self::WebDiscovery),
+            | "sociavault_google_search"
+            | "dork_generate" => Some(Self::WebDiscovery),
 
             // News/events (5)
             "newsapi_search" | "newsapi_headlines" | "gnews_search" | "newsdata_latest"
@@ -90,10 +91,11 @@ impl IntelligenceCategory {
             | "sociavault_profile"
             | "sociavault_user_content" => Some(Self::SocialContent),
 
-            // Public account corroboration (3)
-            "keybase_identity" | "stackexchange_users" | "wikipedia_users" => {
-                Some(Self::PublicAccountCorroboration)
-            }
+            // Public account corroboration (4)
+            "keybase_identity"
+            | "stackexchange_users"
+            | "wikipedia_users"
+            | "whatsmyname_lookup" => Some(Self::PublicAccountCorroboration),
 
             // Domain/network relationships (6)
             "crtsh_certificates"
@@ -244,9 +246,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_59_tools_mapped_to_categories() {
+    fn all_61_tools_mapped_to_categories() {
         let tools = registry();
-        assert_eq!(tools.len(), 59, "catalog has exactly 59 tools");
+        assert_eq!(tools.len(), 61, "catalog has exactly 61 tools");
 
         for tool in tools {
             let cat = IntelligenceCategory::for_tool(tool.id);

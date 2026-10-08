@@ -69,9 +69,14 @@ fn world_scale(zoom: u8, width: f64, height: f64) -> f64 {
     (width / 2.0).min(height) * f64::from(1_u16 << zoom.min(4))
 }
 
-/// World view is drawn a little smaller than the canvas so land has room around it.
+/// Linear factor vs the previous default (0.82). Clamped so the globe still fits.
+const WORLD_VIEW_FACTOR: f64 = 0.82 * 1.20;
+
+/// World view: ~1.20× the previous linear scale, uniformly around the current
+/// center. Small terminals clamp to the fit scale instead of cropping continents.
 fn world_view_scale(width: f64, height: f64) -> f64 {
-    world_scale(0, width, height) * 0.82
+    let fit = world_scale(0, width, height);
+    (fit * WORLD_VIEW_FACTOR).min(fit)
 }
 
 /// Center and scale that place the country's outline in the middle of the view.
@@ -913,5 +918,31 @@ mod tests {
             panic!("land uses rgb");
         };
         assert!(hot_r > cold_r);
+    }
+
+    #[test]
+    fn default_world_scale_is_enlarged_and_fits_small_terminals() {
+        for (cols, rows) in [(160_u16, 50_u16), (120, 40), (80, 24), (40, 12)] {
+            let width = f64::from(cols.saturating_sub(2)) * 2.0;
+            let height = f64::from(rows.saturating_sub(2)) * 4.0;
+            let fit = world_scale(0, width, height);
+            let view = world_view_scale(width, height);
+            assert!(view <= fit + 1e-9, "{cols}x{rows} view {view} fit {fit}");
+            assert!(
+                (view - fit * WORLD_VIEW_FACTOR).abs() < 1e-9 || view == fit,
+                "{cols}x{rows}"
+            );
+            for (lon, lat) in [(-170.0, 70.0), (170.0, -50.0), (0.0, 0.0), (120.0, 30.0)] {
+                let (x, y) = project(lon, lat, 0.0, 15.0, view, width, height);
+                assert!(
+                    x > -width * 0.05 && x < width * 1.05,
+                    "{cols}x{rows} {lon},{lat} x={x}"
+                );
+                assert!(
+                    y > -height * 0.15 && y < height * 1.15,
+                    "{cols}x{rows} {lon},{lat} y={y}"
+                );
+            }
+        }
     }
 }

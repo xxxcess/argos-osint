@@ -23,7 +23,7 @@ use crossterm::event::{
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::Stdout;
@@ -206,6 +206,7 @@ pub enum Overlay {
     Choice(ChoiceKind),
     IntelRecon,
     Palette,
+    AddFallback,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,6 +301,7 @@ pub enum FieldId {
     GoogleModelFilter,
     NvidiaModelFilter,
     RouterModelFilter,
+    FallbackFilter,
     Composer,
 }
 
@@ -356,6 +358,20 @@ impl DefaultsRole {
             DefaultsRole::EntityResolver => "defaults.entity_resolver",
             DefaultsRole::ClaimAssessor => "defaults.claim_assessor",
             DefaultsRole::InvestigationController => "defaults.investigation_controller",
+        }
+    }
+
+    pub fn role_key(self) -> &'static str {
+        match self {
+            DefaultsRole::Recon => "recon",
+            DefaultsRole::ToolPicker => "tool-picker",
+            DefaultsRole::Synthesis => "synthesis",
+            DefaultsRole::Classifier => "classifier",
+            DefaultsRole::Summarization => "summarization",
+            DefaultsRole::EvidenceCurator => "evidence_curator",
+            DefaultsRole::EntityResolver => "entity_resolver",
+            DefaultsRole::ClaimAssessor => "claim_assessor",
+            DefaultsRole::InvestigationController => "investigation_controller",
         }
     }
 
@@ -446,6 +462,14 @@ pub enum ButtonId {
     SaveInvestigationController,
     DefaultRole(DefaultsRole),
     RefreshModels,
+    AddFallback,
+    DeleteFallback,
+    MoveFallbackUp,
+    MoveFallbackDown,
+    FallbackItem(usize),
+    FallbackPick(usize),
+    FallbackTab(ProviderPage),
+    ConfirmAddFallback,
     #[allow(dead_code)]
     NewThread,
     DeleteThread,
@@ -458,6 +482,9 @@ pub enum ButtonId {
     OsintAttach,
     OsintStartRecon,
     OsintCancel,
+    OsintRefreshDataset,
+    OsintRefreshTemplates,
+    OsintSearchSelected,
     OsintToggle,
     OsintRaw,
     OsintPrev,
@@ -634,6 +661,14 @@ enum WorkEvent {
     },
     OsintDone {
         outcome: Result<(String, osint::ToolResult), String>,
+    },
+    DatasetRefreshProgress {
+        dataset: String,
+        phase: String,
+    },
+    DatasetRefreshDone {
+        dataset: String,
+        outcome: Result<String, String>,
     },
     CatalogDone {
         role: DefaultsRole,
@@ -832,6 +867,8 @@ pub struct App {
     pub history_pos: usize,
     running: HashMap<String, Arc<AtomicBool>>,
     osint_cancel: Option<Arc<AtomicBool>>,
+    pub dataset_refresh_running: Option<String>,
+    dataset_refresh_cancel: Option<Arc<AtomicBool>>,
     pub recon_provider: String,
     pub recon_model: String,
     pub picker_provider: String,
@@ -855,6 +892,11 @@ pub struct App {
     pub model_catalog: Vec<ListedModel>,
     pub catalog_cache: HashMap<String, Vec<ListedModel>>,
     pub catalog_for: String,
+    pub fallback_sel: usize,
+    pub fallback_popup_tab: ProviderPage,
+    pub fallback_popup_filter: String,
+    pub fallback_popup_sel: usize,
+    pub fallback_popup_restore: Option<Target>,
     pub choice_items: Vec<ChoiceItem>,
     pub choice_sel: usize,
     pub choice_note: String,
@@ -1207,6 +1249,8 @@ impl App {
             history_pos: 0,
             running: HashMap::new(),
             osint_cancel: None,
+            dataset_refresh_running: None,
+            dataset_refresh_cancel: None,
             recon_provider: provider::effective_kind(&recon_default),
             recon_model: recon_default.model,
             picker_provider: provider::effective_kind(&picker_default),
@@ -1230,6 +1274,11 @@ impl App {
             model_catalog: Vec::new(),
             catalog_cache: HashMap::new(),
             catalog_for: String::new(),
+            fallback_sel: 0,
+            fallback_popup_tab: ProviderPage::Google,
+            fallback_popup_filter: String::new(),
+            fallback_popup_sel: 0,
+            fallback_popup_restore: None,
             choice_items: Vec::new(),
             choice_sel: 0,
             choice_note: String::new(),
@@ -2305,6 +2354,7 @@ impl App {
             FieldId::GoogleModelFilter => &self.google_model_filter,
             FieldId::NvidiaModelFilter => &self.nvidia_model_filter,
             FieldId::RouterModelFilter => &self.router_model_filter,
+            FieldId::FallbackFilter => &self.fallback_popup_filter,
             FieldId::Composer => &self.input,
         }
     }
@@ -2364,6 +2414,7 @@ impl App {
             FieldId::GoogleModelFilter => &mut self.google_model_filter,
             FieldId::NvidiaModelFilter => &mut self.nvidia_model_filter,
             FieldId::RouterModelFilter => &mut self.router_model_filter,
+            FieldId::FallbackFilter => &mut self.fallback_popup_filter,
             FieldId::Composer => &mut self.input,
         }
     }
@@ -3760,6 +3811,8 @@ impl App {
         let synthesizer = provider::role_secret(&self.auth, &self.settings, "synthesis")
             .ok()
             .filter(|secret| provider::resolved_key(secret).is_some());
+        let synthesizer_fallbacks =
+            provider::role_fallback_secrets(&self.auth, &self.settings, "synthesis");
         let tx = self.work_tx.clone();
         let user_agent =
             osint::effective_user_agent(Some(&self.settings.osint_user_agent)).to_string();
@@ -3774,6 +3827,7 @@ impl App {
                 &feed,
                 classifier,
                 synthesizer,
+                &synthesizer_fallbacks,
                 move |event| {
                     let _ = emit_tx.send(WorkEvent::Atlas(event));
                 },
@@ -3988,6 +4042,62 @@ impl App {
         Ok(())
     }
 
+    fn search_selected_dork(&mut self) -> Result<String> {
+        let query = self
+            .osint_result
+            .as_ref()
+            .and_then(|(_, r)| {
+                if r.tool_id == "dork_generate" {
+                    if let Some(arr) = r.observations.as_array() {
+                        arr.first()
+                            .and_then(|item| item.get("generated_query").and_then(Value::as_str))
+                            .map(String::from)
+                    } else if let Some(arr) =
+                        r.observations.get("artifacts").and_then(Value::as_array)
+                    {
+                        arr.first()
+                            .and_then(|item| item.get("generated_query").and_then(Value::as_str))
+                            .map(String::from)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                let val: Value = serde_json::from_str(&self.osint_input).ok()?;
+                val.get("query")
+                    .or_else(|| val.get("objective"))
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
+            .ok_or_else(|| anyhow::anyhow!("No generated query found to search"))?;
+
+        if self.tool_needs_key("firecrawl_search") {
+            return Err(anyhow::anyhow!(
+                "Firecrawl API key is required to execute search"
+            ));
+        }
+
+        if let Some(pos) = osint::registry()
+            .iter()
+            .position(|t| t.id == "firecrawl_search")
+        {
+            self.tool_sel = pos;
+            self.osint_input = serde_json::to_string_pretty(&json!({
+                "query": query,
+                "limit": 5,
+            }))?;
+            self.run_osint()?;
+            Ok(format!("Searching Firecrawl for \"{}\"", query))
+        } else {
+            Err(anyhow::anyhow!(
+                "firecrawl_search tool not found in catalog"
+            ))
+        }
+    }
+
     fn on_work_event(&mut self, event: WorkEvent) -> bool {
         match event {
             WorkEvent::ReconStage { thread_id, stage } => {
@@ -4082,6 +4192,28 @@ impl App {
                         self.push_log("error", format!("OSINT failed: {err}"));
                         self.status = err;
                     }
+                }
+                true
+            }
+            WorkEvent::DatasetRefreshProgress { dataset, phase } => {
+                self.status = format!("{}: {}", dataset, phase);
+                true
+            }
+            WorkEvent::DatasetRefreshDone { dataset, outcome } => {
+                self.dataset_refresh_running = None;
+                self.dataset_refresh_cancel = None;
+                match outcome {
+                    Ok(msg) => {
+                        self.status = msg.clone();
+                        self.push_log("info", format!("{dataset}: {msg}"));
+                    }
+                    Err(err) => {
+                        self.status = format!("{dataset} refresh failed: {err}");
+                        self.push_log("error", format!("{dataset} dataset refresh failed: {err}"));
+                    }
+                }
+                if self.module == Some(ModuleId::Jobs) {
+                    self.reload_jobs();
                 }
                 true
             }
@@ -4398,7 +4530,178 @@ impl App {
         }
     }
 
+    fn current_fallbacks(&self) -> &[argos_osint_core::provider::ModelRoute] {
+        self.settings
+            .defaults
+            .role(self.defaults_role.role_key())
+            .map(|a| a.fallbacks.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn mutate_role_fallbacks<F>(&mut self, op: F) -> Result<String>
+    where
+        F: FnOnce(&mut argos_osint_core::provider::ModelAssignment) -> Result<String, String>,
+    {
+        let role = self.defaults_role;
+        let assignment = self
+            .settings
+            .defaults
+            .role_mut(role.role_key())
+            .ok_or_else(|| anyhow::anyhow!("unknown role"))?;
+        let message = op(assignment).map_err(|e| anyhow::anyhow!(e))?;
+        self.save_settings()?;
+        Ok(message)
+    }
+
+    fn open_add_fallback(&mut self) {
+        self.fallback_popup_restore = Some(self.focus);
+        self.fallback_popup_tab = ProviderPage::Google;
+        self.fallback_popup_filter.clear();
+        self.fallback_popup_sel = 0;
+        self.scrolls.popup = 0;
+        self.overlay = Overlay::AddFallback;
+        self.ensure_fallback_catalog();
+        self.set_focus(Target::Field(FieldId::FallbackFilter));
+        self.status = format!(
+            "Add fallback · {} · tried top to bottom after primary retries (4 then 3 each)",
+            self.defaults_role.label()
+        );
+    }
+
+    fn cycle_fallback_tab(&mut self, delta: i32) {
+        const TABS: [ProviderPage; 3] = [
+            ProviderPage::Google,
+            ProviderPage::Nvidia,
+            ProviderPage::OpenRouter,
+        ];
+        let idx = TABS
+            .iter()
+            .position(|p| *p == self.fallback_popup_tab)
+            .unwrap_or(0) as i32;
+        let next = (idx + delta).rem_euclid(TABS.len() as i32) as usize;
+        self.fallback_popup_tab = TABS[next];
+        self.fallback_popup_sel = 0;
+        self.ensure_fallback_catalog();
+    }
+
+    fn ensure_fallback_catalog(&mut self) {
+        let provider = self.catalog_provider();
+        if let Some(models) = self.catalog_cache.get(&provider).cloned() {
+            self.model_catalog = models;
+            self.catalog_for = provider;
+            return;
+        }
+        let secret = provider::account_secret(&self.auth, &provider);
+        if secret.api_key.as_deref().unwrap_or("").trim().is_empty() {
+            self.model_catalog.clear();
+            self.catalog_for.clear();
+            return;
+        }
+        self.refresh_catalog();
+    }
+
+    pub fn filtered_fallback_models(&self) -> Vec<ListedModel> {
+        let query = self.fallback_popup_filter.trim().to_ascii_lowercase();
+        self.model_catalog
+            .iter()
+            .filter(|model| {
+                query.is_empty()
+                    || model.id.to_ascii_lowercase().contains(&query)
+                    || model.name.to_ascii_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn fallback_incompatible(&self, model: &str) -> Option<&'static str> {
+        if matches!(
+            self.defaults_role,
+            DefaultsRole::ToolPicker | DefaultsRole::Classifier
+        ) {
+            return None;
+        }
+        if provider::is_decisions_model(model) {
+            Some("decisions model cannot complete chat")
+        } else {
+            None
+        }
+    }
+
+    fn delete_selected_fallback(&mut self) -> Result<String> {
+        let index = self.fallback_sel;
+        self.mutate_role_fallbacks(|assignment| {
+            assignment.remove_fallback(index)?;
+            Ok("Fallback removed".into())
+        })
+        .inspect(|_| {
+            self.fallback_sel = self.fallback_sel.saturating_sub(1);
+        })
+    }
+
+    fn move_selected_fallback(&mut self, delta: i32) -> Result<String> {
+        let index = self.fallback_sel;
+        let mut dest = index;
+        self.mutate_role_fallbacks(|assignment| {
+            dest = assignment.move_fallback(index, delta)?;
+            Ok(format!("Fallback {}", dest + 1))
+        })?;
+        self.fallback_sel = dest;
+        Ok(format!("Fallback {}", dest + 1))
+    }
+
+    fn confirm_add_fallback(&mut self) -> Result<String> {
+        let models = self.filtered_fallback_models();
+        let Some(model) = models.get(self.fallback_popup_sel) else {
+            anyhow::bail!("Select a model");
+        };
+        if let Some(reason) = self.fallback_incompatible(&model.id) {
+            anyhow::bail!("{reason}");
+        }
+        let provider = self.catalog_provider();
+        if provider::account_secret(&self.auth, &provider)
+            .api_key
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            anyhow::bail!(
+                "Save an API key on the {} tab first",
+                self.fallback_popup_tab.title()
+            );
+        }
+        let route = argos_osint_core::provider::ModelRoute {
+            provider: provider.clone(),
+            model: model.id.clone(),
+            account: String::new(),
+        };
+        let label = route.label();
+        self.mutate_role_fallbacks(|assignment| {
+            assignment.add_fallback(route.clone())?;
+            Ok(format!("Added fallback {label}"))
+        })?;
+        let len = self.current_fallbacks().len();
+        self.fallback_sel = len.saturating_sub(1);
+        let restore = self.fallback_popup_restore.take();
+        self.overlay = Overlay::None;
+        self.scrolls.popup = 0;
+        if let Some(target) = restore {
+            self.set_focus(target);
+        } else {
+            self.set_focus(Target::Button(ButtonId::AddFallback));
+        }
+        Ok(format!("Added fallback {label}"))
+    }
+
     fn catalog_provider(&self) -> String {
+        if self.overlay == Overlay::AddFallback {
+            return match self.fallback_popup_tab {
+                ProviderPage::Google => "google".into(),
+                ProviderPage::Nvidia => "nvidia".into(),
+                ProviderPage::OpenRouter => "openrouter".into(),
+                ProviderPage::Defaults => "openrouter".into(),
+            };
+        }
         match self.provider_page {
             ProviderPage::Google => "google".into(),
             ProviderPage::Nvidia => "nvidia".into(),
@@ -5129,7 +5432,10 @@ impl App {
         };
         let tx = self.work_tx.clone();
         runtime.spawn(async move {
-            let opts = argos_osint_core::summarization::ExecOptions::for_secret(&secret);
+            let mut opts = argos_osint_core::summarization::ExecOptions::for_secret(&secret);
+            if cfg!(test) {
+                opts.max_backoff = std::time::Duration::from_millis(20);
+            }
             let report = ge::explain(&db, &secret, &req, &opts, ge::Faults::default()).await;
             let _ = tx.send(WorkEvent::GraphSummary {
                 report: Box::new(report),
@@ -5375,11 +5681,127 @@ impl App {
             }
             ButtonId::OsintRun => self.run_osint().map(|_| "Tool started".into()),
             ButtonId::OsintCancel => {
+                let mut cancelled = false;
+                if let Some(cancel) = &self.dataset_refresh_cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                    cancelled = true;
+                }
                 if let Some(cancel) = &self.osint_cancel {
                     cancel.store(true, Ordering::Relaxed);
+                    cancelled = true;
                 }
-                Ok("Tool cancellation requested".into())
+                if cancelled {
+                    self.status = "Cancellation requested".into();
+                    Ok("Cancellation requested".into())
+                } else {
+                    Ok("Nothing to cancel".into())
+                }
             }
+            ButtonId::OsintRefreshDataset => {
+                if self.dataset_refresh_running.is_some() {
+                    Ok("A dataset refresh is already in progress".into())
+                } else {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    self.dataset_refresh_running = Some("whatsmyname".into());
+                    self.dataset_refresh_cancel = Some(cancel.clone());
+                    self.status = "Refreshing WhatsMyName dataset...".into();
+                    self.push_log("info", "Started WhatsMyName dataset refresh");
+                    let job = Arc::new(std::sync::Mutex::new(tracked::begin_cancellable(
+                        JobSpec::new("tools", "dataset_refresh", "Refresh WhatsMyName dataset")
+                            .tool("whatsmyname_lookup"),
+                        cancel.clone(),
+                    )));
+                    let tx = self.work_tx.clone();
+                    let stop = cancel.clone();
+                    let job_worker = job.clone();
+                    tokio::spawn(async move {
+                        let tx_prog = tx.clone();
+                        let job_phase = job_worker.clone();
+                        let res = osint::whatsmyname::refresh_with_progress(
+                            Some(cancel.clone()),
+                            move |phase| {
+                                if let Ok(guard) = job_phase.lock() {
+                                    if let Some(ref j) = *guard {
+                                        j.phase(phase, None, None);
+                                    }
+                                }
+                                let _ = tx_prog.send(WorkEvent::DatasetRefreshProgress {
+                                    dataset: "whatsmyname".into(),
+                                    phase: phase.to_string(),
+                                });
+                            },
+                        )
+                        .await;
+                        let outcome = match res {
+                            Ok(manifest) => Ok(format!(
+                                "WhatsMyName dataset refreshed: {} sites ({})",
+                                manifest.total_count, manifest.active_version
+                            )),
+                            Err(err) => Err(err.to_string()),
+                        };
+                        let job_handle = job_worker.lock().ok().and_then(|mut g| g.take());
+                        tracked::finish(job_handle, "tool", &outcome, Some(&stop));
+                        let _ = tx.send(WorkEvent::DatasetRefreshDone {
+                            dataset: "whatsmyname".into(),
+                            outcome,
+                        });
+                    });
+                    Ok("Refreshing WhatsMyName dataset".into())
+                }
+            }
+            ButtonId::OsintRefreshTemplates => {
+                if self.dataset_refresh_running.is_some() {
+                    Ok("A dataset refresh is already in progress".into())
+                } else {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    self.dataset_refresh_running = Some("dorksearch".into());
+                    self.dataset_refresh_cancel = Some(cancel.clone());
+                    self.status = "Refreshing DorkSearch templates...".into();
+                    self.push_log("info", "Started DorkSearch templates refresh");
+                    let job = Arc::new(std::sync::Mutex::new(tracked::begin_cancellable(
+                        JobSpec::new("tools", "templates_refresh", "Refresh DorkSearch templates")
+                            .tool("dork_generate"),
+                        cancel.clone(),
+                    )));
+                    let tx = self.work_tx.clone();
+                    let stop = cancel.clone();
+                    let job_worker = job.clone();
+                    tokio::spawn(async move {
+                        let tx_prog = tx.clone();
+                        let job_phase = job_worker.clone();
+                        let res = osint::dork_generator::refresh_with_progress(
+                            Some(cancel.clone()),
+                            move |phase| {
+                                if let Ok(guard) = job_phase.lock() {
+                                    if let Some(ref j) = *guard {
+                                        j.phase(phase, None, None);
+                                    }
+                                }
+                                let _ = tx_prog.send(WorkEvent::DatasetRefreshProgress {
+                                    dataset: "dorksearch".into(),
+                                    phase: phase.to_string(),
+                                });
+                            },
+                        )
+                        .await;
+                        let outcome = match res {
+                            Ok(manifest) => Ok(format!(
+                                "DorkSearch templates refreshed: {} templates ({})",
+                                manifest.total_count, manifest.active_version
+                            )),
+                            Err(err) => Err(err.to_string()),
+                        };
+                        let job_handle = job_worker.lock().ok().and_then(|mut g| g.take());
+                        tracked::finish(job_handle, "tool", &outcome, Some(&stop));
+                        let _ = tx.send(WorkEvent::DatasetRefreshDone {
+                            dataset: "dorksearch".into(),
+                            outcome,
+                        });
+                    });
+                    Ok("Refreshing DorkSearch templates".into())
+                }
+            }
+            ButtonId::OsintSearchSelected => self.search_selected_dork(),
             ButtonId::OsintToggle => {
                 let tool = osint::registry()
                     .get(self.tool_sel)
@@ -5593,6 +6015,7 @@ impl App {
             ButtonId::DefaultRole(role) => {
                 if self.defaults_role != role {
                     self.defaults_role = role;
+                    self.fallback_sel = 0;
                     self.model_catalog.clear();
                     self.catalog_for.clear();
                 }
@@ -5602,6 +6025,28 @@ impl App {
                 self.refresh_catalog();
                 return;
             }
+            ButtonId::AddFallback => {
+                self.open_add_fallback();
+                return;
+            }
+            ButtonId::DeleteFallback => self.delete_selected_fallback(),
+            ButtonId::MoveFallbackUp => self.move_selected_fallback(-1),
+            ButtonId::MoveFallbackDown => self.move_selected_fallback(1),
+            ButtonId::FallbackItem(index) => {
+                self.fallback_sel = index;
+                Ok(format!("Fallback {}", index + 1))
+            }
+            ButtonId::FallbackPick(index) => {
+                self.fallback_popup_sel = index;
+                Ok(format!("Model {}", index + 1))
+            }
+            ButtonId::FallbackTab(page) => {
+                self.fallback_popup_tab = page;
+                self.fallback_popup_sel = 0;
+                self.ensure_fallback_catalog();
+                Ok(page.title().to_string())
+            }
+            ButtonId::ConfirmAddFallback => self.confirm_add_fallback(),
             ButtonId::OpenDocumentation => {
                 let Some(tool) = osint::registry().get(self.tool_sel) else {
                     return;
@@ -6206,8 +6651,16 @@ impl App {
             Target::IntelReconTab(index) => self.select_intel_recon_tab(index),
             Target::IntelReconSection(index) => self.toggle_intel_recon_section(index),
             Target::CloseOverlay => {
+                let restore = if self.overlay == Overlay::AddFallback {
+                    self.fallback_popup_restore.take()
+                } else {
+                    None
+                };
                 self.overlay = Overlay::None;
                 self.scrolls.popup = 0;
+                if let Some(target) = restore {
+                    self.set_focus(target);
+                }
             }
             Target::Tab(index) => {
                 let _ = self.switch_tab(index);
@@ -6496,6 +6949,49 @@ impl App {
         }
         if ctrl && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K')) {
             self.open_palette();
+            return true;
+        }
+        if self.overlay == Overlay::AddFallback {
+            if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('d')) {
+                super::ui::page(
+                    self,
+                    if key.code == KeyCode::Char('d') {
+                        1
+                    } else {
+                        -1
+                    },
+                );
+                return true;
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.activate_target(Target::CloseOverlay),
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                    self.cycle_fallback_tab(-1);
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                    self.cycle_fallback_tab(1);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.fallback_popup_sel = self.fallback_popup_sel.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let last = self.filtered_fallback_models().len().saturating_sub(1);
+                    self.fallback_popup_sel = (self.fallback_popup_sel + 1).min(last);
+                }
+                KeyCode::Enter => {
+                    let result = self.confirm_add_fallback();
+                    self.report(result);
+                }
+                KeyCode::Backspace => {
+                    self.fallback_popup_filter.pop();
+                    self.fallback_popup_sel = 0;
+                }
+                KeyCode::Char(c) if !c.is_control() => {
+                    self.fallback_popup_filter.push(c);
+                    self.fallback_popup_sel = 0;
+                }
+                _ => {}
+            }
             return true;
         }
         if self.overlay == Overlay::Palette {
@@ -6896,6 +7392,22 @@ impl App {
                     self.push_log("info", "Recon cancellation requested");
                     return true;
                 }
+            }
+        }
+        if self.module == Some(ModuleId::Osint) {
+            let mut cancelled = false;
+            if let Some(cancel) = &self.dataset_refresh_cancel {
+                cancel.store(true, Ordering::Relaxed);
+                cancelled = true;
+            }
+            if let Some(cancel) = &self.osint_cancel {
+                cancel.store(true, Ordering::Relaxed);
+                cancelled = true;
+            }
+            if cancelled {
+                self.status = "Cancellation requested".into();
+                self.push_log("info", "Tool cancellation requested");
+                return true;
             }
         }
         self.arm_quit()
@@ -7584,8 +8096,10 @@ pub async fn run(mut app: App) -> Result<()> {
                 dirty = false;
             }
         }
-        let busy =
-            !app.running.is_empty() || app.osint_cancel.is_some() || app.provider_pending.is_some();
+        let busy = !app.running.is_empty()
+            || app.osint_cancel.is_some()
+            || app.dataset_refresh_running.is_some()
+            || app.provider_pending.is_some();
         let composer_focused = app.focus == Target::Field(FieldId::Composer);
         let mut wait = atlas_poll_wait(
             &app,
@@ -7807,6 +8321,8 @@ mod tests {
             history_pos: 0,
             running: HashMap::new(),
             osint_cancel: None,
+            dataset_refresh_running: None,
+            dataset_refresh_cancel: None,
             recon_provider: String::new(),
             recon_model: String::new(),
             picker_provider: String::new(),
@@ -7830,6 +8346,11 @@ mod tests {
             model_catalog: Vec::new(),
             catalog_cache: HashMap::new(),
             catalog_for: String::new(),
+            fallback_sel: 0,
+            fallback_popup_tab: ProviderPage::Google,
+            fallback_popup_filter: String::new(),
+            fallback_popup_sel: 0,
+            fallback_popup_restore: None,
             choice_items: Vec::new(),
             choice_sel: 0,
             choice_note: String::new(),
@@ -8454,6 +8975,87 @@ mod tests {
             .flat_map(|y| (0..80).map(move |x| (x, y)))
             .any(|(x, y)| super::super::ui::hit_test(&app, x, y)
                 == Some(Target::Button(ButtonId::SaveSynthesis))));
+        app.defaults_role = DefaultsRole::Recon;
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        assert!(!(0..24)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .any(|(x, y)| super::super::ui::hit_test(&app, x, y)
+                == Some(Target::Button(ButtonId::RefreshModels))));
+        let painted = screen_text(&terminal);
+        assert!(
+            painted.contains("No fallback models configured"),
+            "{painted}"
+        );
+        assert!(painted.contains("Add fallback"), "{painted}");
+        assert!(!painted.contains("Refresh models"), "{painted}");
+    }
+
+    #[test]
+    fn defaults_fallbacks_add_delete_reorder_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app();
+        app.settings_path = dir.path().join("config.toml");
+        app.auth_path = dir.path().join("auth.json");
+        let mut google = provider::account_secret(&app.auth, "google");
+        google.api_key = Some("google-key".into());
+        app.auth.set_account(google);
+        app.google_key = "google-key".into();
+        app.select(ModuleId::Providers.index());
+        app.provider_page = ProviderPage::Defaults;
+        click(&mut app, Target::Button(ButtonId::AddFallback));
+        assert_eq!(app.overlay, Overlay::AddFallback);
+        app.on_work_event(WorkEvent::CatalogDone {
+            role: DefaultsRole::Recon,
+            provider: "google".into(),
+            outcome: Ok(vec![
+                ListedModel {
+                    id: "gemini-2.5-pro".into(),
+                    name: "Gemini 2.5 Pro".into(),
+                    free: false,
+                },
+                ListedModel {
+                    id: "gemini-flash".into(),
+                    name: "Gemini Flash".into(),
+                    free: true,
+                },
+            ]),
+        });
+        app.fallback_popup_sel = 0;
+        click(&mut app, Target::Button(ButtonId::ConfirmAddFallback));
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.settings.defaults.recon.fallbacks.len(), 1);
+        assert_eq!(
+            app.settings.defaults.recon.fallbacks[0].model,
+            "gemini-2.5-pro"
+        );
+        app.overlay = Overlay::AddFallback;
+        app.fallback_popup_tab = ProviderPage::Google;
+        app.fallback_popup_sel = 1;
+        click(&mut app, Target::Button(ButtonId::ConfirmAddFallback));
+        assert_eq!(app.settings.defaults.recon.fallbacks.len(), 2);
+        click(&mut app, Target::Button(ButtonId::FallbackItem(1)));
+        click(&mut app, Target::Button(ButtonId::MoveFallbackUp));
+        assert_eq!(
+            app.settings.defaults.recon.fallbacks[0].model,
+            "gemini-flash"
+        );
+        click(&mut app, Target::Button(ButtonId::FallbackItem(1)));
+        click(&mut app, Target::Button(ButtonId::DeleteFallback));
+        assert_eq!(app.settings.defaults.recon.fallbacks.len(), 1);
+        assert_eq!(
+            app.settings.defaults.recon.fallbacks[0].model,
+            "gemini-flash"
+        );
+        let saved = std::fs::read_to_string(&app.settings_path).unwrap();
+        assert!(saved.contains("gemini-flash"), "{saved}");
+        assert!(!saved.contains("gemini-2.5-pro"), "{saved}");
+        click(&mut app, Target::Button(ButtonId::AddFallback));
+        assert_eq!(app.overlay, Overlay::AddFallback);
+        click(&mut app, Target::CloseOverlay);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.focus, Target::Button(ButtonId::AddFallback));
     }
 
     #[test]
@@ -10114,6 +10716,7 @@ mod tests {
         app.settings.defaults.summarization = argos_osint_core::provider::ModelAssignment {
             provider: "openrouter".into(),
             model: "mock-model".into(),
+            ..Default::default()
         };
         let ids = claim_fixture(app);
         app.select(ModuleId::Brain.index());
@@ -10165,7 +10768,11 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("Providers"));
-        assert_eq!(fx.server.hits(), 1, "auth errors are not retried");
+        assert_eq!(
+            fx.server.hits(),
+            4,
+            "401 consumes the primary attempt budget"
+        );
         assert!(!failure.event_id.is_empty() && !failure.job_id.is_empty());
         assert!(app
             .graph_summary
@@ -10197,7 +10804,7 @@ mod tests {
         assert!(app.open_memory_detail(&fx.ids[0]));
         assert!(app.graph_summary_pending.is_none());
         assert!(app.summary_failure.as_ref().is_some_and(|f| f.from_record));
-        assert_eq!((graph_jobs(&fx).len(), fx.server.hits()), (1, 1));
+        assert_eq!((graph_jobs(&fx).len(), fx.server.hits()), (1, 4));
 
         // Retry: fresh budget, linked to the failed job, without leaving Brain.
         render(&mut app, 140, 40);
@@ -10207,7 +10814,7 @@ mod tests {
         let jobs = graph_jobs(&fx);
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[1].2, jobs[0].0, "retry correlates to the failed job");
-        assert_eq!(fx.server.hits(), 2);
+        assert_eq!(fx.server.hits(), 8);
         assert_eq!(app.module, Some(ModuleId::Brain));
 
         // View logs: filtered to the job, failure event selected.
@@ -10301,7 +10908,11 @@ mod tests {
             app.graph_summary.contains("Earlier result")
                 && app.graph_summary.contains("Baltic Wire")
         );
-        assert_eq!(fx.server.hits(), 3, "503 retried once: 1 + 2 requests");
+        assert_eq!(
+            fx.server.hits(),
+            5,
+            "503 consumes the primary budget after the first success: 1 + 4"
+        );
         super::super::tracked::testing::use_db(None);
     }
 

@@ -32,8 +32,8 @@ mod tests {
             })
             .await;
         assert!(out.value.is_none());
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert_eq!(out.attempts_used, 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
+        assert_eq!(out.attempts_used, 4);
         assert_eq!(out.last_category, ErrorCategory::Timeout);
     }
 
@@ -47,7 +47,7 @@ mod tests {
             })
             .await;
         assert!(out.value.is_none());
-        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]

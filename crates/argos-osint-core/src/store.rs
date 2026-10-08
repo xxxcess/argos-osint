@@ -39,7 +39,7 @@ pub struct GraphSummary {
 
 /// Schema version this build writes. 20 adds the unified investigation
 /// harness tables (tasks, dependencies, passages, assessments, events, stream parts).
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 25;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -512,6 +512,33 @@ impl Store {
             }
             if version < 24 {
                 self.conn.pragma_update(None, "user_version", 24)?;
+            }
+            // v25: durable Atlas packet outputs, dispositions, receipts.
+            {
+                let work_cols: Vec<String> = {
+                    let mut stmt = self.conn.prepare("PRAGMA table_info(atlas_work_units)")?;
+                    let cols = stmt
+                        .query_map([], |row| row.get(1))?
+                        .collect::<rusqlite::Result<_>>()
+                        .unwrap_or_default();
+                    cols
+                };
+                if !work_cols.is_empty() {
+                    for (name, decl) in [
+                        ("output_json", "TEXT NOT NULL DEFAULT ''"),
+                        ("disposition", "TEXT NOT NULL DEFAULT ''"),
+                        ("receipt_json", "TEXT NOT NULL DEFAULT ''"),
+                    ] {
+                        if !work_cols.iter().any(|c| c == name) {
+                            self.conn.execute_batch(&format!(
+                                "ALTER TABLE atlas_work_units ADD COLUMN {name} {decl}"
+                            ))?;
+                        }
+                    }
+                }
+            }
+            if version < 25 {
+                self.conn.pragma_update(None, "user_version", 25)?;
             }
             // Additive, idempotent: revision-aware graph summary cache and
             // the latest explanation diagnostic.
@@ -1362,8 +1389,8 @@ impl Store {
             "INSERT OR REPLACE INTO atlas_work_units (
                 run_id, unit_id, stage, input_ids, input_rev, contract_version,
                 dependency_ids, is_required, output_refs, effective_model, attempt_history,
-                next_eligible_at, terminal_reason
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                next_eligible_at, terminal_reason, output_json, disposition, receipt_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             rusqlite::params![
                 manifest.run_id,
                 manifest.unit_id,
@@ -1377,10 +1404,41 @@ impl Store {
                 manifest.effective_model,
                 serde_json::to_string(&manifest.attempt_history).unwrap_or_default(),
                 manifest.next_eligible_at,
-                manifest.terminal_reason
+                manifest.terminal_reason,
+                manifest.output_json,
+                manifest.disposition,
+                manifest.receipt_json,
             ],
         )?;
         Ok(())
+    }
+
+    fn atlas_unit_from_row(
+        run_id: &str,
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<crate::atlas_work::UnitManifest> {
+        let input_ids: String = row.get(2)?;
+        let dependency_ids: String = row.get(5)?;
+        let output_refs: String = row.get(7)?;
+        let attempt_history: String = row.get(9)?;
+        Ok(crate::atlas_work::UnitManifest {
+            run_id: run_id.to_string(),
+            unit_id: row.get(0)?,
+            stage: row.get(1)?,
+            input_ids: serde_json::from_str(&input_ids).unwrap_or_default(),
+            input_rev: row.get(3)?,
+            contract_version: row.get(4)?,
+            dependency_ids: serde_json::from_str(&dependency_ids).unwrap_or_default(),
+            is_required: row.get(6)?,
+            output_refs: serde_json::from_str(&output_refs).unwrap_or_default(),
+            effective_model: row.get(8)?,
+            attempt_history: serde_json::from_str(&attempt_history).unwrap_or_default(),
+            next_eligible_at: row.get(10)?,
+            terminal_reason: row.get(11)?,
+            output_json: row.get::<_, String>(12).unwrap_or_default(),
+            disposition: row.get::<_, String>(13).unwrap_or_default(),
+            receipt_json: row.get::<_, String>(14).unwrap_or_default(),
+        })
     }
 
     pub fn atlas_get_unit_manifests(
@@ -1389,29 +1447,29 @@ impl Store {
         stage: i32,
     ) -> Result<Vec<crate::atlas_work::UnitManifest>> {
         let mut stmt = self.conn.prepare(
-            "SELECT unit_id, stage, input_ids, input_rev, contract_version, dependency_ids, is_required, output_refs, effective_model, attempt_history, next_eligible_at, terminal_reason
+            "SELECT unit_id, stage, input_ids, input_rev, contract_version, dependency_ids, is_required, output_refs, effective_model, attempt_history, next_eligible_at, terminal_reason, output_json, disposition, receipt_json
              FROM atlas_work_units WHERE run_id = ?1 AND stage = ?2"
         )?;
         let rows = stmt.query_map(rusqlite::params![run_id, stage], |row| {
-            let input_ids: String = row.get(2)?;
-            let dependency_ids: String = row.get(5)?;
-            let output_refs: String = row.get(7)?;
-            let attempt_history: String = row.get(9)?;
-            Ok(crate::atlas_work::UnitManifest {
-                run_id: run_id.to_string(),
-                unit_id: row.get(0)?,
-                stage: row.get(1)?,
-                input_ids: serde_json::from_str(&input_ids).unwrap_or_default(),
-                input_rev: row.get(3)?,
-                contract_version: row.get(4)?,
-                dependency_ids: serde_json::from_str(&dependency_ids).unwrap_or_default(),
-                is_required: row.get(6)?,
-                output_refs: serde_json::from_str(&output_refs).unwrap_or_default(),
-                effective_model: row.get(8)?,
-                attempt_history: serde_json::from_str(&attempt_history).unwrap_or_default(),
-                next_eligible_at: row.get(10)?,
-                terminal_reason: row.get(11)?,
-            })
+            Self::atlas_unit_from_row(run_id, row)
+        })?;
+        let mut manifests = Vec::new();
+        for row in rows {
+            manifests.push(row?);
+        }
+        Ok(manifests)
+    }
+
+    pub fn atlas_get_all_unit_manifests(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::atlas_work::UnitManifest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT unit_id, stage, input_ids, input_rev, contract_version, dependency_ids, is_required, output_refs, effective_model, attempt_history, next_eligible_at, terminal_reason, output_json, disposition, receipt_json
+             FROM atlas_work_units WHERE run_id = ?1 ORDER BY stage, unit_id"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+            Self::atlas_unit_from_row(run_id, row)
         })?;
         let mut manifests = Vec::new();
         for row in rows {

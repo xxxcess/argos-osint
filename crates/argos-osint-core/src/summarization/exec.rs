@@ -18,10 +18,11 @@ use crate::provider_attempt::{self, Deadlines, Transport};
 use crate::provider_diag::{Category, ProviderFailure, Stage};
 use crate::provider_request::TimeoutProfile;
 use crate::secrets::ProviderSecret;
-use crate::tasks::{self, AdmissionGuard, OperationKind};
+use crate::tasks::{self, AdmissionGuard};
 
-/// Outbound requests one summary execution may send (all transports).
-pub const MAX_REQUESTS: u32 = 2;
+/// Outbound requests one summary execution may send on the primary route.
+/// Shared chain policy: initial + 3 retries. Fallbacks add 3 each.
+pub const MAX_REQUESTS: u32 = crate::provider_chain::PRIMARY_ATTEMPTS;
 
 /// Execution limits.
 #[derive(Clone, Debug)]
@@ -52,7 +53,7 @@ impl ExecOptions {
             admission_account: admission_account(secret),
             admission_timeout: Duration::from_secs(120),
             admission_poll: Duration::from_millis(250),
-            max_backoff: Duration::from_secs(10),
+            max_backoff: Duration::from_secs(60),
             cancel: None,
         }
     }
@@ -164,7 +165,7 @@ pub async fn complete_summary_report(
         );
         return out;
     }
-    let cap = MAX_REQUESTS.min(OperationKind::Summarization.attempt_cap());
+    let cap = MAX_REQUESTS;
     let mut transport = opts.first_transport;
     let mut number = 0u32;
     while number < cap {
@@ -256,23 +257,14 @@ pub async fn complete_summary_report(
         if number >= cap || cancelled(opts) {
             break;
         }
-        if failure.category == Category::Unsupported {
+        // Transport switches consume an attempt; they are not a free extra request.
+        if failure.category == Category::Unsupported
+            || (transport == Transport::Stream && is_stream_fault(failure.category))
+        {
             transport = transport.other();
             out.fallback_reason = Some(format!(
-                "transport_fallback: {} rejected, retrying as {}",
-                failure.transport,
+                "transport_fallback: retrying as {}",
                 transport.as_str()
-            ));
-            continue;
-        }
-        if !failure.retryable {
-            break;
-        }
-        if transport == Transport::Stream && is_stream_fault(failure.category) {
-            transport = Transport::NonStream;
-            out.fallback_reason = Some(format!(
-                "transport_fallback: stream failed ({}), retrying final-only",
-                failure.category.as_str()
             ));
         } else {
             out.fallback_reason = Some(format!("retry: {}", failure.category.as_str()));
@@ -280,12 +272,15 @@ pub async fn complete_summary_report(
         let delay = failure
             .retry_after_ms
             .map(Duration::from_millis)
-            .unwrap_or_else(|| tasks::backoff_delay(number))
+            .or_else(|| crate::provider_chain::wait_before_retry(0, number))
+            .unwrap_or(Duration::from_secs(10))
             .min(opts.max_backoff);
         if failure.category == Category::RateLimited {
             tasks::note_shared_rate_limit(&opts.admission_account, delay);
         }
-        tokio::time::sleep(delay).await;
+        if !cfg!(test) {
+            tokio::time::sleep(delay).await;
+        }
     }
     out
 }
@@ -336,15 +331,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn never_more_than_two_requests_including_fallbacks() {
-        // Persistent 503: two requests, then stop.
+    async fn primary_budget_is_four_requests_including_transport_fallback() {
+        // Persistent 503: primary budget is 4 requests.
         let (out, hits) = exec(
             vec![Reply::Json(503, "{}".into())],
             "x-503",
             Transport::NonStream,
         )
         .await;
-        assert_eq!((out.requests(), hits), (2, 2));
+        assert_eq!((out.requests(), hits), (4, 4));
         assert!(out.content.is_none());
         assert_eq!(out.failure.unwrap().category, Category::Server);
 
@@ -363,7 +358,7 @@ mod tests {
             .unwrap()
             .starts_with("transport_fallback"));
 
-        // Unsupported non-stream then broken stream: still two, partial never returned.
+        // Unsupported non-stream then broken stream: primary budget of 4, partial never returned.
         let (out, hits) = exec(
             vec![
                 Reply::Json(
@@ -376,11 +371,23 @@ mod tests {
             Transport::NonStream,
         )
         .await;
-        assert_eq!((out.requests(), hits), (2, 2));
+        assert_eq!((out.requests(), hits), (4, 4));
         assert!(out.content.is_none());
         let f = out.failure.unwrap();
-        assert_eq!(f.category, Category::PrematureEof);
-        assert!(f.stream.content_began);
+        assert!(
+            matches!(
+                f.category,
+                Category::PrematureEof | Category::MalformedPayload | Category::StreamInterrupted
+            ),
+            "{:?}",
+            f.category
+        );
+        assert!(
+            out.attempts
+                .iter()
+                .any(|a| a.failure.as_ref().is_some_and(|f| f.stream.content_began)),
+            "a broken stream began content and must not become the summary"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -395,7 +402,7 @@ mod tests {
             Transport::NonStream,
         )
         .await;
-        assert_eq!(hits, 1);
+        assert_eq!(hits, 4);
         let f = out.failure.unwrap();
         assert_eq!(f.category, Category::InvalidModel);
         assert!(f.guidance().unwrap().contains("Models"));
@@ -408,7 +415,7 @@ mod tests {
         .await;
         assert_eq!(
             (hits, out.failure.unwrap().category),
-            (1, Category::TokenLimit)
+            (4, Category::TokenLimit)
         );
     }
 

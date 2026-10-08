@@ -1,7 +1,7 @@
 //! Brain graph explanation: one durable, budgeted, revision-aware execution.
 //!
 //! [`explain`] registers one `graph_explanation` job, runs the summary through
-//! [`crate::summarization::complete_summary_report`] (≤2 outbound requests,
+//! [`crate::summarization::complete_summary_report`] (primary 4 outbound requests,
 //! admission waits free), records every attempt as a child job with a
 //! structured event, saves the result only for the exact inputs it was written
 //! from, and persists the failure event and the diagnostic record *before*
@@ -373,7 +373,7 @@ pub async fn explain(
                     job.phase(
                         &format!("attempt {number} · {}", transport.as_str()),
                         Some(number as i64 - 1),
-                        Some(2),
+                        Some(i64::from(crate::summarization::MAX_REQUESTS)),
                     );
                     child = job
                         .child(

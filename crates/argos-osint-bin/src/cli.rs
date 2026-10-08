@@ -203,6 +203,32 @@ enum OsintCommand {
     UserAgent {
         value: String,
     },
+    /// Manage external OSINT datasets (whatsmyname, dorksearch).
+    Dataset {
+        #[command(subcommand)]
+        command: DatasetCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DatasetCommand {
+    /// Show current status and manifest info for a dataset.
+    Status {
+        /// Dataset name: whatsmyname or dorksearch.
+        name: String,
+    },
+    /// Refresh a dataset from its upstream official source.
+    Refresh {
+        /// Dataset name: whatsmyname or dorksearch.
+        name: String,
+    },
+    /// Import a dataset from a local JSON file.
+    Import {
+        /// Dataset name: whatsmyname or dorksearch.
+        name: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -549,6 +575,51 @@ async fn osint_command(command: OsintCommand) -> Result<()> {
             let (call_id, result) = service.manual(&tool_id, value).await?;
             print_json(&serde_json::json!({"call_id":call_id,"result":result}))
         }
+        OsintCommand::Dataset { command } => match command {
+            DatasetCommand::Status { name } => {
+                let norm = name.trim().to_ascii_lowercase();
+                if norm == "whatsmyname" || norm == "wmn" {
+                    print_json(&osint::whatsmyname::status())
+                } else if norm == "dorksearch" || norm == "dorks" || norm == "dork" {
+                    print_json(&osint::dork_generator::status())
+                } else {
+                    Err(anyhow!(
+                        "unknown dataset '{}'; expected 'whatsmyname' or 'dorksearch'",
+                        name
+                    ))
+                }
+            }
+            DatasetCommand::Refresh { name } => {
+                let norm = name.trim().to_ascii_lowercase();
+                if norm == "whatsmyname" || norm == "wmn" {
+                    let manifest = osint::whatsmyname::refresh().await?;
+                    print_json(&manifest)
+                } else if norm == "dorksearch" || norm == "dorks" || norm == "dork" {
+                    let manifest = osint::dork_generator::refresh().await?;
+                    print_json(&manifest)
+                } else {
+                    Err(anyhow!(
+                        "unknown dataset '{}'; expected 'whatsmyname' or 'dorksearch'",
+                        name
+                    ))
+                }
+            }
+            DatasetCommand::Import { name, file } => {
+                let norm = name.trim().to_ascii_lowercase();
+                if norm == "whatsmyname" || norm == "wmn" {
+                    let manifest = osint::whatsmyname::import_from_file(&file)?;
+                    print_json(&manifest)
+                } else if norm == "dorksearch" || norm == "dorks" || norm == "dork" {
+                    let manifest = osint::dork_generator::import_from_file(&file)?;
+                    print_json(&manifest)
+                } else {
+                    Err(anyhow!(
+                        "unknown dataset '{}'; expected 'whatsmyname' or 'dorksearch'",
+                        name
+                    ))
+                }
+            }
+        },
     }
 }
 
@@ -911,6 +982,7 @@ mod tests {
         settings.defaults.synthesis = provider::ModelAssignment {
             provider: "grok".into(),
             model: "grok-4.6".into(),
+            ..Default::default()
         };
         let shown = defaults_json(&AuthFile::default(), &settings).unwrap();
         assert_eq!(shown["tool_picker"]["provider"], "openrouter");

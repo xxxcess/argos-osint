@@ -3,6 +3,8 @@
 //! elements, then use that peer set for fact, inference, and link support before
 //! storing them where Brain recall already looks.
 
+use std::path::Path;
+
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -144,7 +146,7 @@ pub struct RawClaim {
 }
 
 /// A claim that survived the span gate.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct KeptClaim {
     pub entity: String,
     pub namespace: String,
@@ -189,6 +191,10 @@ pub struct Extraction {
     /// Classifier peer-matching failure; deterministic overlap was used instead.
     pub peer_error: Option<String>,
     pub context_error: Option<String>,
+    /// Optional-work failures (context, peers) that must not mark the cycle Partial.
+    pub warnings: Vec<String>,
+    /// Per-packet diagnostics for the UI.
+    pub diagnostics: Vec<String>,
 }
 
 pub struct Settled {
@@ -576,11 +582,14 @@ fn fit_cell(value: &str, width: usize) -> String {
 /// use that peer set for fact, inference, and link support.
 /// `progress` receives `(done, total)` work units as each extract step finishes.
 pub async fn extract(
+    db_path: &Path,
     run_id: &str,
     synthesis: &ProviderSecret,
+    fallbacks: &[ProviderSecret],
     classifier: Option<&ProviderSecret>,
     articles: &[AtlasArticleRow],
     origins: &[OriginStat],
+    context_required: bool,
     mut progress: impl FnMut(u32, u32),
 ) -> Result<Extraction> {
     if provider::is_decisions_model(&synthesis.model) {
@@ -598,6 +607,8 @@ pub async fn extract(
             extract_error: None,
             peer_error: None,
             context_error: None,
+            warnings: Vec::new(),
+            diagnostics: Vec::new(),
         });
     }
     let lead_packets = significant.chunks(PACKET_LIMIT).len() as u32;
@@ -607,68 +618,117 @@ pub async fn extract(
     let mut lead = Vec::new();
     let mut lead_dropped = 0u32;
     let mut extract_error = None;
-    let mut completed_ids = std::collections::HashSet::new();
-    if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-        let completed_units = store
-            .atlas_get_unit_manifests(run_id, 4)
-            .unwrap_or_default();
-        for unit in &completed_units {
-            if unit.terminal_reason.is_none() {
-                completed_ids.insert(unit.unit_id.clone());
+    let mut warnings = Vec::new();
+    let mut diagnostics = Vec::new();
+    let (existing, legacy_claims) = {
+        let store = Store::open(db_path)?;
+        (
+            store
+                .atlas_get_unit_manifests(run_id, crate::atlas_work::STAGE_EXTRACT)
+                .unwrap_or_default(),
+            legacy_checkpoint_claims(&store, run_id),
+        )
+    };
+
+    for packet in significant.chunks(PACKET_LIMIT) {
+        let input_ids: Vec<String> = packet.iter().map(|a| a.id.clone()).collect();
+        let input_rev = crate::atlas_work::articles_rev(packet);
+        let unit_id = crate::atlas_work::packet_identity("lead", &input_ids, &input_rev);
+        if let Some(unit) = existing.iter().find(|u| u.unit_id == unit_id) {
+            if let Some(kept) = reusable_kept(unit) {
+                lead_dropped += dropped_from_receipt(unit);
+                lead.extend(kept);
+                done += 1;
+                progress(done, total);
+                continue;
             }
         }
-    }
-
-    for (i, packet) in significant.chunks(PACKET_LIMIT).enumerate() {
-        let unit_id = format!("extract-lead-{i}");
-        if completed_ids.contains(&unit_id) {
+        if let Some(kept) = recover_legacy_packet(&legacy_claims, packet, false) {
+            persist_packet(
+                db_path,
+                run_id,
+                &unit_id,
+                &input_ids,
+                &input_rev,
+                true,
+                synthesis,
+                &kept,
+                0,
+                crate::atlas_work::DISPOSITION_SUCCESS,
+                None,
+                Vec::new(),
+            )?;
+            lead.extend(kept);
             done += 1;
             progress(done, total);
             continue;
         }
 
-        match ask_claims(synthesis, &lead_prompt(packet.len()), &packet_json(packet)?).await {
-            Ok(raw) => {
-                let (kept, dropped) = accept_claims(packet, &raw, AcceptMode::Lead);
+        match ask_claims(
+            synthesis,
+            fallbacks,
+            &lead_prompt(packet.len()),
+            &packet_json(packet)?,
+        )
+        .await
+        {
+            Ok(asked) => {
+                let (kept, dropped) = accept_claims(packet, &asked.raw, AcceptMode::Lead);
                 lead_dropped += dropped;
+                let disposition = if kept.is_empty() {
+                    crate::atlas_work::DISPOSITION_EMPTY
+                } else {
+                    crate::atlas_work::DISPOSITION_SUCCESS
+                };
+                persist_packet(
+                    db_path,
+                    run_id,
+                    &unit_id,
+                    &input_ids,
+                    &input_rev,
+                    true,
+                    &asked.secret,
+                    &kept,
+                    dropped,
+                    disposition,
+                    None,
+                    asked.history,
+                )?;
+                diagnostics.push(packet_diag(
+                    "lead",
+                    packet,
+                    true,
+                    &asked.secret.model,
+                    asked.attempts,
+                    None,
+                ));
                 lead.extend(kept);
-                if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-                    let _ = store.atlas_save_unit_manifest(&crate::atlas_work::UnitManifest {
-                        run_id: run_id.to_string(),
-                        unit_id,
-                        stage: 4,
-                        input_ids: packet.iter().map(|a| a.id.clone()).collect(),
-                        input_rev: String::new(),
-                        contract_version: "1".into(),
-                        dependency_ids: Vec::new(),
-                        is_required: true,
-                        output_refs: Vec::new(),
-                        effective_model: synthesis.model.clone(),
-                        attempt_history: vec![chrono::Utc::now().to_rfc3339()],
-                        next_eligible_at: None,
-                        terminal_reason: None,
-                    });
-                }
             }
             Err(err) => {
-                extract_error = Some(err.to_string());
-                if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-                    let _ = store.atlas_save_unit_manifest(&crate::atlas_work::UnitManifest {
-                        run_id: run_id.to_string(),
-                        unit_id,
-                        stage: 4,
-                        input_ids: packet.iter().map(|a| a.id.clone()).collect(),
-                        input_rev: String::new(),
-                        contract_version: "1".into(),
-                        dependency_ids: Vec::new(),
-                        is_required: true,
-                        output_refs: Vec::new(),
-                        effective_model: synthesis.model.clone(),
-                        attempt_history: vec![chrono::Utc::now().to_rfc3339()],
-                        next_eligible_at: None,
-                        terminal_reason: Some(err.to_string()),
-                    });
-                }
+                let message = err.to_string();
+                extract_error = Some(message.clone());
+                persist_packet(
+                    db_path,
+                    run_id,
+                    &unit_id,
+                    &input_ids,
+                    &input_rev,
+                    true,
+                    synthesis,
+                    &[],
+                    0,
+                    crate::atlas_work::DISPOSITION_FAILED,
+                    Some(&message),
+                    Vec::new(),
+                )?;
+                diagnostics.push(packet_diag(
+                    "lead",
+                    packet,
+                    true,
+                    &synthesis.model,
+                    0,
+                    Some(&message),
+                ));
             }
         }
         done += 1;
@@ -683,6 +743,8 @@ pub async fn extract(
             extract_error: None,
             peer_error: None,
             context_error: None,
+            warnings,
+            diagnostics,
         });
     }
     merge_aliases(&mut lead, &significant);
@@ -693,7 +755,12 @@ pub async fn extract(
             progress(done, total);
             match result {
                 Ok(peers) => (peers, None),
-                Err(err) => (Vec::new(), Some(err.to_string())),
+                Err(err) => {
+                    warnings.push(format!(
+                        "Classifier peer matching failed; using overlap ({err})."
+                    ));
+                    (Vec::new(), Some(err.to_string()))
+                }
             }
         }
         None => (Vec::new(), None),
@@ -706,6 +773,8 @@ pub async fn extract(
             extract_error,
             peer_error,
             context_error: None,
+            warnings,
+            diagnostics,
         });
     }
     let context_articles = context_candidates(articles, &lead);
@@ -715,6 +784,8 @@ pub async fn extract(
             extract_error,
             peer_error,
             context_error: None,
+            warnings,
+            diagnostics,
         });
     }
     let context_packets = context_articles.chunks(PACKET_LIMIT).len() as u32;
@@ -724,15 +795,74 @@ pub async fn extract(
     let mut context_raw = Vec::new();
     let mut context_error = None;
     for packet in context_articles.chunks(PACKET_LIMIT) {
+        let input_ids: Vec<String> = packet.iter().map(|a| a.id.clone()).collect();
+        let input_rev = crate::atlas_work::articles_rev(packet);
+        let unit_id = crate::atlas_work::packet_identity("context", &input_ids, &input_rev);
+        if let Some(unit) = existing.iter().find(|u| u.unit_id == unit_id) {
+            if let Some(kept) = reusable_kept(unit) {
+                context_raw.extend(kept.into_iter().map(raw_from_kept));
+                done += 1;
+                progress(done, total);
+                continue;
+            }
+        }
         let user = format!(
             "Entities:\n{}\nArticles:\n{}",
             entities.join("\n"),
             packet_json(packet)?
         );
-        match ask_claims(synthesis, &context_prompt(packet.len()), &user).await {
-            Ok(raw) => context_raw.extend(raw),
+        match ask_claims(synthesis, fallbacks, &context_prompt(packet.len()), &user).await {
+            Ok(asked) => {
+                let (kept, dropped) = accept_claims(packet, &asked.raw, AcceptMode::Context);
+                persist_packet(
+                    db_path,
+                    run_id,
+                    &unit_id,
+                    &input_ids,
+                    &input_rev,
+                    context_required,
+                    &asked.secret,
+                    &kept,
+                    dropped,
+                    if kept.is_empty() {
+                        crate::atlas_work::DISPOSITION_EMPTY
+                    } else {
+                        crate::atlas_work::DISPOSITION_SUCCESS
+                    },
+                    None,
+                    asked.history,
+                )?;
+                context_raw.extend(asked.raw);
+            }
             Err(err) => {
-                context_error = Some(err.to_string());
+                let message = err.to_string();
+                persist_packet(
+                    db_path,
+                    run_id,
+                    &unit_id,
+                    &input_ids,
+                    &input_rev,
+                    context_required,
+                    synthesis,
+                    &[],
+                    0,
+                    crate::atlas_work::DISPOSITION_FAILED,
+                    Some(&message),
+                    Vec::new(),
+                )?;
+                diagnostics.push(packet_diag(
+                    "context",
+                    packet,
+                    context_required,
+                    &synthesis.model,
+                    0,
+                    Some(&message),
+                ));
+                if context_required {
+                    context_error = Some(message);
+                } else {
+                    warnings.push(format!("Context claims were not extracted ({message})."));
+                }
             }
         }
         done += 1;
@@ -750,6 +880,8 @@ pub async fn extract(
         extract_error,
         peer_error,
         context_error,
+        warnings,
+        diagnostics,
     })
 }
 
@@ -781,7 +913,9 @@ pub async fn extract_for_article_body(
     let span_article = article_with_body_spans(article, body_markdown);
     let packet = [span_article];
     let user = packet_json_with_body(article, body_markdown)?;
-    let raw = ask_claims(synthesis, &body_lead_prompt(BODY_CLAIM_LIMIT), &user).await?;
+    let raw = ask_claims(synthesis, &[], &body_lead_prompt(BODY_CLAIM_LIMIT), &user)
+        .await?
+        .raw;
     let (mut lead, lead_dropped) = accept_claims(&packet, &raw, AcceptMode::Lead);
     if lead.is_empty() {
         return Ok(finish_insights(1, lead_dropped, &packet, lead, &[], &[]));
@@ -1536,7 +1670,181 @@ fn clip_chars(text: &str, limit: usize) -> String {
     text.trim().chars().take(limit).collect()
 }
 
-async fn ask_claims(secret: &ProviderSecret, system: &str, user: &str) -> Result<Vec<RawClaim>> {
+struct AskedClaims {
+    raw: Vec<RawClaim>,
+    secret: ProviderSecret,
+    attempts: u32,
+    history: Vec<String>,
+}
+
+fn reusable_kept(unit: &crate::atlas_work::UnitManifest) -> Option<Vec<KeptClaim>> {
+    if !unit.reusable_success() {
+        return None;
+    }
+    serde_json::from_str(&unit.output_json).ok()
+}
+
+fn dropped_from_receipt(unit: &crate::atlas_work::UnitManifest) -> u32 {
+    serde_json::from_str::<serde_json::Value>(&unit.receipt_json)
+        .ok()
+        .and_then(|v| v.get("dropped").and_then(|d| d.as_u64()))
+        .unwrap_or(0) as u32
+}
+
+fn legacy_checkpoint_claims(store: &Store, run_id: &str) -> Vec<AtlasInsightClaim> {
+    crate::atlas_memory::load_checkpoint(store, run_id)
+        .ok()
+        .flatten()
+        .map(|c| c.claims)
+        .unwrap_or_default()
+}
+
+fn recover_legacy_packet(
+    claims: &[AtlasInsightClaim],
+    packet: &[AtlasArticleRow],
+    context: bool,
+) -> Option<Vec<KeptClaim>> {
+    if claims.is_empty() {
+        return None;
+    }
+    let ids: std::collections::HashSet<&str> = packet.iter().map(|a| a.id.as_str()).collect();
+    let kept: Vec<KeptClaim> = claims
+        .iter()
+        .filter(|c| ids.contains(c.article_id.as_str()))
+        .map(|c| KeptClaim {
+            entity: c.entity.clone(),
+            namespace: c.namespace.clone(),
+            predicate: c.predicate.clone(),
+            object: c.object.clone(),
+            topic: c.topic.clone(),
+            claim: c.claim.clone(),
+            classification: c.classification.clone(),
+            confidence: c.confidence,
+            article_id: c.article_id.clone(),
+            source_url: c.source_url.clone(),
+            published_at: c.published_at.clone(),
+            country: String::new(),
+            context,
+            title_peers: 0,
+            body_peers: 0,
+            reliability: c.reliability.clone(),
+            info_credibility: c.info_credibility,
+            admiralty: c.admiralty.clone(),
+            rsp_status: c.rsp_status.clone(),
+        })
+        .collect();
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept)
+    }
+}
+
+fn persist_packet(
+    db_path: &Path,
+    run_id: &str,
+    unit_id: &str,
+    input_ids: &[String],
+    input_rev: &str,
+    is_required: bool,
+    secret: &ProviderSecret,
+    kept: &[KeptClaim],
+    dropped: u32,
+    disposition: &str,
+    terminal_reason: Option<&str>,
+    history: Vec<String>,
+) -> Result<()> {
+    let output_refs: Vec<String> = kept.iter().map(fingerprint).collect();
+    let mut attempt_history = history;
+    if attempt_history.is_empty() {
+        attempt_history.push(chrono::Utc::now().to_rfc3339());
+    }
+    let store = Store::open(db_path)?;
+    store.atlas_save_unit_manifest(&crate::atlas_work::UnitManifest {
+        run_id: run_id.to_string(),
+        unit_id: unit_id.to_string(),
+        stage: crate::atlas_work::STAGE_EXTRACT,
+        input_ids: input_ids.to_vec(),
+        input_rev: input_rev.to_string(),
+        contract_version: crate::atlas_work::EXTRACT_CONTRACT.into(),
+        dependency_ids: Vec::new(),
+        is_required,
+        output_refs,
+        effective_model: secret.model.clone(),
+        attempt_history,
+        next_eligible_at: None,
+        terminal_reason: terminal_reason.map(str::to_string),
+        output_json: serde_json::to_string(kept)?,
+        disposition: disposition.into(),
+        receipt_json: serde_json::json!({ "dropped": dropped }).to_string(),
+    })?;
+    Ok(())
+}
+
+fn packet_diag(
+    stage: &str,
+    packet: &[AtlasArticleRow],
+    required: bool,
+    model: &str,
+    attempts: u32,
+    error: Option<&str>,
+) -> String {
+    let articles: Vec<&str> = packet.iter().map(|a| a.id.as_str()).collect();
+    format!(
+        "stage={stage} articles={} required={} model={model} attempts={attempts}{}",
+        articles.join(","),
+        if required { "yes" } else { "optional" },
+        error
+            .map(|e| format!(" error={}", sanitize_diag(e)))
+            .unwrap_or_default()
+    )
+}
+
+fn sanitize_diag(err: &str) -> String {
+    let mut out = err.replace('\n', " ");
+    if out.len() > 240 {
+        out.truncate(240);
+        out.push('…');
+    }
+    out
+}
+
+fn raw_from_kept(claim: KeptClaim) -> RawClaim {
+    RawClaim {
+        entity: claim.entity,
+        namespace: claim.namespace,
+        predicate: claim.predicate,
+        object: claim.object,
+        topic: claim.topic,
+        claim: claim.claim,
+        classification: claim.classification,
+        confidence: claim.confidence,
+        evidence_ids: vec![claim.article_id],
+    }
+}
+
+/// True when the packet ledger shows required lead work that is not reusable.
+/// An empty ledger does not rewind a phase-5 cursor (legacy checkpoints stay).
+pub fn required_extraction_incomplete(store: &Store, run_id: &str) -> bool {
+    let Ok(units) = store.atlas_get_unit_manifests(run_id, crate::atlas_work::STAGE_EXTRACT) else {
+        return false;
+    };
+    let required: Vec<_> = units
+        .iter()
+        .filter(|u| u.is_required && u.unit_id.starts_with("lead-"))
+        .collect();
+    if required.is_empty() {
+        return false;
+    }
+    required.iter().any(|u| !u.reusable_success())
+}
+
+async fn ask_claims(
+    primary: &ProviderSecret,
+    fallbacks: &[ProviderSecret],
+    system: &str,
+    user: &str,
+) -> Result<AskedClaims> {
     let messages = [
         ChatMessage {
             role: "system".into(),
@@ -1551,8 +1859,55 @@ async fn ask_claims(secret: &ProviderSecret, system: &str, user: &str) -> Result
             tool_calls: Vec::new(),
         },
     ];
-    let done = provider::complete(secret, &messages, &[], |_| {}).await?;
-    parse_claims(&done.content)
+    let mut secrets: Vec<ProviderSecret> = Vec::with_capacity(1 + fallbacks.len());
+    secrets.push(primary.clone());
+    secrets.extend(fallbacks.iter().cloned());
+    let routes = crate::provider_chain::routes_from_secrets(primary, fallbacks);
+    let report = crate::provider_chain::execute(
+        &routes,
+        |idx, _route| {
+            let secret = secrets[idx].clone();
+            let messages = messages.clone();
+            async move {
+                let done = provider::complete_one(&secret, &messages, &[])
+                    .await
+                    .map_err(|e| crate::provider_chain::DispatchError::new(e.to_string()))?;
+                parse_claims(&done.content).map_err(|e| {
+                    crate::provider_chain::DispatchError::new(format!("invalid output: {e}"))
+                })
+            }
+        },
+        crate::provider_chain::ExecuteOptions {
+            instant: cfg!(test),
+            admission_account: crate::summarization::admission_account(primary),
+            ..Default::default()
+        },
+    )
+    .await;
+    let history: Vec<String> = report
+        .history
+        .iter()
+        .map(|h| {
+            format!(
+                "route {} attempt {} {} {}",
+                h.route_index, h.attempt, h.outcome, h.reason
+            )
+        })
+        .collect();
+    match report.value {
+        Some(raw) => {
+            let idx = report.effective_route.unwrap_or(0) as usize;
+            Ok(AskedClaims {
+                raw,
+                secret: secrets.get(idx).cloned().unwrap_or_else(|| primary.clone()),
+                attempts: report.requests,
+                history,
+            })
+        }
+        None if report.blocked => Err(anyhow!("blocked: {}", report.failure_message())),
+        None if report.cancelled => Err(anyhow!("cancelled")),
+        None => Err(anyhow!(report.failure_message())),
+    }
 }
 
 fn parse_claims(text: &str) -> Result<Vec<RawClaim>> {
@@ -2529,7 +2884,22 @@ mod tests {
             stt_model: None,
             device: None,
         };
-        let err = match extract("test-run", &secret, None, &[], &[], |_, _| {}).await {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        let _store = Store::open(&db).unwrap();
+        let err = match extract(
+            &db,
+            "test-run",
+            &secret,
+            &[],
+            None,
+            &[],
+            &[],
+            false,
+            |_, _| {},
+        )
+        .await
+        {
             Ok(_) => panic!("a decisions model extracted claims"),
             Err(err) => err,
         };

@@ -13,6 +13,8 @@ use super::{
     subject_of, SearchHit, ACCOUNTS,
 };
 
+pub use crate::osint::dork_generator::SearchQueryArtifact;
+
 /// Closed binding vocabulary shared by questions, the picker, and the binder.
 pub const BINDING_KINDS: &[&str] = &[
     "domain",
@@ -966,6 +968,31 @@ pub const TOOLS: &[ToolIo] = &[
             "email",
         ],
     ),
+    ToolIo {
+        after: HANDLE_SEEDS,
+        keys: &[("handle", "handle"), ("profile_url", "url")],
+        profile_of_input: true,
+        ..row(
+            "whatsmyname_lookup",
+            &[Slot {
+                fills: &[fill("handle", "username")],
+            }],
+            &["handle", "url"],
+        )
+    },
+    ToolIo {
+        optional: &[fill("domain", "domain")],
+        ..row(
+            "dork_generate",
+            &[Slot {
+                fills: &[
+                    fill_how(QUERY_KIND, "objective", How::SearchQuery),
+                    fill_how(QUERY_KIND, "query", How::SearchQuery),
+                ],
+            }],
+            &[],
+        )
+    },
 ];
 
 pub fn tool_row(tool_id: &str) -> Option<&'static ToolIo> {
@@ -2232,6 +2259,9 @@ fn leaf_strings(value: &Value, out: &mut Vec<String>) {
 
 /// Values of the row's structured keys, as (kind, value, platform qualifier).
 fn keyed(row: &ToolIo, value: &Value, parent: &str, out: &mut Vec<(&'static str, String, String)>) {
+    if row.tool == "whatsmyname_lookup" && parent == "outcomes" {
+        return;
+    }
     match value {
         Value::Object(map) => {
             let sibling_platform = ["proof_type", "service", "platform", "network"]
@@ -2519,6 +2549,9 @@ pub fn rule_bindings(
                     for hit in hits.iter().filter(|hit| wanted(&hit.url)).take(5) {
                         push(URL_KIND, &hit.url, "");
                     }
+                }
+                for (_, value, _) in keyed_values.iter().filter(|(item, _, _)| *item == URL_KIND) {
+                    push(URL_KIND, value, "");
                 }
             }
             "email" => texts

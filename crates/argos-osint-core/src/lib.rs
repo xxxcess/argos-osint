@@ -40,6 +40,7 @@ pub mod paths;
 pub mod pipeline;
 pub mod provider;
 pub mod provider_attempt;
+pub mod provider_chain;
 pub mod provider_diag;
 pub mod provider_request;
 pub mod recon;

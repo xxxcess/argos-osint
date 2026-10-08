@@ -227,6 +227,7 @@ fn model_areas(area: Rect) -> Vec<Rect> {
             Constraint::Length(FIELD_H),
             Constraint::Length(FIELD_H),
             Constraint::Length(ACTION_H),
+            Constraint::Min(4),
             Constraint::Length(ACTION_H),
             Constraint::Min(0),
         ],
@@ -3235,6 +3236,63 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     None
 }
 
+fn osint_buttons(
+    tool_id: Option<&str>,
+    refresh_running: Option<&str>,
+) -> Vec<(ButtonId, &'static str)> {
+    match tool_id {
+        Some("whatsmyname_lookup") => {
+            let refresh_lbl = if refresh_running == Some("whatsmyname") {
+                "Refreshing…"
+            } else {
+                "Refresh"
+            };
+            vec![
+                (ButtonId::OsintRun, "Run"),
+                (ButtonId::OsintCancel, "Cancel"),
+                (ButtonId::OsintRefreshDataset, refresh_lbl),
+                (ButtonId::OsintToggle, "Enable"),
+                (ButtonId::OsintRaw, "Raw"),
+                (ButtonId::OsintAttach, "Attach"),
+                (ButtonId::OsintStartRecon, "Recon"),
+                (ButtonId::OsintPrev, "Prev"),
+                (ButtonId::OsintNext, "Next"),
+                (ButtonId::OpenDocumentation, "Docs"),
+            ]
+        }
+        Some("dork_generate") => {
+            let refresh_lbl = if refresh_running == Some("dorksearch") {
+                "Refreshing…"
+            } else {
+                "Refresh"
+            };
+            vec![
+                (ButtonId::OsintRun, "Generate"),
+                (ButtonId::OsintSearchSelected, "Search"),
+                (ButtonId::OsintRefreshTemplates, refresh_lbl),
+                (ButtonId::OsintCancel, "Cancel"),
+                (ButtonId::OsintToggle, "Enable"),
+                (ButtonId::OsintRaw, "Raw"),
+                (ButtonId::OsintAttach, "Attach"),
+                (ButtonId::OsintStartRecon, "Recon"),
+                (ButtonId::OsintPrev, "Prev"),
+                (ButtonId::OsintNext, "Next"),
+            ]
+        }
+        _ => vec![
+            (ButtonId::OsintRun, "Run"),
+            (ButtonId::OsintCancel, "Cancel"),
+            (ButtonId::OsintToggle, "Enable"),
+            (ButtonId::OsintRaw, "Raw"),
+            (ButtonId::OsintAttach, "Attach"),
+            (ButtonId::OsintStartRecon, "Recon"),
+            (ButtonId::OsintPrev, "Prev"),
+            (ButtonId::OsintNext, "Next"),
+            (ButtonId::OpenDocumentation, "Docs"),
+        ],
+    }
+}
+
 fn osint_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     let slot = api_key_slot(app);
     let layout = osint_areas(body, slot.is_some());
@@ -3269,22 +3327,13 @@ fn osint_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         return Some(Target::Field(FieldId::OsintInput));
     }
     if contains(actions, x, y) {
-        let areas = button_areas(actions, 9);
-        let ids = [
-            ButtonId::OsintRun,
-            ButtonId::OsintCancel,
-            ButtonId::OsintToggle,
-            ButtonId::OsintRaw,
-            ButtonId::OsintAttach,
-            ButtonId::OsintStartRecon,
-            ButtonId::OsintPrev,
-            ButtonId::OsintNext,
-            ButtonId::OpenDocumentation,
-        ];
+        let tool = osint::registry().get(app.tool_sel);
+        let buttons = osint_buttons(tool.map(|t| t.id), app.dataset_refresh_running.as_deref());
+        let areas = button_areas(actions, buttons.len());
         return areas
             .iter()
             .position(|rect| contains(*rect, x, y))
-            .map(|index| Target::Button(ids[index]));
+            .map(|index| Target::Button(buttons[index].0));
     }
     None
 }
@@ -3389,7 +3438,40 @@ fn provider_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
                 return Some(Target::Button(role.save_button()));
             }
             if contains(models[4], x, y) {
-                return Some(Target::Button(ButtonId::RefreshModels));
+                let fallbacks = app
+                    .settings
+                    .defaults
+                    .role(role.role_key())
+                    .map(|a| a.fallbacks.len())
+                    .unwrap_or(0);
+                if fallbacks == 0 {
+                    return Some(Target::Button(ButtonId::AddFallback));
+                }
+                let inner = inset(models[4]);
+                if inner.height > 0 {
+                    let row_h = 1.max(inner.height / fallbacks.max(1) as u16);
+                    for i in 0..fallbacks {
+                        let y0 = inner.y.saturating_add(i as u16 * row_h);
+                        if y >= y0 && y < y0.saturating_add(row_h).min(inner.y + inner.height) {
+                            return Some(Target::Button(ButtonId::FallbackItem(i)));
+                        }
+                    }
+                }
+            }
+            if contains(models[5], x, y) {
+                let buttons = button_areas(models[5], 4);
+                if contains(buttons[0], x, y) {
+                    return Some(Target::Button(ButtonId::AddFallback));
+                }
+                if contains(buttons[1], x, y) {
+                    return Some(Target::Button(ButtonId::DeleteFallback));
+                }
+                if contains(buttons[2], x, y) {
+                    return Some(Target::Button(ButtonId::MoveFallbackUp));
+                }
+                if contains(buttons[3], x, y) {
+                    return Some(Target::Button(ButtonId::MoveFallbackDown));
+                }
             }
         }
     }
@@ -3511,6 +3593,9 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
                 },
             )
         }
+        FieldId::FallbackFilter if app.overlay == Overlay::AddFallback => {
+            Some(add_fallback_layout(add_fallback_popup_area(app.screen))[2])
+        }
         _ => None,
     }
 }
@@ -3600,9 +3685,10 @@ fn field_placeholder(field: FieldId) -> &'static str {
         FieldId::RouterEndpoint | FieldId::GoogleEndpoint | FieldId::NvidiaEndpoint => {
             "API base URL, including version"
         }
-        FieldId::GoogleModelFilter | FieldId::NvidiaModelFilter | FieldId::RouterModelFilter => {
-            "Filter model names or IDs…"
-        }
+        FieldId::GoogleModelFilter
+        | FieldId::NvidiaModelFilter
+        | FieldId::RouterModelFilter
+        | FieldId::FallbackFilter => "Filter model names or IDs…",
         FieldId::Composer => "Ask an OSINT question…",
         field if is_picker_field(field) => {
             if matches!(
@@ -4329,6 +4415,8 @@ fn header_detail(app: &App) -> String {
 fn footer_line(app: &App) -> Paragraph<'static> {
     let keys = if matches!(app.overlay, Overlay::Palette) {
         "type to filter · ↑↓ · Enter run · Esc close"
+    } else if matches!(app.overlay, Overlay::AddFallback) {
+        "←→ provider · type to filter · ↑↓ · Enter add · Esc close"
     } else if let Overlay::Choice(_) = app.overlay {
         "↑↓ choose · Enter select · Esc close"
     } else if app.overlay == Overlay::IntelRecon {
@@ -5285,7 +5373,7 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(List::new(items).block(pane(" tools ")), list);
-    let desc = if let Some(tool) = osint::registry().get(app.tool_sel) {
+    let (desc, tool_id) = if let Some(tool) = osint::registry().get(app.tool_sel) {
         let result = app
             .osint_result
             .as_ref()
@@ -5317,8 +5405,48 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             tool.documentation
         };
-        format!(
-            "{}\n{} · {} · {}\n\nDocumentation\n{docs}\n\n{}\n\nInputs: {}\nExample: {}\n\nPolicy: {}\nTimeout: {}s · Cache: {}s{}",
+        let dataset_status = if tool.id == "whatsmyname_lookup" {
+            if app.dataset_refresh_running.as_deref() == Some("whatsmyname") {
+                format!(
+                    "\n\nDataset Status\n{} Refreshing WhatsMyName dataset from upstream...\n(Tracked in Jobs queue · press Cancel to abort)",
+                    loading_spinner_frame()
+                )
+            } else {
+                let st = osint::whatsmyname::status();
+                if st.is_available {
+                    format!(
+                        "\n\nDataset Status\nActive Version: {}\nSites: {} ({} supported, {} skipped)\nLast Checked: {}\nUpstream: {} ({})",
+                        st.active_version.as_deref().unwrap_or("none"),
+                        st.total_count,
+                        st.supported_count,
+                        st.skipped_count,
+                        st.last_checked.as_deref().unwrap_or("unknown"),
+                        st.source_url.as_deref().unwrap_or("official"),
+                        st.license_status.as_deref().unwrap_or("CC BY-SA 4.0"),
+                    )
+                } else {
+                    "\n\nDataset Status\nNot loaded. Click 'Refresh' to download official dataset or import with CLI.".into()
+                }
+            }
+        } else if tool.id == "dork_generate" {
+            if app.dataset_refresh_running.as_deref() == Some("dorksearch") {
+                format!(
+                    "\n\nTemplate Catalog Status\n{} Refreshing DorkSearch templates from upstream...\n(Tracked in Jobs queue · press Cancel to abort)",
+                    loading_spinner_frame()
+                )
+            } else {
+                let st = osint::dork_generator::status();
+                format!(
+                    "\n\nTemplate Catalog Status\nActive Version: {}\nTemplates: 70 templates · 13 categories · 4 page examples\nLast Checked: {}\nSource: https://dorksearch.pro/script.js",
+                    st.active_version.as_deref().unwrap_or("dsp-seed"),
+                    st.last_checked.as_deref().unwrap_or("embedded seed"),
+                )
+            }
+        } else {
+            String::new()
+        };
+        let body = format!(
+            "{}\n{} · {} · {}\n\nDocumentation\n{docs}\n\n{}\n\nInputs: {}\nExample: {}\n\nPolicy: {}\nTimeout: {}s · Cache: {}s{}{}",
             tool.name,
             tool.id,
             tool.category,
@@ -5336,10 +5464,12 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
             tool.restrictions,
             tool.timeout_seconds,
             tool.cache_seconds,
+            dataset_status,
             result
-        )
+        );
+        (body, tool.id)
     } else {
-        "Select a tool".into()
+        ("Select a tool".into(), "")
     };
     let inner_w = inset(detail).width.max(1) as usize;
     let desc_lines = wrapped_line_count(&desc, inner_w);
@@ -5370,19 +5500,16 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
         draw_field(frame, app, slot.fallback, " Fallback ", layout.fallback);
     }
     draw_field(frame, app, FieldId::OsintInput, " Input JSON ", input);
-    let buttons = button_areas(actions, 9);
-    let labels = [
-        (ButtonId::OsintRun, "Run"),
-        (ButtonId::OsintCancel, "Cancel"),
-        (ButtonId::OsintToggle, "Enable"),
-        (ButtonId::OsintRaw, "Raw"),
-        (ButtonId::OsintAttach, "Attach"),
-        (ButtonId::OsintStartRecon, "Recon"),
-        (ButtonId::OsintPrev, "Prev"),
-        (ButtonId::OsintNext, "Next"),
-        (ButtonId::OpenDocumentation, "Docs"),
-    ];
-    for (index, (button, label)) in labels.into_iter().enumerate() {
+    let button_list = osint_buttons(
+        if tool_id.is_empty() {
+            None
+        } else {
+            Some(tool_id)
+        },
+        app.dataset_refresh_running.as_deref(),
+    );
+    let buttons = button_areas(actions, button_list.len());
+    for (index, (button, label)) in button_list.into_iter().enumerate() {
         draw_button(frame, app, button, label, buttons[index]);
     }
 }
@@ -5813,59 +5940,106 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
             draw_field(frame, app, provider, " Provider ", models[1]);
             draw_field(frame, app, model, " Model ", models[2]);
             draw_button(frame, app, save, "Save default", models[3]);
+            draw_fallbacks_list(frame, app, models[4]);
+            let actions = button_areas(models[5], 4);
             draw_button(
                 frame,
                 app,
-                ButtonId::RefreshModels,
-                "Refresh models",
-                models[4],
+                ButtonId::AddFallback,
+                "Add fallback",
+                actions[0],
             );
-            let provider = app.role_provider();
-            let label = if provider.is_empty() {
-                "this account"
-            } else {
-                match provider::normalize_kind(&provider).as_str() {
-                    "grok" => "Grok (legacy)",
-                    "openai-chatgpt" => "OpenAI (legacy)",
-                    "openrouter" => "OpenRouter",
-                    "google" => "Google",
-                    "nvidia" => "Nvidia",
-                    "local" => "Local",
-                    _ => "this account",
-                }
-            };
-            let model = app.field(role.model_field());
-            let transport = if !model.is_empty()
-                && matches!(role, DefaultsRole::ToolPicker | DefaultsRole::Classifier)
-            {
-                format!(" Transport: {}.", provider::picker_transport(model))
-            } else {
-                String::new()
-            };
-            let note = if provider.is_empty() {
-                "Choose a connected account. Open Provider and Model, then Save default.".into()
-            } else if app.model_catalog.is_empty() || app.catalog_for != provider {
-                format!("Open Model to list what {label} can call. Save default stores this role.")
-            } else {
-                format!(
-                    "{} models this account can call. Open Model to choose, then Save default.",
-                    app.model_catalog.len()
-                )
-            };
-            let note = format!("{note}{transport}");
-            if models[5].height >= 8 {
-                super::model_roles::draw_model_roles_view(frame, app, models[5]);
+            draw_button(
+                frame,
+                app,
+                ButtonId::DeleteFallback,
+                "Delete selected",
+                actions[1],
+            );
+            draw_button(frame, app, ButtonId::MoveFallbackUp, "Move up", actions[2]);
+            draw_button(
+                frame,
+                app,
+                ButtonId::MoveFallbackDown,
+                "Move down",
+                actions[3],
+            );
+            let note = "Tried top to bottom after primary retries. Primary: 4 attempts (10s/20s/30s). Each fallback: 3 attempts (10s/20s).";
+            if models[6].height >= 8 {
+                let split = split_vertical(models[6], [Constraint::Length(3), Constraint::Min(0)]);
+                frame.render_widget(
+                    Paragraph::new(note)
+                        .style(theme::dim())
+                        .wrap(Wrap { trim: true }),
+                    split[0],
+                );
+                super::model_roles::draw_model_roles_view(frame, app, split[1]);
             } else {
                 frame.render_widget(
                     Paragraph::new(note)
                         .style(theme::dim())
-                        .scroll((app.scrolls.detail, 0))
                         .wrap(Wrap { trim: true }),
-                    models[5],
+                    models[6],
                 );
             }
         }
     }
+}
+
+fn draw_fallbacks_list(frame: &mut Frame, app: &App, area: Rect) {
+    let focused = matches!(
+        app.focus,
+        Target::Button(ButtonId::FallbackItem(_) | ButtonId::AddFallback)
+    );
+    let title = if focused {
+        " Fallbacks · focused "
+    } else {
+        " Fallbacks "
+    };
+    frame.render_widget(pane(title), area);
+    let inner = inset(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let fallbacks = app
+        .settings
+        .defaults
+        .role(app.defaults_role.role_key())
+        .map(|a| a.fallbacks.as_slice())
+        .unwrap_or(&[]);
+    if fallbacks.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No fallback models configured")
+                .style(theme::dim())
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+    let mut lines = Vec::new();
+    for (i, route) in fallbacks.iter().enumerate() {
+        app.layout.borrow_mut().register(
+            Target::Button(ButtonId::FallbackItem(i)),
+            Rect {
+                x: inner.x,
+                y: inner.y.saturating_add(i as u16),
+                width: inner.width,
+                height: 1,
+            },
+        );
+        let mut label = format!("{}. {}", i + 1, route.label());
+        let secret = provider::account_secret(&app.auth, &route.provider);
+        if secret.api_key.as_deref().unwrap_or("").trim().is_empty() {
+            label.push_str(" · missing key");
+        }
+        let style = if i == app.fallback_sel {
+            theme::selected()
+        } else {
+            theme::text()
+        };
+        lines.push(Line::from(Span::styled(label, style)));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn atlas_live_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
@@ -7618,40 +7792,40 @@ fn draw_atlas_insights(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), centered);
         return;
     }
-    let width = inset(area).width as usize;
-    let room = inset(area).height.saturating_sub(2) as usize;
-    let table = atlas_insights::insight_table_lines(&app.atlas_stats.insights);
-    let (head, rows) = if table.len() <= 2 {
-        (table, Vec::new())
-    } else {
-        let mut table = table;
-        let rows = table.split_off(2);
-        (table, rows)
-    };
-    let start = (app.scrolls.insights as usize).min(rows.len().saturating_sub(room.max(1)));
-    let mut lines: Vec<Line> = head
-        .into_iter()
-        .map(|line| Line::from(Span::styled(center_text(&line, width), theme::dim())))
-        .collect();
-    // Fifth-phase row: saved/reused/indexed counts, never extraction counts.
     let memories = app.atlas_stats.memories.line();
+    let stats = atlas_insights::insight_stats_line(&app.atlas_stats.insights);
+    let mut prefix = Vec::new();
     if !memories.is_empty() {
-        lines.insert(
-            0,
-            Line::from(Span::styled(center_text(&memories, width), theme::dim())),
-        );
+        prefix.push(Line::from(Span::styled(memories, theme::dim())));
     }
-    lines.extend(
-        rows.into_iter()
-            .skip(start)
-            .take(room.max(1))
-            .map(|line| Line::from(Span::styled(center_text(&line, width), theme::text()))),
-    );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(pane(" insights "))
-            .wrap(Wrap { trim: false }),
-        area,
+    prefix.push(Line::from(Span::styled(stats, theme::dim())));
+    let rows: Vec<Vec<String>> = app
+        .atlas_stats
+        .insights
+        .rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.entity.clone(),
+                row.predicate.clone(),
+                row.object.clone(),
+                row.topic.clone(),
+                row.classification.clone(),
+            ]
+        })
+        .collect();
+    super::atlas_table::render_wrapped_table(
+        frame,
+        super::atlas_table::WrappedTable {
+            area,
+            headers: &["Entity", "Predicate", "Object", "Topic", "Class"],
+            rows: &rows,
+            min_widths: &[12, 10, 12, 8, 8],
+            scroll_lines: app.scrolls.insights as usize,
+            focused: false,
+            title: " insights ",
+            prefix,
+        },
     );
 }
 
@@ -8136,6 +8310,7 @@ fn popup_text(app: &App) -> String {
             .map(|item| item.label)
             .collect::<Vec<_>>()
             .join("\n"),
+        Overlay::AddFallback => String::new(),
         Overlay::None => String::new(),
     }
 }
@@ -8192,7 +8367,7 @@ fn help_text(app: &App) -> &'static str {
         Some(ModuleId::Logs) => "Logs\n\nDurable events from every app and background worker, kept 24 hours\nThe header counts errors, warnings, and failures in the last hour\nFilter narrows by text. Level, App, and the job filter narrow further\n↑↓ select an event · Enter or click folds its detail\nf toggles live follow. Moving off the newest event pauses it\no or Open job shows the event's job in Jobs\nOpened from Jobs, Esc or Back to job returns there\nClear events removes events only; jobs, results, and memories stay\nCtrl+U/Ctrl+D and the wheel scroll the list",
         Some(ModuleId::Jobs) => "Jobs\n\nBackground work with timing, attempts, and errors\nActive work is listed first, then recent history, then service workers\nStatus and App filter the table. Filter matches title, id, operation, or error\n↑↓ select a job · Enter opens its detail (full screen when narrow)\nl or View logs opens Logs filtered to the job and its phases\nRetry failed requeues only failed index or summary tasks; completed work is kept\nOpen source jumps to the Atlas cycle or investigation when there is one\nUnknown historic timing shows Unavailable\nEsc closes the detail, then returns home",
         Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe detail shows the path graph on top, Related on the left, and Summary on the right\nNarrow terminals stack Related above Summary; the focused one gets more room\nRelated lists other memories: linked ones (shared claim relation, source, entity, or investigation) first, then similar ones, which are not evidence\nTab moves between Back, the graph, Related, and Summary\n↑↓ select a related memory · Enter or click opens it, even when Find hides it\nEsc or Back returns to the previous memory, then to the list with its Find and selection\nThe list keeps its selection and Find when memories change elsewhere\nIf memories cannot be read, the last loaded list stays and the error is shown and logged\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
-        Some(ModuleId::Providers) => "Models\n\nEach account tab stores that provider only\nDefaults sets Recon and Synthesis separately\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
+        Some(ModuleId::Providers) => "Models\n\nEach account tab stores that provider only\nDefaults sets every role's primary model and ordered fallbacks\nFallbacks are tried top to bottom after primary retries (4 then 3 each)\nAdd fallback opens Google, Nvidia, or OpenRouter catalogs\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
         _ => "Controls\n\nTab moves between fields and buttons\n1–9 switch apps when not typing in a field\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }
 }
@@ -8218,12 +8393,165 @@ fn popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn add_fallback_popup_area(screen: Rect) -> Rect {
+    popup_area(screen)
+}
+
+fn add_fallback_layout(area: Rect) -> Vec<Rect> {
+    let inner = inset(area);
+    split_vertical(
+        inner,
+        [
+            Constraint::Length(ACTION_H),
+            Constraint::Length(2),
+            Constraint::Length(FIELD_H),
+            Constraint::Min(4),
+            Constraint::Length(ACTION_H),
+        ],
+    )
+}
+
+fn draw_add_fallback(frame: &mut Frame, app: &App) {
+    let area = add_fallback_popup_area(frame.area());
+    cover(frame, area);
+    let title = format!(" Add fallback · {} ", app.defaults_role.label());
+    frame.render_widget(Paragraph::new("").block(theme::card(&title)), area);
+    let close = Rect {
+        x: area.x + area.width.saturating_sub(8),
+        y: area.y,
+        width: 8.min(area.width),
+        height: 1,
+    };
+    app.layout
+        .borrow_mut()
+        .register(Target::CloseOverlay, close);
+    frame.render_widget(Paragraph::new(" close ").style(theme::card_accent()), close);
+
+    let rows = add_fallback_layout(area);
+    let tabs = [
+        ProviderPage::Google,
+        ProviderPage::Nvidia,
+        ProviderPage::OpenRouter,
+    ];
+    let tab_rects = button_areas(rows[0], tabs.len());
+    for (page, rect) in tabs.into_iter().zip(tab_rects) {
+        app.layout
+            .borrow_mut()
+            .register(Target::Button(ButtonId::FallbackTab(page)), rect);
+        let selected = app.fallback_popup_tab == page;
+        draw_button_state(
+            frame,
+            app,
+            ButtonId::FallbackTab(page),
+            page.title(),
+            rect,
+            selected,
+        );
+    }
+
+    let provider = match app.fallback_popup_tab {
+        ProviderPage::Google => "google",
+        ProviderPage::Nvidia => "nvidia",
+        ProviderPage::OpenRouter => "openrouter",
+        ProviderPage::Defaults => "openrouter",
+    };
+    let secret = provider::account_secret(&app.auth, provider);
+    let has_key = !secret.api_key.as_deref().unwrap_or("").trim().is_empty();
+    let status = if !has_key {
+        format!(
+            "No API key. Save one on the {} tab, then add a fallback.",
+            app.fallback_popup_tab.title()
+        )
+    } else if app.catalog_for == provider && app.model_catalog.is_empty() {
+        "This account returned no models.".into()
+    } else if app.catalog_for != provider {
+        "Loading models this account can call…".into()
+    } else {
+        format!(
+            "{} models · unknown capabilities stay selectable",
+            app.model_catalog.len()
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(status)
+            .style(theme::dim())
+            .wrap(Wrap { trim: true }),
+        rows[1],
+    );
+
+    draw_field(frame, app, FieldId::FallbackFilter, " Filter ", rows[2]);
+    app.layout
+        .borrow_mut()
+        .register(Target::Field(FieldId::FallbackFilter), rows[2]);
+
+    let models = app.filtered_fallback_models();
+    let list_inner = inset(rows[3]);
+    frame.render_widget(pane(" Models "), rows[3]);
+    let mut lines = Vec::new();
+    if !has_key {
+        lines.push(Line::from(Span::styled(
+            "Add is disabled until a key is saved.",
+            theme::dim(),
+        )));
+    } else if models.is_empty() && !app.fallback_popup_filter.trim().is_empty() {
+        lines.push(Line::from("No models match this filter."));
+    } else if models.is_empty() {
+        lines.push(Line::from(Span::styled("No models loaded.", theme::dim())));
+    } else {
+        for (i, model) in models.iter().enumerate() {
+            let y = list_inner.y.saturating_add(i as u16);
+            if y < list_inner.y.saturating_add(list_inner.height) {
+                app.layout.borrow_mut().register(
+                    Target::Button(ButtonId::FallbackPick(i)),
+                    Rect {
+                        x: list_inner.x,
+                        y,
+                        width: list_inner.width,
+                        height: 1,
+                    },
+                );
+            }
+            let mut label = format!("{} · {}", model.name, model.id);
+            if let Some(reason) = app.fallback_incompatible(&model.id) {
+                label.push_str(" · ");
+                label.push_str(reason);
+            }
+            let style = if i == app.fallback_popup_sel {
+                theme::selected()
+            } else {
+                theme::text()
+            };
+            lines.push(Line::from(Span::styled(label, style)));
+        }
+    }
+    let skip = app.scrolls.popup as usize;
+    let visible: Vec<Line> = lines.into_iter().skip(skip).collect();
+    frame.render_widget(
+        Paragraph::new(visible).wrap(Wrap { trim: false }),
+        list_inner,
+    );
+
+    let add_enabled = has_key && !models.is_empty();
+    draw_button_state(
+        frame,
+        app,
+        ButtonId::ConfirmAddFallback,
+        "Add fallback",
+        rows[4],
+        add_enabled && app.focus == Target::Button(ButtonId::ConfirmAddFallback),
+    );
+}
+
 fn draw_overlay(frame: &mut Frame, app: &App) {
     app.layout
         .borrow_mut()
         .push_scope(active_popup_area(app, frame.area()));
     if matches!(app.overlay, Overlay::Palette) {
         draw_palette(frame, app);
+        return;
+    }
+    if matches!(app.overlay, Overlay::AddFallback) {
+        draw_add_fallback(frame, app);
         return;
     }
     if let Overlay::Choice(kind) = app.overlay {
@@ -8240,7 +8568,11 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         Overlay::Help => " Shortcuts ",
         Overlay::Memories { .. } => " Memory ",
         Overlay::Block { .. } => " Detail ",
-        Overlay::Choice(_) | Overlay::IntelRecon | Overlay::Palette | Overlay::None => " ",
+        Overlay::Choice(_)
+        | Overlay::IntelRecon
+        | Overlay::Palette
+        | Overlay::AddFallback
+        | Overlay::None => " ",
     };
     let run_card = atlas_run_card(app);
     let body = if run_card {

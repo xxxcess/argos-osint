@@ -19,9 +19,12 @@ mod news_legal;
 #[cfg(test)]
 pub(crate) use news_legal::fixture;
 pub mod contracts;
+pub mod dataset;
+pub mod dork_generator;
 mod providers;
 pub mod results;
 pub mod source_eval;
+pub mod whatsmyname;
 pub mod wikipedia_rsp;
 pub use contracts::{
     compact_capability_catalog, picker_candidates, ArgumentBuilderContract, CompactToolCapability,
@@ -105,7 +108,7 @@ pub fn plan_interval(id: &str) -> PlanInterval {
         return PlanInterval::Daily;
     }
     match id {
-        "hackertarget_hostsearch" => PlanInterval::Daily,
+        "hackertarget_hostsearch" | "whatsmyname_lookup" | "dork_generate" => PlanInterval::Daily,
         // WP:RSP changes slowly; keep the built index for a month.
         "wikipedia_source_reliability" => PlanInterval::Monthly,
         _ => PlanInterval::Never,
@@ -180,6 +183,8 @@ pub fn registry() -> &'static [ToolDefinition] {
         tool!("courtlistener_case_search","CourtListener case law","Legal","Court opinions (case law) that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=o with q as an exact phrase. First page only, at most 20 results, no highlighting, never semantic search. Optional court (court ids separated by spaces), filed_after and filed_before (YYYY-MM-DD). Enter the CourtListener API token on a Legal tool, or set COURTLISTENER_API_TOKEN; it is sent as Authorization: Token. Free tier 5/min, 50/hour, 125/day: at most 3 CourtListener calls per turn, 12 s apart.",30),
         tool!("courtlistener_docket_search","CourtListener federal dockets","Legal","Federal (PACER/RECAP) dockets that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=r with q as an exact phrase. First page only, at most 20 results, no highlighting; no RECAP fetch or paid PACER pulls. Optional court and filed_after (YYYY-MM-DD). Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30),
         tool!("courtlistener_judge_search","CourtListener judges","Legal","Judges whose name matches the subject (exact phrase), with court and position.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=p with q as an exact phrase. First page only, at most 20 results. Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30),
+        tool!("whatsmyname_lookup","WhatsMyName lookup","Identities","Enumerate public accounts across websites using the official WhatsMyName dataset.",["username"],"https://github.com/WebBreacher/WhatsMyName","Dataset-driven detection; network access required; zero credit cost.",90),
+        tool!("dork_generate","Dork generator","Web","Compose structured search queries from DorkSearch PRO templates for Firecrawl search.",["objective|query|purpose|target"],"https://dorksearch.pro/","Local query synthesis; zero credit cost.",20),
     ]).as_slice()
 }
 pub fn definition(id: &str) -> Option<&'static ToolDefinition> {
@@ -334,14 +339,35 @@ fn optional_keys(id: &str) -> &'static [&'static str] {
         "currents_latest" => &["language"],
         "courtlistener_case_search" => &["court", "filed_after", "filed_before"],
         "courtlistener_docket_search" => &["court", "filed_after"],
+        "whatsmyname_lookup" => &["categories", "sites", "platforms", "max_sites"],
+        "dork_generate" => &[
+            "purpose",
+            "category",
+            "target",
+            "query",
+            "objective",
+            "operand_overrides",
+            "max_queries",
+            "domain",
+            "keywords",
+            "categories",
+            "template_ids",
+            "title",
+            "url_text",
+            "excluded_domain",
+            "url",
+            "subject",
+        ],
         _ => &[],
     }
 }
 fn key_schema(key: &str) -> Value {
     match key {
         "latitude" | "longitude" => json!({"type": "number"}),
-        "radius_m" | "limit" | "offset" => json!({"type": "integer"}),
-        "urls" | "sources" | "categories" | "formats" => {
+        "radius_m" | "limit" | "offset" | "max_sites" | "max_queries" => {
+            json!({"type": "integer"})
+        }
+        "urls" | "sources" | "categories" | "formats" | "sites" | "template_ids" => {
             json!({"type": "array", "items": {"type": "string"}})
         }
         "perfect_match" => json!({"type": "boolean"}),
@@ -379,6 +405,7 @@ impl ToolDefinition {
                 "ip" => json!("8.8.8.8"),
                 "url" => json!("https://example.org"),
                 "query" => json!("example"),
+                "objective" => json!("Find public annual reports for the organization"),
                 "company_name" => json!("Example Inc"),
                 "cik" => json!("0000320193"),
                 "name" => json!("Example"),
@@ -438,6 +465,13 @@ pub fn validate(id: &str, inputs: &Value) -> Result<()> {
             "missing {}",
             group.replace('|', " or ")
         );
+    }
+    if id == "whatsmyname_lookup" {
+        str_arg(inputs, "username")?;
+        return Ok(());
+    }
+    if id == "dork_generate" {
+        return Ok(());
     }
     if id == "commoncrawl_urls" && inputs.get("index").is_none() {
         let mut copy = inputs.clone();
@@ -1781,6 +1815,11 @@ fn request(id: &str, v: &Value) -> Result<Request> {
                 &[("q", &x), ("size", "30")],
             )
         }
+        "whatsmyname_lookup" => {
+            let u = str_arg(v, "username")?;
+            q(whatsmyname::WMN_UPSTREAM_URL, &[], &[("u", u)])
+        }
+        "dork_generate" => q("https://dorksearch.pro/", &[], &[]),
         _ => Err(anyhow!("unknown tool {id}")),
     }
 }
@@ -2359,6 +2398,55 @@ impl Executor {
                 credits_reported: None,
             });
         }
+        if id == "whatsmyname_lookup" {
+            let lookup_input: whatsmyname::LookupInput = serde_json::from_value(inputs.clone())?;
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(whatsmyname::REQUEST_TIMEOUT)
+                .build()?;
+            let observation = whatsmyname::lookup(&client, lookup_input, user_agent).await?;
+            let status = if observation.coverage.found > 0 {
+                "completed"
+            } else if observation.coverage.completed > 0 {
+                "no_results"
+            } else if observation.coverage.error > 0 || observation.coverage.timeout > 0 {
+                "failed"
+            } else {
+                "completed"
+            };
+            return Ok(ToolResult {
+                tool_id: id.into(),
+                inputs,
+                status: status.into(),
+                source_url: whatsmyname::WMN_UPSTREAM_URL.into(),
+                retrieved_at: Utc::now().to_rfc3339(),
+                observations: serde_json::to_value(&observation)?,
+                raw: String::new(),
+                error: None,
+                cached: false,
+                truncated: false,
+                credits_charged: 0,
+                credits_reported: None,
+            });
+        }
+        if id == "dork_generate" {
+            let gen_input: dork_generator::GenerateInput = serde_json::from_value(inputs.clone())?;
+            let artifacts = dork_generator::generate(gen_input)?;
+            return Ok(ToolResult {
+                tool_id: id.into(),
+                inputs,
+                status: "completed".into(),
+                source_url: "https://dorksearch.pro/".into(),
+                retrieved_at: Utc::now().to_rfc3339(),
+                observations: serde_json::to_value(&artifacts)?,
+                raw: String::new(),
+                error: None,
+                cached: false,
+                truncated: false,
+                credits_charged: 0,
+                credits_reported: None,
+            });
+        }
         if id == "sec_submissions" && inputs.get("cik").is_none() {
             let (kind, needle) = one_of(&inputs, &["ticker", "name"])?;
             let mapping = self
@@ -2905,7 +2993,7 @@ mod tests {
         };
         let mut ids: Vec<&str> = registry().iter().map(|tool| tool.id).collect();
         ids.push("hunter_tech_lookup");
-        assert_eq!(ids.len(), 60);
+        assert_eq!(ids.len(), 62);
         for id in ids {
             for blank in [None, Some(""), Some("   "), Some(" \t\n ")] {
                 let sent = agent(&request_headers(
@@ -2968,9 +3056,9 @@ mod tests {
 
     #[test]
     fn registry_and_validation() {
-        assert_eq!(registry().len(), 59);
+        assert_eq!(registry().len(), 61);
         let ids: std::collections::HashSet<_> = registry().iter().map(|t| t.id).collect();
-        assert_eq!(ids.len(), 59);
+        assert_eq!(ids.len(), 61);
         assert_eq!(
             registry()
                 .iter()

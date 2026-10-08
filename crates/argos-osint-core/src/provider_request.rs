@@ -159,10 +159,12 @@ where
                 if category == ErrorCategory::RateLimit {
                     tasks::note_shared_rate_limit(account, tasks::backoff_delay(attempts));
                 }
-                if !tasks::can_retry(kind, attempts, category) {
+                let Some(wait) = crate::provider_chain::wait_before_retry(0, attempts) else {
                     break;
+                };
+                if !cfg!(test) {
+                    tokio::time::sleep(wait).await;
                 }
-                tokio::time::sleep(tasks::backoff_delay(attempts)).await;
             }
         }
     }
@@ -186,8 +188,8 @@ mod retry_tests {
             Err(ErrorCategory::RateLimit) as Result<(), ErrorCategory>
         })
         .await;
-        assert_eq!(out.attempts_used, 2);
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(out.attempts_used, 4);
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
         assert!(out.value.is_none());
     }
 
@@ -199,7 +201,7 @@ mod retry_tests {
             Err(ErrorCategory::TemporaryNetwork) as Result<(), ErrorCategory>
         })
         .await;
-        assert_eq!(out.attempts_used, 3);
-        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert_eq!(out.attempts_used, 4);
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
     }
 }

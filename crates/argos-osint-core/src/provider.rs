@@ -339,12 +339,101 @@ pub fn writer_secret(auth: &crate::secrets::AuthFile, settings: &SettingsFile) -
     secret
 }
 
+/// One inference route (provider/account/model). Secrets stay in the secret store.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelRoute {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub account: String,
+}
+
+impl ModelRoute {
+    pub fn matches(&self, other: &ModelRoute) -> bool {
+        normalize_kind(&self.provider) == normalize_kind(&other.provider)
+            && self.account.trim() == other.account.trim()
+            && self.model.trim() == other.model.trim()
+    }
+
+    pub fn label(&self) -> String {
+        if self.account.trim().is_empty() {
+            format!("{} · {}", self.provider, self.model)
+        } else {
+            format!("{} / {} · {}", self.provider, self.account, self.model)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelAssignment {
     #[serde(default)]
     pub provider: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub account: String,
+    /// Ordered fallbacks tried after the primary route's retries.
+    #[serde(default)]
+    pub fallbacks: Vec<ModelRoute>,
+}
+
+impl ModelAssignment {
+    pub fn as_route(&self) -> ModelRoute {
+        ModelRoute {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            account: self.account.clone(),
+        }
+    }
+
+    pub fn chain(&self) -> Vec<ModelRoute> {
+        let mut routes = vec![self.as_route()];
+        routes.extend(self.fallbacks.iter().cloned());
+        routes
+    }
+
+    pub fn is_duplicate(&self, route: &ModelRoute) -> bool {
+        self.as_route().matches(route)
+            || self
+                .fallbacks
+                .iter()
+                .any(|existing| existing.matches(route))
+    }
+
+    /// Append a fallback. Rejects an exact duplicate of the primary or of another fallback.
+    pub fn add_fallback(&mut self, route: ModelRoute) -> Result<(), String> {
+        if route.provider.trim().is_empty() || route.model.trim().is_empty() {
+            return Err("provider and model are required".into());
+        }
+        if self.is_duplicate(&route) {
+            return Err("that route is already assigned to this role".into());
+        }
+        self.fallbacks.push(route);
+        Ok(())
+    }
+
+    pub fn remove_fallback(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.fallbacks.len() {
+            return Err("no fallback selected".into());
+        }
+        self.fallbacks.remove(index);
+        Ok(())
+    }
+
+    pub fn move_fallback(&mut self, index: usize, delta: i32) -> Result<usize, String> {
+        if index >= self.fallbacks.len() {
+            return Err("no fallback selected".into());
+        }
+        let dest = index as i32 + delta;
+        if dest < 0 || dest as usize >= self.fallbacks.len() {
+            return Ok(index);
+        }
+        let dest = dest as usize;
+        self.fallbacks.swap(index, dest);
+        Ok(dest)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -502,6 +591,7 @@ impl RoleDefaults {
                         ModelAssignment {
                             provider: TOOL_PICKER_PROVIDER.into(),
                             model: TOOL_PICKER_MODEL.into(),
+                            ..Default::default()
                         },
                         Some("tool_picker"),
                     )
@@ -525,6 +615,7 @@ impl RoleDefaults {
             self.decision_model = ModelAssignment {
                 provider: TOOL_PICKER_PROVIDER.into(),
                 model: TOOL_PICKER_MODEL.into(),
+                ..Default::default()
             };
             return true;
         }
@@ -551,6 +642,7 @@ impl RoleDefaults {
             self.tool_picker = ModelAssignment {
                 provider: TOOL_PICKER_PROVIDER.into(),
                 model: TOOL_PICKER_MODEL.into(),
+                ..Default::default()
             };
             return true;
         }
@@ -563,6 +655,7 @@ impl RoleDefaults {
             self.classifier = ModelAssignment {
                 provider: TOOL_PICKER_PROVIDER.into(),
                 model: TOOL_PICKER_MODEL.into(),
+                ..Default::default()
             };
             return true;
         }
@@ -826,6 +919,40 @@ pub fn role_secret(
     Ok(secret)
 }
 
+/// Resolve a fallback/primary route to a secret. Empty keys become a secret
+/// the chain will preflight-skip rather than a hard error.
+pub fn route_secret(
+    auth: &crate::secrets::AuthFile,
+    route: &ModelRoute,
+) -> crate::secrets::ProviderSecret {
+    let kind = if route.account.trim().is_empty() {
+        route.provider.as_str()
+    } else {
+        route.account.as_str()
+    };
+    let mut secret = account_secret(auth, kind);
+    if !route.model.trim().is_empty() {
+        secret.model = route.model.trim().into();
+    }
+    secret
+}
+
+/// Fallback secrets for a role, in saved priority order (primary excluded).
+pub fn role_fallback_secrets(
+    auth: &crate::secrets::AuthFile,
+    settings: &SettingsFile,
+    role: &str,
+) -> Vec<crate::secrets::ProviderSecret> {
+    let Some(assignment) = settings.defaults.role(role) else {
+        return Vec::new();
+    };
+    assignment
+        .fallbacks
+        .iter()
+        .map(|route| route_secret(auth, route))
+        .collect()
+}
+
 /// Map login input onto a known provider id. Unknown text is returned
 /// trimmed so a saved custom kind still round-trips.
 pub fn normalize_kind(kind: &str) -> String {
@@ -983,10 +1110,6 @@ pub async fn complete(
         let status = resp.status();
         let headers = resp.headers().clone();
         let text = resp.text().await.unwrap_or_default();
-        // Some local servers reject stream+tools. Retry once without streaming.
-        if status.as_u16() == 400 || status.as_u16() == 404 {
-            return complete_once(secret, messages, tools).await;
-        }
         return Err(typed_http_error(
             secret,
             &url,
@@ -1003,10 +1126,6 @@ pub async fn complete(
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(err) => {
-                // Mid-stream drops are common on large synthesis replies; finish without streaming.
-                if acc.is_empty() {
-                    return complete_once(secret, messages, tools).await;
-                }
                 return Err(err).context("read provider stream");
             }
         };
@@ -1021,11 +1140,19 @@ pub async fn complete(
     }
     let completion = acc.into_completion();
     if completion.is_empty() {
-        // Stream produced no text and no tools (or only metadata). Retry once
-        // without streaming; parse_completion also folds reasoning_content.
-        return complete_once(secret, messages, tools).await;
+        return Err(completion.empty_error("stream"));
     }
     Ok(completion)
+}
+
+/// One non-streaming request. The shared chain owns retries; callers must not
+/// wrap this in a second retry loop.
+pub async fn complete_one(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    tools: &[ToolSpec],
+) -> Result<Completion> {
+    complete_once(secret, messages, tools).await
 }
 
 /// One Decisions answer. `choice` for choice questions, `score` for score questions,
@@ -1916,6 +2043,15 @@ impl SettingsFile {
         if mutated {
             migrated = true;
         }
+        if let Some(fb) = settings.defaults.decision_fallback.clone() {
+            let route = fb.as_route();
+            if !route.model.trim().is_empty()
+                && !settings.defaults.decision_model.is_duplicate(&route)
+                && settings.defaults.decision_model.add_fallback(route).is_ok()
+            {
+                migrated = true;
+            }
+        }
         // Bump the old product default (200) to the current monthly Firecrawl allowance.
         if settings.recon_limits.firecrawl_credits == 200 {
             settings.recon_limits.firecrawl_credits = default_firecrawl_credits();
@@ -2210,6 +2346,7 @@ mod tests {
         settings.defaults.synthesis = ModelAssignment {
             provider: "openrouter".into(),
             model: "test/synth".into(),
+            ..Default::default()
         };
         // Empty summarization → inherits at resolve time.
         let secret = role_secret(&auth, &settings, "summarization").unwrap();
@@ -2217,6 +2354,53 @@ mod tests {
         assert!(settings.defaults.inherit_summarization_from_synthesis());
         assert_eq!(settings.defaults.summarization.model, "test/synth");
         assert!(!settings.defaults.inherit_summarization_from_synthesis());
+    }
+
+    #[test]
+    fn role_fallbacks_add_delete_reorder_and_reject_duplicates() {
+        let mut assignment = ModelAssignment {
+            provider: "openrouter".into(),
+            model: "primary".into(),
+            ..Default::default()
+        };
+        let google = ModelRoute {
+            provider: "google".into(),
+            model: "gemini-2.5-pro".into(),
+            account: String::new(),
+        };
+        let nvidia = ModelRoute {
+            provider: "nvidia".into(),
+            model: "nvidia-text".into(),
+            account: String::new(),
+        };
+        assignment.add_fallback(google.clone()).unwrap();
+        assignment.add_fallback(nvidia.clone()).unwrap();
+        assert!(assignment
+            .add_fallback(google.clone())
+            .unwrap_err()
+            .contains("already assigned"));
+        assert!(assignment
+            .add_fallback(ModelRoute {
+                provider: "openrouter".into(),
+                model: "primary".into(),
+                account: String::new(),
+            })
+            .unwrap_err()
+            .contains("already assigned"));
+        assert_eq!(assignment.fallbacks.len(), 2);
+        assignment.move_fallback(1, -1).unwrap();
+        assert_eq!(assignment.fallbacks[0].model, "nvidia-text");
+        assignment.remove_fallback(0).unwrap();
+        assert_eq!(assignment.fallbacks[0].model, "gemini-2.5-pro");
+        let toml = toml::to_string(&RoleDefaults {
+            recon: assignment.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        let loaded: RoleDefaults = toml::from_str(&toml).unwrap();
+        assert_eq!(loaded.recon.fallbacks.len(), 1);
+        let empty: RoleDefaults = toml::from_str("[recon]\nprovider='grok'\nmodel='g'\n").unwrap();
+        assert!(empty.recon.fallbacks.is_empty());
     }
 
     #[tokio::test]
@@ -2383,59 +2567,48 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            for _ in 0..2 {
-                let Ok((mut socket, _)) = listener.accept().await else {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = vec![0u8; 65536];
+            let mut request = String::new();
+            loop {
+                let n = socket.read(&mut buffer).await.unwrap_or(0);
+                if n == 0 {
                     break;
-                };
-                let mut buffer = vec![0u8; 65536];
-                let mut request = String::new();
-                loop {
-                    let n = socket.read(&mut buffer).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    request.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                    let Some(end) = request.find("\r\n\r\n") else {
-                        continue;
-                    };
-                    let length = request[..end]
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|v| v.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= end + 4 + length {
-                        break;
-                    }
                 }
-                if request.contains("\"stream\":true") {
-                    let body = "{\"error\":{\"message\":\"stream unsupported\"}}";
-                    let reply = format!(
-                        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = socket.write_all(reply.as_bytes()).await;
+                request.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                let Some(end) = request.find("\r\n\r\n") else {
                     continue;
+                };
+                let length = request[..end]
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
                 }
-                let body = serde_json::json!({
-                    "choices": [{
-                        "finish_reason": "stop",
-                        "message": {
-                            "role": "assistant",
-                            "content": "",
-                            "reasoning_content": "## Graph\n\nSupported by the articles."
-                        }
-                    }]
-                })
-                .to_string();
-                let reply = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = socket.write_all(reply.as_bytes()).await;
             }
+            let body = serde_json::json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "## Graph\n\nSupported by the articles."
+                    }
+                }]
+            })
+            .to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
         });
         let secret = ProviderSecret {
             kind: "openrouter".into(),
@@ -2451,7 +2624,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: Vec::new(),
         }];
-        let completion = complete(&secret, &messages, &[], |_| {}).await.unwrap();
+        let completion = complete_one(&secret, &messages, &[]).await.unwrap();
         assert_eq!(completion.content, "");
         assert!(
             completion.reasoning.contains("## Graph"),
@@ -2523,60 +2696,44 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            for _ in 0..2 {
-                let Ok((mut socket, _)) = listener.accept().await else {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = vec![0u8; 65536];
+            let mut request = String::new();
+            loop {
+                let n = socket.read(&mut buffer).await.unwrap_or(0);
+                if n == 0 {
                     break;
-                };
-                let mut buffer = vec![0u8; 65536];
-                let mut request = String::new();
-                loop {
-                    let n = socket.read(&mut buffer).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    request.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                    let Some(end) = request.find("\r\n\r\n") else {
-                        continue;
-                    };
-                    let length = request[..end]
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|v| v.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= end + 4 + length {
-                        break;
-                    }
                 }
-                if request.contains("\"stream\":true") {
-                    let event = serde_json::json!({"choices":[{"delta":{},"finish_reason":"content_filter"}]});
-                    let stream_body = format!("data: {event}\n\ndata: [DONE]\n\n");
-                    let reply = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{stream_body}",
-                        stream_body.len()
-                    );
-                    let _ = socket.write_all(reply.as_bytes()).await;
-                } else {
-                    let body = serde_json::json!({
-                        "choices": [{
-                            "finish_reason": "content_filter",
-                            "message": {
-                                "role": "assistant",
-                                "content": "",
-                                "refusal": "blocked"
-                            }
-                        }]
+                request.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                let Some(end) = request.find("\r\n\r\n") else {
+                    continue;
+                };
+                let length = request[..end]
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
                     })
-                    .to_string();
-                    let reply = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = socket.write_all(reply.as_bytes()).await;
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
                 }
             }
+            let event = serde_json::json!({
+                "choices": [{
+                    "delta": {"refusal": "blocked"},
+                    "finish_reason": "content_filter"
+                }]
+            });
+            let stream_body = format!("data: {event}\n\ndata: [DONE]\n\n");
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{stream_body}",
+                stream_body.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
         });
         let secret = ProviderSecret {
             kind: "openrouter".into(),

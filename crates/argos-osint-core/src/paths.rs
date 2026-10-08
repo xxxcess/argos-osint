@@ -47,3 +47,13 @@ pub fn config_path() -> PathBuf {
 pub fn hardware_cache_path() -> PathBuf {
     home_dir().join("hardware.json")
 }
+
+/// Root directory for cached dataset snapshots (`~/.argos/datasets/`).
+pub fn datasets_dir() -> PathBuf {
+    home_dir().join("datasets")
+}
+
+/// Directory for a specific dataset (`~/.argos/datasets/<name>/`).
+pub fn dataset_dir(name: &str) -> PathBuf {
+    datasets_dir().join(name)
+}

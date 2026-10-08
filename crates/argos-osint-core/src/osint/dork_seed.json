@@ -1,0 +1,1123 @@
+{
+  "schema_version": 1,
+  "source_url": "https://dorksearch.pro/",
+  "capture_date": "2026-10-08",
+  "license_status": "No explicit reuse license established from captured sources; archival reference, not redistribution clearance.",
+  "category_count": 13,
+  "template_count": 70,
+  "example_count": 4,
+  "firecrawl_compatibility": "Not tested; original fragments preserved unchanged.",
+  "categories": [
+    {
+      "name": "Files & Documents",
+      "source_name": " Files & Documents",
+      "items": [
+        {
+          "id": "dsp-b5cf476d021e1c5b",
+          "category": "Files & Documents",
+          "label": "Public PDFs",
+          "query_fragment": "filetype:pdf",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:pdf \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-3bf8eed6c5caa4c1",
+          "category": "Files & Documents",
+          "label": "Excel Data",
+          "query_fragment": "filetype:xls OR filetype:xlsx OR filetype:csv",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:xls OR filetype:xlsx OR filetype:csv \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-4f87c308c6a126df",
+          "category": "Files & Documents",
+          "label": "Word Docs",
+          "query_fragment": "filetype:doc OR filetype:docx",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:doc OR filetype:docx \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-8d7f6b440f8eb0a0",
+          "category": "Files & Documents",
+          "label": "Text / Notes",
+          "query_fragment": "filetype:txt OR filetype:rtf OR filetype:md",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:txt OR filetype:rtf OR filetype:md \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-4d1d3681b537802b",
+          "category": "Files & Documents",
+          "label": "Presentations",
+          "query_fragment": "filetype:ppt OR filetype:pptx",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:ppt OR filetype:pptx \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-8092b122276df5ac",
+          "category": "Files & Documents",
+          "label": "Spreadsheets (ODS)",
+          "query_fragment": "filetype:ods",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:ods \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-6e76e435c78340f3",
+          "category": "Files & Documents",
+          "label": "Archives",
+          "query_fragment": "filetype:zip OR filetype:rar OR filetype:tar OR filetype:gz",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:zip OR filetype:rar OR filetype:tar OR filetype:gz \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "Server & Config",
+      "source_name": " Server & Config",
+      "items": [
+        {
+          "id": "dsp-4edbbdfa7740ef8c",
+          "category": "Server & Config",
+          "label": "Directory Listing",
+          "query_fragment": "intitle:\"index of\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intitle:\"index of\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-26308e9a1e44aaf1",
+          "category": "Server & Config",
+          "label": "Config Files",
+          "query_fragment": "filetype:xml OR filetype:conf OR filetype:cnf OR filetype:ini OR filetype:env",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:xml OR filetype:conf OR filetype:cnf OR filetype:ini OR filetype:env \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-3d97f03e96b31bbb",
+          "category": "Server & Config",
+          "label": "Log Files",
+          "query_fragment": "filetype:log OR filetype:err",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:log OR filetype:err \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-c419003b5ab61834",
+          "category": "Server & Config",
+          "label": "Apache / Nginx Status",
+          "query_fragment": "inurl:server-status OR intitle:\"nginx status\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:server-status OR intitle:\"nginx status\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-e59381d621d170f6",
+          "category": "Server & Config",
+          "label": "PHP Info",
+          "query_fragment": "inurl:phpinfo.php OR intitle:phpinfo",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:phpinfo.php OR intitle:phpinfo \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-55ede4a7c3cc5a72",
+          "category": "Server & Config",
+          "label": "Docker Configs",
+          "query_fragment": "filename:docker-compose OR filetype:yml intext:docker",
+          "source": "script.js:dorksData",
+          "needs_review": true,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filename:docker-compose OR filetype:yml intext:docker \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-50b1109d4a95c50d",
+          "category": "Server & Config",
+          "label": "Kubernetes Configs",
+          "query_fragment": "filetype:yaml intext:apiVersion",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:yaml intext:apiVersion \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "Bug Bounty & Vulnerabilities",
+      "source_name": " Bug Bounty & Vulnerabilities",
+      "items": [
+        {
+          "id": "dsp-3ef0e996ad0b384e",
+          "category": "Bug Bounty & Vulnerabilities",
+          "label": "Open Redirect",
+          "query_fragment": "inurl:redir OR inurl:redirect= OR inurl:return= OR inurl:next=",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:redir OR inurl:redirect= OR inurl:return= OR inurl:next= \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-a88f215111215173",
+          "category": "Bug Bounty & Vulnerabilities",
+          "label": "XSS Parameters",
+          "query_fragment": "inurl:q= OR inurl:search= OR inurl:s= OR inurl:lang=",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:q= OR inurl:search= OR inurl:s= OR inurl:lang= \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-8f61560b94c3a370",
+          "category": "Bug Bounty & Vulnerabilities",
+          "label": "SQL Injection Params",
+          "query_fragment": "inurl:id= OR inurl:cat= OR inurl:pid= OR inurl:sid=",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:id= OR inurl:cat= OR inurl:pid= OR inurl:sid= \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-5afa28c415b97b68",
+          "category": "Bug Bounty & Vulnerabilities",
+          "label": "File Upload Forms",
+          "query_fragment": "inurl:upload OR inurl:uploader",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:upload OR inurl:uploader \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-83e3fbd848b680c1",
+          "category": "Bug Bounty & Vulnerabilities",
+          "label": "Admin Panels",
+          "query_fragment": "inurl:admin OR inurl:login OR inurl:dashboard",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:admin OR inurl:login OR inurl:dashboard \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-ea934545184a8285",
+          "category": "Bug Bounty & Vulnerabilities",
+          "label": "SQL Errors",
+          "query_fragment": "intext:\"sql syntax\" OR intext:\"mysql_fetch\" OR intext:\"Fatal error\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:\"sql syntax\" OR intext:\"mysql_fetch\" OR intext:\"Fatal error\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-44e7c53b4876d950",
+          "category": "Bug Bounty & Vulnerabilities",
+          "label": "LFI / RFI",
+          "query_fragment": "inurl:file= OR inurl:path= OR inurl:include=",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:file= OR inurl:path= OR inurl:include= \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-e3c0fa68a6a3d6c8",
+          "category": "Bug Bounty & Vulnerabilities",
+          "label": "XXE Targets",
+          "query_fragment": "filetype:xml intext:DOCTYPE",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:xml intext:DOCTYPE \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "Cloud & DevOps",
+      "source_name": " Cloud & DevOps",
+      "items": [
+        {
+          "id": "dsp-63fab230b274969e",
+          "category": "Cloud & DevOps",
+          "label": "AWS S3 Buckets",
+          "query_fragment": "intext:\"s3.amazonaws.com\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:\"s3.amazonaws.com\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-e872a974dbc0a5ae",
+          "category": "Cloud & DevOps",
+          "label": "Azure Blob Storage",
+          "query_fragment": "inurl:blob.core.windows.net",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:blob.core.windows.net \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-e100c9c77f2bc544",
+          "category": "Cloud & DevOps",
+          "label": "Google Cloud Storage",
+          "query_fragment": "inurl:storage.googleapis.com",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:storage.googleapis.com \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-c27f000a4aca5ec2",
+          "category": "Cloud & DevOps",
+          "label": "Git Repositories",
+          "query_fragment": "inurl:/.git OR inurl:.git/config",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:/.git OR inurl:.git/config \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-debf428de768fee4",
+          "category": "Cloud & DevOps",
+          "label": "Environment Files",
+          "query_fragment": "filename:.env",
+          "source": "script.js:dorksData",
+          "needs_review": true,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filename:.env \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-5ead5c680c9cebce",
+          "category": "Cloud & DevOps",
+          "label": "Jenkins Panels",
+          "query_fragment": "intitle:\"Dashboard [Jenkins]\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intitle:\"Dashboard [Jenkins]\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-1e01edb4e9dbe976",
+          "category": "Cloud & DevOps",
+          "label": "Terraform Files",
+          "query_fragment": "filetype:tf OR filetype:tfstate",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:tf OR filetype:tfstate \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "Databases & Backups",
+      "source_name": " Databases & Backups",
+      "items": [
+        {
+          "id": "dsp-c135b07ba183c1e6",
+          "category": "Databases & Backups",
+          "label": "SQL Dumps",
+          "query_fragment": "filetype:sql intext:\"CREATE TABLE\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:sql intext:\"CREATE TABLE\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-7129bdaa1661921e",
+          "category": "Databases & Backups",
+          "label": "Database Backups",
+          "query_fragment": "filetype:bak OR filetype:dump",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:bak OR filetype:dump \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-2363a175f8cef110",
+          "category": "Databases & Backups",
+          "label": "SQLite DBs",
+          "query_fragment": "filetype:sqlite OR filetype:db",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:sqlite OR filetype:db \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-b5aa9f9508a2b794",
+          "category": "Databases & Backups",
+          "label": "MongoDB Dumps",
+          "query_fragment": "filetype:json intext:mongodb",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:json intext:mongodb \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-426d039cf48483d8",
+          "category": "Databases & Backups",
+          "label": "Redis Dumps",
+          "query_fragment": "filetype:rdb",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:rdb \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-07030f2dc1999b51",
+          "category": "Databases & Backups",
+          "label": "cPanel Backups",
+          "query_fragment": "filetype:tar.gz inurl:cpanel",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:tar.gz inurl:cpanel \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "Credentials & Secrets",
+      "source_name": " Credentials & Secrets",
+      "items": [
+        {
+          "id": "dsp-a002cb2a004b338c",
+          "category": "Credentials & Secrets",
+          "label": "API Keys",
+          "query_fragment": "intext:\"api_key\" OR intext:\"client_secret\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:\"api_key\" OR intext:\"client_secret\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-fa722cbea1460a9d",
+          "category": "Credentials & Secrets",
+          "label": "AWS Keys",
+          "query_fragment": "intext:\"AKIA\" OR intext:\"aws_access_key_id\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:\"AKIA\" OR intext:\"aws_access_key_id\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-582f6de116db344e",
+          "category": "Credentials & Secrets",
+          "label": "Private SSH Keys",
+          "query_fragment": "intext:\"BEGIN RSA PRIVATE KEY\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:\"BEGIN RSA PRIVATE KEY\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-71c8254c7462c8e9",
+          "category": "Credentials & Secrets",
+          "label": "Passwords Files",
+          "query_fragment": "filetype:txt intext:password",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:txt intext:password \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-5c7ed8d9dfd41dcd",
+          "category": "Credentials & Secrets",
+          "label": "JWT Tokens",
+          "query_fragment": "intext:\"eyJ\" OR intext:\"Bearer eyJ\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:\"eyJ\" OR intext:\"Bearer eyJ\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-dfb70a24118eab37",
+          "category": "Credentials & Secrets",
+          "label": "OAuth Tokens",
+          "query_fragment": "intext:\"access_token\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:\"access_token\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "Source Code & Leaks",
+      "source_name": " Source Code & Leaks",
+      "items": [
+        {
+          "id": "dsp-3fba335c8da36cae",
+          "category": "Source Code & Leaks",
+          "label": "Exposed Source Code",
+          "query_fragment": "filetype:php OR filetype:js OR filetype:py OR filetype:java",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:php OR filetype:js OR filetype:py OR filetype:java \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-075c992bc4a8a04e",
+          "category": "Source Code & Leaks",
+          "label": "Backup Source Files",
+          "query_fragment": "filetype:old OR filetype:bak OR filetype:swp",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:old OR filetype:bak OR filetype:swp \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-fdde2c35f7854066",
+          "category": "Source Code & Leaks",
+          "label": "Secrets in JS",
+          "query_fragment": "filetype:js intext:key OR intext:token",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:js intext:key OR intext:token \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-f2b55fb0861fc064",
+          "category": "Source Code & Leaks",
+          "label": "Hardcoded Passwords",
+          "query_fragment": "intext:\"password =\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:\"password =\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "Debug & Dev Environments",
+      "source_name": " Debug & Dev Environments",
+      "items": [
+        {
+          "id": "dsp-a686fc7c3f3a59a4",
+          "category": "Debug & Dev Environments",
+          "label": "Debug Enabled",
+          "query_fragment": "APP_DEBUG=true OR debug=true",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org APP_DEBUG=true OR debug=true \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-aa055102eb013d17",
+          "category": "Debug & Dev Environments",
+          "label": "Test / Dev Sites",
+          "query_fragment": "inurl:test OR inurl:dev OR inurl:staging",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:test OR inurl:dev OR inurl:staging \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-0b49a576487deb6a",
+          "category": "Debug & Dev Environments",
+          "label": "Swagger APIs",
+          "query_fragment": "inurl:swagger OR inurl:api-docs",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:swagger OR inurl:api-docs \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-a5e8f40bdafa76c1",
+          "category": "Debug & Dev Environments",
+          "label": "GraphQL Endpoints",
+          "query_fragment": "inurl:graphql OR intext:\"__schema\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:graphql OR intext:\"__schema\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "Network & Infrastructure",
+      "source_name": " Network & Infrastructure",
+      "items": [
+        {
+          "id": "dsp-d1c4f29f5195c322",
+          "category": "Network & Infrastructure",
+          "label": "Open Web Ports",
+          "query_fragment": "inurl:8080 OR inurl:8443 OR inurl:9200",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:8080 OR inurl:8443 OR inurl:9200 \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-c17b34abd1812508",
+          "category": "Network & Infrastructure",
+          "label": "Elasticsearch",
+          "query_fragment": "intitle:\"You Know, for Search\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intitle:\"You Know, for Search\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-f7be8afdfca00534",
+          "category": "Network & Infrastructure",
+          "label": "Kibana Dashboards",
+          "query_fragment": "intitle:\"Kibana\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intitle:\"Kibana\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-0ca68e9297000294",
+          "category": "Network & Infrastructure",
+          "label": "Prometheus Metrics",
+          "query_fragment": "inurl:/metrics",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:/metrics \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "People & Identity OSINT",
+      "source_name": " People & Identity OSINT",
+      "items": [
+        {
+          "id": "dsp-fc718d8065493387",
+          "category": "People & Identity OSINT",
+          "label": "Employee Lists",
+          "query_fragment": "filetype:xls intext:employee",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:xls intext:employee \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-07e2654e13d212c2",
+          "category": "People & Identity OSINT",
+          "label": "Phone Directories",
+          "query_fragment": "filetype:pdf intext:\"phone directory\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:pdf intext:\"phone directory\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-3acd46ab76b68c4e",
+          "category": "People & Identity OSINT",
+          "label": "CVs / Resumes",
+          "query_fragment": "filetype:pdf intext:resume OR intext:curriculum",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:pdf intext:resume OR intext:curriculum \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-09dbfbddebc3a1a4",
+          "category": "People & Identity OSINT",
+          "label": "ID Numbers",
+          "query_fragment": "filetype:xls intext:DNI OR intext:passport",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:xls intext:DNI OR intext:passport \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "OSINT & Recon",
+      "source_name": " OSINT & Recon",
+      "items": [
+        {
+          "id": "dsp-3b764fd0e88dbf19",
+          "category": "OSINT & Recon",
+          "label": "Subdomains",
+          "query_fragment": "-www",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org -www \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-5d1d77ecda58d53a",
+          "category": "OSINT & Recon",
+          "label": "Wayback Machine",
+          "query_fragment": "site:web.archive.org",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "keywords": "example.org"
+          },
+          "sample_source_preview": "site:web.archive.org \"example.org\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-0cf4e7c5e34138d0",
+          "category": "OSINT & Recon",
+          "label": "Public Cameras",
+          "query_fragment": "intitle:\"Live View\" OR inurl:view.shtml",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intitle:\"Live View\" OR inurl:view.shtml \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-e7849bfef5482334",
+          "category": "OSINT & Recon",
+          "label": "Printers",
+          "query_fragment": "intitle:\"HP LaserJet\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intitle:\"HP LaserJet\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-a7760e4da2c5ca28",
+          "category": "OSINT & Recon",
+          "label": "IoT Devices",
+          "query_fragment": "intitle:\"AXIS\" OR intitle:\"NETGEAR\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intitle:\"AXIS\" OR intitle:\"NETGEAR\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    },
+    {
+      "name": "Advanced Operators",
+      "source_name": " Advanced Operators",
+      "items": [
+        {
+          "id": "dsp-2976f4eddcd96074",
+          "category": "Advanced Operators",
+          "label": "Cached Pages",
+          "query_fragment": "cache:",
+          "source": "script.js:dorksData",
+          "needs_review": true,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org cache: \"research\"",
+          "sample_status": "needs_operand_and_compatibility_review_do_not_execute_preview",
+          "required_operand_sample": {
+            "url": "https://example.org/report"
+          }
+        },
+        {
+          "id": "dsp-591640145e32cfcb",
+          "category": "Advanced Operators",
+          "label": "Related Sites",
+          "query_fragment": "related:",
+          "source": "script.js:dorksData",
+          "needs_review": true,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org related: \"research\"",
+          "sample_status": "needs_operand_and_compatibility_review_do_not_execute_preview",
+          "required_operand_sample": {
+            "domain": "example.org"
+          }
+        },
+        {
+          "id": "dsp-eb615f625e5dbc09",
+          "category": "Advanced Operators",
+          "label": "Exact Title",
+          "query_fragment": "intitle:\"\"",
+          "source": "script.js:dorksData",
+          "needs_review": true,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intitle:\"\" \"research\"",
+          "sample_status": "needs_operand_and_compatibility_review_do_not_execute_preview",
+          "required_operand_sample": {
+            "title": "Annual report"
+          }
+        },
+        {
+          "id": "dsp-41433eae6ec03fa0",
+          "category": "Advanced Operators",
+          "label": "Exact URL",
+          "query_fragment": "inurl:\"\"",
+          "source": "script.js:dorksData",
+          "needs_review": true,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org inurl:\"\" \"research\"",
+          "sample_status": "needs_operand_and_compatibility_review_do_not_execute_preview",
+          "required_operand_sample": {
+            "url_text": "reports"
+          }
+        },
+        {
+          "id": "dsp-a5cf8cbda4948284",
+          "category": "Advanced Operators",
+          "label": "Exclude Domain",
+          "query_fragment": "-example.com",
+          "source": "script.js:dorksData",
+          "needs_review": true,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org -example.com \"research\"",
+          "sample_status": "needs_operand_and_compatibility_review_do_not_execute_preview",
+          "required_operand_sample": {
+            "excluded_domain": "example.net"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Breach & Incident Intelligence",
+      "source_name": " Breach & Incident Intelligence",
+      "items": [
+        {
+          "id": "dsp-049c0923dc57adb7",
+          "category": "Breach & Incident Intelligence",
+          "label": "Data Breach Reports",
+          "query_fragment": "intext:\"data breach\"",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:\"data breach\" \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-8c785e7fbea9695a",
+          "category": "Breach & Incident Intelligence",
+          "label": "Ransomware Victims",
+          "query_fragment": "intext:ransomware filetype:pdf",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org intext:ransomware filetype:pdf \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        },
+        {
+          "id": "dsp-67b7c857319409d3",
+          "category": "Breach & Incident Intelligence",
+          "label": "Credential Leaks",
+          "query_fragment": "filetype:txt intext:credentials",
+          "source": "script.js:dorksData",
+          "needs_review": false,
+          "sample_input": {
+            "domain": "example.org",
+            "keywords": "research"
+          },
+          "sample_source_preview": "site:example.org filetype:txt intext:credentials \"research\"",
+          "sample_status": "illustrative_source_composition_not_firecrawl_verified"
+        }
+      ]
+    }
+  ],
+  "page_examples": [
+    {
+      "query_fragment": "site:*.edu filetype:pdf intitle:\"confidential\"",
+      "label": "📄 Confidential PDFs in .edu",
+      "source": "index.html:loadExample",
+      "sample_input": {
+        "custom_query": "site:*.edu filetype:pdf intitle:\"confidential\""
+      },
+      "sample_status": "original_website_example_not_firecrawl_verified"
+    },
+    {
+      "query_fragment": "inurl:admin intitle:login filetype:php",
+      "label": "🔐 PHP admin panels",
+      "source": "index.html:loadExample",
+      "sample_input": {
+        "custom_query": "inurl:admin intitle:login filetype:php"
+      },
+      "sample_status": "original_website_example_not_firecrawl_verified"
+    },
+    {
+      "query_fragment": "filetype:sql intext:password OR intext:username",
+      "label": "🗄️ SQL files with credentials",
+      "source": "index.html:loadExample",
+      "sample_input": {
+        "custom_query": "filetype:sql intext:password OR intext:username"
+      },
+      "sample_status": "original_website_example_not_firecrawl_verified"
+    },
+    {
+      "query_fragment": "site:github.com \"api_key\" OR \"API_SECRET\"",
+      "label": "🔑 API Keys on GitHub",
+      "source": "index.html:loadExample",
+      "sample_input": {
+        "custom_query": "site:github.com \"api_key\" OR \"API_SECRET\""
+      },
+      "sample_status": "original_website_example_not_firecrawl_verified"
+    }
+  ],
+  "sample_notes": "Samples are author-added illustrative inputs and source-style previews; labels/fragments are captured upstream. Source-style OR scoping must be normalized by section 7 before execution. needs_review=false is not a compatibility approval."
+}

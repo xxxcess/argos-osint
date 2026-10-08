@@ -1,0 +1,58 @@
+# Concepts
+
+Short names used across the TUI, CLI, and store. Source of truth for investigation mechanics is [architecture.md](architecture.md).
+
+## Apps and internal IDs
+
+Home launches nine surfaces. Labels on screen differ from `ModuleId` values; keep the IDs unless a migration requires otherwise.
+
+| Label | `ModuleId` | Kind |
+| --- | --- | --- |
+| Intel | `Intel` | Application |
+| Atlas | `Atlas` | Application |
+| Brain | `Brain` | Application |
+| Recon | `Recon` | Application |
+| Jobs | `Jobs` | System |
+| Logs | `Logs` | System |
+| Tools | `Osint` | System |
+| Models | `Providers` | System |
+| Profile | `System` | System |
+
+Only Recon has a composer. Intel Briefing starts a **report job** on an Atlas article; that is not a Recon investigation thread.
+
+## Model roles
+
+Each role is provider + model in `config.toml`. Accounts live in `auth.json`. Saving a key does not change a role.
+
+| Role | Job |
+| --- | --- |
+| Recon | Directives and bindings |
+| Tool picker | One next tool per request (Jev decisions or chat JSON) |
+| Synthesis | Cited answer |
+| Classifier | Recon report mode from the prompt |
+| Summarization | Graph/path summaries |
+| Evidence curator, Entity resolver, Claim assessor, Investigation controller | Investigation harness |
+
+Legacy Grok/OpenAI accounts remain until the user assigns a replacement. New setup tabs are Defaults, OpenRouter, Google, Nvidia.
+
+## Primary OSINT providers
+
+Firecrawl, SociaVault, and Hunter are primary. Everything else is a gap-filler. Hunter inputs come only from the prompt, Firecrawl, SociaVault, or earlier Hunter calls.
+
+## Bindings
+
+A binding is a typed value (`domain`, `handle`, `url`, …) with an evidence id. `recon/investigation/tool_io.rs` maps every catalog input to a kind, a prompt extractor, a rule extractor, and producers. Ungrounded inputs skip the step.
+
+## Intel report jobs
+
+An Intel report is a durable job on one article (`intel_report_jobs`). Collection dispatches are rows in `intel_report_attempts`. The UI label is `Tools: N calls used · B budget`. N is Argos dispatches (including errors), not provider billing. Cache reuse and validation skips are not fresh calls. Schema version 24 creates `intel_report_attempts` on open if it is missing.
+
+Summary shows the selected revision's `bluf` section. View full report opens a 70%-width card of all sections. Busy work on this article hides Summary and the launch control; another article's job does not.
+
+## Persistence
+
+`~/.argos/argos.db` (override `ARGOS_HOME`) is SQLite `user_version` 24. Brain vectors are LanceDB `memory_lancedb/` (384-dim MiniLM). Migrations are additive and transactional. `ARGOS_EMBED=0` keeps Jaccard recall.
+
+## Graph
+
+`graphify-out/graph.json` is the code graph. Query it before broad search. After code edits, `graphify update .`. Track `graph.json`, `manifest.json`, and `GRAPH_REPORT.md` only.

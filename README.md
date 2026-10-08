@@ -1,6 +1,8 @@
 # Argos OSINT
 
-Argos is a terminal investigation workspace. It opens on **Home**. **Intel**, **Atlas**, **Brain**, and **Recon** are the applications. **OSINT**, **Providers**, and **Profile** are system apps: they configure gathering, accounts, and host state. Only Recon has a chat. The last surviving Recon thread is restored when Recon opens.
+Argos is a terminal investigation workspace. It opens on **Home**. **Intel**, **Atlas**, **Brain**, and **Recon** are the applications. **Jobs**, **Logs**, **Tools**, **Models**, and **Profile** are system apps: they configure gathering, accounts, host state, and background work. Internal module ids stay `Osint`, `Providers`, and `System`. Only Recon has a chat. The last surviving Recon thread is restored when Recon opens.
+
+Documentation index: [docs/README.md](docs/README.md). Architecture figures: [workspace](docs/diagrams/workspace.html), [Recon turn](docs/diagrams/recon-turn.html), [Intel report](docs/diagrams/intel-report.html).
 
 ## Run and navigate
 
@@ -14,9 +16,9 @@ Recon opens on a full-screen list of recent investigations. ↑↓ moves through
 
 The transcript follows the Grok Build chat. Your question sits on a raised band with a prompt arrow. The answer is rendered Markdown: headings, lists, bold, code, quotes, and links. Decisions and lookups stay on collapsed disclosure rows. A `◉ brain` mark on an answer opens the memories that were in its prompt. A new investigation stays untitled until the Recon model names it from the first question. `:rename` replaces that title.
 
-Intel browses Atlas-stored headlines on a bulletin board: six classification tabs, a news-cycle day filter, search, and a hero story. Enter opens Briefing Focus with extracted claims, tags, links, and a country mini-map. Recon on that screen is a stub for a later handoff.
+Intel browses Atlas-stored headlines on a bulletin board: six classification tabs, a news-cycle day filter, search, and a hero story. Enter opens Briefing Focus with extracted claims, tags, links, a country mini-map, and a Summary of the selected report's BLUF. View full report opens a 70%-width card. A mode button starts Verify / Explain / Assess Outlook / Full Assessment as a background job (Jobs). Busy work on the selected article hides Summary and that launch control.
 
-Brain, Atlas, OSINT, Providers, and System use fields and buttons only. OSINT keeps previous and next controls for saved manual runs. Profile shows hardware and storage paths.
+Brain, Atlas, Tools, Models, and Profile use fields and buttons only. Tools keeps previous and next controls for saved manual runs, plus documentation in the detail pane. Profile shows hardware and storage paths. Jobs lists background work. Logs holds durable events.
 
 Atlas is a two-phase news pipeline. **Run** scans a 48-hour window with GNews and NewsData keyword clusters, scores countries into four heat bands, and drops the bottom 20%. It then pulls country headlines from NewsAPI and Currents for the kept bands, Group 1 first. **Pause** finishes the request in flight and stores a cursor. **Resume** continues that run. Ctrl+C on the Atlas screen pauses. The origins table names each country as `United States (US)` with its tier, temperature, discovery volume, and headline count. The feed below lists headlines from the current session only; article text is not stored. Enter or a click opens the headline. Atlas opens on **History**, the list of saved runs. Enter or a click opens that run's statistics. A world map sits above the history list and takes most of that pane. It is a Web Mercator coastline drawn as Braille. Tier 1 and 2 countries are named in full. Tier 3 shows the country code. The map does not take keys or clicks. Fully zoomed out, countries from the selected run are colored by temperature, and choosing another history row recolours the map. `+` and `-` zoom, and the arrow keys pan once the map is focused. Daily free-tier caps are GNews 100, NewsData 200, NewsAPI 100, and Currents 250.
 
@@ -52,7 +54,7 @@ The other 30 tools are gap-fillers (DNS, certificates, RDAP, archives, code sear
 cargo run -p argos-osint-bin -- osint user-agent 'Argos contact@example.com'
 ```
 
-Brain retains manual save, recall, pin, edit, and delete. Investigation insights have entity and topic anchors, evidence sources, and merged provenance. Providers keeps Grok, OpenAI, and OpenRouter connections, plus independent **Recon**, **Tool picker**, and **Synthesis** choices under **Defaults** (a three-way selector; the Tool picker defaults to OpenRouter `typesafe/jev-1.13`, which uses the OpenRouter decisions API). Account sign-in does not change any default. Profile inspects host hardware and Argos storage.
+Brain retains manual save, recall, pin, edit, and delete. Investigation insights have entity and topic anchors, evidence sources, and merged provenance. Models keeps **Defaults**, **OpenRouter**, **Google**, and **Nvidia** tabs, plus independent role choices (Recon, Tool picker, Synthesis, and the later investigation roles). The Tool picker defaults to OpenRouter `typesafe/jev-1.13` (decisions API) only when empty. Legacy Grok/OpenAI accounts stay until the user reassigns them. Saving a key does not change any default. Profile inspects host hardware and Argos storage.
 
 ## CLI
 

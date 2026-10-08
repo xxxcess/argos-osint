@@ -4,8 +4,8 @@
 //! finding, cited evidence, and the source that evidence came from. Edges use the
 //! relationship verbs the Brain graph draws.
 
-use std::collections::{HashMap, HashSet};
 use rusqlite::OptionalExtension;
+use std::collections::{HashMap, HashSet};
 
 use crate::store::Store;
 
@@ -128,16 +128,25 @@ pub struct ReconPath {
 impl Store {
     /// The graph for one memory. A hand-saved memory with no claim is empty.
     pub fn graph_for_memory(&self, memory_id: &str) -> anyhow::Result<MemoryGraph> {
-        let kind: Option<String> = self.conn.query_row("SELECT memory_kind FROM memory_metadata WHERE memory_id=?1", [memory_id], |r| r.get::<_, String>(0)).optional()?;
-        
+        let kind: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT memory_kind FROM memory_metadata WHERE memory_id=?1",
+                [memory_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+
         let Some(kind_str) = kind else {
             return self.legacy_graph_for_memory(memory_id);
         };
-        
+
         match kind_str.as_str() {
             "cycle_brief" => self.build_brief_graph(memory_id),
-            "manual_note" | "user_profile" | "investigation_digest" | "source_summary" => Ok(MemoryGraph::default()),
-            "atomic_claim" | _ => self.legacy_graph_for_memory(memory_id),
+            "manual_note" | "user_profile" | "investigation_digest" | "source_summary" => {
+                Ok(MemoryGraph::default())
+            }
+            _ => self.legacy_graph_for_memory(memory_id),
         }
     }
 
@@ -183,8 +192,10 @@ impl Store {
 
     fn build_brief_graph(&self, memory_id: &str) -> anyhow::Result<MemoryGraph> {
         let mut stmt = self.conn.prepare("SELECT member_id FROM memory_brief_memberships WHERE brief_id=?1 AND member_type='atomic_claim'")?;
-        let members: Vec<String> = stmt.query_map([memory_id], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
-        
+        let members: Vec<String> = stmt
+            .query_map([memory_id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+
         let mut graph = GraphBuilder::default();
         let brief_node = graph.node(GraphNode {
             id: format!("brief:{}", memory_id),
@@ -196,14 +207,17 @@ impl Store {
             run_id: String::new(),
             published_at: String::new(),
         });
-        
+
         for member_id in members {
             if let Ok(Some(insight)) = self.insight_for_memory(&member_id) {
                 let claim_node = graph.node(GraphNode {
                     id: format!("finding:{}", member_id),
                     kind: GraphNodeKind::Finding,
                     label: format!("{} → {}", insight.predicate, insight.object_value),
-                    detail: format!("{} · {} → {}", insight.entity, insight.predicate, insight.object_value),
+                    detail: format!(
+                        "{} · {} → {}",
+                        insight.entity, insight.predicate, insight.object_value
+                    ),
                     tags: vec![],
                     article_id: String::new(),
                     run_id: String::new(),
@@ -217,13 +231,12 @@ impl Store {
                 });
             }
         }
-        
+
         Ok(MemoryGraph {
             nodes: graph.nodes,
             edges: graph.edges,
         })
     }
-
 }
 
 pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph {

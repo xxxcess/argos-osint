@@ -632,7 +632,6 @@ impl Store {
         crate::tasks::set_job_stage_coverage(&self.conn, job_id, coverage_json)
     }
 
-
     pub fn job_apps(&self) -> Result<Vec<String>> {
         job_apps(&self.conn)
     }

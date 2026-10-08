@@ -680,8 +680,11 @@ pub fn draw_country_mini_map(
     let height = rows * 4;
     let width_f = width as f64;
     let height_f = height as f64;
-    let (center_lon, center_lat, scale) =
-        country_fit(&code, width_f, height_f).unwrap_or((0.0, 15.0, world_view_scale(width_f, height_f)));
+    let (center_lon, center_lat, scale) = country_fit(&code, width_f, height_f).unwrap_or((
+        0.0,
+        15.0,
+        world_view_scale(width_f, height_f),
+    ));
     let focus_id = land_index(&code).map(|index| (index as u8).saturating_add(1));
     let mut grid = vec![0_u8; width * height];
     let width_i = width as i32;

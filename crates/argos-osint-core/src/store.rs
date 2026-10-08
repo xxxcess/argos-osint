@@ -39,7 +39,7 @@ pub struct GraphSummary {
 
 /// Schema version this build writes. 20 adds the unified investigation
 /// harness tables (tasks, dependencies, passages, assessments, events, stream parts).
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -466,17 +466,54 @@ impl Store {
                     .execute_batch(include_str!("schema_atlas_recall.sql"))?;
                 self.conn.pragma_update(None, "user_version", 21)?;
             }
-if version < 22 {
+            if version < 22 {
                 self.conn.execute_batch(
                     "UPDATE intel_report_jobs
                      SET tool_calls_done = -1
                      WHERE state IN ('completed', 'failed', 'partial', 'cancelled')
-                       AND tool_calls_done = 0;"
+                       AND tool_calls_done = 0;",
                 )?;
                 self.conn.pragma_update(None, "user_version", 22)?;
             }
+            // intel_report_attempts was added to schema_intel_recon.sql after v16
+            // shipped. Create it before any backfill that reads the table.
+            // Idempotent for databases already at v23/v24 that never got the table.
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS intel_report_attempts (
+                   id TEXT PRIMARY KEY,
+                   job_id TEXT NOT NULL REFERENCES intel_report_jobs(id) ON DELETE CASCADE,
+                   generation INTEGER NOT NULL,
+                   task_id TEXT NOT NULL REFERENCES intel_report_tasks(id) ON DELETE CASCADE,
+                   tool_id TEXT NOT NULL,
+                   state TEXT NOT NULL,
+                   started_at TEXT NOT NULL,
+                   finished_at TEXT NOT NULL DEFAULT ''
+                 );
+                 CREATE INDEX IF NOT EXISTS intel_report_attempts_job
+                   ON intel_report_attempts(job_id, generation);",
+            )?;
+            // Only attributable dispatch records can recover historical usage.
+            if version < 23 {
+                self.conn.execute_batch(
+                    "UPDATE intel_report_jobs
+                     SET tool_calls_done = (
+                         SELECT COUNT(*) FROM intel_report_attempts a
+                         WHERE a.job_id = intel_report_jobs.id
+                           AND a.generation = intel_report_jobs.generation
+                     )
+                     WHERE tool_calls_done < 0
+                       AND EXISTS (
+                           SELECT 1 FROM intel_report_attempts a
+                           WHERE a.job_id = intel_report_jobs.id
+                             AND a.generation = intel_report_jobs.generation
+                       );",
+                )?;
+                self.conn.pragma_update(None, "user_version", 23)?;
+            }
+            if version < 24 {
+                self.conn.pragma_update(None, "user_version", 24)?;
+            }
             // Additive, idempotent: revision-aware graph summary cache and
-
             // the latest explanation diagnostic.
             graph_summaries::migrate(&self.conn)?;
             Ok(())
@@ -1317,8 +1354,10 @@ if version < 22 {
         Ok(())
     }
 
-
-    pub fn atlas_save_unit_manifest(&self, manifest: &crate::atlas_work::UnitManifest) -> Result<()> {
+    pub fn atlas_save_unit_manifest(
+        &self,
+        manifest: &crate::atlas_work::UnitManifest,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO atlas_work_units (
                 run_id, unit_id, stage, input_ids, input_rev, contract_version,
@@ -1344,7 +1383,11 @@ if version < 22 {
         Ok(())
     }
 
-    pub fn atlas_get_unit_manifests(&self, run_id: &str, stage: i32) -> Result<Vec<crate::atlas_work::UnitManifest>> {
+    pub fn atlas_get_unit_manifests(
+        &self,
+        run_id: &str,
+        stage: i32,
+    ) -> Result<Vec<crate::atlas_work::UnitManifest>> {
         let mut stmt = self.conn.prepare(
             "SELECT unit_id, stage, input_ids, input_rev, contract_version, dependency_ids, is_required, output_refs, effective_model, attempt_history, next_eligible_at, terminal_reason
              FROM atlas_work_units WHERE run_id = ?1 AND stage = ?2"
@@ -2774,6 +2817,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reports, 1);
+    }
+
+    #[test]
+    fn v22_database_without_report_attempts_opens_and_creates_the_table() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let store = Store::open(file.path()).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "DROP TABLE IF EXISTS intel_report_attempts;
+                 PRAGMA user_version=22;",
+            )
+            .unwrap();
+        drop(store);
+        let reopened = Store::open(file.path()).unwrap();
+        let present: i64 = reopened
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='intel_report_attempts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(present, 1);
+        let version: i64 = reopened
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        reopened
+            .conn
+            .query_row("SELECT COUNT(*) FROM intel_report_attempts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
     }
 
     #[test]

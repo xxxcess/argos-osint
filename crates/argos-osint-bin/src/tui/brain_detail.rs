@@ -385,7 +385,9 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
 
 /// One-line strip above the graph: Back, mode, title, history depth.
 pub fn draw_nav(frame: &mut Frame, app: &App, areas: &DetailAreas, claim: bool) {
-    app.layout.borrow_mut().register(Target::Button(ButtonId::BrainDetailBack), areas.back);
+    app.layout
+        .borrow_mut()
+        .register(Target::Button(ButtonId::BrainDetailBack), areas.back);
     let back_style = if app.focus == Target::Button(ButtonId::BrainDetailBack) {
         theme::selected()
     } else {

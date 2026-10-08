@@ -607,9 +607,11 @@ pub async fn extract(
     let mut lead = Vec::new();
     let mut lead_dropped = 0u32;
     let mut extract_error = None;
-let mut completed_ids = std::collections::HashSet::new();
+    let mut completed_ids = std::collections::HashSet::new();
     if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-        let completed_units = store.atlas_get_unit_manifests(run_id, 4).unwrap_or_default();
+        let completed_units = store
+            .atlas_get_unit_manifests(run_id, 4)
+            .unwrap_or_default();
         for unit in &completed_units {
             if unit.terminal_reason.is_none() {
                 completed_ids.insert(unit.unit_id.clone());
@@ -900,7 +902,7 @@ pub fn apply_peer_support(
             let body = format!("{} {}", peer.title, peer.description);
             let body_both =
                 contains_span(&body, &claim.entity) && contains_span(&body, &claim.object);
-            
+
             // Assess specific passages rather than inflating verified truth.
             // Strict claim-passage assessment sets support counts, but does not alter claim.classification or claim.confidence.
             if title_both {
@@ -1598,14 +1600,21 @@ fn parse_json_value(text: &str) -> Result<Value> {
     let open = trimmed.as_bytes()[start];
     let close = if open == b'[' { ']' } else { '}' };
     let Some(end) = trimmed.rfind(close) else {
-        return Err(anyhow::anyhow!("Incomplete JSON object in extraction output"));
+        return Err(anyhow::anyhow!(
+            "Incomplete JSON object in extraction output"
+        ));
     };
     if end < start {
-        return Err(anyhow::anyhow!("Malformed JSON structure in extraction output"));
+        return Err(anyhow::anyhow!(
+            "Malformed JSON structure in extraction output"
+        ));
     }
     match serde_json::from_str(&trimmed[start..=end]) {
         Ok(value) => Ok(value),
-        Err(e) => Err(anyhow::anyhow!("Failed to parse JSON extraction output: {}", e)),
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to parse JSON extraction output: {}",
+            e
+        )),
     }
 }
 

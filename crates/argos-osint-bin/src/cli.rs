@@ -342,7 +342,7 @@ fn ask(label: &str, default: &str) -> Result<String> {
 }
 
 async fn login() -> Result<()> {
-    let kind = ask("Provider (grok/openai/openrouter/local)", "grok")?;
+    let kind = ask("Provider (google/nvidia/openrouter/local)", "google")?;
     let kind = provider::normalize_kind(&kind);
     if kind == "grok" {
         println!(
@@ -490,7 +490,13 @@ fn defaults_command(command: DefaultsCommand) -> Result<()> {
             anyhow::ensure!(
                 matches!(
                     kind.as_str(),
-                    "grok" | "openai" | "openai-chatgpt" | "openrouter" | "local"
+                    "grok"
+                        | "openai"
+                        | "openai-chatgpt"
+                        | "openrouter"
+                        | "google"
+                        | "nvidia"
+                        | "local"
                 ),
                 "unknown provider"
             );

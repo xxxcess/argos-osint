@@ -2163,13 +2163,16 @@ pub(crate) fn recall_for_turn(
         token_budget: 1500,
         ..Default::default()
     };
-    let policy = crate::brain_query::AdmissionPolicy { strict_mode: true, allow_background: false };
-    
+    let policy = crate::brain_query::AdmissionPolicy {
+        strict_mode: true,
+        allow_background: false,
+    };
+
     let text_hits = store.recall(question, query.candidate_limit)?;
     let unfamiliar = super::brain_is_thin(&text_hits);
     let mut recalled = store.recon_recall(&thread_entities)?;
     let subject = super::question_subject(question);
-    
+
     let mut admitted_count = 0;
     for hit in &text_hits {
         if admitted_count >= 6 {

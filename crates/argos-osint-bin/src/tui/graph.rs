@@ -141,6 +141,19 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
         title.push_str("· focused ");
     }
     app.layout.borrow_mut().register(Target::DetailPath, area);
+    for index in (app.scrolls.path as usize)
+        ..(app.scrolls.path as usize + path_area.height as usize).min(painted.len())
+    {
+        app.layout.borrow_mut().register(
+            Target::PathLine(index),
+            Rect {
+                x: path_area.x,
+                y: path_area.y + (index - app.scrolls.path as usize) as u16,
+                width: path_area.width,
+                height: 1,
+            },
+        );
+    }
     frame.render_widget(panel(&title), area);
     frame.render_widget(
         Paragraph::new(painted)
@@ -181,7 +194,9 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     } else {
         " summary "
     };
-    app.layout.borrow_mut().register(Target::DetailSummary, area);
+    app.layout
+        .borrow_mut()
+        .register(Target::DetailSummary, area);
     let Some(failure) = &app.summary_failure else {
         frame.render_widget(
             Paragraph::new(summary_lines(text, width))

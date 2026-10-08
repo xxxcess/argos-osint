@@ -1,5 +1,6 @@
 mod app;
 mod atlas_actions;
+mod atlas_table;
 mod brain_detail;
 mod commands;
 mod graph;

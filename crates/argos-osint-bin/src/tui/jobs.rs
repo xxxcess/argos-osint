@@ -634,18 +634,23 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect, can_open_source: bool) {
             for i in 0..count {
                 let index = start + i;
                 if index < view.rows.len() {
-                    app.layout.borrow_mut().register(Target::JobRow(index), Rect {
-                        x: inner.x,
-                        y: inner.y + 1 + i as u16,
-                        width: inner.width,
-                        height: 1,
-                    });
+                    app.layout.borrow_mut().register(
+                        Target::JobRow(index),
+                        Rect {
+                            x: inner.x,
+                            y: inner.y + 1 + i as u16,
+                            width: inner.width,
+                            height: 1,
+                        },
+                    );
                 }
             }
         }
     }
     if a.detail.width > 0 && a.detail.height > 0 {
-        app.layout.borrow_mut().register(Target::JobDetail, a.detail);
+        app.layout
+            .borrow_mut()
+            .register(Target::JobDetail, a.detail);
         let text = match &view.detail {
             Some(detail) => detail_lines(detail, now).join("\n"),
             None => "Select a job to see its timing, tasks, and attempts.".into(),

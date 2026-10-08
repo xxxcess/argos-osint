@@ -251,6 +251,7 @@ pub fn draw(frame: &mut Frame, app: &App, failure: &SummaryFailure, inner: Rect)
         if rect.y >= inner.y + inner.height {
             break;
         }
+        app.layout.borrow_mut().register(Target::Button(id), rect);
         let focused = app.focus == Target::Button(id);
         let style = if focused {
             theme::selected()

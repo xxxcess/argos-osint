@@ -282,8 +282,12 @@ async fn run_collect(
         .await;
 
     let store = Store::open(&runtime.db_path)?;
-    let state = if result.is_ok() { "success" } else { "failed" };
-    let _ = store.finish_report_attempt(&job.id, &attempt_id, state);
+    let state = if matches!(&result, Ok(response) if response.error.is_none()) {
+        "success"
+    } else {
+        "failed"
+    };
+    store.finish_report_attempt(&job.id, &attempt_id, state)?;
 
     match result {
         Ok(res) if res.error.is_none() => {

@@ -1980,7 +1980,8 @@ where
                                 "WP:RSP source reliability index was not refreshed ({err})."
                             ))),
                         }
-                        atlas_insights::extract(&run_id, 
+                        atlas_insights::extract(
+                            &run_id,
                             secret,
                             classifier.as_ref(),
                             &articles,

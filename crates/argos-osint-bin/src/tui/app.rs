@@ -1,6 +1,7 @@
 //! App state and keyboard routing for the Argos terminal shell.
 
 use super::tracked;
+use super::ui::nudge;
 use anyhow::Result;
 use argos_osint_core::brain::{Memory, MemorySource, ScoredMemory};
 use argos_osint_core::hardware::{self, HardwareProfile};
@@ -172,10 +173,10 @@ pub struct Scrolls {
     /// Line offset inside the fixed-height full-article pane.
     pub intel_full: u16,
     pub intel_jobs: u16,
+    /// Vertical scroll offset for the Recon investigation context panel.
+    pub recon_context: u16,
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChoiceKind {
     Provider,
     Model,
@@ -218,22 +219,21 @@ pub struct PaletteItem {
     pub disabled_reason: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProviderPage {
-    Grok,
-    OpenAI,
-    OpenRouter,
     Defaults,
+    OpenRouter,
+    Google,
+    Nvidia,
 }
 impl ProviderPage {
-    pub const ALL: [Self; 4] = [Self::Grok, Self::OpenAI, Self::OpenRouter, Self::Defaults];
+    pub const ALL: [Self; 4] = [Self::Defaults, Self::OpenRouter, Self::Google, Self::Nvidia];
     pub fn title(self) -> &'static str {
         match self {
-            Self::Grok => "Grok",
-            Self::OpenAI => "OpenAI",
-            Self::OpenRouter => "OpenRouter",
             Self::Defaults => "Defaults",
+            Self::OpenRouter => "OpenRouter",
+            Self::Google => "Google",
+            Self::Nvidia => "Nvidia",
         }
     }
 }
@@ -245,8 +245,7 @@ pub enum BrainListMode {
     Graph,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FieldId {
     BrainApp,
     BrainConversation,
@@ -294,12 +293,18 @@ pub enum FieldId {
     InvestigationControllerModel,
     RouterKey,
     RouterEndpoint,
+    GoogleKey,
+    GoogleEndpoint,
+    NvidiaKey,
+    NvidiaEndpoint,
+    GoogleModelFilter,
+    NvidiaModelFilter,
+    RouterModelFilter,
     Composer,
 }
 
 /// The model role the Defaults tab is editing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefaultsRole {
     Recon,
     ToolPicker,
@@ -424,8 +429,7 @@ impl DefaultsRole {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ButtonId {
     Send,
     Add,
@@ -448,6 +452,8 @@ pub enum ButtonId {
     CancelRun,
     ResumeRun,
     RetryInsights,
+    /// Toggle the Recon investigation context panel (show/hide).
+    ToggleInvestigation,
     OsintRun,
     OsintAttach,
     OsintStartRecon,
@@ -456,6 +462,14 @@ pub enum ButtonId {
     OsintRaw,
     OsintPrev,
     OsintNext,
+    /// "see more" page-down for the tool/OSINT detail pane.
+    SeeMoreDetail,
+    /// "see more" page-down for the Brain recall/anchors pane.
+    SeeMoreRecall,
+    /// "see more" page-down for a generic Block overlay body.
+    SeeMorePopup,
+    /// Open the selected tool's documentation URL.
+    OpenDocumentation,
     SaveFirecrawlKey,
     SaveHunterKey,
     SaveSociaVaultKey,
@@ -514,18 +528,20 @@ pub enum ButtonId {
     LogsFollow,
     LogsOpenJob,
     LogsBack,
-    GrokSignIn,
-    GrokCheck,
-    OpenAISignIn,
-    OpenAICheck,
     RouterSave,
     RouterVerify,
     RouterAdvanced,
+    IntelFullReport,
+    GoogleSave,
+    GoogleVerify,
+    GoogleAdvanced,
+    NvidiaSave,
+    NvidiaVerify,
+    NvidiaAdvanced,
     RefreshHardware,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
     App(usize),
     Home,
@@ -575,6 +591,12 @@ pub enum Target {
     TabClose(usize),
     TabPlus,
     TabOverflow,
+    /// The Recon investigation context panel (scroll focus).
+    ReconContext,
+    /// The OSINT/Tools detail pane (scroll focus).
+    OsintDetail,
+    /// The Brain memory anchors/recall pane (scroll focus).
+    BrainRecall,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
@@ -594,10 +616,6 @@ pub struct SessionTabsState {
 
 #[derive(Debug)]
 enum ProviderEvent {
-    Progress {
-        page: ProviderPage,
-        line: String,
-    },
     Finished {
         page: ProviderPage,
         result: Result<String, String>,
@@ -622,10 +640,7 @@ enum WorkEvent {
         provider: String,
         outcome: Result<Vec<ListedModel>, String>,
     },
-    Access {
-        grok: bool,
-        openai: bool,
-    },
+
     InsightDone {
         thread_id: String,
         outcome: Result<(), String>,
@@ -672,7 +687,6 @@ struct LiveAnswer {
     painted: Option<Instant>,
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FocusEntry {
     pub target: Target,
@@ -694,14 +708,14 @@ impl LayoutRegistry {
         self.scopes.clear();
         self.current_scope = 0;
     }
-    
+
     pub fn push_scope(&mut self, rect: ratatui::layout::Rect) -> usize {
         let id = self.scopes.len();
         self.scopes.push(rect);
         self.current_scope = id;
         id
     }
-    
+
     pub fn register(&mut self, target: Target, rect: ratatui::layout::Rect) {
         self.entries.push(FocusEntry {
             target,
@@ -839,30 +853,36 @@ pub struct App {
     pub show_thinking: bool,
     pub defaults_role: DefaultsRole,
     pub model_catalog: Vec<ListedModel>,
+    pub catalog_cache: HashMap<String, Vec<ListedModel>>,
     pub catalog_for: String,
     pub choice_items: Vec<ChoiceItem>,
     pub choice_sel: usize,
     pub choice_note: String,
     pub palette_query: String,
     pub palette_sel: usize,
-    pub grok_signed_in: bool,
-    pub openai_signed_in: bool,
-    access_probe: bool,
-    access_checked: bool,
+    pub google_key: String,
+    pub google_endpoint: String,
+    pub google_advanced: bool,
+    pub nvidia_key: String,
+    pub nvidia_endpoint: String,
+    pub nvidia_advanced: bool,
     pub router_key: String,
     pub router_endpoint: String,
     pub router_advanced: bool,
-    pub grok_status: String,
-    pub openai_status: String,
+    pub google_status: String,
+    pub nvidia_status: String,
     pub router_status: String,
-    pub provider_progress: Vec<String>,
-    pub provider_progress_page: Option<ProviderPage>,
+    pub router_model_filter: String,
+    pub google_model_filter: String,
+    pub nvidia_model_filter: String,
     pub provider_pending: Option<ProviderPage>,
     pub focus: Target,
     pub cursor: usize,
     pub screen: Rect,
     pub layout: std::cell::RefCell<LayoutRegistry>,
     pub status: String,
+    /// Page sizes (inner viewport height) for `see more` buttons, set during rendering.
+    pub see_more_pages: std::cell::Cell<[u16; 3]>, // [detail, recall, popup]
     pub memories: Vec<Memory>,
     pub selected_insight: Option<recon::InsightView>,
     pub memory_sel: usize,
@@ -911,7 +931,6 @@ pub struct App {
     pub intel_jobs: Vec<IntelReportJobRow>,
     pub intel_sections: Vec<IntelReportSectionRow>,
     pub intel_job_sel: usize,
-    pub intel_collapsed_sections: HashSet<String>,
     /// Active mode tab in the Recon configuration popup.
     pub intel_recon_tab: usize,
     /// Classifier-recommended recon mode for the focused briefing article.
@@ -978,7 +997,49 @@ fn atlas_log_level(text: &str) -> &'static str {
     }
 }
 
+fn open_external_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err(anyhow::anyhow!("no URL opener for this platform"))
+}
+
 impl App {
+    pub(crate) fn selected_intel_busy(&self) -> bool {
+        let Some(article) = self.intel_articles.get(self.intel_sel) else {
+            return false;
+        };
+        self.intel_body_running.contains(&article.id)
+            || self.intel_insights_running.contains(&article.id)
+            || self.intel_body.as_ref().is_some_and(|body| {
+                matches!(
+                    body.state.as_str(),
+                    "queued" | "running" | "fetching" | "filtering" | "parsing" | "persisting"
+                )
+            })
+            || self.intel_jobs.iter().any(|job| {
+                job.article_id == article.id
+                    && (matches!(
+                        job.state.as_str(),
+                        "queued" | "running" | "waiting" | "paused"
+                    ) || self.intel_report_running.contains_key(&job.id))
+            })
+    }
     pub fn boot() -> Result<Self> {
         paths::ensure_home()?;
         let store = Store::open(&paths::db_path())?;
@@ -1045,7 +1106,7 @@ impl App {
         let mut app = Self {
             module: None,
             launcher_sel: 0,
-            provider_page: ProviderPage::Grok,
+            provider_page: ProviderPage::Defaults,
             input: draft,
             brain_app: String::new(),
             brain_conversation: String::new(),
@@ -1167,30 +1228,39 @@ impl App {
             show_thinking: false,
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
+            catalog_cache: HashMap::new(),
             catalog_for: String::new(),
             choice_items: Vec::new(),
             choice_sel: 0,
             choice_note: String::new(),
             palette_query: String::new(),
             palette_sel: 0,
-            grok_signed_in: argos_osint_core::grok_oauth::login_present(),
-            openai_signed_in: false,
-            access_probe: false,
-            access_checked: false,
+            google_key: provider::account_secret(&auth, "google")
+                .api_key
+                .unwrap_or_default(),
+            google_endpoint: provider::account_secret(&auth, "google").base_url,
+            google_advanced: false,
+            nvidia_key: provider::account_secret(&auth, "nvidia")
+                .api_key
+                .unwrap_or_default(),
+            nvidia_endpoint: provider::account_secret(&auth, "nvidia").base_url,
+            nvidia_advanced: false,
             router_key: router.api_key.unwrap_or_default(),
             router_endpoint: router.base_url,
             router_advanced: false,
-            grok_status: "Not checked · Sign in or check existing login".into(),
-            openai_status: "Not checked · Sign in or check existing login".into(),
+            google_status: "Enter a key, then verify or save".into(),
+            nvidia_status: "Enter a key, then verify or save".into(),
+            router_model_filter: String::new(),
+            google_model_filter: String::new(),
+            nvidia_model_filter: String::new(),
             router_status: "Enter a key, then verify or save".into(),
-            provider_progress: Vec::new(),
-            provider_progress_page: None,
             provider_pending: None,
             focus: Target::App(0),
             cursor: 0,
             screen: Rect::default(),
             layout: std::cell::RefCell::new(LayoutRegistry::default()),
             status: "ready".into(),
+            see_more_pages: std::cell::Cell::new([8, 8, 8]),
             memories,
             selected_insight: None,
             memory_sel: 0,
@@ -1230,7 +1300,6 @@ impl App {
             intel_jobs: Vec::new(),
             intel_sections: Vec::new(),
             intel_job_sel: 0,
-            intel_collapsed_sections: HashSet::new(),
             intel_recon_tab: 0,
             intel_recon_recommended: intel_recon::default_recon_mode(),
             intel_recon_recommended_for: String::new(),
@@ -2229,6 +2298,13 @@ impl App {
             FieldId::InvestigationControllerModel => &self.investigation_controller_model,
             FieldId::RouterKey => &self.router_key,
             FieldId::RouterEndpoint => &self.router_endpoint,
+            FieldId::GoogleKey => &self.google_key,
+            FieldId::GoogleEndpoint => &self.google_endpoint,
+            FieldId::NvidiaKey => &self.nvidia_key,
+            FieldId::NvidiaEndpoint => &self.nvidia_endpoint,
+            FieldId::GoogleModelFilter => &self.google_model_filter,
+            FieldId::NvidiaModelFilter => &self.nvidia_model_filter,
+            FieldId::RouterModelFilter => &self.router_model_filter,
             FieldId::Composer => &self.input,
         }
     }
@@ -2281,6 +2357,13 @@ impl App {
             FieldId::InvestigationControllerModel => &mut self.investigation_controller_model,
             FieldId::RouterKey => &mut self.router_key,
             FieldId::RouterEndpoint => &mut self.router_endpoint,
+            FieldId::GoogleKey => &mut self.google_key,
+            FieldId::GoogleEndpoint => &mut self.google_endpoint,
+            FieldId::NvidiaKey => &mut self.nvidia_key,
+            FieldId::NvidiaEndpoint => &mut self.nvidia_endpoint,
+            FieldId::GoogleModelFilter => &mut self.google_model_filter,
+            FieldId::NvidiaModelFilter => &mut self.nvidia_model_filter,
+            FieldId::RouterModelFilter => &mut self.router_model_filter,
             FieldId::Composer => &mut self.input,
         }
     }
@@ -4010,20 +4093,7 @@ impl App {
                 self.finish_catalog(role, provider, outcome);
                 true
             }
-            WorkEvent::Access { grok, openai } => {
-                if grok {
-                    self.grok_signed_in = true;
-                }
-                if openai {
-                    self.openai_signed_in = true;
-                }
-                self.access_probe = false;
-                self.access_checked = true;
-                if matches!(self.overlay, Overlay::Choice(ChoiceKind::Provider)) {
-                    self.rebuild_provider_choices();
-                }
-                true
-            }
+
             WorkEvent::InsightDone { thread_id, outcome } => {
                 if self.selected_thread.as_deref() == Some(&thread_id) {
                     self.status = match outcome {
@@ -4328,9 +4398,18 @@ impl App {
         }
     }
 
+    fn catalog_provider(&self) -> String {
+        match self.provider_page {
+            ProviderPage::Google => "google".into(),
+            ProviderPage::Nvidia => "nvidia".into(),
+            ProviderPage::OpenRouter => "openrouter".into(),
+            ProviderPage::Defaults => self.role_provider(),
+        }
+    }
+
     fn refresh_catalog(&mut self) {
         let role = self.defaults_role;
-        let provider = self.role_provider();
+        let provider = self.catalog_provider();
         if provider.is_empty() {
             self.status = "Choose a provider first".into();
             return;
@@ -4371,12 +4450,17 @@ impl App {
         provider: String,
         outcome: Result<Vec<ListedModel>, String>,
     ) {
-        if self.defaults_role != role || self.role_provider() != provider {
-            return;
-        }
         match outcome {
             Ok(models) => {
                 let count = models.len();
+                self.catalog_cache.insert(provider.clone(), models.clone());
+                let current = self.catalog_provider();
+                if self.defaults_role != role && current != provider {
+                    return;
+                }
+                if current != provider && self.role_provider() != provider {
+                    return;
+                }
                 self.model_catalog = models;
                 self.catalog_for = provider;
                 self.status = format!("{count} models this account can call");
@@ -4417,9 +4501,8 @@ impl App {
     fn open_provider_picker(&mut self) {
         self.scrolls.popup = 0;
         self.overlay = Overlay::Choice(ChoiceKind::Provider);
-        self.choice_note = "Connected accounts. Sign in on the other tabs to add one.".into();
+        self.choice_note = "Configured accounts. Add a key on a provider tab.".into();
         self.rebuild_provider_choices();
-        self.probe_access();
     }
 
     fn open_model_picker(&mut self) {
@@ -4450,16 +4533,29 @@ impl App {
 
     fn rebuild_provider_choices(&mut self) {
         let mut items = Vec::new();
-        if self.grok_signed_in {
+        let current = self.role_provider();
+        if matches!(
+            current.as_str(),
+            "grok" | "grok-subscription" | "openai" | "openai-chatgpt"
+        ) {
             items.push(ChoiceItem {
-                id: "grok".into(),
-                label: "Grok · subscription models".into(),
+                id: current.clone(),
+                label: format!(
+                    "{} · Choose a replacement provider",
+                    provider_label(&current)
+                ),
             });
         }
-        if self.openai_signed_in {
+        if !self.google_key.is_empty() || self.auth.account("google").is_some() {
             items.push(ChoiceItem {
-                id: "openai-chatgpt".into(),
-                label: "OpenAI · ChatGPT subscription".into(),
+                id: "google".into(),
+                label: "Google · AI Studio key".into(),
+            });
+        }
+        if !self.nvidia_key.is_empty() || self.auth.account("nvidia").is_some() {
+            items.push(ChoiceItem {
+                id: "nvidia".into(),
+                label: "Nvidia · API Catalog key".into(),
             });
         }
         if openrouter_ready(&self.auth) {
@@ -4472,7 +4568,6 @@ impl App {
             id: "local".into(),
             label: "Local · models on this machine".into(),
         });
-        let current = self.role_provider();
         self.set_choices(items, &current);
     }
 
@@ -4552,29 +4647,6 @@ impl App {
         }
         self.overlay = Overlay::None;
         self.scrolls.popup = 0;
-    }
-
-    fn probe_access(&mut self) {
-        if self.access_checked || self.access_probe {
-            return;
-        }
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        self.access_probe = true;
-        let tx = self.work_tx.clone();
-        let job = tracked::begin(JobSpec::new(
-            "models",
-            "access_probe",
-            "Check subscription sign-ins",
-        ));
-        tokio::spawn(async move {
-            let grok = argos_osint_core::grok_oauth::check_login().await.is_ok();
-            let openai = argos_osint_core::subscription::check_login().await.is_ok();
-            // Signed-out accounts are an answer, not a failure.
-            tracked::finish(job, "provider", &Ok::<(), String>(()), None);
-            let _ = tx.send(WorkEvent::Access { grok, openai });
-        });
     }
 
     fn refresh_selected(&mut self) -> Result<()> {
@@ -5291,6 +5363,16 @@ impl App {
             }
             ButtonId::ResumeRun => self.resume_recon().map(|_| "Resuming run".into()),
             ButtonId::RetryInsights => self.toggle_recall(),
+            ButtonId::ToggleInvestigation => {
+                self.recon_context_enabled = !self.recon_context_enabled;
+                self.settings.tui_recon_context = Some(self.recon_context_enabled);
+                let _ = self.save_settings();
+                Ok(if self.recon_context_enabled {
+                    "Investigation panel shown".into()
+                } else {
+                    "Investigation panel hidden".into()
+                })
+            }
             ButtonId::OsintRun => self.run_osint().map(|_| "Tool started".into()),
             ButtonId::OsintCancel => {
                 if let Some(cancel) = &self.osint_cancel {
@@ -5334,6 +5416,21 @@ impl App {
             }
             ButtonId::OsintPrev => self.shift_manual(false),
             ButtonId::OsintNext => self.shift_manual(true),
+            ButtonId::SeeMoreDetail => {
+                let page = self.see_more_pages.get()[0] as i32;
+                nudge(&mut self.scrolls.detail, page, 10_000);
+                return;
+            }
+            ButtonId::SeeMoreRecall => {
+                let page = self.see_more_pages.get()[1] as i32;
+                nudge(&mut self.scrolls.recall, page, 10_000);
+                return;
+            }
+            ButtonId::SeeMorePopup => {
+                let page = self.see_more_pages.get()[2] as i32;
+                nudge(&mut self.scrolls.popup, page, 10_000);
+                return;
+            }
             ButtonId::SaveFirecrawlKey => self.remember_firecrawl_key(),
             ButtonId::SaveHunterKey => self.remember_hunter_key(),
             ButtonId::SaveSociaVaultKey => self.remember_sociavault_key(),
@@ -5505,20 +5602,38 @@ impl App {
                 self.refresh_catalog();
                 return;
             }
-            ButtonId::GrokSignIn => {
-                self.start_subscription(ProviderPage::Grok, true);
+            ButtonId::OpenDocumentation => {
+                let Some(tool) = osint::registry().get(self.tool_sel) else {
+                    return;
+                };
+                if tool.documentation.starts_with("http://")
+                    || tool.documentation.starts_with("https://")
+                {
+                    self.status = format!("Open {}", tool.documentation);
+                    if !cfg!(test) {
+                        let _ = open_external_url(tool.documentation);
+                    }
+                } else {
+                    self.status = "Documentation unavailable".into();
+                }
                 return;
             }
-            ButtonId::GrokCheck => {
-                self.start_subscription(ProviderPage::Grok, false);
+            ButtonId::GoogleSave => {
+                let result = self.save_provider(ProviderPage::Google);
+                self.report(result);
                 return;
             }
-            ButtonId::OpenAISignIn => {
-                self.start_subscription(ProviderPage::OpenAI, true);
+            ButtonId::GoogleVerify => {
+                self.verify_provider(ProviderPage::Google);
                 return;
             }
-            ButtonId::OpenAICheck => {
-                self.start_subscription(ProviderPage::OpenAI, false);
+            ButtonId::NvidiaSave => {
+                let result = self.save_provider(ProviderPage::Nvidia);
+                self.report(result);
+                return;
+            }
+            ButtonId::NvidiaVerify => {
+                self.verify_provider(ProviderPage::Nvidia);
                 return;
             }
             ButtonId::RouterSave => self.save_router(),
@@ -5540,7 +5655,41 @@ impl App {
                 return;
             }
             ButtonId::IntelReports => {
-                self.open_intel_recon_popup();
+                if !self.selected_intel_busy() {
+                    self.open_intel_recon_popup();
+                }
+                return;
+            }
+            ButtonId::IntelFullReport => {
+                if self.selected_intel_busy() {
+                    return;
+                }
+                let Some(job) = self.intel_jobs.get(self.intel_job_sel) else {
+                    return;
+                };
+                let mut sections = self
+                    .store
+                    .intel_report_sections(&job.id)
+                    .unwrap_or_default();
+                sections.sort_by_key(|section| section.ordinal);
+                let mut body = format!(
+                    "{} · revision {} · {}\n\n",
+                    job.mode, job.revision, job.state
+                );
+                for section in sections {
+                    body.push_str(&format!("## {} · {}\n\n", section.title, section.status));
+                    if section.markdown.trim().is_empty() {
+                        body.push_str("Content unavailable for this section.\n\n");
+                    } else {
+                        body.push_str(&section.markdown);
+                        body.push_str("\n\n");
+                    }
+                }
+                self.scrolls.popup = 0;
+                self.overlay = Overlay::Block {
+                    title: format!("Report {} r{}", job.id, job.revision),
+                    body,
+                };
                 return;
             }
             ButtonId::IntelReconStart => {
@@ -5613,6 +5762,21 @@ impl App {
             ButtonId::RefreshHardware => {
                 self.hardware = hardware::profile_cached(true);
                 Ok("Hardware refreshed".into())
+            }
+            ButtonId::GoogleAdvanced | ButtonId::NvidiaAdvanced => {
+                let shown = if button == ButtonId::GoogleAdvanced {
+                    self.google_advanced = !self.google_advanced;
+                    self.google_advanced
+                } else {
+                    self.nvidia_advanced = !self.nvidia_advanced;
+                    self.nvidia_advanced
+                };
+                Ok(if shown {
+                    "Advanced endpoint shown"
+                } else {
+                    "Advanced endpoint hidden"
+                }
+                .into())
             }
         };
         self.report(result);
@@ -5816,80 +5980,80 @@ impl App {
         });
     }
 
-    fn start_subscription(&mut self, page: ProviderPage, login: bool) {
+    fn provider_draft(&self, page: ProviderPage) -> Result<ProviderSecret> {
+        let (kind, key, base_url) = match page {
+            ProviderPage::Google => ("google", &self.google_key, &self.google_endpoint),
+            ProviderPage::Nvidia => ("nvidia", &self.nvidia_key, &self.nvidia_endpoint),
+            _ => anyhow::bail!("Choose Google or Nvidia"),
+        };
+        let mut secret = provider::account_secret(&self.auth, kind);
+        secret.api_key = Some(key.trim().to_string()).filter(|key| !key.is_empty());
+        secret.base_url = provider::normalize_base(base_url);
+        let endpoint = url::Url::parse(&secret.base_url)
+            .map_err(|_| anyhow::anyhow!("Enter a valid HTTPS API endpoint"))?;
+        anyhow::ensure!(
+            endpoint.scheme() == "https"
+                && endpoint.host_str().is_some()
+                && endpoint.username().is_empty()
+                && endpoint.password().is_none()
+                && endpoint.query().is_none()
+                && endpoint.fragment().is_none(),
+            "Use an HTTPS endpoint without credentials, query, or fragment"
+        );
+        anyhow::ensure!(
+            provider::resolved_key(&secret).is_some(),
+            "Enter an API key or set the provider environment key"
+        );
+        Ok(secret)
+    }
+
+    fn save_provider(&mut self, page: ProviderPage) -> Result<String> {
+        let secret = self.provider_draft(page)?;
+        let mut auth = self.auth.clone();
+        auth.set_account(secret);
+        auth.save_to(&self.auth_path)?;
+        self.auth = auth;
+        let status = format!("{} account saved · verify to test access", page.title());
+        match page {
+            ProviderPage::Google => self.google_status = status.clone(),
+            ProviderPage::Nvidia => self.nvidia_status = status.clone(),
+            _ => unreachable!(),
+        }
+        Ok(status)
+    }
+
+    fn verify_provider(&mut self, page: ProviderPage) {
         if self.provider_pending.is_some() {
-            self.status = "Another provider sign-in is running".into();
+            self.status = "Another provider check is running".into();
             return;
         }
-        self.provider_pending = Some(page);
-        self.provider_progress.clear();
-        self.provider_progress_page = Some(page);
-        let label = if page == ProviderPage::Grok {
-            "Grok"
-        } else {
-            "ChatGPT"
+        let secret = match self.provider_draft(page) {
+            Ok(secret) => secret,
+            Err(err) => {
+                self.status = err.to_string();
+                return;
+            }
         };
-        let status = format!("{} {}…", if login { "Starting" } else { "Checking" }, label);
-        if page == ProviderPage::Grok {
-            self.grok_status = status.clone();
+        self.provider_pending = Some(page);
+        let label = page.title();
+        let status = format!("Verifying {label} connection…");
+        if page == ProviderPage::Google {
+            self.google_status = status.clone();
         } else {
-            self.openai_status = status.clone();
+            self.nvidia_status = status.clone();
         }
         self.status = status;
         let tx = self.provider_tx.clone();
         let job = tracked::begin(JobSpec::new(
             "models",
-            if login {
-                "provider_login"
-            } else {
-                "provider_check"
-            },
-            format!(
-                "{} {label} subscription",
-                if login { "Sign in to" } else { "Check" }
-            ),
+            "provider_verify",
+            format!("Verify {label} connection"),
         ));
         tokio::spawn(async move {
-            let result = if page == ProviderPage::Grok {
-                let outcome = if login {
-                    let progress_tx = tx.clone();
-                    argos_osint_core::grok_oauth::login(move |line| {
-                        let _ = progress_tx.send(ProviderEvent::Progress {
-                            page,
-                            line: line.into(),
-                        });
-                    })
-                    .await
-                } else {
-                    argos_osint_core::grok_oauth::check_login().await
-                };
-                match outcome {
-                    Ok(_) => {
-                        let secret = provider::account_secret(&AuthFile::default(), "grok");
-                        provider::verified_catalog(&secret)
-                            .await
-                            .map(|models| {
-                                format!("Grok subscription connected · {} models", models.len())
-                            })
-                            .map_err(|err| err.to_string())
-                    }
-                    Err(err) => Err(err.to_string()),
-                }
-            } else {
-                let outcome = if login {
-                    let progress_tx = tx.clone();
-                    argos_osint_core::subscription::login(move |line| {
-                        let _ = progress_tx.send(ProviderEvent::Progress {
-                            page,
-                            line: line.into(),
-                        });
-                    })
-                    .await
-                } else {
-                    argos_osint_core::subscription::check_login().await
-                };
-                outcome.map_err(|err| err.to_string())
-            };
+            let result = provider::verified_catalog(&secret)
+                .await
+                .map(|models| format!("{label} catalog reachable · {} models", models.len()))
+                .map_err(|err| err.to_string());
             tracked::finish(job, "provider", &result, None);
             let _ = tx.send(ProviderEvent::Finished { page, result });
         });
@@ -5897,41 +6061,15 @@ impl App {
 
     fn on_provider_event(&mut self, event: ProviderEvent) {
         match event {
-            ProviderEvent::Progress { page, line } => {
-                if self.provider_pending == Some(page) {
-                    self.provider_progress.push(line);
-                    if self.provider_progress.len() > 6 {
-                        self.provider_progress.remove(0);
-                    }
-                }
-            }
             ProviderEvent::Finished { page, result } => {
                 if self.provider_pending != Some(page) {
                     return;
                 }
                 self.provider_pending = None;
                 let message = result.unwrap_or_else(|err| err);
-                let lower = message.to_ascii_lowercase();
                 match page {
-                    ProviderPage::Grok => {
-                        self.grok_status = message.clone();
-                        if lower.contains("ready")
-                            || lower.contains("connected")
-                            || lower.contains("signed in")
-                        {
-                            self.grok_signed_in = true;
-                        } else if lower.contains("sign-in required") {
-                            self.grok_signed_in = false;
-                        }
-                    }
-                    ProviderPage::OpenAI => {
-                        self.openai_status = message.clone();
-                        if lower.contains("signed in") {
-                            self.openai_signed_in = true;
-                        } else if lower.contains("sign-in required") {
-                            self.openai_signed_in = false;
-                        }
-                    }
+                    ProviderPage::Google => self.google_status = message.clone(),
+                    ProviderPage::Nvidia => self.nvidia_status = message.clone(),
                     ProviderPage::OpenRouter => self.router_status = message.clone(),
                     ProviderPage::Defaults => {}
                 }
@@ -6085,6 +6223,9 @@ impl App {
             Target::TabOverflow => {
                 self.open_investigation_switcher();
             }
+            Target::ReconContext => self.set_focus(Target::ReconContext),
+            Target::OsintDetail => self.set_focus(Target::OsintDetail),
+            Target::BrainRecall => self.set_focus(Target::BrainRecall),
         }
     }
 
@@ -7248,9 +7389,11 @@ pub fn intel_day_button_label(day: &str) -> String {
 
 fn provider_label(kind: &str) -> &'static str {
     match provider::normalize_kind(kind).as_str() {
-        "grok" | "grok-subscription" => "Grok",
-        "openai" | "openai-chatgpt" => "OpenAI",
+        "grok" | "grok-subscription" => "Grok (legacy)",
+        "openai" | "openai-chatgpt" => "OpenAI (legacy)",
         "openrouter" => "OpenRouter",
+        "google" => "Google",
+        "nvidia" => "Nvidia",
         "local" => "Local",
         _ => "Provider",
     }
@@ -7597,7 +7740,9 @@ mod tests {
         App {
             module: None,
             launcher_sel: 0,
-            provider_page: ProviderPage::Grok,
+            provider_page: ProviderPage::Defaults,
+            layout: std::cell::RefCell::new(LayoutRegistry::default()),
+            see_more_pages: std::cell::Cell::new([8, 8, 8]),
             input: String::new(),
             brain_app: String::new(),
             brain_conversation: String::new(),
@@ -7683,24 +7828,28 @@ mod tests {
             show_thinking: false,
             defaults_role: DefaultsRole::Recon,
             model_catalog: Vec::new(),
+            catalog_cache: HashMap::new(),
             catalog_for: String::new(),
             choice_items: Vec::new(),
             choice_sel: 0,
             choice_note: String::new(),
             palette_query: String::new(),
             palette_sel: 0,
-            grok_signed_in: false,
-            openai_signed_in: false,
-            access_probe: false,
-            access_checked: false,
+            google_key: String::new(),
+            google_endpoint: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            google_advanced: false,
+            nvidia_key: String::new(),
+            nvidia_endpoint: "https://integrate.api.nvidia.com/v1".into(),
+            nvidia_advanced: false,
             router_key: String::new(),
             router_endpoint: "https://openrouter.ai/api/v1".into(),
             router_advanced: false,
-            grok_status: "Not checked".into(),
-            openai_status: "Not checked".into(),
+            google_status: "Enter a key, then verify or save".into(),
+            nvidia_status: "Enter a key, then verify or save".into(),
+            router_model_filter: String::new(),
+            google_model_filter: String::new(),
+            nvidia_model_filter: String::new(),
             router_status: "Not checked".into(),
-            provider_progress: Vec::new(),
-            provider_progress_page: None,
             provider_pending: None,
             focus: Target::App(0),
             cursor: 0,
@@ -7745,7 +7894,6 @@ mod tests {
             intel_jobs: Vec::new(),
             intel_sections: Vec::new(),
             intel_job_sel: 0,
-            intel_collapsed_sections: HashSet::new(),
             intel_recon_tab: 0,
             intel_recon_recommended: intel_recon::default_recon_mode(),
             intel_recon_recommended_for: String::new(),
@@ -7797,10 +7945,15 @@ mod tests {
     }
 
     fn click(app: &mut App, target: Target) {
+        let backend = ratatui::backend::TestBackend::new(app.screen.width, app.screen.height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, app))
+            .expect("render before click");
         let position = (0..app.screen.height)
             .flat_map(|y| (0..app.screen.width).map(move |x| (x, y)))
             .find(|(x, y)| super::super::ui::hit_test(app, *x, *y) == Some(target))
-            .expect("visible click target");
+            .unwrap_or_else(|| panic!("visible click target: {target:?}"));
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: position.0,
@@ -8256,20 +8409,15 @@ mod tests {
     }
 
     #[test]
-    fn subscription_progress_and_result_update_the_correct_page() {
+    fn provider_verify_result_updates_only_its_page() {
         let mut app = app();
-        app.provider_pending = Some(ProviderPage::Grok);
-        app.on_provider_event(ProviderEvent::Progress {
-            page: ProviderPage::Grok,
-            line: "Open browser".into(),
-        });
-        assert_eq!(app.provider_progress, ["Open browser"]);
+        app.provider_pending = Some(ProviderPage::Google);
         app.on_provider_event(ProviderEvent::Finished {
-            page: ProviderPage::Grok,
-            result: Ok("Grok subscription connected · 2 models".into()),
+            page: ProviderPage::Google,
+            result: Ok("Google catalog reachable · 2 models".into()),
         });
-        assert!(app.grok_status.contains("connected"));
-        assert_eq!(app.openai_status, "Not checked");
+        assert!(app.google_status.contains("reachable"));
+        assert_eq!(app.nvidia_status, "Enter a key, then verify or save");
         assert_eq!(app.provider_pending, None);
     }
 
@@ -8281,8 +8429,8 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         app.select(ModuleId::Providers.index());
         for (page, target) in [
-            (ProviderPage::Grok, Target::Button(ButtonId::GrokSignIn)),
-            (ProviderPage::OpenAI, Target::Button(ButtonId::OpenAISignIn)),
+            (ProviderPage::Google, Target::Button(ButtonId::GoogleSave)),
+            (ProviderPage::Nvidia, Target::Button(ButtonId::NvidiaSave)),
             (
                 ProviderPage::OpenRouter,
                 Target::Button(ButtonId::RouterVerify),
@@ -8311,8 +8459,8 @@ mod tests {
     #[test]
     fn defaults_pick_provider_and_model_from_account_access() {
         let mut app = app();
-        app.grok_signed_in = true;
-        app.openai_signed_in = true;
+        app.google_key = "google-key".into();
+        app.nvidia_key = "nvidia-key".into();
         let mut router = provider::account_secret(&app.auth, "openrouter");
         router.api_key = Some("router-key".into());
         app.auth.set_account(router);
@@ -8325,7 +8473,7 @@ mod tests {
             .iter()
             .map(|item| item.id.as_str())
             .collect();
-        assert_eq!(ids, ["grok", "openai-chatgpt", "openrouter", "local"]);
+        assert_eq!(ids, ["google", "nvidia", "openrouter", "local"]);
         let openrouter = ids.iter().position(|id| *id == "openrouter").unwrap();
         click(&mut app, Target::Choice(openrouter));
         assert_eq!(app.recon_provider, "openrouter");
@@ -8381,9 +8529,9 @@ mod tests {
         );
         click(&mut app, Target::Field(FieldId::SynthesisProvider));
         assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)));
-        assert_eq!(app.choice_items[0].id, "grok");
+        assert_eq!(app.choice_items[0].id, "google");
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.synthesis_provider, "grok");
+        assert_eq!(app.synthesis_provider, "google");
         assert!(app.synthesis_model.is_empty());
         assert_eq!(app.recon_provider, "openrouter");
         assert_eq!(app.recon_model, "beta");
@@ -8391,7 +8539,16 @@ mod tests {
         click(&mut app, Target::Field(FieldId::SynthesisProvider));
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.synthesis_provider, "openai-chatgpt");
+        assert_eq!(app.synthesis_provider, "nvidia");
+        app.on_work_event(WorkEvent::CatalogDone {
+            role: DefaultsRole::Synthesis,
+            provider: "nvidia".into(),
+            outcome: Ok(vec![ListedModel {
+                id: "nvidia-text-model".into(),
+                name: "Nvidia text model".into(),
+                free: false,
+            }]),
+        });
         click(&mut app, Target::Field(FieldId::SynthesisModel));
         assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Model)));
         assert_eq!(
@@ -8399,10 +8556,10 @@ mod tests {
                 .iter()
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
-            ["codex-default"]
+            ["nvidia-text-model"]
         );
         click(&mut app, Target::Choice(0));
-        assert_eq!(app.synthesis_model, "codex-default");
+        assert_eq!(app.synthesis_model, "nvidia-text-model");
         app.on_work_event(WorkEvent::CatalogDone {
             role: DefaultsRole::Synthesis,
             provider: "grok".into(),
@@ -8412,12 +8569,12 @@ mod tests {
                 free: false,
             }]),
         });
-        assert_eq!(app.catalog_for, "openai-chatgpt");
-        assert_eq!(app.model_catalog[0].id, "codex-default");
+        assert_eq!(app.catalog_for, "nvidia");
+        assert_eq!(app.model_catalog[0].id, "nvidia-text-model");
         assert_eq!(app.recon_model, "beta");
 
-        app.grok_signed_in = false;
-        app.openai_signed_in = false;
+        app.google_key.clear();
+        app.nvidia_key.clear();
         app.auth = AuthFile::default();
         click(&mut app, Target::Field(FieldId::SynthesisProvider));
         let available: Vec<_> = app
@@ -8426,8 +8583,8 @@ mod tests {
             .map(|item| item.id.as_str())
             .collect();
         assert!(available.contains(&"local"));
-        assert!(!available.contains(&"grok"));
-        assert!(!available.contains(&"openai-chatgpt"));
+        assert!(!available.contains(&"google"));
+        assert!(!available.contains(&"nvidia"));
         assert_eq!(
             available.contains(&"openrouter"),
             openrouter_ready(&app.auth)
@@ -10110,7 +10267,11 @@ mod tests {
         let _enter = fx.rt.enter();
         assert!(app.open_memory_detail(&fx.ids[0]));
         settle_summary(&mut app, &fx);
-        assert_eq!(app.graph_summary, good);
+        assert_eq!(
+            app.graph_summary, good,
+            "status={} failure={:?}",
+            app.status, app.summary_failure
+        );
         assert!(app.summary_failure.is_none());
         // Reopen: valid cache, no request.
         app.leave_brain_detail();
@@ -10962,25 +11123,178 @@ mod tests {
     }
 
     #[test]
-    fn grok_and_openai_account_panes_show_their_text() {
+    fn google_and_nvidia_account_panes_show_key_forms() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 100, 36);
         app.select(ModuleId::Providers.index());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+        app.provider_page = ProviderPage::Google;
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("Google"), "{painted}");
+        assert!(painted.contains("Paste Google AI Studio key"), "{painted}");
+        app.provider_page = ProviderPage::Nvidia;
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
+        assert!(painted.contains("Nvidia"), "{painted}");
+        assert!(painted.contains("Paste NVIDIA API key"), "{painted}");
+    }
+
+    #[test]
+    fn provider_catalog_filters_locally_and_keeps_independent_cache() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 100, 36);
+        app.select(ModuleId::Providers.index());
+        app.provider_page = ProviderPage::Google;
+        app.catalog_cache.insert(
+            "google".into(),
+            vec![
+                ListedModel {
+                    id: "gemini-2.5-pro".into(),
+                    name: "Gemini 2.5 Pro".into(),
+                    free: false,
+                },
+                ListedModel {
+                    id: "gemini-flash".into(),
+                    name: "Gemini Flash".into(),
+                    free: true,
+                },
+            ],
+        );
+        app.google_model_filter = "flash".into();
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
         let painted = screen_text(&terminal);
-        assert!(painted.contains("Grok subscription"), "{painted}");
-        assert!(painted.contains("Not checked"), "{painted}");
-        app.provider_page = ProviderPage::OpenAI;
+        assert!(painted.contains("Gemini Flash"), "{painted}");
+        assert!(!painted.contains("gemini-2.5-pro"), "{painted}");
+        assert!(painted.contains("1 of 2"), "{painted}");
+        click(&mut app, Target::Field(FieldId::GoogleModelFilter));
+        assert_eq!(app.focus, Target::Field(FieldId::GoogleModelFilter));
+        click(&mut app, Target::Button(ButtonId::RefreshModels));
+        app.provider_page = ProviderPage::Nvidia;
+        app.catalog_cache.insert(
+            "nvidia".into(),
+            vec![ListedModel {
+                id: "nvidia-text-model".into(),
+                name: "Nvidia Text".into(),
+                free: false,
+            }],
+        );
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let nvidia = screen_text(&terminal);
+        assert!(nvidia.contains("nvidia-text-model"), "{nvidia}");
+        assert!(!nvidia.contains("Gemini Flash"), "{nvidia}");
+    }
+
+    #[test]
+    fn investigation_panel_is_thirty_percent_of_viewport() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.recon_context_enabled = true;
+        app.screen = Rect::new(0, 0, 160, 50);
+        let body = super::super::ui::body_rect(&app);
+        let (_transcript, context) = super::super::ui::recon_workspace(&app, body);
+        let context = context.expect("expanded investigation panel");
+        assert_eq!(context.width, (160 * 30) / 100);
+        app.screen = Rect::new(0, 0, 80, 24);
+        let body = super::super::ui::body_rect(&app);
+        let (_transcript, context) = super::super::ui::recon_workspace(&app, body);
+        assert!(context.is_none());
+    }
+
+    #[test]
+    fn full_report_popup_is_seventy_percent_of_viewport() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 160, 50);
+        app.overlay = Overlay::Block {
+            title: "Report ijob-1 r1".into(),
+            body: "bluf".into(),
+        };
+        let area = super::super::ui::active_popup_area(&app, app.screen);
+        assert_eq!(area.width, (160 * 70) / 100);
+        assert_eq!(area.height, (50 * 80) / 100);
+        assert_eq!(area.x, (160 - area.width) / 2);
+    }
+
+    #[test]
+    fn tool_documentation_heading_is_visible_for_filtered_selection() {
+        let mut app = app();
+        app.screen = Rect::new(0, 0, 120, 40);
+        app.select(ModuleId::Osint.index());
+        app.tool_sel = osint::registry()
+            .iter()
+            .position(|tool| tool.id == "hunter_domain_search")
+            .unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
         let painted = screen_text(&terminal);
-        assert!(painted.contains("ChatGPT subscription"), "{painted}");
-        assert!(painted.contains("Not checked"), "{painted}");
+        assert!(painted.contains("Documentation"), "{painted}");
+        assert!(
+            painted.contains("hunter.io/api-documentation") || painted.contains("Docs"),
+            "{painted}"
+        );
+        click(&mut app, Target::Button(ButtonId::OpenDocumentation));
+        assert!(app.status.contains("http"), "{}", app.status);
+    }
+
+    #[test]
+    fn selected_intel_busy_hides_only_this_article_controls() {
+        let mut app = app();
+        app.intel_articles = vec![
+            AtlasArticleRow {
+                run_id: "r".into(),
+                id: "art-busy".into(),
+                title: "Busy".into(),
+                description: String::new(),
+                url: "https://example.com/busy".into(),
+                country: "us".into(),
+                source_name: "Wire".into(),
+                source_domain: "example.com".into(),
+                author: String::new(),
+                image_url: String::new(),
+                published_at: String::new(),
+                provider: "newsapi".into(),
+                temperature: 1.0,
+                category: "stability".into(),
+                seen_at: String::new(),
+            },
+            AtlasArticleRow {
+                run_id: "r".into(),
+                id: "art-idle".into(),
+                title: "Idle".into(),
+                description: String::new(),
+                url: "https://example.com/idle".into(),
+                country: "us".into(),
+                source_name: "Wire".into(),
+                source_domain: "example.com".into(),
+                author: String::new(),
+                image_url: String::new(),
+                published_at: String::new(),
+                provider: "newsapi".into(),
+                temperature: 1.0,
+                category: "stability".into(),
+                seen_at: String::new(),
+            },
+        ];
+        app.intel_sel = 0;
+        app.intel_body_running.insert("art-busy".into());
+        assert!(app.selected_intel_busy());
+        app.intel_sel = 1;
+        assert!(!app.selected_intel_busy());
     }
 
     #[test]
@@ -11601,15 +11915,11 @@ mod tests {
         assert!(hit(&app, Target::Button(ButtonId::Send)));
 
         let order = super::super::ui::focus_order(&app);
-        assert_eq!(
-            order,
-            vec![
-                Target::Tab(app.tab_sel),
-                Target::App(app.launcher_sel),
-                Target::Field(FieldId::Composer),
-                Target::Button(ButtonId::Send)
-            ]
-        );
+        assert_eq!(order.first(), Some(&Target::Tab(0)));
+        assert!(order.contains(&Target::TabPlus));
+        assert!(order.contains(&Target::App(app.launcher_sel)));
+        assert!(order.contains(&Target::Field(FieldId::Composer)));
+        assert!(order.contains(&Target::Button(ButtonId::Send)));
     }
 
     fn hit(app: &App, target: Target) -> bool {

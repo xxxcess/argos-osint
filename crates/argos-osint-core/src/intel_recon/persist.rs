@@ -584,7 +584,6 @@ impl Store {
         Ok(max.unwrap_or(0) + 1)
     }
 
-    
     pub fn insert_report_attempt(
         &self,
         job_id: &str,
@@ -593,28 +592,46 @@ impl Store {
         tool_id: &str,
     ) -> Result<String> {
         let id = new_row_id("atmpt");
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let reserved = tx.execute(
+            "UPDATE intel_report_jobs
+             SET tool_calls_done = tool_calls_done + 1, current_tool = ?3, updated_at = ?4
+             WHERE id = ?1 AND generation = ?2
+               AND state IN ('queued', 'running', 'waiting')
+               AND tool_calls_done >= 0
+               AND tool_calls_done < tool_calls_allowance",
+            rusqlite::params![job_id, generation, tool_id, now()],
+        )?;
+        anyhow::ensure!(
+            reserved == 1,
+            "Report tool budget exhausted or job is no longer active"
+        );
+        tx.execute(
             "INSERT INTO intel_report_attempts (id, job_id, generation, task_id, tool_id, state, started_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
             rusqlite::params![id, job_id, generation, task_id, tool_id, now()],
         )?;
-        // also increment tool_calls_done on the job
-        self.conn.execute(
-            "UPDATE intel_report_jobs SET tool_calls_done = tool_calls_done + 1, current_tool = ?2 WHERE id = ?1",
-            rusqlite::params![job_id, tool_id]
-        )?;
+        tx.commit()?;
         Ok(id)
     }
 
     pub fn finish_report_attempt(&self, job_id: &str, id: &str, state: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE intel_report_attempts SET state=?2, finished_at=?3 WHERE id=?1",
-            rusqlite::params![id, state, now()],
+        let tx = self.conn.unchecked_transaction()?;
+        let finished = tx.execute(
+            "UPDATE intel_report_attempts SET state=?3, finished_at=?4
+             WHERE id=?1 AND job_id=?2 AND state='running'",
+            rusqlite::params![id, job_id, state, now()],
         )?;
-        self.conn.execute(
-            "UPDATE intel_report_jobs SET current_tool = '' WHERE id = ?1",
-            rusqlite::params![job_id]
-        )?;
+        if finished == 1 {
+            tx.execute(
+                "UPDATE intel_report_jobs SET current_tool = '' WHERE id = ?1
+                 AND generation = (SELECT generation FROM intel_report_attempts WHERE id=?2)
+                 AND NOT EXISTS (SELECT 1 FROM intel_report_attempts
+                                 WHERE job_id=?1 AND generation=intel_report_jobs.generation AND state='running')",
+                rusqlite::params![job_id, id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

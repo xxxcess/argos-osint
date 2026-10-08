@@ -61,12 +61,11 @@ fn composer_height(area: Rect, app: &App) -> u16 {
     }
     let input_lines = app.input.split('\n').count().max(1) as u16;
     let base_box_h = if area.height >= 26 { 3 } else { 2 };
-    let box_h = (input_lines + 1).max(base_box_h).min(5);
-    box_h
+    (input_lines + 1).max(base_box_h).min(5)
 }
 
 /// Module body for the current screen (shared by dashboards for layout maths).
-pub(super) fn body_rect(app: &App) -> Rect {
+pub(crate) fn body_rect(app: &App) -> Rect {
     chrome(app.screen, app).body
 }
 
@@ -166,16 +165,16 @@ fn brain_list(area: Rect) -> BrainList {
     let rows = split_vertical(
         area,
         [
-            Constraint::Length(ACTION_H),
             Constraint::Length(FIELD_H),
             Constraint::Min(4),
+            Constraint::Length(ACTION_H),
             Constraint::Length(8),
         ],
     );
     BrainList {
-        actions: rows[0],
-        query: rows[1],
-        list: rows[2],
+        query: rows[0],
+        list: rows[1],
+        actions: rows[2],
         recall: rows[3],
     }
 }
@@ -251,11 +250,25 @@ fn chat_areas(area: Rect) -> (Rect, Rect) {
     (rows[0], rows[1])
 }
 
-fn recon_workspace(app: &App, area: Rect) -> (Rect, Option<Rect>) {
-    if !app.recon_context_enabled || area.width < 110 {
+pub(crate) fn recon_workspace(app: &App, area: Rect) -> (Rect, Option<Rect>) {
+    if !app.recon_context_enabled || app.screen.width < 110 {
         return (area, None);
     }
-    let panes = split_horizontal(area, [Constraint::Min(74), Constraint::Length(30)]);
+    // 30% of the terminal viewport, then clipped to the remaining app body.
+    let context_w = ((u32::from(app.screen.width) * 30) / 100)
+        .min(u32::from(area.width.saturating_sub(1)))
+        .max(1) as u16;
+    if context_w == 0 || context_w >= area.width {
+        return (area, None);
+    }
+    let transcript_w = area.width.saturating_sub(context_w);
+    let panes = split_horizontal(
+        area,
+        [
+            Constraint::Length(transcript_w),
+            Constraint::Length(context_w),
+        ],
+    );
     (panes[0], Some(panes[1]))
 }
 
@@ -407,18 +420,6 @@ fn system_areas(area: Rect) -> (Rect, Rect) {
     (rows[1], rows[0])
 }
 
-fn auth_areas(area: Rect) -> Vec<Rect> {
-    split_vertical(
-        area,
-        [
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(ACTION_H),
-            Constraint::Min(0),
-        ],
-    )
-}
-
 fn router_areas(area: Rect) -> Vec<Rect> {
     split_vertical(
         area,
@@ -441,6 +442,21 @@ fn popup_area(area: Rect) -> Rect {
         y: area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
+    }
+}
+
+pub(crate) fn active_popup_area(app: &App, area: Rect) -> Rect {
+    if matches!(&app.overlay, Overlay::Block { title, .. } if title.starts_with("Report ")) {
+        let width = ((u32::from(area.width) * 70) / 100).max(1) as u16;
+        let height = ((u32::from(area.height) * 80) / 100).max(1) as u16;
+        Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        }
+    } else {
+        popup_area(area)
     }
 }
 
@@ -1680,6 +1696,25 @@ fn clip_chars(value: &str, max: usize) -> String {
     }
 }
 
+/// Estimate the number of wrapped lines a string will occupy at `width` columns.
+/// Counts newlines and adds extra lines for each source line longer than `width`.
+fn wrapped_line_count(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return text.lines().count().max(1);
+    }
+    text.lines()
+        .map(|line| {
+            let chars = line.chars().count();
+            if chars == 0 {
+                1
+            } else {
+                chars.div_ceil(width)
+            }
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
 pub(crate) fn center_line(value: &str, width: usize) -> String {
     center_text(value, width)
 }
@@ -2403,6 +2438,7 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
             let max = intel_brief_scroll_max(app);
             nudge(&mut app.scrolls.intel_brief, delta * 3, max);
         }
+        Region::ReconContext => nudge(&mut app.scrolls.recon_context, delta * 3, 10_000),
         Region::None => {}
     }
 }
@@ -2414,7 +2450,7 @@ pub fn page(app: &mut App, direction: i32) {
         return;
     }
     if app.overlay != Overlay::None {
-        let room = inset(popup_area(app.screen)).height.max(1) as i32;
+        let room = inset(active_popup_area(app, app.screen)).height.max(1) as i32;
         let max = popup_max(app);
         nudge(&mut app.scrolls.popup, direction * room, max);
         return;
@@ -2454,6 +2490,9 @@ pub fn page(app: &mut App, direction: i32) {
             let room = (tool_room(app) / 2).max(1) as i32;
             let max = tool_max(app);
             nudge_list(&mut app.scrolls.tools, direction * room, max);
+        }
+        Some(ModuleId::Osint) if app.focus == Target::OsintDetail => {
+            nudge(&mut app.scrolls.detail, direction * 6, 10_000);
         }
         Some(ModuleId::Osint) | Some(ModuleId::Providers) => {
             nudge(&mut app.scrolls.detail, direction * 6, 10_000);
@@ -2539,7 +2578,7 @@ fn scroll_chat(app: &mut App, delta: i32) {
     app.chat_follow = next == max;
 }
 
-fn nudge(scroll: &mut u16, delta: i32, max: u16) {
+pub(crate) fn nudge(scroll: &mut u16, delta: i32, max: u16) {
     *scroll = (i32::from(*scroll) + delta).clamp(0, i32::from(max)) as u16;
 }
 
@@ -2564,6 +2603,7 @@ enum Region {
     Summary,
     IntelBrief,
     IntelFull,
+    ReconContext,
     None,
 }
 
@@ -2571,9 +2611,11 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
     let body = chrome(app.screen, app).body;
     match app.module {
         Some(ModuleId::Recon) if app.recon_chat => {
-            let (transcript, _, _) = recon_chat_areas(app, body);
+            let (transcript, context, _) = recon_chat_areas(app, body);
             if contains(transcript, x, y) {
                 Region::Chat
+            } else if context.is_some_and(|c| contains(c, x, y)) {
+                Region::ReconContext
             } else {
                 Region::None
             }
@@ -2738,7 +2780,7 @@ pub(super) fn detail_rows(detail: &str, width: usize) -> Vec<String> {
 }
 
 fn popup_max(app: &App) -> u16 {
-    let room = inset(popup_area(app.screen)).height.max(1) as usize;
+    let room = inset(active_popup_area(app, app.screen)).height.max(1) as usize;
     popup_text(app).lines().count().saturating_sub(room) as u16
 }
 
@@ -2949,6 +2991,47 @@ pub fn focus_order(app: &App) -> Vec<Target> {
     let registry = app.layout.borrow();
     let mut entries = registry.entries.clone();
     entries.retain(|e| e.scope == registry.current_scope);
+    drop(registry);
+    // After a state change the last paint may still be the previous surface.
+    // Raster the current module so Tab order matches hit-testing without a redraw.
+    if app.overlay == Overlay::None {
+        entries.clear();
+        let mut fallback = HashMap::<Target, (u16, u16)>::new();
+        for y in 0..app.screen.height {
+            for x in 0..app.screen.width {
+                if let Some(target) = legacy_target_at(app, x, y) {
+                    fallback.entry(target).or_insert((x, y));
+                }
+            }
+        }
+        entries.extend(
+            fallback
+                .into_iter()
+                .map(|(target, (x, y))| super::app::FocusEntry {
+                    target,
+                    rect: Rect {
+                        x,
+                        y,
+                        width: 1,
+                        height: 1,
+                    },
+                    scope: 0,
+                    scrollable: false,
+                }),
+        );
+    } else if entries.is_empty() {
+        entries.push(super::app::FocusEntry {
+            target: Target::CloseOverlay,
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            scope: 0,
+            scrollable: false,
+        });
+    }
     entries.sort_by_key(|e| (e.rect.y, e.rect.x));
 
     let mut order = Vec::new();
@@ -2970,59 +3053,6 @@ pub fn choice_list_room(app: &App) -> usize {
     inner.height.saturating_sub(note as u16) as usize
 }
 
-pub fn choice_hits(app: &App) -> Vec<(usize, Rect)> {
-    let inner = inset(popup_area(app.screen));
-    if inner.width == 0 || inner.height == 0 {
-        return Vec::new();
-    }
-    if app.overlay == Overlay::Palette {
-        let start = app.scrolls.popup as usize;
-        let room = inner.height.saturating_sub(1) as usize;
-        return app
-            .palette_items()
-            .into_iter()
-            .enumerate()
-            .skip(start)
-            .take(room)
-            .map(|(index, _)| {
-                (
-                    index,
-                    Rect {
-                        x: inner.x,
-                        y: inner.y + 1 + (index - start) as u16,
-                        width: inner.width,
-                        height: 1,
-                    },
-                )
-            })
-            .collect();
-    }
-    let mut y = inner.y;
-    let mut height = inner.height;
-    if !app.choice_note.is_empty() {
-        y = y.saturating_add(1);
-        height = height.saturating_sub(1);
-    }
-    let start = app.scrolls.popup as usize;
-    app.choice_items
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height as usize)
-        .map(|(index, _)| {
-            (
-                index,
-                Rect {
-                    x: inner.x,
-                    y: y + (index - start) as u16,
-                    width: inner.width,
-                    height: 1,
-                },
-            )
-        })
-        .collect()
-}
-
 pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
     let registry = app.layout.borrow();
     for entry in registry.entries.iter().rev() {
@@ -3030,7 +3060,60 @@ pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
             return Some(entry.target);
         }
     }
-    None
+    drop(registry);
+    if app.overlay == Overlay::None {
+        legacy_target_at(app, x, y)
+    } else {
+        None
+    }
+}
+
+fn legacy_target_at(app: &App, x: u16, y: u16) -> Option<Target> {
+    let layout = chrome(app.screen, app);
+    if app.module.is_none() {
+        let composer = home_composer_areas(layout.body);
+        if contains(composer.send, x, y) {
+            return Some(Target::Button(ButtonId::Send));
+        }
+        if contains(composer.input, x, y) {
+            return Some(Target::Field(FieldId::Composer));
+        }
+    } else if layout.composer.height > 0 {
+        let composer = recon_composer_areas(layout.composer);
+        if contains(composer.send, x, y) {
+            return Some(Target::Button(ButtonId::Send));
+        }
+        if contains(composer.input, x, y) {
+            return Some(Target::Field(FieldId::Composer));
+        }
+    }
+    let tabs = if app.module.is_none() {
+        layout.header
+    } else {
+        layout.tab_strip
+    };
+    if contains(tabs, x, y) {
+        if let Some(target) = tab_strip_hit(app, tabs, x, y) {
+            return Some(target);
+        }
+    }
+    if !contains(layout.body, x, y) {
+        return None;
+    }
+    match app.module {
+        None => home_line(app, x, y).map(Target::App),
+        Some(ModuleId::Recon) => recon_hit(app, layout.body, x, y),
+        Some(ModuleId::Brain) => brain_hit(app, layout.body, x, y),
+        Some(ModuleId::Osint) => osint_hit(app, layout.body, x, y),
+        Some(ModuleId::Atlas) => atlas_hit(app, layout.body, x, y),
+        Some(ModuleId::Intel) => intel_hit(app, layout.body, x, y),
+        Some(ModuleId::Providers) => provider_hit(app, layout.body, x, y),
+        Some(ModuleId::System) => system_hit(app, layout.body, x, y),
+        Some(ModuleId::Jobs) => {
+            super::jobs::hit(app, layout.body, x, y, app.job_source().is_some())
+        }
+        Some(ModuleId::Logs) => super::logs::hit(app, layout.body, x, y),
+    }
 }
 
 fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
@@ -3186,7 +3269,7 @@ fn osint_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         return Some(Target::Field(FieldId::OsintInput));
     }
     if contains(actions, x, y) {
-        let areas = button_areas(actions, 8);
+        let areas = button_areas(actions, 9);
         let ids = [
             ButtonId::OsintRun,
             ButtonId::OsintCancel,
@@ -3196,6 +3279,7 @@ fn osint_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             ButtonId::OsintStartRecon,
             ButtonId::OsintPrev,
             ButtonId::OsintNext,
+            ButtonId::OpenDocumentation,
         ];
         return areas
             .iter()
@@ -3215,39 +3299,73 @@ fn provider_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             .map(|index| Target::ProviderTab(ProviderPage::ALL[index]));
     }
     match app.provider_page {
-        ProviderPage::Grok | ProviderPage::OpenAI => {
-            let auth = auth_areas(rows[1]);
-            if contains(auth[2], x, y) {
-                let buttons = button_areas(auth[2], 2);
-                let ids = if app.provider_page == ProviderPage::Grok {
-                    [ButtonId::GrokSignIn, ButtonId::GrokCheck]
-                } else {
-                    [ButtonId::OpenAISignIn, ButtonId::OpenAICheck]
+        ProviderPage::Google | ProviderPage::Nvidia | ProviderPage::OpenRouter => {
+            let (key_field, ep_field, btn_save, btn_verify, btn_advanced, advanced) =
+                match app.provider_page {
+                    ProviderPage::Google => (
+                        FieldId::GoogleKey,
+                        FieldId::GoogleEndpoint,
+                        ButtonId::GoogleSave,
+                        ButtonId::GoogleVerify,
+                        ButtonId::GoogleAdvanced,
+                        app.google_advanced,
+                    ),
+                    ProviderPage::Nvidia => (
+                        FieldId::NvidiaKey,
+                        FieldId::NvidiaEndpoint,
+                        ButtonId::NvidiaSave,
+                        ButtonId::NvidiaVerify,
+                        ButtonId::NvidiaAdvanced,
+                        app.nvidia_advanced,
+                    ),
+                    ProviderPage::OpenRouter => (
+                        FieldId::RouterKey,
+                        FieldId::RouterEndpoint,
+                        ButtonId::RouterSave,
+                        ButtonId::RouterVerify,
+                        ButtonId::RouterAdvanced,
+                        app.router_advanced,
+                    ),
+                    _ => unreachable!(),
                 };
-                return buttons
-                    .iter()
-                    .position(|rect| contains(*rect, x, y))
-                    .map(|index| Target::Button(ids[index]));
-            }
-        }
-        ProviderPage::OpenRouter => {
             let router = router_areas(rows[1]);
             if contains(router[1], x, y) {
-                return Some(Target::Field(FieldId::RouterKey));
+                return Some(Target::Field(key_field));
             }
             if contains(router[2], x, y) {
                 let buttons = button_areas(router[2], 2);
-                return Some(Target::Button(if contains(buttons[0], x, y) {
-                    ButtonId::RouterSave
-                } else {
-                    ButtonId::RouterVerify
-                }));
+                if contains(buttons[0], x, y) {
+                    return Some(Target::Button(btn_save));
+                }
+                if contains(buttons[1], x, y) {
+                    return Some(Target::Button(btn_verify));
+                }
             }
             if contains(router[3], x, y) {
-                return Some(Target::Button(ButtonId::RouterAdvanced));
+                return Some(Target::Button(btn_advanced));
             }
-            if app.router_advanced && contains(router[4], x, y) {
-                return Some(Target::Field(FieldId::RouterEndpoint));
+            if advanced && contains(router[4], x, y) {
+                return Some(Target::Field(ep_field));
+            }
+            let catalog_area = split_vertical(
+                router[5],
+                [
+                    Constraint::Length(FIELD_H),
+                    Constraint::Length(ACTION_H),
+                    Constraint::Min(0),
+                ],
+            );
+            let filter_field = match app.provider_page {
+                ProviderPage::Google => FieldId::GoogleModelFilter,
+                ProviderPage::Nvidia => FieldId::NvidiaModelFilter,
+                ProviderPage::OpenRouter => FieldId::RouterModelFilter,
+                ProviderPage::Defaults => unreachable!(),
+            };
+            if contains(catalog_area[0], x, y) {
+                return Some(Target::Field(filter_field));
+            }
+            if contains(catalog_area[1], x, y) {
+                return Some(Target::Button(ButtonId::RefreshModels));
             }
         }
         ProviderPage::Defaults => {
@@ -3373,16 +3491,25 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
                 _ => rows[2],
             })
         }
-        FieldId::RouterKey | FieldId::RouterEndpoint
-            if app.module == Some(ModuleId::Providers)
-                && app.provider_page == ProviderPage::OpenRouter =>
+        FieldId::RouterKey
+        | FieldId::RouterEndpoint
+        | FieldId::GoogleKey
+        | FieldId::GoogleEndpoint
+        | FieldId::NvidiaKey
+        | FieldId::NvidiaEndpoint
+            if app.module == Some(ModuleId::Providers) =>
         {
             let rows = router_areas(provider_areas(layout.body)[1]);
-            Some(if field == FieldId::RouterKey {
-                rows[1]
-            } else {
-                rows[4]
-            })
+            Some(
+                if matches!(
+                    field,
+                    FieldId::RouterKey | FieldId::GoogleKey | FieldId::NvidiaKey
+                ) {
+                    rows[1]
+                } else {
+                    rows[4]
+                },
+            )
         }
         _ => None,
     }
@@ -3455,6 +3582,58 @@ fn field_value_area(area: Rect) -> Rect {
     }
 }
 
+fn field_placeholder(field: FieldId) -> &'static str {
+    match field {
+        FieldId::BrainApp => "Source app name",
+        FieldId::BrainConversation => "Optional conversation ID",
+        FieldId::BrainInsight => "Write a useful fact or finding…",
+        FieldId::BrainQuery => "Search memories by topic…",
+        FieldId::ReconSearch => "Find investigations…",
+        FieldId::IntelSearch => "Search title, source, or topic…",
+        FieldId::OsintSearch => "Find tools by name or purpose…",
+        FieldId::OsintInput => "JSON inputs; see example above",
+        FieldId::JobsSearch => "Find jobs by name or state…",
+        FieldId::LogsSearch => "Filter messages or IDs…",
+        FieldId::RouterKey => "Paste OpenRouter API key",
+        FieldId::GoogleKey => "Paste Google AI Studio key",
+        FieldId::NvidiaKey => "Paste NVIDIA API key",
+        FieldId::RouterEndpoint | FieldId::GoogleEndpoint | FieldId::NvidiaEndpoint => {
+            "API base URL, including version"
+        }
+        FieldId::GoogleModelFilter | FieldId::NvidiaModelFilter | FieldId::RouterModelFilter => {
+            "Filter model names or IDs…"
+        }
+        FieldId::Composer => "Ask an OSINT question…",
+        field if is_picker_field(field) => {
+            if matches!(
+                field,
+                FieldId::ReconProvider
+                    | FieldId::PickerProvider
+                    | FieldId::SynthesisProvider
+                    | FieldId::ClassifierProvider
+                    | FieldId::SummarizationProvider
+                    | FieldId::EvidenceCuratorProvider
+                    | FieldId::EntityResolverProvider
+                    | FieldId::ClaimAssessorProvider
+                    | FieldId::InvestigationControllerProvider
+            ) {
+                "Choose a provider"
+            } else {
+                "Choose a model"
+            }
+        }
+        FieldId::FirecrawlFallback
+        | FieldId::HunterFallback
+        | FieldId::SociaVaultFallback
+        | FieldId::NewsApiFallback
+        | FieldId::CourtListenerFallback
+        | FieldId::GnewsFallback
+        | FieldId::NewsDataFallback
+        | FieldId::CurrentsFallback => "Optional backup API key",
+        _ => "Paste API key",
+    }
+}
+
 pub(super) fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &str, area: Rect) {
     app.layout.borrow_mut().register(Target::Field(field), area);
     if area.width < 2 || area.height == 0 {
@@ -3471,6 +3650,8 @@ pub(super) fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &s
     let secret = matches!(
         field,
         FieldId::RouterKey
+            | FieldId::GoogleKey
+            | FieldId::NvidiaKey
             | FieldId::FirecrawlKey
             | FieldId::FirecrawlFallback
             | FieldId::HunterKey
@@ -3503,28 +3684,7 @@ pub(super) fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &s
     let gutter = if focused { "▎" } else { " " };
     let width = value_area.width.saturating_sub(1) as usize;
     let empty = if display.is_empty() {
-        if picker {
-            "Choose".to_string()
-        } else if focused {
-            String::new()
-        } else if field == FieldId::Composer {
-            if app.module.is_none() {
-                "What would you like to investigate?".to_string()
-            } else {
-                "Ask a question or /help".to_string()
-            }
-        } else if field == FieldId::BrainQuery {
-            format!("{} memories", app.memories.len())
-        } else if field == FieldId::IntelSearch {
-            let n = app.intel_articles.len();
-            if n == 1 {
-                "1 article".into()
-            } else {
-                format!("{n} articles")
-            }
-        } else {
-            "type to edit".to_string()
-        }
+        field_placeholder(field).to_string()
     } else {
         String::new()
     };
@@ -3616,10 +3776,12 @@ pub(super) fn draw_button_state(
     area: Rect,
     active: bool,
 ) {
+    app.layout
+        .borrow_mut()
+        .register(Target::Button(button), area);
     if area.width < 2 || area.height < 2 {
         return;
     }
-    app.layout.borrow_mut().register(Target::Button(button), area);
     let selected = active || app.focus == Target::Button(button);
     let border = if selected {
         theme::accent()
@@ -3694,8 +3856,65 @@ pub(super) fn pane(title: &str) -> Block<'static> {
         .style(theme::text())
 }
 
+/// Like `pane` but highlights the border and appends ` · focused` when `focused` is true.
+pub fn focused_pane(title: &str, focused: bool) -> Block<'static> {
+    if focused {
+        let focused_title = format!("{} · focused ", title.trim_end_matches(' '));
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme::accent())
+            .title(focused_title)
+            .title_style(theme::accent())
+            .style(theme::text())
+    } else {
+        pane(title)
+    }
+}
+
+/// Render a `see more` footer button inside `pane_area` when the content
+/// (measured in wrapped lines) overflows the inner viewport. Returns the
+/// adjusted inner content area (shrunk by 1 row for the footer reservation).
+///
+/// `scroll` is the current line offset. `total_lines` is the total wrapped
+/// line count. `page_size` is stored so the button handler can page by it.
+/// The button is registered with the layout registry; clicking or Enter pages
+/// down one viewport.
+pub fn draw_see_more(
+    frame: &mut Frame,
+    app: &App,
+    pane_area: Rect,
+    scroll: u16,
+    total_lines: usize,
+    button: ButtonId,
+    page_slot: usize,
+) -> Rect {
+    let inner = inset(pane_area);
+    let inner_h = inner.height as usize;
+    let has_more = total_lines.saturating_sub(scroll as usize) > inner_h.saturating_sub(1);
+    if !has_more || inner_h < 3 {
+        return pane_area;
+    }
+    // Store page size (inner height minus 1 overlap line) for the handler.
+    let page = inner_h.saturating_sub(1).max(1) as u16;
+    let mut pages = app.see_more_pages.get();
+    pages[page_slot] = page;
+    app.see_more_pages.set(pages);
+    // Reserve the last row of the pane area for the footer.
+    let footer_rect = Rect {
+        x: pane_area.x,
+        y: pane_area.y + pane_area.height.saturating_sub(1),
+        width: pane_area.width,
+        height: 1,
+    };
+    draw_button(frame, app, button, " see more ", footer_rect);
+    // Return the content area with the footer row reserved.
+    Rect {
+        height: pane_area.height.saturating_sub(1),
+        ..pane_area
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
-    app.layout.borrow_mut().clear();
     app.layout.borrow_mut().clear();
     let area = frame.area();
     frame.render_widget(Paragraph::new("").style(theme::text()), area);
@@ -4014,6 +4233,10 @@ pub(crate) fn draw_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
     }
     let items = tab_strip_layout(area, app);
     for item in items {
+        app.layout.borrow_mut().register(item.target, item.rect);
+        if let (Some(close_rect), Some(close_target)) = (item.close_rect, item.close_target) {
+            app.layout.borrow_mut().register(close_target, close_rect);
+        }
         let style = if item.focused {
             theme::selected()
         } else if item.active {
@@ -4418,18 +4641,12 @@ fn composer_prompt_text<'a>(
             if blink_on {
                 Text::from(Line::from(vec![
                     Span::styled("█ ", theme::card_accent()),
-                    Span::styled(
-                        placeholder,
-                        theme::card_dim(),
-                    ),
+                    Span::styled(placeholder, theme::card_dim()),
                 ]))
             } else {
                 Text::from(Line::from(vec![
                     Span::styled("  ", theme::card_dim()),
-                    Span::styled(
-                        placeholder,
-                        theme::card_dim(),
-                    ),
+                    Span::styled(placeholder, theme::card_dim()),
                 ]))
             }
         } else {
@@ -4529,6 +4746,12 @@ pub(crate) fn draw_composer(
     areas: &HomeComposerAreas,
     is_home: bool,
 ) {
+    app.layout
+        .borrow_mut()
+        .register(Target::Field(FieldId::Composer), areas.input);
+    app.layout
+        .borrow_mut()
+        .register(Target::Button(ButtonId::Send), areas.send);
     let screen_h = frame.area().height;
     if areas.box_rect.y < screen_h {
         frame.render_widget(
@@ -4560,8 +4783,13 @@ pub(crate) fn draw_composer(
         };
         let is_focused = app.focus == Target::Field(FieldId::Composer);
         let blink_on = cursor_blink_visible();
-        let prompt_text = composer_prompt_text(&app.input, app.cursor, is_focused, blink_on, is_home);
-        let alignment = if is_home { Alignment::Center } else { Alignment::Left };
+        let prompt_text =
+            composer_prompt_text(&app.input, app.cursor, is_focused, blink_on, is_home);
+        let alignment = if is_home {
+            Alignment::Center
+        } else {
+            Alignment::Left
+        };
         frame.render_widget(
             Paragraph::new(prompt_text).alignment(alignment),
             prompt_rect,
@@ -4615,7 +4843,11 @@ pub(crate) fn draw_composer(
             } else {
                 "[ Send ↵ ]"
             };
-            let send_alignment = if is_home { Alignment::Right } else { Alignment::Left };
+            let send_alignment = if is_home {
+                Alignment::Right
+            } else {
+                Alignment::Left
+            };
             frame.render_widget(
                 Paragraph::new(action_label)
                     .alignment(send_alignment)
@@ -4674,6 +4906,9 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
                 height: 1,
             }
         };
+        if let Some(index) = row.target {
+            app.layout.borrow_mut().register(Target::App(index), rect);
+        }
         frame.render_widget(
             Paragraph::new(line.unwrap()).alignment(if row.center {
                 Alignment::Center
@@ -4780,6 +5015,14 @@ pub(crate) fn recon_context_buttons(area: Rect, app: &App) -> Vec<(ButtonId, Rec
         defs.push((ButtonId::ResumeRun, "Resume"));
     }
     defs.push((ButtonId::CancelRun, "Cancel"));
+    defs.push((
+        ButtonId::ToggleInvestigation,
+        if app.recon_context_enabled {
+            "Hide investigation"
+        } else {
+            "Show investigation"
+        },
+    ));
 
     let count = defs.len() as u16;
     if count == 0 || area.width < 4 || area.height < count * 2 {
@@ -4817,6 +5060,13 @@ fn draw_recon_chat(frame: &mut Frame, app: &App, area: Rect) {
             buttons.push((ButtonId::ResumeRun, "Resume"));
         }
         buttons.push((ButtonId::CancelRun, "Cancel"));
+        // On narrow terminals the investigation panel is hidden; offer an explicit toggle.
+        let toggle_label = if app.recon_context_enabled {
+            "Hide investigation"
+        } else {
+            "Show investigation"
+        };
+        buttons.push((ButtonId::ToggleInvestigation, toggle_label));
         let count = buttons.len();
         let run_buttons = button_areas(run_actions, count);
         for (i, (id, label)) in buttons.into_iter().enumerate() {
@@ -4826,33 +5076,52 @@ fn draw_recon_chat(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
-    let buttons = recon_context_buttons(area, app);
-    let info_h = if let Some((_, first_rect, _)) = buttons.first() {
-        first_rect.y.saturating_sub(area.y)
+    let focused = app.focus == Target::ReconContext;
+    let title = if focused {
+        " Investigation · focused "
     } else {
-        area.height
+        " Investigation "
     };
-    let info_area = Rect {
-        x: area.x.saturating_add(1),
-        y: area.y,
-        width: area.width.saturating_sub(1),
-        height: info_h,
+    let border_style = if focused {
+        theme::accent()
+    } else {
+        theme::dim()
     };
-
     frame.render_widget(
         Block::default()
-            .borders(Borders::LEFT)
-            .border_style(theme::dim()),
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(border_style),
         area,
     );
+    // Register the panel as a focus target using its full area.
+    app.layout.borrow_mut().register(Target::ReconContext, area);
+    let inner = inset(area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
 
-    let mut lines = vec!["Investigation".to_string(), String::new()];
+    let buttons = recon_context_buttons(area, app);
+    let info_h = if let Some((_, first_rect, _)) = buttons.first() {
+        first_rect.y.saturating_sub(inner.y)
+    } else {
+        inner.height
+    };
+    let info_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: info_h.min(inner.height),
+    };
+
+    let mut lines = vec![String::new()];
     if let Some(thread) = app
         .threads
         .iter()
         .find(|thread| Some(&thread.id) == app.selected_thread.as_ref())
     {
-        lines.push(clip_chars(&thread.title, 27));
+        // Full title, wrapped by the Paragraph widget — no character clipping.
+        lines.push(thread.title.clone());
     }
     if !app.recon_stage.is_empty() {
         lines.push(format!("Stage · {}", app.recon_stage));
@@ -4865,11 +5134,12 @@ fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
             .and_then(|raw| serde_json::from_str::<Plan>(raw).ok())
         {
             lines.push(format!("Directives · {}", plan.directives.len()));
-            for directive in plan.directives.iter().take(5) {
+            // Show all directives; wrapping is handled by the Paragraph widget.
+            for directive in plan.directives.iter() {
                 lines.push(format!(
                     "{}  {}",
                     directive.id.to_uppercase(),
-                    clip_chars(&directive.goal, 23)
+                    directive.goal
                 ));
             }
         }
@@ -4878,20 +5148,19 @@ fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(format!("Evidence calls · {}", app.calls.len()));
     let memories: usize = app.answer_memories.values().map(Vec::len).sum();
     lines.push(String::new());
-    lines.push("Brain context controls:".to_string());
-    lines.push(" [x] Strict   [ ] Balanced   [ ] Exploratory".to_string());
-    lines.push(" [x] All time [ ] Date range".to_string());
-    lines.push(" [ ] Include background".to_string());
-    lines.push(String::new());
     lines.push(format!("▼ Memories used ({memories})"));
     for mem_list in app.answer_memories.values() {
         for mem in mem_list {
-            lines.push(format!("  • {} (Admitted: strict query match)", clip_chars(&mem.text, 35)));
+            // Full memory text, wrapped by the Paragraph widget.
+            lines.push(format!("  • {}", mem.text));
         }
     }
+    let content = lines.join("\n");
+    let scroll_offset = app.scrolls.recon_context;
     frame.render_widget(
-        Paragraph::new(lines.join("\n"))
+        Paragraph::new(content)
             .style(theme::dim())
+            .scroll((scroll_offset, 0))
             .wrap(Wrap { trim: false }),
         info_area,
     );
@@ -5036,15 +5305,20 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
                     .map(|text| format!("\nError: {text}"))
                     .unwrap_or_default();
                 format!(
-                    "\n\nManual run {id}: {} · {}\nSource: {}{error}\n{body}",
+                    "\n\nResults\nManual run {id}: {} · {}\nSource: {}{error}\n{body}",
                     result.status,
                     atlas::friendly_date(&result.retrieved_at),
                     result.source_url
                 )
             })
             .unwrap_or_default();
+        let docs = if tool.documentation.is_empty() {
+            "Documentation unavailable"
+        } else {
+            tool.documentation
+        };
         format!(
-            "{}\n{} · {} · {}\n\nInputs: {}\nExample: {}\n\n{}\n\nPolicy: {}\nTimeout: {}s · Cache: {}s\nDocs: {}{}",
+            "{}\n{} · {} · {}\n\nDocumentation\n{docs}\n\n{}\n\nInputs: {}\nExample: {}\n\nPolicy: {}\nTimeout: {}s · Cache: {}s{}",
             tool.name,
             tool.id,
             tool.category,
@@ -5056,26 +5330,39 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
                 (true, true) => "enabled · needs key",
                 (false, _) => "disabled",
             },
+            tool.description,
             tool.inputs.join(", "),
             tool.example_input(),
-            tool.description,
             tool.restrictions,
             tool.timeout_seconds,
             tool.cache_seconds,
-            tool.documentation,
             result
         )
     } else {
         "Select a tool".into()
     };
+    let inner_w = inset(detail).width.max(1) as usize;
+    let desc_lines = wrapped_line_count(&desc, inner_w);
+    let detail = draw_see_more(
+        frame,
+        app,
+        detail,
+        app.scrolls.detail,
+        desc_lines,
+        ButtonId::SeeMoreDetail,
+        0,
+    );
     frame.render_widget(
         Paragraph::new(desc)
             .style(theme::text())
-            .block(pane(" tool "))
+            .block(focused_pane(" tool ", app.focus == Target::OsintDetail))
             .scroll((app.scrolls.detail, 0))
             .wrap(Wrap { trim: true }),
         detail,
     );
+    app.layout
+        .borrow_mut()
+        .register(Target::OsintDetail, detail);
     if let Some(slot) = slot {
         let parts = split_horizontal(layout.key, [Constraint::Min(8), Constraint::Length(16)]);
         draw_field(frame, app, slot.field, " API key ", parts[0]);
@@ -5083,7 +5370,7 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
         draw_field(frame, app, slot.fallback, " Fallback ", layout.fallback);
     }
     draw_field(frame, app, FieldId::OsintInput, " Input JSON ", input);
-    let buttons = button_areas(actions, 8);
+    let buttons = button_areas(actions, 9);
     let labels = [
         (ButtonId::OsintRun, "Run"),
         (ButtonId::OsintCancel, "Cancel"),
@@ -5093,6 +5380,7 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
         (ButtonId::OsintStartRecon, "Recon"),
         (ButtonId::OsintPrev, "Prev"),
         (ButtonId::OsintNext, "Next"),
+        (ButtonId::OpenDocumentation, "Docs"),
     ];
     for (index, (button, label)) in labels.into_iter().enumerate() {
         draw_button(frame, app, button, label, buttons[index]);
@@ -5121,10 +5409,6 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let layout = brain_list(area);
-    let actions = button_areas(layout.actions, 3);
-    draw_button(frame, app, ButtonId::CreateMemory, "Create", actions[0]);
-    draw_button(frame, app, ButtonId::Pin, "Pin", actions[1]);
-    draw_button(frame, app, ButtonId::Delete, "Delete", actions[2]);
     draw_field(frame, app, FieldId::BrainQuery, " Find ", layout.query);
     let room = list_room(layout.list.height) / 2;
     // Keep each row exactly two lines so room/reveal math matches what is painted.
@@ -5173,6 +5457,16 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         frame.render_widget(List::new(items).block(pane(&title)), layout.list);
     }
+    let action_buttons = button_areas(layout.actions, 3);
+    draw_button(
+        frame,
+        app,
+        ButtonId::CreateMemory,
+        "Create",
+        action_buttons[0],
+    );
+    draw_button(frame, app, ButtonId::Pin, "Pin", action_buttons[1]);
+    draw_button(frame, app, ButtonId::Delete, "Delete", action_buttons[2]);
     let recalled = if matches!(app.focus, Target::Memory(_)) {
         if let Some(insight) = &app.selected_insight {
             memory_anchors_text(insight)
@@ -5182,14 +5476,29 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Find filters saved memory. Select an investigation insight to read its anchors.".into()
     };
+    let recall_content = recalled.clone();
+    let recall_w = inset(layout.recall).width.max(1) as usize;
+    let recall_lines = wrapped_line_count(&recall_content, recall_w);
+    let recall_area = draw_see_more(
+        frame,
+        app,
+        layout.recall,
+        app.scrolls.recall,
+        recall_lines,
+        ButtonId::SeeMoreRecall,
+        1,
+    );
     frame.render_widget(
         Paragraph::new(recalled)
             .style(theme::text())
-            .block(pane(" anchors "))
+            .block(focused_pane(" anchors ", app.focus == Target::BrainRecall))
             .scroll((app.scrolls.recall, 0))
             .wrap(Wrap { trim: true }),
-        layout.recall,
+        recall_area,
     );
+    app.layout
+        .borrow_mut()
+        .register(Target::BrainRecall, recall_area);
 }
 
 /// Memory list title: read failure first, then an active Find filter.
@@ -5292,6 +5601,14 @@ fn source_anchor_label(source: &argos_osint_core::recon::InsightSource) -> Strin
 
 fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
     let rows = provider_areas(area);
+    for (page, rect) in ProviderPage::ALL
+        .into_iter()
+        .zip(button_areas(rows[0], ProviderPage::ALL.len()))
+    {
+        app.layout
+            .borrow_mut()
+            .register(Target::ProviderTab(page), rect);
+    }
     draw_tabs(
         frame,
         rows[0],
@@ -5305,97 +5622,175 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
         }),
     );
     match app.provider_page {
-        ProviderPage::Grok | ProviderPage::OpenAI => {
-            let grok = app.provider_page == ProviderPage::Grok;
-            let content = auth_areas(rows[1]);
-            let intro = if grok {
-                "Grok subscription sign-in. The account stays with Grok."
-            } else {
-                "ChatGPT subscription sign-in through Codex CLI."
+        ProviderPage::Google | ProviderPage::Nvidia | ProviderPage::OpenRouter => {
+            let (
+                status,
+                key_field,
+                _key_val,
+                btn_save,
+                btn_verify,
+                btn_advanced,
+                advanced,
+                ep_field,
+                _ep_val,
+                title,
+            ) = match app.provider_page {
+                ProviderPage::Google => (
+                    app.google_status.as_str(),
+                    FieldId::GoogleKey,
+                    &app.google_key,
+                    ButtonId::GoogleSave,
+                    ButtonId::GoogleVerify,
+                    ButtonId::GoogleAdvanced,
+                    app.google_advanced,
+                    FieldId::GoogleEndpoint,
+                    &app.google_endpoint,
+                    " google ",
+                ),
+                ProviderPage::Nvidia => (
+                    app.nvidia_status.as_str(),
+                    FieldId::NvidiaKey,
+                    &app.nvidia_key,
+                    ButtonId::NvidiaSave,
+                    ButtonId::NvidiaVerify,
+                    ButtonId::NvidiaAdvanced,
+                    app.nvidia_advanced,
+                    FieldId::NvidiaEndpoint,
+                    &app.nvidia_endpoint,
+                    " nvidia ",
+                ),
+                ProviderPage::OpenRouter => (
+                    app.router_status.as_str(),
+                    FieldId::RouterKey,
+                    &app.router_key,
+                    ButtonId::RouterSave,
+                    ButtonId::RouterVerify,
+                    ButtonId::RouterAdvanced,
+                    app.router_advanced,
+                    FieldId::RouterEndpoint,
+                    &app.router_endpoint,
+                    " openrouter ",
+                ),
+                _ => unreachable!(),
             };
-            frame.render_widget(
-                Paragraph::new(intro)
-                    .style(theme::dim())
-                    .block(pane(" account "))
-                    .wrap(Wrap { trim: true }),
-                content[0],
-            );
-            let status = if grok {
-                &app.grok_status
-            } else {
-                &app.openai_status
-            };
-            frame.render_widget(
-                Paragraph::new(status.as_str())
-                    .style(theme::accent())
-                    .block(pane(" connection "))
-                    .wrap(Wrap { trim: true }),
-                content[1],
-            );
-            let buttons = button_areas(content[2], 2);
-            if grok {
-                draw_button(frame, app, ButtonId::GrokSignIn, "Sign in", buttons[0]);
-                draw_button(frame, app, ButtonId::GrokCheck, "Check", buttons[1]);
-            } else {
-                draw_button(frame, app, ButtonId::OpenAISignIn, "Sign in", buttons[0]);
-                draw_button(frame, app, ButtonId::OpenAICheck, "Check", buttons[1]);
-            }
-            let progress = if app.provider_progress_page == Some(app.provider_page)
-                && !app.provider_progress.is_empty()
-            {
-                app.provider_progress.join("\n")
-            } else if grok {
-                "Sign in opens Grok's browser flow. You can also run grok login --oauth, then check here.".into()
-            } else {
-                "Sign in shows a device URL and code. You can also run codex login, then check here.".into()
-            };
-            frame.render_widget(
-                Paragraph::new(progress)
-                    .style(theme::dim())
-                    .block(pane(" sign-in "))
-                    .scroll((app.scrolls.detail, 0))
-                    .wrap(Wrap { trim: true }),
-                content[3],
-            );
-        }
-        ProviderPage::OpenRouter => {
+
             let router = router_areas(rows[1]);
             frame.render_widget(
-                Paragraph::new(app.router_status.as_str())
+                Paragraph::new(status)
                     .style(theme::accent())
-                    .block(pane(" openrouter "))
+                    .block(pane(title))
                     .wrap(Wrap { trim: true }),
                 router[0],
             );
-            draw_field(frame, app, FieldId::RouterKey, " API key ", router[1]);
+            draw_field(frame, app, key_field, " API key ", router[1]);
             let buttons = button_areas(router[2], 2);
-            draw_button(frame, app, ButtonId::RouterSave, "Save", buttons[0]);
-            draw_button(frame, app, ButtonId::RouterVerify, "Verify", buttons[1]);
+            draw_button(frame, app, btn_save, "Save", buttons[0]);
+            draw_button(frame, app, btn_verify, "Verify", buttons[1]);
             draw_button(
                 frame,
                 app,
-                ButtonId::RouterAdvanced,
-                if app.router_advanced {
+                btn_advanced,
+                if advanced {
                     "Hide endpoint"
                 } else {
                     "Show endpoint"
                 },
                 router[3],
             );
-            if app.router_advanced {
-                draw_field(
-                    frame,
-                    app,
-                    FieldId::RouterEndpoint,
-                    " HTTPS endpoint ",
-                    router[4],
-                );
+            if advanced {
+                draw_field(frame, app, ep_field, " HTTPS endpoint ", router[4]);
             }
-            frame.render_widget(
-                Paragraph::new("Verify tests the form without saving it. Save stores this account only. Model routing stays on Defaults.")
-                    .style(theme::dim())
-                    .wrap(Wrap { trim: true }),
+            let catalog_area = split_vertical(
                 router[5],
+                [
+                    Constraint::Length(FIELD_H),
+                    Constraint::Length(ACTION_H),
+                    Constraint::Min(0),
+                ],
+            );
+            let (filter_field, filter_text, provider_id) = match app.provider_page {
+                ProviderPage::Google => (
+                    FieldId::GoogleModelFilter,
+                    &app.google_model_filter,
+                    "google",
+                ),
+                ProviderPage::Nvidia => (
+                    FieldId::NvidiaModelFilter,
+                    &app.nvidia_model_filter,
+                    "nvidia",
+                ),
+                ProviderPage::OpenRouter => (
+                    FieldId::RouterModelFilter,
+                    &app.router_model_filter,
+                    "openrouter",
+                ),
+                ProviderPage::Defaults => unreachable!(),
+            };
+            draw_field(frame, app, filter_field, " Filter models ", catalog_area[0]);
+            draw_button(
+                frame,
+                app,
+                ButtonId::RefreshModels,
+                "Refresh models",
+                catalog_area[1],
+            );
+            let catalog = app
+                .catalog_cache
+                .get(provider_id)
+                .cloned()
+                .or_else(|| (app.catalog_for == provider_id).then(|| app.model_catalog.clone()))
+                .unwrap_or_default();
+            let query = filter_text.trim().to_ascii_lowercase();
+            let filtered: Vec<_> = catalog
+                .iter()
+                .filter(|model| {
+                    query.is_empty()
+                        || model.id.to_ascii_lowercase().contains(&query)
+                        || model.name.to_ascii_lowercase().contains(&query)
+                })
+                .cloned()
+                .collect();
+            let title = if catalog.is_empty() {
+                if app.catalog_for == provider_id {
+                    " Models · empty catalog ".to_string()
+                } else {
+                    " Models · not loaded ".to_string()
+                }
+            } else if filtered.is_empty() {
+                format!(" Models · 0 of {} ", catalog.len())
+            } else {
+                format!(" Models · {} of {} ", filtered.len(), catalog.len())
+            };
+            let lines: Vec<Line> = if catalog.is_empty() {
+                vec![Line::from(
+                    "Catalog not loaded. Refresh models after saving a key.",
+                )]
+            } else if filtered.is_empty() {
+                vec![Line::from("No models match this filter.")]
+            } else {
+                filtered
+                    .iter()
+                    .map(|model| Line::from(format!("{} · {}", model.name, model.id)))
+                    .collect()
+            };
+            let list = draw_see_more(
+                frame,
+                app,
+                catalog_area[2],
+                app.scrolls.detail,
+                lines.len(),
+                ButtonId::SeeMoreDetail,
+                0,
+            );
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(focused_pane(
+                        &title,
+                        matches!(app.focus, Target::Button(ButtonId::SeeMoreDetail)),
+                    ))
+                    .scroll((app.scrolls.detail, 0))
+                    .wrap(Wrap { trim: false }),
+                list,
             );
         }
         ProviderPage::Defaults => {
@@ -5430,9 +5825,11 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
                 "this account"
             } else {
                 match provider::normalize_kind(&provider).as_str() {
-                    "grok" => "Grok",
-                    "openai-chatgpt" => "OpenAI",
+                    "grok" => "Grok (legacy)",
+                    "openai-chatgpt" => "OpenAI (legacy)",
                     "openrouter" => "OpenRouter",
+                    "google" => "Google",
+                    "nvidia" => "Nvidia",
                     "local" => "Local",
                     _ => "this account",
                 }
@@ -5896,9 +6293,17 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             frame,
             center,
             layout.reports,
-            " recon reports ",
+            " Summary ",
             &layout.reports_lines,
             0,
+        );
+        draw_clipped_button(
+            frame,
+            app,
+            center,
+            layout.full_report_btn,
+            ButtonId::IntelFullReport,
+            "View full report",
         );
     }
 
@@ -5939,6 +6344,7 @@ struct IntelCenterLayout {
     full: AbsRect,
     reports_btn: AbsRect,
     reports: AbsRect,
+    full_report_btn: AbsRect,
     brief_lines: Vec<Line<'static>>,
     full_lines: Vec<Line<'static>>,
     reports_lines: Vec<Line<'static>>,
@@ -6016,16 +6422,32 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     let full_inner = full_h.saturating_sub(2).max(1);
     let full_scroll_max = full_lines.len().saturating_sub(full_inner as usize) as u16;
 
-    let reports_lines = intel_brief_reports_lines(app, inner_w);
-    let reports_h = (reports_lines.len() as u16)
-        .saturating_add(2)
-        .max(min_section);
+    let busy = app.selected_intel_busy();
+    let reports_lines = if busy {
+        Vec::new()
+    } else {
+        intel_brief_reports_lines(app, inner_w)
+    };
+    let reports_h = if busy {
+        0
+    } else {
+        (reports_lines.len() as u16)
+            .saturating_add(2)
+            .max(min_section)
+    };
+    let recon_h = if busy { 0 } else { ACTION_H };
+    let view_h = if busy || app.intel_jobs.is_empty() {
+        0
+    } else {
+        ACTION_H
+    };
 
     let total = brief_h
         .saturating_add(ACTION_H)
         .saturating_add(full_h)
-        .saturating_add(ACTION_H)
-        .saturating_add(reports_h);
+        .saturating_add(recon_h)
+        .saturating_add(reports_h)
+        .saturating_add(view_h);
     let stack_scroll_max = total.saturating_sub(viewport.height);
     let scroll = app.scrolls.intel_brief.min(stack_scroll_max) as i32;
 
@@ -6036,9 +6458,11 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     y += i32::from(ACTION_H);
     let full = abs_rect(viewport.x, y, viewport.width, full_h);
     y += i32::from(full_h);
-    let reports_btn = abs_rect(viewport.x, y, viewport.width, ACTION_H);
-    y += i32::from(ACTION_H);
+    let reports_btn = abs_rect(viewport.x, y, viewport.width, recon_h);
+    y += i32::from(recon_h);
     let reports = abs_rect(viewport.x, y, viewport.width, reports_h);
+    y += i32::from(reports_h);
+    let full_report_btn = abs_rect(viewport.x, y, viewport.width, view_h);
 
     Some(IntelCenterLayout {
         brief,
@@ -6046,6 +6470,7 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
         full,
         reports_btn,
         reports,
+        full_report_btn,
         brief_lines,
         full_lines,
         reports_lines,
@@ -6294,13 +6719,19 @@ fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
     let block = pane(" jobs ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let (content, actions) = if inner.height >= 6 {
+        let rows = split_vertical(inner, [Constraint::Min(0), Constraint::Length(ACTION_H)]);
+        (rows[0], rows[1])
+    } else {
+        (inner, Rect::default())
+    };
     let mut lines = intel_brief_task_lines(app);
     if app.intel_jobs.is_empty() && lines.is_empty() {
         frame.render_widget(
             Paragraph::new("No background jobs.")
                 .style(theme::dim())
                 .wrap(Wrap { trim: false }),
-            inner,
+            content,
         );
         return;
     }
@@ -6329,10 +6760,15 @@ fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
             )));
             let tools_str = if job.tool_calls_done == -1 {
                 "Tool usage unavailable".to_string()
-            } else if job.tool_calls_done == 0 && (job.state == "completed" || job.state == "partial" || job.state == "failed") {
+            } else if job.tool_calls_done == 0
+                && (job.state == "completed" || job.state == "partial" || job.state == "failed")
+            {
                 "0 calls used · reused evidence".to_string()
             } else {
-                format!("Tools: {} calls used · {} budget", job.tool_calls_done, job.tool_calls_allowance)
+                format!(
+                    "Tools: {} calls used · {} budget",
+                    job.tool_calls_done, job.tool_calls_allowance
+                )
             };
             lines.push(Line::from(Span::styled(
                 format!(
@@ -6360,12 +6796,26 @@ fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
                     theme::dim(),
                 )));
             }
-            if lines.len() >= inner.height as usize {
+            if lines.len() >= content.height as usize {
                 break;
             }
         }
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), content);
+    if !app.intel_jobs.is_empty() && actions.width > 0 {
+        let buttons = button_areas(actions, 4);
+        for (index, (id, label)) in [
+            (ButtonId::IntelJobPause, "Pause"),
+            (ButtonId::IntelJobResume, "Resume"),
+            (ButtonId::IntelJobCancel, "Cancel"),
+            (ButtonId::IntelJobRetry, "Retry"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            draw_button(frame, app, id, label, buttons[index]);
+        }
+    }
 }
 
 /// Focus-brief background task rows: full article fetch, insight re-extract, mode classify.
@@ -7051,77 +7501,35 @@ fn loading_spinner_frame() -> &'static str {
 }
 
 fn intel_brief_reports_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    if app.intel_jobs.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No Recon reports yet",
+    let Some(job) = app.intel_jobs.get(app.intel_job_sel) else {
+        return vec![Line::from(Span::styled(
+            "No Recon report yet",
             theme::dim(),
-        )));
-        return lines;
-    }
-    for job in &app.intel_jobs {
-        let mode = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
-            .map(|m| m.title())
-            .unwrap_or(job.mode.as_str());
-        lines.push(Line::from(Span::styled(
-            format!(
-                "{mode} · r{} · {} · {}",
-                job.revision, job.state, job.updated_at
-            ),
-            theme::text().add_modifier(Modifier::BOLD),
-        )));
-        let sections = if app
-            .intel_sections
-            .first()
-            .is_some_and(|s| s.job_id == job.id)
-        {
-            app.intel_sections.clone()
-        } else {
-            Vec::new()
-        };
-        if sections.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  {}/{} sections · stage {}",
-                    job.sections_done, job.sections_total, job.stage
-                ),
-                theme::dim(),
-            )));
-            continue;
+        ))];
+    };
+    let mode = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
+        .map(|mode| mode.title())
+        .unwrap_or(job.mode.as_str());
+    let mut lines = vec![Line::from(Span::styled(
+        format!("{mode} · r{} · {}", job.revision, job.state),
+        theme::dim(),
+    ))];
+    let bluf = app
+        .intel_sections
+        .iter()
+        .find(|section| section.job_id == job.id && section.section_key == "bluf");
+    match bluf.filter(|section| !section.markdown.trim().is_empty()) {
+        Some(section) => {
+            lines.extend(
+                super::markdown::markdown_lines(&section.markdown, width.max(1))
+                    .into_iter()
+                    .map(md_line_to_line),
+            );
         }
-        for section in &sections {
-            let marker = match section.status.as_str() {
-                "complete" => "✓",
-                "running" => "…",
-                "waiting" | "stale" => "○",
-                "failed" => "!",
-                _ => "·",
-            };
-            lines.push(Line::from(Span::styled(
-                format!("{marker} {}", section.title),
-                theme::accent(),
-            )));
-            if section.status == "waiting" && !section.waiting_on.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!("  waiting for {}", section.waiting_on),
-                    theme::dim(),
-                )));
-            }
-            let collapsed_key = format!("{}:{}", job.id, section.section_key);
-            if app.intel_collapsed_sections.contains(&collapsed_key) {
-                lines.push(Line::from(Span::styled("  [collapsed]", theme::dim())));
-                continue;
-            }
-            if !section.markdown.trim().is_empty() {
-                let md = super::markdown::markdown_lines(&section.markdown, width.max(1));
-                for line in md {
-                    lines.push(md_line_to_line(line));
-                }
-            } else if section.status == "running" {
-                lines.push(Line::from(Span::styled("  synthesizing…", theme::dim())));
-            }
-        }
-        lines.push(Line::from(""));
+        None => lines.push(Line::from(Span::styled(
+            "Summary not available for this report",
+            theme::dim(),
+        ))),
     }
     lines
 }
@@ -7147,6 +7555,9 @@ fn intel_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             }
             if abs_contains(layout.reports_btn, x, y) && contains(center, x, y) {
                 return Some(Target::Button(ButtonId::IntelReports));
+            }
+            if abs_contains(layout.full_report_btn, x, y) && contains(center, x, y) {
+                return Some(Target::Button(ButtonId::IntelFullReport));
             }
         }
         let rows = intel_briefing_right_rows(app, right);
@@ -7272,58 +7683,27 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
         atlas_run_label(app),
         buttons[2],
     );
-    let width = inset(table).width as usize;
-    let room = inset(table).height.saturating_sub(1) as usize;
-    let header = "Country                         Tier   Temp   Volume  Articles  Share";
-    let mut lines = vec![Line::from(Span::styled(
-        center_text(header, width),
-        theme::dim(),
-    ))];
-    let data: Vec<String> = if app.atlas_stats.origins.is_empty() {
-        vec!["No country statistics yet.".into()]
-    } else {
-        let rows: Vec<&atlas::OriginStat> = app
-            .atlas_stats
-            .origins
-            .iter()
-            .filter(|row| row.articles > 0 || !app.atlas_stats.scored)
-            .collect();
-        if rows.is_empty() {
-            vec!["No country statistics yet.".into()]
-        } else {
-            rows.into_iter()
-                .map(|row| {
-                    let tier = if row.tier == 0 {
-                        "-".into()
-                    } else {
-                        row.tier.to_string()
-                    };
-                    format!(
-                        "{:<32} {:<6} {:<6.2} {:<7} {:<9} {:.0}%",
-                        atlas::country_label(&row.country),
-                        tier,
-                        row.temperature,
-                        row.volume,
-                        row.articles,
-                        app.atlas_stats.share(row.articles) * 100.0
-                    )
-                })
-                .collect()
-        }
-    };
-    let start = (app.scrolls.origins as usize).min(data.len().saturating_sub(room.max(1)));
-    for line in data.into_iter().skip(start).take(room.max(1)) {
-        let empty = line == "No country statistics yet.";
-        lines.push(Line::from(Span::styled(
-            center_text(&line, width),
-            if empty { theme::dim() } else { theme::text() },
-        )));
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(pane(" origins "))
-            .wrap(Wrap { trim: false }),
-        table,
+    app.layout
+        .borrow_mut()
+        .register(Target::AtlasCycleStats, table);
+    let origins: Vec<&atlas::OriginStat> = app
+        .atlas_stats
+        .origins
+        .iter()
+        .filter(|row| row.articles > 0 || !app.atlas_stats.scored)
+        .collect();
+    super::atlas_table::draw_origins(
+        frame,
+        super::atlas_table::OriginsView {
+            area: table,
+            origins: &origins,
+            stats: &app.atlas_stats,
+            scroll: app.scrolls.origins as usize,
+            title: " origins ",
+            empty: "No country statistics yet.",
+            prefix: Vec::new(),
+            focused: app.focus == Target::AtlasCycleStats,
+        },
     );
     draw_atlas_insights(frame, app, insights);
     let feed_width = inset(feed).width as usize;
@@ -7443,8 +7823,6 @@ fn news_cycle_line(
 }
 
 fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
-    let width = inset(area).width as usize;
-    let room = inset(area).height.saturating_sub(3) as usize;
     let stats = selected_cycle_stats(app);
     let origins: Vec<&atlas::OriginStat> = stats
         .origins
@@ -7456,48 +7834,26 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
         stats.article_total(),
         atlas_insights::insight_stats_line(&stats.insights)
     );
-    let header = "Country                         Tier   Temp   Volume  Articles  Share";
     let memories = stats.memories.line();
-    let mut lines = vec![
-        Line::from(Span::styled(fit(&summary, width), theme::dim())),
-        Line::from(Span::styled(fit(&memories, width), theme::dim())),
-        Line::from(Span::styled(header.to_string(), theme::dim())),
-    ];
-    let data: Vec<String> = if origins.is_empty() {
-        vec!["No country statistics for this cycle.".into()]
-    } else {
-        origins
-            .iter()
-            .map(|row| {
-                let tier = if row.tier == 0 {
-                    "-".into()
-                } else {
-                    row.tier.to_string()
-                };
-                format!(
-                    "{:<32} {:<6} {:<6.2} {:<7} {:<9} {:.0}%",
-                    atlas::country_label(&row.country),
-                    tier,
-                    row.temperature,
-                    row.volume,
-                    row.articles,
-                    stats.share(row.articles) * 100.0
-                )
-            })
-            .collect()
-    };
-    let start = (app.scrolls.origins as usize).min(data.len().saturating_sub(room.max(1)));
-    for line in data.into_iter().skip(start).take(room.max(1)) {
-        lines.push(Line::from(Span::styled(
-            fit(&line, width),
-            if origins.is_empty() {
-                theme::dim()
-            } else {
-                theme::text()
-            },
-        )));
-    }
-    frame.render_widget(Paragraph::new(lines).block(pane(" stats ")), area);
+    app.layout
+        .borrow_mut()
+        .register(Target::AtlasCycleStats, area);
+    super::atlas_table::draw_origins(
+        frame,
+        super::atlas_table::OriginsView {
+            area,
+            origins: &origins,
+            stats: &stats,
+            scroll: app.scrolls.origins as usize,
+            title: " stats ",
+            empty: "No country statistics for this cycle.",
+            prefix: vec![
+                Line::from(Span::styled(summary, theme::dim())),
+                Line::from(Span::styled(memories, theme::dim())),
+            ],
+            focused: app.focus == Target::AtlasCycleStats,
+        },
+    );
 }
 
 fn draw_map_or_hold(frame: &mut Frame, app: &App, area: Rect) {
@@ -7616,7 +7972,7 @@ fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
         return None;
     }
-    let (actions, _table, _insights, feed) = atlas_live_areas(body);
+    let (actions, table, _insights, feed) = atlas_live_areas(body);
     if contains(actions, x, y) {
         let buttons = button_areas(actions, 3);
         return Some(Target::Button(if contains(buttons[0], x, y) {
@@ -7626,6 +7982,9 @@ fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         } else {
             ButtonId::AtlasRun
         }));
+    }
+    if contains(table, x, y) {
+        return Some(Target::AtlasCycleStats);
     }
     if contains(feed, x, y) {
         let index = atlas_row_at(feed, app.scrolls.atlas_feed, y)?;
@@ -7853,23 +8212,16 @@ fn popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         let md = super::markdown::markdown_lines(&popup_text(app), width.max(1));
         return md.into_iter().map(md_line_to_line).collect();
     }
-    let center_table =
-        matches!(&app.overlay, Overlay::Block { title, .. } if title.starts_with("Run "));
-    let mut in_table = false;
     popup_text(app)
         .lines()
-        .map(|line| {
-            if center_table && (in_table || line.starts_with("Country")) {
-                in_table = !line.is_empty();
-                Line::from(center_text(line, width))
-            } else {
-                Line::from(line.to_string())
-            }
-        })
+        .map(|line| Line::from(line.to_string()))
         .collect()
 }
 
 fn draw_overlay(frame: &mut Frame, app: &App) {
+    app.layout
+        .borrow_mut()
+        .push_scope(active_popup_area(app, frame.area()));
     if matches!(app.overlay, Overlay::Palette) {
         draw_palette(frame, app);
         return;
@@ -7882,7 +8234,7 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         draw_intel_recon_popup(frame, app);
         return;
     }
-    let area = popup_area(frame.area());
+    let area = active_popup_area(app, frame.area());
     cover(frame, area);
     let title = match &app.overlay {
         Overlay::Help => " Shortcuts ",
@@ -7903,10 +8255,25 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         area
     };
     let inner_width = inset(body).width as usize;
+    let lines = popup_lines(app, inner_width);
+    let body = draw_see_more(
+        frame,
+        app,
+        body,
+        app.scrolls.popup,
+        lines.len(),
+        ButtonId::SeeMorePopup,
+        2,
+    );
+    let title = if app.focus == Target::Button(ButtonId::SeeMorePopup) {
+        format!("{} · focused ", title.trim())
+    } else {
+        title.to_string()
+    };
     frame.render_widget(
-        Paragraph::new(popup_lines(app, inner_width))
+        Paragraph::new(lines)
             .style(theme::card_text())
-            .block(theme::card(title))
+            .block(theme::card(&title))
             .scroll((app.scrolls.popup, 0))
             .wrap(Wrap { trim: false }),
         body,
@@ -7917,6 +8284,9 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         width: 8.min(area.width),
         height: 1,
     };
+    app.layout
+        .borrow_mut()
+        .register(Target::CloseOverlay, close);
     if run_card {
         let button = run_news_rect(area).intersection(frame.area());
         draw_button(frame, app, ButtonId::AtlasNewsFeed, "News feed", button);
@@ -8061,9 +8431,22 @@ fn draw_intel_recon_popup(frame: &mut Frame, app: &App) {
         width: 8.min(area.width),
         height: 1,
     };
+    app.layout
+        .borrow_mut()
+        .register(Target::CloseOverlay, close);
     frame.render_widget(Paragraph::new(" close ").style(theme::card_accent()), close);
 
     let layout = intel_recon_popup_layout(area, app);
+    for (index, rect) in layout.tabs.iter().copied().enumerate() {
+        app.layout
+            .borrow_mut()
+            .register(Target::IntelReconTab(index), rect);
+    }
+    for (index, rect) in layout.sections.iter().copied().enumerate() {
+        app.layout
+            .borrow_mut()
+            .register(Target::IntelReconSection(index), rect);
+    }
     let modes = ReportMode::all();
     let mode = app.intel_recon_mode();
     draw_tabs(
@@ -8199,6 +8582,15 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
         .skip(start)
         .take(height as usize)
     {
+        app.layout.borrow_mut().register(
+            Target::Choice(index),
+            Rect {
+                x: inner.x,
+                y: y + (index - start) as u16,
+                width: inner.width,
+                height: 1,
+            },
+        );
         let selected = index == app.choice_sel;
         let mark = if selected { "▸ " } else { "  " };
         let text = fit(&format!("{mark}{}", item.label), inner.width as usize);
@@ -8222,6 +8614,9 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
         width: 8.min(area.width),
         height: 1,
     };
+    app.layout
+        .borrow_mut()
+        .register(Target::CloseOverlay, close);
     frame.render_widget(Paragraph::new(" close ").style(theme::card_accent()), close);
 }
 
@@ -8622,7 +9017,7 @@ mod tests {
         let recon_areas = recon_composer_areas(recon_area);
         assert_eq!(recon_areas.box_rect.x, recon_area.x);
         assert_eq!(recon_areas.box_rect.width, recon_area.width);
-        assert_eq!(recon_areas.guidance.width, recon_area.width);
+        assert_eq!(recon_areas.guidance.width, 0);
     }
 
     #[test]

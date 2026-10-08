@@ -155,6 +155,24 @@ pub fn presets() -> &'static [ProviderPreset] {
             key_required: true,
         },
         ProviderPreset {
+            id: "google",
+            label: "Google",
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+            text_model: "",
+            voice_model: "",
+            env_key: Some("GEMINI_API_KEY"),
+            key_required: true,
+        },
+        ProviderPreset {
+            id: "nvidia",
+            label: "Nvidia",
+            base_url: "https://integrate.api.nvidia.com/v1",
+            text_model: "",
+            voice_model: "",
+            env_key: Some("NVIDIA_API_KEY"),
+            key_required: true,
+        },
+        ProviderPreset {
             id: "local",
             label: "Local",
             base_url: "http://127.0.0.1:11434/v1",
@@ -823,6 +841,8 @@ pub fn normalize_kind(kind: &str) -> String {
         "openai" => "openai".into(),
         "chatgpt" | "openaichatgpt" => "openai-chatgpt".into(),
         "openrouter" => "openrouter".into(),
+        "google" | "gemini" => "google".into(),
+        "nvidia" => "nvidia".into(),
         "local" | "ollama" | "llama" | "llamacpp" | "lmstudio" => "local".into(),
         _ => kind.trim().to_lowercase(),
     }
@@ -848,6 +868,10 @@ pub fn detect_kind_from_url(url: &str) -> String {
         .unwrap_or_default();
     if host == "openrouter.ai" || host.ends_with(".openrouter.ai") {
         "openrouter".into()
+    } else if host == "generativelanguage.googleapis.com" {
+        "google".into()
+    } else if host == "integrate.api.nvidia.com" {
+        "nvidia".into()
     } else if host == "api.x.ai" || host == "x.ai" || host.ends_with(".x.ai") {
         "grok".into()
     } else if host == "api.openai.com" || host.ends_with(".openai.com") {
@@ -884,6 +908,11 @@ fn resolved_key_with(
     let kind = effective_kind(secret);
     let name = preset(&kind).and_then(|preset| preset.env_key)?;
     lookup(name)
+        .or_else(|| {
+            (kind == "google")
+                .then(|| lookup("GOOGLE_API_KEY"))
+                .flatten()
+        })
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
@@ -1575,7 +1604,11 @@ pub async fn list_catalog(secret: &ProviderSecret) -> Result<Vec<ListedModel>> {
     if !status.is_success() {
         return Err(catalog_error(secret, status, &text));
     }
-    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let v: Value = serde_json::from_str(&text).context("malformed model catalog JSON")?;
+    anyhow::ensure!(
+        v.get("data").is_some_and(Value::is_array),
+        "Model catalog response is missing a data array"
+    );
     Ok(parse_model_catalog(&v))
 }
 

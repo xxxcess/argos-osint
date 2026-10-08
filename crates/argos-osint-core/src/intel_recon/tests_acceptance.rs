@@ -67,6 +67,67 @@ mod acceptance {
     }
 
     #[test]
+    fn report_attempt_budget_survives_stage_updates_and_reopen() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let store = Store::open(file.path()).unwrap();
+        let art = article();
+        store.atlas_upsert_article(&art).unwrap();
+        let job = create_report_job(
+            &store,
+            &art,
+            ReportMode::Verify,
+            &ReportScope::default(),
+            false,
+        )
+        .unwrap();
+        let task = store
+            .intel_report_tasks(&job.id)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.task_type == "collect")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE intel_report_jobs SET tool_calls_allowance=1 WHERE id=?1",
+                [&job.id],
+            )
+            .unwrap();
+        let attempt = store
+            .insert_report_attempt(&job.id, job.generation, &task.id, "firecrawl_search")
+            .unwrap();
+        store
+            .update_report_job(&job.id, "running", "collected", 0, 0, "", "")
+            .unwrap();
+        store
+            .finish_report_attempt(&job.id, &attempt, "success")
+            .unwrap();
+        store
+            .finish_report_attempt(&job.id, &attempt, "failed")
+            .unwrap();
+        assert!(store
+            .insert_report_attempt(&job.id, job.generation, &task.id, "firecrawl_search")
+            .is_err());
+        assert!(store
+            .insert_report_attempt(&job.id, job.generation + 1, &task.id, "firecrawl_search")
+            .is_err());
+        drop(store);
+        let reopened = Store::open(file.path()).unwrap();
+        let persisted = reopened.intel_report_job(&job.id).unwrap().unwrap();
+        assert_eq!(persisted.tool_calls_done, 1);
+        assert!(persisted.current_tool.is_empty());
+        let state: String = reopened
+            .conn
+            .query_row(
+                "SELECT state FROM intel_report_attempts WHERE id=?1",
+                [&attempt],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "success");
+    }
+
+    #[test]
     fn coverage_ledger_dispositions_every_seeded_element() {
         let store = Store::memory().unwrap();
         let inv = store

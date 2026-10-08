@@ -23,7 +23,10 @@ pub struct DependencyCoverage {
     pub missing_units: Vec<String>,
 }
 
-pub fn check_dependency_coverage(manifest: &UnitManifest, completed_units: &[String]) -> DependencyCoverage {
+pub fn check_dependency_coverage(
+    manifest: &UnitManifest,
+    completed_units: &[String],
+) -> DependencyCoverage {
     let mut missing_units = Vec::new();
     for dep in &manifest.dependency_ids {
         if !completed_units.contains(dep) {

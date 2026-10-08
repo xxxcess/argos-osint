@@ -1,0 +1,39 @@
+<svg role="img" aria-labelledby="intel-title intel-desc" viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
+        <title id="intel-title">Intel report job</title>
+        <desc id="intel-desc">An Atlas article becomes a report job. Collection writes unique attempts. Summary shows only the selected revision BLUF. Tool counts never overwrite from a stale snapshot.</desc>
+        <defs>
+          <marker id="i-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#4f5d75" />
+          </marker>
+          <marker id="i-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#eb6c36" />
+          </marker>
+        </defs>
+        <rect width="800" height="300" fill="#f5f5f5" />
+        <path d="M148 80 L180 80" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#i-arrow)" />
+        <path d="M308 80 L340 80" fill="none" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#i-accent)" />
+        <path d="M468 80 L500 80" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#i-arrow)" />
+        <path d="M628 80 L660 80" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#i-arrow)" />
+        <path d="M404 132 L404 168" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#i-arrow)" />
+        <g font-family="Geist,system-ui,sans-serif" font-size="12" font-weight="600" fill="#2d3142" text-anchor="middle">
+          <rect x="24" y="40" width="124" height="80" rx="6" fill="#fff" stroke="#2d3142" />
+          <text x="86" y="76">Article</text>
+          <text x="86" y="96" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">Atlas row</text>
+          <rect x="180" y="40" width="128" height="80" rx="6" fill="#fff" stroke="#2d3142" />
+          <text x="244" y="76">Job</text>
+          <text x="244" y="96" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">intel_report_jobs</text>
+          <rect x="340" y="40" width="128" height="80" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2" />
+          <text x="404" y="76">Collect</text>
+          <text x="404" y="96" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">atomic attempts</text>
+          <rect x="500" y="40" width="128" height="80" rx="6" fill="#fff" stroke="#2d3142" />
+          <text x="564" y="76">Sections</text>
+          <text x="564" y="96" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">bluf first</text>
+          <rect x="660" y="40" width="116" height="80" rx="6" fill="#fff" stroke="#2d3142" />
+          <text x="718" y="76">Summary</text>
+          <text x="718" y="96" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">UI card</text>
+        </g>
+        <rect x="280" y="176" width="248" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" />
+        <text x="404" y="204" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="12" font-weight="600" fill="#2d3142">intel_report_attempts</text>
+        <text x="404" y="224" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">N calls used · B budget · unique attempt id</text>
+        <text x="400" y="272" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Stage updates never write tool_calls_done. Busy on this article hides Summary.</text>
+      </svg>

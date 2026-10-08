@@ -4,6 +4,8 @@ Argos keeps GSD for phases and milestones in `.planning/`. The project-owned V2 
 
 ## Start with the graph
 
+[![Agent exploration](diagrams/agent-graphify.svg)](diagrams/agent-graphify.html)
+
 The tracked code and Cargo dependency graph is `graphify-out/graph.json`. Before the first broad search in a session, run `graphify query "<question>"`. A successful query unlocks broad search for that session. Scoped source searches are always available. An explicit request to skip graphify bypasses the guard. If the graph is missing or unusable, search remains available and the plugin prints a bootstrap instruction.
 
 Use `graphify explain "<concept>"` or `graphify path "<A>" "<B>"` for focused follow-up. After code edits, run `graphify update .`. Only `graph.json`, `manifest.json`, and `GRAPH_REPORT.md` are tracked; caches and visual output stay local. GSD reads the same graph through `.planning/config.json`.

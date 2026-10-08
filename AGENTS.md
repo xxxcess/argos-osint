@@ -5,6 +5,8 @@ Rust workspace with two crates:
 - `crates/argos-osint-core` — core library: Brain (memory/recall), OSINT registry/executor, provider routing, Recon orchestration, SQLite + LanceDB persistence
 - `crates/argos-osint-bin` — CLI (`argos`) and ratatui TUI terminal interface
 
+Figures: [workspace](docs/diagrams/workspace.html) · [persistence](docs/diagrams/persistence.html) · [catalog](docs/diagrams.md)
+
 ## Developer Commands
 ```sh
 # Run the TUI
@@ -104,12 +106,14 @@ Runs on 4 targets: macOS Intel (macos-15-intel), macOS ARM (macos-14), Linux x86
 
 ## Key Files to Read for Context
 - `docs/README.md` — documentation map
-- `README.md` — product tour, navigation, CLI reference
+- `README.md` — product overview and doc index
+- `docs/usage.md` — TUI navigation and CLI
 - `docs/architecture.md` — investigation flow, tool picker, bindings, persistence, Atlas, Intel reports
 - `docs/concepts.md` — glossary (module ids, roles, bindings, schema)
 - `docs/conventions.md` — TUI, schema, tests, scratch, planning, diagrams
 - `docs/providers.md` — provider setup, model roles, OSINT provider details
 - `docs/diagrams.md` — editorial diagram language (diagram-design)
+- `docs/index.html` — browser docs site (rebuild: `python3 scripts/build_docs_site.py`)
 - `crates/argos-osint-core/src/osint/providers.rs` — primary provider adapters
 - `crates/argos-osint-core/src/recon/investigation/tool_io.rs` — tool input/binding table (source of truth for binder/picker)
 
@@ -120,6 +124,8 @@ This project tracks a code and Cargo dependency graph at `graphify-out/`. Skill:
 When working as the default `plan` agent, wait for the user to approve a plan before starting implementation. Once approved, prefer launching the `build` subagent with the approved plan and relevant paths, then review its result and report the outcome. Keep the approved scope and preserve existing working tree changes.
 
 When the user types `/graphify`, use the installed graphify skill before doing anything else.
+
+[![Agent exploration](docs/diagrams/agent-graphify.svg)](docs/diagrams/agent-graphify.html)
 
 Rules:
 - For a codebase question, first run `graphify query "<question>"` when `graphify-out/graph.json` exists. Expand the query from `graphify-out/.vocab.txt` (tokens that actually appear on graph labels). Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for a single symbol. Search the returned `source_location` paths; do not grep the whole tree first.

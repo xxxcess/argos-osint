@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conventions · Argos docs</title>
+  <link rel="stylesheet" href="site.css">
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="index.html">Argos OSINT</a>
+    <nav>
+        <a href="index.html">Overview</a>
+        <a href="gallery.html">Gallery</a>
+        <a href="usage.html">Usage</a>
+        <a href="concepts.html">Concepts</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="providers.html">Providers</a>
+        <a href="conventions.html" class="on">Conventions</a>
+        <a href="investigation-harness.html">Harness</a>
+        <a href="jev-decision-gates.html">Jev</a>
+        <a href="opencode-v2.html">OpenCode</a>
+        <a href="ui-interaction-audit.html">UI audit</a>
+        <a href="agents.html">Agents</a>
+    </nav>
+  </header>
+  <main class="doc ">
+<h1 id="conventions">Conventions</h1>
+<p>Rules that keep Argos and agent work aligned. Product behavior lives in <a href="architecture.html">architecture.md</a>. Agent commands live in <a href="agents.html">AGENTS.md</a>.</p>
+<h2 id="checks">Checks</h2>
+<p>Order matches CI: <code>cargo fmt --all --check</code> → <code>cargo clippy --workspace --all-targets -- -D warnings</code> → <code>cargo test --workspace</code> (offline, <code>ARGOS_EMBED</code> unset). MiniLM tests are <code>#[ignore]</code> and need <code>ARGOS_EMBED=1</code>.</p>
+<h2 id="tui">TUI</h2>
+<ul><li>Layout, hit-test, and Tab order come from the same rectangles. <code>LayoutRegistry</code> is filled during <code>draw</code>. Overlay-none Tab order rasterizes the current module so it stays valid after a state change that has not been painted yet. Figure: <a href="../diagrams/tui-shell.html">tui-shell.html</a>.</li><li>Internal IDs stay <code>Osint</code> / <code>Providers</code> / <code>System</code> even when the labels are Tools / Models / Profile.</li><li>Empty focused fields keep their placeholder until the user types. Placeholders are never saved. Keys stay masked.</li><li>Long panes own an offset, a wrapped extent, and a <code>see more</code> footer. Offsets are not <code>u16</code>-truncated page math.</li><li>Investigation panel width is <code>floor(0.30 × terminal viewport)</code> when the screen is at least 110 columns. Full-report cards are <code>floor(0.70 × viewport)</code> wide.</li></ul>
+<h2 id="schema">Schema</h2>
+<ul><li>Bump <code>SCHEMA_VERSION</code> and add an additive <code>user_version</code> step in <code>store.rs</code>.</li><li><code>CREATE TABLE IF NOT EXISTS</code> for any table that landed in a SQL file after that schema version already shipped. Existing databases skip the original <code>include_str!</code> apply. Figure: <a href="../diagrams/schema-core.html">schema-core.html</a>.</li><li>Create a table before any <code>UPDATE</code>/<code>SELECT</code> that reads it (v23 used to query <code>intel_report_attempts</code> before v24 created it).</li><li>Do not delete legacy secrets when saving a new provider account.</li></ul>
+<h2 id="tests">Tests</h2>
+<ul><li>Offline by default. HTTP fixtures and fake executors; no live keys in the suite.</li><li>Coverage tests in core: every tool input has a binding kind, extractors, and producers.</li><li>TUI: <code>ratatui::backend::TestBackend</code> at 160×50, 120×40, 100×36, 80×24 as needed. <code>click</code> draws first.</li></ul>
+<h2 id="agent-scratch">Agent scratch</h2>
+<p>Scratch scripts and logs go only under <code>.agent-scratch/</code> (gitignored). Never write <code>patch_*.py</code> at the repo root or in <code>crates/</code>. After the check gate passes, delete that task's scratch files.</p>
+<h2 id="planning-files">Planning files</h2>
+<p>Multi-step work uses the <strong>planning-with-files</strong> skill: <code>task_plan.md</code>, <code>findings.md</code>, <code>progress.md</code> under <code>.planning/&lt;YYYY-MM-DD-slug&gt;/</code>. Root copies of those names are gitignored leftovers; do not treat them as the active plan. One orchestrator owns <code>task_plan.md</code>. Untrusted web text goes in <code>findings.md</code> only.</p>
+<h2 id="graphify">Graphify</h2>
+<p>Query <code>graphify-out/graph.json</code> before broad exploration. Expand query tokens from graph vocabulary. After code changes: <code>graphify update .</code>. Dirty graph files are expected.</p>
+<h2 id="diagrams">Diagrams</h2>
+<p>New figures follow <a href="diagrams.html">diagrams.md</a>: self-contained HTML + SVG, no Mermaid, no shadows, accent on at most two nodes. After adding a figure or editing Markdown, run <code>python3 scripts/build_docs_site.py</code> so <a href="index.html">docs/index.html</a> stays current.</p>
+  </main>
+  <footer>
+    <p>Open <code>docs/index.html</code> in a browser. Figures: <a href="gallery.html">gallery</a> · source Markdown stays in <code>docs/</code>.</p>
+  </footer>
+</body>
+</html>

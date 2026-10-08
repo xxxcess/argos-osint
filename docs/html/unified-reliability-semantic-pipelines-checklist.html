@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reliability checklist · Argos docs</title>
+  <link rel="stylesheet" href="site.css">
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="index.html">Argos OSINT</a>
+    <nav>
+        <a href="index.html">Overview</a>
+        <a href="gallery.html">Gallery</a>
+        <a href="usage.html">Usage</a>
+        <a href="concepts.html">Concepts</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="providers.html">Providers</a>
+        <a href="conventions.html">Conventions</a>
+        <a href="investigation-harness.html">Harness</a>
+        <a href="jev-decision-gates.html">Jev</a>
+        <a href="opencode-v2.html">OpenCode</a>
+        <a href="ui-interaction-audit.html">UI audit</a>
+        <a href="agents.html">Agents</a>
+    </nav>
+  </header>
+  <main class="doc ">
+<h1 id="unified-reliability-summarization-semantic-pipelines-completion-checklist">Unified reliability / summarization / semantic pipelines — completion checklist</h1>
+<p>Branch: <code>feat/ann-live-summary-flush</code> Spec: <code>specs/argos-unified-reliability-semantic-pipelines-spec.md</code> (local path on agent box) Base: <code>main</code> @ <code>8e9e144</code> (PR #35 squash-merge) PR: https://github.com/xxxcess/argos-osint/pull/36</p>
+<h2 id="phase-status-18">Phase status (§18)</h2>
+<div class='table-wrap'><table><thead><tr><th>Phase</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td>1. Preserve data</td><td><strong>Done</strong></td><td>(from #35)</td></tr><tr><td>2. Shared execution</td><td><strong>Mostly done</strong></td><td>Live summary flush drain with optional secret</td></tr><tr><td>3. Deadline integration</td><td><strong>Mostly done</strong></td><td>(from #35)</td></tr><tr><td>4. Role + summary foundation</td><td><strong>Done</strong></td><td></td></tr><tr><td>5. Summary call sites</td><td><strong>Mostly done</strong></td><td>Deterministic publish + enqueue; live upgrade when secret configured</td></tr><tr><td>6. Automatic vectors</td><td><strong>Mostly done</strong></td><td>Shadow Lance + optional IVF-Flat when policy enables</td></tr><tr><td>7. Evidence retrieval</td><td><strong>Mostly done</strong></td><td>Hybrid passages + <strong>measured ANN policy</strong> (Exact default)</td></tr><tr><td>8. Remaining summary modes</td><td><strong>Mostly done</strong></td><td>Flush enqueue on tool-obs, report_context, follow-up, article desc, atlas brief, section digest</td></tr><tr><td>9. Pipeline adoption</td><td><strong>Mostly done</strong></td><td></td></tr><tr><td>10. Exploration / tools</td><td><strong>Mostly done</strong></td><td>Store::recall boosts via hybrid_passage_candidates</td></tr><tr><td>11. Verification</td><td><strong>Advanced partial</strong></td><td>Synthetic ANN harness; live flush without inventing network success</td></tr></tbody></table></div>
+<h2 id="this-follow-up">This follow-up</h2>
+<ol><li><strong>Measured ANN</strong> — <code>AnnThresholds</code> / <code>measure_ann_recall</code> / <code>decide_ann_policy</code>; ExactSearch remains default until thresholds met (or force). <code>BrainIndex::ensure_ann_index</code> builds IVF-Flat only when <code>AnnPolicy::AnnEnabled</code>.</li><li><strong>Live LLM flush</strong> — persist flush request JSON; <code>try_live_summary_upgrade</code>; scheduler loads summarization secret when present; never invents success without secrets.</li><li><strong>Enqueue coverage</strong> — tool-observation, report_context, follow-up context, article description (+ prior atlas brief / section digest).</li><li><strong>Hybrid adoption</strong> — <code>Store::recall</code> re-ranks long memories via <code>hybrid_passage_candidates</code>.</li></ol>
+<h2 id="honest-remaining-gaps">Honest remaining gaps</h2>
+<ul><li>ANN still <strong>off by default</strong> until a real measurement on a large enough corpus justifies it; unit tests prove the gate and that IVF can be built when enabled.</li><li>Live LLM upgrade only runs when auth/settings expose a summarization secret; offline CI always takes the no-secret path.</li><li>Full §19 chaos / HTTP mocks still out of scope.</li><li>Repo-wide clippy <code>-D warnings</code> on pre-existing issues still out of scope.</li></ul>
+  </main>
+  <footer>
+    <p>Open <code>docs/index.html</code> in a browser. Figures: <a href="gallery.html">gallery</a> · source Markdown stays in <code>docs/</code>.</p>
+  </footer>
+</body>
+</html>

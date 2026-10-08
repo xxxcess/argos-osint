@@ -1,12 +1,15 @@
 # Argos documentation
 
-Start here. Deep investigation mechanics stay in [architecture.md](architecture.md). Provider keys and role routing stay in [providers.md](providers.md).
+**Browser:** open [index.html](index.html) (redirects to [html/index.html](html/index.html)). That site includes every Markdown doc and every diagram. Rebuild with `python3 scripts/build_docs_site.py`.
+
+Start here for Markdown. Deep investigation mechanics stay in [architecture.md](architecture.md). Provider keys and role routing stay in [providers.md](providers.md).
 
 ## Product
 
 | Doc | What it is |
 | --- | --- |
-| [../README.md](../README.md) | How to run, navigate, and use the CLI |
+| [../README.md](../README.md) | Product overview, quick start, doc index |
+| [usage.md](usage.md) | TUI navigation, CLI, state directory |
 | [architecture.md](architecture.md) | Recon turn, binder, picker, persistence, Atlas, news/legal |
 | [providers.md](providers.md) | Model accounts (Defaults, OpenRouter, Google, Nvidia) and OSINT keys |
 | [concepts.md](concepts.md) | Glossary: apps vs IDs, roles, bindings, Intel jobs, schema |
@@ -15,13 +18,26 @@ Start here. Deep investigation mechanics stay in [architecture.md](architecture.
 
 ## Figures
 
-Self-contained HTML + SVG (open in a browser). Grammar: [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design).
+Self-contained HTML + SVG. Grammar: [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design). Full catalog: [diagrams.md](diagrams.md).
 
 | Figure | Type | File |
 | --- | --- | --- |
 | Workspace | Architecture | [diagrams/workspace.html](diagrams/workspace.html) |
+| TUI shell | Nested | [diagrams/tui-shell.html](diagrams/tui-shell.html) |
 | Recon turn | Process | [diagrams/recon-turn.html](diagrams/recon-turn.html) |
+| Bindings | Data flow | [diagrams/recon-bindings.html](diagrams/recon-bindings.html) |
+| Tool picker | Flowchart | [diagrams/tool-picker.html](diagrams/tool-picker.html) |
+| OSINT catalog | Nested | [diagrams/osint-providers.html](diagrams/osint-providers.html) |
+| Atlas cycle | Process | [diagrams/atlas-pipeline.html](diagrams/atlas-pipeline.html) |
 | Intel report | Data flow | [diagrams/intel-report.html](diagrams/intel-report.html) |
+| Intel job states | State machine | [diagrams/intel-job-states.html](diagrams/intel-job-states.html) |
+| Brain recall | Architecture | [diagrams/brain-recall.html](diagrams/brain-recall.html) |
+| Models and roles | Architecture | [diagrams/model-roles.html](diagrams/model-roles.html) |
+| Persistence | Layer stack | [diagrams/persistence.html](diagrams/persistence.html) |
+| Report tables | Database schema | [diagrams/schema-core.html](diagrams/schema-core.html) |
+| Durable jobs | State machine | [diagrams/jobs-lifecycle.html](diagrams/jobs-lifecycle.html) |
+| Investigation harness | Process | [diagrams/investigation-harness.html](diagrams/investigation-harness.html) |
+| Agent exploration | Process | [diagrams/agent-graphify.html](diagrams/agent-graphify.html) |
 
 ## Agent and workflow
 

@@ -8,7 +8,7 @@ Order matches CI: `cargo fmt --all --check` → `cargo clippy --workspace --all-
 
 ## TUI
 
-- Layout, hit-test, and Tab order come from the same rectangles. `LayoutRegistry` is filled during `draw`. Overlay-none Tab order rasterizes the current module so it stays valid after a state change that has not been painted yet.
+- Layout, hit-test, and Tab order come from the same rectangles. `LayoutRegistry` is filled during `draw`. Overlay-none Tab order rasterizes the current module so it stays valid after a state change that has not been painted yet. Figure: [tui-shell.html](diagrams/tui-shell.html).
 - Internal IDs stay `Osint` / `Providers` / `System` even when the labels are Tools / Models / Profile.
 - Empty focused fields keep their placeholder until the user types. Placeholders are never saved. Keys stay masked.
 - Long panes own an offset, a wrapped extent, and a `see more` footer. Offsets are not `u16`-truncated page math.
@@ -17,7 +17,7 @@ Order matches CI: `cargo fmt --all --check` → `cargo clippy --workspace --all-
 ## Schema
 
 - Bump `SCHEMA_VERSION` and add an additive `user_version` step in `store.rs`.
-- `CREATE TABLE IF NOT EXISTS` for any table that landed in a SQL file after that schema version already shipped. Existing databases skip the original `include_str!` apply.
+- `CREATE TABLE IF NOT EXISTS` for any table that landed in a SQL file after that schema version already shipped. Existing databases skip the original `include_str!` apply. Figure: [schema-core.html](diagrams/schema-core.html).
 - Create a table before any `UPDATE`/`SELECT` that reads it (v23 used to query `intel_report_attempts` before v24 created it).
 - Do not delete legacy secrets when saving a new provider account.
 
@@ -41,4 +41,4 @@ Query `graphify-out/graph.json` before broad exploration. Expand query tokens fr
 
 ## Diagrams
 
-New figures follow [diagrams.md](diagrams.md): self-contained HTML + SVG, no Mermaid, no shadows, accent on at most two nodes.
+New figures follow [diagrams.md](diagrams.md): self-contained HTML + SVG, no Mermaid, no shadows, accent on at most two nodes. After adding a figure or editing Markdown, run `python3 scripts/build_docs_site.py` so [docs/index.html](index.html) stays current.

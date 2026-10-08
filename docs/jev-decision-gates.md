@@ -8,6 +8,8 @@ A single canonical **`DecisionContract`** is compiled into either:
 1. **Jev-native questions** (`typesafe/jev-1.13` via OpenRouter `POST /alpha/decisions`), or
 2. **Compact schema-constrained prompts** for general models (`StrictJsonSchema`, `JsonMode`, or `ValidatedText`).
 
+[![Tool picker transport](diagrams/tool-picker.svg)](diagrams/tool-picker.html)
+
 Application code enforces deterministic surface restrictions, budget caps, credentials, and recovery policies. Generative models continue planning, query decomposition, and narrative synthesis.
 
 ---

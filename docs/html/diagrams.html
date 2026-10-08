@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diagrams · Argos docs</title>
+  <link rel="stylesheet" href="site.css">
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="index.html">Argos OSINT</a>
+    <nav>
+        <a href="index.html">Overview</a>
+        <a href="gallery.html">Gallery</a>
+        <a href="usage.html">Usage</a>
+        <a href="concepts.html">Concepts</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="providers.html">Providers</a>
+        <a href="conventions.html">Conventions</a>
+        <a href="investigation-harness.html">Harness</a>
+        <a href="jev-decision-gates.html">Jev</a>
+        <a href="opencode-v2.html">OpenCode</a>
+        <a href="ui-interaction-audit.html">UI audit</a>
+        <a href="agents.html">Agents</a>
+    </nav>
+  </header>
+  <main class="doc ">
+<h1 id="diagram-conventions">Diagram conventions</h1>
+<p>Argos figures follow the editorial grammar in <a href="https://github.com/cathrynlavery/diagram-design">cathrynlavery/diagram-design</a>: self-contained HTML with inline SVG. No Mermaid. No shadows. No generic rounded-box grids.</p>
+<p>Open a file under <code>docs/diagrams/</code> in a browser. Matching <code>.svg</code> files exist for Markdown embeds (GitHub README). Do not rasterize unless someone asks for PNG export.</p>
+<h2 id="catalog">Catalog</h2>
+<div class='table-wrap'><table><thead><tr><th>Aspect</th><th>Type</th><th>HTML</th><th>SVG</th></tr></thead><tbody><tr><td>Workspace</td><td>Architecture</td><td><a href="../diagrams/workspace.html">workspace.html</a></td><td><a href="../diagrams/workspace.svg">workspace.svg</a></td></tr><tr><td>TUI shell</td><td>Nested</td><td><a href="../diagrams/tui-shell.html">tui-shell.html</a></td><td><a href="../diagrams/tui-shell.svg">tui-shell.svg</a></td></tr><tr><td>Recon turn</td><td>Process</td><td><a href="../diagrams/recon-turn.html">recon-turn.html</a></td><td><a href="../diagrams/recon-turn.svg">recon-turn.svg</a></td></tr><tr><td>Bindings</td><td>Data flow</td><td><a href="../diagrams/recon-bindings.html">recon-bindings.html</a></td><td><a href="../diagrams/recon-bindings.svg">recon-bindings.svg</a></td></tr><tr><td>Tool picker</td><td>Flowchart</td><td><a href="../diagrams/tool-picker.html">tool-picker.html</a></td><td><a href="../diagrams/tool-picker.svg">tool-picker.svg</a></td></tr><tr><td>OSINT catalog</td><td>Nested</td><td><a href="../diagrams/osint-providers.html">osint-providers.html</a></td><td><a href="../diagrams/osint-providers.svg">osint-providers.svg</a></td></tr><tr><td>Atlas cycle</td><td>Process</td><td><a href="../diagrams/atlas-pipeline.html">atlas-pipeline.html</a></td><td><a href="../diagrams/atlas-pipeline.svg">atlas-pipeline.svg</a></td></tr><tr><td>Intel report</td><td>Data flow</td><td><a href="../diagrams/intel-report.html">intel-report.html</a></td><td><a href="../diagrams/intel-report.svg">intel-report.svg</a></td></tr><tr><td>Intel job states</td><td>State machine</td><td><a href="../diagrams/intel-job-states.html">intel-job-states.html</a></td><td><a href="../diagrams/intel-job-states.svg">intel-job-states.svg</a></td></tr><tr><td>Brain recall</td><td>Architecture</td><td><a href="../diagrams/brain-recall.html">brain-recall.html</a></td><td><a href="../diagrams/brain-recall.svg">brain-recall.svg</a></td></tr><tr><td>Models and roles</td><td>Architecture</td><td><a href="../diagrams/model-roles.html">model-roles.html</a></td><td><a href="../diagrams/model-roles.svg">model-roles.svg</a></td></tr><tr><td>Persistence</td><td>Layer stack</td><td><a href="../diagrams/persistence.html">persistence.html</a></td><td><a href="../diagrams/persistence.svg">persistence.svg</a></td></tr><tr><td>Report tables</td><td>Database schema</td><td><a href="../diagrams/schema-core.html">schema-core.html</a></td><td><a href="../diagrams/schema-core.svg">schema-core.svg</a></td></tr><tr><td>Durable jobs</td><td>State machine</td><td><a href="../diagrams/jobs-lifecycle.html">jobs-lifecycle.html</a></td><td><a href="../diagrams/jobs-lifecycle.svg">jobs-lifecycle.svg</a></td></tr><tr><td>Investigation harness</td><td>Process</td><td><a href="../diagrams/investigation-harness.html">investigation-harness.html</a></td><td><a href="../diagrams/investigation-harness.svg">investigation-harness.svg</a></td></tr><tr><td>Agent exploration</td><td>Process</td><td><a href="../diagrams/agent-graphify.html">agent-graphify.html</a></td><td><a href="../diagrams/agent-graphify.svg">agent-graphify.svg</a></td></tr></tbody></table></div>
+<h2 id="when-to-draw">When to draw</h2>
+<p>Draw when a reader learns more from a picture than from a paragraph or table. Skip one-shape “diagrams” and lists of names.</p>
+<p>Pick a <strong>semantic pattern</strong> then a <strong>visual type</strong>. Accent (<code>#eb6c36</code>) on <strong>1–2</strong> focal nodes. At most 9 nodes and 12 arrows. Orthogonal connectors. 4px grid. Node radius 6. No <code>box-shadow</code>. No JetBrains Mono. Names in Geist sans; ports and ids in Geist Mono; titles in Instrument Serif.</p>
+<p>Each <code>&lt;svg&gt;</code> has <code>role=&quot;img&quot;</code> and unique <code>&lt;title&gt;</code> / <code>&lt;desc&gt;</code> ids (<code>&lt;slug&gt;-title</code>, <code>&lt;slug&gt;-desc</code>).</p>
+<h2 id="agent-rule">Agent rule</h2>
+<p>Follow this file and <a href="https://github.com/cathrynlavery/diagram-design">cathrynlavery/diagram-design</a>. Put new figures in <code>docs/diagrams/</code> as HTML plus a sibling SVG, then link them from <a href="index.html">README.md</a> and the matching prose doc. Do not drop Mermaid fences into <code>docs/</code>.</p>
+  </main>
+  <footer>
+    <p>Open <code>docs/index.html</code> in a browser. Figures: <a href="gallery.html">gallery</a> · source Markdown stays in <code>docs/</code>.</p>
+  </footer>
+</body>
+</html>

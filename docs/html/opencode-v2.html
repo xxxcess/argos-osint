@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenCode · Argos docs</title>
+  <link rel="stylesheet" href="site.css">
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="index.html">Argos OSINT</a>
+    <nav>
+        <a href="index.html">Overview</a>
+        <a href="gallery.html">Gallery</a>
+        <a href="usage.html">Usage</a>
+        <a href="concepts.html">Concepts</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="providers.html">Providers</a>
+        <a href="conventions.html">Conventions</a>
+        <a href="investigation-harness.html">Harness</a>
+        <a href="jev-decision-gates.html">Jev</a>
+        <a href="opencode-v2.html" class="on">OpenCode</a>
+        <a href="ui-interaction-audit.html">UI audit</a>
+        <a href="agents.html">Agents</a>
+    </nav>
+  </header>
+  <main class="doc ">
+<h1 id="opencode-v2-workflow">OpenCode V2 workflow</h1>
+<p>Argos keeps GSD for phases and milestones in <code>.planning/</code>. The project-owned V2 plugins under <code>.opencode/plugins/</code> add graph-first code navigation, a compatibility bridge for the installed GSD hook scripts, and a small automatic session handoff.</p>
+<h2 id="start-with-the-graph">Start with the graph</h2>
+<figure><a href="../diagrams/agent-graphify.html"><img src="../diagrams/agent-graphify.svg" alt="Agent exploration"></a><figcaption>Agent exploration</figcaption></figure>
+<p>The tracked code and Cargo dependency graph is <code>graphify-out/graph.json</code>. Before the first broad search in a session, run <code>graphify query &quot;&lt;question&gt;&quot;</code>. A successful query unlocks broad search for that session. Scoped source searches are always available. An explicit request to skip graphify bypasses the guard. If the graph is missing or unusable, search remains available and the plugin prints a bootstrap instruction.</p>
+<p>Use <code>graphify explain &quot;&lt;concept&gt;&quot;</code> or <code>graphify path &quot;&lt;A&gt;&quot; &quot;&lt;B&gt;&quot;</code> for focused follow-up. After code edits, run <code>graphify update .</code>. Only <code>graph.json</code>, <code>manifest.json</code>, and <code>GRAPH_REPORT.md</code> are tracked; caches and visual output stay local. GSD reads the same graph through <code>.planning/config.json</code>.</p>
+<h2 id="focused-ecc-commands">Focused ECC commands</h2>
+<div class='table-wrap'><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody><tr><td><code>/ecc-plan</code></td><td>Read-only implementation plan from graph and source evidence</td></tr><tr><td><code>/ecc-review</code></td><td>Read-only correctness review of a diff</td></tr><tr><td><code>/ecc-verify</code></td><td>Format check, clippy, workspace tests, then graph refresh</td></tr><tr><td><code>/ecc-checkpoint</code></td><td>Short manual handoff</td></tr><tr><td><code>/ecc-learn</code></td><td>Proposal for a reusable practice, subject to approval</td></tr></tbody></table></div>
+<p>ECC planner and reviewer agents inherit the active model. They cannot edit files. The automatic handoff stores at most 500 characters each for the latest request and outcome plus up to 12 paths in OpenCode plugin storage. It loads once in a later session for the same project. It does not replace GSD phase artifacts.</p>
+<h2 id="verify-setup">Verify setup</h2>
+<p>With OpenCode V2 running in this project, inspect <code>/api/plugin</code> for <code>argos.graphify</code> and <code>argos.gsd-v2</code>, <code>/api/command</code> for the five <code>ecc-*</code> commands, and <code>/api/skill</code> for their skills. The incompatible global GSD V1 plugin was moved from <code>~/.config/opencode/plugins/gsd-core.js</code> to <code>~/.config/opencode/gsd-core.v1.js</code>; the project-owned V2 bridge still uses the installed GSD hook scripts. A future GSD update may restore the V1 file in the global plugins directory. If the startup error returns, move that restored file out of <code>plugins/</code> again.</p>
+<p>Run <code>node --test .opencode/tests/*.test.mjs</code> to check graph gating, handoff, and GSD bridge behavior.</p>
+  </main>
+  <footer>
+    <p>Open <code>docs/index.html</code> in a browser. Figures: <a href="gallery.html">gallery</a> · source Markdown stays in <code>docs/</code>.</p>
+  </footer>
+</body>
+</html>

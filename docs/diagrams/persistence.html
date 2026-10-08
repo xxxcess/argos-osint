@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Persistence stack</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root { --paper:#f5f5f5; --ink:#2d3142; --muted:#4f5d75; --soft:#7a8399; --accent:#eb6c36; --link:#2e5aa8; }
+    html,body { margin:0; background:var(--paper); color:var(--ink); font-family:Geist,system-ui,sans-serif; }
+    main { max-width:920px; margin:0 auto; padding:40px 24px 64px; }
+    .eyebrow { font-family:"Geist Mono",ui-monospace,monospace; font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted); }
+    h1 { font-family:"Instrument Serif",serif; font-weight:400; font-size:1.75rem; margin:.4rem 0 .5rem; }
+    p.lede { color:var(--muted); max-width:40rem; margin:0 0 1.25rem; font-size:15px; line-height:1.5; }
+    .frame { overflow-x:auto; }
+    svg { min-width:880px; display:block; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Layer stack</div>
+    <h1>Persistence stack</h1>
+    <p class="lede">State lives under ~/.argos. Migrations are additive and transactional. Schema version 24 creates intel_report_attempts on open if it is missing.</p>
+    <div class="frame">
+      <svg role="img" aria-labelledby="persistence-title persistence-desc" viewBox="0 0 880 380" xmlns="http://www.w3.org/2000/svg">
+        <title id="persistence-title">Persistence stack</title>
+        <desc id="persistence-desc">State lives under ~/.argos. Migrations are additive and transactional. Schema version 24 creates intel_report_attempts on open if it is missing.</desc>
+
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+        </defs>
+
+        <rect width="880" height="380" fill="#f5f5f5"/>
+
+        <text x="24" y="40" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399" transform="rotate(-90 24 200)">FILES ↓</text>
+        <rect x="56" y="24" width="800" height="64" fill="#fff" stroke="rgba(45,49,66,0.12)"/>
+        <text x="72" y="48" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">L5</text>
+        <text x="120" y="52" font-family="Geist,system-ui,sans-serif" font-size="15" font-weight="600" fill="#2d3142">TUI / CLI</text>
+        <text x="820" y="52" text-anchor="end" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">argos-osint-bin</text>
+        <rect x="56" y="88" width="800" height="64" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.12)"/>
+        <text x="72" y="112" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">L4</text>
+        <text x="120" y="116" font-family="Geist,system-ui,sans-serif" font-size="15" font-weight="600" fill="#2d3142">Core library</text>
+        <text x="820" y="116" text-anchor="end" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">argos-osint-core</text>
+        <rect x="56" y="152" width="800" height="64" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2"/>
+        <text x="72" y="176" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#eb6c36">L3</text>
+        <text x="120" y="180" font-family="Geist,system-ui,sans-serif" font-size="15" font-weight="600" fill="#2d3142">SQLite</text>
+        <text x="820" y="180" text-anchor="end" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">argos.db · user_version 24</text>
+        <rect x="56" y="216" width="800" height="64" fill="#fff" stroke="rgba(45,49,66,0.12)"/>
+        <text x="72" y="240" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">L2</text>
+        <text x="120" y="244" font-family="Geist,system-ui,sans-serif" font-size="15" font-weight="600" fill="#2d3142">LanceDB</text>
+        <text x="820" y="244" text-anchor="end" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">memory_lancedb/ · 384-d</text>
+        <rect x="56" y="280" width="800" height="64" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.12)"/>
+        <text x="72" y="304" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">L1</text>
+        <text x="120" y="308" font-family="Geist,system-ui,sans-serif" font-size="15" font-weight="600" fill="#2d3142">Secrets and settings</text>
+        <text x="820" y="308" text-anchor="end" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">auth.json · config.toml</text>
+
+      </svg>
+    </div>
+  </main>
+</body>
+</html>

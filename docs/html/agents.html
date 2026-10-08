@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agents · Argos docs</title>
+  <link rel="stylesheet" href="site.css">
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="index.html">Argos OSINT</a>
+    <nav>
+        <a href="index.html">Overview</a>
+        <a href="gallery.html">Gallery</a>
+        <a href="usage.html">Usage</a>
+        <a href="concepts.html">Concepts</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="providers.html">Providers</a>
+        <a href="conventions.html">Conventions</a>
+        <a href="investigation-harness.html">Harness</a>
+        <a href="jev-decision-gates.html">Jev</a>
+        <a href="opencode-v2.html">OpenCode</a>
+        <a href="ui-interaction-audit.html">UI audit</a>
+        <a href="agents.html" class="on">Agents</a>
+    </nav>
+  </header>
+  <main class="doc ">
+<h1 id="argos-osint-agent-instructions">Argos OSINT — Agent Instructions</h1>
+<h2 id="project-structure">Project Structure</h2>
+<p>Rust workspace with two crates:</p>
+<ul><li><code>crates/argos-osint-core</code> — core library: Brain (memory/recall), OSINT registry/executor, provider routing, Recon orchestration, SQLite + LanceDB persistence</li><li><code>crates/argos-osint-bin</code> — CLI (<code>argos</code>) and ratatui TUI terminal interface</li></ul>
+<p>Figures: <a href="../diagrams/workspace.html">workspace</a> · <a href="../diagrams/persistence.html">persistence</a> · <a href="diagrams.html">catalog</a></p>
+<h2 id="developer-commands">Developer Commands</h2>
+<pre><code class="lang-sh"># Run the TUI
+cargo run -p argos-osint-bin
+
+# Build / check
+cargo build
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Test (offline; ARGOS_EMBED unset)
+cargo test --workspace
+
+# Integration test with MiniLM embeddings (downloads ~23 MB model on first run)
+ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm</code></pre>
+<p><strong>Command order matters:</strong> <code>fmt -&gt; clippy -&gt; test</code> (matches CI)</p>
+<h2 id="toolchain-build-quirks">Toolchain &amp; Build Quirks</h2>
+<ul><li>Rust <strong>1.94.0</strong> pinned in <code>rust-toolchain.toml</code> (workspace <code>rust-version = &quot;1.91&quot;</code> minimum)</li><li><strong>Vendored protoc</strong>: <code>.cargo/config.toml</code> sets <code>PROTOC = &quot;tools/protoc&quot;</code> — a shim that finds the <code>protoc-bin-vendored</code> binary downloaded by Cargo. No system <code>protobuf</code> install needed.</li><li>First <code>cargo build</code> is slow (LanceDB pulls many Arrow/DataFusion crates). Needs C toolchain: <code>xcode-select --install</code> on macOS.</li><li><code>ARGOS_EMBED=0</code> skips embedding (falls back to Jaccard recall). Set <code>ARGOS_EMBED=1</code> for vector tests.</li></ul>
+<h2 id="state-config-all-under-argos-override-with-argos-home">State &amp; Config (all under <code>~/.argos</code>, override with <code>ARGOS_HOME</code>)</h2>
+<div class='table-wrap'><table><thead><tr><th>File</th><th>Purpose</th></tr></thead><tbody><tr><td><code>argos.db</code></td><td>SQLite: Brain memories, threads, runs, calls, cache, entities, provenance</td></tr><tr><td><code>memory_lancedb/</code></td><td>LanceDB vectors for Brain (table <code>brain_memories</code>, 384-dim)</td></tr><tr><td><code>config.toml</code></td><td>Role defaults (Recon, Tool picker, Synthesis, Classifier, Summarization), OSINT settings, recon limits</td></tr><tr><td><code>auth.json</code></td><td>Provider credentials (OpenRouter, Google, Nvidia, and preserved legacy Grok/OpenAI accounts) — owner-only perms on Unix</td></tr><tr><td><code>hardware.json</code></td><td>Cached host profile</td></tr></tbody></table></div>
+<p>Migrations are additive and versioned; reopening preserves new/unrelated tables.</p>
+<h2 id="cli-entry-points-argos-binary">CLI Entry Points (<code>argos</code> binary)</h2>
+<pre><code class="lang-sh"># Recon (investigations)
+argos recon new --title &#x27;...&#x27;
+argos recon list --search &lt;term&gt;
+argos recon show &lt;thread-id&gt;
+argos recon ask &lt;thread-id&gt; &#x27;question&#x27;
+argos recon ask-new &#x27;question&#x27;
+argos recon resume &lt;run-id&gt;
+argos recon retry &lt;run-id&gt;
+argos recon delete &lt;thread-id&gt; --with-insights
+
+# OSINT (manual tool runs)
+argos osint list
+argos osint describe &lt;tool-id&gt;
+argos osint run &lt;tool-id&gt; --input &#x27;{&quot;key&quot;:&quot;value&quot;}&#x27;
+argos osint history
+argos osint attach &lt;call-id&gt; &lt;thread-id&gt;
+argos osint enable|disable &lt;tool-id&gt;
+argos osint user-agent &#x27;Contact &lt;email&gt;&#x27;   # required for Nominatim/SEC
+
+# Provider / model defaults
+argos defaults show
+argos defaults set recon|tool-picker|synthesis|classifier|summarization --provider &lt;p&gt; --model &lt;m&gt;
+argos models --role recon|tool-picker|synthesis|classifier|summarization
+
+# Brain
+argos insights --entity &lt;name&gt;
+argos remember --app &lt;app&gt; --conversation &lt;id&gt; &#x27;fact&#x27;
+argos recall &#x27;query&#x27;
+argos memories
+argos memories reindex   # rebuild LanceDB index</code></pre>
+<h2 id="architecture-notes-non-obvious">Architecture Notes (non-obvious)</h2>
+<ul><li><strong>Model roles</strong> are configured independently in Models → Defaults: <strong>Recon</strong> (questions/bindings), <strong>Tool picker</strong> (tool ordering), <strong>Synthesis</strong> (answers), plus Classifier, Summarization, and investigation harness roles. Old Writer role seeds Recon+Synthesis on migration; Tool picker defaults to OpenRouter <code>typesafe/jev-1.13</code> (decisions transport) only when empty.</li><li><strong>Tool picker</strong> has two transports: Jev decisions models (<code>typesafe/jev-*</code>) use OpenRouter <code>/alpha/decisions</code> API; others use chat transport with JSON repair.</li><li><strong>Primary providers</strong>: Firecrawl, SociaVault, Hunter. All other tools are gap-fillers. Hunter inputs only accept bindings from prompt, Firecrawl, SociaVault, or earlier Hunter calls.</li><li><strong>Recon turn flow</strong>: Brain recall → directives (d1–d5) → tool picker (1 pick/request, up to 13) → binder grounds every input → executor runs sequentially → streaming synthesis with deadline. Figure: <code>docs/diagrams/recon-turn.html</code>.</li><li><strong>Intel reports</strong> are jobs on an Atlas article (<code>intel_report_attempts</code> for dispatch accounting). Summary is the selected revision's <code>bluf</code>. Figure: <code>docs/diagrams/intel-report.html</code>.</li><li><strong>Atlas</strong> is a separate Home app: two-phase news pipeline (GNews/NewsData discovery → NewsAPI/Currents headlines), daily quota ledger per provider.</li><li>TUI labels vs ids: Tools=<code>Osint</code>, Models=<code>Providers</code>, Profile=<code>System</code>.</li></ul>
+<h2 id="testing-quirks">Testing Quirks</h2>
+<ul><li>Workspace tests run offline (<code>ARGOS_EMBED</code> unset). MiniLM/LanceDB tests are <code>#[ignore]</code> and require <code>ARGOS_EMBED=1</code>.</li><li>Coverage tests in <code>argos-osint-core</code> verify every tool input maps to a binding kind with prompt extractor, rule extractor, and producer.</li><li>Fixture tests cover request builders for every OSINT route (URL, method, headers, host lock).</li></ul>
+<h2 id="environment-variables">Environment Variables</h2>
+<div class='table-wrap'><table><thead><tr><th>Var</th><th>Effect</th></tr></thead><tbody><tr><td><code>ARGOS_HOME</code></td><td>Override state directory (<code>~/.argos</code>)</td></tr><tr><td><code>ARGOS_EMBED=0</code></td><td>Disable embeddings, use Jaccard-only recall</td></tr><tr><td><code>ARGOS_EMBED_MODEL_DIR</code></td><td>Override MiniLM cache location</td></tr><tr><td><code>FIRECRAWL_API_KEY</code>, <code>SOCIAVAULT_API_KEY</code>, <code>HUNTER_API_KEY</code></td><td>Primary provider keys (saved keys override env)</td></tr><tr><td><code>NEWSAPI_API_KEY</code>, <code>COURTLISTENER_API_TOKEN</code>, <code>GNEWS_API_KEY</code>, <code>NEWSDATA_API_KEY</code>, <code>CURRENTS_API_KEY</code></td><td>Context provider keys</td></tr><tr><td><code>OPENROUTER_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>GOOGLE_API_KEY</code>, <code>NVIDIA_API_KEY</code></td><td>Model provider keys when no saved key is present</td></tr></tbody></table></div>
+<h2 id="ci-githubworkflowsciyml">CI (<code>.github/workflows/ci.yml</code>)</h2>
+<p>Runs on 4 targets: macOS Intel (macos-15-intel), macOS ARM (macos-14), Linux x86_64 (ubuntu-24.04), Linux ARM64 (ubuntu-24.04-arm). Steps: <code>cargo fetch</code>, <code>cargo build --locked</code>, <code>cargo test --workspace --locked</code>, <code>cargo clippy --workspace --all-targets --locked -- -D warnings</code>, plus ignored MiniLM test with <code>ARGOS_EMBED=1</code>.</p>
+<h2 id="key-files-to-read-for-context">Key Files to Read for Context</h2>
+<ul><li><code>docs/README.md</code> — documentation map</li><li><code>README.md</code> — product overview and doc index</li><li><code>docs/usage.md</code> — TUI navigation and CLI</li><li><code>docs/architecture.md</code> — investigation flow, tool picker, bindings, persistence, Atlas, Intel reports</li><li><code>docs/concepts.md</code> — glossary (module ids, roles, bindings, schema)</li><li><code>docs/conventions.md</code> — TUI, schema, tests, scratch, planning, diagrams</li><li><code>docs/providers.md</code> — provider setup, model roles, OSINT provider details</li><li><code>docs/diagrams.md</code> — editorial diagram language (diagram-design)</li><li><code>docs/index.html</code> — browser docs site (rebuild: <code>python3 scripts/build_docs_site.py</code>)</li><li><code>crates/argos-osint-core/src/osint/providers.rs</code> — primary provider adapters</li><li><code>crates/argos-osint-core/src/recon/investigation/tool_io.rs</code> — tool input/binding table (source of truth for binder/picker)</li></ul>
+<h2 id="graphify">graphify</h2>
+<p>This project tracks a code and Cargo dependency graph at <code>graphify-out/</code>. Skill: <code>.opencode/skills/graphify/SKILL.md</code>. OpenCode V2 plugins in <code>.opencode/plugins/</code> add graph-first navigation. Use GSD for phases and milestones; use <code>/ecc-plan</code>, <code>/ecc-review</code>, <code>/ecc-verify</code>, <code>/ecc-checkpoint</code>, and <code>/ecc-learn</code> for focused workflow steps.</p>
+<p>When working as the default <code>plan</code> agent, wait for the user to approve a plan before starting implementation. Once approved, prefer launching the <code>build</code> subagent with the approved plan and relevant paths, then review its result and report the outcome. Keep the approved scope and preserve existing working tree changes.</p>
+<p>When the user types <code>/graphify</code>, use the installed graphify skill before doing anything else.</p>
+<figure><a href="../diagrams/agent-graphify.html"><img src="../diagrams/agent-graphify.svg" alt="Agent exploration"></a><figcaption>Agent exploration</figcaption></figure>
+<p>Rules:</p>
+<ul><li>For a codebase question, first run <code>graphify query &quot;&lt;question&gt;&quot;</code> when <code>graphify-out/graph.json</code> exists. Expand the query from <code>graphify-out/.vocab.txt</code> (tokens that actually appear on graph labels). Use <code>graphify path &quot;&lt;A&gt;&quot; &quot;&lt;B&gt;&quot;</code> for relationships and <code>graphify explain &quot;&lt;concept&gt;&quot;</code> for a single symbol. Search the returned <code>source_location</code> paths; do not grep the whole tree first.</li><li>Dirty <code>graphify-out/</code> files after hooks or <code>graphify update</code> are expected. Dirty graph files are not a reason to skip graphify. Skip only if the graph is the thing being fixed, or the user says not to use it.</li><li>If <code>graphify-out/wiki/index.md</code> exists, use it for broad navigation instead of raw source browsing.</li><li>Read <code>graphify-out/GRAPH_REPORT.md</code> only for architecture review or when query/path/explain do not surface enough context.</li><li>After modifying code, run <code>graphify update .</code> (AST-only, no API cost). Track only <code>graph.json</code>, <code>manifest.json</code>, and <code>GRAPH_REPORT.md</code>.</li></ul>
+<h2 id="planning-with-files">planning-with-files</h2>
+<p>Use the <strong>planning-with-files</strong> skill (<code>~/.agents/skills/planning-with-files/SKILL.md</code>, or the Claude plugin of the same name) for any task that needs five or more tool calls, spans phases, or must survive a context compact.</p>
+<ol><li>Resolve or create a named plan under <code>.planning/&lt;YYYY-MM-DD-slug&gt;/</code> (<code>scripts/init-session.sh &quot;Task name&quot;</code>). Pin <code>PLAN_ID</code> when several plans exist. Do not invent a competing root <code>task_plan.md</code> when a named plan is selected.</li><li>Keep <code>task_plan.md</code> (phases, Next Step, decisions, errors), <code>findings.md</code> (research; untrusted web text belongs here only), and <code>progress.md</code> (session log). Re-read the plan before decisions; update it after each phase.</li><li>One orchestrator owns <code>task_plan.md</code>. Workers append their own ledger or files.</li><li>Root <code>task_plan.md</code> / <code>findings.md</code> / <code>progress.md</code> are gitignored leftovers. <code>.planning/</code> is the source of truth.</li><li>Graphify first, then write the plan from the subgraph — not the other way around.</li></ol>
+<h2 id="diagrams">diagrams</h2>
+<p>Concept figures in <code>docs/diagrams/</code> follow <a href="https://github.com/cathrynlavery/diagram-design">cathrynlavery/diagram-design</a>: self-contained HTML + inline SVG, orthogonal connectors, no shadows, no Mermaid, accent on at most two nodes. Conventions: <code>docs/diagrams.md</code>. When a new architecture or relationship needs a figure, add an HTML file there and link it from <code>docs/README.md</code> and the matching prose doc.</p>
+<h2 id="temporary-agent-scripts">Temporary agent scripts</h2>
+<p>Applies to every agent and model (Gemini, Claude, GPT, OpenCode, Codex, and any subagent). A "scratch script" is any file an agent creates to inspect, patch, review, or test Argos source that Argos itself does not need to build, run, or test: <code>*.py</code>, <code>*.sh</code>, <code>*.awk</code>, <code>*.sed</code>, temporary <code>*.rs</code> copies, logs, and generated audit or patch helpers.</p>
+<p>Rules:</p>
+<ul><li><strong>One isolated location.</strong> Create scratch scripts and their outputs only under <code>.agent-scratch/</code> at the repository root (create it if missing). It is listed in <code>.gitignore</code>; never remove that entry.</li><li><strong>Never at the repository root or in source folders.</strong> Do not write <code>patch_*.py</code>, <code>fix_*.py</code>, <code>patch*.sh</code>, <code>update_*.sh</code>, <code>temp.rs</code>, or similar files next to <code>Cargo.toml</code> or inside <code>crates/</code>, <code>docs/</code>, or <code>scripts/</code>.</li><li><strong>Never commit them.</strong> Do not <code>git add</code> scratch files. If one is already tracked, remove it with <code>git rm</code> as part of the change that made it obsolete.</li><li><strong>Prefer direct edits.</strong> Make reviewable source edits with the editor tools. Use a scratch script only when a direct edit is impractical. Never use a script that rewrites source by line number (<code>sed -i &#x27;N,Mc&#x27;</code>, <code>awk</code> splices) without re-reading the target first.</li><li><strong>Deletion gate.</strong> When the requested changes meet their acceptance criteria and the repository checks pass in order (<code>cargo fmt --all --check</code> → <code>cargo clippy --workspace --all-targets -- -D warnings</code> → <code>cargo test --workspace</code>), delete the task's files in <code>.agent-scratch/</code>, then confirm <code>git status</code> shows no stray scripts. Do not wait for a separate cleanup request.</li><li><strong>Maintained utilities are different.</strong> Keep a script under <code>scripts/</code> only if the project still uses it and it is documented (for example <code>scripts/render_tui_cells.py</code>). Never move scratch scripts into <code>scripts/</code> to avoid deleting them.</li><li><strong>Hand-offs.</strong> If work stops before the gate passes (for example inference or context runs out), leave the scratch files in <code>.agent-scratch/</code> and list them in the hand-off so the next agent can finish and delete them.</li></ul>
+  </main>
+  <footer>
+    <p>Open <code>docs/index.html</code> in a browser. Figures: <a href="gallery.html">gallery</a> · source Markdown stays in <code>docs/</code>.</p>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,26 @@
+      <svg role="img" aria-labelledby="tui-shell-title tui-shell-desc" viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
+        <title id="tui-shell-title">TUI shell</title>
+        <desc id="tui-shell-desc">Chrome wraps the module body. An overlay pushes a hit-test scope so Tab and clicks stay inside the card until Escape.</desc>
+
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+        </defs>
+
+        <rect width="800" height="300" fill="#f5f5f5"/>
+
+        <rect x="40" y="24" width="720" height="248" rx="8" fill="rgba(45,49,66,0.015)" stroke="rgba(45,49,66,0.30)"/>
+        <rect x="48" y="16" width="72" height="16" fill="#f5f5f5"/>
+        <text x="56" y="28" font-family="Geist Mono,ui-monospace,monospace" font-size="8" letter-spacing="0.14em" fill="#7a8399">CHROME</text>
+        <rect x="64" y="48" width="672" height="200" rx="8" fill="rgba(45,49,66,0.025)" stroke="#4f5d75"/>
+        <rect x="72" y="40" width="56" height="16" fill="#f5f5f5"/>
+        <text x="80" y="52" font-family="Geist Mono,ui-monospace,monospace" font-size="8" letter-spacing="0.14em" fill="#4f5d75">BODY</text>
+        <rect x="200" y="88" width="400" height="128" rx="8" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2"/>
+        <rect x="208" y="80" width="80" height="16" fill="#f5f5f5"/>
+        <text x="216" y="92" font-family="Geist Mono,ui-monospace,monospace" font-size="8" letter-spacing="0.14em" fill="#eb6c36">OVERLAY</text>
+        <text x="400" y="148" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="14" font-weight="600" fill="#2d3142">Popup trap</text>
+        <text x="400" y="168" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">LayoutRegistry scope · Esc restores</text>
+        <text x="400" y="188" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">see more · 70% report card</text>
+
+      </svg>

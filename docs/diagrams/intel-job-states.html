@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Intel report states</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root { --paper:#f5f5f5; --ink:#2d3142; --muted:#4f5d75; --soft:#7a8399; --accent:#eb6c36; --link:#2e5aa8; }
+    html,body { margin:0; background:var(--paper); color:var(--ink); font-family:Geist,system-ui,sans-serif; }
+    main { max-width:920px; margin:0 auto; padding:40px 24px 64px; }
+    .eyebrow { font-family:"Geist Mono",ui-monospace,monospace; font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted); }
+    h1 { font-family:"Instrument Serif",serif; font-weight:400; font-size:1.75rem; margin:.4rem 0 .5rem; }
+    p.lede { color:var(--muted); max-width:40rem; margin:0 0 1.25rem; font-size:15px; line-height:1.5; }
+    .frame { overflow-x:auto; }
+    svg { min-width:800px; display:block; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">State machine</div>
+    <h1>Intel report states</h1>
+    <p class="lede">A report job is queued, then running. Pause parks it. Terminal states are completed, partial, failed, or cancelled. Busy on this article hides Summary.</p>
+    <div class="frame">
+      <svg role="img" aria-labelledby="intel-job-states-title intel-job-states-desc" viewBox="0 0 800 260" xmlns="http://www.w3.org/2000/svg">
+        <title id="intel-job-states-title">Intel report states</title>
+        <desc id="intel-job-states-desc">A report job is queued, then running. Pause parks it. Terminal states are completed, partial, failed, or cancelled. Busy on this article hides Summary.</desc>
+
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+        </defs>
+
+        <rect width="800" height="260" fill="#f5f5f5"/>
+
+        <circle cx="48" cy="80" r="6" fill="#2d3142"/>
+        <path d="M54 80 H88" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+        <path d="M212 80 H244" fill="none" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+        <path d="M368 80 H400" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+        <path d="M524 56 H556" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+        <path d="M368 104 V148 H140 V104" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+        <text x="248" y="140" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399">resume</text>
+        <text x="228" y="64" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399">start</text>
+        <text x="460" y="64" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399">pause</text>
+        <text x="580" y="40" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399">done / fail / cancel</text>
+        <rect x="88" y="40" width="124" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
+        <text x="150.0" y="68" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">queued</text>
+        <text x="150.0" y="86" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">planned</text>
+        <rect x="244" y="40" width="124" height="80" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2"/>
+        <text x="306.0" y="68" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">running</text>
+        <text x="306.0" y="86" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">attempts</text>
+        <rect x="400" y="40" width="124" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
+        <text x="462.0" y="68" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">paused</text>
+        <text x="462.0" y="86" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">cursor kept</text>
+        <rect x="556" y="16" width="200" height="128" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
+        <text x="656.0" y="44" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">terminal</text>
+        <text x="656.0" y="62" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">completed · partial · failed · cancelled</text>
+        <circle cx="768" cy="80" r="8" fill="none" stroke="#2d3142" stroke-width="1.5"/>
+        <circle cx="768" cy="80" r="5" fill="#2d3142"/>
+        <text x="400" y="220" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Another article's job does not hide this article's Summary.</text>
+
+      </svg>
+    </div>
+  </main>
+</body>
+</html>

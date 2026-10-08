@@ -9,52 +9,11 @@ The Unified Investigation Harness provides a shared, incremental, evidence-drive
 
 The harness preserves surface-specific presentations, permission restrictions, and persistent database identities while unifying the underlying task scheduling, catalog governance, tool routing, evidence curation, and model execution.
 
----
+[![Investigation harness](diagrams/investigation-harness.svg)](diagrams/investigation-harness.html)
 
 ## Architecture
 
-```
-                  ┌──────────────────────────────────────────────┐
-                  │            Investigation Surface             │
-                  │  (Recon Chat | Home Composer | Intel Brief)  │
-                  └──────────────────────┬───────────────────────┘
-                                         │
-                                         ▼
-                  ┌──────────────────────────────────────────────┐
-                  │             Validation Gates                 │
-                  │  Task Admission ── Preflight ── Need Gates   │
-                  └──────────────────────┬───────────────────────┘
-                                         │
-                                         ▼
-                  ┌──────────────────────────────────────────────┐
-                  │             Task Engine & Router             │
-                  │  Directives ── Patterns ── Tool Picker       │
-                  └──────────────────────┬───────────────────────┘
-                                         │
-                                         ▼
-                  ┌──────────────────────────────────────────────┐
-                  │             OSINT Tool Executor              │
-                  │   59 Tools Across 14 Intelligence Categories │
-                  └──────────────────────┬───────────────────────┘
-                                         │
-                                         ▼
-                  ┌──────────────────────────────────────────────┐
-                  │             Evidence Curation                │
-                  │  Passage Extraction ── Stance ── Entities    │
-                  └──────────────────────┬───────────────────────┘
-                                         │
-                                         ▼
-                  ┌──────────────────────────────────────────────┐
-                  │         Claim-Specific Assessment            │
-                  │    Strict Entity Isolation ── Citations      │
-                  └──────────────────────┬───────────────────────┘
-                                         │
-                                         ▼
-                  ┌──────────────────────────────────────────────┐
-                  │             Streaming Synthesis              │
-                  │   Channel Separation: Thinking vs Answer     │
-                  └──────────────────────────────────────────────┘
-```
+Surfaces keep their own UI and stored ids. Admission gates, the picker, the executor, evidence curation, and synthesis are shared. See [architecture.md](architecture.md) for Recon turn mechanics.
 
 ---
 

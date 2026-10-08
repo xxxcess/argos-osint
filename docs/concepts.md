@@ -6,6 +6,8 @@ Short names used across the TUI, CLI, and store. Source of truth for investigati
 
 Home launches nine surfaces. Labels on screen differ from `ModuleId` values; keep the IDs unless a migration requires otherwise.
 
+[![Argos workspace](diagrams/workspace.svg)](diagrams/workspace.html)
+
 | Label | `ModuleId` | Kind |
 | --- | --- | --- |
 | Intel | `Intel` | Application |
@@ -24,6 +26,8 @@ Only Recon has a composer. Intel Briefing starts a **report job** on an Atlas ar
 
 Each role is provider + model in `config.toml`. Accounts live in `auth.json`. Saving a key does not change a role.
 
+[![Models and roles](diagrams/model-roles.svg)](diagrams/model-roles.html)
+
 | Role | Job |
 | --- | --- |
 | Recon | Directives and bindings |
@@ -39,9 +43,13 @@ Legacy Grok/OpenAI accounts remain until the user assigns a replacement. New set
 
 Firecrawl, SociaVault, and Hunter are primary. Everything else is a gap-filler. Hunter inputs come only from the prompt, Firecrawl, SociaVault, or earlier Hunter calls.
 
+[![OSINT catalog](diagrams/osint-providers.svg)](diagrams/osint-providers.html)
+
 ## Bindings
 
 A binding is a typed value (`domain`, `handle`, `url`, …) with an evidence id. `recon/investigation/tool_io.rs` maps every catalog input to a kind, a prompt extractor, a rule extractor, and producers. Ungrounded inputs skip the step.
+
+[![Binding and grounding](diagrams/recon-bindings.svg)](diagrams/recon-bindings.html)
 
 ## Intel report jobs
 
@@ -52,6 +60,10 @@ Summary shows the selected revision's `bluf` section. View full report opens a 7
 ## Persistence
 
 `~/.argos/argos.db` (override `ARGOS_HOME`) is SQLite `user_version` 24. Brain vectors are LanceDB `memory_lancedb/` (384-dim MiniLM). Migrations are additive and transactional. `ARGOS_EMBED=0` keeps Jaccard recall.
+
+[![Persistence stack](diagrams/persistence.svg)](diagrams/persistence.html)
+
+[![Report tables](diagrams/schema-core.svg)](diagrams/schema-core.html)
 
 ## Graph
 

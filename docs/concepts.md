@@ -53,13 +53,21 @@ A binding is a typed value (`domain`, `handle`, `url`, …) with an evidence id.
 
 ## Intel report jobs
 
-An Intel report is a durable job on one article (`intel_report_jobs`). Collection dispatches are rows in `intel_report_attempts`. The UI label is `Tools: N calls used · B budget`. N is Argos dispatches (including errors), not provider billing. Cache reuse and validation skips are not fresh calls. Schema version 24 creates `intel_report_attempts` on open if it is missing.
+Durable job on one Atlas article (`intel_report_jobs`). Dispatches are rows in `intel_report_attempts` (created on open at schema 24 if missing).
 
-Summary shows the selected revision's `bluf` section. View full report opens a 70%-width card of all sections. Busy work on this article hides Summary and the launch control; another article's job does not.
+| UI | Meaning |
+| --- | --- |
+| `Tools: N calls used · B budget` | N = Argos dispatches including errors. Cache reuse and validation skips are not calls. |
+| Summary | Selected revision `bluf` |
+| View full report | 70%-width card of all sections |
+
+Busy work on this article hides Summary and the launch control. Another article’s job does not.
 
 ## Persistence
 
-`~/.argos/argos.db` (override `ARGOS_HOME`) is SQLite `user_version` 24. Brain vectors are LanceDB `memory_lancedb/` (384-dim MiniLM). Migrations are additive and transactional. `ARGOS_EMBED=0` keeps Jaccard recall.
+- SQLite `~/.argos/argos.db` (`ARGOS_HOME`), `user_version` 24, additive migrations
+- LanceDB `memory_lancedb/` (384-dim MiniLM)
+- `ARGOS_EMBED=0` → Jaccard recall
 
 [![Persistence stack](diagrams/persistence.svg)](diagrams/persistence.html)
 

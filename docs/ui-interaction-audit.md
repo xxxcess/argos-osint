@@ -1,6 +1,12 @@
 # Argos UI Interaction Audit
 
-Inventory of Home, the nine apps, popups, and field IDs from `ModuleId`, `Overlay`, `FieldId`, `ButtonId`, and `Target` in `crates/argos-osint-bin/src/tui/app.rs`. Layout registration lives in `ui.rs` (`LayoutRegistry`); Tab order is `(top, left)` of registered rectangles after draw. Placeholders are in `field_placeholder`. Long panes use `draw_see_more` (`see more` footer). Focused panes append ` · focused` via `focused_pane`.
+Inventory of Home, the nine apps, popups, and field IDs from `ModuleId`, `Overlay`, `FieldId`, `ButtonId`, and `Target` in `crates/argos-osint-bin/src/tui/app.rs`.
+
+- Layout: `ui.rs` `LayoutRegistry`
+- Tab order: `(top, left)` of registered rectangles after draw
+- Placeholders: `field_placeholder`
+- Long panes: `draw_see_more` (`see more` footer)
+- Focused panes append ` · focused` via `focused_pane`
 
 ## Shared contracts
 

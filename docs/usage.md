@@ -8,7 +8,7 @@ How to run the terminal UI and CLI. Product tour in the [README](../README.md). 
 cargo run -p argos-osint-bin
 ```
 
-Argos opens on **Home**. `↑↓` and Enter open an app. Number keys `1`–`9` open Intel, Atlas, Brain, Recon, Jobs, Logs, Tools, Models, and Profile. Esc or the Home control returns to Home. `?` opens the shortcut card for the current screen.
+Opens on **Home**. `↑↓` + Enter open an app. Keys `1`–`9` jump Intel → Profile. Esc or Home returns Home. `?` opens shortcuts.
 
 [![TUI shell](diagrams/tui-shell.svg)](diagrams/tui-shell.html)
 
@@ -25,11 +25,18 @@ A click commits on mouse-up only if the pointer stays within one cell of the pre
 
 ### Recon
 
-Recon opens on a full-screen list of recent investigations. Enter opens the transcript. Esc from the transcript returns to the list.
+Full-screen list of recent investigations. Enter opens the transcript. Esc from the transcript returns to the list.
 
-In the transcript, Tab moves between the log and the prompt. Enter sends; Shift+Enter inserts a line. `↑↓` select a message, decision, or tool; `←→` fold a decision or tool log. `f` opens full text. Ctrl+N starts an investigation. Alt+Left / Alt+Right cycle recent threads when the cursor is not in a field.
+| Keys | Action |
+| --- | --- |
+| Tab | Transcript ↔ prompt |
+| Enter / Shift+Enter | Send / newline |
+| `↑↓` / `←→` | Select message · fold decision/tool |
+| `f` | Full text |
+| Ctrl+N | New investigation |
+| Alt+Left / Alt+Right | Cycle threads (cursor not in a field) |
 
-The question sits on a raised prompt band. The answer is Markdown. Decisions and lookups stay collapsed. A `◉ brain` mark opens memories that were in that synthesis prompt. A new investigation stays untitled until Recon names it from the first question. `:rename`, `:delete`, and `:delete-with-insights` are composer commands.
+Question on a raised prompt band. Answer is Markdown. Decisions and lookups stay collapsed. `◉ brain` opens memories used in that synthesis. Untitled until Recon names it from the first question. Composer commands: `:rename`, `:delete`, `:delete-with-insights`.
 
 Turn flow, bindings, and citations: [architecture.md](architecture.md).
 
@@ -37,7 +44,12 @@ Turn flow, bindings, and citations: [architecture.md](architecture.md).
 
 ### Intel
 
-Bulletin board of Atlas headlines: classification tabs, day filter, search, hero story. Enter opens Briefing Focus (claims, tags, links, country mini-map, Summary). View full report opens a 70%-width card. A mode button starts Verify / Explain / Assess Outlook / Full Assessment as a Jobs-backed report. Busy work on the selected article hides Summary and that launch control.
+Atlas headline board: tabs, day filter, search, hero story.
+
+- Enter → Briefing Focus (claims, tags, links, mini-map, Summary)
+- View full report → 70%-width card
+- Mode button → Verify / Explain / Assess Outlook / Full Assessment (Jobs-backed)
+- Busy work on this article hides Summary and the launch control
 
 Details: [concepts.md](concepts.md) · [architecture.md](architecture.md#intel-reports).
 
@@ -45,7 +57,12 @@ Details: [concepts.md](concepts.md) · [architecture.md](architecture.md#intel-r
 
 ### Atlas
 
-Two-phase news pipeline. Run scans 48 hours with GNews and NewsData, scores countries, then pulls NewsAPI and Currents headlines for the kept bands. Pause stores a cursor; Resume continues. History lists saved cycles; a Braille world map follows the selected cycle.
+Two-phase news cycle:
+
+1. GNews + NewsData, 48 h, score countries
+2. NewsAPI + Currents headlines for kept bands
+
+Pause stores a cursor. Resume continues. History + Braille world map follow the selected cycle.
 
 Pipeline and quotas: [architecture.md](architecture.md#atlas).
 
@@ -66,7 +83,7 @@ Module ids vs labels: [concepts.md](concepts.md). TUI contracts: [conventions.md
 
 ## CLI
 
-Prefix with `cargo run -p argos-osint-bin --` when running from source. Commands use the same store, registry, and executor as the TUI. JSON where practical.
+From source: prefix `cargo run -p argos-osint-bin --`. Same store, registry, and executor as the TUI. JSON where practical.
 
 ```sh
 # Recon
@@ -102,13 +119,24 @@ argos memories
 argos memories reindex
 ```
 
-`recon show` prints the plan (directives, grounding, bindings, picker records). Default delete keeps Brain memories and marks their source deleted; `--with-insights` removes memories owned only by that investigation. `recon limits` sets per-turn budgets, including `--max-turn-seconds` (default 900). Synthesis streams to the transcript and to stderr for `argos ask`; stdout stays the final JSON.
-
-Nominatim and SEC require an identifying User-Agent. Set it before those lookups.
+- `recon show` — plan (directives, grounding, bindings, picker records)
+- Default delete keeps Brain memories and marks their source deleted; `--with-insights` removes memories owned only by that investigation
+- `recon limits` — per-turn budgets, including `--max-turn-seconds` (default 900)
+- `argos ask` streams to stderr; stdout is final JSON
+- Nominatim and SEC need an identifying User-Agent first
 
 ## State
 
-State lives in `~/.argos` (`ARGOS_HOME` overrides). Opening `argos.db` runs additive migrations (`user_version` 24). Brain vectors sit in `memory_lancedb/`. `config.toml` holds role defaults; `auth.json` holds credentials (owner-only on Unix). `ARGOS_EMBED=0` skips MiniLM and uses Jaccard recall.
+State: `~/.argos` (`ARGOS_HOME` overrides).
+
+| Path | Contents |
+| --- | --- |
+| `argos.db` | SQLite, `user_version` 24, additive migrations |
+| `memory_lancedb/` | Brain vectors |
+| `config.toml` | Role defaults |
+| `auth.json` | Credentials (owner-only on Unix) |
+
+`ARGOS_EMBED=0` skips MiniLM (Jaccard recall).
 
 [![Persistence stack](diagrams/persistence.svg)](diagrams/persistence.html)
 

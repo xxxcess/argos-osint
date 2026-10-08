@@ -1,48 +1,221 @@
 # Architecture
 
-`argos-osint-core` owns durable state, the shared OSINT registry/executor, provider routing, and Recon orchestration. `argos-osint-bin` owns the CLI and terminal UI. Home launches Intel, Atlas, Brain, and Recon. Tools, Models, and Profile configure Argos and do not accept chat (internal ids `Osint`, `Providers`, `System`). Jobs and Logs watch background work. `tui/ui.rs` renders controls, the Recon transcript, and matching hit regions; `tui/app.rs` manages focus, scrolling, and background events. Logs holds durable events; Profile shows hardware and paths.
+| Crate | Owns |
+| --- | --- |
+| `argos-osint-core` | Store, OSINT registry/executor, provider routing, Recon |
+| `argos-osint-bin` | CLI and ratatui TUI |
+
+Home launches Intel, Atlas, Brain, Recon. Tools / Models / Profile configure Argos (`Osint`, `Providers`, `System`). Jobs and Logs watch background work.
 
 [![Argos workspace](diagrams/workspace.svg)](diagrams/workspace.html)
 
-Index: [README.md](README.md). Glossary: [concepts.md](concepts.md). Catalog: [diagrams.md](diagrams.md).
+Index: [README.md](README.md) · Glossary: [concepts.md](concepts.md) · Figures: [diagrams.md](diagrams.md)
 
 ## Investigation flow
 
 [![One Recon turn](diagrams/recon-turn.svg)](diagrams/recon-turn.html)
 
+Each turn stores a user message and a run with snapshots of Recon, Tool picker, and Synthesis (`recon_runs.tool_picker_model`, schema v8).
 
-Each Recon turn stores a user message and a run with snapshots of all three model roles: Recon, Tool picker, and Synthesis (`recon_runs.tool_picker_model`, schema version 8). Brain recall runs first. When recalled memories have linked sources, Recon and the Tool picker also receive a compact **Brain memory resources** summary (resource types such as article links, video links, file/download links, or file locations, plus a short candidate list of URLs each paired with the recalled Brain claim or inference text, ordered by claim+URL overlap with the user prompt). The point is selective retrieval: both models should choose only the assets whose linked claim is most likely to answer the question, not chase every link. Those URLs are available to the binder (`evidence_id` `brain:…`) but are not listed under the picker's `known_bindings`. The Recon log lists them under **From Brain**, separate from prompt-seeded bindings under **From the question**. There is no deterministic scrape injection. Instead, up to five claim-ranked Brain article/web links are offered as discrete picker options (`brain_scrape:0` …); picking one becomes a pre-bound `firecrawl_scrape` for that URL. While those options remain and no search-found URL binding exists yet, bare `firecrawl_scrape` is withheld so the model cannot scrape an arbitrary first Brain URL. The binder also prefers `brain:` URL bindings over later search hits (and puts them first in batch scrape lists). Scraped page/extract evidence above a modest size is compacted by the synthesis model (stage `compacting evidence`, with directive goals in the compact prompt) before final synthesis. The classifier (or a keyword heuristic when the classifier role is unset) picks a Recon report mode — Verify, Explain, or Assess Outlook — from the user prompt. Recon then infers the **directives** the prompt needs (shaped for that Recon mode's section priorities) (at least one, at most five, ids `d1` onward) from the user prompt, the thread subject, the previous turn's synthesis when there is one, recalled insights, any Brain resource summary, and history titles. It decides what each directive should establish from that prompt, and does not start from a fixed identity, accounts, and companies set. It never sees the tool catalog, only the binding kinds. Each directive has an imperative `goal` (at most 15 words) that says what to establish, never which tool to use, plus `entities`, `targets` (binding kinds), `done_when`, and an optional search `query`. A goal or entity that names a catalog tool id, a provider, or a platform API (`directives::PROVIDER_TERMS`) is rejected, except for words that belong to the prompt's own entity, so "who is Hunter Biden?", "who runs GitHub?", and "what is Google?" keep valid directives while "Run Hunter domain search on Acme" is still rejected. Entities must be verbatim spans of the prompt, or on a follow-up whose prompt names no entity of its own ("what about his companies?"), the thread subject: the directive entities of the latest earlier run (`thread_subject`). A follow-up may also name a verbatim span of the previous synthesis, so "what agendas are these billionaires pursuing?" can keep George Soros and Jeff Yass when that answer named them. A reply that only copies the pronoun still falls back to the thread subject. That handoff is a compacted excerpt: citations and the evidence trailer are removed, and the lead findings plus the D1–D5 lines are kept within about 1,200 characters. The same excerpt is established findings in the synthesis packet, so the written answer continues the investigation. An invalid reply gets one repair. After that the deterministic set is used and the plan records `directives_mode = "directives_fallback"`: d1 "Establish the subject's identity and public roles" (person_name, org_name, url), d2 "Find the subject's official online accounts and websites" (handle, domain, url), and d3 "Find organizations affiliated with the subject and their contact domains" (org_name, domain, email). Identifier kinds the prompt names (a domain, IP, email) are added to d1's targets. Old plans with `derived_questions` and `questions_mode` still load.
+### Pipeline
 
-The Tool picker orders the tools with the classified Recon mode and its section priorities in state (`mode_guidance`). When Brain recall linked resources, state also carries `brain_resources` (type counts and candidates with claim text plus URLs) and the candidate list may include `brain_scrape:*` options whose criteria name the claim and URL, so the picker can retrieve the most relevant Brain articles before general search. It picks one tool per request. Request 1 sends the turn's directives, the bindings already known (explicit domains, emails, URLs, handles), the compact eligible catalog (enabled tools whose provider key is present, each with the binding kinds its inputs take), and the dependency table derived from the tool input table below. The reply is the single best tool to run first. That tool leaves the candidate set, and the next request carries the ordered list so far and asks for the best next tool from what remains. The loop stops at `min(max_calls, MAX_PICKS)` tools (`MAX_PICKS` is 13), when no candidates remain, or when the picker answers `done`, which is offered only after three picks. Candidates are recomputed for every pick (`picker::offered_candidates`). Until a primary-provider tool (Firecrawl, SociaVault, Hunter) is picked, only primary tools are offered: Firecrawl search, SociaVault profile and searches when a handle or a subject name is known, and any primary tool the prompt's bindings can already run. Gap-filler tools join after the first primary pick, or at once for an IP, CVE, wallet, or coordinates prompt. Every candidate must serve a directive: the kinds it produces (or, for a tool with no extracted output, the kinds it takes) must overlap that directive's `targets`. `sociavault_google_search` is never an ordering candidate. The same rule applies to the deterministic path and after a low-confidence reset. A duplicate, removed, or unknown id is rejected and asked again once; a second bad reply takes the deterministic pick for that position. Order is pick order, then a stable topological fix moves a required producer ahead of its consumer without another model call. `depends_on` comes from the dependency table plus the chat `needs` and `produces` when present.
+1. Brain recall
+2. Classifier picks report mode (Verify / Explain / Assess Outlook); keyword heuristic if the role is unset
+3. Recon writes 1–5 directives (`d1`…)
+4. Tool picker orders tools (1 pick per request, up to 13)
+5. Binder grounds every input; executor runs sequentially
+6. Streaming synthesis with a recomputed deadline
+
+### Brain recall
+
+- Recalled memories with sources get a compact **Brain memory resources** packet (article / video / file links plus claim text, ranked by overlap with the prompt).
+- URLs are binder-available (`evidence_id` `brain:…`). They are not listed under picker `known_bindings`.
+- Recon log: **From Brain** vs **From the question**.
+- Up to five claim-ranked links become picker options `brain_scrape:0`…. Picking one is a pre-bound `firecrawl_scrape`.
+- While those options remain and no search URL exists, bare `firecrawl_scrape` is withheld.
+- Binder prefers `brain:` URLs over later search hits (first in batch scrape lists).
+- Large scrape/extract evidence is compacted by Synthesis (`compacting evidence`) before the final answer.
+
+### Directives
+
+Recon infers directives from the prompt, thread subject, previous synthesis, recalled insights, Brain resources, and history titles. It never sees the tool catalog — only binding kinds.
+
+| Field | Rule |
+| --- | --- |
+| `goal` | Imperative, ≤15 words. What to establish. Never which tool. |
+| `entities` | Verbatim spans of the prompt; follow-up with no entity uses `thread_subject` or a span of previous synthesis |
+| `targets` | Binding kinds |
+| `done_when` | Completion test |
+| `query` | Optional search query |
+
+Rejected: goals/entities that name a catalog tool id, provider, or platform API (`directives::PROVIDER_TERMS`), except words that belong to the prompt entity. “Who is Hunter Biden?” stays. “Run Hunter domain search on Acme” is dropped.
+
+Follow-up handoff is a compacted excerpt (~1,200 chars): citations and the evidence trailer stripped; lead findings plus D1–D5 kept. Same excerpt is established findings in the synthesis packet.
+
+Invalid reply: one repair, then fallback (`directives_mode = "directives_fallback"`):
+
+| Id | Goal | Targets |
+| --- | --- | --- |
+| d1 | Establish identity and public roles | person_name, org_name, url (+ identifier kinds named in the prompt) |
+| d2 | Find official accounts and websites | handle, domain, url |
+| d3 | Find affiliated organizations and contact domains | org_name, domain, email |
+
+Old plans with `derived_questions` / `questions_mode` still load.
+
+### Tool picker
 
 [![Tool picker transport](diagrams/tool-picker.svg)](diagrams/tool-picker.html)
 
-The picker has two transports. Decisions models (`typesafe/jev-1.13`, `~typesafe/jev-latest`, or any id containing `/jev`) use `POST https://openrouter.ai/api/alpha/decisions` with one `choice` question per request whose options are the remaining tool ids (plus `done` after three picks). The choice probability becomes that pick's confidence. If every pick falls below 0.45, the model order is discarded and the deterministic fallback order is used. Any other model uses the chat transport: one completion per pick returning `{ "tool_id", "serves", "needs", "produces", "reason" }` or `{"tool_id":"done"}`, validated and repaired once. Picker requests are bounded (`MAX_PICKS` picks, one repair each, and two fallback picks per turn). After a provider 429 the turn makes no more picker calls and the deterministic picker finishes the list. An unconfigured or unreachable picker also falls back without failing the turn. Per-pick confidence, reason, transport, and candidate count are stored in `plan_json` (`picks`), which `recon show` prints; the transcript row does not show probabilities.
+State includes classified mode (`mode_guidance`) and, when present, `brain_resources` plus `brain_scrape:*` candidates.
 
-Argos tracks a separate local monthly Firecrawl credit allowance (`recon_limits.firecrawl_credits`, default 1000) that is not the Firecrawl dashboard balance. Older configs that still have the previous product default of 200 are migrated to 1000 on load. When a call is not dispatched, the Recon log names the concrete reason (local allowance exhausted with remaining/needed amounts, duplicate in-flight call, or disabled tool) rather than a generic credit/call-budget deferral.
+- One tool per request. Request 1: directives, known bindings, compact eligible catalog, dependency table.
+- That tool leaves the set; next request carries the ordered list.
+- Stop at `min(max_calls, MAX_PICKS)` (`MAX_PICKS` = 13), empty candidates, or `done` (offered only after three picks).
+- Candidates recomputed every pick (`picker::offered_candidates`).
+- Until a primary tool is picked, only primaries are offered (Firecrawl search; SociaVault profile/search when a handle or subject name is known; any primary the prompt can already run).
+- Gap-fillers join after the first primary pick, or immediately for IP / CVE / wallet / coordinates.
+- Every candidate must serve a directive (produced or taken kinds overlap `targets`).
+- `sociavault_google_search` is never an ordering candidate.
+- Duplicate / unknown id: ask once, then deterministic pick for that slot.
+- Order is pick order, then a stable topological fix (`depends_on` from the table plus chat `needs`/`produces`).
 
-Recon executes the ordered list one call at a time through the same `osint::Executor`, credit holds, cache, and cancel path as manual OSINT runs. Before each call the binder fills inputs subject first: an input that can take the directive's entity directly (a name for `wikidata_entities`, a query for Firecrawl or SociaVault search) gets the entity, and values found later fill only what the entity cannot (handle, domain, URL, platform id). Otherwise it fills inputs from accepted bindings: handles with their platform, domains, emails, names, URLs, IPs, CVEs, packages, wallets, addresses, and coordinates. A binding is accepted only when its value occurs in a stored observation (or the question), and it keeps that evidence id. After each result the rule extractor parses the kinds that tool produces; the Recon model extraction then runs when a later step is still missing an input, or when this tool yields handles and a later step takes one, unless a provider 429 already tripped this turn. Model output passes the same verbatim, ownership, and platform-normalization checks and is merged with the rule output; each step's outcome (rule count, model added/skipped/failed) is stored in `plan.binding_notes` and shown in the decision row. A step whose inputs cannot be bound is skipped as unresolved. Every input of every call is grounded: `plan.grounding` records `{step, input, value, source}`, where the source is a directive entity (`d1 entity`, `d2 entity + qualifier`), the prompt, an accepted binding with its evidence id (`binding call-…`), or a fixed value (`fixed`, e.g. `limit`). The decision row shows it (`query=Elon Musk (d1 entity)`). A step with an input that has no grounding entry for its value is skipped before dispatch with `ungrounded input …`. Search queries (`firecrawl_search`, `sociavault_search`, `sociavault_search_users`, `sociavault_google_search`) are never question text. A query is a directive entity, or an accepted binding value, plus at most one fixed qualifier keyed by the directive's first target kind (handle → `official account`, domain → `official website`, org_name → `company`, email → `contact`, person_name → none), at most 6 words and 80 characters, with no question words and no tool or provider names (`grounded_query`). Recon's `query` is used only when it passes that check; otherwise the deterministic `<entity>` or `<entity> <qualifier>` is used. Platform searches send the entity alone. When the directives target identity, accounts, and companies (the fallback set for "who is elon musk?"): d1 Firecrawl `Elon Musk`, d2 accounts search `Elon Musk official account`, d2 SociaVault user search `Elon Musk`, d3 Firecrawl `Elon Musk company`. A relevance gate runs on search-result tools (`firecrawl_search`, `sociavault_google_search`, `sociavault_search`): a domain, org_name, email, or url binding, from the rules or the Recon model, is kept only when a result containing that value also names a directive entity in its title, description, snippet, or URL (the whole entity or all its name tokens). Dropped values are listed in the step's binding note. When a call fails, or a dependent step is still starved after extraction, Recon makes one single-pick fallback request. The candidates are tools that can run now and whose observation yields a missing kind; when a handle is missing, one accounts search may repeat Firecrawl search with the d2 entity and the handle qualifier (`Elon Musk official account`), grounded as `d2 entity + qualifier`. A handle a directive names (`Twitter handle @elonmusk`) is a known binding before any tool runs: handle and platform, with the directive id as evidence, kept only when it occurs verbatim in that directive and names the subject, and marked unverified. It can fill SociaVault, Keybase, and Wikipedia; an observed handle outranks it, and the decision row, picker state, and Synthesis packet mark it unverified. The pick is inserted as the next step, and only later steps still missing a kind it yields depend on it (from their unmet kinds in the tool input table); steps whose inputs are already bound keep their dependencies and run. A step already waiting on a fallback does not ask for another. Each search step's query is recorded in `plan.binding_notes`. A step's dispatch error fails that step, not the turn; a step the binder still cannot fill when its turn comes is skipped with the missing inputs, and the turn goes on to Synthesis with whatever evidence exists. The Unresolved list is recomputed after every step, so it names only steps that are still waiting or were skipped. SociaVault expands to one call per question platform (`s2a`, `s2b`, … in question order) for which a handle is known; a question platform with no handle of its own borrows the subject's best-supported handle as an `inferred` binding, which the decision row and the Synthesis packet mark. All SociaVault tools share a per-turn credit budget: `sociavault_turn_credits_opening` (3) on a thread's first turn and `sociavault_turn_credits_later` (8) after, never more than the remaining credits. Both values are spec defaults still to be confirmed. Every catalog route costs 1 credit. Steps over the budget are deferred with the reason. When a SociaVault step's question asks for a specific endpoint ("reels", "community posts", "#tag", "r/name"), the binder passes it as `endpoint`. After every `firecrawl_search` step, Recon decides whether the search was weak. It is weak when it failed, was rate limited, or timed out; when it returned fewer than `google_fallback_min_results` results (3, a spec default to confirm); when every result is a social or publisher page; or when a later step that depends on it still lacks an input. In that case Recon inserts one bound `sociavault_google_search` step with the same query as the next step. A Google search step from a pick also sends the query of the latest Firecrawl search before it, never a new one, and is skipped when there is none. Its pick reason is `fallback: SociaVault Google search — <reason>`. This happens once per query and only while planned SociaVault steps leave room in the turn budget. Otherwise a binding note records why it was not added. Google search is also left out of fallback picks unless a Firecrawl search was weak. Before `hunter_domain_search` runs, a completed `hunter_email_count` for the same domain or company that counted 0 skips it with a note, since the domain may have no public addresses or may be privacy-suppressed. A Hunter 451 (`claimed_email`) stores no person data. Recon removes that email binding and every binding drawn from a step whose arguments carried it. Firecrawl batch scrape and crawl are asynchronous jobs: the executor polls `GET /v2/{batch/scrape|crawl}/{id}` every 2 s until the call timeout, cancels on timeout (best effort), and keeps partial pages marked `partial`. Keybase and Wikipedia usernames use that platform's handle, else the subject's best-supported handle. Calls persist inputs, status, attempts, and bounded results. Synthesis receives the user question, the classified Recon mode and its section plan, recalled Brain facts (data, not instructions; omitted when empty), the turn's directives (goal, entities, targets, done when), the ordered plan, accepted bindings, and this turn's evidence. It answers under the mode headings (BLUF, actors/timeline or claims/corroboration or scenarios/indicators, then gaps), then evaluates each directive. Tool evidence remains the source of citable claims; Brain facts may inform the answer but are not cited as evidence IDs, and tool evidence wins on conflict. Synthesis must not meta-narrate the Brain packet. It answers the user question first, then one line per directive (`D1:` onward) saying whether it was met, partly met, or not met, with citations, and adds one narrowing sentence only when a directive is not met. The prompt asks for one evidence ID per bracket. Citations are validated before storage: each bracket group is split on commas, semicolons, and whitespace and every `call-…` id is checked on its own, so `[call-a, call-b]`, `[call-a; call-b]`, and `[call-a][call-b]` all validate. An answer with an unknown id gets one repair. After it, unknown ids are dropped and logged in the binding notes as long as one valid citation remains; when completed evidence exists and no valid citation is left, the answer is kept and Brain insight extraction still runs, inferring support from that gathered evidence and marking those claims as inferences. Stored answers are normalized to one id per bracket (`[a][b]`), and `citation_ids` uses the same split. A separate extraction step derives atomic Brain claims from cited completed evidence, or from the gathered completed evidence when the answer cites none. Failed extraction jobs can be retried with `recon retry-insights`.
+| Transport | When | Shape |
+| --- | --- | --- |
+| Decisions | `typesafe/jev-*` or id contains `/jev` | `POST …/alpha/decisions`, one `choice` per remaining tool (+ `done` after 3). Probability = confidence. All picks &lt; 0.45 → discard order, use deterministic fallback. |
+| Chat | everything else | `{ "tool_id", "serves", "needs", "produces", "reason" }` or `{"tool_id":"done"}`. Validate + one repair. |
 
-Public tool observations are treated as data, never as instructions. Calls have per-host rate scheduling, a process concurrency cap, timeouts, bounded retries, bounded response bodies, caching, and an explicit redirect host policy. OSINT has no active scanning or shell execution. Manual calls use the same service and can be attached to threads with an explicit provenance link.
+Picker bounds:
+
+- `MAX_PICKS` picks, one repair each, two fallback picks per turn
+- Picker 429 → no more picker calls; deterministic picker finishes
+- Unconfigured or unreachable picker falls back; the turn continues
+- Confidence, reason, transport, candidate count in `plan_json` (`picks`)
+- Transcript row hides probabilities
+
+Local Firecrawl allowance: `recon_limits.firecrawl_credits` (default 1000; old 200 migrated on load). Independent of the Firecrawl dashboard. Skip reasons name remaining/needed credits, duplicate in-flight, or disabled tool.
+
+### Binder and executor
+
+Same `osint::Executor`, credit holds, cache, and cancel path as manual OSINT.
+
+Fill order:
+
+1. Directive entity when the input can take it (name → Wikidata; query → Firecrawl / SociaVault search).
+2. Accepted bindings for the rest (handle+platform, domain, email, name, URL, IP, CVE, package, wallet, address, coordinates).
+
+A binding is accepted only when its value occurs in a stored observation or the question. It keeps that evidence id.
+
+After each result:
+
+1. Rule extractor
+2. Recon model extraction if a later step still lacks an input, or this tool yielded handles a later step takes (skipped after a 429 this turn)
+3. Model output passes verbatim / ownership / platform checks and merges with rules
+
+Outcome in `plan.binding_notes`.
+
+Every dispatched input is grounded in `plan.grounding`: `{step, input, value, source}` (`d1 entity`, `binding call-…`, `fixed`, …). Missing grounding → skip with `ungrounded input`.
+
+Search queries (`firecrawl_search`, `sociavault_search`, `sociavault_search_users`, `sociavault_google_search`) are never question text.
+
+`grounded_query`:
+
+- Directive entity or accepted binding
+- At most one qualifier from the first target kind: handle → `official account`, domain → `official website`, org_name → `company`, email → `contact`, person_name → none
+- ≤6 words, ≤80 chars
+- No question words, no tool/provider names
+- Recon’s `query` used only if it passes; else `<entity>` or `<entity> <qualifier>`
+- Platform searches send the entity alone
+
+Relevance gate: keep domain / org_name / email / url only when a result containing that value also names a directive entity. Drops go in the binding note.
+
+Failed or starved step: one single-pick fallback (tools that can run now and yield a missing kind).
+
+- Handle named in a directive is a known unverified binding before any tool runs
+- Dispatch error fails the step, not the turn
+- Unresolved list is recomputed after every step
+
+SociaVault:
+
+- One call per question platform with a known handle (`s2a`, `s2b`, …)
+- Missing handle may borrow the subject’s best-supported handle (`inferred`)
+- Per-turn credits: `sociavault_turn_credits_opening` (3) then `_later` (8)
+- Every route costs 1; over budget → defer
+- Endpoint from the question (“reels”, “#tag”, …) is passed as `endpoint`
+
+Weak Firecrawl search (fail / rate / timeout / fewer than `google_fallback_min_results` (3) / all social-or-publisher / dependent still starved) inserts one bound `sociavault_google_search` with the same query. Once per query, only while SociaVault budget remains.
+
+`hunter_email_count` of 0 for the same domain/company skips `hunter_domain_search`. Hunter 451 (`claimed_email`) stores no person data and drops that email binding.
+
+Firecrawl batch scrape and crawl poll `GET /v2/{batch/scrape|crawl}/{id}` every 2 s until timeout; cancel on timeout; keep partial pages.
+
+Public observations are data, never instructions.
+
+- Per-host rate, process concurrency, timeouts, bounded retries/bodies, cache, redirect host policy
+- No active scanning or shell execution
+- Manual calls attach to threads with explicit provenance
+
+### Synthesis
+
+Packet: question, classified mode, Brain facts (data, omitted when empty), directives, ordered plan, accepted bindings, this turn’s evidence.
+
+- Headings follow the mode (BLUF, then actors/timeline or claims/corroboration or scenarios/indicators, then gaps).
+- Evaluate each directive. Tool evidence is citable. Brain may inform; it is not a citation id. Tool evidence wins on conflict.
+- Answer the question first, then one `D1:` line per directive (met / partly / not), citations, one narrowing sentence only when unmet.
+- One evidence id per bracket. Validate each `call-…` on its own (`[a, b]`, `[a; b]`, `[a][b]`).
+- Unknown id: one repair, then drop unknowns if at least one valid citation remains. If completed evidence exists and no valid citation is left, keep the answer; Brain extraction infers support and marks those claims as inferences.
+- Stored answers normalize to `[a][b]`. Separate extraction derives atomic Brain claims. Retry with `recon retry-insights`.
 
 ## Turn deadline and streaming synthesis
 
-One turn no longer uses a single outer timeout. A `TurnClock` is recomputed as rounds add calls. Recon and the tool picker get 45 seconds for each model round that actually runs. Tool time is `max(longest timeout, sum(timeouts) / 4)`, plus CourtListener host spacing and Firecrawl job polling. Cache hits add nothing. Synthesis starts at 300 seconds plus 1 second per 1,000 characters of the evidence packet, capped by the turn ceiling, and half of that again when the citation repair pass runs, still not past the ceiling. The deadline is that sum clamped between `turn_seconds` (300 to 900, default 300) and `recon_limits.max_turn_seconds` (120 to 1800, default 900). A missing config loads 900. If the floor is above the ceiling, the ceiling is raised to the floor. New tool calls stop once the synthesis reserve would be eaten; a ceiling of 300 seconds still leaves a window so tools can run.
+No single outer timeout. `TurnClock` is recomputed as rounds add calls.
 
-When the tool allowance runs out, later calls are skipped with reason `turn budget` and the turn moves to synthesis. Synthesis still gets its allowance from the moment it starts, until the hard ceiling. While tokens arrive, synthesis continues until that ceiling and stops early only after 60 seconds with no new text. A cutoff saves the streamed text, a deterministic evidence summary with call ids, and the note `Synthesis ran out of time; re-run or raise max_turn_seconds`. If the provider stream fails after tokens have already arrived, that text is kept the same way instead of failing the turn and clearing the live answer. The run completes with stage `cut short`. Cancel still stops the turn immediately. The transcript shows the current deadline (`Deadline 6m 10s: 11 calls, ~52k chars evidence`), and the same breakdown is stored on `plan.deadline_note`.
+| Slice | Allowance |
+| --- | --- |
+| Recon / picker | 45 s per model round that actually runs |
+| Tools | `max(longest timeout, sum(timeouts) / 4)` + CourtListener spacing + Firecrawl poll. Cache hits add 0. |
+| Synthesis | 300 s + 1 s per 1,000 chars of evidence, capped by the turn ceiling. Citation repair adds half again, still under the ceiling. |
 
-`ask` and `resume` report `TurnEvent::AnswerDelta` as synthesis tokens arrive. The TUI appends them to a live answer bubble, throttled to about 50ms, and keeps tokens for a thread that is not open. The validated answer, after citation repair, replaces that bubble. `argos ask` writes the same deltas to stderr. Stdout remains the final JSON. A provider that rejects streaming falls back to one completion and the answer appears all at once.
+Deadline = that sum clamped between `turn_seconds` (300–900, default 300) and `recon_limits.max_turn_seconds` (120–1800, default 900). Missing config loads 900. Floor above ceiling raises the ceiling.
+
+- New tool calls stop once they would eat the synthesis reserve
+- Tool allowance gone → skip later calls (`turn budget`) and synthesize
+- Stream until the hard ceiling; early stop only after 60 s with no new text
+- Cutoff keeps streamed text, a deterministic evidence summary, and `Synthesis ran out of time; re-run or raise max_turn_seconds`
+- Provider stream fail after tokens: keep the text. Stage `cut short`
+- Cancel stops immediately
+
+Transcript shows `Deadline 6m 10s: 11 calls, ~52k chars evidence` (`plan.deadline_note`).
+
+- `ask` / `resume` emit `TurnEvent::AnswerDelta`
+- TUI live bubble ~50 ms
+- `argos ask` deltas → stderr; stdout is final JSON
+- Provider that rejects streaming: one completion
 
 ## Tool inputs and bindings
 
 [![Binding and grounding](diagrams/recon-bindings.svg)](diagrams/recon-bindings.html)
 
+`recon/investigation/tool_io.rs` is the single table (`TOOLS`). Picker catalog, dependencies, binder, filler, rule extractor, starved-step check, and fallback filter all read it.
 
-`recon/investigation/tool_io.rs` holds one row per catalog tool (`TOOLS`): which binding kind fills each required input, how it is written (plain, domain as URL, platform+handle or platform+user_id pair, platform+query, platform-specific handle, ranked URL list, subreddit, company or webmail email, package parts, coordinates, search query), optional fills, fixed extras, the declared producers, the kinds the tool's observation yields, and JSON keys that carry a kind. The picker's catalog inputs and dependency table, the binder, the argument filler, the rule extractor, the starved-step check, and the fallback candidate filter all read this table; there is no per-tool binding code elsewhere. The subject comes from the question with imperative lead-ins (`recon`, `investigate`, `look up`, …), social tails (`social life`, `social accounts`, …), and attribute words (`total`, `follower count`, `net worth`, `socials`, …) removed, so "recon donald trumps social life…" names Donald Trump and "what is elon musk total follower count on socials?" names Elon Musk. Person names must be two to four tokens without product words (`scraper`, `archive`, `api`, …). Handles are kept only when the subject owns them: a profile URL or an `@mention` paired with the nearest platform name, or a keyed account field.
+Subject extraction:
 
-Every binding records `source_tool`, the tool whose observation yielded it (empty for the prompt). **Hunter inputs (decision D1)** come only from the prompt, Firecrawl, SociaVault, or an earlier Hunter call: `restricted_sources` / `allowed_producer` in `tool_io.rs`. The binder filters bindings with `binding_allowed` before it fills a Hunter step, and the unmet-kind, dependency-order, and `depends_on` checks count only allowed producers. A value found only by a gap-filler (crt.sh, RDAP, Keybase, GitHub, and so on) is never bound to Hunter. When a primary observation later contains the same value, the binding merge records the primary source and evidence, and from then on Hunter can use it. Firecrawl map and crawl apply the same rule with Firecrawl and Hunter as sources. Fills from the user's question stay visible on Hunter steps, and fills from tools show `via <tool>`. Ordering gates (`GATES`) place `hunter_email_count` before `hunter_domain_search`, and `hunter_email_insight` before person and combined enrichment, when both are planned.
+- Strip imperative lead-ins (`recon`, `investigate`, …), social tails, attribute words (`follower count`, `net worth`, …)
+- Person names: 2–4 tokens, no product words
+- Handles only when the subject owns them (profile URL, `@mention` next to a platform, or a keyed account field)
 
-A coverage test iterates `osint::registry()` and asserts that every required input of every tool maps to a binding kind, that each kind has a prompt extractor and at least one tool producer (`PROMPT_ONLY` lists exceptions with a reason; it is empty), that each kind has a rule extractor, and that each declared producer yields a kind the tool takes. A second coverage test walks every SociaVault route in `osint::SOCIAVAULT_ROUTES`. For each route, the tool's fills must write `platform` and one of the route's inputs, and that input's kind must have a producer. The test also checks that every Firecrawl and Hunter tool has a row, that Hunter's declared and implied producers are primary providers only, and that every gap-filler producer is refused. `platform_id` is listed in `TOOL_ONLY`: it comes only from a SociaVault profile call. Request-builder fixture tests cover every route: URL path, method, query or body, credential header, and host lock. Fixture tests run person, organization, domain, IP, email, username, CVE, package, wallet, URL, and place prompts from the question through a producer observation to the next tool's filled arguments.
+Every binding records `source_tool` (empty for the prompt).
+
+**Hunter inputs** (`restricted_sources` / `allowed_producer`): prompt, Firecrawl, SociaVault, or earlier Hunter. Gap-filler values wait until a primary observation contains the same value. Firecrawl map/crawl: Firecrawl and Hunter sources only.
+
+Gates: `hunter_email_count` before `hunter_domain_search`; `hunter_email_insight` before person/combined enrichment.
+
+Coverage tests:
+
+- Every required input maps to a kind with prompt extractor, producer, and rule extractor
+- Every SociaVault route writes `platform` plus a route input
+- Hunter producers are primary-only
+- `platform_id` is `TOOL_ONLY` (SociaVault profile)
+- Request-builder fixtures cover every route
 
 | Tool | Inputs | Binding kinds | Producers (besides the prompt) | Extractor |
 |---|---|---|---|---|
@@ -114,16 +287,15 @@ A coverage test iterates `osint::registry()` and asserts that every required inp
 | address | yes | GLEIF, SEC, Nominatim, Census, Firecrawl (4), Hunter (2) (10) | keyed address fields (composed parts must all occur) |
 | coordinates | yes | Nominatim, Census (2) | lat/lon fields |
 
-No tool is left unreachable. `overpass_places` became reachable through the `coordinates` kind (Nominatim or Census, radius 500 m). Phone numbers are not supported: no catalog tool takes one, so there is no `phone` binding kind.
+`overpass_places` is reachable via `coordinates` (Nominatim or Census, radius 500 m). No `phone` kind: no catalog tool takes a phone number.
 
 ## Primary providers
 
 [![OSINT catalog](diagrams/osint-providers.svg)](diagrams/osint-providers.html)
 
+Firecrawl, SociaVault, and Hunter are primary. Everything else is a gap-filler.
 
-Firecrawl, SociaVault, and Hunter are the primary providers. Every other tool is a gap-filler driven by their data.
-
-**SociaVault**: 44 one-credit `GET https://api.sociavault.com/v1/scrape/...` routes, grouped into 5 catalog tools so the picker catalog stays compact. Each tool takes a `platform` (plus an optional `endpoint`), and an internal route matrix (`SOCIAVAULT_ROUTES`) maps them to a path and query parameter. The first route for each platform is the default. Followers/following routes and single-post routes (post details, comments, transcripts) are deliberately absent. Unknown endpoints are rejected.
+**SociaVault** — 44 one-credit `GET https://api.sociavault.com/v1/scrape/...` routes in 5 catalog tools. Internal `SOCIAVAULT_ROUTES` maps platform + optional `endpoint`. No followers/following or single-post routes. Unknown endpoints rejected.
 
 | Tool | Routes | Platform: endpoints (default first) |
 |---|---|---|
@@ -133,13 +305,44 @@ Firecrawl, SociaVault, and Hunter are the primary providers. Every other tool is
 | `sociavault_user_content` | 18 | facebook: posts, reels; instagram: posts, highlights, reels; pinterest: boards; threads: posts; tiktok: videos, live; twitch: videos, schedule; twitter: tweets, tweets_all (user_id); youtube: videos, community_posts, lives, playlists, shorts |
 | `sociavault_google_search` | 1 | google: search (fallback only) |
 
-**Firecrawl** (`https://api.firecrawl.dev/v2`): `firecrawl_search` (`POST /search`, sources web/news, categories github→`developer`/research, `tbs`, location, limit ≤ 10), `firecrawl_scrape` (`POST /scrape`, markdown and links only), `firecrawl_map` (`POST /map`, same-site links, contact and about pages ranked first, top 25 kept), `firecrawl_batch_scrape` (`POST /batch/scrape`, default 5 and at most 10 URLs, polled), `firecrawl_crawl` (`POST /crawl`, at most 10 pages, depth 1, off by default, polled), and `firecrawl_extract` (`POST /scrape` with a fixed JSON schema; 5 credits). Map and crawl refuse social, publisher, and Q&A hosts.
+**Firecrawl** (`https://api.firecrawl.dev/v2`)
 
-**Hunter** (`https://api.hunter.io/v2`, read endpoints only): `hunter_domain_finder` (`/domain-finder`, free), `hunter_email_count` (`/email-count`, free), `hunter_domain_search`, `hunter_email_finder`, `hunter_email_verifier` (202 retried up to 3 times), `hunter_company_enrichment` (`/companies/find`, alias `hunter_tech_lookup`), `hunter_email_insight` (`/email-insight`, free), `hunter_person_enrichment` (`/people/find` by webmail email or LinkedIn handle), and `hunter_combined_enrichment` (`/combined/find`, company email only).
+| Tool | Route | Notes |
+| --- | --- | --- |
+| `firecrawl_search` | `POST /search` | sources web/news; github→`developer`/research; `tbs`; location; limit ≤ 10 |
+| `firecrawl_scrape` | `POST /scrape` | markdown and links |
+| `firecrawl_map` | `POST /map` | same-site; contact/about first; top 25 |
+| `firecrawl_batch_scrape` | `POST /batch/scrape` | 5 default, ≤10 URLs, polled |
+| `firecrawl_crawl` | `POST /crawl` | ≤10 pages, depth 1, off by default, polled |
+| `firecrawl_extract` | `POST /scrape` + schema | 5 credits |
 
-Dependency chain: prompt → Firecrawl search (Google search after a weak search) → SociaVault search/search users → SociaVault profile (handle, platform id) → user content; Firecrawl search or Hunter domain finder → domain → Firecrawl map → batch scrape / extract; domain → Hunter email count → domain search → email finder → verifier; domain → company enrichment → social handles → SociaVault profile; email → email insight → person (webmail) or combined (company) enrichment. Gap-fillers (crt.sh, passive DNS, RDAP, Shodan, Keybase, GitHub, and others) consume these values but never feed Hunter.
+Map and crawl refuse social, publisher, and Q&A hosts.
 
-Spec defaults to confirm (all named settings or consts): `google_fallback_min_results = 3` (`GOOGLE_FALLBACK_MIN_RESULTS`), `sociavault_turn_credits_opening = 3` / `sociavault_turn_credits_later = 8` (`SOCIAVAULT_TURN_CREDITS_*`), and `picker::MAX_PICKS = 13`.
+**Hunter** (`https://api.hunter.io/v2`, read only)
+
+| Tool | Route | Notes |
+| --- | --- | --- |
+| `hunter_domain_finder` | `/domain-finder` | free |
+| `hunter_email_count` | `/email-count` | free |
+| `hunter_domain_search` | domain search | — |
+| `hunter_email_finder` | email finder | — |
+| `hunter_email_verifier` | verifier | 202 retried up to 3 times |
+| `hunter_company_enrichment` | `/companies/find` | alias `hunter_tech_lookup` |
+| `hunter_email_insight` | `/email-insight` | free |
+| `hunter_person_enrichment` | `/people/find` | webmail email or LinkedIn handle |
+| `hunter_combined_enrichment` | `/combined/find` | company email only |
+
+Chains:
+
+- prompt → Firecrawl search (Google search after a weak search) → SociaVault search/users → profile → user content
+- Firecrawl search or Hunter domain finder → domain → Firecrawl map → batch scrape / extract
+- domain → Hunter email count → domain search → email finder → verifier
+- domain → company enrichment → social handles → SociaVault profile
+- email → email insight → person (webmail) or combined (company) enrichment
+
+Gap-fillers consume these values and never feed Hunter.
+
+Spec defaults still to confirm: `google_fallback_min_results = 3`, `sociavault_turn_credits_opening = 3` / `_later = 8`, `picker::MAX_PICKS = 13`.
 
 ## Persistence
 
@@ -147,12 +350,39 @@ Spec defaults to confirm (all named settings or consts): `google_fallback_min_re
 
 [![Report tables](diagrams/schema-core.svg)](diagrams/schema-core.html)
 
+- `store.rs` migrates additively, then `schema_recon.sql` (threads, messages, runs, calls, cache, settings, entities, claims, sources, relations, edits, extraction jobs, app state).
+- Intel: `schema_intel_recon.sql` — `intel_report_jobs`, `intel_report_tasks`, `intel_report_attempts` (v24), sections.
+- Tables added after a shipped version also need `CREATE TABLE IF NOT EXISTS` on open, before any `SELECT`/`UPDATE`.
+- `ARGOS_HOME` changes the whole state root.
 
-`store.rs` migrates the existing Brain database additively, then applies `schema_recon.sql` for threads, messages, runs, calls, cache, settings, entities, claim insights, sources, relations, edits, extraction jobs, and application state. Intel recon tables (`schema_intel_recon.sql`) include `intel_report_jobs`, `intel_report_tasks`, `intel_report_attempts` (schema version 24), and sections. SQLite foreign keys and unique source identities protect provenance. Answers also store exact cited call IDs. The database migration uses a transaction and user version; reopening preserves new and unrelated tables. A table added to a SQL file after that schema version already shipped must also be created on the open path with `CREATE TABLE IF NOT EXISTS` before any statement that reads it. `ARGOS_HOME` changes the complete state root.
+Brain recall is hybrid:
 
-Brain recall is hybrid. SQLite (`argos.db`) stays the source of truth for memories, claims, and provenance; Brain vectors live in a LanceDB directory beside it, `memory_lancedb/` (`paths::lancedb_dir()`, so `~/.argos/memory_lancedb` by default), in one table `brain_memories` with `memory_id` (Utf8, the logical key) and `vector` (FixedSizeList<Float32, 384>). Vectors come from a local all-MiniLM-L6-v2 (Xenova's quantized ONNX export) run with tract-onnx in `embed.rs`: mean pooling over the attention mask, then L2 normalization. The model and `tokenizer.json` are cached under `ARGOS_HOME/models/all-MiniLM-L6-v2` (or `ARGOS_EMBED_MODEL_DIR`) and downloaded from Hugging Face on first use. `brain_lance.rs` wraps the async LanceDB API in sync calls (a process-local Tokio runtime, with `block_in_place` or a helper thread when already inside a runtime), so `Store` methods and `recall_for_turn` stay sync. Writes (`add_memory`, `update_memory`, Atlas and Recon claim persistence) upsert vectors after the SQLite commit; deletes (memory, Atlas article or cycle, thread with insights) remove them. `Store::recall` embeds the query, takes cosine neighbours from Lance (score `1 - distance`), and blends them with the Jaccard/category ranking in `brain::hybrid_recall`; `recall_for_turn` then adds entity-linked insights from `recon_recall`. The SQLite table `memory_embed_meta` (schema version 17) stores the embedding fingerprint (model, pooling, width, table layout). On the first vector use in a process, a missing table or a fingerprint mismatch drops and rebuilds the Lance table from `memories` (above 3,000 memories recall stays on Jaccard until a manual rebuild), and otherwise missing or stale ids are reconciled. `argos memories reindex` rebuilds the table and fingerprint on demand. `ARGOS_EMBED=0` turns embedding off; every index or embedding failure also degrades recall to Jaccard and never fails a turn. Version 17 also drops a leftover `memory_vec` table and its shadow tables from unreleased local builds.
+| Store | Role |
+| --- | --- |
+| SQLite `argos.db` | Memories, claims, provenance (source of truth) |
+| LanceDB `memory_lancedb/` | `brain_memories`: `memory_id` + 384-dim vector |
 
-At launch, runs still marked running become interrupted, with completed calls retained. Resume is explicit and skips completed calls. Deleting a thread rejects later run writes, removes its transcript and thread owned calls, and updates shared insight sources. The default deletion mode keeps Brain memories and marks their source deleted. `--with-insights` deletes every Brain memory owned by that investigation, including pinned and edited ones, plus the saved recon-path summary. Shared insights retain surviving evidence. Manual Brain memories filed against another conversation stay available through `remember` and `recall`.
+Vectors: local all-MiniLM-L6-v2 (Xenova quantized ONNX) via tract-onnx in `embed.rs` (mean pool, L2).
+
+- Model cache: `ARGOS_HOME/models/all-MiniLM-L6-v2` or `ARGOS_EMBED_MODEL_DIR`
+- `brain_lance.rs` wraps async Lance in sync
+- Writes upsert after SQLite commit; deletes remove vectors
+
+`Store::recall`:
+
+- Embed query → cosine neighbours (`1 - distance`) blended with Jaccard/category (`brain::hybrid_recall`)
+- `recall_for_turn` adds entity-linked insights
+- `memory_embed_meta` (v17) stores the embedding fingerprint
+- Mismatch or missing table rebuilds from `memories` (above 3,000 stay Jaccard until `argos memories reindex`)
+- `ARGOS_EMBED=0` or any index failure → Jaccard; the turn continues
+- v17 also drops leftover `memory_vec`
+
+Launch:
+
+- Running runs become interrupted; completed calls retained
+- Resume is explicit and skips completed calls
+- Default thread delete keeps Brain memories and marks their source deleted
+- `--with-insights` deletes memories owned only by that investigation
 
 ## Model and UI boundaries
 
@@ -160,10 +390,16 @@ At launch, runs still marked running become interrupted, with completed calls re
 
 [![TUI shell](diagrams/tui-shell.svg)](diagrams/tui-shell.html)
 
+- Credentials: `auth.json`. Roles: `config.toml`.
+- Tabs: Defaults, OpenRouter, Google, Nvidia.
+- Old Writer seeds Recon + Synthesis. Tool picker default (`openrouter` / `typesafe/jev-1.13`) seeds only when both fields empty.
+- Sign-in does not assign roles. Legacy Grok/OpenAI stay until replaced; never sent to Google or Nvidia.
+- Recon: list, then transcript. Synthesis answers store Brain memory ids used in the prompt. Markdown answer, raised prompt band, collapsed decision/tool rows. Untitled threads named from the first question.
+- Publisher / social / wiki / aggregator hosts stay citations or handles. They never become subject identifiers. Never sent to Hunter.
+- Catalog: 59 tools in `osint.rs` (15 categories). Primary adapters: `osint/providers.rs`. News/legal: `osint/news_legal.rs`.
+- Keys: Firecrawl bearer (`firecrawl_api_key` / `FIRECRAWL_API_KEY`); Hunter `x-api-key`; SociaVault `X-API-Key`. Saved key overrides env. `locked_host` on primary requests.
 
-Provider accounts live in `auth.json`; role choices live independently in `config.toml`. Models tabs are Defaults, OpenRouter, Google, and Nvidia. The old Writer choice seeds the Recon and Synthesis defaults during migration. The Tool picker default (`openrouter` / `typesafe/jev-1.13`) is seeded only when both of its fields are empty and never overwrites a saved role. Sign-in saves credentials without assigning model roles. Legacy Grok/OpenAI accounts remain until the user picks a replacement and are never sent to Google or Nvidia. The TUI sends run events with thread IDs and reloads selected thread state from SQLite, so switching threads does not route one thread's result into another transcript. Recon has two full-screen views: the investigation list, then the transcript of the investigation that was opened. Each synthesis answer stores the Brain memories that were in its prompt. The transcript renders that answer as Markdown, shows the question on a raised prompt band, and keeps decisions and tool calls as collapsed disclosure rows. A mark on the answer opens the memories. When a thread is still titled `New investigation`, the Recon model names it from the first question and a later manual rename is left in place.
-
-The recon log in the transcript shows the turn's directives (or the fallback set) with their entities and targets, the picker transport and model snapshot, each ordered step with the directives it serves and its dependencies, the inputs bound for it and the bindings it produced with their evidence ids, and any fallback requests. If the answer step fails, for example on a provider 429, the run is marked failed with that reason, the tool results stay stored, and the run can be resumed; resume skips completed steps and binds the next one from the saved bindings. News and reference publishers, Q&A, wiki, aggregator, and user-generated sites (Quora, Reddit, Medium, Wikipedia and mirrors, Fandom, answers sites, Social Blade, Apify, and similar), article pages, and account platforms such as truthsocial.com or x.com stay citations or handles, including subject-named subdomains such as `elonmusk.fandom.com`: their domains do not become entities or identifiers of the subject, and social or publisher hosts are never sent to Hunter. The earlier opening-discovery and tool-isolation helpers remain compiled and tested but are not used by a turn. The model account extraction and the "answered?" assessment, the last paths that sent the tool catalog to the Recon model, were removed. The 59 tool definitions in `osint.rs` are the catalog shown in OSINT and supplied to the picker, across fifteen categories (News and Legal joined in #29; their adapters live in `osint/news_legal.rs`). The primary-provider adapters live in `osint/providers.rs` (see Primary providers below). Firecrawl uses a bearer token from `firecrawl_api_key` or `FIRECRAWL_API_KEY`. Hunter uses `HUNTER_API_KEY` with header `x-api-key`. SociaVault uses `SOCIAVAULT_API_KEY` with header `X-API-Key`. Each provider's tools share one key row in the OSINT screen. The executor refuses a primary-provider request whose host is not that provider's API host (`locked_host`). A non-empty settings key overrides the matching environment variable. Each definition carries validation, examples, source documentation, restrictions, and cache/rate policy. Adapters build fixed-host requests from validated values. Detailed raw responses are bounded and collapsed in the UI. Network fixture tests cover parser and validation behavior; live endpoints need separate optional smoke checks because quotas and uptime vary.
+Answer-step 429: run failed, tool results kept, resume skips completed steps.
 
 ## Intel reports
 
@@ -171,31 +407,62 @@ The recon log in the transcript shows the turn's directives (or the fallback set
 
 [![Intel report states](diagrams/intel-job-states.svg)](diagrams/intel-job-states.html)
 
-
-Intel Briefing starts a report job on the selected Atlas article. Collection reserves budget by inserting `intel_report_attempts` (unique attempt id, job, generation, task, tool). `update_report_job` writes stage and section counts only; it does not assign `tool_calls_done`. The UI shows `Tools: N calls used · B budget`. Busy work on this article hides Summary and View full report; another article's job does not. Summary renders the selected revision's `bluf` section. The full-report card is 70% of the terminal width. See [intel-report.html](diagrams/intel-report.html).
+- Briefing starts a job on the selected Atlas article.
+- Collection inserts `intel_report_attempts` (unique attempt id, job, generation, task, tool).
+- `update_report_job` writes stage and section counts only. It does not assign `tool_calls_done`.
+- UI: `Tools: N calls used · B budget`. N is Argos dispatches, including errors.
+- Busy on this article hides Summary and View full report. Another article’s job does not.
+- Summary = selected revision `bluf`. Full-report card = 70% terminal width.
 
 ## Atlas
 
 [![Atlas news cycle](diagrams/atlas-pipeline.svg)](diagrams/atlas-pipeline.html)
 
+Two-phase news pipeline. Pause stores a cursor; Resume continues.
 
-Atlas is a Home application beside Recon and Brain. Its live view runs, pauses, and resumes a two-phase news pipeline. Phase 1 sends the keyword clusters to GNews Search (`/api/v4/search`, because `source.country` is only on that payload) and NewsData latest (`/api/1/latest`), 10 articles per request, English, a 48-hour window, and no country filter. Queries are packed under GNews's 200-character limit. Country codes are tallied and split 20/30/30/20. Group 1 is temperature 1.0, Group 2 interpolates 0.99 to 0.70, Group 3 interpolates 0.69 to 0.10, and Group 4 is dropped. Phase 2 requests NewsAPI country headlines (`pageSize` 20, no keyword) and Currents latest news (`page_size` 20) for the kept countries, Group 1 first. A shared daily quota ledger stops a provider at its free-tier cap (GNews 100, NewsData 200, NewsAPI 100, Currents 250) and also counts Recon's NewsAPI calls. Dedup drops a repeated URL hash, an exact normalized title, or a fuzzy title above 0.85 when the other publisher's domain ranks higher. The set includes the live session feed, the current run's saved rows, and every article still inside the 36-hour retention window, so a new cycle skips headlines already processed; a better-source replace only applies inside the current run. The database stores the run, its cursor, and the country statistics. Headline text stays in the session feed and is not written to SQLite. The origins table and the past-run card render each row as the country name and code, `United States (US)`. Past runs is a separate list; choosing one opens that run's statistics. Above that list, a Web Mercator world map drawn in Braille colors countries from the selected run by temperature, and stamps tier 1 and 2 countries by name and tier 3 countries by code. The map takes about three quarters of the space under the buttons and does not take keys or clicks. Choosing another history row recolours the map. Zooming in clears that heat overlay. GNews, NewsData, and Currents are catalog tools for manual runs and are omitted from the Recon picker.
+| Phase | Providers | Shape |
+| --- | --- | --- |
+| 1 Discovery | GNews Search `/api/v4/search`, NewsData `/api/1/latest` | 10 articles, English, 48 h, no country filter. GNews queries packed under 200 chars. |
+| 2 Headlines | NewsAPI country headlines (`pageSize` 20), Currents (`page_size` 20) | Kept countries, Group 1 first. |
+
+Country tally split 20/30/30/20. Group 1 temperature 1.0; Group 2 0.99–0.70; Group 3 0.69–0.10; Group 4 dropped.
+
+Daily quota ledger (free-tier): GNews 100, NewsData 200, NewsAPI 100 (includes Recon), Currents 250.
+
+Dedup: URL hash, exact normalized title, or fuzzy title &gt; 0.85 when the other publisher ranks higher. Set includes live feed, current run, and 36-hour retention.
+
+- SQLite stores the run, cursor, and country stats
+- Headline text stays in the session feed
+- Origins: `United States (US)`
+- History list plus Web Mercator Braille map (tier 1–2 named, tier 3 by code)
+- Map is not interactive
+
+GNews, NewsData, Currents are catalog tools for manual runs and omitted from the Recon picker.
 
 ## News and Legal context tools (#29)
 
-`newsapi_search`, `newsapi_headlines`, `courtlistener_case_search`, `courtlistener_docket_search`, and `courtlistener_judge_search` serve two directive **context kinds**, `news` and `legal`. A directive may target them (`target_kind_allowed`), but they are not binding kinds: the tools' `ToolIo` rows set `context` and produce no bindings, so their URLs never feed Hunter or any other tool (D1 unchanged); they are evidence and citations only. `evidence_kinds` returns the context kind, so `serves_for` offers News tools only to a directive targeting `news` and Legal tools only to one targeting `legal`; with no directives they serve nothing.
+`newsapi_search`, `newsapi_headlines`, `courtlistener_case_search`, `courtlistener_docket_search`, `courtlistener_judge_search` serve context kinds `news` and `legal`. They are evidence only: `ToolIo` sets `context`, produce no bindings, never feed Hunter.
 
-A deterministic keyword rule (`directives::context_targets`) decides the context targets in both paths: `fallback_directives` adds them to d1, and `parse_directives` adds missing ones to d1 and removes any Recon added that the prompt does not ask for, so "who is elon musk?" never spends the daily quotas. Keywords inside the subject's own name do not count: the rule shares the entity exemption the tool-name check uses (`entity_mask`), so "who owns Fox News?", "who is Judge Judy?" and "what is the Daily Journal?" run no context tool, while "latest news about Fox News" and "has Judge Judy been sued?" still do. Headline and judge searches are picked by the same rule. On a news or legal prompt the directive entity is the bare name ("has Elon Musk been sued?" → `Elon Musk`). The binder fills `query` with the entity alone (`How::EntityPhrase`, grounding `d1 entity`); the request builder sends it as an exact phrase. Date inputs (`from`/`to`, `filed_after`/`filed_before`) are filled only from dates written in the prompt (`prompt_dates`), grounded as `prompt`.
+`directives::context_targets` (keyword rule):
 
-The picker puts the context tools for a targeted kind first in the deterministic order (`picker::context_tools`: NewsAPI search, plus headlines when the prompt says headlines, plus `wikipedia_source_reliability`; CourtListener case and docket search, plus judge search first when the prompt mentions a judge), after the opening primary pick, and adds one when a model-picked order left a targeted kind uncovered. Without a key a News or Legal tool is left out of the eligible catalog (other keyed tools stay, marked `keyed: false`) and the OSINT screen shows "needs key". `wikipedia_source_reliability` needs no key.
+- Adds missing news/legal targets to d1; strips ones the prompt did not ask for.
+- Keywords inside the subject’s name do not count (`entity_mask`). “Who owns Fox News?” spends no news quota. “Latest news about Fox News” does.
+- Query = directive entity as exact phrase (`How::EntityPhrase`). Dates only from the prompt (`prompt_dates`).
 
-The step loop caps dispatched calls per provider (`news_calls_per_turn` 2, `legal_calls_per_turn` 3; extra steps are deferred with the budget reason). A CourtListener `rate_limited` result skips the remaining CourtListener steps with "CourtListener rate limit reached"; the turn still synthesizes. The executor spaces CourtListener requests 12 s apart, never retries a NewsAPI or CourtListener 429, maps NewsAPI `status: error` codes and CourtListener 401/403/429 to readable errors, and redacts a key a body echoes. After a completed News or Legal call, `context_gate` drops result rows whose title or snippet does not contain a directive entity (or all its name tokens) from the evidence passed to Synthesis, notes the drop in the binding notes, and marks the step `no_results` when every row is dropped. Synthesis is asked to give each news line its publish date and source and each court line its court, filing date, and case name. When a WP:RSP index is warm, Synthesis also receives up to five Source reliability lines (Admiralty A–F) for publisher hosts in the news evidence.
+Picker puts matching context tools first after the opening primary pick (`picker::context_tools`). Missing key → omitted from eligible catalog.
+
+- Caps: `news_calls_per_turn` 2, `legal_calls_per_turn` 3
+- CourtListener 429 skips remaining CourtListener steps
+- Executor spaces CourtListener 12 s; no retry of NewsAPI/CourtListener 429
+- `context_gate` drops rows whose title/snippet lacks a directive entity
+
+Synthesis: news lines get publish date and source; court lines get court, filing date, case name. Warm WP:RSP index adds up to five Source reliability lines (Admiralty A–F).
 
 ## Admiralty source evaluation (WP:RSP)
 
-Article and claim confidence use two axes:
+| Axis | Scale | Source |
+| --- | --- | --- |
+| Source Reliability | A–F | English WP:RSP via MediaWiki `action=parse` on `Wikipedia:Reliable_sources/Perennial_sources/{1..8,X}`. `gr`→B, `nc`/`m`→C, `gu`→D, deprecated/blacklisted→E, unlisted→F. **A** is never assigned from RSP alone. |
+| Information Credibility | 1–6 | Atlas peer support: title peers + fact→1, fact or body peers→2, mid inference→3, low confidence→4, unreliable or conflict→5, no baseline with F→6. |
 
-1. **Source Reliability (A–F)** from English Wikipedia WP:RSP via MediaWiki `action=parse` on `Wikipedia:Reliable_sources/Perennial_sources/{1..8,X}`. Mapping: `gr`→B, `nc`/`m`→C, `gu`→D, deprecated/blacklisted→E, unlisted→F. **A** is not assigned from RSP alone.
-2. **Information Credibility (1–6)** from peer corroboration after Atlas peer support: title peers + fact→1, fact or body peers→2, mid inference→3, low confidence→4, unreliable source or conflict→5, no baseline with F→6.
-
-Scaled confidence is `clamp(base × reliability_factor × credibility_factor, 0, 1)` and is what Intel HIGH/MEAN show. The Intel confidence pane also shows REL (letter) and CRD (digit) with an Admiralty footnote (`B2 · reuters.com · generally reliable · 2021`). The RSP index caches for 30 days in process memory and `app_state.wikipedia_rsp_index`.
+Scaled confidence: `clamp(base × reliability_factor × credibility_factor, 0, 1)`. Intel shows HIGH/MEAN plus REL (letter) and CRD (digit). Index caches 30 days in process memory and `app_state.wikipedia_rsp_index`.

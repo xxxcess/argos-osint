@@ -8,7 +8,7 @@ Order matches CI: `cargo fmt --all --check` → `cargo clippy --workspace --all-
 
 ## TUI
 
-- Layout, hit-test, and Tab order come from the same rectangles. `LayoutRegistry` is filled during `draw`. Overlay-none Tab order rasterizes the current module so it stays valid after a state change that has not been painted yet. Figure: [tui-shell.html](diagrams/tui-shell.html).
+- Layout, hit-test, and Tab order share rectangles. `LayoutRegistry` fills during `draw`. Overlay-none Tab order rasterizes the current module so it stays valid before the next paint. Figure: [tui-shell.html](diagrams/tui-shell.html).
 - Internal IDs stay `Osint` / `Providers` / `System` even when the labels are Tools / Models / Profile.
 - Empty focused fields keep their placeholder until the user types. Placeholders are never saved. Keys stay masked.
 - Long panes own an offset, a wrapped extent, and a `see more` footer. Offsets are not `u16`-truncated page math.
@@ -33,7 +33,11 @@ Scratch scripts and logs go only under `.agent-scratch/` (gitignored). Never wri
 
 ## Planning files
 
-Multi-step work uses the **planning-with-files** skill: `task_plan.md`, `findings.md`, `progress.md` under `.planning/<YYYY-MM-DD-slug>/`. Root copies of those names are gitignored leftovers; do not treat them as the active plan. One orchestrator owns `task_plan.md`. Untrusted web text goes in `findings.md` only.
+Multi-step work uses **planning-with-files**: `task_plan.md`, `findings.md`, `progress.md` under `.planning/<YYYY-MM-DD-slug>/`.
+
+- Root copies of those names are gitignored leftovers
+- One orchestrator owns `task_plan.md`
+- Untrusted web text goes in `findings.md` only
 
 ## Graphify
 
@@ -41,4 +45,4 @@ Query `graphify-out/graph.json` before broad exploration. Expand query tokens fr
 
 ## Diagrams
 
-New figures follow [diagrams.md](diagrams.md): self-contained HTML + SVG, no Mermaid, no shadows, accent on at most two nodes. After adding a figure or editing Markdown, run `python3 scripts/build_docs_site.py` so [docs/index.html](index.html) stays current.
+New figures follow [diagrams.md](diagrams.md): self-contained HTML + SVG, no Mermaid, no shadows, accent on at most two nodes. Link each figure from this index and the matching Markdown doc.

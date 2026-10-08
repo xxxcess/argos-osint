@@ -1,10 +1,12 @@
 # Argos OSINT
 
-Argos is a terminal investigation workspace. It gathers public sources, binds evidence, and writes cited answers. Home launches four applications—**Intel**, **Atlas**, **Brain**, and **Recon**—and five system surfaces: **Jobs**, **Logs**, **Tools**, **Models**, and **Profile**.
+Argos is a terminal investigation workspace. It gathers public sources, binds evidence, and writes cited answers.
 
-Only Recon has a chat. Everything else is fields, lists, and buttons. Observations are retrieved data with a timestamp, not proof of identity or ownership.
+Home launches four applications — **Intel**, **Atlas**, **Brain**, **Recon** — and five system surfaces: **Jobs**, **Logs**, **Tools**, **Models**, **Profile**.
 
-[Documentation in the browser](docs/index.html) · [Markdown index](docs/README.md) · [All figures](docs/diagrams.md)
+Only Recon has a chat. Everything else is fields, lists, and buttons. Observations are retrieved data with a timestamp. They are not proof of identity or ownership.
+
+[Docs](docs/README.md) · [Usage](docs/usage.md) · [Figures](docs/diagrams.md)
 
 [![Argos workspace](docs/diagrams/workspace.svg)](docs/diagrams/workspace.html)
 
@@ -67,4 +69,7 @@ The rest of the set: [docs/diagrams.md](docs/diagrams.md).
 
 ## Limits
 
-Adapters issue bounded public HTTP. A catalog entry or fixture test does not prove live availability. Shodan InternetDB is noncommercial. Nominatim needs an identifying User-Agent, attribution, caching, and at most one request per second. Model calls use the account and terms you configure.
+- Adapters issue bounded public HTTP. A catalog entry or fixture test does not prove live availability.
+- Shodan InternetDB is noncommercial.
+- Nominatim needs an identifying User-Agent, attribution, caching, and at most one request per second.
+- Model calls use the account and terms you configure.

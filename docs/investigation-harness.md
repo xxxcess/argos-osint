@@ -1,110 +1,83 @@
-# Argos OSINT — Unified Investigation Harness
+# Unified Investigation Harness
 
-## Overview
+Shared evidence-driven pipeline for:
 
-The Unified Investigation Harness provides a shared, incremental, evidence-driven execution pipeline used across:
-- **Recon Chat** (direct interactive multi-turn investigations)
-- **Home Composer** (fast launcher with immediate session allocation)
-- **Intel Briefing & Jobs** (systematic multi-section background reports)
+- **Recon Chat** — interactive multi-turn investigations
+- **Home Composer** — launcher that allocates a session immediately
+- **Intel Briefing & Jobs** — multi-section background reports
 
-The harness preserves surface-specific presentations, permission restrictions, and persistent database identities while unifying the underlying task scheduling, catalog governance, tool routing, evidence curation, and model execution.
+Surfaces keep their own UI, permissions, and stored ids. Admission, picker, executor, evidence curation, and synthesis are shared. Recon turn details: [architecture.md](architecture.md).
 
 [![Investigation harness](diagrams/investigation-harness.svg)](diagrams/investigation-harness.html)
 
-## Architecture
+## Model roles
 
-Surfaces keep their own UI and stored ids. Admission gates, the picker, the executor, evidence curation, and synthesis are shared. See [architecture.md](architecture.md) for Recon turn mechanics.
+Defaults live under **Models → Defaults**. Empty derived roles inherit. Explicit config wins. Cycles are rejected. In-flight tasks keep snapshotted assignments.
 
----
-
-## 9 Logical Model Roles & Inheritance
-
-Model defaults are configured under **Providers → Defaults** or `/models`. Nine distinct logical roles govern the lifecycle of an investigation:
-
-| Logical Role | Purpose | Default Inheritance |
+| Logical Role | Purpose | Default inheritance |
 |--------------|---------|---------------------|
-| `recon` (Planner) | Query decomposition, directive formulation, task dependencies | Root default |
-| `tool_picker` | Picks next eligible tool and binding arguments | OpenRouter Jev (`typesafe/jev-1.13`) |
-| `synthesis` | Produces structured assessments, final briefing, executive answers | Root default |
-| `classifier` | OSINT taxonomy classification and tag assignment | OpenRouter Jev (`typesafe/jev-1.13`) |
-| `summarization` | Compresses evidence passages, produces grounded views | Inherits `synthesis` |
-| `evidence_curator` | Extracts source-linked passages, observations, and temporal dates | Inherits `recon` |
-| `entity_resolver` | Resolves cross-platform identities and entity conflicts | Inherits `classifier` |
-| `claim_assessor` | Evaluates claim verification, stances, and citations | Inherits `synthesis` |
-| `investigation_controller`| Verifies checkpoints, stopping conditions, and task dispatch | Inherits `recon` |
+| `recon` | Directives, task dependencies | Root default |
+| `tool_picker` | Next eligible tool | OpenRouter Jev (`typesafe/jev-1.13`) |
+| `synthesis` | Assessments and answers | Root default |
+| `classifier` | Taxonomy and tags | OpenRouter Jev (`typesafe/jev-1.13`) |
+| `summarization` | Compress evidence | Inherits `synthesis` |
+| `evidence_curator` | Source-linked passages | Inherits `recon` |
+| `entity_resolver` | Identity conflicts | Inherits `classifier` |
+| `claim_assessor` | Verdicts and citations | Inherits `synthesis` |
+| `investigation_controller` | Checkpoints and dispatch | Inherits `recon` |
 
-### Inheritance Rules
-1. When a derived role (such as `evidence_curator` or `claim_assessor`) has an empty provider/model assignment in `config.toml`, it automatically inherits from its designated parent.
-2. An explicit configuration immediately overrides inheritance.
-3. Inheritance cycles are rejected.
-4. Changing defaults applies to future tasks; in-flight tasks preserve their snapshotted assignments.
+## Catalog projection
 
----
+59 tools in 14 intelligence categories. `hunter_tech_lookup` aliases `hunter_technologies`.
 
-## 3-Level Tool Catalog & 14 Intelligence Categories
+1. Web Discovery
+2. News & Events
+3. Publisher Context
+4. Legal & Litigation
+5. Corporate & Organizations
+6. Professional Identity
+7. Social Content
+8. Public Account Corroboration
+9. Domain & Infrastructure
+10. Historical Web
+11. Software & Code
+12. Geography & Places
+13. Bitcoin & Blockchain
+14. Vulnerabilities & Cyber
 
-All 59 catalog tools map into 14 authoritative intelligence categories:
+| Level | Audience | Contents |
+| --- | --- | --- |
+| 1 Compact | Planner / Controller | Cost, prerequisites, limits |
+| 2 Candidates | Picker | Binding status, expected contribution |
+| 3 Contract | Executor | JSON schema, route, retry guidance |
 
-1. **Web Discovery** (`firecrawl_search`, `firecrawl_crawl`, `sociavault_google_search`, etc.)
-2. **News & Events** (`gnews_search`, `newsdata_latest`, `newsapi_everything`, `currents_search`, etc.)
-3. **Publisher Context** (`wikipedia_search`, `wikipedia_page`, `wikidata_entity`, etc.)
-4. **Legal & Litigation** (`courtlistener_dockets`, `courtlistener_opinions`, etc.)
-5. **Corporate & Organizations** (`sec_edgar_company`, `sec_edgar_filings`, `opencorporates_search`, etc.)
-6. **Professional Identity** (`hunter_domain_search`, `hunter_email_verifier`, `hunter_technologies`, etc.)
-7. **Social Content** (`sociavault_twitter_user`, `sociavault_instagram_user`, `sociavault_reddit_post`, etc.)
-8. **Public Account Corroboration** (`github_user`, `github_repo`, `huggingface_model`, etc.)
-9. **Domain & Infrastructure** (`whois_lookup`, `dns_lookup`, `shodan_host`, `crtsh_certs`, etc.)
-10. **Historical Web** (`wayback_available`, `wayback_timemap`, `commoncrawl_index`, etc.)
-11. **Software & Code** (`github_code_search`, `npm_package`, `pypi_package`, etc.)
-12. **Geography & Places** (`nominatim_search`, `overpass_query`, `geonames_postal`, etc.)
-13. **Bitcoin & Blockchain** (`blockchain_address`, `blockchain_tx`, etc.)
-14. **Vulnerabilities & Cyber** (`cve_lookup`, `nvd_cve`, `alienvault_otx`, etc.)
+## Validation gates
 
-*Note: `hunter_tech_lookup` is an authoritative alias resolving to `hunter_technologies`.*
+1. **Task admission** — surface eligibility, no duplicate tasks, valid dependencies
+2. **Tool preflight**
+   - Atlas-only news tools (`atlas_gnews`, `atlas_newsdata`, `atlas_currents`, `atlas_newsapi`) forbidden in Recon and Intel
+   - `sociavault_google_search` needs **both** weak Firecrawl **and** an unmet evidence need
+   - Platform-native tools need an unmet platform-native need
+3. **Evidence admission** — URL/domain, retrieval timestamp, quote/facts
+4. **Claim assessment** — claim-specific isolation; contradictions kept
+5. **Publication** — every assertion grounded in admitted passages
 
-### 3-Level Catalog Projection
-- **Level 1 (Compact Capabilities)**: Lightweight descriptions, cost, prerequisites, and limitations for Planner and Controller prompt context.
-- **Level 2 (Picker Candidates)**: Task-specific candidate list with prerequisite binding status and expected contributions.
-- **Level 3 (Argument Contract)**: Concrete JSON schema, route builder, and retry guidance for the selected tool.
+## Reasoning channels
 
----
+- Reasoning is never promoted to answer text or evidence. Reasoning-only completion = empty, bounded repair.
+- Stream answer (`on_delta`) and reasoning (`on_reasoning`) separately.
+- TUI thinking rows: `▶ Thinking… · {role} · {model} · {timestamp}`. Expand with Enter/click.
+- `/thinking` toggles disclosure. `/details` toggles directive/tool payloads.
 
-## Validation Gates & Scarce Provider Protections
+## Persistence
 
-Investigations are guarded by five deterministic validation gates:
+SQLite (current schema version 24; harness tables from v20+):
 
-1. **Task Admission Gate**: Verifies surface eligibility, prevents duplicate tasks, and validates dependency graphs.
-2. **Tool Preflight Gate**:
-   - **Atlas Encapsulation**: Atlas-only news discovery tools (`atlas_gnews`, `atlas_newsdata`, `atlas_currents`, `atlas_newsapi`) are strictly forbidden in Recon Chat and Intel.
-   - **SociaVault Protection**: `sociavault_google_search` requires **both** weak Firecrawl discovery and an unmet evidence need. Weak Firecrawl alone cannot authorize SociaVault credit expenditure.
-   - **Platform-Native Gate**: Specialized platform tools require an unmet platform-native need.
-3. **Evidence Admission Gate**: Ensures every curated passage possesses an authoritative URL/domain, retrieval timestamp, and substantive quote/facts.
-4. **Claim Assessment Gate**: Strict claim-specific evidence isolation. An unrelated supporting passage for entity B can never validate a claim about entity A. Contradictions are explicitly preserved.
-5. **Publication Gate**: Verifies that every assertion in the final briefing is grounded in admitted evidence passages.
-
----
-
-## Reasoning Channel Separation & Collapsed Thinking
-
-Argos enforces strict channel separation between model reasoning and answer content across all providers (Grok, OpenAI, OpenRouter, and Local):
-
-1. **No Reasoning Promotion**: Reasoning/thinking output is never promoted to answer text or treated as evidence. If a model returns only reasoning without answer content, it is classified as an empty completion requiring bounded repair.
-2. **Separate Streaming**: Answer tokens and reasoning tokens flow through distinct channels (`on_delta` vs `on_reasoning`).
-3. **Collapsed Default Display**:
-   - In the TUI, thinking rows appear as compact summaries:
-     `▶ Thinking… · {role} · {model} · {timestamp}`
-   - Users can expand any attempt row via Enter or click.
-   - `/thinking` toggles global thinking disclosure without affecting model reasoning effort.
-   - `/details` toggles directive and tool payload disclosure without exposing thinking.
-
----
-
-## Chronological Trace & Persistence
-
-All activity is recorded in SQLite schema version 20:
-- `investigation_tasks`: Granular task execution states (`pending`, `executing`, `completed`, `failed`, `blocked`, `cancelled`).
-- `investigation_task_dependencies`: Directional task prerequisite edges.
-- `investigation_evidence_passages`: Deduplicated evidence quotes with entity bindings and stance tags.
-- `investigation_claim_assessments`: Claim-specific verdicts (`verified`, `refuted`, `inconclusive`, `insufficient_evidence`).
-- `investigation_events`: Chronological trace of gates, tool calls, and transitions with secret redaction.
-- `investigation_stream_parts`: Durable attempt streams for crash recovery and resumable execution.
+| Table | Contents |
+| --- | --- |
+| `investigation_tasks` | `pending`, `executing`, `completed`, `failed`, `blocked`, `cancelled` |
+| `investigation_task_dependencies` | Prerequisite edges |
+| `investigation_evidence_passages` | Deduped quotes, entity bindings, stance |
+| `investigation_claim_assessments` | `verified`, `refuted`, `inconclusive`, `insufficient_evidence` |
+| `investigation_events` | Gate/tool/transition trace, secrets redacted |
+| `investigation_stream_parts` | Durable streams for resume |

@@ -2,7 +2,7 @@
 
 Argos figures follow the editorial grammar in [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design): self-contained HTML with inline SVG. No Mermaid. No shadows. No generic rounded-box grids.
 
-Open a file under `docs/diagrams/` in a browser. Matching `.svg` files exist for Markdown embeds (GitHub README). Do not rasterize unless someone asks for PNG export.
+Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.svg` files embed in Markdown. Do not rasterize unless someone asks for PNG.
 
 ## Catalog
 

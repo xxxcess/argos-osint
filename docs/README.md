@@ -1,8 +1,8 @@
 # Argos documentation
 
-**Browser:** open [index.html](index.html) (redirects to [html/index.html](html/index.html)). That site includes every Markdown doc and every diagram. Rebuild with `python3 scripts/build_docs_site.py`.
+Start here. Docs are Markdown under `docs/`. Open a figure HTML file only when you want the SVG page.
 
-Start here for Markdown. Deep investigation mechanics stay in [architecture.md](architecture.md). Provider keys and role routing stay in [providers.md](providers.md).
+Deep investigation: [architecture.md](architecture.md). Keys and roles: [providers.md](providers.md).
 
 ## Product
 
@@ -18,7 +18,7 @@ Start here for Markdown. Deep investigation mechanics stay in [architecture.md](
 
 ## Figures
 
-Self-contained HTML + SVG. Grammar: [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design). Full catalog: [diagrams.md](diagrams.md).
+HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design). Catalog: [diagrams.md](diagrams.md).
 
 | Figure | Type | File |
 | --- | --- | --- |

@@ -24,7 +24,7 @@ Only Recon has a composer. Intel Briefing starts a **report job** on an Atlas ar
 
 ## Model roles
 
-Each role is provider + model in `config.toml`. Accounts live in `auth.json`. Saving a key does not change a role.
+Each role is provider + model plus an ordered `fallbacks` list in `config.toml`. Accounts live in `auth.json`. Saving a key does not change a role.
 
 [![Models and roles](diagrams/model-roles.svg)](diagrams/model-roles.html)
 
@@ -65,7 +65,7 @@ Busy work on this article hides Summary and the launch control. Another articleâ
 
 ## Persistence
 
-- SQLite `~/.argos/argos.db` (`ARGOS_HOME`), `user_version` 24, additive migrations
+- SQLite `~/.argos/argos.db` (`ARGOS_HOME`), `user_version` 25, additive migrations (v25 Atlas packet outputs)
 - LanceDB `memory_lancedb/` (384-dim MiniLM)
 - `ARGOS_EMBED=0` â†’ Jaccard recall
 

@@ -35,7 +35,7 @@ ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm
 ## State & Config (all under `~/.argos`, override with `ARGOS_HOME`)
 | File | Purpose |
 |------|---------|
-| `argos.db` | SQLite: Brain memories, threads, runs, calls, cache, entities, provenance |
+| `argos.db` | SQLite: Brain memories, threads, runs, calls, cache, entities, provenance, Atlas packets (schema 25) |
 | `memory_lancedb/` | LanceDB vectors for Brain (table `brain_memories`, 384-dim) |
 | `config.toml` | Role defaults (Recon, Tool picker, Synthesis, Classifier, Summarization), OSINT settings, recon limits |
 | `auth.json` | Provider credentials (OpenRouter, Google, Nvidia, and preserved legacy Grok/OpenAI accounts) — owner-only perms on Unix |
@@ -79,12 +79,13 @@ argos memories reindex   # rebuild LanceDB index
 
 ## Architecture notes
 
-- **Roles** (Models → Defaults): Recon, Tool picker, Synthesis, Classifier, Summarization, plus harness roles. Old Writer seeds Recon+Synthesis. Tool picker seeds OpenRouter `typesafe/jev-1.13` only when empty.
+- **Roles** (Models → Defaults): Recon, Tool picker, Synthesis, Classifier, Summarization, plus harness roles. Ordered `fallbacks` per role. Old Writer seeds Recon+Synthesis. Tool picker seeds OpenRouter `typesafe/jev-1.13` only when empty.
 - **Picker transports**: `typesafe/jev-*` → OpenRouter `/alpha/decisions`. Others → chat JSON + repair.
 - **Primary OSINT**: Firecrawl, SociaVault, Hunter. Hunter inputs: prompt, Firecrawl, SociaVault, or earlier Hunter.
 - **Recon turn**: Brain recall → directives (d1–d5) → picker (1 pick/request, ≤13) → binder → sequential executor → streaming synthesis. Figure: `docs/diagrams/recon-turn.html`.
 - **Intel**: jobs on an Atlas article; `intel_report_attempts` for dispatch counts; Summary = selected `bluf`. Figure: `docs/diagrams/intel-report.html`.
-- **Atlas**: GNews/NewsData discovery → NewsAPI/Currents headlines; daily quota ledger.
+- **Atlas**: GNews/NewsData discovery → NewsAPI/Currents headlines; phase 4 durable packets; phase 5 index/verify. Outcomes: completed / waiting / blocked / partial / failed. Optional context failures are warnings. Indexed +1 (brief) is expected.
+- **Retries**: primary 4 attempts (10/20/30s waits), each fallback 3 (10/20s). One retry owner; `complete()` is one-shot streaming. Figure: `docs/diagrams/atlas-pipeline.html`.
 - **IDs**: Tools=`Osint`, Models=`Providers`, Profile=`System`.
 
 ## Testing Quirks

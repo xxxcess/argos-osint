@@ -352,6 +352,7 @@ Spec defaults still to confirm: `google_fallback_min_results = 3`, `sociavault_t
 
 - `store.rs` migrates additively, then `schema_recon.sql` (threads, messages, runs, calls, cache, settings, entities, claims, sources, relations, edits, extraction jobs, app state).
 - Intel: `schema_intel_recon.sql` — `intel_report_jobs`, `intel_report_tasks`, `intel_report_attempts` (v24), sections.
+- Atlas packets: schema v25 stores durable unit outputs, dispositions, and completion receipts (`atlas_work_units`).
 - Tables added after a shipped version also need `CREATE TABLE IF NOT EXISTS` on open, before any `SELECT`/`UPDATE`.
 - `ARGOS_HOME` changes the whole state root.
 
@@ -391,8 +392,8 @@ Launch:
 [![TUI shell](diagrams/tui-shell.svg)](diagrams/tui-shell.html)
 
 - Credentials: `auth.json`. Roles: `config.toml`.
-- Tabs: Defaults, OpenRouter, Google, Nvidia.
-- Old Writer seeds Recon + Synthesis. Tool picker default (`openrouter` / `typesafe/jev-1.13`) seeds only when both fields empty.
+- Tabs: Defaults, OpenRouter, Google, Nvidia. Defaults lists ordered fallbacks per role (Add / Delete / Move). Refresh model lives on provider tabs only.
+- Old Writer seeds Recon + Synthesis. Tool picker default (`openrouter` / `typesafe/jev-1.13`) seeds only when both fields empty. Empty `fallbacks` lists are added on migration.
 - Sign-in does not assign roles. Legacy Grok/OpenAI stay until replaced; never sent to Google or Nvidia.
 - Recon: list, then transcript. Synthesis answers store Brain memory ids used in the prompt. Markdown answer, raised prompt band, collapsed decision/tool rows. Untitled threads named from the first question.
 - Publisher / social / wiki / aggregator hosts stay citations or handles. They never become subject identifiers. Never sent to Hunter.
@@ -418,12 +419,15 @@ Answer-step 429: run failed, tool results kept, resume skips completed steps.
 
 [![Atlas news cycle](diagrams/atlas-pipeline.svg)](diagrams/atlas-pipeline.html)
 
-Two-phase news pipeline. Pause stores a cursor; Resume continues.
+News cycle with durable extraction, publication, and indexing. Pause stores a cursor; Resume continues from the saved phase and retries only incomplete packets.
 
 | Phase | Providers | Shape |
 | --- | --- | --- |
 | 1 Discovery | GNews Search `/api/v4/search`, NewsData `/api/1/latest` | 10 articles, English, 48 h, no country filter. GNews queries packed under 200 chars. |
 | 2 Headlines | NewsAPI country headlines (`pageSize` 20), Currents (`page_size` 20) | Kept countries, Group 1 first. |
+| 3 Classify | Classifier role | Category tag per article (`unk` without a classifier). |
+| 4 Extract | Synthesis role + ordered fallbacks | Lead claims required; supplemental context optional. Validated packets persist atomically with dispositions and a completion receipt. |
+| 5 Index | Local MiniLM / Jaccard | Publication then required memory IDs + brief. Incomplete index stays Waiting while background retries continue. |
 
 Country tally split 20/30/30/20. Group 1 temperature 1.0; Group 2 0.99–0.70; Group 3 0.69–0.10; Group 4 dropped.
 
@@ -431,11 +435,26 @@ Daily quota ledger (free-tier): GNews 100, NewsData 200, NewsAPI 100 (includes R
 
 Dedup: URL hash, exact normalized title, or fuzzy title &gt; 0.85 when the other publisher ranks higher. Set includes live feed, current run, and 36-hour retention.
 
-- SQLite stores the run, cursor, and country stats
+Cycle outcome is derived from durable obligations, not a sticky Partial flag:
+
+| State | Meaning |
+| --- | --- |
+| completed | Required lead, publication, and indexing succeeded. Optional context failures become warnings. |
+| waiting | Eligible work remains (including background indexing). |
+| blocked | Required configuration is missing (for example embeddings disabled when indexing is required). |
+| partial | Recovery exhausted with useful output but missing required work. |
+| failed | No useful required output. |
+
+- Packet identity = stage + canonical input IDs/revisions + contract version
+- Empty legacy output refs are not treated as success; those packets re-extract
+- Indexed count includes the cycle brief (+1 vs created claims). Compare IDs and revisions, not created vs indexed totals
+- Diagnostics: `12 new claims · 1 brief · 13/13 index ready`
+- SQLite stores the run, cursor, country stats, packet units, and publication receipts
 - Headline text stays in the session feed
 - Origins: `United States (US)`
-- History list plus Web Mercator Braille map (tier 1–2 named, tier 3 by code)
-- Map is not interactive
+- History list plus Web Mercator Braille map (default world view ~1.20× prior scale; pan/zoom until reset)
+- Insights tables fill inner width and wrap; tall rows scroll by rendered lines
+- Atlas cycle jobs: parent `atlas_cycle` plus phase children; waiting/blocked are not terminal
 
 GNews, NewsData, Currents are catalog tools for manual runs and omitted from the Recon picker.
 

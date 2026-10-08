@@ -62,7 +62,7 @@ Two-phase news cycle:
 1. GNews + NewsData, 48 h, score countries
 2. NewsAPI + Currents headlines for kept bands
 
-Pause stores a cursor. Resume continues. History + Braille world map follow the selected cycle.
+Pause stores a cursor. Resume continues and retries only incomplete packets. History + Braille world map follow the selected cycle (default world view about 1.20× the previous scale). Insights tables wrap to inner width. Incomplete indexing stays **waiting** while background retries continue; optional context failures complete with warnings.
 
 Pipeline and quotas: [architecture.md](architecture.md#atlas).
 
@@ -74,7 +74,7 @@ Pipeline and quotas: [architecture.md](architecture.md#atlas).
 | --- | --- |
 | Brain | Saved memories, Find, Create / Pin / Delete, path graph ([recall](diagrams/brain-recall.html)) |
 | Tools (`Osint`) | Manual HTTP tools, keys, documentation, history |
-| Models (`Providers`) | Defaults, OpenRouter, Google, Nvidia |
+| Models (`Providers`) | Defaults (primary + ordered fallbacks), OpenRouter, Google, Nvidia |
 | Jobs | Background work ([lifecycle](diagrams/jobs-lifecycle.html)) |
 | Logs | Durable events |
 | Profile (`System`) | Hardware and storage paths |

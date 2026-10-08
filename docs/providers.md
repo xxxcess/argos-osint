@@ -40,6 +40,8 @@ argos logout
 
 Saving a role writes `config.toml` only. System log records `defaults.<role>: … -> …`. Provider list = accounts on this machine. Model list = what that account may call. A saved model id is kept if the live catalog is down.
 
+Each role has an ordered `fallbacks` list of provider/account/model routes. Migration adds empty lists without changing the primary. Exact duplicates of the primary or of another fallback are rejected; the same model through another provider or account is distinct. Defaults shows priority, provider, and model; Add fallback opens a Google | Nvidia | OpenRouter catalog popup. Catalog browsing never issues inference. Help: `Tried top to bottom after primary retries`.
+
 `argos osint user-agent` sets the public HTTP contact string. Blank → built-in `Argos OSINT/0.1 (…)`. Never send an empty User-Agent.
 
 ### Tool picker transport
@@ -88,10 +90,15 @@ Surfaces: Brain summary failure card, Jobs dashboard, `provider_verify` CLI. Eve
 
 ## Budgeted executor
 
-- ≤2 outbound requests per execution (1 streaming + 1 non-streaming, or 2 streaming if the provider refuses non-streaming)
+Shared chain (`provider_chain`): primary **4** attempts (waits 10s, 20s, 30s before retries); each fallback **3** (waits 10s, 20s). Maximum requests `4 + 3F`; all-failure base waits `60 + 30F` seconds. Exhaust the primary before fallback 1, then each fallback top to bottom. Snapshot routes at admission; persist attempt history.
+
+- Every dispatched inference failure follows this policy, including 400/401/403/404, 429, 5xx, network/TLS, timeout, stream, and invalid output
+- Missing credentials, invalid route, or definite capability incompatibility is a recorded skip (Blocked if nothing can dispatch)
 - Admission wait does not consume an attempt
-- Non-retryable (`auth`, `permission`, `invalid_model`, `configuration`, `malformed_request`) stop after 1
-- Retryable categories honor `Retry-After` and shared backoff
+- Honor provider Retry-After / account cooldowns in addition to base waits
+- `complete()` is one streaming request; `complete_one()` is one non-stream request. Hidden stream-to-nonstream retries were removed so the chain owns the budget
+- Summarization uses the same primary budget of 4; a transport switch inside that budget still counts as a request
+- Successful fallback is informational and does not mark a cycle Partial
 - Provider 429 / 503 defer picker calls; deterministic order when no primaries remain
 
 ## Graph explanation jobs
@@ -119,6 +126,6 @@ Recon limits: `news_calls_per_turn` 2, `legal_calls_per_turn` 3. Spec defaults s
 ## Verification and testing
 
 - Unit tests for every failure category and stage
-- Executor ≤2 requests; admission wait consumes no attempt
+- Executor primary budget is 4 requests; admission wait consumes no attempt
 - Cache invalidation when inputs change
 - Graph explanation provider integration

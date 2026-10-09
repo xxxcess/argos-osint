@@ -152,11 +152,33 @@ V2 ignores `experimental.primary_tools`. `.opencode/opencode.json` is the primar
 | `webfetch` | `url` |
 | `websearch` | `query` |
 | `question` | header, prompt, choices |
-| `subagent` | `explore`, `ecc-planner`, or `ecc-reviewer` |
+| `subagent` | `agent`, `description`, `prompt`. Optional `background` and `sessionID` |
 
-Skill ids: `graphify`, `argos-plan`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`.
+Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`.
 
-Repo questions start with shell `graphify query "<question>"`. Load `graphify` only when that command is unclear. Multi-step work loads `argos-plan` and leaves the plan on disk. GSD phase commands stay explicit (`/gsd-...`); their tools are not on `build` or `plan`.
+`build` may launch `explore`, `ecc-planner`, `ecc-reviewer`, and `ecc-edit`. `plan` may launch the first three. Repo questions start with shell `graphify query "<question>"`. Load `graphify` only when that command is unclear. Multi-step work loads `argos-plan` and leaves the plan on disk. GSD phase commands stay explicit (`/gsd-...`); their tools are not on `build` or `plan`.
+
+## OpenCode phase edits
+
+On `build`, load `argos-implement` and send the current phase's code edits to `ecc-edit`. `plan` does not launch `ecc-edit`.
+
+1. Read the in-progress phase and split its files into disjoint sets. One set is one unit.
+2. Call `subagent` once per unit. Two or more units go in the same turn with `"background": true`. One unit stays in the foreground. Do not set `model`.
+
+```json
+{
+  "agent": "ecc-edit",
+  "description": "Edit binder inputs",
+  "prompt": "Phase, exact file list, change, and constraints. The child has no other context.",
+  "background": true
+}
+```
+
+3. Stop until those children finish. Do not edit their files in the parent while they run, and do not poll them.
+4. `ecc-edit` formats the Rust files it changed with `cargo fmt -- <paths>` and does not run tests.
+5. The parent then runs, with shell `timeout` `600000` and `ARGOS_EMBED` unset: `cargo fmt --all --check`, then `cargo clippy --workspace --all-targets -- -D warnings`, then `cargo test --workspace`.
+6. On failure, map each error to its unit. Launch `ecc-edit` again the same way. Pass `sessionID` to continue the editor that already owns those files, and include the failing command and the relevant output in `prompt`.
+7. Re-run the failed command, then the full trio. After it passes, run `graphify update .`.
 
 ## planning-with-files
 
@@ -166,7 +188,7 @@ Use **planning-with-files** (`~/.agents/skills/planning-with-files/SKILL.md`) fo
 2. Files: `task_plan.md` (phases, Next Step, decisions, errors), `findings.md` (research; untrusted web text here only), `progress.md` (session log).
 3. One orchestrator owns `task_plan.md`. Workers append their own ledger.
 4. Root `task_plan.md` / `findings.md` / `progress.md` are gitignored leftovers.
-5. Graphify first, then write the plan from the subgraph. Do not paste the plan back into the chat.
+5. Graphify first, then write the plan from the subgraph. Do not paste the plan back into the chat. Implementation of the current phase on the `build` agent follows **OpenCode phase edits**.
 
 ## diagrams
 

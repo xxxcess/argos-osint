@@ -13,11 +13,19 @@ OpenCode V2 ignores `experimental.primary_tools`. `build` and `plan` in `.openco
 | `edit`, `write` | `build` only. `plan` cannot edit project files |
 | `skill` | `{ "id": "<id>" }` |
 | `webfetch`, `websearch`, `question` | One URL, one query, or one user choice |
-| `subagent` | `explore`, `ecc-planner`, or `ecc-reviewer` |
+| `subagent` | `agent`, `description`, `prompt`. `build` may launch `explore`, `ecc-planner`, `ecc-reviewer`, and `ecc-edit`. `plan` may launch the first three |
 
-Skill ids: `graphify`, `argos-plan`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`.
+Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`.
 
 `argos-plan` writes `.planning/<YYYY-MM-DD-slug>/` and keeps that text out of the chat. Load `graphify` only when the shell command above is unclear. `/gsd-...` still runs GSD with its own tools.
+
+## Phase edits
+
+On `build`, load `argos-implement`. Split the in-progress phase into disjoint file sets and call `subagent` once per set. Use `ecc-edit`. Set `background` to true and send every call in the same turn when there are two or more sets. The prompt carries the phase, the file list, and the change. Do not set `model`, and do not poll.
+
+`ecc-edit` changes only those files, then runs `cargo fmt -- <paths>` for the Rust files it changed. It cannot run the test suite.
+
+When the children finish, the parent runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`, with shell `timeout` `600000` and `ARGOS_EMBED` unset. Failures go back to `ecc-edit`, using `sessionID` to continue the editor that owns the file. The parent re-runs the failed command, then the full trio, then `graphify update .`. `plan` does not launch `ecc-edit`.
 
 ## Graph first
 

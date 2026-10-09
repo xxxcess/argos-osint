@@ -67,16 +67,18 @@ Primary: Firecrawl, SociaVault, Hunter. Saved key overrides env.
 Cache for the credit-reset interval: daily → 1 day; weekly → 1 week; monthly → 30 days.
 
 - Firecrawl and Hunter reset monthly
-- SociaVault prepaid never resets; public tools have no plan → 30 days
+- SociaVault and Whoxy prepaid never reset; public tools have no plan → 30 days
 - NewsAPI, CourtListener, HackerTarget reset daily
 - Failed results are never cached
 - Live smoke tests are `#[ignore]`
 
 | Provider | Tools | Notes |
 |---|---|---|
-| Firecrawl | search, scrape, map, batch scrape, crawl (off by default), extract | Batch scrape and crawl are polled jobs, charged per page. Extract uses a fixed schema (5 credits). |
+| Firecrawl | search, scrape, map, batch scrape, crawl (off by default), extract, plus Google/Yandex/Mojeek SERP scrape adapters | Batch scrape and crawl are polled jobs, charged per page. Extract uses a fixed schema (5 credits). Named-engine tools POST `/v2/scrape` at engine SERP URLs; `firecrawl_search` does not satisfy named-engine coverage. |
 | SociaVault | profile, search, search users, user content, Google search | 44 one-credit routes. No followers/following or single-post routes. Google search only after a weak Firecrawl search. |
 | Hunter | domain finder, email count, domain search, email finder, email verifier, company enrichment, email insight, person enrichment, combined enrichment | Read endpoints only. Inputs from prompt, Firecrawl, SociaVault, or earlier Hunter. `hunter_tech_lookup` aliases company enrichment. |
+| Whoxy | `whoxy_whois_history` | Prepaid WHOIS history. Env `WHOXY_API_KEY` / `WHOXY_API_KEY_FALLBACK`. Header `x-api-key` then query `key`. 1 credit for nonempty history, 0 for recognized empty. Cache full history, project `from`/`to`/`limit`. Default pool 0. |
+| Holehe | `holehe_email_lookup` | No key. Native Twitter, Spotify, Pinterest adapters (experimental, fixture-validated, not live-validated). 123 upstream catalog ids; others return `unsupported`. |
 
 ## Typed provider diagnostics
 

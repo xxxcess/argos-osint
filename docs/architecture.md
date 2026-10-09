@@ -165,31 +165,16 @@ Packet: question, classified mode, Brain facts (data, omitted when empty), direc
 - Unknown id: one repair, then drop unknowns if at least one valid citation remains. If completed evidence exists and no valid citation is left, keep the answer; Brain extraction infers support and marks those claims as inferences.
 - Stored answers normalize to `[a][b]`. Separate extraction derives atomic Brain claims. Retry with `recon retry-insights`.
 
-## Turn deadline and streaming synthesis
+## Turn telemetry and streaming synthesis
 
-No single outer timeout. `TurnClock` is recomputed as rounds add calls.
+Elapsed-time clocks are telemetry. They do not skip tools, cut synthesis, or move a turn to the background. Stops come from user cancel, per-request timeouts, call/credit caps, retry exhaustion, and no-progress bounds. Persisted `turn_seconds` / `max_turn_seconds` still load; CLI flags are hidden and emit a deprecation warning.
 
-| Slice | Allowance |
-| --- | --- |
-| Recon / picker | 45 s per model round that actually runs |
-| Tools | `max(longest timeout, sum(timeouts) / 4)` + CourtListener spacing + Firecrawl poll. Cache hits add 0. |
-| Synthesis | 300 s + 1 s per 1,000 chars of evidence, capped by the turn ceiling. Citation repair adds half again, still under the ceiling. |
-
-Deadline = that sum clamped between `turn_seconds` (300–900, default 300) and `recon_limits.max_turn_seconds` (120–1800, default 900). Missing config loads 900. Floor above ceiling raises the ceiling.
-
-- New tool calls stop once they would eat the synthesis reserve
-- Tool allowance gone → skip later calls (`turn budget`) and synthesize
-- Stream until the hard ceiling; early stop only after 60 s with no new text
-- Cutoff keeps streamed text, a deterministic evidence summary, and `Synthesis ran out of time; re-run or raise max_turn_seconds`
-- Provider stream fail after tokens: keep the text. Stage `cut short`
-- Cancel stops immediately
-
-Transcript shows `Deadline 6m 10s: 11 calls, ~52k chars evidence` (`plan.deadline_note`).
+`plan.deadline_note` may still carry an elapsed/allowance label (`Deadline 6m 10s: 11 calls, ~52k chars evidence`). The TUI status shows stage, retries, and call counts.
 
 - `ask` / `resume` emit `TurnEvent::AnswerDelta`
 - TUI live bubble ~50 ms
 - `argos ask` deltas → stderr; stdout is final JSON
-- Provider that rejects streaming: one completion
+- Provider that rejects streaming: the shared role executor counts the next attempt
 
 ## Tool inputs and bindings
 
@@ -273,9 +258,9 @@ Coverage tests:
 
 | Kind | From the prompt | Tool producers | Rule extractor |
 |---|---|---|---|
-| domain | yes | crt.sh, passive DNS, HackerTarget, RDAP, Shodan, urlscan, Firecrawl (5), Hunter (5), SociaVault (3), Keybase, and others (24) | domain scanner (registrable TLD; social, publisher, file, and webmail hosts dropped) and entity selection on search hits |
+| domain | yes | crt.sh, Whoxy WHOIS history, passive DNS, HackerTarget, RDAP, Shodan, urlscan, Firecrawl (5), Hunter (5), SociaVault (3), Keybase, and others | domain scanner (registrable TLD; social, publisher, file, and webmail hosts dropped) and entity selection on search hits |
 | ip | yes | passive DNS, HackerTarget, urlscan, Firecrawl (7) | IPv4/IPv6 scanner |
-| email | yes | RDAP, grep.app, Firecrawl (5), Hunter (4), SociaVault (3) (15) | email scanner (webmail domains are not company domains) |
+| email | yes | RDAP, Holehe email lookup, grep.app, Firecrawl (5), Hunter (4), SociaVault (3) | email scanner (webmail domains are not company domains) |
 | url | yes | Common Crawl, Arquivo, GitHub, GitLab, Wikidata, Keybase, NVD, urlscan, Firecrawl (6), SociaVault (4), and others (20) | URL scanner (subject-related or own-domain hosts) |
 | handle | yes | Firecrawl (5), Keybase, GitHub, Hunter (3), SociaVault (5) (15) | profile-URL and @mention-near-platform extractor plus keyed account fields (Keybase proofs, SociaVault, Hunter social keys); subject-owned only; platform qualifier kept; SociaVault search results unverified |
 | platform_id | no (`TOOL_ONLY`) | SociaVault profile (1) | keyed `platform_id` (Twitter rest_id, Instagram user id, YouTube channelId) with its platform |
@@ -310,6 +295,9 @@ Firecrawl, SociaVault, and Hunter are primary. Everything else is a gap-filler.
 | Tool | Route | Notes |
 | --- | --- | --- |
 | `firecrawl_search` | `POST /search` | sources web/news; github→`developer`/research; `tbs`; location; limit ≤ 10 |
+| `firecrawl_google_search` | `POST /scrape` of Google SERP | named-engine discovery; parser fixtures only, not live-validated |
+| `firecrawl_yandex_search` | `POST /scrape` of Yandex SERP | named-engine discovery; parser fixtures only, not live-validated |
+| `firecrawl_mojeek_search` | `POST /scrape` of Mojeek SERP | named-engine discovery; parser fixtures only, not live-validated |
 | `firecrawl_scrape` | `POST /scrape` | markdown and links |
 | `firecrawl_map` | `POST /map` | same-site; contact/about first; top 25 |
 | `firecrawl_batch_scrape` | `POST /batch/scrape` | 5 default, ≤10 URLs, polled |
@@ -332,6 +320,10 @@ Map and crawl refuse social, publisher, and Q&A hosts.
 | `hunter_person_enrichment` | `/people/find` | webmail email or LinkedIn handle |
 | `hunter_combined_enrichment` | `/combined/find` | company email only |
 
+**Whoxy** (`https://api.whoxy.com/`) — `whoxy_whois_history`. Prepaid credit pool (default 0). Cache the full history, then project `from`/`to`/`limit`. Observation dates are not registration dates. Monthly `credit_reset` does not replenish Whoxy.
+
+**Holehe** — `holehe_email_lookup` (`EmailRegistration`). Native Twitter, Spotify, and Pinterest adapters; 120 other catalog services return `unsupported`. Registration is email association, not identity or account control.
+
 Chains:
 
 - prompt → Firecrawl search (Google search after a weak search) → SociaVault search/users → profile → user content
@@ -353,6 +345,7 @@ Spec defaults still to confirm: `google_fallback_min_results = 3`, `sociavault_t
 - `store.rs` migrates additively, then `schema_recon.sql` (threads, messages, runs, calls, cache, settings, entities, claims, sources, relations, edits, extraction jobs, app state).
 - Intel: `schema_intel_recon.sql` — `intel_report_jobs`, `intel_report_tasks`, `intel_report_attempts` (v24), sections.
 - Atlas packets: schema v25 stores durable unit outputs, dispositions, and completion receipts (`atlas_work_units`).
+- Schema v26: `recon_model_operations`, `recon_model_attempts`, Intel `lease_epoch`.
 - Tables added after a shipped version also need `CREATE TABLE IF NOT EXISTS` on open, before any `SELECT`/`UPDATE`.
 - `ARGOS_HOME` changes the whole state root.
 

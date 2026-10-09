@@ -65,7 +65,7 @@ Busy work on this article hides Summary and the launch control. Another articleâ
 
 ## Persistence
 
-- SQLite `~/.argos/argos.db` (`ARGOS_HOME`), `user_version` 25, additive migrations (v25 Atlas packet outputs)
+- SQLite `~/.argos/argos.db` (`ARGOS_HOME`), `user_version` 26, additive migrations (v26 `recon_model_operations` / `recon_model_attempts`, Intel `lease_epoch`)
 - LanceDB `memory_lancedb/` (384-dim MiniLM)
 - `ARGOS_EMBED=0` â†’ Jaccard recall
 

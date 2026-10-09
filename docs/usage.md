@@ -121,7 +121,7 @@ argos memories reindex
 
 - `recon show` — plan (directives, grounding, bindings, picker records)
 - Default delete keeps Brain memories and marks their source deleted; `--with-insights` removes memories owned only by that investigation
-- `recon limits` — per-turn budgets, including `--max-turn-seconds` (default 900)
+- `recon limits` — per-turn budgets (`--max-calls`, provider credits). `--turn-seconds` / `--max-turn-seconds` are hidden and deprecated; they no longer terminate a turn.
 - `argos ask` streams to stderr; stdout is final JSON
 - Nominatim and SEC need an identifying User-Agent first
 
@@ -131,7 +131,7 @@ State: `~/.argos` (`ARGOS_HOME` overrides).
 
 | Path | Contents |
 | --- | --- |
-| `argos.db` | SQLite, `user_version` 24, additive migrations |
+| `argos.db` | SQLite, `user_version` 26, additive migrations |
 | `memory_lancedb/` | Brain vectors |
 | `config.toml` | Role defaults |
 | `auth.json` | Credentials (owner-only on Unix) |

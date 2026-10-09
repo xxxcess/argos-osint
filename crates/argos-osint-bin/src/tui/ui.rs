@@ -14,7 +14,7 @@ use super::recon_parts::InvestigationPart;
 use super::app::{
     intel_category_short, intel_day_button_label, is_picker_field, unix_now, App, AtlasPage,
     BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId, IntelPage, IntelReconFocus,
-    ModuleId, Overlay, ProviderPage, Target, INTEL_CATEGORIES,
+    LastViewSession, ModuleId, Overlay, ProviderPage, Target, INTEL_CATEGORIES,
 };
 use super::theme;
 use argos_osint_core::atlas;
@@ -447,7 +447,17 @@ fn popup_area(area: Rect) -> Rect {
 }
 
 pub(crate) fn active_popup_area(app: &App, area: Rect) -> Rect {
-    if matches!(&app.overlay, Overlay::Block { title, .. } if title.starts_with("Report ")) {
+    if matches!(&app.overlay, Overlay::ResumeSession(_)) {
+        let width = 64.min(area.width.saturating_sub(4));
+        let height = 12.min(area.height.saturating_sub(2));
+        Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        }
+    } else if matches!(&app.overlay, Overlay::Block { title, .. } if title.to_ascii_lowercase().contains("report"))
+    {
         let width = ((u32::from(area.width) * 70) / 100).max(1) as u16;
         let height = ((u32::from(area.height) * 80) / 100).max(1) as u16;
         Rect {
@@ -2435,6 +2445,10 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
                 nudge(&mut app.scrolls.intel_brief, delta * 3, stack_max);
             }
         }
+        Region::IntelExtracted => {
+            let max = intel_extracted_scroll_max(app);
+            nudge(&mut app.scrolls.intel_extracted, delta * 3, max);
+        }
         Region::IntelBrief => {
             let max = intel_brief_scroll_max(app);
             nudge(&mut app.scrolls.intel_brief, delta * 3, max);
@@ -2556,8 +2570,13 @@ pub fn page(app: &mut App, direction: i32) {
             shift_atlas_feed(app, direction * room);
         }
         Some(ModuleId::Intel) if app.intel_page == IntelPage::Briefing => {
-            let max = intel_brief_scroll_max(app);
-            nudge(&mut app.scrolls.intel_brief, direction * 6, max);
+            if app.focus == Target::IntelLeftColumn {
+                let max = intel_extracted_scroll_max(app);
+                nudge(&mut app.scrolls.intel_extracted, direction * 6, max);
+            } else {
+                let max = intel_brief_scroll_max(app);
+                nudge(&mut app.scrolls.intel_brief, direction * 6, max);
+            }
         }
         Some(ModuleId::Intel) => {
             let room = intel_list_room(app).max(1) as i32;
@@ -2602,6 +2621,7 @@ enum Region {
     Path,
     Related,
     Summary,
+    IntelExtracted,
     IntelBrief,
     IntelFull,
     ReconContext,
@@ -2706,8 +2726,10 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
             }
         }
         Some(ModuleId::Intel) if app.intel_page == IntelPage::Briefing => {
-            let (_left, center, _right) = intel_briefing_areas(body);
-            if !contains(center, x, y) {
+            let (left, center, _right) = intel_briefing_areas(body);
+            if contains(left, x, y) {
+                Region::IntelExtracted
+            } else if !contains(center, x, y) {
                 Region::None
             } else if let Some(layout) = intel_center_layout(app, center) {
                 if abs_contains(layout.full, x, y) {
@@ -3667,29 +3689,111 @@ fn field_value_area(area: Rect) -> Rect {
     }
 }
 
-fn field_placeholder(field: FieldId) -> &'static str {
+fn count_items_label(count: usize) -> String {
+    if count == 1 {
+        "1 item".to_string()
+    } else {
+        format!("{count} items")
+    }
+}
+
+pub(crate) fn field_placeholder(app: &App, field: FieldId) -> String {
     match field {
-        FieldId::BrainApp => "Source app name",
-        FieldId::BrainConversation => "Optional conversation ID",
-        FieldId::BrainInsight => "Write a useful fact or finding…",
-        FieldId::BrainQuery => "Search memories by topic…",
-        FieldId::ReconSearch => "Find investigations…",
-        FieldId::IntelSearch => "Search title, source, or topic…",
-        FieldId::OsintSearch => "Find tools by name or purpose…",
-        FieldId::OsintInput => "JSON inputs; see example above",
-        FieldId::JobsSearch => "Find jobs by name or state…",
-        FieldId::LogsSearch => "Filter messages or IDs…",
-        FieldId::RouterKey => "Paste OpenRouter API key",
-        FieldId::GoogleKey => "Paste Google AI Studio key",
-        FieldId::NvidiaKey => "Paste NVIDIA API key",
-        FieldId::RouterEndpoint | FieldId::GoogleEndpoint | FieldId::NvidiaEndpoint => {
-            "API base URL, including version"
+        FieldId::BrainApp => "Source app name".into(),
+        FieldId::BrainConversation => "Optional conversation ID".into(),
+        FieldId::BrainInsight => "Write a useful fact or finding…".into(),
+        FieldId::BrainQuery => {
+            format!(
+                "Search memories by topic ({})…",
+                count_items_label(app.memories.len())
+            )
         }
-        FieldId::GoogleModelFilter
-        | FieldId::NvidiaModelFilter
-        | FieldId::RouterModelFilter
-        | FieldId::FallbackFilter => "Filter model names or IDs…",
-        FieldId::Composer => "Ask an OSINT question…",
+        FieldId::ReconSearch => {
+            format!(
+                "Find investigations ({})…",
+                count_items_label(app.threads.len())
+            )
+        }
+        FieldId::IntelSearch => {
+            format!(
+                "Search title, source, or topic ({})…",
+                count_items_label(app.intel_articles.len())
+            )
+        }
+        FieldId::OsintSearch => {
+            format!(
+                "Find tools by name or purpose ({})…",
+                count_items_label(osint::registry().len())
+            )
+        }
+        FieldId::OsintInput => "JSON inputs; see example above".into(),
+        FieldId::JobsSearch => {
+            format!(
+                "Find jobs by name or state ({})…",
+                count_items_label(app.jobs.rows.len())
+            )
+        }
+        FieldId::LogsSearch => {
+            format!(
+                "Filter messages or IDs ({})…",
+                count_items_label(app.logs.rows.len())
+            )
+        }
+        FieldId::RouterKey => "Paste OpenRouter API key".into(),
+        FieldId::GoogleKey => "Paste Google AI Studio key".into(),
+        FieldId::NvidiaKey => "Paste NVIDIA API key".into(),
+        FieldId::RouterEndpoint | FieldId::GoogleEndpoint | FieldId::NvidiaEndpoint => {
+            "API base URL, including version".into()
+        }
+        FieldId::GoogleModelFilter => {
+            let count = app
+                .catalog_cache
+                .get("google")
+                .map(|c| c.len())
+                .unwrap_or_else(|| {
+                    if app.catalog_for == "google" {
+                        app.model_catalog.len()
+                    } else {
+                        0
+                    }
+                });
+            format!("Filter model names or IDs ({})…", count_items_label(count))
+        }
+        FieldId::NvidiaModelFilter => {
+            let count = app
+                .catalog_cache
+                .get("nvidia")
+                .map(|c| c.len())
+                .unwrap_or_else(|| {
+                    if app.catalog_for == "nvidia" {
+                        app.model_catalog.len()
+                    } else {
+                        0
+                    }
+                });
+            format!("Filter model names or IDs ({})…", count_items_label(count))
+        }
+        FieldId::RouterModelFilter => {
+            let count = app
+                .catalog_cache
+                .get("openrouter")
+                .map(|c| c.len())
+                .unwrap_or_else(|| {
+                    if app.catalog_for == "openrouter" {
+                        app.model_catalog.len()
+                    } else {
+                        0
+                    }
+                });
+            format!("Filter model names or IDs ({})…", count_items_label(count))
+        }
+        FieldId::FallbackFilter => {
+            format!(
+                "Filter model names or IDs ({})…",
+                count_items_label(app.model_catalog.len())
+            )
+        }
+        FieldId::Composer => "Ask an OSINT question…".into(),
         field if is_picker_field(field) => {
             if matches!(
                 field,
@@ -3703,9 +3807,9 @@ fn field_placeholder(field: FieldId) -> &'static str {
                     | FieldId::ClaimAssessorProvider
                     | FieldId::InvestigationControllerProvider
             ) {
-                "Choose a provider"
+                "Choose a provider".into()
             } else {
-                "Choose a model"
+                "Choose a model".into()
             }
         }
         FieldId::FirecrawlFallback
@@ -3715,8 +3819,8 @@ fn field_placeholder(field: FieldId) -> &'static str {
         | FieldId::CourtListenerFallback
         | FieldId::GnewsFallback
         | FieldId::NewsDataFallback
-        | FieldId::CurrentsFallback => "Optional backup API key",
-        _ => "Paste API key",
+        | FieldId::CurrentsFallback => "Optional backup API key".into(),
+        _ => "Paste API key".into(),
     }
 }
 
@@ -3770,7 +3874,7 @@ pub(super) fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &s
     let gutter = if focused { "▎" } else { " " };
     let width = value_area.width.saturating_sub(1) as usize;
     let empty = if display.is_empty() {
-        field_placeholder(field).to_string()
+        field_placeholder(app, field)
     } else {
         String::new()
     };
@@ -6417,11 +6521,116 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     };
     let (left, center, right) = intel_briefing_areas(area);
     let insights_loading = intel_insights_loading(app);
-    if insights_loading {
-        draw_intel_section_loading(frame, left, " extracted ", "Extracting insights", app);
-    } else {
-        let buckets = intel_recon::bucket_extracted(&app.intel_claims, &app.intel_relations);
-        draw_intel_side_pane(frame, left, " extracted ", &buckets);
+    app.layout
+        .borrow_mut()
+        .register(Target::IntelLeftColumn, left);
+
+    frame.render_widget(Block::default().style(theme::text()), left);
+    if let Some(layout) = intel_extracted_layout(app, left) {
+        let detail = intel_insights_progress_detail(app);
+        // 1. claims
+        if layout.claims_loading {
+            draw_clipped_intel_loading(
+                frame,
+                left,
+                layout.claims,
+                " claims ",
+                "Extracting claims",
+                detail.as_deref(),
+            );
+        } else {
+            draw_clipped_md_pane(
+                frame,
+                left,
+                layout.claims,
+                " claims ",
+                &layout.claims_lines,
+                0,
+            );
+        }
+        // 2. inferences
+        if layout.inferences_loading {
+            draw_clipped_intel_loading(
+                frame,
+                left,
+                layout.inferences,
+                " inferences ",
+                "Extracting inferences",
+                detail.as_deref(),
+            );
+        } else {
+            draw_clipped_md_pane(
+                frame,
+                left,
+                layout.inferences,
+                " inferences ",
+                &layout.inferences_lines,
+                0,
+            );
+        }
+        // 3. actors
+        if layout.actors_loading {
+            let phase = if intel_insights_loading(app) {
+                "Extracting actors"
+            } else {
+                "Reviewing actors"
+            };
+            draw_clipped_intel_loading(
+                frame,
+                left,
+                layout.actors,
+                " actors ",
+                phase,
+                detail.as_deref(),
+            );
+        } else {
+            draw_clipped_md_pane(
+                frame,
+                left,
+                layout.actors,
+                " actors ",
+                &layout.actors_lines,
+                0,
+            );
+        }
+        // 4. links
+        if layout.links_loading {
+            let phase = if intel_insights_loading(app) {
+                "Extracting links"
+            } else {
+                "Explaining links"
+            };
+            draw_clipped_intel_loading(
+                frame,
+                left,
+                layout.links,
+                " links ",
+                phase,
+                detail.as_deref(),
+            );
+        } else {
+            draw_clipped_md_pane(frame, left, layout.links, " links ", &layout.links_lines, 0);
+        }
+        // 5. related context
+        if layout.context_loading {
+            draw_clipped_intel_loading(
+                frame,
+                left,
+                layout.context,
+                " related context ",
+                "Extracting context",
+                detail.as_deref(),
+            );
+        } else {
+            draw_clipped_md_pane(
+                frame,
+                left,
+                layout.context,
+                " related context ",
+                &layout.context_lines,
+                0,
+            );
+        }
     }
 
     // Side panes stay fixed; only the center stack scrolls.
@@ -6463,14 +6672,18 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             ButtonId::IntelReports,
             app.intel_recon_recommended.title(),
         );
-        draw_clipped_md_pane(
-            frame,
-            center,
-            layout.reports,
-            " Summary ",
-            &layout.reports_lines,
-            0,
-        );
+        if intel_report_generating(app) {
+            draw_intel_summary_loading(frame, center, layout.reports, app);
+        } else {
+            draw_clipped_md_pane(
+                frame,
+                center,
+                layout.reports,
+                " Summary ",
+                &layout.reports_lines,
+                0,
+            );
+        }
         draw_clipped_button(
             frame,
             app,
@@ -6596,19 +6809,12 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     let full_inner = full_h.saturating_sub(2).max(1);
     let full_scroll_max = full_lines.len().saturating_sub(full_inner as usize) as u16;
 
+    let reports_lines = intel_brief_reports_lines(app, inner_w);
+    let reports_h = (reports_lines.len() as u16)
+        .saturating_add(2)
+        .max(min_section)
+        .max(7);
     let busy = app.selected_intel_busy();
-    let reports_lines = if busy {
-        Vec::new()
-    } else {
-        intel_brief_reports_lines(app, inner_w)
-    };
-    let reports_h = if busy {
-        0
-    } else {
-        (reports_lines.len() as u16)
-            .saturating_add(2)
-            .max(min_section)
-    };
     let recon_h = if busy { 0 } else { ACTION_H };
     let view_h = if busy || app.intel_jobs.is_empty() {
         0
@@ -6821,72 +7027,214 @@ fn intel_briefing_right_rows(app: &App, right: Rect) -> Vec<Rect> {
     )
 }
 
-fn draw_intel_side_pane(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    buckets: &intel_recon::ExtractedBuckets,
-) {
-    let block = pane(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let mut lines = Vec::new();
-    push_extracted_section(&mut lines, "CLAIMS / FACTS", &buckets.facts, "· none");
-    push_extracted_section(&mut lines, "INFERENCES", &buckets.inferences, "· none");
-    push_extracted_section(&mut lines, "CONTEXT", &buckets.context, "· none");
-    lines.push(Line::from(Span::styled(
-        "ACTORS",
-        theme::accent().add_modifier(Modifier::BOLD),
-    )));
-    if buckets.actors.is_empty() {
-        lines.push(Line::from(Span::styled("· none extracted", theme::dim())));
-    } else {
-        for item in &buckets.actors {
-            lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
-        }
+fn extracted_claims_markdown(items: &[intel_recon::ExtractedLine]) -> String {
+    if items.is_empty() {
+        return "_none_".to_string();
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "LINKS",
-        theme::accent().add_modifier(Modifier::BOLD),
-    )));
-    if buckets.links.is_empty() {
-        lines.push(Line::from(Span::styled("· none", theme::dim())));
-    } else {
-        for item in &buckets.links {
-            lines.push(Line::from(Span::styled(format!("· {item}"), theme::text())));
-        }
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((0, 0)),
-        inner,
-    );
+    items
+        .iter()
+        .map(|item| match item.confidence {
+            Some(score) => format!("- {} ({score:.2})", item.text),
+            None => format!("- {}", item.text),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn push_extracted_section(
-    lines: &mut Vec<Line<'static>>,
-    heading: &str,
-    items: &[intel_recon::ExtractedLine],
-    empty: &str,
-) {
-    lines.push(Line::from(Span::styled(
-        heading.to_string(),
-        theme::accent().add_modifier(Modifier::BOLD),
-    )));
+fn extracted_inferences_markdown(items: &[intel_recon::ExtractedLine]) -> String {
     if items.is_empty() {
-        lines.push(Line::from(Span::styled(empty.to_string(), theme::dim())));
-    } else {
-        for item in items {
-            let label = match item.confidence {
-                Some(score) => format!("· {} ({score:.2})", item.text),
-                None => format!("· {}", item.text),
-            };
-            lines.push(Line::from(Span::styled(label, theme::text())));
-        }
+        return "_none_".to_string();
     }
-    lines.push(Line::from(""));
+    items
+        .iter()
+        .map(|item| match item.confidence {
+            Some(score) => format!("- {} ({score:.2})", item.text),
+            None => format!("- {}", item.text),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn extracted_actors_markdown(items: &[String]) -> String {
+    if items.is_empty() {
+        return "_none extracted_".to_string();
+    }
+    items
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn extracted_links_markdown(items: &[String]) -> String {
+    if items.is_empty() {
+        return "_none_".to_string();
+    }
+    items
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn extracted_context_markdown(items: &[intel_recon::ExtractedLine]) -> String {
+    if items.is_empty() {
+        return "_none_".to_string();
+    }
+    items
+        .iter()
+        .map(|item| match item.confidence {
+            Some(score) => format!("- {} ({score:.2})", item.text),
+            None => format!("- {}", item.text),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_extracted_md(text: &str, width: usize) -> Vec<Line<'static>> {
+    super::markdown::markdown_lines(text, width.max(1))
+        .into_iter()
+        .map(md_line_to_line)
+        .collect()
+}
+
+struct IntelExtractedLayout {
+    claims: AbsRect,
+    inferences: AbsRect,
+    actors: AbsRect,
+    links: AbsRect,
+    context: AbsRect,
+    claims_lines: Vec<Line<'static>>,
+    inferences_lines: Vec<Line<'static>>,
+    actors_lines: Vec<Line<'static>>,
+    links_lines: Vec<Line<'static>>,
+    context_lines: Vec<Line<'static>>,
+    claims_loading: bool,
+    inferences_loading: bool,
+    actors_loading: bool,
+    links_loading: bool,
+    context_loading: bool,
+    stack_scroll_max: u16,
+}
+
+fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLayout> {
+    let article = app.intel_articles.get(app.intel_sel)?;
+    if viewport.width < 4 || viewport.height < 4 {
+        return None;
+    }
+    let inner_w = viewport.width.saturating_sub(2).max(1) as usize;
+    let buckets = intel_recon::bucket_extracted_with_explanations(
+        &app.intel_claims,
+        &app.intel_relations,
+        &app.intel_link_explanations,
+    );
+
+    let claims_md = extracted_claims_markdown(&buckets.facts);
+    let inferences_md = extracted_inferences_markdown(&buckets.inferences);
+    let actors_md = extracted_actors_markdown(&buckets.actors);
+    let links_md = extracted_links_markdown(&buckets.links);
+    let context_md = extracted_context_markdown(&buckets.context);
+
+    let claims_lines = parse_extracted_md(&claims_md, inner_w);
+    let inferences_lines = parse_extracted_md(&inferences_md, inner_w);
+    let actors_lines = parse_extracted_md(&actors_md, inner_w);
+    let links_lines = parse_extracted_md(&links_md, inner_w);
+    let context_lines = parse_extracted_md(&context_md, inner_w);
+
+    let insights_loading = intel_insights_loading(app);
+    let claims_loading = insights_loading;
+    let inferences_loading = insights_loading;
+    let actors_loading = insights_loading || app.intel_actors_reviewing.contains(&article.id);
+    let links_loading = insights_loading || app.intel_links_reviewing.contains(&article.id);
+    let context_loading = insights_loading;
+
+    let section_h = |lines_count: usize, loading: bool| -> u16 {
+        let natural = (lines_count as u16).saturating_add(2);
+        if loading {
+            natural.max(5)
+        } else {
+            natural.max(3)
+        }
+    };
+
+    let claims_h = section_h(claims_lines.len(), claims_loading);
+    let inferences_h = section_h(inferences_lines.len(), inferences_loading);
+    let actors_h = section_h(actors_lines.len(), actors_loading);
+    let links_h = section_h(links_lines.len(), links_loading);
+    let context_h = section_h(context_lines.len(), context_loading);
+
+    let total = claims_h
+        .saturating_add(inferences_h)
+        .saturating_add(actors_h)
+        .saturating_add(links_h)
+        .saturating_add(context_h);
+    let stack_scroll_max = total.saturating_sub(viewport.height);
+    let scroll = app.scrolls.intel_extracted.min(stack_scroll_max) as i32;
+
+    let mut y = i32::from(viewport.y) - scroll;
+    let claims = abs_rect(viewport.x, y, viewport.width, claims_h);
+    y += i32::from(claims_h);
+    let inferences = abs_rect(viewport.x, y, viewport.width, inferences_h);
+    y += i32::from(inferences_h);
+    let actors = abs_rect(viewport.x, y, viewport.width, actors_h);
+    y += i32::from(actors_h);
+    let links = abs_rect(viewport.x, y, viewport.width, links_h);
+    y += i32::from(links_h);
+    let context = abs_rect(viewport.x, y, viewport.width, context_h);
+
+    Some(IntelExtractedLayout {
+        claims,
+        inferences,
+        actors,
+        links,
+        context,
+        claims_lines,
+        inferences_lines,
+        actors_lines,
+        links_lines,
+        context_lines,
+        claims_loading,
+        inferences_loading,
+        actors_loading,
+        links_loading,
+        context_loading,
+        stack_scroll_max,
+    })
+}
+
+pub fn intel_extracted_scroll_max(app: &App) -> u16 {
+    let body = chrome(app.screen, app).body;
+    let (left, _center, _right) = intel_briefing_areas(body);
+    intel_extracted_layout(app, left)
+        .map(|layout| layout.stack_scroll_max)
+        .unwrap_or(0)
+}
+
+fn draw_clipped_intel_loading(
+    frame: &mut Frame,
+    viewport: Rect,
+    area: AbsRect,
+    title: &str,
+    phase: &str,
+    detail: Option<&str>,
+) {
+    let Some((vis, _)) = intersect_abs(viewport, area) else {
+        return;
+    };
+    frame.render_widget(Block::default().style(theme::text()), vis);
+    stroke_clipped_box(frame, viewport, area, title);
+
+    let inner = AbsRect {
+        x: area.x.saturating_add(1),
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let Some((inner_vis, _)) = intersect_abs(viewport, inner) else {
+        return;
+    };
+    let label = format!("{} {phase}", loading_spinner_frame());
+    draw_centered_loading_card(frame, inner_vis, &label, detail);
 }
 
 fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
@@ -7548,6 +7896,88 @@ pub(crate) fn intel_insights_loading(app: &App) -> bool {
     app.intel_insights_running.contains(&article.id)
 }
 
+/// True while a recon report job for the focused article is running / generating.
+pub(crate) fn intel_report_generating(app: &App) -> bool {
+    let Some(article) = app.intel_articles.get(app.intel_sel) else {
+        return false;
+    };
+    app.intel_jobs.iter().any(|job| {
+        job.article_id == article.id
+            && (app.intel_report_running.contains_key(&job.id)
+                || matches!(job.state.as_str(), "queued" | "running" | "waiting"))
+    })
+}
+
+fn draw_intel_summary_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app: &App) {
+    let Some((vis, _)) = intersect_abs(viewport, area) else {
+        return;
+    };
+    frame.render_widget(Block::default().style(theme::text()), vis);
+    stroke_clipped_box(frame, viewport, area, " Summary ");
+
+    let inner = AbsRect {
+        x: area.x.saturating_add(1),
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let Some((inner_vis, _)) = intersect_abs(viewport, inner) else {
+        return;
+    };
+    let (label, detail) = intel_report_progress_lines(app);
+    draw_centered_loading_card(frame, inner_vis, &label, detail.as_deref());
+}
+
+fn intel_report_progress_lines(app: &App) -> (String, Option<String>) {
+    let Some(article) = app.intel_articles.get(app.intel_sel) else {
+        return (
+            format!("{} Generating report", loading_spinner_frame()),
+            None,
+        );
+    };
+    let active_job = app.intel_jobs.iter().find(|job| {
+        job.article_id == article.id
+            && (app.intel_report_running.contains_key(&job.id)
+                || matches!(job.state.as_str(), "queued" | "running" | "waiting"))
+    });
+    let Some(job) = active_job else {
+        return (
+            format!("{} Generating report", loading_spinner_frame()),
+            None,
+        );
+    };
+    let mode_title = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
+        .map(|m| m.title())
+        .unwrap_or(job.mode.as_str());
+    let label = format!(
+        "{} Generating {} report",
+        loading_spinner_frame(),
+        mode_title
+    );
+
+    let stage = job.stage.trim();
+    let detail = if !stage.is_empty() {
+        if job.sections_total > 0 && job.sections_done > 0 {
+            Some(format!(
+                "{stage} · section {}/{}",
+                job.sections_done, job.sections_total
+            ))
+        } else {
+            Some(stage.to_string())
+        }
+    } else if !job.current_tool.trim().is_empty() {
+        Some(format!("Running {}", job.current_tool.trim()))
+    } else if job.sections_total > 0 {
+        Some(format!(
+            "Section {}/{}",
+            job.sections_done, job.sections_total
+        ))
+    } else {
+        None
+    };
+    (label, detail)
+}
+
 /// Same centered spinner treatment as Atlas insights extraction.
 fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app: &App) {
     let Some((vis, _)) = intersect_abs(viewport, area) else {
@@ -7722,7 +8152,10 @@ fn md_line_to_line(line: super::markdown::MdLine) -> Line<'static> {
 
 fn intel_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     if app.intel_page == IntelPage::Briefing {
-        let (_left, center, right) = intel_briefing_areas(body);
+        let (left, center, right) = intel_briefing_areas(body);
+        if contains(left, x, y) {
+            return Some(Target::IntelLeftColumn);
+        }
         if let Some(layout) = intel_center_layout(app, center) {
             if abs_contains(layout.reload, x, y) && contains(center, x, y) {
                 return Some(Target::Button(ButtonId::IntelBodyRefresh));
@@ -8311,6 +8744,7 @@ fn popup_text(app: &App) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         Overlay::AddFallback => String::new(),
+        Overlay::ResumeSession(_) => "Open last app view session".to_string(),
         Overlay::None => String::new(),
     }
 }
@@ -8360,7 +8794,7 @@ fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools · 8 Models · 9 Profile\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
         Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nThe mode button under the full article opens Verify / Explain / Assess Outlook / Full Assessment\nJobs pane tracks focus-brief background progress and recon reports\nEsc returns from briefing to bulletin, or from bulletin to home",
-        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 90 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 90 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, Repair memories, and Delete sit between the map and those panes. Resume continues the selected cycle when it stopped while saving or indexing memories. Repair memories rechecks saved cycles and requeues missing memories or vectors (progress in Jobs). When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
+        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 60 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 60 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, Repair memories, and Delete sit between the map and those panes. Resume continues the selected cycle when it stopped while saving or indexing memories. Repair memories rechecks saved cycles and requeues missing memories or vectors (progress in Jobs). When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon investigation\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between transcript and prompt\n↑↓ select a query, plan, evidence activity, or answer\n←→ or h/l fold the selected Plan or activity\nEnter toggles that fold · o inspects the captured source · f opens full text\n◉ brain opens memories used by Synthesis\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "Profile\n\nInspect host hardware and Argos storage\nRefresh hardware re-reads the host profile\nData, index, and cache paths are listed only when they exist\nEvents moved to Logs; background work is in Jobs\nEsc returns home",
@@ -8383,7 +8817,9 @@ fn cover(frame: &mut Frame, area: Rect) {
 }
 
 fn popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    if matches!(&app.overlay, Overlay::Help) {
+    if matches!(&app.overlay, Overlay::Help)
+        || matches!(&app.overlay, Overlay::Block { title, .. } if title.to_ascii_lowercase().contains("report"))
+    {
         let md = super::markdown::markdown_lines(&popup_text(app), width.max(1));
         return md.into_iter().map(md_line_to_line).collect();
     }
@@ -8542,6 +8978,134 @@ fn draw_add_fallback(frame: &mut Frame, app: &App) {
     );
 }
 
+fn draw_resume_session(frame: &mut Frame, app: &App, session: &LastViewSession) {
+    let area = active_popup_area(app, frame.area());
+    cover(frame, area);
+    frame.render_widget(
+        Paragraph::new("").block(theme::card(" Open last app view session ")),
+        area,
+    );
+
+    let inner = inset(area);
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "A previous session was detected:",
+        theme::text().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    let mod_title = session.module.as_deref().unwrap_or("Unknown");
+    lines.push(Line::from(vec![
+        Span::styled("  App:     ", theme::dim()),
+        Span::styled(
+            mod_title.to_ascii_uppercase(),
+            theme::accent().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    if let Some(page) = &session.intel_page {
+        let art = session.intel_article_title.as_deref().unwrap_or("");
+        let detail = if art.is_empty() {
+            page.clone()
+        } else {
+            format!("{page} · {art}")
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  Screen:  ", theme::dim()),
+            Span::styled(fit(&detail, inner.width as usize - 12), theme::text()),
+        ]));
+    } else if let Some(tid) = &session.recon_thread_id {
+        let t_title = session
+            .recon_thread_title
+            .as_deref()
+            .unwrap_or(tid.as_str());
+        lines.push(Line::from(vec![
+            Span::styled("  Screen:  ", theme::dim()),
+            Span::styled(fit(t_title, inner.width as usize - 12), theme::text()),
+        ]));
+    } else if let Some(mem) = &session.memory_title {
+        lines.push(Line::from(vec![
+            Span::styled("  Screen:  ", theme::dim()),
+            Span::styled(fit(mem, inner.width as usize - 12), theme::text()),
+        ]));
+    } else if let Some(page) = &session.atlas_page {
+        lines.push(Line::from(vec![
+            Span::styled("  Screen:  ", theme::dim()),
+            Span::styled(page, theme::text()),
+        ]));
+    } else if let Some(tool) = &session.osint_tool_id {
+        lines.push(Line::from(vec![
+            Span::styled("  Tool:    ", theme::dim()),
+            Span::styled(tool, theme::text()),
+        ]));
+    } else if let Some(page) = &session.providers_page {
+        lines.push(Line::from(vec![
+            Span::styled("  Page:    ", theme::dim()),
+            Span::styled(page, theme::text()),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    let content_height = inner.height.saturating_sub(2);
+    frame.render_widget(
+        Paragraph::new(lines).style(theme::card_text()),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: content_height,
+        },
+    );
+
+    let btn_y = inner.y + inner.height.saturating_sub(1);
+    let confirm_w = 24.min(inner.width / 2);
+    let dismiss_w = 20.min(inner.width / 2);
+
+    let confirm_rect = Rect {
+        x: inner.x + 1,
+        y: btn_y,
+        width: confirm_w,
+        height: 1,
+    };
+    let dismiss_rect = Rect {
+        x: inner.x + confirm_w + 3,
+        y: btn_y,
+        width: dismiss_w,
+        height: 1,
+    };
+
+    let confirm_focused = app.focus == Target::Button(ButtonId::ResumeSessionConfirm);
+    let dismiss_focused = app.focus == Target::Button(ButtonId::ResumeSessionDismiss);
+
+    let confirm_style = if confirm_focused {
+        theme::selected()
+    } else {
+        theme::accent()
+    };
+    let dismiss_style = if dismiss_focused {
+        theme::selected()
+    } else {
+        theme::dim()
+    };
+
+    app.layout
+        .borrow_mut()
+        .register(Target::Button(ButtonId::ResumeSessionConfirm), confirm_rect);
+    app.layout
+        .borrow_mut()
+        .register(Target::Button(ButtonId::ResumeSessionDismiss), dismiss_rect);
+
+    frame.render_widget(
+        Paragraph::new(Span::styled("[ Enter / Y ] Resume", confirm_style)),
+        confirm_rect,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled("[ Esc / N ] Start fresh", dismiss_style)),
+        dismiss_rect,
+    );
+}
+
 fn draw_overlay(frame: &mut Frame, app: &App) {
     app.layout
         .borrow_mut()
@@ -8562,12 +9126,17 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         draw_intel_recon_popup(frame, app);
         return;
     }
+    if let Overlay::ResumeSession(ref session) = app.overlay {
+        draw_resume_session(frame, app, session);
+        return;
+    }
     let area = active_popup_area(app, frame.area());
     cover(frame, area);
     let title = match &app.overlay {
         Overlay::Help => " Shortcuts ",
         Overlay::Memories { .. } => " Memory ",
         Overlay::Block { .. } => " Detail ",
+        Overlay::ResumeSession(_) => " Open last app view session ",
         Overlay::Choice(_)
         | Overlay::IntelRecon
         | Overlay::Palette

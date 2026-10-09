@@ -57,24 +57,46 @@ impl ReportMode {
             Self::FullAssessment,
         ]
     }
+
+    pub fn style_guide(self) -> &'static str {
+        match self {
+            Self::Verify => {
+                "This mode should read like a verification brief. Keep background only when it changes a claim’s assessment."
+            }
+            Self::Explain => {
+                "The main repetition risk is describing the same event in the timeline, background, and implications. Each section should add a different analytical contribution."
+            }
+            Self::AssessOutlook => {
+                "Keep scenarios distinct from the outlook: scenarios describe alternatives; the outlook weighs their consequences under stated conditions. Avoid unsupported numerical probabilities."
+            }
+            Self::FullAssessment => {
+                "Full Assessment should integrate the other modes around shared evidence. Its ten sections should not become three reports pasted together."
+            }
+        }
+    }
 }
 
 /// Markdown section headings and analyst framing for a chat Recon synthesis answer.
 pub fn chat_response_spec(mode: ReportMode) -> String {
     let mode = normalize_chat_mode(mode);
-    let headings: Vec<String> = chat_section_titles(mode)
-        .into_iter()
-        .map(|title| format!("## {title}"))
-        .collect();
+    let mut sections = Vec::new();
+    for section in section_plan(mode) {
+        let heading = match (mode, section.key) {
+            (ReportMode::Verify, "assertions") => "Claims and Evidence Assessments",
+            _ => section.title,
+        };
+        sections.push(format!("## {heading}\n- {}", section.guideline));
+    }
     format!(
         "Recon mode: {} — {}.\n\
-Write the answer as Markdown with these headings in order (omit a heading only when \
-there is nothing evidence-backed to say under it):\n{}\n\
-After the sections, add one line per directive (D1:, D2:, …) saying whether it was met, \
-partly met, or not met, with citations.",
+Mode writing style and guidelines:\n{}\n\
+The writing targets below are recommendations—soft limits that should expand when necessary to preserve material evidence or uncertainty.\n\
+Write the answer as Markdown with these headings in order (omit a heading only when there is nothing evidence-backed to say under it):\n\n{}\n\n\
+After the sections, add one line per directive (D1:, D2:, …) saying whether it was met, partly met, or not met, with citations.",
         mode.title(),
         mode.description(),
-        headings.join("\n")
+        mode.style_guide(),
+        sections.join("\n\n")
     )
 }
 
@@ -133,6 +155,14 @@ Investigation focus: {}",
 pub struct SectionPlan {
     pub key: &'static str,
     pub title: &'static str,
+    pub guideline: &'static str,
+}
+
+pub fn section_guideline(mode: ReportMode, section_key: &str) -> Option<&'static str> {
+    section_plan(mode)
+        .into_iter()
+        .find(|s| s.key == section_key)
+        .map(|s| s.guideline)
 }
 
 pub fn section_plan(mode: ReportMode) -> Vec<SectionPlan> {
@@ -141,120 +171,148 @@ pub fn section_plan(mode: ReportMode) -> Vec<SectionPlan> {
             SectionPlan {
                 key: "bluf",
                 title: "Key Judgments / BLUF",
+                guideline: "2–3 bullets stating the overall finding, strongest supporting evidence, and principal uncertainty.",
             },
             SectionPlan {
                 key: "assertions",
                 title: "Article Assertions and Evidence Assessments",
+                guideline: "One bullet per consequential claim: claim → supported/disputed/unresolved → brief reason → citation.",
             },
             SectionPlan {
                 key: "sources",
                 title: "Source Reliability and Independent Corroboration",
+                guideline: "2–4 bullets explaining source quality, independence, and meaningful corroboration. Avoid repeating the claims.",
             },
             SectionPlan {
                 key: "inferences",
                 title: "Inferences, Context and Link Validation",
+                guideline: "2–4 bullets identifying inferred relationships, their supporting evidence, and limits. Clearly distinguish inference from observation.",
             },
             SectionPlan {
                 key: "contradictions",
                 title: "Contradictions, Corrections and Unresolved Gaps",
+                guideline: "One bullet per material conflict: disagreement → effect on judgment → unresolved point.",
             },
             SectionPlan {
                 key: "coverage",
                 title: "Sources and Coverage",
+                guideline: "Compact source and coverage bullets. Account for assessed and unresolved claims without retelling the findings.",
             },
         ],
         ReportMode::Explain => vec![
             SectionPlan {
                 key: "bluf",
                 title: "Key Judgments / BLUF",
+                guideline: "2–3 bullets answering what happened, why it matters, and the main explanatory uncertainty.",
             },
             SectionPlan {
                 key: "actors",
                 title: "Actors, Roles and Relevant Relationships",
+                guideline: "One bullet per relevant actor: name → role → consequential relationship. Exclude incidental people and publishers.",
             },
             SectionPlan {
                 key: "timeline",
                 title: "Event Timeline and Locations",
+                guideline: "Numbered chronological entries: date → event → location → significance, with citations.",
             },
             SectionPlan {
                 key: "background",
                 title: "Background, Drivers and Alternative Explanations",
+                guideline: "3–5 bullets covering necessary context, main drivers, and credible alternatives. Separate established causes from proposed explanations.",
             },
             SectionPlan {
                 key: "implications",
                 title: "Implications and Affected Parties",
+                guideline: "2–4 bullets: affected party → consequence → supporting basis.",
             },
             SectionPlan {
                 key: "gaps",
                 title: "Gaps, Sources and Coverage",
+                guideline: "Short bullets identifying missing information, its effect on the explanation, and source coverage.",
             },
         ],
         ReportMode::AssessOutlook => vec![
             SectionPlan {
                 key: "bluf",
                 title: "Key Judgments and Forecast Horizon",
+                guideline: "2–3 bullets stating the horizon, central outlook, and main uncertainty.",
             },
             SectionPlan {
                 key: "baseline",
                 title: "Established Baseline and Critical Uncertainties",
+                guideline: "3–5 bullets explicitly labeled Established or Uncertain.",
             },
             SectionPlan {
                 key: "scenarios",
                 title: "Competing Explanations and Scenarios",
+                guideline: "Usually 2–3 numbered scenarios: scenario → conditions → supporting/challenging evidence → potential outcome. Do not invent alternatives to meet a count.",
             },
             SectionPlan {
                 key: "indicators",
                 title: "Indicators, Triggers and Disconfirming Evidence",
+                guideline: "One bullet per observable signal: indicator → scenario it supports or weakens → why.",
             },
             SectionPlan {
                 key: "outlook",
                 title: "Conditional Outlook and Consequences",
+                guideline: "2–4 “If … then …” bullets connecting conditions to outcomes within the stated horizon.",
             },
             SectionPlan {
                 key: "assumptions",
                 title: "Assumptions, Gaps, Sources and Coverage",
+                guideline: "Compact labeled bullets for assumptions, forecast-sensitive gaps, and evidence coverage.",
             },
         ],
         ReportMode::FullAssessment => vec![
             SectionPlan {
                 key: "bluf",
                 title: "Executive Intelligence Brief / BLUF",
+                guideline: "3–4 bullets covering the central finding, explanation, conditional outlook, and largest uncertainty.",
             },
             SectionPlan {
                 key: "verified",
                 title: "Verified Claims and Evidence",
+                guideline: "One concise cited bullet per verified claim.",
             },
             SectionPlan {
                 key: "disputes",
                 title: "Source Assessment, Disputes and Corrections",
+                guideline: "Bullets containing source limitations, contested claims, and corrections.",
             },
             SectionPlan {
                 key: "actors",
                 title: "Actors and Relationships",
+                guideline: "One bullet per material actor or relationship.",
             },
             SectionPlan {
                 key: "timeline",
                 title: "Event Timeline and Geographic Context",
+                guideline: "Numbered chronological entries; include geographic context only when consequential.",
             },
             SectionPlan {
                 key: "drivers",
                 title: "Drivers, Context and Competing Explanations",
+                guideline: "3–5 explanatory bullets.",
             },
             SectionPlan {
                 key: "implications",
                 title: "Implications and Affected Parties",
+                guideline: "2–4 consequence-focused bullets.",
             },
             SectionPlan {
                 key: "scenarios",
                 title: "Scenarios and Conditional Outlook",
+                guideline: "Usually 2–3 numbered scenarios with conditions, outcomes, and uncertainty.",
             },
             SectionPlan {
                 key: "indicators",
                 title: "Indicators and Collection Priorities",
+                guideline: "Prioritized numbered items identifying observable signals or evidence needed to resolve consequential gaps.",
             },
             SectionPlan {
                 key: "gaps",
                 title: "Gaps, Sources and Complete Element Coverage",
+                guideline: "Compact coverage accounting. Preserve every required element’s status, even when this section needs more entries.",
             },
         ],
     }
@@ -304,5 +362,31 @@ mod tests {
         let outlook = investigation_mode_spec(ReportMode::AssessOutlook);
         assert!(outlook.contains("competing scenarios"));
         assert!(outlook.contains("Indicators"));
+    }
+
+    #[test]
+    fn every_mode_section_has_guideline() {
+        for mode in ReportMode::all() {
+            assert!(!mode.style_guide().is_empty(), "{mode:?}");
+            for section in section_plan(mode) {
+                assert!(!section.guideline.is_empty(), "{mode:?} {}", section.key);
+                assert_eq!(
+                    section_guideline(mode, section.key),
+                    Some(section.guideline)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chat_response_spec_embeds_section_guidelines_and_style_guide() {
+        for mode in ReportMode::all() {
+            let spec = chat_response_spec(mode);
+            assert!(spec.contains(mode.style_guide()), "{mode:?}");
+            assert!(spec.contains("soft limits"));
+            for section in section_plan(mode) {
+                assert!(spec.contains(section.guideline), "{mode:?} {}", section.key);
+            }
+        }
     }
 }

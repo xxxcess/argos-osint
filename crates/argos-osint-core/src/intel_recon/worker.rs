@@ -544,10 +544,20 @@ async fn run_synthesize(
                 mode,
                 section_key: section_key.into(),
                 section_title: section.title.clone(),
-                objective: format!(
-                    "Write the {section_key} section for a {} report.",
-                    mode.title()
-                ),
+                objective: {
+                    let guideline =
+                        super::modes::section_guideline(mode, section_key).unwrap_or("");
+                    format!(
+                        "Write the '{section_key}' section (## {}) for a {} report.\n\
+Writing target, structure, and style:\n{}\n\
+Mode style guide:\n{}\n\
+The writing targets are recommendations—soft limits that should expand when necessary to preserve material evidence or uncertainty.",
+                        section.title,
+                        mode.title(),
+                        guideline,
+                        mode.style_guide()
+                    )
+                },
                 article_title: runtime.article_title.clone(),
                 article_url: runtime.article_url.clone(),
                 preview: runtime.article_preview.clone(),

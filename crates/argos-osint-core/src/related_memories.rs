@@ -292,6 +292,131 @@ fn row(memory: &Memory, reason: String, kind: RelationKind, score: f32) -> Relat
     }
 }
 
+use crate::provider::{self, ChatMessage};
+use crate::secrets::ProviderSecret;
+
+/// Convert a technical relationship reason into a meaningful, natural language explanation.
+pub fn format_meaningful_link_reason(reason: &str) -> String {
+    if let Some(rest) = reason.strip_prefix("claim relation:") {
+        let rest = rest.trim();
+        match rest {
+            "context for" | "context" => "Provides background context for this memory".to_string(),
+            "supports" | "corroborates" => "Corroborates and supports this memory".to_string(),
+            "conflict or revision" | "conflict" => "Contradicts or revises this memory".to_string(),
+            "revision of" | "revises" => "Updates earlier claim in this memory".to_string(),
+            "causes" => "Causal precursor to this memory".to_string(),
+            other => format!("Directly linked: {}", other),
+        }
+    } else if let Some(rest) = reason.strip_prefix("same source article:") {
+        format!("Shares source report: {}", rest.trim())
+    } else if let Some(rest) = reason.strip_prefix("same entity:") {
+        format!("Shares common actor: {}", rest.trim())
+    } else if reason == "cites the same tool result" {
+        "Cites the same OSINT tool result".to_string()
+    } else if reason == "same investigation" {
+        "Connected within the same investigation thread".to_string()
+    } else {
+        reason.to_string()
+    }
+}
+
+/// Rewrites related memory link reasons meaningfully using the summarization / synthesis model role.
+/// Returns a list of rewritten reasons matching `items` in order. Does NOT mutate DB or Brain.
+pub async fn explain_related_memories_with_model(
+    secret: Option<&ProviderSecret>,
+    target_memory_text: &str,
+    items: &[RelatedMemory],
+) -> Vec<String> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    if let Some(secret) = secret {
+        if let Ok(model_reasons) =
+            query_model_related_reasons(secret, target_memory_text, items).await
+        {
+            if model_reasons.len() == items.len() {
+                return model_reasons;
+            }
+        }
+    }
+
+    // Meaningful fallback: transform raw technical phrases into clear natural language descriptions
+    items
+        .iter()
+        .map(|item| format_meaningful_link_reason(&item.reason))
+        .collect()
+}
+
+async fn query_model_related_reasons(
+    secret: &ProviderSecret,
+    target_memory_text: &str,
+    items: &[RelatedMemory],
+) -> anyhow::Result<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct ReasonsResp {
+        reasons: Option<Vec<String>>,
+    }
+
+    let mut items_text = String::new();
+    for (i, item) in items.iter().enumerate() {
+        items_text.push_str(&format!(
+            "{}. Title: \"{}\" | Base connection: \"{}\"\n",
+            i + 1,
+            item.title,
+            format_meaningful_link_reason(&item.reason)
+        ));
+    }
+
+    let system = "You are an OSINT intelligence analyst explaining how related memories connect to an active memory.\n\
+For each related memory, write a single concise phrase (under 10 words) explaining specifically how it connects to or informs the active memory.\n\
+Avoid generic jargon. Be direct and readable.\n\
+Return JSON only: {\"reasons\": [\"...\"]}";
+
+    let user = format!(
+        "Active memory:\n\"{target_memory_text}\"\n\nRelated memories:\n{items_text}\n\nReturn JSON only with 'reasons' array containing exactly {} strings in order.",
+        items.len()
+    );
+
+    let messages = [
+        ChatMessage {
+            role: "system".into(),
+            content: system.into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+        ChatMessage {
+            role: "user".into(),
+            content: user,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+    ];
+
+    let done = provider::complete(secret, &messages, &[], |_| {}).await?;
+    let cleaned = strip_json_fences(&done.content);
+    let parsed: ReasonsResp = serde_json::from_str(&cleaned)?;
+    let mut reasons = parsed.reasons.unwrap_or_default();
+    if reasons.len() < items.len() {
+        for item in items.iter().skip(reasons.len()) {
+            reasons.push(format_meaningful_link_reason(&item.reason));
+        }
+    }
+    Ok(reasons)
+}
+
+fn strip_json_fences(text: &str) -> String {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        let rest = rest.strip_prefix("json").unwrap_or(rest);
+        let rest = rest.trim_start_matches('\n');
+        if let Some(end) = rest.rfind("```") {
+            return rest[..end].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

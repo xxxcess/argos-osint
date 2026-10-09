@@ -892,21 +892,8 @@ pub fn role_secret(
     settings: &SettingsFile,
     role: &str,
 ) -> Result<ProviderSecret> {
-    let assignment = settings.defaults.role(role).ok_or_else(|| {
-        anyhow!("role must be recon, tool-picker, synthesis, classifier, or summarization")
-    })?;
-    // Summarization inherits Synthesis when both of its fields are empty.
-    let assignment = if role_name(role) == Some("summarization")
-        && assignment.provider.trim().is_empty()
-        && assignment.model.trim().is_empty()
-    {
-        settings
-            .defaults
-            .role("synthesis")
-            .ok_or_else(|| anyhow!("synthesis role missing"))?
-    } else {
-        assignment
-    };
+    let name = role_name(role).ok_or_else(|| anyhow!("unknown role: {role}"))?;
+    let (assignment, _) = settings.defaults.resolve_role(name);
     let legacy = writer_secret(auth, settings);
     let mut secret = if assignment.provider.is_empty() {
         legacy

@@ -1,6 +1,6 @@
 //! Persistent Brain memories and their conversation provenance.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -543,6 +543,20 @@ impl Store {
             // Additive, idempotent: revision-aware graph summary cache and
             // the latest explanation diagnostic.
             graph_summaries::migrate(&self.conn)?;
+
+            // Additive, idempotent: persist view-only intel link explanations.
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS intel_link_explanations (
+                   article_id TEXT NOT NULL,
+                   left_id TEXT NOT NULL,
+                   right_id TEXT NOT NULL,
+                   explanation TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY (article_id, left_id, right_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS intel_link_explanations_article
+                   ON intel_link_explanations(article_id);",
+            )?;
             Ok(())
         })();
         match result {
@@ -1603,6 +1617,10 @@ impl Store {
                 }
             }
             let _ = removed;
+            let _ = self.conn.execute(
+                "DELETE FROM intel_link_explanations WHERE article_id = ?1",
+                [article_id],
+            );
             queued = self.queue_index_for(&doomed)?;
             Ok(orphaned)
         })();
@@ -1873,6 +1891,62 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Persists view-only link explanations for an article on the Intel Brief page.
+    pub fn save_intel_link_explanations(
+        &self,
+        article_id: &str,
+        explanations: &HashMap<(String, String), String>,
+    ) -> Result<()> {
+        if explanations.is_empty() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO intel_link_explanations (article_id, left_id, right_id, explanation, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(article_id, left_id, right_id) DO UPDATE SET
+               explanation = excluded.explanation,
+               updated_at = excluded.updated_at",
+        )?;
+        for ((left, right), explanation) in explanations {
+            stmt.execute(params![article_id, left, right, explanation, now])?;
+        }
+        Ok(())
+    }
+
+    /// Fetches persisted view-only link explanations for an article on the Intel Brief page.
+    pub fn get_intel_link_explanations(
+        &self,
+        article_id: &str,
+    ) -> Result<HashMap<(String, String), String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT left_id, right_id, explanation
+             FROM intel_link_explanations
+             WHERE article_id = ?1",
+        )?;
+        let rows = stmt.query_map([article_id], |row| {
+            Ok((
+                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for r in rows {
+            let (k, v) = r?;
+            map.insert(k, v);
+        }
+        Ok(map)
+    }
+
+    /// Deletes persisted link explanations for an article.
+    pub fn delete_intel_link_explanations(&self, article_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM intel_link_explanations WHERE article_id = ?1",
+            [article_id],
+        )?;
+        Ok(())
     }
 
     /// A run left `running` by a closed process can be resumed.
@@ -3272,5 +3346,49 @@ mod tests {
         assert_eq!(shared_left.len(), 1);
         assert_eq!(shared_left[0].entity, "fleet");
         assert_eq!(store.list_memories().unwrap().len(), before - 1);
+    }
+
+    #[test]
+    fn intel_link_explanations_round_trip_and_cleanup() {
+        let store = Store::memory().unwrap();
+        let mut map = HashMap::new();
+        map.insert(
+            ("fp-a".to_string(), "fp-b".to_string()),
+            "Direct claim link: explains causality".to_string(),
+        );
+        map.insert(
+            ("fp-c".to_string(), "fp-d".to_string()),
+            "Shares source article with this memory".to_string(),
+        );
+        store.save_intel_link_explanations("art-1", &map).unwrap();
+
+        let loaded = store.get_intel_link_explanations("art-1").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded.get(&("fp-a".to_string(), "fp-b".to_string())),
+            Some(&"Direct claim link: explains causality".to_string())
+        );
+
+        // Update on conflict
+        let mut update = HashMap::new();
+        update.insert(
+            ("fp-a".to_string(), "fp-b".to_string()),
+            "Updated explanation for relation".to_string(),
+        );
+        store
+            .save_intel_link_explanations("art-1", &update)
+            .unwrap();
+        let loaded2 = store.get_intel_link_explanations("art-1").unwrap();
+        assert_eq!(
+            loaded2.get(&("fp-a".to_string(), "fp-b".to_string())),
+            Some(&"Updated explanation for relation".to_string())
+        );
+
+        // Delete
+        store.delete_intel_link_explanations("art-1").unwrap();
+        assert!(store
+            .get_intel_link_explanations("art-1")
+            .unwrap()
+            .is_empty());
     }
 }

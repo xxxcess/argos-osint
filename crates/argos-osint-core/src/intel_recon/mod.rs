@@ -1,5 +1,6 @@
 //! Article-centered Intel Recon: body retrieval, report jobs, and section synthesis.
 
+mod actor_review;
 mod body;
 mod body_filter;
 mod brain;
@@ -16,6 +17,10 @@ mod tests_acceptance;
 mod validate;
 mod worker;
 
+pub use actor_review::{
+    apply_reviewed_actors, is_meaningful_actor, resolve_actor_reviewer_secret,
+    review_article_actors, ActorReviewItem, ActorReviewResult,
+};
 pub use body::{
     body_fetch_routes, enqueue_article_body, fetch_article_body, BodyFetchEvent, EnqueueOutcome,
     FAILURE_COOLDOWN_SECS,
@@ -25,7 +30,10 @@ pub use body_filter::{
     IrrelevantRange,
 };
 pub use brain::{upsert_recon_insights, ReconInsightUpdate};
-pub use briefing_view::{bucket_extracted, ExtractedBuckets, ExtractedLine};
+pub use briefing_view::{
+    bucket_extracted, bucket_extracted_with_explanations, explain_intel_links_with_model,
+    explain_relation_link, ExtractedBuckets, ExtractedLine,
+};
 pub use classify_mode::{
     classifiable_modes, classify_prompt_mode, classify_recon_mode, default_recon_mode,
     heuristic_prompt_mode, parse_mode_choice, parse_mode_from_chat, ModeClassifyInput,
@@ -39,7 +47,8 @@ pub use ledger::{
     body_assertion_candidates, coverage_complete, seed_element_ledger, ElementStatus,
 };
 pub use modes::{
-    chat_response_spec, investigation_mode_spec, section_plan, ReportMode, SectionPlan,
+    chat_response_spec, investigation_mode_spec, section_guideline, section_plan, ReportMode,
+    SectionPlan,
 };
 pub use persist::{
     ArticleBodyRow, IntelAssessmentRow, IntelElementRow, IntelEvidenceRow, IntelInvestigationRow,

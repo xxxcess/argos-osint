@@ -357,8 +357,10 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
             }
             RelRow::Reason(index) => {
                 let item = &view.items[index];
+                let reason_text =
+                    argos_osint_core::related_memories::format_meaningful_link_reason(&item.reason);
                 Line::from(Span::styled(
-                    fit(&format!("  {} · {}", item.reason, item.provenance), width),
+                    fit(&format!("  {} · {}", reason_text, item.provenance), width),
                     theme::muted(),
                 ))
             }

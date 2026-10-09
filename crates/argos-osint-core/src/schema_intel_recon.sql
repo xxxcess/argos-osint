@@ -199,3 +199,15 @@ CREATE TABLE IF NOT EXISTS intel_assessments (
 );
 CREATE INDEX IF NOT EXISTS intel_assessments_element
   ON intel_assessments(element_id, origin);
+
+CREATE TABLE IF NOT EXISTS intel_link_explanations (
+  article_id TEXT NOT NULL,
+  left_id TEXT NOT NULL,
+  right_id TEXT NOT NULL,
+  explanation TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (article_id, left_id, right_id)
+);
+CREATE INDEX IF NOT EXISTS intel_link_explanations_article
+  ON intel_link_explanations(article_id);
+

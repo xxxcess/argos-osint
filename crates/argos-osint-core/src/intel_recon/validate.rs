@@ -145,20 +145,20 @@ pub fn validate_article_body(
 }
 
 fn clean_markdown(raw: &str) -> String {
-    let mut out = String::new();
-    let mut blank = 0;
+    let mut cleaned_lines = Vec::new();
     for line in raw.lines() {
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
-            blank += 1;
-            if blank <= 2 {
-                out.push('\n');
+            if cleaned_lines
+                .last()
+                .map(|l: &String| !l.is_empty())
+                .unwrap_or(false)
+            {
+                cleaned_lines.push(String::new());
             }
             continue;
         }
-        blank = 0;
-        // Drop obvious nav chrome lines.
-        let lower = trimmed.to_ascii_lowercase();
+        let lower = trimmed.trim().to_ascii_lowercase();
         if lower.starts_with("skip to ")
             || lower == "menu"
             || lower == "navigation"
@@ -166,10 +166,58 @@ fn clean_markdown(raw: &str) -> String {
         {
             continue;
         }
-        out.push_str(trimmed);
-        out.push('\n');
+        cleaned_lines.push(trimmed.to_string());
     }
-    out.trim().to_string()
+
+    // Strip leading publisher site-wide navigation lists / link rosters.
+    let mut start_idx = 0;
+    while start_idx < cleaned_lines.len() {
+        let line = cleaned_lines[start_idx].trim();
+        if line.is_empty() {
+            start_idx += 1;
+            continue;
+        }
+        let is_nav_bullet = line.starts_with('•')
+            || line.starts_with('*')
+            || line.starts_with('-')
+            || line.starts_with("·");
+        let is_short_link = (line.starts_with('[') && line.contains("](") && line.len() < 50)
+            || (is_nav_bullet && line.len() < 45);
+        if is_short_link {
+            let mut end_nav = start_idx + 1;
+            while end_nav < cleaned_lines.len() {
+                let next_line = cleaned_lines[end_nav].trim();
+                if next_line.is_empty() {
+                    end_nav += 1;
+                    continue;
+                }
+                let next_is_bullet = next_line.starts_with('•')
+                    || next_line.starts_with('*')
+                    || next_line.starts_with('-')
+                    || next_line.starts_with("·");
+                let next_is_short = (next_line.starts_with('[')
+                    && next_line.contains("](")
+                    && next_line.len() < 50)
+                    || (next_is_bullet && next_line.len() < 45);
+                if next_is_short {
+                    end_nav += 1;
+                } else {
+                    break;
+                }
+            }
+            let count = cleaned_lines[start_idx..end_nav]
+                .iter()
+                .filter(|l| !l.trim().is_empty())
+                .count();
+            if count >= 3 {
+                start_idx = end_nav;
+                continue;
+            }
+        }
+        break;
+    }
+
+    cleaned_lines[start_idx..].join("\n").trim().to_string()
 }
 
 fn word_count(text: &str) -> usize {
@@ -211,5 +259,20 @@ mod tests {
     fn empty_is_unavailable() {
         let v = validate_article_body("   ", "Title", "https://example.com");
         assert_eq!(v.quality, BodyQuality::Unavailable);
+    }
+
+    #[test]
+    fn strips_leading_sitewide_nav_link_roster() {
+        let noisy = "• India Today\n• Aaj Tak\n• Business Today\n• Cosmopolitan\n\nDonald Trump makes another Nobel Peace Prize pitch.\nDonald Trump is making another pitch for the Nobel Peace Prize.";
+        let v = validate_article_body(
+            noisy,
+            "Trump makes another Nobel Peace Prize pitch",
+            "https://example.com",
+        );
+        assert!(!v.cleaned_markdown.contains("India Today"));
+        assert!(!v.cleaned_markdown.contains("Aaj Tak"));
+        assert!(v
+            .cleaned_markdown
+            .contains("Donald Trump is making another pitch"));
     }
 }

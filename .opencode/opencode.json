@@ -2,18 +2,6 @@
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "plan",
   "agents": {
-    "explore": {
-      "mode": "subagent",
-      "model": "openrouter/north-mini-code:free",
-      "permissions": [
-        { "action": "edit", "resource": "*", "effect": "deny" },
-        { "action": "shell", "resource": "*", "effect": "allow" }
-      ]
-    },
-    "compaction": {
-      "mode": "primary",
-      "model": "openrouter/nemotron-3-ultra-550b-a55b:free#high"
-    },
     "build": {
       "permissions": [
         { "action": "execute", "resource": "*", "effect": "deny" },

@@ -45,11 +45,11 @@ impl ClockSet {
     }
 
     pub fn foreground_expired(&self) -> bool {
-        self.wall_elapsed() >= self.foreground
+        self.remaining_foreground().is_zero()
     }
 
     pub fn job_expired(&self) -> bool {
-        self.wall_elapsed() >= self.job_lifetime
+        self.remaining_lifetime().is_zero()
     }
 
     /// Active attempt budget cannot exceed remaining hard lifetime.

@@ -18,8 +18,8 @@ use serde_json::Value;
 
 use crate::provider::{self, ChatMessage, Completion};
 use crate::provider_diag::{
-    classify_status, provider_error, request_id, retry_after, Category, ProviderFailure, Stage,
-    StreamState,
+    classify_status, provider_error, request_id, retry_after_uncapped, Category, ProviderFailure,
+    Stage, StreamState,
 };
 use crate::secrets::ProviderSecret;
 
@@ -87,6 +87,17 @@ pub async fn attempt(
     transport: Transport,
     deadlines: Deadlines,
 ) -> AttemptReport {
+    attempt_with_observer(secret, messages, transport, deadlines, None).await
+}
+
+/// Send exactly one request with an optional text observer for streamed answer deltas.
+pub async fn attempt_with_observer(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    transport: Transport,
+    deadlines: Deadlines,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+) -> AttemptReport {
     let started = Instant::now();
     let kind = provider::effective_kind(secret);
     let endpoint = format!(
@@ -96,7 +107,11 @@ pub async fn attempt(
     if is_subscription(secret) {
         let outcome = match tokio::time::timeout(
             deadlines.total,
-            crate::subscription::complete(secret, messages, &[], |_| {}),
+            crate::subscription::complete(secret, messages, &[], |delta| {
+                if let Some(obs) = observer {
+                    obs(delta);
+                }
+            }),
         )
         .await
         {
@@ -133,6 +148,7 @@ pub async fn attempt(
         started,
         &mut first_ms,
         &mut stream_state,
+        observer,
     )
     .await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -162,6 +178,7 @@ async fn run(
     started: Instant,
     first_ms: &mut Option<u64>,
     state: &mut StreamState,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Result<Completion, ProviderFailure> {
     let client = reqwest::Client::builder()
         .connect_timeout(deadlines.connect)
@@ -202,7 +219,7 @@ async fn run(
     *first_ms = Some(started.elapsed().as_millis() as u64);
     let status = resp.status();
     let req_id = request_id(resp.headers());
-    let wait = retry_after(resp.headers(), Duration::from_secs(30));
+    let wait = retry_after_uncapped(resp.headers());
     let remaining = |started: Instant| deadlines.total.saturating_sub(started.elapsed());
     if !status.is_success() {
         let text = tokio::time::timeout(remaining(started), resp.text())
@@ -232,30 +249,36 @@ async fn run(
         f.request_id = req_id.clone();
         f
     };
-    match transport {
-        Transport::NonStream => {
-            let text = match tokio::time::timeout(remaining(started), resp.text()).await {
-                Err(_) => {
-                    return Err(attach(ProviderFailure::new(
-                        Stage::Stream,
-                        Category::Timeout,
-                        "response body exceeded the total deadline",
-                    )))
-                }
-                Ok(Err(err)) => {
-                    return Err(attach(ProviderFailure::from_error(
-                        Stage::Stream,
-                        Category::StreamInterrupted,
-                        &err,
-                    )))
-                }
-                Ok(Ok(text)) => text,
-            };
-            parse_final_json(&text).map_err(attach)
-        }
-        Transport::Stream => read_stream(resp, deadlines, started, state)
+    let is_event_stream = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.starts_with("text/event-stream"))
+        .unwrap_or(transport == Transport::Stream);
+
+    if is_event_stream {
+        read_stream(resp, deadlines, started, state, observer)
             .await
-            .map_err(attach),
+            .map_err(attach)
+    } else {
+        let text = match tokio::time::timeout(remaining(started), resp.text()).await {
+            Err(_) => {
+                return Err(attach(ProviderFailure::new(
+                    Stage::Stream,
+                    Category::Timeout,
+                    "response body exceeded the total deadline",
+                )))
+            }
+            Ok(Err(err)) => {
+                return Err(attach(ProviderFailure::from_error(
+                    Stage::Stream,
+                    Category::StreamInterrupted,
+                    &err,
+                )))
+            }
+            Ok(Ok(text)) => text,
+        };
+        parse_final_json(&text).map_err(attach)
     }
 }
 
@@ -364,6 +387,7 @@ async fn read_stream(
     deadlines: Deadlines,
     started: Instant,
     state: &mut StreamState,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Result<Completion, ProviderFailure> {
     let mut stream = resp.bytes_stream();
     let mut acc = Acc::default();
@@ -419,12 +443,12 @@ async fn read_stream(
         while let Some(idx) = buf.find('\n') {
             let line = buf[..idx].trim().to_string();
             buf.drain(..=idx);
-            line_event(&line, state, &mut acc)?;
+            line_event(&line, state, &mut acc, observer)?;
         }
     }
     if !buf.trim().is_empty() {
         let line = buf.trim().to_string();
-        line_event(&line, state, &mut acc)?;
+        line_event(&line, state, &mut acc, observer)?;
     }
     fill(state, &acc);
     if !state.done_marker && state.finish_reason.is_none() {
@@ -477,7 +501,12 @@ fn stream_fail(
     f
 }
 
-fn line_event(line: &str, state: &mut StreamState, acc: &mut Acc) -> Result<(), ProviderFailure> {
+fn line_event(
+    line: &str,
+    state: &mut StreamState,
+    acc: &mut Acc,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+) -> Result<(), ProviderFailure> {
     if line.is_empty() {
         acc.event.clear();
         return Ok(());
@@ -532,6 +561,9 @@ fn line_event(line: &str, state: &mut StreamState, acc: &mut Acc) -> Result<(), 
     if let Some(delta) = v.pointer("/choices/0/delta") {
         if let Some(t) = delta.get("content").and_then(Value::as_str) {
             acc.content.push_str(t);
+            if let Some(obs) = observer {
+                obs(t);
+            }
         }
         for key in ["reasoning_content", "reasoning"] {
             if let Some(t) = delta.get(key).and_then(Value::as_str) {

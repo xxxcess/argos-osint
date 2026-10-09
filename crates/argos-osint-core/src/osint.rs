@@ -21,10 +21,13 @@ pub(crate) use news_legal::fixture;
 pub mod contracts;
 pub mod dataset;
 pub mod dork_generator;
+pub mod holehe;
 mod providers;
 pub mod results;
+pub mod search_engines;
 pub mod source_eval;
 pub mod whatsmyname;
+pub mod whoxy;
 pub mod wikipedia_rsp;
 pub use contracts::{
     compact_capability_catalog, picker_candidates, ArgumentBuilderContract, CompactToolCapability,
@@ -108,7 +111,10 @@ pub fn plan_interval(id: &str) -> PlanInterval {
         return PlanInterval::Daily;
     }
     match id {
-        "hackertarget_hostsearch" | "whatsmyname_lookup" | "dork_generate" => PlanInterval::Daily,
+        "hackertarget_hostsearch"
+        | "whatsmyname_lookup"
+        | "dork_generate"
+        | "holehe_email_lookup" => PlanInterval::Daily,
         // WP:RSP changes slowly; keep the built index for a month.
         "wikipedia_source_reliability" => PlanInterval::Monthly,
         _ => PlanInterval::Never,
@@ -126,6 +132,7 @@ pub fn registry() -> &'static [ToolDefinition] {
     TOOLS.get_or_init(|| vec![
         tool!("crtsh_certificates","crt.sh certificates","Domains","Discover certificate records and hostnames.",["domain"],"https://crt.sh/","Public service; availability varies.",30),
         tool!("mnemonic_passive_dns","mnemonic Passive DNS","Domains","Historical hostname and IP relationships.",["domain_or_ip"],"https://docs.mnemonic.no/service-integration-guides/passivedns/docs/public/01-public_api.html","Public endpoint; bounded pagination and quotas apply.",30),
+        tool!("whoxy_whois_history","Whoxy WHOIS history","Domains","Historical WHOIS snapshots, registrar/contact changes, and nameserver diffs for a domain.",["domain"],"https://www.whoxy.com/whois-history/","GET https://api.whoxy.com/?history=DOMAIN. Enter the Whoxy key on this tool, or set WHOXY_API_KEY; the key is never stored on the input or evidence URL. Prepaid lookups: 1 credit for nonempty history, 0 for a genuine empty result. Observation dates are not registration dates.",30),
         tool!("hackertarget_hostsearch","HackerTarget Host Search","Domains","Indexed subdomains and IPs.",["domain"],"https://hackertarget.com/ip-tools/","Free daily allowance and request rate apply.",20),
         tool!("ripestat_network_info","RIPEstat network info","Networks","Announced prefix and routing ASN for an IP.",["ip"],"https://stat.ripe.net/docs/data_api","Routing origin is not website ownership.",20),
         tool!("arin_rdap","ARIN RDAP","Networks","IP registration and contacts.",["ip"],"https://www.arin.net/resources/registry/whois/rdap/","Regional registry may redirect.",25),
@@ -155,6 +162,9 @@ pub fn registry() -> &'static [ToolDefinition] {
         tool!("shodan_internetdb","Shodan InternetDB","Exposure","Observed ports, hostnames and vulnerability associations.",["ip"],"https://internetdb.shodan.io/","Free access is noncommercial; observations may be old.",20),
         tool!("urlscan_search","urlscan search","Exposure","Search existing website scan records.",["domain|query"],"https://urlscan.io/docs/api/","Search only; no scan submission; historical observations.",20),
         tool!("firecrawl_search","Firecrawl search","Web","Web search for titles, links, and descriptions. A new investigation runs two complementary searches before enrichment. Later searches are targeted follow-ups.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/search","POST https://api.firecrawl.dev/v2/search with query and limit (at most 10). Optional sources (web, news), categories (github, research), tbs time filter, and location. Enter the API key on this tool, or set FIRECRAWL_API_KEY. Results are snippets, not page content. Automatic investigation does not paginate. 2 credits per 10 results.",60),
+        tool!("firecrawl_google_search","Google Search (via Firecrawl)","Web","Search Google by scraping its SERP HTML via Firecrawl /v2/scrape.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/scrape","POST https://api.firecrawl.dev/v2/scrape with Google search URL template. Parses organic result headings, snippets, and clean destination URLs. 1 credit.",60),
+        tool!("firecrawl_yandex_search","Yandex Search (via Firecrawl)","Web","Search Yandex by scraping its SERP HTML via Firecrawl /v2/scrape.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/scrape","POST https://api.firecrawl.dev/v2/scrape with Yandex search URL template. Parses organic result headings, snippets, and clean destination URLs. 1 credit.",60),
+        tool!("firecrawl_mojeek_search","Mojeek Search (via Firecrawl)","Web","Search Mojeek by scraping its SERP HTML via Firecrawl /v2/scrape.",["query"],"https://docs.firecrawl.dev/api-reference/endpoint/scrape","POST https://api.firecrawl.dev/v2/scrape with Mojeek search URL template. Parses organic result headings, snippets, and clean destination URLs. 1 credit.",60),
         tool!("firecrawl_scrape","Firecrawl page","Web","Retrieve one public page as markdown when a search snippet is not enough to support a consequential claim.",["url"],"https://docs.firecrawl.dev/api-reference/endpoint/scrape","POST https://api.firecrawl.dev/v2/scrape for a single URL already found in evidence. One page per call; optional formats markdown and links (structured JSON goes through firecrawl_extract). Same Firecrawl API key as search. 1 credit.",60),
         tool!("firecrawl_map","Firecrawl map","Web","List a subject-owned site's pages, contact, about, team, press, and legal pages first.",["domain|url"],"https://docs.firecrawl.dev/api-reference/endpoint/map","POST https://api.firecrawl.dev/v2/map with optional search. Same registrable domain only, at most 100 links, never a social, publisher, or Q&A host. 1 credit per call.",60),
         tool!("firecrawl_batch_scrape","Firecrawl batch scrape","Web","Retrieve up to 10 evidence URLs as markdown in one job, such as the contact and about pages a map found.",["urls"],"https://docs.firecrawl.dev/api-reference/endpoint/batch-scrape","POST https://api.firecrawl.dev/v2/batch/scrape, then GET /v2/batch/scrape/{id} until done. URLs must already be in evidence; default 5, at most 10; markdown only; 1 credit per page. Polling is free; a job still running at the timeout is recorded as partial.",120),
@@ -184,6 +194,7 @@ pub fn registry() -> &'static [ToolDefinition] {
         tool!("courtlistener_docket_search","CourtListener federal dockets","Legal","Federal (PACER/RECAP) dockets that name the subject (exact phrase), with court, filing date, and case name.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=r with q as an exact phrase. First page only, at most 20 results, no highlighting; no RECAP fetch or paid PACER pulls. Optional court and filed_after (YYYY-MM-DD). Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30),
         tool!("courtlistener_judge_search","CourtListener judges","Legal","Judges whose name matches the subject (exact phrase), with court and position.",["query"],"https://www.courtlistener.com/help/api/rest/search/","GET https://www.courtlistener.com/api/rest/v4/search/?type=p with q as an exact phrase. First page only, at most 20 results. Same CourtListener token (COURTLISTENER_API_TOKEN), sent as Authorization: Token. At most 3 CourtListener calls per turn, 12 s apart.",30),
         tool!("whatsmyname_lookup","WhatsMyName lookup","Identities","Enumerate public accounts across websites using the official WhatsMyName dataset.",["username"],"https://github.com/WebBreacher/WhatsMyName","Dataset-driven detection; network access required; zero credit cost.",90),
+        tool!("holehe_email_lookup","Holehe email lookup","Email","Check whether an email address is registered on selected public services.",["email"],"https://github.com/megadose/holehe","Native adapters for Twitter, Spotify, and Pinterest; other catalog services return unsupported. No API key. Registration is email association, not identity or account control. Optional services and max_sites (default 10, cap 50).",40),
         tool!("dork_generate","Dork generator","Web","Compose structured search queries from DorkSearch PRO templates for Firecrawl search.",["objective|query|purpose|target"],"https://dorksearch.pro/","Local query synthesis; zero credit cost.",20),
     ]).as_slice()
 }
@@ -209,6 +220,57 @@ pub fn canonical_tool_id(id: &str) -> &str {
         "hunter_tech_lookup" => "hunter_company_enrichment",
         other => other,
     }
+}
+
+/// Canonical cache key identity for a tool and its arguments.
+pub fn cache_identity(tool_id: &str, inputs: &serde_json::Value) -> String {
+    let canonical = canonical_tool_id(tool_id);
+    if canonical == "whoxy_whois_history" {
+        if let Some(domain) = inputs.get("domain").and_then(serde_json::Value::as_str) {
+            let normalized = whoxy::normalize_domain(domain)
+                .unwrap_or_else(|_| domain.trim().to_ascii_lowercase());
+            return format!("{canonical}:v1:{{\"domain\":\"{normalized}\"}}");
+        }
+    }
+    let serialized = serde_json::to_string(inputs).unwrap_or_else(|_| inputs.to_string());
+    format!("{canonical}:v1:{serialized}")
+}
+
+/// Project a cached base result to the requested view.
+pub fn project_cached_result(
+    tool_id: &str,
+    inputs: &serde_json::Value,
+    cached: &ToolResult,
+) -> ToolResult {
+    let mut projected = cached.clone();
+    projected.tool_id = canonical_tool_id(tool_id).to_string();
+    projected.inputs = inputs.clone();
+    projected.cached = true;
+    projected.credits_charged = 0;
+    projected.credits_reported = None;
+    if canonical_tool_id(tool_id) == whoxy::TOOL_ID {
+        if let (Ok(raw), Ok(query)) = (
+            serde_json::from_str::<Value>(&cached.raw),
+            whoxy::parse_query(inputs),
+        ) {
+            if let Ok(full) = whoxy::parse_history_envelope(&raw, &query.domain) {
+                projected.observations =
+                    whoxy::bounded_model_view(&whoxy::project_history(&full, &query));
+            }
+        }
+    }
+    projected
+}
+
+/// Returns true if the tool is an external search discovery tool.
+pub fn is_search_discovery_tool(tool_id: &str) -> bool {
+    matches!(
+        canonical_tool_id(tool_id),
+        "firecrawl_search"
+            | "firecrawl_google_search"
+            | "firecrawl_yandex_search"
+            | "firecrawl_mojeek_search"
+    )
 }
 
 /// Catalog tools that start disabled. `firecrawl_crawl` spends a credit per page.
@@ -242,7 +304,11 @@ pub fn endpoint_cost(id: &str) -> Option<EndpointCost> {
     let cost = |provider, credits| EndpointCost { provider, credits };
     match canonical_tool_id(id) {
         "firecrawl_search" => Some(cost("firecrawl", 2)),
-        "firecrawl_scrape" | "firecrawl_map" => Some(cost("firecrawl", 1)),
+        "firecrawl_scrape"
+        | "firecrawl_map"
+        | "firecrawl_google_search"
+        | "firecrawl_yandex_search"
+        | "firecrawl_mojeek_search" => Some(cost("firecrawl", 1)),
         "firecrawl_batch_scrape" => Some(cost("firecrawl", BATCH_SCRAPE_DEFAULT_URLS as u32)),
         "firecrawl_crawl" => Some(cost("firecrawl", providers::CRAWL_MAX_PAGES as u32)),
         "firecrawl_extract" => Some(cost("firecrawl", providers::EXTRACT_CREDITS)),
@@ -266,6 +332,7 @@ pub fn endpoint_cost(id: &str) -> Option<EndpointCost> {
         id if atlas_news::provider(id).is_some() => {
             atlas_news::provider(id).map(|provider| cost(provider, 0))
         }
+        "whoxy_whois_history" => Some(cost("whoxy", 1)),
         _ => None,
     }
 }
@@ -318,6 +385,9 @@ fn optional_keys(id: &str) -> &'static [&'static str] {
         "wayback_availability" => &["timestamp"],
         "arquivo_history" | "nominatim_geocode" => &["limit"],
         "firecrawl_search" => &["limit", "sources", "categories", "tbs", "location"],
+        "firecrawl_google_search" | "firecrawl_yandex_search" | "firecrawl_mojeek_search" => {
+            &["limit"]
+        }
         "firecrawl_scrape" => &["formats"],
         "firecrawl_map" => &["search", "limit"],
         "firecrawl_crawl" => &["limit"],
@@ -340,6 +410,8 @@ fn optional_keys(id: &str) -> &'static [&'static str] {
         "courtlistener_case_search" => &["court", "filed_after", "filed_before"],
         "courtlistener_docket_search" => &["court", "filed_after"],
         "whatsmyname_lookup" => &["categories", "sites", "platforms", "max_sites"],
+        "whoxy_whois_history" => &["from", "to", "limit"],
+        "holehe_email_lookup" => &["services", "max_sites"],
         "dork_generate" => &[
             "purpose",
             "category",
@@ -367,7 +439,7 @@ fn key_schema(key: &str) -> Value {
         "radius_m" | "limit" | "offset" | "max_sites" | "max_queries" => {
             json!({"type": "integer"})
         }
-        "urls" | "sources" | "categories" | "formats" | "sites" | "template_ids" => {
+        "urls" | "sources" | "categories" | "formats" | "sites" | "template_ids" | "services" => {
             json!({"type": "array", "items": {"type": "string"}})
         }
         "perfect_match" => json!({"type": "boolean"}),
@@ -468,6 +540,27 @@ pub fn validate(id: &str, inputs: &Value) -> Result<()> {
     }
     if id == "whatsmyname_lookup" {
         str_arg(inputs, "username")?;
+        return Ok(());
+    }
+    if id == "holehe_email_lookup" {
+        holehe::normalize_email(str_arg(inputs, "email")?)?;
+        if let Some(services) = inputs.get("services") {
+            let ids = services
+                .as_array()
+                .ok_or_else(|| anyhow!("services must be an array of strings"))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| anyhow!("services must be an array of strings"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            holehe::select_services(Some(&ids), holehe::MAX_SITES_CAP)?;
+        }
+        return Ok(());
+    }
+    if id == "whoxy_whois_history" {
+        whoxy::parse_query(inputs)?;
         return Ok(());
     }
     if id == "dork_generate" {
@@ -1080,6 +1173,12 @@ fn parse_observations(
             truncated,
         ));
     }
+    if matches!(
+        id,
+        "firecrawl_google_search" | "firecrawl_yandex_search" | "firecrawl_mojeek_search"
+    ) {
+        return search_engines::parse_serp_response(id, &v, "", 5);
+    }
     if id == "firecrawl_scrape" {
         if v.get("success").and_then(Value::as_bool) == Some(false) {
             let message = v
@@ -1170,6 +1269,10 @@ fn parse_observations(
         }
         return Ok((sociavault_card(&v), false));
     }
+    if id == "whoxy_whois_history" {
+        let full = whoxy::parse_history_envelope(&v, "")?;
+        return Ok((whoxy::bounded_model_view(&full), false));
+    }
     if id == "crtsh_certificates" {
         let mut hosts = std::collections::BTreeSet::new();
         if let Some(rows) = v.as_array() {
@@ -1242,7 +1345,25 @@ fn no_results(id: &str, value: &Value) -> bool {
         "sociavault_search" | "sociavault_search_users" | "sociavault_user_content" => {
             return empty("accounts") && empty("links") && empty("texts");
         }
+        "whoxy_whois_history" => {
+            return value.get("zero_history").and_then(Value::as_bool) == Some(true);
+        }
+        "holehe_email_lookup" => {
+            return value
+                .get("counts")
+                .and_then(|c| c.get("registered"))
+                .and_then(Value::as_u64)
+                == Some(0)
+                && value.get("partial").and_then(Value::as_bool) != Some(true);
+        }
         _ => {}
+    }
+    if matches!(
+        id,
+        "firecrawl_google_search" | "firecrawl_yandex_search" | "firecrawl_mojeek_search"
+    ) {
+        return value.get("outcome").and_then(Value::as_str) == Some("zero_results")
+            || empty("items") && empty("results");
     }
     if id == "firecrawl_scrape" {
         return value
@@ -1819,6 +1940,18 @@ fn request(id: &str, v: &Value) -> Result<Request> {
             let u = str_arg(v, "username")?;
             q(whatsmyname::WMN_UPSTREAM_URL, &[], &[("u", u)])
         }
+        "whoxy_whois_history" => {
+            let domain = whoxy::parse_query(v)?.domain;
+            Ok(get(whoxy::history_request_url(&domain)?))
+        }
+        "holehe_email_lookup" => {
+            holehe::normalize_email(str_arg(v, "email")?)?;
+            q(
+                "https://api.twitter.com/i/users/email_available.json",
+                &[],
+                &[],
+            )
+        }
         "dork_generate" => q("https://dorksearch.pro/", &[], &[]),
         _ => Err(anyhow!("unknown tool {id}")),
     }
@@ -1862,6 +1995,8 @@ pub struct ProviderKeys {
     pub newsdata_fallback: String,
     pub currents: String,
     pub currents_fallback: String,
+    pub whoxy: String,
+    pub whoxy_fallback: String,
 }
 
 impl ProviderKeys {
@@ -1876,6 +2011,7 @@ impl ProviderKeys {
             "gnews" => (&self.gnews, &self.gnews_fallback),
             "newsdata" => (&self.newsdata, &self.newsdata_fallback),
             "currents" => (&self.currents, &self.currents_fallback),
+            "whoxy" => (&self.whoxy, &self.whoxy_fallback),
             _ => ("", ""),
         }
     }
@@ -1943,6 +2079,7 @@ fn keyed_provider(id: &str) -> Option<&'static str> {
     primary_provider(id)
         .or_else(|| news_legal::provider(id))
         .or_else(|| atlas_news::provider(id))
+        .or_else(|| (id == whoxy::TOOL_ID).then_some("whoxy"))
 }
 
 /// Atlas pipeline tools are manual and Atlas-only. Recon's picker never offers them.
@@ -2040,6 +2177,13 @@ fn header_for(id: &str, raw: &str) -> Result<Option<(reqwest::header::HeaderName
             key,
         )));
     }
+    if id == whoxy::TOOL_ID {
+        let key = keyed("Enter the Whoxy API key on a Whoxy tool, or set WHOXY_API_KEY")?;
+        return Ok(Some((
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            key,
+        )));
+    }
     Ok(None)
 }
 
@@ -2063,6 +2207,12 @@ fn bind_request(
     if atlas_news::provider(id) == Some("newsdata") {
         if let Some((_, value)) = &credential {
             url.query_pairs_mut().append_pair("apikey", value);
+        }
+        send = None;
+    }
+    if canonical_tool_id(id) == whoxy::TOOL_ID {
+        if let Some((_, value)) = &credential {
+            url.query_pairs_mut().append_pair("key", value);
         }
         send = None;
     }
@@ -2191,7 +2341,7 @@ fn public_source_url(url: &Url) -> String {
     let mut clean = url.clone();
     let pairs: Vec<(String, String)> = clean
         .query_pairs()
-        .filter(|(key, _)| key != "apikey" && key != "apiKey")
+        .filter(|(key, _)| key != "apikey" && key != "apiKey" && key != "key")
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
     clean.set_query(None);
@@ -2388,6 +2538,33 @@ impl Executor {
                 inputs,
                 status: status.into(),
                 source_url: observation.rsp_url.clone(),
+                retrieved_at: Utc::now().to_rfc3339(),
+                observations: serde_json::to_value(&observation)?,
+                raw: String::new(),
+                error: None,
+                cached: false,
+                truncated: false,
+                credits_charged: 0,
+                credits_reported: None,
+            });
+        }
+        if id == holehe::TOOL_ID {
+            let lookup_input: holehe::LookupInput = serde_json::from_value(inputs.clone())?;
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(holehe::REQUEST_TIMEOUT)
+                .build()?;
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let observation = holehe::lookup(&client, lookup_input, user_agent, &cancel).await?;
+            let status = holehe::observation_status(&observation);
+            return Ok(ToolResult {
+                tool_id: id.into(),
+                inputs,
+                status: status.into(),
+                source_url: format!(
+                    "https://github.com/megadose/holehe/tree/{}",
+                    holehe::catalog::UPSTREAM_COMMIT
+                ),
                 retrieved_at: Utc::now().to_rfc3339(),
                 observations: serde_json::to_value(&observation)?,
                 raw: String::new(),
@@ -2599,6 +2776,10 @@ impl Executor {
                     next.scheme() == "https" && (same_host || rdap),
                     "redirect host is not allowed"
                 );
+                ensure!(
+                    canonical_tool_id(id) != whoxy::TOOL_ID,
+                    "Whoxy does not follow redirects"
+                );
                 url = next;
                 continue;
             }
@@ -2708,6 +2889,24 @@ impl Executor {
                 Ok((value, cut)) => {
                     result.observations = value;
                     result.truncated |= cut;
+                    if id == whoxy::TOOL_ID {
+                        if let Ok(query) = whoxy::parse_query(&inputs) {
+                            if let Ok(raw_json) = serde_json::from_str::<Value>(&result.raw) {
+                                if let Ok(full) =
+                                    whoxy::parse_history_envelope(&raw_json, &query.domain)
+                                {
+                                    result.credits_reported =
+                                        Some(whoxy::reported_lookup_cost(&full));
+                                    result.observations = whoxy::bounded_model_view(
+                                        &whoxy::project_history(&full, &query),
+                                    );
+                                    if full.zero_history {
+                                        result.status = "no_results".into();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     result.status = if e.to_string().contains("quota")
@@ -2993,7 +3192,7 @@ mod tests {
         };
         let mut ids: Vec<&str> = registry().iter().map(|tool| tool.id).collect();
         ids.push("hunter_tech_lookup");
-        assert_eq!(ids.len(), 62);
+        assert_eq!(ids.len(), 67);
         for id in ids {
             for blank in [None, Some(""), Some("   "), Some(" \t\n ")] {
                 let sent = agent(&request_headers(
@@ -3048,6 +3247,8 @@ mod tests {
         );
         assert_eq!(plan_interval("github_repositories"), PlanInterval::Never);
         assert_eq!(plan_interval("blockchain_address"), PlanInterval::Never);
+        assert_eq!(plan_interval("whoxy_whois_history"), PlanInterval::Never);
+        assert_eq!(plan_interval("holehe_email_lookup"), PlanInterval::Daily);
         assert_eq!(cache_seconds("firecrawl_search"), CACHE_MONTH_SECONDS);
         assert_eq!(cache_seconds("sociavault_profile"), CACHE_MONTH_SECONDS);
         assert_eq!(cache_seconds("newsapi_headlines"), CACHE_DAY_SECONDS);
@@ -3056,16 +3257,16 @@ mod tests {
 
     #[test]
     fn registry_and_validation() {
-        assert_eq!(registry().len(), 61);
+        assert_eq!(registry().len(), 66);
         let ids: std::collections::HashSet<_> = registry().iter().map(|t| t.id).collect();
-        assert_eq!(ids.len(), 61);
+        assert_eq!(ids.len(), 66);
         assert_eq!(
             registry()
                 .iter()
                 .map(|t| t.category)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            15
+            16
         );
         for t in registry() {
             assert!(!t.description.is_empty());
@@ -3303,5 +3504,70 @@ mod tests {
             .unwrap()
             .iter()
             .any(|link| link.as_str().unwrap().contains("youtube.com")));
+    }
+
+    #[test]
+    fn whoxy_cache_identity_is_domain_only() {
+        let a = cache_identity(
+            "whoxy_whois_history",
+            &json!({"domain":"Example.ORG.","from":"2015-01-01","limit":2}),
+        );
+        let b = cache_identity(
+            "whoxy_whois_history",
+            &json!({"domain":"example.org","to":"2016-01-01"}),
+        );
+        assert_eq!(a, b);
+        assert!(a.contains("example.org"));
+        assert!(!a.contains("from"));
+    }
+
+    #[test]
+    fn whoxy_source_url_drops_the_key() {
+        let mut url =
+            Url::parse("https://api.whoxy.com/?history=example.org&key=SECRETKEY").unwrap();
+        url.query_pairs_mut().append_pair("extra", "1");
+        let public = public_source_url(&url);
+        assert!(!public.contains("SECRETKEY"));
+        assert!(!public.contains("key="));
+        assert!(public.contains("history=example.org"));
+    }
+
+    #[test]
+    fn whoxy_projects_cached_full_history() {
+        let raw = json!({
+            "status": 1,
+            "total_records_found": 2,
+            "whois_records": [
+                {"query_time": "2014-01-01 00:00:00", "domain_registrar": {"registrar_name": "A"}},
+                {"query_time": "2016-01-01 00:00:00", "domain_registrar": {"registrar_name": "B"}}
+            ]
+        });
+        let cached = ToolResult {
+            tool_id: "whoxy_whois_history".into(),
+            inputs: json!({"domain": "example.org"}),
+            status: "completed".into(),
+            source_url: "https://api.whoxy.com/?history=example.org".into(),
+            retrieved_at: "2020-01-01T00:00:00Z".into(),
+            observations: json!({}),
+            raw: raw.to_string(),
+            error: None,
+            cached: false,
+            truncated: false,
+            credits_charged: 1,
+            credits_reported: Some(1),
+        };
+        let projected = project_cached_result(
+            "whoxy_whois_history",
+            &json!({"domain": "example.org", "from": "2015-01-01", "limit": 1}),
+            &cached,
+        );
+        assert!(projected.cached);
+        assert_eq!(projected.credits_charged, 0);
+        assert_eq!(projected.observations["displayed"], 1);
+        assert_eq!(projected.observations["omitted"], 0);
+        assert_eq!(
+            projected.observations["snapshots"][0]["query_time"],
+            "2016-01-01 00:00:00"
+        );
     }
 }

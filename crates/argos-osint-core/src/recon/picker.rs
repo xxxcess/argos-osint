@@ -10,7 +10,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
@@ -19,7 +18,7 @@ use serde_json::{json, Value};
 
 use super::{
     brain_resources::{self, BrainResourceSummary},
-    investigation, Binding, Directive, PickRecord,
+    investigation, Binding, ChatMessage, Directive, PickRecord,
 };
 use crate::{provider, secrets::ProviderSecret};
 
@@ -218,132 +217,167 @@ pub struct Ordered {
     pub note: String,
 }
 
+use super::model_exec::{execute_decisions_or_chat, DecisionsAdapter, OperationScope, RoleRuntime};
+
+struct PickRequestAdapter<'r, 'b>(&'r PickRequest<'b>);
+
+impl<'r, 'b> DecisionsAdapter<PickReply> for PickRequestAdapter<'r, 'b> {
+    fn compile_native(&self) -> (Value, Value) {
+        decisions_request(self.0)
+    }
+
+    fn parse_native(&self, resp: &provider::DecisionsResponse) -> Result<PickReply, String> {
+        let answer = resp.answers.get("next_tool").cloned().unwrap_or_default();
+        Ok(PickReply {
+            tool_id: answer.choice.clone().unwrap_or_default(),
+            confidence: answer.choice_probability(),
+            ..PickReply::default()
+        })
+    }
+
+    fn compile_chat(&self) -> Vec<ChatMessage> {
+        chat_request(self.0)
+    }
+
+    fn parse_chat(&self, raw: &str) -> Result<PickReply, String> {
+        Ok(parse_chat_pick(raw))
+    }
+}
+
 /// One tool-picker session for a turn. Counts requests and stops calling the provider
-/// after a 429, a transport error, or the request ceiling.
+/// after a transport error or the request ceiling.
 pub struct Picker<'a> {
-    secret: &'a ProviderSecret,
+    runtime: std::borrow::Cow<'a, RoleRuntime>,
     cancel: &'a Arc<AtomicBool>,
     transport: &'static str,
     unavailable: Option<String>,
     pub requests: u32,
-    pub rate_limited: bool,
     pub failure: Option<String>,
     pub fallback_picks: usize,
     pub cost: f64,
-    clock: Option<Arc<Mutex<super::budget::TurnClock>>>,
+    pub rate_limited: bool,
 }
 
 impl<'a> Picker<'a> {
-    pub fn new(secret: &'a ProviderSecret, cancel: &'a Arc<AtomicBool>) -> Self {
-        let transport = provider::picker_transport(&secret.model);
-        let unavailable = if secret.model.trim().is_empty() {
+    pub fn new(secret: &ProviderSecret, cancel: &'a Arc<AtomicBool>) -> Self {
+        Self::from_secret(secret, cancel)
+    }
+
+    pub fn for_runtime(runtime: &'a RoleRuntime, cancel: &'a Arc<AtomicBool>) -> Self {
+        let (assignment, _) = runtime.settings.defaults.resolve_role("tool-picker");
+        let transport = provider::picker_transport(&assignment.model);
+        let unavailable = if assignment.model.trim().is_empty() {
             Some("tool_picker_unavailable: no tool-picker model is configured".to_string())
         } else if transport == "decisions"
-            && (provider::effective_kind(secret) != "openrouter"
-                || provider::resolved_key(secret).is_none())
+            && (assignment.provider != "openrouter"
+                || runtime
+                    .auth
+                    .account("openrouter")
+                    .is_none_or(|a| a.api_key.as_deref().unwrap_or("").trim().is_empty()))
         {
             Some("tool_picker_unavailable: Jev needs a connected OpenRouter key".to_string())
         } else {
             None
         };
         Self {
-            secret,
+            runtime: std::borrow::Cow::Borrowed(runtime),
             cancel,
             transport,
             unavailable,
             requests: 0,
-            rate_limited: false,
             failure: None,
             fallback_picks: 0,
             cost: 0.0,
-            clock: None,
+            rate_limited: false,
         }
     }
 
-    pub(crate) fn bind_clock(&mut self, clock: Arc<Mutex<super::budget::TurnClock>>) {
-        self.clock = Some(clock);
+    pub fn from_secret(secret: &ProviderSecret, cancel: &'a Arc<AtomicBool>) -> Self {
+        let mut settings = provider::SettingsFile::default();
+        settings.defaults.tool_picker = provider::ModelAssignment {
+            provider: secret.kind.clone(),
+            model: secret.model.clone(),
+            ..Default::default()
+        };
+        let mut auth = crate::secrets::AuthFile::default();
+        auth.set_account(secret.clone());
+        let runtime = RoleRuntime::new(auth, settings);
+        let (assignment, _) = runtime.settings.defaults.resolve_role("tool-picker");
+        let transport = provider::picker_transport(&assignment.model);
+        let unavailable = if assignment.model.trim().is_empty() {
+            Some("tool_picker_unavailable: no tool-picker model is configured".to_string())
+        } else if transport == "decisions"
+            && (assignment.provider != "openrouter"
+                || runtime
+                    .auth
+                    .account("openrouter")
+                    .is_none_or(|a| a.api_key.as_deref().unwrap_or("").trim().is_empty()))
+        {
+            Some("tool_picker_unavailable: Jev needs a connected OpenRouter key".to_string())
+        } else {
+            None
+        };
+        Self {
+            runtime: std::borrow::Cow::Owned(runtime),
+            cancel,
+            transport,
+            unavailable,
+            requests: 0,
+            failure: None,
+            fallback_picks: 0,
+            cost: 0.0,
+            rate_limited: false,
+        }
     }
+
+    #[allow(dead_code)]
+    pub(crate) fn bind_clock(&mut self, _clock: Arc<Mutex<super::budget::TurnClock>>) {}
 
     /// Whether another provider request is allowed this turn.
     pub fn can_call(&self) -> bool {
-        self.unavailable.is_none()
-            && !self.rate_limited
-            && self.failure.is_none()
-            && self.requests < MAX_REQUESTS
+        self.unavailable.is_none() && self.failure.is_none() && self.requests < MAX_REQUESTS
     }
 
-    /// One request. A 429 stops later picker calls in the turn.
+    /// One request.
     async fn ask(&mut self, request: &PickRequest<'_>) -> Result<PickReply> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("cancelled"));
         }
         self.requests += 1;
-        let limit = self.clock.as_ref().map(|clock| {
-            let mut clock = clock.lock().unwrap();
-            clock.note_round();
-            clock.recon_remaining()
-        });
-        let outcome = self.one_request(request, limit).await;
+        let outcome = self.one_request(request).await;
         if let Err(err) = &outcome {
-            if err.to_string() == "cancelled" || super::deadline_hit(err) {
-                // Cancel and the recon deadline stop the turn; they are not a transport failure.
-            } else if super::provider_rate_limited(err) {
-                self.rate_limited = true;
+            if err.to_string() == "cancelled" {
+                // Cancel stops the turn; it is not a transport failure.
             } else {
-                self.failure = Some(err.to_string().chars().take(160).collect());
+                let msg = err.to_string();
+                let lower = msg.to_ascii_lowercase();
+                if lower.contains("rate limit")
+                    || lower.contains("rate_limit")
+                    || lower.contains("rate-limit")
+                    || lower.contains("429")
+                {
+                    self.rate_limited = true;
+                }
+                self.failure = Some(msg.chars().take(160).collect());
             }
         }
         outcome
     }
 
-    async fn one_request(
-        &mut self,
-        request: &PickRequest<'_>,
-        limit: Option<Duration>,
-    ) -> Result<PickReply> {
-        if limit.is_some_and(|limit| limit.is_zero()) {
-            return Err(anyhow!(super::budget::RECON_DEADLINE));
-        }
-        let decide = self.transport == "decisions";
-        let run = async {
-            if decide {
-                let (state, questions) = decisions_request(request);
-                provider::decide(self.secret, &state, &questions)
-                    .await
-                    .map(|response| {
-                        if let Some(cost) = response.cost {
-                            self.cost += cost;
-                        }
-                        let answer = response
-                            .answers
-                            .get("next_tool")
-                            .cloned()
-                            .unwrap_or_default();
-                        PickReply {
-                            tool_id: answer.choice.clone().unwrap_or_default(),
-                            confidence: answer.choice_probability(),
-                            ..PickReply::default()
-                        }
-                    })
-            } else {
-                let messages = chat_request(request);
-                provider::complete(self.secret, &messages, &[], |_| {})
-                    .await
-                    .map(|response| parse_chat_pick(&response.content))
-            }
-        };
-        if let Some(limit) = limit {
-            tokio::select! {
-                result = run => result,
-                _ = super::wait_cancel(self.cancel.clone()) => Err(anyhow!("cancelled")),
-                _ = tokio::time::sleep(limit) => Err(anyhow!(super::budget::RECON_DEADLINE)),
-            }
-        } else {
-            tokio::select! {
-                result = run => result,
-                _ = super::wait_cancel(self.cancel.clone()) => Err(anyhow!("cancelled")),
-            }
-        }
+    async fn one_request(&mut self, request: &PickRequest<'_>) -> Result<PickReply> {
+        let adapter = PickRequestAdapter(request);
+        let scope = OperationScope::new("tool-picker", "tool-picker");
+        let (reply, _report) = execute_decisions_or_chat(
+            &self.runtime.auth,
+            &self.runtime.settings,
+            &scope,
+            &adapter,
+            self.cancel,
+            None,
+            None,
+        )
+        .await?;
+        Ok(reply)
     }
 
     /// Builds the ordered list, one pick per request. Stops at `limit` tools, at `done`

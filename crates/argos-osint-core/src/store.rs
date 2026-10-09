@@ -37,9 +37,9 @@ pub struct GraphSummary {
     pub focus: String,
 }
 
-/// Schema version this build writes. 20 adds the unified investigation
-/// harness tables (tasks, dependencies, passages, assessments, events, stream parts).
-pub const SCHEMA_VERSION: i64 = 25;
+/// Schema version this build writes. 26 adds model operations/attempts,
+/// coverage ledger, and intel task lease epoch.
+pub const SCHEMA_VERSION: i64 = 26;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -557,6 +557,104 @@ impl Store {
                  CREATE INDEX IF NOT EXISTS intel_link_explanations_article
                    ON intel_link_explanations(article_id);",
             )?;
+
+            if version < 26 {
+                self.conn.pragma_update(None, "user_version", 26)?;
+            }
+            // Schema 26: model operations, attempts, coverage ledger, lease epoch
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS recon_model_operations (
+                   id TEXT PRIMARY KEY,
+                   run_id TEXT NOT NULL DEFAULT '',
+                   task_id TEXT NOT NULL DEFAULT '',
+                   role TEXT NOT NULL,
+                   generation INTEGER NOT NULL DEFAULT 1,
+                   status TEXT NOT NULL,
+                   draft TEXT NOT NULL DEFAULT '',
+                   final_message_id TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS recon_operations_final_msg
+                   ON recon_model_operations(run_id, final_message_id)
+                   WHERE final_message_id IS NOT NULL AND run_id != '';
+                 CREATE INDEX IF NOT EXISTS recon_operations_run ON recon_model_operations(run_id);
+                 CREATE INDEX IF NOT EXISTS recon_operations_task ON recon_model_operations(task_id);
+
+                 CREATE TABLE IF NOT EXISTS recon_model_attempts (
+                   id TEXT PRIMARY KEY,
+                   operation_id TEXT NOT NULL REFERENCES recon_model_operations(id) ON DELETE CASCADE,
+                   generation INTEGER NOT NULL DEFAULT 1,
+                   route_index INTEGER NOT NULL,
+                   attempt INTEGER NOT NULL,
+                   provider TEXT NOT NULL,
+                   account TEXT NOT NULL,
+                   model TEXT NOT NULL,
+                   transport TEXT NOT NULL,
+                   dispatched INTEGER NOT NULL,
+                   outcome TEXT NOT NULL,
+                   failure_category TEXT NOT NULL DEFAULT '',
+                   http_status INTEGER,
+                   request_id TEXT NOT NULL DEFAULT '',
+                   finish_reason TEXT NOT NULL DEFAULT '',
+                   char_count INTEGER NOT NULL DEFAULT 0,
+                   wait_ms INTEGER NOT NULL DEFAULT 0,
+                   error_message TEXT NOT NULL DEFAULT '',
+                   started_at TEXT NOT NULL,
+                   finished_at TEXT NOT NULL DEFAULT '',
+                   UNIQUE(operation_id, generation, route_index, attempt)
+                 );
+                 CREATE INDEX IF NOT EXISTS recon_attempts_op ON recon_model_attempts(operation_id, generation);
+
+                 CREATE TABLE IF NOT EXISTS recon_coverage (
+                   id TEXT PRIMARY KEY,
+                   scope TEXT NOT NULL,
+                   generation INTEGER NOT NULL DEFAULT 1,
+                   directive_index INTEGER NOT NULL DEFAULT 0,
+                   category TEXT NOT NULL,
+                   payload_json TEXT NOT NULL DEFAULT '{}',
+                   updated_at TEXT NOT NULL,
+                   UNIQUE(scope, generation, directive_index, category)
+                 );
+                 CREATE INDEX IF NOT EXISTS recon_coverage_scope ON recon_coverage(scope, generation);",
+            )?;
+
+            // Add lease_epoch column to intel_report_tasks if missing
+            let has_lease_epoch: bool = {
+                let mut stmt = self.conn.prepare("PRAGMA table_info(intel_report_tasks)")?;
+                let mut rows = stmt.query([])?;
+                let mut found = false;
+                while let Some(row) = rows.next()? {
+                    let col_name: String = row.get(1)?;
+                    if col_name == "lease_epoch" {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            };
+            if !has_lease_epoch {
+                let _ = self.conn.execute(
+                    "ALTER TABLE intel_report_tasks ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0",
+                    [],
+                );
+            }
+
+            // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
+            if version < 26 {
+                let _ = self.conn.execute(
+                    "INSERT OR IGNORE INTO recon_model_operations (id, run_id, role, generation, status, draft, final_message_id, created_at, updated_at)
+                     SELECT 'legacy_op_' || r.id, r.id, 'synthesis', 1, 'final', '', m.id, r.created_at, r.updated_at
+                     FROM recon_runs r
+                     JOIN recon_messages m ON m.run_id = r.id AND m.role = 'assistant'
+                     WHERE r.state = 'completed'
+                       AND m.content NOT LIKE '%[Cut short%'
+                       AND m.content NOT LIKE '%cut_short%'
+                       AND NOT EXISTS (SELECT 1 FROM recon_model_operations op WHERE op.run_id = r.id)",
+                    [],
+                );
+            }
+
             Ok(())
         })();
         match result {

@@ -641,14 +641,43 @@ pub fn http_failure(
     f
 }
 
-/// `Retry-After` in seconds (HTTP-date values are ignored), capped.
-pub fn retry_after(headers: &reqwest::header::HeaderMap, cap: Duration) -> Option<Duration> {
+/// `Retry-After` in seconds or HTTP-date, optionally capped.
+pub fn retry_after_central(
+    headers: &reqwest::header::HeaderMap,
+    cap: Option<Duration>,
+) -> Option<Duration> {
     let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    let secs: f64 = value.trim().parse().ok()?;
-    if !secs.is_finite() || secs < 0.0 {
+    let trimmed = value.trim();
+    let duration = if let Ok(secs) = trimmed.parse::<f64>() {
+        if !secs.is_finite() || secs < 0.0 {
+            return None;
+        }
+        Duration::from_secs_f64(secs)
+    } else if let Ok(date) = chrono::DateTime::parse_from_rfc2822(trimmed) {
+        let now = chrono::Utc::now();
+        let diff = date.signed_duration_since(now);
+        if diff.num_milliseconds() <= 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(diff.num_milliseconds() as u64)
+        }
+    } else {
         return None;
-    }
-    Some(Duration::from_secs_f64(secs).min(cap))
+    };
+    Some(match cap {
+        Some(c) => duration.min(c),
+        None => duration,
+    })
+}
+
+/// `Retry-After` in seconds or HTTP-date, capped.
+pub fn retry_after(headers: &reqwest::header::HeaderMap, cap: Duration) -> Option<Duration> {
+    retry_after_central(headers, Some(cap))
+}
+
+/// `Retry-After` in seconds or HTTP-date, uncapped.
+pub fn retry_after_uncapped(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    retry_after_central(headers, None)
 }
 
 /// Request id header from common providers.

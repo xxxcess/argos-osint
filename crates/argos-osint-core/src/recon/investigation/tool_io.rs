@@ -408,11 +408,35 @@ const PAGE_PRODUCES: &[&str] = &[
     "domain", "url", "handle", "email", "ip", "cve", "wallet", "package", "address",
 ];
 const IP_SEEDS: &[&str] = &["mnemonic_passive_dns", "hackertarget_hostsearch"];
-const HANDLE_SEEDS: &[&str] = &["firecrawl_search", "sociavault_profile"];
+const SEARCH_SEEDS: &[&str] = &[
+    "firecrawl_search",
+    "firecrawl_google_search",
+    "firecrawl_yandex_search",
+    "firecrawl_mojeek_search",
+];
+const HANDLE_SEEDS: &[&str] = &[
+    "firecrawl_search",
+    "firecrawl_google_search",
+    "firecrawl_yandex_search",
+    "firecrawl_mojeek_search",
+    "sociavault_profile",
+];
 /// Producers of a domain the subject owns, for Hunter and Firecrawl map and crawl.
-const DOMAIN_SEEDS: &[&str] = &["firecrawl_search", "hunter_domain_finder"];
+const DOMAIN_SEEDS: &[&str] = &[
+    "firecrawl_search",
+    "firecrawl_google_search",
+    "firecrawl_yandex_search",
+    "firecrawl_mojeek_search",
+    "hunter_domain_finder",
+];
 /// Producers of an email for the Hunter email tools.
-const EMAIL_SEEDS: &[&str] = &["firecrawl_search", "hunter_domain_search"];
+const EMAIL_SEEDS: &[&str] = &[
+    "firecrawl_search",
+    "firecrawl_google_search",
+    "firecrawl_yandex_search",
+    "firecrawl_mojeek_search",
+    "hunter_domain_search",
+];
 const SOCIAL_SEARCH_QUERY: &[Fill] = &[
     fill_how(
         "person_name",
@@ -459,12 +483,12 @@ const HUNTER_COMBINED_KEYS: &[(&str, &str)] = &[
 /// The tool input table. Coverage is asserted against `osint::registry()` in tests.
 pub const TOOLS: &[ToolIo] = &[
     ToolIo {
-        after: &["firecrawl_search"],
+        after: SEARCH_SEEDS,
         keys: &[("name_value", "domain"), ("common_name", "domain")],
         ..row("crtsh_certificates", &[DOMAIN], &["domain"])
     },
     ToolIo {
-        after: &["firecrawl_search"],
+        after: SEARCH_SEEDS,
         ..row(
             "mnemonic_passive_dns",
             &[Slot {
@@ -474,7 +498,11 @@ pub const TOOLS: &[ToolIo] = &[
         )
     },
     ToolIo {
-        after: &["firecrawl_search"],
+        after: SEARCH_SEEDS,
+        ..row("whoxy_whois_history", &[DOMAIN], &[])
+    },
+    ToolIo {
+        after: SEARCH_SEEDS,
         ..row("hackertarget_hostsearch", &[DOMAIN], &["domain", "ip"])
     },
     ToolIo {
@@ -656,7 +684,37 @@ pub const TOOLS: &[ToolIo] = &[
         )
     },
     ToolIo {
-        after: &["firecrawl_search"],
+        extras: &[("limit", 5)],
+        ..row(
+            "firecrawl_google_search",
+            &[Slot {
+                fills: &[fill_how(QUERY_KIND, "query", How::SearchQuery)],
+            }],
+            SEARCH_PRODUCES,
+        )
+    },
+    ToolIo {
+        extras: &[("limit", 5)],
+        ..row(
+            "firecrawl_yandex_search",
+            &[Slot {
+                fills: &[fill_how(QUERY_KIND, "query", How::SearchQuery)],
+            }],
+            SEARCH_PRODUCES,
+        )
+    },
+    ToolIo {
+        extras: &[("limit", 5)],
+        ..row(
+            "firecrawl_mojeek_search",
+            &[Slot {
+                fills: &[fill_how(QUERY_KIND, "query", How::SearchQuery)],
+            }],
+            SEARCH_PRODUCES,
+        )
+    },
+    ToolIo {
+        after: SEARCH_SEEDS,
         ..row(
             "firecrawl_scrape",
             &[Slot {
@@ -710,7 +768,7 @@ pub const TOOLS: &[ToolIo] = &[
         )
     },
     ToolIo {
-        after: &["firecrawl_search"],
+        after: SEARCH_SEEDS,
         keys: &[("domain", "domain"), ("company_name", "org_name")],
         ..row(
             "hunter_domain_finder",
@@ -980,6 +1038,13 @@ pub const TOOLS: &[ToolIo] = &[
             &["handle", "url"],
         )
     },
+    row(
+        "holehe_email_lookup",
+        &[Slot {
+            fills: &[fill("email", "email")],
+        }],
+        &[],
+    ),
     ToolIo {
         optional: &[fill("domain", "domain")],
         ..row(

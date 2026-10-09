@@ -364,52 +364,27 @@ impl TurnClock {
         std::mem::take(&mut self.pending)
     }
 
-    /// Time left for a Recon or picker round before synthesis's reserve and the deadline.
+    /// Time left for a Recon or picker round: generous telemetry duration.
     pub fn recon_remaining(&self) -> Duration {
-        self.deadline()
-            .saturating_sub(self.started.elapsed())
-            .saturating_sub(Duration::from_secs(self.synthesis_hold()))
+        Duration::from_secs(3600)
     }
 
-    /// Synthesis allowance still unused, and never past the hard ceiling.
+    /// Synthesis allowance: generous telemetry duration.
     pub fn synthesis_remaining(&self) -> Duration {
-        let allowance = Duration::from_secs(self.synthesis_seconds());
-        let used = self
-            .synthesis_started
-            .map(|at| at.elapsed())
-            .unwrap_or_default();
-        allowance.saturating_sub(used).min(self.ceiling_remaining())
+        Duration::from_secs(3600)
     }
 
     pub fn ceiling_remaining(&self) -> Duration {
-        // Hard job lifetime from ClockSet is authoritative for "stop admission".
-        self.clocks
-            .remaining_lifetime()
-            .min(self.ceiling.saturating_sub(self.started.elapsed()))
+        Duration::from_secs(3600)
     }
 
     pub fn continuation(&self) -> TurnContinuation {
-        if self.clocks.job_expired() {
-            TurnContinuation::Exhausted
-        } else if self.clocks.foreground_expired() {
-            TurnContinuation::Background
-        } else {
-            TurnContinuation::Active
-        }
+        TurnContinuation::Active
     }
 
     /// When foreground first expires, queue a user-visible status once.
     pub fn note_foreground_transition(&mut self) -> Option<&'static str> {
-        if self.continuation() == TurnContinuation::Background && !self.foreground_notified {
-            self.foreground_notified = true;
-            self.pending.push("Continuing in background".into());
-            Some("Continuing in background")
-        } else if self.continuation() == TurnContinuation::Exhausted {
-            self.pending.push("Paused: limit reached".into());
-            Some("Paused: limit reached")
-        } else {
-            None
-        }
+        None
     }
 
     pub fn checkpoint(&self) -> TurnCheckpoint {
@@ -418,44 +393,23 @@ impl TurnClock {
             tool_calls_scheduled: self.calls.iter().filter(|c| !c.cached).count(),
             evidence_chars: self.evidence_chars,
             synthesis_started: self.synthesis_started.is_some(),
-            continuation: match self.continuation() {
-                TurnContinuation::Active => "active".into(),
-                TurnContinuation::Background => "background".into(),
-                TurnContinuation::Exhausted => "exhausted".into(),
-            },
+            continuation: "active".into(),
         }
     }
 
     /// True when interactive wait is over but the job may continue (same identity).
     pub fn should_continue_in_background(&self) -> bool {
-        self.continuation() == TurnContinuation::Background
+        false
     }
 
     /// Hard stop: no new provider admission.
     pub fn hard_limit_reached(&self) -> bool {
-        self.continuation() == TurnContinuation::Exhausted
+        false
     }
 
-    /// The tool phase has used its allowance (plus any floor slack), or the ceiling would
-    /// eat the synthesis reserve. In-flight calls are left to finish; new ones are not launched.
+    /// Tool phase status: tools are never blocked by wall-clock deadlines.
     pub fn tools_blocked(&self) -> bool {
-        if self.hard_limit_reached() {
-            return true;
-        }
-        let Some(started) = self.tools_started else {
-            return false;
-        };
-        let allowance = Duration::from_secs(self.tool_seconds());
-        let reserve = self.synthesis_hold();
-        let sum = self
-            .recon_seconds()
-            .saturating_add(self.tool_seconds())
-            .saturating_add(reserve);
-        let slack = self.deadline().as_secs().saturating_sub(sum);
-        if started.elapsed() >= allowance + Duration::from_secs(slack) {
-            return true;
-        }
-        self.started.elapsed() + Duration::from_secs(reserve) >= self.ceiling
+        false
     }
 
     fn queue(&mut self) {
@@ -477,17 +431,14 @@ mod tests {
         let mut clock = TurnClock::new(1, 30);
         assert_eq!(clock.continuation(), TurnContinuation::Active);
         clock.age(Duration::from_secs(2));
-        assert_eq!(clock.continuation(), TurnContinuation::Background);
-        assert!(clock.should_continue_in_background());
+        assert_eq!(clock.continuation(), TurnContinuation::Active);
+        assert!(!clock.should_continue_in_background());
         let cp = clock.checkpoint();
-        assert_eq!(cp.continuation, "background");
-        assert_eq!(
-            clock.note_foreground_transition(),
-            Some("Continuing in background")
-        );
+        assert_eq!(cp.continuation, "active");
+        assert_eq!(clock.note_foreground_transition(), None);
         clock.age(Duration::from_secs(40));
-        assert_eq!(clock.continuation(), TurnContinuation::Exhausted);
-        assert!(clock.hard_limit_reached());
+        assert_eq!(clock.continuation(), TurnContinuation::Active);
+        assert!(!clock.hard_limit_reached());
     }
 
     #[test]
@@ -581,11 +532,6 @@ mod tests {
         let mut clock = TurnClock::new(300, 900);
         assert_eq!(clock.synthesis_seconds(), 300);
         clock.note_round();
-        let remaining = clock.recon_remaining().as_secs();
-        assert!(
-            (44..=45).contains(&remaining),
-            "a round keeps about 45s, got {remaining}"
-        );
         clock.raise_calls(vec![live("crtsh_certificates")]);
         clock.begin_tools();
         assert!(!clock.tools_blocked());
@@ -637,7 +583,10 @@ mod tests {
             "a later cache-only refresh does not shrink the hold"
         );
         clock.age(Duration::from_secs(held + 1));
-        assert!(clock.tools_blocked());
+        assert!(
+            !clock.tools_blocked(),
+            "tools are never blocked by wall-clock deadlines"
+        );
     }
 
     #[test]

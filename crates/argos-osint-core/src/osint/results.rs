@@ -73,6 +73,7 @@ pub fn extract_search_results(observations: &Value) -> Vec<SearchResultItem> {
             .or_else(|| item.get("source_url"))
             .or_else(|| item.get("target"))
             .or_else(|| item.get("html_url"))
+            .or_else(|| item.get("destination"))
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim()

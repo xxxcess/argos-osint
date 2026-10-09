@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS intel_report_tasks (
   output_ref TEXT NOT NULL DEFAULT '',
   lease_owner TEXT NOT NULL DEFAULT '',
   lease_until TEXT NOT NULL DEFAULT '',
+  lease_epoch INTEGER NOT NULL DEFAULT 0,
   error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

@@ -180,3 +180,58 @@ CREATE TABLE IF NOT EXISTS credit_reservations (
   state TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS recon_model_operations (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL DEFAULT '',
+  task_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL,
+  draft TEXT NOT NULL DEFAULT '',
+  final_message_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS recon_operations_final_msg
+  ON recon_model_operations(run_id, final_message_id)
+  WHERE final_message_id IS NOT NULL AND run_id != '';
+CREATE INDEX IF NOT EXISTS recon_operations_run ON recon_model_operations(run_id);
+CREATE INDEX IF NOT EXISTS recon_operations_task ON recon_model_operations(task_id);
+
+CREATE TABLE IF NOT EXISTS recon_model_attempts (
+  id TEXT PRIMARY KEY,
+  operation_id TEXT NOT NULL REFERENCES recon_model_operations(id) ON DELETE CASCADE,
+  generation INTEGER NOT NULL DEFAULT 1,
+  route_index INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  account TEXT NOT NULL,
+  model TEXT NOT NULL,
+  transport TEXT NOT NULL,
+  dispatched INTEGER NOT NULL,
+  outcome TEXT NOT NULL,
+  failure_category TEXT NOT NULL DEFAULT '',
+  http_status INTEGER,
+  request_id TEXT NOT NULL DEFAULT '',
+  finish_reason TEXT NOT NULL DEFAULT '',
+  char_count INTEGER NOT NULL DEFAULT 0,
+  wait_ms INTEGER NOT NULL DEFAULT 0,
+  error_message TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL DEFAULT '',
+  UNIQUE(operation_id, generation, route_index, attempt)
+);
+CREATE INDEX IF NOT EXISTS recon_attempts_op ON recon_model_attempts(operation_id, generation);
+
+CREATE TABLE IF NOT EXISTS recon_coverage (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 1,
+  directive_index INTEGER NOT NULL DEFAULT 0,
+  category TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL,
+  UNIQUE(scope, generation, directive_index, category)
+);
+CREATE INDEX IF NOT EXISTS recon_coverage_scope ON recon_coverage(scope, generation);
+

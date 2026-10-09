@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::{canonical_tool_id, endpoint_cost, registry};
 
-/// The 14 official intelligence categories from the spec.
+/// Intelligence categories used by the picker and diversity policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IntelligenceCategory {
     WebDiscovery,
@@ -22,6 +22,7 @@ pub enum IntelligenceCategory {
     Geography,
     Bitcoin,
     Vulnerabilities,
+    EmailRegistration,
 }
 
 impl IntelligenceCategory {
@@ -41,14 +42,18 @@ impl IntelligenceCategory {
             Self::Geography => "Geography",
             Self::Bitcoin => "Bitcoin activity",
             Self::Vulnerabilities => "Vulnerabilities/exposure",
+            Self::EmailRegistration => "Email registration/lookups",
         }
     }
 
     pub fn for_tool(tool_id: &str) -> Option<Self> {
         let tool = canonical_tool_id(tool_id);
         match tool {
-            // Web discovery (8)
+            // Web discovery (8 base + 3 engines)
             "firecrawl_search"
+            | "firecrawl_google_search"
+            | "firecrawl_yandex_search"
+            | "firecrawl_mojeek_search"
             | "firecrawl_scrape"
             | "firecrawl_map"
             | "firecrawl_batch_scrape"
@@ -97,8 +102,9 @@ impl IntelligenceCategory {
             | "wikipedia_users"
             | "whatsmyname_lookup" => Some(Self::PublicAccountCorroboration),
 
-            // Domain/network relationships (6)
-            "crtsh_certificates"
+            // Domain/network relationships (6 base + 1 whoxy)
+            "whoxy_whois_history"
+            | "crtsh_certificates"
             | "mnemonic_passive_dns"
             | "hackertarget_hostsearch"
             | "ripestat_network_info"
@@ -125,7 +131,162 @@ impl IntelligenceCategory {
             "nvd_cve" | "cve_record" | "osv_package" | "sans_ip_activity" | "shodan_internetdb"
             | "urlscan_search" => Some(Self::Vulnerabilities),
 
+            // Email registration (1)
+            "holehe_email_lookup" => Some(Self::EmailRegistration),
+
             _ => None,
+        }
+    }
+
+    /// Dataset ID underlying the tool for independent corroboration.
+    pub fn dataset_for_tool(tool_id: &str) -> &'static str {
+        let canonical = canonical_tool_id(tool_id);
+        match canonical {
+            "newsapi_search" | "newsapi_headlines" => "newsapi",
+            "gnews_search" => "gnews",
+            "newsdata_latest" => "newsdata",
+            "currents_latest" => "currents",
+            "wikipedia_source_reliability" => "wikipedia_rsp",
+            "courtlistener_case_search"
+            | "courtlistener_docket_search"
+            | "courtlistener_judge_search" => "courtlistener",
+            "gleif_entities" => "gleif",
+            "sec_submissions" => "sec_edgar",
+            "wikidata_entities" => "wikidata",
+            "hunter_company_enrichment"
+            | "hunter_domain_finder"
+            | "hunter_email_count"
+            | "hunter_domain_search"
+            | "hunter_email_finder"
+            | "hunter_email_verifier"
+            | "hunter_email_insight"
+            | "hunter_person_enrichment"
+            | "hunter_combined_enrichment" => "hunter",
+            "sociavault_search"
+            | "sociavault_search_users"
+            | "sociavault_profile"
+            | "sociavault_user_content" => "sociavault",
+            "keybase_identity" => "keybase",
+            "stackexchange_users" => "stackexchange",
+            "wikipedia_users" => "wikipedia",
+            "whatsmyname_lookup" => "whatsmyname",
+            "whoxy_whois_history" => "whoxy_whois",
+            "crtsh_certificates" => "crtsh",
+            "mnemonic_passive_dns" => "mnemonic_dns",
+            "hackertarget_hostsearch" => "hackertarget",
+            "ripestat_network_info" => "ripestat",
+            "arin_rdap" => "arin",
+            "apnic_rdap" => "apnic",
+            "wayback_availability" => "wayback",
+            "arquivo_history" => "arquivo",
+            "commoncrawl_urls" => "commoncrawl",
+            "github_repositories" => "github",
+            "gitlab_projects" => "gitlab",
+            "grepapp_code_search" => "grepapp",
+            "nominatim_geocode" => "nominatim",
+            "census_geocode" => "census",
+            "overpass_places" => "overpass",
+            "blockstream_address" => "blockstream",
+            "mempool_address" => "mempool",
+            "blockchain_address" => "blockchain_info",
+            "nvd_cve" => "nvd",
+            "cve_record" => "cve_org",
+            "osv_package" => "osv_dev",
+            "sans_ip_activity" => "sans_isc",
+            "shodan_internetdb" => "shodan",
+            "urlscan_search" => "urlscan",
+            "firecrawl_google_search" => "google_serp",
+            "firecrawl_yandex_search" => "yandex_serp",
+            "firecrawl_mojeek_search" => "mojeek_serp",
+            "firecrawl_search"
+            | "firecrawl_scrape"
+            | "firecrawl_map"
+            | "firecrawl_batch_scrape"
+            | "firecrawl_crawl"
+            | "firecrawl_extract" => "firecrawl",
+            "sociavault_google_search" => "sociavault_serp",
+            "dork_generate" => "dork_generator",
+            "holehe_email_lookup" => "holehe",
+            _ => "unknown",
+        }
+    }
+
+    /// Canonical preference ranking of candidate tools within an intelligence category.
+    pub fn ranked_candidates_for(category: Self) -> &'static [&'static str] {
+        match category {
+            Self::NewsEvents => &[
+                "newsapi_search",
+                "gnews_search",
+                "newsdata_latest",
+                "currents_latest",
+            ],
+            Self::DomainNetwork => &[
+                "whoxy_whois_history",
+                "crtsh_certificates",
+                "mnemonic_passive_dns",
+                "hackertarget_hostsearch",
+                "ripestat_network_info",
+                "arin_rdap",
+                "apnic_rdap",
+            ],
+            Self::HistoricalWeb => &[
+                "wayback_availability",
+                "arquivo_history",
+                "commoncrawl_urls",
+            ],
+            Self::SoftwareCode => &[
+                "github_repositories",
+                "gitlab_projects",
+                "grepapp_code_search",
+            ],
+            Self::Organizations => &[
+                "gleif_entities",
+                "sec_submissions",
+                "wikidata_entities",
+                "hunter_company_enrichment",
+            ],
+            Self::ProfessionalIdentity => &[
+                "hunter_domain_search",
+                "hunter_email_finder",
+                "hunter_email_verifier",
+                "hunter_person_enrichment",
+            ],
+            Self::SocialContent => &[
+                "sociavault_search",
+                "sociavault_profile",
+                "sociavault_user_content",
+            ],
+            Self::PublicAccountCorroboration => &[
+                "keybase_identity",
+                "whatsmyname_lookup",
+                "stackexchange_users",
+                "wikipedia_users",
+            ],
+            Self::Geography => &["nominatim_geocode", "census_geocode", "overpass_places"],
+            Self::Bitcoin => &[
+                "blockstream_address",
+                "mempool_address",
+                "blockchain_address",
+            ],
+            Self::Vulnerabilities => &[
+                "nvd_cve",
+                "osv_package",
+                "shodan_internetdb",
+                "urlscan_search",
+            ],
+            Self::WebDiscovery => &[
+                "firecrawl_google_search",
+                "firecrawl_yandex_search",
+                "firecrawl_mojeek_search",
+                "firecrawl_search",
+            ],
+            Self::PublisherContext => &["wikipedia_source_reliability"],
+            Self::LegalProceedings => &[
+                "courtlistener_case_search",
+                "courtlistener_docket_search",
+                "courtlistener_judge_search",
+            ],
+            Self::EmailRegistration => &["holehe_email_lookup"],
         }
     }
 }
@@ -246,9 +407,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_61_tools_mapped_to_categories() {
+    fn all_catalog_tools_mapped_to_categories() {
         let tools = registry();
-        assert_eq!(tools.len(), 61, "catalog has exactly 61 tools");
+        assert_eq!(tools.len(), 66, "catalog has exactly 66 tools");
 
         for tool in tools {
             let cat = IntelligenceCategory::for_tool(tool.id);

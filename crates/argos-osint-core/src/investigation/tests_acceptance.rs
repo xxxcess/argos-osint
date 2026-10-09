@@ -16,13 +16,13 @@ use crate::provider::{ModelAssignment, RoleDefaults};
 #[test]
 fn test_all_catalog_tools_mapped_to_categories() {
     let reg = registry();
-    assert_eq!(reg.len(), 61, "Catalog must contain exactly 61 tools");
+    assert_eq!(reg.len(), 66, "Catalog must contain exactly 66 tools");
 
     for tool in reg {
         let cat = IntelligenceCategory::for_tool(tool.id);
         assert!(
             cat.is_some(),
-            "Tool '{}' must be mapped to one of the 14 IntelligenceCategory variants",
+            "Tool '{}' must be mapped to an IntelligenceCategory variant",
             tool.id
         );
     }

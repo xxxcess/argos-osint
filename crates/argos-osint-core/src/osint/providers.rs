@@ -1120,6 +1120,14 @@ pub fn firecrawl_request(id: &str, v: &Value) -> Result<Request> {
             Some("https://api.firecrawl.dev/v2/crawl"),
         ),
         "firecrawl_extract" => post("scrape", firecrawl_extract_body(v)?, None),
+        "firecrawl_google_search" | "firecrawl_yandex_search" | "firecrawl_mojeek_search" => {
+            let query = super::str_arg(v, "query")?;
+            post(
+                "scrape",
+                super::search_engines::build_scrape_body(id, query)?,
+                None,
+            )
+        }
         _ => Err(anyhow!("unknown tool {id}")),
     }
 }
@@ -1133,6 +1141,8 @@ pub fn locked_host(id: &str) -> Option<&'static str> {
         Some("api.sociavault.com")
     } else if id.starts_with("hunter_") {
         Some("api.hunter.io")
+    } else if id == super::whoxy::TOOL_ID {
+        Some(super::whoxy::HOST)
     } else {
         super::news_legal::locked_host(id).or_else(|| super::atlas_news::locked_host(id))
     }

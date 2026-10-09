@@ -7,9 +7,12 @@ pub use graph::{
     force_links, graph_brief, recon_path, ForceLink, GraphEdge, GraphEdgeKind, GraphNode,
     GraphNodeKind, MemoryGraph, PathBand, ReconPath,
 };
+pub mod diversity;
 pub(crate) mod investigation;
+pub mod model_exec;
 mod orchestrate;
 mod picker;
+pub mod tool_runner;
 
 use crate::{
     osint::{self, Executor, ToolResult},
@@ -33,7 +36,7 @@ use std::{
     time::Duration,
 };
 static IDS: AtomicU64 = AtomicU64::new(0);
-fn id(prefix: &str) -> String {
+pub(crate) fn id(prefix: &str) -> String {
     format!(
         "{prefix}-{}-{}-{}",
         Utc::now().timestamp_micros(),
@@ -109,7 +112,12 @@ pub fn fallback_investigation_title(question: &str) -> String {
     }
 }
 
-async fn investigation_title(secret: &crate::secrets::ProviderSecret, question: &str) -> String {
+async fn investigation_title(
+    auth: &AuthFile,
+    settings: &SettingsFile,
+    question: &str,
+    db_path: Option<&Path>,
+) -> String {
     let source: String = question.chars().take(4_000).collect();
     let messages = vec![
         chat(
@@ -121,13 +129,23 @@ async fn investigation_title(secret: &crate::secrets::ProviderSecret, question: 
         ),
         chat("user", format!("<user_query>\n{source}\n</user_query>")),
     ];
-    let titled = match tokio::time::timeout(
-        Duration::from_secs(15),
-        provider::complete(secret, &messages, &[], |_| {}),
+    let scope = model_exec::OperationScope::new("investigation-title", "recon");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let titled = match model_exec::execute_chat(
+        auth,
+        settings,
+        &scope,
+        &messages,
+        |_| Ok(()),
+        &cancel,
+        None,
+        None,
+        db_path,
+        false,
     )
     .await
     {
-        Ok(Ok(response)) => clean_investigation_title(&response.content),
+        Ok((text, _)) => clean_investigation_title(&text),
         _ => String::new(),
     };
     if titled.is_empty() {
@@ -252,8 +270,10 @@ pub enum TurnEvent {
     AnswerDelta(String),
     /// Replaces the streaming mark. The citation repair pass uses "fixing citations…".
     AnswerNote(String),
-    /// Current deadline, updated when rounds add calls or the evidence size is known.
-    Deadline(String),
+    /// Clears any provisional answer text streamed so far on route retry/reset.
+    AnswerReset,
+    /// Replaces provisional draft entirely (e.g. non-streaming fallback completion).
+    AnswerReplacement(String),
 }
 
 impl std::fmt::Display for TurnEvent {
@@ -261,8 +281,9 @@ impl std::fmt::Display for TurnEvent {
         match self {
             Self::Stage(text)
             | Self::AnswerNote(text)
-            | Self::Deadline(text)
-            | Self::AnswerDelta(text) => f.write_str(text),
+            | Self::AnswerDelta(text)
+            | Self::AnswerReplacement(text) => f.write_str(text),
+            Self::AnswerReset => Ok(()),
         }
     }
 }
@@ -701,11 +722,31 @@ impl Store {
             }
         }
         tx.execute(
+            "INSERT INTO extraction_jobs(answer_id,run_id,state,updated_at) VALUES (?1,?2,'queued',?3)",
+            params![m.id, run_id, now()],
+        )?;
+        tx.execute(
+            "UPDATE recon_model_operations SET status='final', final_message_id=?1, updated_at=?2 WHERE id = (SELECT id FROM recon_model_operations WHERE run_id=?3 AND role='synthesis' ORDER BY created_at DESC LIMIT 1)",
+            params![m.id, now(), run_id],
+        )?;
+        tx.execute(
             "UPDATE recon_threads SET updated_at=?1 WHERE id=?2",
             params![now(), tid],
         )?;
+        tx.execute(
+            "UPDATE recon_runs SET stage='complete', updated_at=?1 WHERE id=?2 AND state='running'",
+            params![now(), run_id],
+        )?;
         tx.commit()?;
         Ok(m)
+    }
+    pub fn has_final_answer_for_run(&self, run_id: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM recon_model_operations WHERE run_id=?1 AND role='synthesis' AND status='final'",
+            [run_id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+        Ok(count > 0)
     }
     pub fn answer_evidence(&self, answer_id: &str) -> Result<Vec<(String, ToolResult)>> {
         let mut stmt=self.conn.prepare("SELECT c.id,c.result_json FROM recon_message_evidence e JOIN osint_calls c ON c.id=e.call_id WHERE e.message_id=?1 ORDER BY c.started_at")?;
@@ -1171,7 +1212,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
     fn touch_quota(&self, provider_name: &str, limits: &provider::ReconLimits) -> Result<()> {
-        let reset = if limits.credit_reset == "never" {
+        let reset = if provider_name == "whoxy" || limits.credit_reset == "never" {
             "never"
         } else {
             "monthly"
@@ -1346,9 +1387,10 @@ impl Store {
         Ok(())
     }
     pub fn inflight_duplicate(&self, tool_id: &str, inputs: &Value) -> Result<bool> {
+        let canonical = osint::canonical_tool_id(tool_id);
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM osint_calls WHERE tool_id=?1 AND inputs_json=?2 AND status IN ('queued','running')",
-            params![tool_id, serde_json::to_string(inputs)?],
+            "SELECT COUNT(*) FROM osint_calls WHERE (tool_id=?1 OR tool_id=?2) AND inputs_json=?3 AND status IN ('queued','running')",
+            params![tool_id, canonical, serde_json::to_string(inputs)?],
             |row| row.get(0),
         )?;
         Ok(count > 0)
@@ -1357,6 +1399,16 @@ impl Store {
         let expires = (Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339();
         self.conn.execute("INSERT INTO osint_cache(key,result_json,expires_at) VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET result_json=excluded.result_json,expires_at=excluded.expires_at",params![key,serde_json::to_string(result)?,expires])?;
         Ok(())
+    }
+    pub fn save_coverage_record(&self, record: &diversity::CoverageRecord) -> Result<()> {
+        diversity::save_coverage_record(self, record)
+    }
+    pub fn load_coverage_records(
+        &self,
+        scope: &str,
+        generation: u32,
+    ) -> Result<Vec<diversity::CoverageRecord>> {
+        diversity::load_coverage_records(self, scope, generation)
     }
     pub fn tool_enabled(&self, id: &str) -> Result<bool> {
         Ok(self
@@ -2601,14 +2653,15 @@ fn clip_long_strings(value: &mut Value, limit: usize) {
 }
 
 async fn compact_page_evidence(
+    auth: &AuthFile,
+    settings: &SettingsFile,
     question: &str,
     directives: &str,
     results: &[(String, ToolResult)],
-    secret: &crate::secrets::ProviderSecret,
     cancel: &Arc<AtomicBool>,
-    clock: &Arc<std::sync::Mutex<budget::TurnClock>>,
-    progress: &mut (impl FnMut(TurnEvent) + Send),
+    _progress: &mut (impl FnMut(TurnEvent) + Send),
     run_id: &str,
+    db_path: Option<&Path>,
 ) -> Result<Vec<(String, ToolResult)>> {
     let mut out = Vec::with_capacity(results.len());
     for (id, result) in results {
@@ -2621,7 +2674,7 @@ async fn compact_page_evidence(
         }
         let mut cloned = result.clone();
         cloned.observations = compact_page(
-            question, directives, id, result, secret, cancel, clock, progress, run_id,
+            auth, settings, question, directives, id, result, cancel, run_id, db_path,
         )
         .await?;
         out.push((id.clone(), cloned));
@@ -2630,24 +2683,16 @@ async fn compact_page_evidence(
 }
 
 async fn compact_page(
+    auth: &AuthFile,
+    settings: &SettingsFile,
     question: &str,
     directives: &str,
     id: &str,
     result: &ToolResult,
-    secret: &crate::secrets::ProviderSecret,
     cancel: &Arc<AtomicBool>,
-    clock: &Arc<std::sync::Mutex<budget::TurnClock>>,
-    progress: &mut (impl FnMut(TurnEvent) + Send),
     run_id: &str,
+    db_path: Option<&Path>,
 ) -> Result<Value> {
-    let limit = clock
-        .lock()
-        .unwrap()
-        .ceiling_remaining()
-        .min(Duration::from_secs(45));
-    if limit.is_zero() {
-        return Ok(page_excerpt(&result.observations));
-    }
     let messages = [
         chat("system", compact_page_system()),
         chat(
@@ -2658,22 +2703,33 @@ async fn compact_page(
             ),
         ),
     ];
-    match await_completion(
-        secret, &messages, cancel, clock, progress, false, limit, 1, run_id,
+    let scope = model_exec::OperationScope::new("compact-page", "summarization").with_run(run_id);
+    match model_exec::execute_chat(
+        auth,
+        settings,
+        &scope,
+        &messages,
+        |_| Ok(()),
+        cancel,
+        None,
+        None,
+        db_path,
+        false,
     )
     .await
     {
-        Err(err) if err.to_string() == "cancelled" => Err(err),
-        Err(_) => Ok(page_excerpt(&result.observations)),
-        Ok(streamed) if streamed.cut == Some("cancelled") => Err(anyhow!("cancelled")),
-        Ok(streamed) => {
-            let text = streamed.text.trim();
-            if streamed.cut.is_some() || text.is_empty() {
+        Ok((text, _)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
                 Ok(page_excerpt(&result.observations))
             } else {
-                Ok(page_summary_observation(&result.observations, text))
+                Ok(page_summary_observation(&result.observations, trimmed))
             }
         }
+        Err(err) if err.to_string() == "cancelled" || err.to_string().contains("cancelled") => {
+            Err(anyhow!("cancelled"))
+        }
+        Err(_) => Ok(page_excerpt(&result.observations)),
     }
 }
 fn parse_json(text: &str) -> Result<Value> {
@@ -2929,52 +2985,22 @@ impl Service {
             newsdata_fallback: spare("newsdata"),
             currents: key("currents"),
             currents_fallback: spare("currents"),
+            whoxy: key("whoxy"),
+            whoxy_fallback: spare("whoxy"),
         }
     }
+
+    pub fn tool_runner(&self) -> tool_runner::ToolRunner {
+        tool_runner::ToolRunner::new(&self.db_path, self.settings.clone(), self.provider_keys())
+    }
+
     async fn execute(&self, tool_id: &str, inputs: Value, refresh: bool) -> Result<ToolResult> {
-        let def = osint::definition(tool_id).ok_or_else(|| anyhow!("unknown tool"))?;
-        let key = format!("{}:v1:{}", tool_id, serde_json::to_string(&inputs)?);
-        if !refresh {
-            if let Some(mut cached) = Store::open(&self.db_path)?.cache_get(&key)? {
-                cached.cached = true;
-                cached.credits_charged = 0;
-                cached.credits_reported = None;
-                return Ok(cached);
-            }
-        }
-        let keys = self.provider_keys();
-        let result = self
-            .executor
-            .run_configured(
-                tool_id,
-                inputs,
-                Some(&self.settings.osint_user_agent),
-                &keys,
-            )
-            .await?;
-        if cacheable(&result) {
-            Store::open(&self.db_path)?.cache_put(&key, &result, def.cache_seconds)?;
-        }
-        if !result.cached && osint::canonical_tool_id(tool_id).starts_with("newsapi_") {
-            if let Ok(store) = Store::open(&self.db_path) {
-                let bucket = if osint::key_exhausted(&keys.newsapi)
-                    && !keys.newsapi_fallback.trim().is_empty()
-                {
-                    "newsapi:fallback"
-                } else {
-                    "newsapi"
-                };
-                crate::atlas::charge_quota(&store, bucket);
-            }
-        }
-        Ok(result)
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.tool_runner()
+            .execute_tool_without_reservation(tool_id, inputs, refresh, &cancel)
+            .await
     }
-    fn begin_title(
-        &self,
-        tid: &str,
-        question: &str,
-        secret: &crate::secrets::ProviderSecret,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    fn begin_title(&self, tid: &str, question: &str) -> Option<tokio::task::JoinHandle<()>> {
         let store = Store::open(&self.db_path).ok()?;
         let thread = store.get_thread(tid).ok()??;
         if thread.title != PLACEHOLDER_TITLE {
@@ -2983,9 +3009,10 @@ impl Service {
         let db = self.db_path.clone();
         let tid = tid.to_string();
         let question = question.to_string();
-        let secret = secret.clone();
+        let auth = self.auth.clone();
+        let settings = self.settings.clone();
         Some(tokio::spawn(async move {
-            let title = investigation_title(&secret, &question).await;
+            let title = investigation_title(&auth, &settings, &question, Some(&db)).await;
             let Ok(store) = Store::open(&db) else {
                 return;
             };
@@ -3070,7 +3097,7 @@ impl Service {
             },
         )?;
         drop(store);
-        let title_task = self.begin_title(tid, question, &recon_secret);
+        let title_task = self.begin_title(tid, question);
         let clock = turn_clock(
             turn_seconds,
             self.settings.recon_limits.effective_max_turn_seconds(),
@@ -3202,21 +3229,33 @@ impl Service {
             }
         }
         let prior_calls = store.calls_for_run(rid)?;
-        let answer_exists = store
-            .list_messages(&run.thread_id)?
-            .iter()
-            .any(|m| m.run_id.as_deref() == Some(rid) && m.role == "assistant");
+        let answer_exists = store.has_final_answer_for_run(rid)?;
         if answer_exists {
             Store::open(&self.db_path)?.set_run(rid, "completed", "complete", None, None)?;
             return Store::open(&self.db_path)?
                 .get_run(rid)?
                 .ok_or_else(|| anyhow!("run missing"));
         }
-        let mut recon_secret = snapshot_secret(&self.auth, &run.recon_model)?;
-        let synthesis_secret = snapshot_secret(&self.auth, &run.synthesis_model)?;
-        if recon_secret.model.is_empty() {
-            recon_secret = provider::role_secret(&self.auth, &self.settings, "recon")?;
-        }
+        let (prev_gen, last_draft): (u32, String) = store
+            .conn
+            .query_row(
+                "SELECT generation, draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis' ORDER BY generation DESC LIMIT 1",
+                [rid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, String::new()));
+        let resume_gen = prev_gen + 1;
+        let op_id = format!("{rid}-synthesis");
+        let _ = store.conn.execute(
+            "INSERT INTO recon_model_operations(id, run_id, task_id, role, generation, status, draft, created_at, updated_at)
+             VALUES (?1, ?2, '', 'synthesis', ?3, 'running', ?4, ?5, ?5)
+             ON CONFLICT(id) DO UPDATE SET generation=excluded.generation, status='running', updated_at=excluded.updated_at",
+            rusqlite::params![op_id, rid, resume_gen, last_draft, now()],
+        );
+        let recon_secret = provider::role_secret(&self.auth, &self.settings, "recon")
+            .or_else(|_| snapshot_secret(&self.auth, &run.recon_model))?;
+        let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "synthesis")
+            .or_else(|_| snapshot_secret(&self.auth, &run.synthesis_model))?;
         ensure!(store.restart_run(rid)?, "run could not restart");
         drop(store);
         let clock = turn_clock(
@@ -3516,17 +3555,16 @@ impl Service {
                 None,
                 None,
             )?;
-            let summarization_secret =
-                provider::role_secret(&self.auth, &self.settings, "summarization")?;
             compact_page_evidence(
+                &self.auth,
+                &self.settings,
                 question,
                 &directive_goals_line(plan),
                 results,
-                &summarization_secret,
                 cancel,
-                clock,
                 progress,
                 &run.id,
+                Some(&self.db_path),
             )
             .await?
         } else {
@@ -3537,12 +3575,11 @@ impl Service {
         let (synthesis_prompt, synthesis_user) =
             synthesis_request(question, plan, &synthesis_results, prior, recalled)?;
         {
-            let mut clock = clock.lock().unwrap();
-            clock.set_evidence(synthesis_user.chars().count());
-            clock.begin_synthesis();
-            let note = clock.breakdown();
-            let labels = clock.take_labels();
-            drop(clock);
+            let mut clock_guard = clock.lock().unwrap();
+            clock_guard.set_evidence(synthesis_user.chars().count());
+            clock_guard.begin_synthesis();
+            let note = clock_guard.breakdown();
+            drop(clock_guard);
             let mut logged = plan.clone();
             logged.deadline_note = note;
             Store::open(&self.db_path)?.set_run(
@@ -3552,91 +3589,138 @@ impl Service {
                 Some(&logged),
                 None,
             )?;
-            for label in labels {
-                progress(TurnEvent::Deadline(label));
-            }
         }
         let synthesis_prompt = synthesis_prompt.as_str();
         let synthesis_messages = [
             chat("system", synthesis_prompt.into()),
             chat("user", synthesis_user.clone()),
         ];
-        let limit = clock.lock().unwrap().synthesis_remaining();
-        let streamed = await_completion(
-            synthesis_secret,
-            &synthesis_messages,
-            cancel,
-            clock,
-            progress,
-            true,
-            limit,
-            results.len(),
-            &run.id,
-        )
-        .await?;
-        if streamed.cut == Some("cancelled") {
-            self.keep_partial(run, plan, results, &streamed.text, "cancelled")?;
-            return Err(anyhow!("cancelled"));
-        }
-        if let Some(reason) = streamed.cut {
-            let note = self.keep_partial(run, plan, results, &streamed.text, reason)?;
-            return Ok(Some(note));
-        }
-        let mut answer = streamed.text.trim().to_string();
-        ensure!(!answer.is_empty(), "empty synthesis answer");
-        // The text already on screen. Repair is not streamed, so a failed repair must
-        // not throw this away and fail the turn.
-        let watched = answer.clone();
-        if let Err(error) = validate_citations(&answer, results) {
-            progress(TurnEvent::AnswerNote("fixing citations…".into()));
-            let allowance = {
-                let mut clock = clock.lock().unwrap();
-                clock.mark_repair();
-                let labels = clock.take_labels();
-                let extra = Duration::from_secs(
-                    budget::synthesis_allowance_seconds(synthesis_user.chars().count(), false) / 2,
-                );
-                let limit = extra.min(clock.ceiling_remaining());
-                drop(clock);
-                for label in labels {
-                    progress(TurnEvent::Deadline(label));
-                }
-                limit
-            };
-            let repair = [chat("system", synthesis_prompt.into()), chat("user", format!("Repair this answer. {error}. Cite only these evidence IDs, one evidence ID per bracket like [id][id]: {}. Previous answer: {answer}", results.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")))];
-            let repaired = match await_completion(
-                synthesis_secret,
-                &repair,
-                cancel,
-                clock,
-                progress,
-                false,
-                allowance,
-                results.len(),
-                &run.id,
+
+        let (prev_gen, _): (u32, String) = Store::open(&self.db_path)?
+            .conn
+            .query_row(
+                "SELECT generation, draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis' ORDER BY generation DESC LIMIT 1",
+                [&run.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .await
-            {
-                Ok(value) => value,
-                Err(err) if err.to_string() == "cancelled" => {
-                    self.keep_partial(run, plan, results, &answer, "cancelled")?;
-                    return Err(err);
+            .unwrap_or((0, String::new()));
+        let generation = prev_gen.max(1);
+        let op_id = format!("{}-synthesis", run.id);
+        let scope = model_exec::OperationScope::new(&op_id, "synthesis")
+            .with_run(&run.id)
+            .with_generation(generation);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
+        let tx1 = tx.clone();
+        let text_observer: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |delta: &str| {
+            let _ = tx1.send(TurnEvent::AnswerDelta(delta.to_string()));
+        });
+        let tx2 = tx.clone();
+        let on_event: Arc<dyn Fn(model_exec::ModelExecEvent) + Send + Sync> =
+            Arc::new(move |evt: model_exec::ModelExecEvent| match evt {
+                model_exec::ModelExecEvent::AttemptReset { .. } => {
+                    let _ = tx2.send(TurnEvent::AnswerReset);
                 }
-                Err(_) => {
-                    let note =
-                        self.keep_partial(run, plan, results, &answer, budget::STREAM_LOST)?;
-                    return Ok(Some(note));
+                model_exec::ModelExecEvent::FinalReplacement { text, .. } => {
+                    let _ = tx2.send(TurnEvent::AnswerReplacement(text));
                 }
-            };
-            if repaired.cut == Some("cancelled") {
-                self.keep_partial(run, plan, results, &answer, "cancelled")?;
+                _ => {}
+            });
+        drop(tx);
+
+        let mut settings = self.settings.clone();
+        settings.defaults.synthesis = crate::provider::ModelAssignment {
+            provider: synthesis_secret.kind.clone(),
+            model: synthesis_secret.model.clone(),
+            ..Default::default()
+        };
+        let mut auth = self.auth.clone();
+        auth.set_account(synthesis_secret.clone());
+
+        let exec_fut = model_exec::execute_chat(
+            &auth,
+            &settings,
+            &scope,
+            &synthesis_messages,
+            |_| Ok(()),
+            cancel,
+            Some(on_event),
+            Some(text_observer),
+            Some(&self.db_path),
+            true,
+        );
+        tokio::pin!(exec_fut);
+
+        let streamed_res = loop {
+            tokio::select! {
+                res = &mut exec_fut => {
+                    while let Ok(evt) = rx.try_recv() {
+                        progress(evt);
+                    }
+                    break res;
+                }
+                Some(evt) = rx.recv() => {
+                    progress(evt);
+                }
+            }
+        };
+
+        let raw_answer = match streamed_res {
+            Ok((text, _)) => text,
+            Err(err) if err.to_string() == "cancelled" || err.to_string().contains("cancelled") => {
                 return Err(anyhow!("cancelled"));
             }
-            if let Some(reason) = repaired.cut {
-                let note = self.keep_partial(run, plan, results, &answer, reason)?;
-                return Ok(Some(note));
+            Err(err) => {
+                return Err(err);
             }
-            answer = repaired.text.trim().into();
+        };
+
+        let mut answer = raw_answer.trim().to_string();
+        ensure!(!answer.is_empty(), "empty synthesis answer");
+        let watched = answer.clone();
+
+        if let Err(error) = validate_citations(&answer, results) {
+            progress(TurnEvent::AnswerNote("fixing citations…".into()));
+            let repair_op_id = format!("{}-synthesis-repair", run.id);
+            let repair_scope = model_exec::OperationScope::new(&repair_op_id, "synthesis")
+                .with_run(&run.id)
+                .with_generation(generation);
+            let repair = [
+                chat("system", synthesis_prompt.into()),
+                chat(
+                    "user",
+                    format!(
+                        "Repair this answer. {error}. Cite only these evidence IDs, one evidence ID per bracket like [id][id]: {}. Previous answer: {answer}",
+                        results.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                ),
+            ];
+            let repaired_res = model_exec::execute_chat(
+                &auth,
+                &settings,
+                &repair_scope,
+                &repair,
+                |_| Ok(()),
+                cancel,
+                None,
+                None,
+                Some(&self.db_path),
+                true,
+            )
+            .await;
+            match repaired_res {
+                Ok((repaired_text, _)) => {
+                    answer = repaired_text.trim().to_string();
+                }
+                Err(err)
+                    if err.to_string() == "cancelled" || err.to_string().contains("cancelled") =>
+                {
+                    return Err(anyhow!("cancelled"));
+                }
+                Err(err) => {
+                    return Err(err);
+                }
+            }
         }
         let (answer, dropped) = match settle_citations(&answer, results) {
             Ok(settled) => settled,
@@ -3711,14 +3795,12 @@ impl Service {
             Some(&logged),
             None,
         )?;
-        if reason == "cancelled" && streamed.trim().is_empty() {
-            return Ok(note);
+        if let Ok(store) = Store::open(&self.db_path) {
+            let _ = store.conn.execute(
+                "UPDATE recon_model_operations SET draft = ?1, updated_at = ?2 WHERE run_id = ?3 AND role = 'synthesis'",
+                params![answer, now(), run.id],
+            );
         }
-        let message = self.store_answer(run, &[], &answer, results, &[])?;
-        Store::open(&self.db_path)?.conn.execute(
-            "UPDATE extraction_jobs SET state='skipped',updated_at=?1 WHERE answer_id=?2",
-            params![now(), message.id],
-        )?;
         Ok(note)
     }
 
@@ -3822,15 +3904,11 @@ impl Service {
         let memory_ids: Vec<String> = recalled.iter().map(|item| item.memory_id.clone()).collect();
         let answer_msg =
             store.add_answer(&run.thread_id, &run.id, answer, &cited_ids, &memory_ids)?;
-        store.conn.execute(
-            "INSERT INTO extraction_jobs(answer_id,run_id,state,updated_at) VALUES (?1,?2,'queued',?3)",
-            params![answer_msg.id, run.id, now()],
-        )?;
         Ok(answer_msg)
     }
     async fn extract_insights(
         &self,
-        secret: &crate::secrets::ProviderSecret,
+        _secret: &crate::secrets::ProviderSecret,
         question: &str,
         answer: &Message,
         evidence: &[(String, ToolResult)],
@@ -3848,8 +3926,25 @@ impl Service {
                 ),
             ),
         ];
-        let resp = provider::complete(secret, &messages, &[], |_| {}).await?;
-        let root = parse_json(&resp.content)?;
+        let mut scope = model_exec::OperationScope::new("extract-insights", "synthesis");
+        if let Some(run_id) = answer.run_id.as_deref() {
+            scope = scope.with_run(run_id);
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (text, _) = model_exec::execute_chat(
+            &self.auth,
+            &self.settings,
+            &scope,
+            &messages,
+            |_| Ok(()),
+            &cancel,
+            None,
+            None,
+            Some(&self.db_path),
+            false,
+        )
+        .await?;
+        let root = parse_json(&text)?;
         let mut claims = root
             .get("claims")
             .and_then(Value::as_array)
@@ -5436,6 +5531,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(trial, 0);
+    }
+
+    #[test]
+    fn whoxy_prepaid_pool_does_not_reset_monthly() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let store = Store::open(file.path()).unwrap();
+        let limits = provider::ReconLimits {
+            whoxy_credits: 2,
+            credit_reset: "monthly".into(),
+            ..provider::ReconLimits::default()
+        };
+        let hold = store.reserve_credits("whoxy", 1, &limits).unwrap().unwrap();
+        store.reconcile_credits(&hold, 1).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE provider_quota SET spent=2, period_start='2020-01-01T00:00:00+00:00' WHERE provider='whoxy'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.credits_available("whoxy", &limits).unwrap(), 0);
+        let policy: String = store
+            .conn
+            .query_row(
+                "SELECT reset_policy FROM provider_quota WHERE provider='whoxy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(policy, "never");
+        assert_eq!(limits.allowance("whoxy"), 2);
+        assert_eq!(
+            limits.configured_cost("whoxy_whois_history"),
+            Some(("whoxy", 1))
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::provider::{self, ChatMessage};
+use crate::provider::ChatMessage;
 use crate::secrets::ProviderSecret;
 use crate::store::Store;
 
@@ -47,6 +47,7 @@ pub struct SectionSynthInput {
 pub struct SectionSynthOutput {
     pub markdown: String,
     pub judgment: SectionJudgment,
+    pub is_draft: bool,
 }
 
 /// Synthesize one section. Uses the synthesis model when available; otherwise a
@@ -225,8 +226,30 @@ Extract and join ONLY the text strictly pertaining to the actual article title a
             tool_calls: Vec::new(),
         },
     ];
-    let done = provider::complete(secret, &messages, &[], |_| {}).await?;
-    let extracted = strip_code_fence(done.content.trim());
+    let mut settings = crate::provider::SettingsFile::default();
+    settings.defaults.synthesis = crate::provider::ModelAssignment {
+        provider: secret.kind.clone(),
+        model: secret.model.clone(),
+        ..Default::default()
+    };
+    let mut auth = crate::secrets::AuthFile::default();
+    auth.set_account(secret.clone());
+    let scope = crate::recon::model_exec::OperationScope::new("refine-body", "synthesis");
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done_content, _) = crate::recon::model_exec::execute_chat(
+        &auth,
+        &settings,
+        &scope,
+        &messages,
+        |_| Ok(()),
+        &cancel,
+        None,
+        None,
+        None,
+        false,
+    )
+    .await?;
+    let extracted = strip_code_fence(done_content.trim());
     anyhow::ensure!(!extracted.is_empty(), "empty refined body");
     Ok(extracted)
 }
@@ -370,8 +393,30 @@ Return JSON: {{\"markdown\":string,\"summary\":string,\"confidence\":number,\
             tool_calls: Vec::new(),
         },
     ];
-    let done = provider::complete(secret, &messages, &[], |_| {}).await?;
-    let reply = parse_json_object(&done.content)?;
+    let mut settings = crate::provider::SettingsFile::default();
+    settings.defaults.synthesis = crate::provider::ModelAssignment {
+        provider: secret.kind.clone(),
+        model: secret.model.clone(),
+        ..Default::default()
+    };
+    let mut auth = crate::secrets::AuthFile::default();
+    auth.set_account(secret.clone());
+    let scope = crate::recon::model_exec::OperationScope::new("intel-synth", "synthesis");
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done_content, _) = crate::recon::model_exec::execute_chat(
+        &auth,
+        &settings,
+        &scope,
+        &messages,
+        |_| Ok(()),
+        &cancel,
+        None,
+        None,
+        None,
+        false,
+    )
+    .await?;
+    let reply = parse_json_object(&done_content)?;
     let markdown = reply
         .get("markdown")
         .and_then(|v| v.as_str())
@@ -392,7 +437,11 @@ Return JSON: {{\"markdown\":string,\"summary\":string,\"confidence\":number,\
         gaps: string_list(reply.get("gaps")),
     };
     validate_output(input, &markdown, &judgment)?;
-    Ok(SectionSynthOutput { markdown, judgment })
+    Ok(SectionSynthOutput {
+        markdown,
+        judgment,
+        is_draft: false,
+    })
 }
 
 fn parse_json_object(text: &str) -> Result<serde_json::Value> {
@@ -579,6 +628,7 @@ Collection priorities: corroborating primary documents, independent reporting, a
             covered_element_ids: covered,
             gaps,
         },
+        is_draft: true,
     }
 }
 
@@ -608,11 +658,12 @@ pub fn save_section(
     );
     let judgment = serde_json::to_string(&judgment).unwrap_or_else(|_| "{}".into());
     let evidence_ids = json!(output.judgment.cited_evidence_ids).to_string();
+    let status = if output.is_draft { "draft" } else { "complete" };
     store.upsert_report_section_markdown(
         &section.job_id,
         &section.section_key,
         &output.markdown,
-        "complete",
+        status,
         &evidence_ids,
         &judgment,
         assessment_version,

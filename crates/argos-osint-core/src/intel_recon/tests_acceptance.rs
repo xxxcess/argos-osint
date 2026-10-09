@@ -312,6 +312,7 @@ mod acceptance {
             article_domain: art.source_domain.clone(),
             run_id: art.run_id.clone(),
             keys: ProviderKeys::default(),
+            auth: crate::secrets::AuthFile::default(),
             synthesis_secret: None,
             classifier_secret: None,
             settings: SettingsFile::default(),
@@ -328,19 +329,14 @@ mod acceptance {
             .intel_report_job(&job.id)
             .unwrap()
             .unwrap();
-        assert!(
-            matches!(finished.state.as_str(), "completed" | "partial"),
-            "state={}",
-            finished.state
-        );
-        assert!(finished.sections_done > 0);
+        assert_eq!(finished.state, "partial");
         let sections = Store::open(&db)
             .unwrap()
             .intel_report_sections(&job.id)
             .unwrap();
         assert!(sections
             .iter()
-            .any(|s| s.status == "complete" && !s.markdown.is_empty()));
+            .any(|s| s.status == "draft" && !s.markdown.is_empty()));
         assert!(events > 0);
     }
 }

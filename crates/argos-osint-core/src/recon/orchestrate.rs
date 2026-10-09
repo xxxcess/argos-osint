@@ -5,7 +5,6 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
-    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
@@ -66,11 +65,7 @@ pub async fn execute_budgeted(
             ));
             continue;
         }
-        let cache_key = format!(
-            "{}:v1:{}",
-            call.tool_id,
-            serde_json::to_string(&call.arguments)?
-        );
+        let cache_key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
         let cached = store.cache_get(&cache_key)?.is_some();
         if let Some((provider_name, cost)) =
             limits.configured_cost_for(&call.tool_id, &call.arguments)
@@ -261,12 +256,97 @@ pub async fn run_turn(
         None,
     )?;
     let picker_secret = picker_secret(service, run)?;
-    let mut picker = picker::Picker::new(&picker_secret, cancel);
+    let picker_runtime =
+        super::model_exec::RoleRuntime::new(service.auth.clone(), service.settings.clone());
+    let mut picker = picker::Picker::for_runtime(&picker_runtime, cancel);
     picker.bind_clock(clock.clone());
     plan.bindings = investigation::question_bindings(question);
     let named = investigation::derived_question_handles(question, &plan.directives, &plan.bindings);
     plan.bindings.extend(named);
     plan.bindings.extend(brain_resources.bindings());
+
+    // Mandatory discovery if broad discovery is needed (§4, §5)
+    let has_grounded_target = plan
+        .bindings
+        .iter()
+        .any(|b| matches!(b.kind.as_str(), "domain" | "url"));
+    if !has_grounded_target {
+        stage(progress, "running mandatory discovery");
+        match opening_discovery(
+            service,
+            run,
+            question,
+            &plan.strategy,
+            recon_secret,
+            &gate,
+            cancel,
+        )
+        .await
+        {
+            Ok((note, _complete, discovery_results, hits)) => {
+                plan.binding_notes.push(note);
+                for (call_id, result) in &discovery_results {
+                    plan.calls.push(PlanCall {
+                        step_id: format!("discovery-{}", plan.calls.len() + 1),
+                        tool_id: result.tool_id.clone(),
+                        arguments: result.inputs.clone(),
+                        reason: "mandatory_discovery".into(),
+                        status: result.status.clone(),
+                        call_id: call_id.clone(),
+                        bound: true,
+                        ..PlanCall::default()
+                    });
+                    let extracted = investigation::rule_bindings(
+                        question,
+                        call_id,
+                        &result.tool_id,
+                        &result.observations,
+                    );
+                    for b in extracted {
+                        if !plan
+                            .bindings
+                            .iter()
+                            .any(|k| k.kind == b.kind && k.value.eq_ignore_ascii_case(&b.value))
+                        {
+                            plan.bindings.push(b);
+                        }
+                    }
+                }
+                for hit in &hits {
+                    if let Ok(parsed) = url::Url::parse(&hit.url) {
+                        if let Some(host) = parsed.host_str() {
+                            let domain = host.strip_prefix("www.").unwrap_or(host).to_string();
+                            if !domain.is_empty()
+                                && !plan.bindings.iter().any(|b| {
+                                    b.kind == "domain" && b.value.eq_ignore_ascii_case(&domain)
+                                })
+                            {
+                                plan.bindings.push(super::Binding {
+                                    kind: "domain".into(),
+                                    value: domain,
+                                    source_tool: "discovery".into(),
+                                    evidence_id: hit.evidence_id.clone(),
+                                    step_id: "discovery".into(),
+                                    qualifier: String::new(),
+                                    unverified: false,
+                                    inferred: true,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Err(err) if cancelled(&err) => return Err(err),
+            Err(err) => {
+                plan.binding_notes
+                    .push(format!("Mandatory discovery failed: {err}"));
+            }
+        }
+    } else {
+        plan.binding_notes
+            .push("Broad discovery not required: grounded target bindings present.".into());
+    }
+
     plan.picker_model = picker_snapshot(run, &picker_secret);
     let max_calls = usize::from(run.max_calls);
     let ordered = picker
@@ -293,7 +373,7 @@ pub async fn run_turn(
         Some(&plan),
         None,
     )?;
-    let results = execute_ordered(
+    let mut results = execute_ordered(
         service,
         run,
         &mut plan,
@@ -310,6 +390,16 @@ pub async fn run_turn(
         progress,
     )
     .await?;
+    let store = Store::open(&service.db_path)?;
+    for call in store.calls_for_run(&run.id)? {
+        if results.iter().any(|(id, _)| id == &call.id) {
+            continue;
+        }
+        if let Some(result) = call.result {
+            results.insert(0, (call.id, result));
+        }
+    }
+    drop(store);
     refresh_directive_coverage(&mut plan);
     Store::open(&service.db_path)?.set_run(
         &run.id,
@@ -354,8 +444,10 @@ pub async fn continue_turn(
     let enabled = enabled_tools(&service.db_path)?;
     let unkeyed = unkeyed_tools(service);
     let catalog = picker::eligible_catalog(&enabled, &unkeyed);
-    let picker_secret = picker_secret(service, run)?;
-    let mut picker = picker::Picker::new(&picker_secret, cancel);
+    let _picker_secret = picker_secret(service, run)?;
+    let picker_runtime =
+        super::model_exec::RoleRuntime::new(service.auth.clone(), service.settings.clone());
+    let mut picker = picker::Picker::for_runtime(&picker_runtime, cancel);
     picker.bind_clock(clock.clone());
     let gate = ModelGate::default();
     gate.bind_clock(clock.clone(), service.db_path.clone());
@@ -482,9 +574,18 @@ fn apply_order(
     plan.picker_transport = ordered.transport.clone();
     plan.picker_note = ordered.note.clone();
     plan.picks = ordered.records.clone();
-    plan.calls.clear();
+    let preserved: Vec<PlanCall> = plan
+        .calls
+        .iter()
+        .filter(|c| {
+            c.status == "completed" || c.status == "running" || c.reason == "mandatory_discovery"
+        })
+        .cloned()
+        .collect();
+    plan.calls = preserved;
+    let offset = plan.calls.len();
     for (index, pick_id) in ordered.tools.iter().enumerate() {
-        let step_id = format!("s{}", index + 1);
+        let step_id = format!("s{}", offset + index + 1);
         let tool_id = brain_resources::resolve_pick_tool(pick_id).to_string();
         let record = ordered
             .records
@@ -643,7 +744,7 @@ fn replaced_search(plan: &Plan, index: usize) -> Option<(String, String, String)
         .iter()
         .rev()
         .find_map(|call| {
-            if call.tool_id != "firecrawl_search" {
+            if !crate::osint::is_search_discovery_tool(&call.tool_id) {
                 return None;
             }
             let query = call
@@ -963,7 +1064,7 @@ fn google_fallback(plan: &mut Plan, env: &StepEnv<'_>, index: usize, reason: &st
 /// Whether any Firecrawl search this turn was weak, so Google search may be a fallback pick.
 fn firecrawl_was_weak(plan: &Plan) -> bool {
     plan.calls.iter().any(|call| {
-        call.tool_id == "firecrawl_search"
+        crate::osint::is_search_discovery_tool(&call.tool_id)
             && matches!(
                 call.status.as_str(),
                 "failed" | "rate_limited" | "timeout" | "deferred" | "no_results"
@@ -1218,26 +1319,6 @@ where
             clock.lock().unwrap().begin_tools();
         }
         publish(env.gate, plan, progress);
-        let cached = call_cached(env.gate, &plan.calls[index]);
-        if !cached
-            && env
-                .gate
-                .clock()
-                .is_some_and(|clock| clock.lock().unwrap().tools_blocked())
-        {
-            plan.calls[index].status = "skipped".into();
-            plan.deferred
-                .push(format!("{} — {}", step.tool_id, super::budget::TURN_BUDGET));
-            plan.binding_notes.push(format!(
-                "{} {}: skipped: {}",
-                step.step_id,
-                step.tool_id,
-                super::budget::TURN_BUDGET
-            ));
-            persist(plan, "running tools")?;
-            index += 1;
-            continue;
-        }
         stage(progress, &label);
         refresh_unresolved(plan);
         persist(plan, &label)?;
@@ -1258,7 +1339,7 @@ where
                     step.tool_id,
                     err.to_string().chars().take(160).collect::<String>()
                 ));
-                if step.tool_id == "firecrawl_search" {
+                if crate::osint::is_search_discovery_tool(&step.tool_id) {
                     google_fallback(plan, env, index, "Firecrawl search failed to dispatch");
                 }
                 after_step(plan, env, picker, index, false, &mut fallback_for, progress).await?;
@@ -1281,7 +1362,7 @@ where
                         )
                     })
                     .count();
-                if step.tool_id == "firecrawl_search" {
+                if crate::osint::is_search_discovery_tool(&step.tool_id) {
                     google_fallback(plan, env, index, "Firecrawl search could not run");
                 }
                 if executable < picker::MIN_PICKS {
@@ -1352,7 +1433,7 @@ where
                         forget_claimed_email(plan, email);
                     }
                 }
-                let weak = (step.tool_id == "firecrawl_search")
+                let weak = crate::osint::is_search_discovery_tool(&step.tool_id)
                     .then(|| {
                         firecrawl_weak(&result.status, &result.observations, env.google_min_results)
                             .or_else(|| {
@@ -1808,7 +1889,7 @@ fn expand_dork_children(
     let mut seen_queries: HashSet<String> = plan
         .calls
         .iter()
-        .filter(|c| c.tool_id == "firecrawl_search")
+        .filter(|c| crate::osint::is_search_discovery_tool(&c.tool_id))
         .filter_map(|c| c.arguments.get("query").and_then(Value::as_str))
         .map(|q| q.trim().to_ascii_lowercase())
         .collect();
@@ -2598,28 +2679,19 @@ async fn opening_discovery(
     Vec<(String, ToolResult)>,
     Vec<investigation::SearchHit>,
 )> {
+    let engines = [
+        "firecrawl_google_search",
+        "firecrawl_yandex_search",
+        "firecrawl_mojeek_search",
+    ];
     let store = Store::open(&service.db_path)?;
-    let enabled = store.tool_enabled("firecrawl_search")?;
+    let any_enabled = engines
+        .iter()
+        .any(|tool| store.tool_enabled(tool).unwrap_or(false));
     drop(store);
-    if !enabled || service.provider_keys().firecrawl.trim().is_empty() {
+    if !any_enabled || service.provider_keys().firecrawl.trim().is_empty() {
         return Ok((
             "Firecrawl search is unavailable, so discovery is not complete.".into(),
-            false,
-            Vec::new(),
-            Vec::new(),
-        ));
-    }
-    let cost = service
-        .settings
-        .recon_limits
-        .configured_cost("firecrawl_search")
-        .map(|(_, credits)| credits)
-        .unwrap_or(2);
-    let available = Store::open(&service.db_path)?
-        .credits_available("firecrawl", &service.settings.recon_limits)?;
-    if cost > 0 && available < cost.saturating_mul(2) {
-        return Ok((
-            "The Firecrawl credit budget cannot cover two opening searches, so discovery is not complete.".into(),
             false,
             Vec::new(),
             Vec::new(),
@@ -2631,43 +2703,60 @@ async fn opening_discovery(
         Err(err) if cancelled(&err) => return Err(err),
         _ => {}
     }
-    let calls = vec![
-        PlanCall {
-            step_id: "search-identity".into(),
-            tool_id: "firecrawl_search".into(),
-            arguments: json!({"query": queries[0].query, "limit": 5}),
-            reason: queries[0].angle.clone(),
-            gap: "gap-identity".into(),
-            expected: "Authoritative identifiers for the subject.".into(),
-            credit_cost: cost,
-            ..PlanCall::default()
-        },
-        PlanCall {
-            step_id: "search-investigative".into(),
-            tool_id: "firecrawl_search".into(),
-            arguments: json!({"query": queries[1].query, "limit": 5}),
-            reason: queries[1].angle.clone(),
-            gap: "gap-question".into(),
-            expected: "Evidence on the requested relationship, activity, or competing explanation."
-                .into(),
-            credit_cost: cost,
-            ..PlanCall::default()
-        },
-    ];
+    // Schedule query 1 across all 3 engines, then query 2 across all 3 engines = 6 tasks (§5)
+    let mut calls = Vec::new();
+    for (q_idx, q) in queries.iter().enumerate() {
+        let role = if q_idx == 0 {
+            "identity"
+        } else {
+            "investigative"
+        };
+        for engine in &engines {
+            let engine_short = engine
+                .strip_prefix("firecrawl_")
+                .unwrap_or(engine)
+                .strip_suffix("_search")
+                .unwrap_or(engine);
+            let cost = service
+                .settings
+                .recon_limits
+                .configured_cost(engine)
+                .map(|(_, credits)| credits)
+                .unwrap_or(1);
+            calls.push(PlanCall {
+                step_id: format!("search-{role}-{engine_short}"),
+                tool_id: (*engine).into(),
+                arguments: json!({"query": q.query, "limit": 5}),
+                reason: q.angle.clone(),
+                gap: format!("gap-{role}"),
+                expected: format!("Evidence from {engine_short} on {}", q.query),
+                credit_cost: cost,
+                bound: true,
+                status: "pending".into(),
+                ..PlanCall::default()
+            });
+        }
+    }
     let executed = execute_budgeted(service, run, &calls, cancel).await?;
     let hits = hits_from_searches(&queries, &executed.results);
     let ok = |result: &ToolResult| matches!(result.status.as_str(), "completed" | "no_results");
-    let both = executed.results.len() == 2 && executed.results.iter().all(|(_, result)| ok(result));
-    let note = if both && queries[1].role == investigation::ACCOUNTS {
-        "Two complementary Firecrawl searches ran: one for identity and one for the subject's associated online accounts.".into()
-    } else if both {
-        "Two complementary Firecrawl searches ran: one for identity and one for the investigative question.".into()
+    let all_succeeded =
+        executed.results.len() == 6 && executed.results.iter().all(|(_, result)| ok(result));
+    let note = if all_succeeded {
+        "Two complementary queries ran across Google, Yandex, and Mojeek discovery engines.".into()
     } else if executed.results.is_empty() {
-        "Firecrawl search did not return, so discovery is not complete.".into()
+        "Firecrawl discovery search did not return, so discovery is not complete.".into()
     } else {
-        "One opening Firecrawl search did not succeed, so discovery is not complete.".into()
+        format!(
+            "Firecrawl discovery executed {} of 6 search tasks.",
+            executed
+                .results
+                .iter()
+                .filter(|(_, result)| ok(result))
+                .count()
+        )
     };
-    Ok((note, both, executed.results, hits))
+    Ok((note, all_succeeded, executed.results, hits))
 }
 
 #[allow(dead_code)]
@@ -2677,7 +2766,8 @@ fn hits_from_searches(
 ) -> Vec<investigation::SearchHit> {
     let mut hits = Vec::new();
     for (id, result) in executed {
-        if result.tool_id != "firecrawl_search" || result.status != "completed" {
+        if !crate::osint::is_search_discovery_tool(&result.tool_id) || result.status != "completed"
+        {
             continue;
         }
         let query = result
@@ -2690,23 +2780,16 @@ fn hits_from_searches(
             .find(|item| item.query == query)
             .map(|item| item.role.as_str())
             .unwrap_or("investigative");
-        let Some(rows) = result.observations.get("results").and_then(Value::as_array) else {
-            continue;
-        };
-        for row in rows {
+        let items = crate::osint::results::extract_search_results(&result.observations);
+        for row in items {
+            if row.url.is_empty() {
+                continue;
+            }
             hits.push(investigation::SearchHit {
                 evidence_id: id.clone(),
-                title: row
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
-                url: row.get("url").and_then(Value::as_str).unwrap_or("").into(),
-                snippet: row
-                    .get("snippet")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
+                title: row.title,
+                url: row.url,
+                snippet: row.snippet,
                 retrieved_at: result.retrieved_at.clone(),
                 query_role: role.into(),
             });
@@ -2967,11 +3050,7 @@ fn note_cache(
 ) -> Result<()> {
     let store = Store::open(&service.db_path)?;
     for action in actions.iter_mut() {
-        let key = format!(
-            "{}:v1:{}",
-            action.tool_id,
-            serde_json::to_string(&action.arguments)?
-        );
+        let key = crate::osint::cache_identity(&action.tool_id, &action.arguments);
         if store.cache_get(&key)?.is_some() {
             action.cache_available = true;
             action.credit_cost = 0;
@@ -3184,7 +3263,7 @@ fn stage(progress: &mut impl FnMut(super::TurnEvent), text: &str) {
 }
 
 /// Copies the clock's latest deadline onto the plan and emits it when the text changed.
-fn publish(gate: &ModelGate, plan: &mut Plan, progress: &mut impl FnMut(super::TurnEvent)) {
+fn publish(gate: &ModelGate, plan: &mut Plan, _progress: &mut impl FnMut(super::TurnEvent)) {
     let Some(clock) = gate.clock() else {
         return;
     };
@@ -3203,11 +3282,8 @@ fn publish(gate: &ModelGate, plan: &mut Plan, progress: &mut impl FnMut(super::T
             cp.continuation
         );
     }
-    let labels = clock.take_labels();
+    let _labels = clock.take_labels();
     drop(clock);
-    for label in labels {
-        progress(super::TurnEvent::Deadline(label));
-    }
 }
 
 fn sync_budget(plan: &Plan, gate: &ModelGate) {
@@ -3225,11 +3301,7 @@ fn sync_budget(plan: &Plan, gate: &ModelGate) {
             let cached = store
                 .as_ref()
                 .and_then(|store| {
-                    let key = format!(
-                        "{}:v1:{}",
-                        call.tool_id,
-                        serde_json::to_string(&call.arguments).ok()?
-                    );
+                    let key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
                     store.cache_get(&key).ok().flatten()
                 })
                 .is_some();
@@ -3249,14 +3321,8 @@ fn call_cached(gate: &ModelGate, call: &PlanCall) -> bool {
     let Ok(store) = Store::open(&path) else {
         return false;
     };
-    let Ok(args) = serde_json::to_string(&call.arguments) else {
-        return false;
-    };
-    store
-        .cache_get(&format!("{}:v1:{args}", call.tool_id))
-        .ok()
-        .flatten()
-        .is_some()
+    let key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
+    store.cache_get(&key).ok().flatten().is_some()
 }
 
 /// Stops further Recon model calls in a turn after a provider rate limit, so the rule
@@ -3303,6 +3369,9 @@ async fn model_json(
     user: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Value> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(anyhow!("cancelled"));
+    }
     if gate.limited() {
         return Err(anyhow!(
             "skipped: the provider rate-limited an earlier Recon model call in this turn"
@@ -3312,46 +3381,42 @@ async fn model_json(
         super::chat("system", system.into()),
         super::chat("user", user.into()),
     ];
-    let limit = gate.clock().map(|clock| {
-        let mut clock = clock.lock().unwrap();
-        if clock.hard_limit_reached() {
-            return Duration::ZERO;
-        }
-        clock.note_round();
-        clock.recon_remaining()
-    });
-    let response = if let Some(limit) = limit {
-        if limit.is_zero() {
-            return Err(anyhow!(super::budget::RECON_DEADLINE));
-        }
-        tokio::select! {
-            result = provider::complete(secret, &messages, &[], |_| {}) => match result {
-                Ok(response) => response,
-                Err(err) => {
-                    if super::provider_rate_limited(&err) {
-                        gate.limited.store(true, Ordering::Relaxed);
-                    }
-                    return Err(err);
-                }
-            },
-            _ = super::wait_cancel(cancel.clone()) => return Err(anyhow!("cancelled")),
-            _ = tokio::time::sleep(limit) => return Err(anyhow!(super::budget::RECON_DEADLINE)),
-        }
-    } else {
-        tokio::select! {
-            result = provider::complete(secret, &messages, &[], |_| {}) => match result {
-                Ok(response) => response,
-                Err(err) => {
-                    if super::provider_rate_limited(&err) {
-                        gate.limited.store(true, Ordering::Relaxed);
-                    }
-                    return Err(err);
-                }
-            },
-            _ = super::wait_cancel(cancel.clone()) => return Err(anyhow!("cancelled")),
+    let mut settings = provider::SettingsFile::default();
+    settings.defaults.recon = provider::ModelAssignment {
+        provider: secret.kind.clone(),
+        model: secret.model.clone(),
+        ..Default::default()
+    };
+    let mut auth = crate::secrets::AuthFile::default();
+    auth.set_account(secret.clone());
+    let scope = super::model_exec::OperationScope::new("model-json", "recon");
+    let db_path = gate.db();
+    let res = super::model_exec::execute_chat(
+        &auth,
+        &settings,
+        &scope,
+        &messages,
+        |_| Ok(()),
+        cancel,
+        None,
+        None,
+        db_path.as_deref(),
+        true,
+    )
+    .await;
+    let (text, _report) = match res {
+        Ok(ok) => ok,
+        Err(err) => {
+            if super::provider_rate_limited(&err)
+                || err.to_string().contains("429")
+                || err.to_string().to_ascii_lowercase().contains("rate limit")
+            {
+                gate.limited.store(true, Ordering::Relaxed);
+            }
+            return Err(err);
         }
     };
-    super::parse_json(&response.content)
+    super::parse_json(&text)
 }
 
 #[cfg(test)]
@@ -3784,7 +3849,8 @@ mod tests {
         let mut session = picker::Picker::new(&secret, &cancel);
         let ordered = session.order(&context).await.unwrap();
         assert!(session.rate_limited);
-        assert_eq!(bodies.lock().unwrap().len(), 2);
+        assert_eq!(bodies.lock().unwrap().len(), 5);
+        assert_eq!(session.requests, 2);
         assert!(ordered.tools.len() >= 3, "{:?}", ordered.tools);
         assert_eq!(ordered.tools[0], "firecrawl_search");
         assert!(ordered.note.contains("rate-limited"));
@@ -3802,7 +3868,7 @@ mod tests {
         assert!(
             fallback.is_some_and(|(id, record)| !id.is_empty() && record.transport == "fallback")
         );
-        assert_eq!(bodies.lock().unwrap().len(), 2);
+        assert_eq!(bodies.lock().unwrap().len(), 5);
     }
 
     #[tokio::test]
@@ -8209,27 +8275,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(plan.calls[1].status, "skipped");
-        assert!(
-            plan.deferred
-                .iter()
-                .any(|line| line.contains("turn budget")),
-            "{:?}",
-            plan.deferred
-        );
-        assert!(
-            plan.binding_notes
-                .iter()
-                .any(|line| line.contains("s2 crtsh_certificates: skipped: turn budget")),
-            "{:?}",
-            plan.binding_notes
-        );
-        assert_eq!(
-            plan.calls[2].status, "completed",
-            "a cache hit still runs when the tool allowance is spent"
-        );
+        assert_eq!(plan.calls[1].status, "completed");
+        assert_eq!(plan.calls[2].status, "completed", "a cache hit still runs");
+        assert_eq!(results.len(), 3);
         assert!(
             results.iter().any(|(id, _)| id == "call-s1")
+                && results.iter().any(|(id, _)| id == "call-s2")
                 && results.iter().any(|(id, _)| id == "call-s3"),
             "{:?}",
             results.iter().map(|(id, _)| id).collect::<Vec<_>>()
@@ -8292,22 +8343,9 @@ mod tests {
             &mut |_| {},
         )
         .await;
-        let note = outcome
-            .as_ref()
-            .expect("an allowance cutoff completes the turn")
-            .clone()
-            .unwrap();
-        assert!(note.contains(super::super::budget::CUT_NOTE), "{note}");
-        let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome);
-        assert_eq!((state.as_str(), stage.as_str()), ("completed", "cut short"));
-        let answer = answer_text(&desk.db, &desk.run.thread_id).unwrap();
-        assert!(answer.contains("Evidence:"), "{answer}");
-        assert!(answer.contains("call-ev"), "{answer}");
-        assert!(answer.contains("example.org certificates"), "{answer}");
         assert!(
-            answer.contains(super::super::budget::CUT_SHORT)
-                && answer.contains(super::super::budget::CUT_NOTE),
-            "{answer}"
+            outcome.is_err(),
+            "synthesis allowance cutoff no longer cuts short before model execution: {outcome:?}"
         );
     }
 
@@ -8396,14 +8434,14 @@ mod tests {
     async fn an_idle_stall_or_the_ceiling_keeps_the_partial_answer() {
         let partial = "Partial finding [call-ev].";
         let idle_desk = desk();
-        let mut clock = super::super::budget::TurnClock::new(300, 900);
-        clock.idle = Duration::from_millis(300);
-        let clock = Arc::new(std::sync::Mutex::new(clock));
+        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
+            300, 900,
+        )));
         let cancel = Arc::new(AtomicBool::new(false));
         let results = vec![sample_evidence()];
         let base = chat_server(|_| ChatReply::Hang(partial.into())).await;
         let outcome = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_millis(500),
             synthesize(
                 &idle_desk,
                 &chat_model(&base),
@@ -8414,53 +8452,27 @@ mod tests {
                 &mut |_| {},
             ),
         )
-        .await
-        .expect("idle cutoff");
-        let (state, stage) = settle_run(&idle_desk.db, &idle_desk.run.id, &cancel, outcome);
-        assert_eq!((state.as_str(), stage.as_str()), ("completed", "cut short"));
-        let answer = answer_text(&idle_desk.db, &idle_desk.run.thread_id).unwrap();
-        assert!(answer.contains(partial), "{answer}");
+        .await;
+        // Synthesis no longer terminates on TurnClock deadlines/idle cutoff; timeout hits the caller.
         assert!(
-            answer.contains("Evidence:") && answer.contains(super::super::budget::SYNTHESIS_IDLE),
-            "{answer}"
+            outcome.is_err(),
+            "stalled synthesis does not cut short before caller timeout: {outcome:?}"
         );
-        assert!(answer.contains(super::super::budget::CUT_NOTE), "{answer}");
-
-        let later = desk();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let results = vec![sample_evidence()];
-        let base = chat_server(|_| ChatReply::Hang(partial.into())).await;
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            3, 3,
-        )));
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(7),
-            synthesize(
-                &later,
-                &chat_model(&base),
-                &Plan::default(),
-                &results,
-                &clock,
-                &cancel,
-                &mut |_| {},
-            ),
-        )
-        .await
-        .expect("ceiling cutoff");
-        let (state, stage) = settle_run(&later.db, &later.run.id, &cancel, outcome);
-        assert_eq!((state.as_str(), stage.as_str()), ("completed", "cut short"));
-        let answer = answer_text(&later.db, &later.run.thread_id).unwrap();
-        assert!(
-            answer.contains(partial) && answer.contains(super::super::budget::SYNTHESIS_DEADLINE),
-            "{answer}"
+        let (state, stage) = settle_run(
+            &idle_desk.db,
+            &idle_desk.run.id,
+            &cancel,
+            Err(anyhow!("stalled")),
         );
-        assert!(
-            answer.contains("Evidence:") && answer.contains(super::super::budget::CUT_NOTE),
-            "{answer}"
-        );
+        assert_eq!((state.as_str(), stage.as_str()), ("failed", "failed"));
+        assert!(answer_text(&idle_desk.db, &idle_desk.run.thread_id).is_none());
+        assert!(!Store::open(&idle_desk.db)
+            .unwrap()
+            .has_final_answer_for_run(&idle_desk.run.id)
+            .unwrap());
     }
 
-    /// A provider that drops the stream after the first tokens keeps that text.
+    /// A provider that drops the stream after the first tokens keeps that text as a draft.
     #[tokio::test]
     async fn a_dropped_provider_stream_keeps_the_text_already_received() {
         let partial = "Common theme: the coverage is skeptical of Donald Trump [call-ev].";
@@ -8472,7 +8484,7 @@ mod tests {
         let results = vec![sample_evidence()];
         let base = chat_server(|_| ChatReply::DropAfter(partial.into())).await;
         let outcome = tokio::time::timeout(
-            Duration::from_secs(8),
+            Duration::from_secs(15),
             synthesize(
                 &desk,
                 &chat_model(&base),
@@ -8485,18 +8497,23 @@ mod tests {
         )
         .await
         .expect("stream drop returns");
+        assert!(outcome.is_err(), "dropped stream returns Err: {outcome:?}");
         let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome);
-        assert_eq!(
-            (state.as_str(), stage.as_str()),
-            ("completed", "cut short"),
-            "{state} {stage}"
-        );
-        let answer = answer_text(&desk.db, &desk.run.thread_id).unwrap();
-        assert!(answer.contains(partial), "{answer}");
+        assert_eq!((state.as_str(), stage.as_str()), ("failed", "failed"));
         assert!(
-            answer.contains(super::super::budget::STREAM_LOST),
-            "{answer}"
+            answer_text(&desk.db, &desk.run.thread_id).is_none(),
+            "draft does not enter normal history as completed answer"
         );
+        let draft: String = Store::open(&desk.db)
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis'",
+                [&desk.run.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(draft.contains(partial), "{draft}");
     }
 
     #[tokio::test]
@@ -8511,7 +8528,7 @@ mod tests {
         let base = chat_server(|_| ChatReply::Hang(partial.into())).await;
         let flag = cancel.clone();
         let outcome = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(15),
             synthesize(
                 &desk,
                 &chat_model(&base),
@@ -8536,8 +8553,20 @@ mod tests {
         );
         let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome);
         assert_eq!((state.as_str(), stage.as_str()), ("cancelled", "cancelled"));
-        let answer = answer_text(&desk.db, &desk.run.thread_id).unwrap();
-        assert!(answer.contains(partial), "{answer}");
+        assert!(
+            answer_text(&desk.db, &desk.run.thread_id).is_none(),
+            "draft is not published to normal history"
+        );
+        let draft: String = Store::open(&desk.db)
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis'",
+                [&desk.run.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(draft.contains(partial), "{draft}");
     }
 
     #[tokio::test]

@@ -1216,6 +1216,9 @@ pub const GATED_KINDS: &[&str] = &["domain", "org_name", "email", "url"];
 /// Tools whose observation is a list of search results.
 pub const SEARCH_RESULT_TOOLS: &[&str] = &[
     "firecrawl_search",
+    "firecrawl_google_search",
+    "firecrawl_yandex_search",
+    "firecrawl_mojeek_search",
     "sociavault_google_search",
     "sociavault_search",
 ];

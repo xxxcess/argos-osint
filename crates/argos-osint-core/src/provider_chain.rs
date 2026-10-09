@@ -36,6 +36,9 @@ pub struct Route {
     /// When set, this route is not dispatched (missing key, invalid, incompatible).
     #[serde(default)]
     pub skip_reason: Option<String>,
+    /// Unique admission slot key for concurrency and rate-limit cooldown.
+    #[serde(default)]
+    pub admission_key: Option<String>,
 }
 
 /// One recorded attempt or skip.
@@ -74,13 +77,27 @@ impl<T> ChainReport<T> {
     }
 }
 
-/// Dispatch failure. Every dispatched failure is retried until the route budget
-/// is exhausted; cancellation stops the chain.
+/// How a failed attempt should be handled by the chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryDisposition {
+    /// Transient failure: retry on the same route up to attempt limit.
+    RetryRoute,
+    /// Non-retryable on this route (bad credentials, invalid model, unsupported, token limit):
+    /// skip to the next configured route without spending remaining attempts on this route.
+    NextRoute,
+    /// Terminal failure (cancelled, invalid local input, refusal, persistence failure):
+    /// stop the chain immediately.
+    Stop,
+}
+
+/// Dispatch failure.
 #[derive(Clone, Debug)]
 pub struct DispatchError {
     pub message: String,
     pub retry_after: Option<Duration>,
     pub cancelled: bool,
+    pub disposition: RetryDisposition,
+    pub failure: Option<crate::provider_diag::ProviderFailure>,
 }
 
 impl DispatchError {
@@ -89,6 +106,61 @@ impl DispatchError {
             message: message.into(),
             retry_after: None,
             cancelled: false,
+            disposition: RetryDisposition::RetryRoute,
+            failure: None,
+        }
+    }
+
+    pub fn with_retry_after(mut self, duration: Duration) -> Self {
+        self.retry_after = Some(duration);
+        self
+    }
+
+    pub fn cancelled() -> Self {
+        Self {
+            message: "cancelled".into(),
+            retry_after: None,
+            cancelled: true,
+            disposition: RetryDisposition::Stop,
+            failure: None,
+        }
+    }
+
+    pub fn from_failure(f: crate::provider_diag::ProviderFailure) -> Self {
+        use crate::provider_diag::Category;
+        let disposition = match f.category {
+            Category::Network
+            | Category::Timeout
+            | Category::RateLimited
+            | Category::Server
+            | Category::Empty
+            | Category::MalformedPayload
+            | Category::StreamInterrupted
+            | Category::PrematureEof
+            | Category::SseError => RetryDisposition::RetryRoute,
+
+            Category::Auth
+            | Category::Permission
+            | Category::InvalidModel
+            | Category::Configuration
+            | Category::Unsupported
+            | Category::TokenLimit => RetryDisposition::NextRoute,
+
+            Category::MalformedRequest
+            | Category::Refused
+            | Category::InvalidResult
+            | Category::Persistence
+            | Category::Cancelled => RetryDisposition::Stop,
+        };
+        let cancelled = f.category == Category::Cancelled;
+        let retry_after = f.retry_after_ms.map(Duration::from_millis);
+        let message = f.summary();
+        Self {
+            message,
+            retry_after,
+            cancelled,
+            disposition,
+            failure: Some(f),
         }
     }
 }
@@ -146,16 +218,44 @@ fn cancelled(opts: &ExecuteOptions) -> bool {
         .is_some_and(|c| c.load(Ordering::Relaxed))
 }
 
-async fn sleep_recorded(opts: &ExecuteOptions, wait: Duration) {
+async fn sleep_recorded(opts: &ExecuteOptions, wait: Duration) -> bool {
     if let Some(slot) = &opts.recorded_waits {
         if let Ok(mut v) = slot.lock() {
             v.push(wait);
         }
     }
     if opts.instant || wait.is_zero() {
-        return;
+        return cancelled(opts);
     }
-    tokio::time::sleep(wait).await;
+    cancellable_sleep(wait, opts.cancel.as_ref()).await
+}
+
+pub async fn cancellable_sleep(wait: Duration, cancel: Option<&Arc<AtomicBool>>) -> bool {
+    if let Some(c) = cancel {
+        if c.load(Ordering::Relaxed) {
+            return true;
+        }
+        let step = Duration::from_millis(50);
+        let mut elapsed = Duration::ZERO;
+        while elapsed < wait {
+            let chunk = step.min(wait - elapsed);
+            tokio::time::sleep(chunk).await;
+            if c.load(Ordering::Relaxed) {
+                return true;
+            }
+            elapsed += chunk;
+        }
+        false
+    } else {
+        tokio::time::sleep(wait).await;
+        false
+    }
+}
+
+async fn wait_cancelled(cancel: &Arc<AtomicBool>) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 fn stamp() -> String {
@@ -220,12 +320,19 @@ where
         any_dispatchable = true;
         let limit = route_attempt_limit(route_index as u32);
         let mut attempt = 0u32;
+        let admission_key = route
+            .admission_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .or_else(|| (!route.account.is_empty()).then_some(route.account.as_str()))
+            .unwrap_or(opts.admission_account.as_str());
+
         while attempt < limit {
             if cancelled(&opts) {
                 report.cancelled = true;
                 break;
             }
-            let guard = if opts.admission_account.is_empty() {
+            let guard = if admission_key.is_empty() {
                 None
             } else {
                 loop {
@@ -233,10 +340,13 @@ where
                         report.cancelled = true;
                         break None;
                     }
-                    if let Some(g) = AdmissionGuard::try_enter(&opts.admission_account) {
+                    if let Some(g) = AdmissionGuard::try_enter(admission_key) {
                         break Some(g);
                     }
-                    sleep_recorded(&opts, Duration::from_millis(50)).await;
+                    if sleep_recorded(&opts, Duration::from_millis(50)).await {
+                        report.cancelled = true;
+                        break None;
+                    }
                 }
             };
             if report.cancelled {
@@ -244,7 +354,16 @@ where
             }
             attempt += 1;
             report.requests += 1;
-            let result = dispatch(route_index, route).await;
+            let dispatch_fut = dispatch(route_index, route);
+            let result = match &opts.cancel {
+                None => dispatch_fut.await,
+                Some(cancel_flag) => {
+                    tokio::select! {
+                        res = dispatch_fut => res,
+                        _ = wait_cancelled(cancel_flag) => Err(DispatchError::cancelled()),
+                    }
+                }
+            };
             drop(guard);
             match result {
                 Ok(value) => {
@@ -262,18 +381,37 @@ where
                     report.effective_model = route.model.clone();
                     return report;
                 }
-                Err(err) if err.cancelled => {
+                Err(err) if err.cancelled || err.disposition == RetryDisposition::Stop => {
+                    let is_cancel = err.cancelled;
                     report.history.push(AttemptRecord {
                         at: stamp(),
                         route_index: route_index as u32,
                         attempt,
                         model: route.model.clone(),
                         dispatched: true,
-                        outcome: "cancel".into(),
+                        outcome: if is_cancel {
+                            "cancel".into()
+                        } else {
+                            "fail".into()
+                        },
                         reason: err.message,
                     });
-                    report.cancelled = true;
+                    if is_cancel {
+                        report.cancelled = true;
+                    }
                     return report;
+                }
+                Err(err) if err.disposition == RetryDisposition::NextRoute => {
+                    report.history.push(AttemptRecord {
+                        at: stamp(),
+                        route_index: route_index as u32,
+                        attempt,
+                        model: route.model.clone(),
+                        dispatched: true,
+                        outcome: "fail".into(),
+                        reason: err.message,
+                    });
+                    break;
                 }
                 Err(err) => {
                     report.history.push(AttemptRecord {
@@ -289,18 +427,16 @@ where
                         break;
                     };
                     let wait = err.retry_after.filter(|d| *d > base).unwrap_or(base);
-                    if let Some(extra) = err.retry_after {
-                        tasks::note_shared_rate_limit(
-                            if opts.admission_account.is_empty() {
-                                &route.provider
-                            } else {
-                                &opts.admission_account
-                            },
-                            extra,
-                        );
+                    if !opts.instant {
+                        if let Some(extra) = err.retry_after {
+                            tasks::note_shared_rate_limit(admission_key, extra);
+                        }
                     }
                     report.waits.push(wait);
-                    sleep_recorded(&opts, wait).await;
+                    if sleep_recorded(&opts, wait).await {
+                        report.cancelled = true;
+                        break;
+                    }
                 }
             }
         }
@@ -336,6 +472,17 @@ pub fn routes_from_secrets(
 }
 
 fn secret_route(secret: &crate::secrets::ProviderSecret) -> Route {
+    let host = url::Url::parse(&secret.base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "default".into());
+    let kind = crate::provider::effective_kind(secret);
+    let account = if secret.kind.is_empty() {
+        "default".to_string()
+    } else {
+        secret.kind.clone()
+    };
+    let admission_key = format!("{}:{}:{}", kind, host, account);
     let missing_key = secret
         .api_key
         .as_deref()
@@ -356,19 +503,10 @@ fn secret_route(secret: &crate::secrets::ProviderSecret) -> Route {
     };
     Route {
         provider: crate::provider::effective_kind(secret),
-        account: secret
-            .api_key
-            .as_deref()
-            .map(|k| {
-                format!(
-                    "{}:{}",
-                    crate::provider::effective_kind(secret),
-                    &k[..k.len().min(4)]
-                )
-            })
-            .unwrap_or_default(),
+        account,
         model: secret.model.clone(),
         skip_reason: skip,
+        admission_key: Some(admission_key),
     }
 }
 
@@ -384,6 +522,7 @@ mod tests {
                 account: format!("a{i}"),
                 model: format!("m{i}"),
                 skip_reason: None,
+                admission_key: None,
             })
             .collect()
     }
@@ -510,6 +649,7 @@ mod tests {
             account: String::new(),
             model: "gemini".into(),
             skip_reason: Some("API key missing; configure google in Providers".into()),
+            admission_key: None,
         }];
         let hits = AtomicU32::new(0);
         let out = execute(
@@ -557,11 +697,8 @@ mod tests {
         let out = execute(
             &routes(1),
             |_i, _r| async {
-                Err(DispatchError {
-                    message: "429".into(),
-                    retry_after: Some(Duration::from_secs(45)),
-                    cancelled: false,
-                }) as Result<(), _>
+                Err(DispatchError::new("429").with_retry_after(Duration::from_secs(45)))
+                    as Result<(), _>
             },
             ExecuteOptions::for_tests(),
         )

@@ -729,6 +729,11 @@ pub struct ReconLimits {
     pub hunter_call_cost: u32,
     #[serde(default = "default_one_cost")]
     pub sociavault_call_cost: u32,
+    /// Prepaid Whoxy WHOIS-history lookups. Default 0 until configured or a balance check.
+    #[serde(default)]
+    pub whoxy_credits: u32,
+    #[serde(default = "default_one_cost")]
+    pub whoxy_call_cost: u32,
 }
 fn default_max_rounds() -> u8 {
     6
@@ -817,6 +822,8 @@ impl Default for ReconLimits {
             firecrawl_scrape_cost: default_one_cost(),
             hunter_call_cost: default_one_cost(),
             sociavault_call_cost: default_one_cost(),
+            whoxy_credits: 0,
+            whoxy_call_cost: default_one_cost(),
         }
     }
 }
@@ -837,6 +844,7 @@ impl ReconLimits {
             "firecrawl" => self.firecrawl_credits,
             "hunter" => self.hunter_credits,
             "sociavault" => self.sociavault_credits,
+            "whoxy" => self.whoxy_credits,
             _ => 0,
         }
     }
@@ -872,6 +880,7 @@ impl ReconLimits {
             _ if base.provider == "hunter" && base.credits == 0 => 0,
             _ if base.provider == "hunter" => self.hunter_call_cost,
             _ if base.provider == "sociavault" => self.sociavault_call_cost,
+            _ if base.provider == "whoxy" => self.whoxy_call_cost,
             _ => base.credits,
         };
         Some((base.provider, credits))
@@ -1869,6 +1878,12 @@ pub struct SettingsFile {
     /// Second Currents account. Used after the primary key hits a rate or quota limit.
     #[serde(default)]
     pub currents_api_key_fallback: String,
+    /// Whoxy API key. A non-empty value overrides `WHOXY_API_KEY`.
+    #[serde(default)]
+    pub whoxy_api_key: String,
+    /// Second Whoxy account. Used after the primary key hits a rate or quota limit.
+    #[serde(default)]
+    pub whoxy_api_key_fallback: String,
     #[serde(default)]
     pub recon_limits: ReconLimits,
 }
@@ -1883,6 +1898,7 @@ pub const KEY_ENV: &[(&str, &str)] = &[
     ("gnews", "GNEWS_API_KEY"),
     ("newsdata", "NEWSDATA_API_KEY"),
     ("currents", "CURRENTS_API_KEY"),
+    ("whoxy", "WHOXY_API_KEY"),
 ];
 
 /// Environment fallbacks for each keyed provider's second account.
@@ -1895,6 +1911,7 @@ pub const KEY_FALLBACK_ENV: &[(&str, &str)] = &[
     ("gnews", "GNEWS_API_KEY_FALLBACK"),
     ("newsdata", "NEWSDATA_API_KEY_FALLBACK"),
     ("currents", "CURRENTS_API_KEY_FALLBACK"),
+    ("whoxy", "WHOXY_API_KEY_FALLBACK"),
 ];
 
 impl SettingsFile {
@@ -1909,6 +1926,7 @@ impl SettingsFile {
             "gnews" => &self.gnews_api_key,
             "newsdata" => &self.newsdata_api_key,
             "currents" => &self.currents_api_key,
+            "whoxy" => &self.whoxy_api_key,
             _ => "",
         }
     }
@@ -1924,6 +1942,7 @@ impl SettingsFile {
             "gnews" => &self.gnews_api_key_fallback,
             "newsdata" => &self.newsdata_api_key_fallback,
             "currents" => &self.currents_api_key_fallback,
+            "whoxy" => &self.whoxy_api_key_fallback,
             _ => "",
         }
     }
@@ -2064,6 +2083,7 @@ impl SettingsFile {
                             | "gnews_api_key"
                             | "newsdata_api_key"
                             | "currents_api_key"
+                            | "whoxy_api_key"
                             | "firecrawl_api_key_fallback"
                             | "hunter_api_key_fallback"
                             | "sociavault_api_key_fallback"
@@ -2072,6 +2092,7 @@ impl SettingsFile {
                             | "gnews_api_key_fallback"
                             | "newsdata_api_key_fallback"
                             | "currents_api_key_fallback"
+                            | "whoxy_api_key_fallback"
                             | "recon_limits"
                     )
                 })

@@ -27,10 +27,13 @@ tokenizers.workspace = true
 toml.workspace = true
 tract-onnx.workspace = true
 url.workspace = true
+scraper.workspace = true
 
 [features]
 # Test/screenshot fixtures used by the binary's tests. Never enabled in release builds.
 fixtures = []
+# Paused-time Tokio tests (`tokio::time::pause`).
+test-util = ["tokio/test-util"]
 
 [build-dependencies]
 # Prebuilt protoc for every host; see tools/protoc and .cargo/config.toml.

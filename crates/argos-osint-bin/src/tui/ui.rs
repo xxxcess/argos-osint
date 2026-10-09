@@ -351,6 +351,12 @@ fn api_key_slot(app: &App) -> Option<ApiKeySlot> {
             FieldId::CourtListenerFallback,
             ButtonId::SaveCourtListenerKey,
         )
+    } else if id == "whoxy_whois_history" {
+        (
+            FieldId::WhoxyKey,
+            FieldId::WhoxyFallback,
+            ButtonId::SaveWhoxyKey,
+        )
     } else {
         return None;
     };
@@ -3301,6 +3307,18 @@ fn osint_buttons(
                 (ButtonId::OsintNext, "Next"),
             ]
         }
+        Some("whoxy_whois_history") => vec![
+            (ButtonId::OsintRun, "Run"),
+            (ButtonId::TestWhoxyConnection, "Test"),
+            (ButtonId::OsintCancel, "Cancel"),
+            (ButtonId::OsintToggle, "Enable"),
+            (ButtonId::OsintRaw, "Raw"),
+            (ButtonId::OsintAttach, "Attach"),
+            (ButtonId::OsintStartRecon, "Recon"),
+            (ButtonId::OsintPrev, "Prev"),
+            (ButtonId::OsintNext, "Next"),
+            (ButtonId::OpenDocumentation, "Docs"),
+        ],
         _ => vec![
             (ButtonId::OsintRun, "Run"),
             (ButtonId::OsintCancel, "Cancel"),
@@ -3539,6 +3557,7 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
         | FieldId::GnewsKey
         | FieldId::NewsDataKey
         | FieldId::CurrentsKey
+        | FieldId::WhoxyKey
             if app.module == Some(ModuleId::Osint)
                 && api_key_slot(app).is_some_and(|slot| slot.field == field) =>
         {
@@ -3553,6 +3572,7 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
         | FieldId::GnewsFallback
         | FieldId::NewsDataFallback
         | FieldId::CurrentsFallback
+        | FieldId::WhoxyFallback
             if app.module == Some(ModuleId::Osint)
                 && api_key_slot(app).is_some_and(|slot| slot.fallback == field) =>
         {
@@ -3812,6 +3832,7 @@ pub(crate) fn field_placeholder(app: &App, field: FieldId) -> String {
                 "Choose a model".into()
             }
         }
+        FieldId::WhoxyKey => "Whoxy API key".into(),
         FieldId::FirecrawlFallback
         | FieldId::HunterFallback
         | FieldId::SociaVaultFallback
@@ -3819,7 +3840,8 @@ pub(crate) fn field_placeholder(app: &App, field: FieldId) -> String {
         | FieldId::CourtListenerFallback
         | FieldId::GnewsFallback
         | FieldId::NewsDataFallback
-        | FieldId::CurrentsFallback => "Optional backup API key".into(),
+        | FieldId::CurrentsFallback
+        | FieldId::WhoxyFallback => "Optional backup API key".into(),
         _ => "Paste API key".into(),
     }
 }
@@ -3858,6 +3880,8 @@ pub(super) fn draw_field(frame: &mut Frame, app: &App, field: FieldId, label: &s
             | FieldId::NewsDataFallback
             | FieldId::CurrentsKey
             | FieldId::CurrentsFallback
+            | FieldId::WhoxyKey
+            | FieldId::WhoxyFallback
     );
     let display = if secret {
         "•".repeat(value.chars().count())
@@ -4604,8 +4628,6 @@ fn status_segments(app: &App) -> String {
                 parts.push(format!("{done}/{} calls", app.calls.len()));
             }
         }
-        let limits = &app.settings.recon_limits;
-        parts.push(format!("{}s", limits.turn_seconds));
     } else if app.module == Some(ModuleId::Osint) {
         if let Some(tool) = osint::registry().get(app.tool_sel) {
             parts.push(tool.name.to_string());
@@ -8996,7 +9018,7 @@ fn draw_resume_session(frame: &mut Frame, app: &App, session: &LastViewSession) 
 
     let mod_title = session.module.as_deref().unwrap_or("Unknown");
     lines.push(Line::from(vec![
-        Span::styled("  App:     ", theme::dim()),
+        Span::styled("App  ", theme::dim()),
         Span::styled(
             mod_title.to_ascii_uppercase(),
             theme::accent().add_modifier(Modifier::BOLD),
@@ -9011,7 +9033,7 @@ fn draw_resume_session(frame: &mut Frame, app: &App, session: &LastViewSession) 
             format!("{page} · {art}")
         };
         lines.push(Line::from(vec![
-            Span::styled("  Screen:  ", theme::dim()),
+            Span::styled("Screen  ", theme::dim()),
             Span::styled(fit(&detail, inner.width as usize - 12), theme::text()),
         ]));
     } else if let Some(tid) = &session.recon_thread_id {
@@ -9020,56 +9042,60 @@ fn draw_resume_session(frame: &mut Frame, app: &App, session: &LastViewSession) 
             .as_deref()
             .unwrap_or(tid.as_str());
         lines.push(Line::from(vec![
-            Span::styled("  Screen:  ", theme::dim()),
+            Span::styled("Screen  ", theme::dim()),
             Span::styled(fit(t_title, inner.width as usize - 12), theme::text()),
         ]));
     } else if let Some(mem) = &session.memory_title {
         lines.push(Line::from(vec![
-            Span::styled("  Screen:  ", theme::dim()),
+            Span::styled("Screen  ", theme::dim()),
             Span::styled(fit(mem, inner.width as usize - 12), theme::text()),
         ]));
     } else if let Some(page) = &session.atlas_page {
         lines.push(Line::from(vec![
-            Span::styled("  Screen:  ", theme::dim()),
+            Span::styled("Screen  ", theme::dim()),
             Span::styled(page, theme::text()),
         ]));
     } else if let Some(tool) = &session.osint_tool_id {
         lines.push(Line::from(vec![
-            Span::styled("  Tool:    ", theme::dim()),
+            Span::styled("Tool  ", theme::dim()),
             Span::styled(tool, theme::text()),
         ]));
     } else if let Some(page) = &session.providers_page {
         lines.push(Line::from(vec![
-            Span::styled("  Page:    ", theme::dim()),
+            Span::styled("Page  ", theme::dim()),
             Span::styled(page, theme::text()),
         ]));
     }
 
-    lines.push(Line::from(""));
-
     let content_height = inner.height.saturating_sub(2);
+    let text_h = (lines.len() as u16).min(content_height);
+    let text_y = inner.y + content_height.saturating_sub(text_h) / 2;
     frame.render_widget(
-        Paragraph::new(lines).style(theme::card_text()),
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(theme::card_text()),
         Rect {
             x: inner.x,
-            y: inner.y,
+            y: text_y,
             width: inner.width,
-            height: content_height,
+            height: text_h,
         },
     );
 
     let btn_y = inner.y + inner.height.saturating_sub(1);
-    let confirm_w = 24.min(inner.width / 2);
-    let dismiss_w = 20.min(inner.width / 2);
+    let gap = 3u16;
+    let confirm_w = 20.min(inner.width.saturating_sub(gap) / 2);
+    let dismiss_w = 23.min(inner.width.saturating_sub(gap) / 2);
+    let btn_x = inner.x + inner.width.saturating_sub(confirm_w + gap + dismiss_w) / 2;
 
     let confirm_rect = Rect {
-        x: inner.x + 1,
+        x: btn_x,
         y: btn_y,
         width: confirm_w,
         height: 1,
     };
     let dismiss_rect = Rect {
-        x: inner.x + confirm_w + 3,
+        x: btn_x + confirm_w + gap,
         y: btn_y,
         width: dismiss_w,
         height: 1,

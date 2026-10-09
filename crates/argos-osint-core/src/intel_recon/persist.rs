@@ -117,6 +117,7 @@ pub struct IntelReportTaskRow {
     pub error: String,
     pub created_at: String,
     pub updated_at: String,
+    pub lease_epoch: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -793,8 +794,8 @@ impl Store {
             "INSERT INTO intel_report_tasks(
                 id, job_id, task_type, section_key, depends_on_json, input_hash,
                 status, attempts, max_attempts, output_ref, lease_owner, lease_until,
-                error, created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,?5,'',?6,0,3,'','','','',?7,?7)",
+                error, created_at, updated_at, lease_epoch
+             ) VALUES (?1,?2,?3,?4,?5,'',?6,0,3,'','','','',?7,?7,0)",
             params![
                 id,
                 job_id,
@@ -812,7 +813,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, job_id, task_type, section_key, depends_on_json, input_hash,
                     status, attempts, max_attempts, output_ref, lease_owner, lease_until,
-                    error, created_at, updated_at
+                    error, created_at, updated_at, lease_epoch
              FROM intel_report_tasks WHERE job_id=?1 ORDER BY created_at",
         )?;
         let rows = stmt.query_map([job_id], task_from_row)?;
@@ -855,10 +856,11 @@ impl Store {
             }
             let updated = self.conn.execute(
                 "UPDATE intel_report_tasks SET
-                    status='running', lease_owner=?2, lease_until=?3,
+                    status='running', lease_owner=?2, lease_until=?3, lease_epoch=lease_epoch+1,
                     attempts=attempts+1, updated_at=?4
-                 WHERE id=?1 AND status IN ('pending','interrupted','running')",
-                params![task.id, owner, lease_until, now()],
+                 WHERE id=?1 AND status IN ('pending','interrupted','running')
+                   AND (lease_until='' OR lease_until IS NULL OR lease_until < ?5)",
+                params![task.id, owner, lease_until, now(), now_ts.to_rfc3339()],
             )?;
             if updated == 1 {
                 return self.intel_report_task(&task.id);
@@ -871,7 +873,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, job_id, task_type, section_key, depends_on_json, input_hash,
                     status, attempts, max_attempts, output_ref, lease_owner, lease_until,
-                    error, created_at, updated_at
+                    error, created_at, updated_at, lease_epoch
              FROM intel_report_tasks WHERE id=?1",
         )?;
         Ok(stmt.query_row([id], task_from_row).optional()?)
@@ -888,6 +890,38 @@ impl Store {
         Ok(())
     }
 
+    pub fn complete_report_task_fenced(
+        &self,
+        id: &str,
+        output_ref: &str,
+        lease_epoch: i64,
+    ) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE intel_report_tasks SET
+                status='completed', output_ref=?2, lease_owner='', lease_until='',
+                error='', updated_at=?3
+             WHERE id=?1 AND lease_epoch=?4",
+            params![id, output_ref, now(), lease_epoch],
+        )?;
+        Ok(updated == 1)
+    }
+
+    pub fn renew_report_task_lease(
+        &self,
+        id: &str,
+        lease_epoch: i64,
+        lease_secs: i64,
+    ) -> Result<bool> {
+        let now_ts = chrono::Utc::now();
+        let lease_until = (now_ts + chrono::Duration::seconds(lease_secs)).to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE intel_report_tasks SET lease_until=?1, updated_at=?2
+             WHERE id=?3 AND lease_epoch=?4 AND status='running'",
+            params![lease_until, now(), id, lease_epoch],
+        )?;
+        Ok(updated == 1)
+    }
+
     pub fn fail_report_task(&self, id: &str, error: &str, retryable: bool) -> Result<()> {
         let status = if retryable { "pending" } else { "failed" };
         self.conn.execute(
@@ -897,6 +931,23 @@ impl Store {
             params![id, status, error, now()],
         )?;
         Ok(())
+    }
+
+    pub fn fail_report_task_fenced(
+        &self,
+        id: &str,
+        error: &str,
+        retryable: bool,
+        lease_epoch: i64,
+    ) -> Result<bool> {
+        let status = if retryable { "pending" } else { "failed" };
+        let updated = self.conn.execute(
+            "UPDATE intel_report_tasks SET
+                status=?2, error=?3, lease_owner='', lease_until='', updated_at=?4
+             WHERE id=?1 AND lease_epoch=?5",
+            params![id, status, error, now(), lease_epoch],
+        )?;
+        Ok(updated == 1)
     }
 
     pub fn interrupt_expired_leases(&self) -> Result<usize> {
@@ -1241,6 +1292,7 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IntelReportTaskRow
         error: row.get(12)?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
+        lease_epoch: row.get(15).unwrap_or(0),
     })
 }
 

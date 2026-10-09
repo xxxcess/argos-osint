@@ -291,6 +291,8 @@ pub enum FieldId {
     NewsDataFallback,
     CurrentsKey,
     CurrentsFallback,
+    WhoxyKey,
+    WhoxyFallback,
     JobsSearch,
     LogsSearch,
     ReconProvider,
@@ -524,6 +526,8 @@ pub enum ButtonId {
     SaveGnewsKey,
     SaveNewsDataKey,
     SaveCurrentsKey,
+    SaveWhoxyKey,
+    TestWhoxyConnection,
     AtlasRun,
     AtlasAuto,
     AtlasRuns,
@@ -685,6 +689,9 @@ enum WorkEvent {
     OsintDone {
         outcome: Result<(String, osint::ToolResult), String>,
     },
+    WhoxyBalance {
+        outcome: Result<u32, String>,
+    },
     DatasetRefreshProgress {
         dataset: String,
         phase: String,
@@ -707,13 +714,16 @@ enum WorkEvent {
         thread_id: String,
         text: String,
     },
-    AnswerNote {
+    AnswerReset {
+        thread_id: String,
+    },
+    AnswerReplacement {
         thread_id: String,
         text: String,
     },
-    Deadline {
+    AnswerNote {
         thread_id: String,
-        label: String,
+        text: String,
     },
     GraphSummary {
         report: Box<argos_osint_core::graph_explanation::ExplainReport>,
@@ -1033,6 +1043,8 @@ pub struct App {
     pub newsdata_fallback: String,
     pub currents_key: String,
     pub currents_fallback: String,
+    pub whoxy_key: String,
+    pub whoxy_fallback: String,
     pub brain_graph: recon::MemoryGraph,
     brain_graph_for: Option<String>,
     /// Open memory detail (graph, Related, Summary), independent of `memory_sel`.
@@ -1216,6 +1228,8 @@ impl App {
             newsdata_fallback: settings.newsdata_api_key_fallback.clone(),
             currents_key: settings.currents_api_key.clone(),
             currents_fallback: settings.currents_api_key_fallback.clone(),
+            whoxy_key: settings.whoxy_api_key.clone(),
+            whoxy_fallback: settings.whoxy_api_key_fallback.clone(),
             selected_thread,
             threads,
             thread_states,
@@ -2549,6 +2563,8 @@ impl App {
             FieldId::NewsDataFallback => &self.newsdata_fallback,
             FieldId::CurrentsKey => &self.currents_key,
             FieldId::CurrentsFallback => &self.currents_fallback,
+            FieldId::WhoxyKey => &self.whoxy_key,
+            FieldId::WhoxyFallback => &self.whoxy_fallback,
             FieldId::ReconProvider => &self.recon_provider,
             FieldId::ReconModel => &self.recon_model,
             FieldId::PickerProvider => &self.picker_provider,
@@ -2609,6 +2625,8 @@ impl App {
             FieldId::NewsDataFallback => &mut self.newsdata_fallback,
             FieldId::CurrentsKey => &mut self.currents_key,
             FieldId::CurrentsFallback => &mut self.currents_fallback,
+            FieldId::WhoxyKey => &mut self.whoxy_key,
+            FieldId::WhoxyFallback => &mut self.whoxy_fallback,
             FieldId::ReconProvider => &mut self.recon_provider,
             FieldId::ReconModel => &mut self.recon_model,
             FieldId::PickerProvider => &mut self.picker_provider,
@@ -3061,6 +3079,37 @@ impl App {
         )
     }
 
+    fn remember_whoxy_key(&mut self) -> Result<String> {
+        let key = self.whoxy_key.clone();
+        let fallback = self.whoxy_fallback.clone();
+        self.remember_keyed(
+            &key,
+            &fallback,
+            "Enter a Whoxy API key",
+            "Whoxy API key saved",
+            |settings, key, fallback| {
+                settings.whoxy_api_key = key;
+                settings.whoxy_api_key_fallback = fallback;
+            },
+        )
+    }
+
+    fn test_whoxy_connection(&mut self) -> Result<String> {
+        let _ = self.remember_whoxy_key();
+        let key = self.settings.provider_key("whoxy");
+        anyhow::ensure!(!key.trim().is_empty(), "Enter a Whoxy API key");
+        let user_agent =
+            osint::effective_user_agent(Some(&self.settings.osint_user_agent)).to_string();
+        let tx = self.work_tx.clone();
+        tokio::spawn(async move {
+            let outcome = osint::whoxy::check_balance(&key, &user_agent)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::WhoxyBalance { outcome });
+        });
+        Ok("Testing Whoxy connection…".into())
+    }
+
     /// Saves the primary key and the optional second account. A blank fallback clears it.
     /// A blank primary is allowed when a fallback is set, so an environment key can stay
     /// the first account.
@@ -3310,6 +3359,8 @@ impl App {
             newsdata_fallback: self.settings.provider_fallback_key("newsdata"),
             currents: self.settings.provider_key("currents"),
             currents_fallback: self.settings.provider_fallback_key("currents"),
+            whoxy: self.settings.provider_key("whoxy"),
+            whoxy_fallback: self.settings.provider_fallback_key("whoxy"),
         }
     }
 
@@ -3723,6 +3774,7 @@ impl App {
                 article.source_domain.clone(),
                 article.run_id.clone(),
                 keys,
+                self.auth.clone(),
                 synthesis,
                 classifier,
                 settings,
@@ -4342,6 +4394,10 @@ impl App {
                 || !self.courtlistener_fallback.trim().is_empty())
         {
             self.remember_courtlistener_key()?;
+        } else if tool.id == "whoxy_whois_history"
+            && (!self.whoxy_key.trim().is_empty() || !self.whoxy_fallback.trim().is_empty())
+        {
+            self.remember_whoxy_key()?;
         }
         let service =
             recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
@@ -4435,14 +4491,13 @@ impl App {
                 true
             }
             WorkEvent::AnswerDelta { thread_id, text } => self.note_delta(&thread_id, &text),
+            WorkEvent::AnswerReset { thread_id } => self.note_reset(&thread_id),
+            WorkEvent::AnswerReplacement { thread_id, text } => {
+                self.note_replacement(&thread_id, &text)
+            }
             WorkEvent::AnswerNote { thread_id, text } => {
                 self.push_log("info", text.clone());
                 self.live_answers.entry(thread_id.clone()).or_default().note = text;
-                self.selected_thread.as_deref() == Some(&thread_id)
-            }
-            WorkEvent::Deadline { thread_id, label } => {
-                self.push_log("info", label.clone());
-                self.deadlines.insert(thread_id.clone(), label);
                 self.selected_thread.as_deref() == Some(&thread_id)
             }
             WorkEvent::ReconDone { thread_id, outcome } => {
@@ -4484,6 +4539,23 @@ impl App {
                 }
                 let _ = self.refresh_threads();
                 self.reload_memories();
+                true
+            }
+            WorkEvent::WhoxyBalance { outcome } => {
+                match outcome {
+                    Ok(balance) => {
+                        if self.settings.recon_limits.whoxy_credits == 0 {
+                            self.settings.recon_limits.whoxy_credits = balance;
+                            let _ = self.settings.save_to(&self.settings_path);
+                        }
+                        self.status = format!("Whoxy connected · history balance {balance}");
+                        self.push_log("info", format!("Whoxy balance check succeeded: {balance}"));
+                    }
+                    Err(err) => {
+                        self.status = err.clone();
+                        self.push_log("error", format!("Whoxy balance check failed: {err}"));
+                    }
+                }
                 true
             }
             WorkEvent::OsintDone { outcome } => {
@@ -4873,6 +4945,22 @@ impl App {
             return false;
         }
         live.shown.clone_from(&live.text);
+        live.painted = Some(Instant::now());
+        self.selected_thread.as_deref() == Some(thread_id)
+    }
+
+    fn note_reset(&mut self, thread_id: &str) -> bool {
+        let live = self.live_answers.entry(thread_id.to_string()).or_default();
+        live.text.clear();
+        live.shown.clear();
+        live.painted = Some(Instant::now());
+        self.selected_thread.as_deref() == Some(thread_id)
+    }
+
+    fn note_replacement(&mut self, thread_id: &str, text: &str) -> bool {
+        let live = self.live_answers.entry(thread_id.to_string()).or_default();
+        live.text = text.to_string();
+        live.shown = text.to_string();
         live.painted = Some(Instant::now());
         self.selected_thread.as_deref() == Some(thread_id)
     }
@@ -6300,6 +6388,8 @@ impl App {
             ButtonId::SaveGnewsKey => self.remember_gnews_key(),
             ButtonId::SaveNewsDataKey => self.remember_newsdata_key(),
             ButtonId::SaveCurrentsKey => self.remember_currents_key(),
+            ButtonId::SaveWhoxyKey => self.remember_whoxy_key(),
+            ButtonId::TestWhoxyConnection => self.test_whoxy_connection(),
             ButtonId::AtlasRun => self.atlas_control(),
             ButtonId::AtlasAuto => self.toggle_atlas_auto(),
             ButtonId::AtlasRuns => {
@@ -8670,8 +8760,11 @@ fn work_event(thread_id: &str, event: recon::TurnEvent) -> WorkEvent {
     match event {
         recon::TurnEvent::Stage(stage) => WorkEvent::ReconStage { thread_id, stage },
         recon::TurnEvent::AnswerDelta(text) => WorkEvent::AnswerDelta { thread_id, text },
+        recon::TurnEvent::AnswerReset => WorkEvent::AnswerReset { thread_id },
+        recon::TurnEvent::AnswerReplacement(text) => {
+            WorkEvent::AnswerReplacement { thread_id, text }
+        }
         recon::TurnEvent::AnswerNote(text) => WorkEvent::AnswerNote { thread_id, text },
-        recon::TurnEvent::Deadline(label) => WorkEvent::Deadline { thread_id, label },
     }
 }
 
@@ -8763,6 +8856,8 @@ mod tests {
             newsdata_fallback: String::new(),
             currents_key: String::new(),
             currents_fallback: String::new(),
+            whoxy_key: String::new(),
+            whoxy_fallback: String::new(),
             selected_thread: None,
             threads: Vec::new(),
             thread_states: HashMap::new(),
@@ -11530,6 +11625,14 @@ mod tests {
         assert!(!hit(&app, Target::Field(FieldId::FirecrawlKey)));
         assert!(!hit(&app, Target::Field(FieldId::HunterKey)));
         assert!(!hit(&app, Target::Field(FieldId::SociaVaultKey)));
+        app.tool_sel = osint::registry()
+            .iter()
+            .position(|tool| tool.id == "whoxy_whois_history")
+            .unwrap();
+        assert!(hit(&app, Target::Field(FieldId::WhoxyKey)));
+        assert!(hit(&app, Target::Button(ButtonId::SaveWhoxyKey)));
+        assert!(hit(&app, Target::Button(ButtonId::TestWhoxyConnection)));
+        assert!(!hit(&app, Target::Field(FieldId::FirecrawlKey)));
     }
 
     /// AC2: NewsAPI and CourtListener tools each show a masked key row with a Save
@@ -11691,14 +11794,9 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }];
-        let label = "Deadline 6m 10s: 11 calls, ~52k chars evidence";
         app.recon_stage = "synthesizing".into();
         app.recon_stages
             .insert("t-open".into(), "synthesizing".into());
-        app.on_work_event(WorkEvent::Deadline {
-            thread_id: "t-open".into(),
-            label: label.into(),
-        });
         assert!(app.on_work_event(WorkEvent::AnswerDelta {
             thread_id: "t-open".into(),
             text: "Hel".into()
@@ -11726,7 +11824,7 @@ mod tests {
         assert_eq!(stream.body, "Hel");
         assert!(blocks
             .iter()
-            .any(|block| block.key == "status:run-1" && block.title.contains(label)));
+            .any(|block| block.key == "status:run-1" && block.title.contains("synthesizing")));
         assert!(!blocks.iter().any(|block| block.body.contains("Hidden")));
         app.live_answers.get_mut("t-open").unwrap().painted =
             Some(Instant::now() - Duration::from_millis(50));

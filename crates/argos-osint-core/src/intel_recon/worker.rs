@@ -17,6 +17,8 @@ use super::brain::{upsert_recon_insights, ReconInsightUpdate};
 use super::jobs::{IntelReportEvent, ReportScope};
 use super::ledger::coverage_complete;
 use super::modes::ReportMode;
+use crate::secrets::AuthFile;
+
 use super::synthesize::{save_section, synthesize_section, SectionJudgment, SectionSynthInput};
 
 #[derive(Clone)]
@@ -30,6 +32,7 @@ pub struct JobRuntime {
     pub article_domain: String,
     pub run_id: String,
     pub keys: ProviderKeys,
+    pub auth: AuthFile,
     pub synthesis_secret: Option<ProviderSecret>,
     pub classifier_secret: Option<ProviderSecret>,
     pub settings: SettingsFile,
@@ -83,7 +86,7 @@ pub async fn run_job_slice(
             &job.error,
         )?;
 
-        let owner = format!("worker-{}", std::process::id());
+        let owner = format!("worker-{}-{}", std::process::id(), crate::recon::id("inst"));
         let task = store.claim_report_task(&job.id, &owner, 120)?;
         if task.is_none() {
             let tasks = store.intel_report_tasks(&job.id)?;
@@ -105,6 +108,25 @@ pub async fn run_job_slice(
         generation: job.generation,
     });
 
+    let renew_cancel = Arc::new(AtomicBool::new(false));
+    let renew_cancel_clone = renew_cancel.clone();
+    let db_path_clone = runtime.db_path.clone();
+    let task_id_clone = task.id.clone();
+    let lease_epoch = task.lease_epoch;
+    let renew_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.tick().await;
+        while !renew_cancel_clone.load(Ordering::Relaxed) {
+            interval.tick().await;
+            if renew_cancel_clone.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Ok(store) = Store::open(&db_path_clone) {
+                let _ = store.renew_report_task_lease(&task_id_clone, lease_epoch, 120);
+            }
+        }
+    });
+
     let result = match task.task_type.as_str() {
         "acquire_body" => run_acquire_body(&runtime, &job.article_id).await,
         "inventory" => {
@@ -124,10 +146,17 @@ pub async fn run_job_slice(
         other => Err(anyhow!("unknown task type {other}")),
     };
 
+    renew_cancel.store(true, Ordering::Relaxed);
+    renew_handle.abort();
+
     let store = Store::open(&runtime.db_path)?;
     match result {
         Ok(output_ref) => {
-            store.complete_report_task(&task.id, &output_ref)?;
+            let fenced_ok =
+                store.complete_report_task_fenced(&task.id, &output_ref, lease_epoch)?;
+            if !fenced_ok {
+                return Ok(false);
+            }
             let sections = store.intel_report_sections(&job.id)?;
             let done = sections.iter().filter(|s| s.status == "complete").count() as i64;
             let elements = store.intel_elements(&job.investigation_id)?;
@@ -153,7 +182,8 @@ pub async fn run_job_slice(
         }
         Err(err) => {
             let retryable = task.attempts < task.max_attempts;
-            store.fail_report_task(&task.id, &err.to_string(), retryable)?;
+            let _ =
+                store.fail_report_task_fenced(&task.id, &err.to_string(), retryable, lease_epoch);
             if !retryable {
                 store.update_report_job(
                     &job.id,
@@ -254,35 +284,51 @@ async fn run_collect(
         }
     }
 
+    let store = Store::open(&runtime.db_path)?;
+    let existing = store.intel_evidence_list(&job.investigation_id)?;
+    if existing.iter().any(|e| e.origin == "search") {
+        store.update_report_job(
+            &job.id,
+            "running",
+            "collected",
+            job.sections_done,
+            job.elements_done,
+            &job.warning,
+            "",
+        )?;
+        return Ok("collect:reused_existing".into());
+    }
+    drop(store);
+
     let (primary, fallback) = runtime.keys.pair("firecrawl");
     if primary.is_empty() && fallback.is_empty() {
         return Ok("collect:no_firecrawl".into());
     }
 
-    let executor = crate::osint::Executor::new()?;
     let query = runtime.article_title.chars().take(80).collect::<String>();
-    let ua = runtime.settings.osint_user_agent.clone();
 
     let attempt_id = {
         let store = Store::open(&runtime.db_path)?;
         store.insert_report_attempt(&job.id, job.generation, task_id, "firecrawl_search")?
     };
 
-    let result = executor
-        .run_configured(
+    let tool_runner = crate::recon::tool_runner::ToolRunner::new(
+        &runtime.db_path,
+        runtime.settings.clone(),
+        runtime.keys.clone(),
+    );
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = tool_runner
+        .execute_tool(
             "firecrawl_search",
             json!({"query": query, "limit": 5}),
-            if ua.trim().is_empty() {
-                None
-            } else {
-                Some(ua.as_str())
-            },
-            &runtime.keys,
+            false,
+            &cancel,
         )
         .await;
 
     let store = Store::open(&runtime.db_path)?;
-    let state = if matches!(&result, Ok(response) if response.error.is_none()) {
+    let state = if matches!(&result, Ok(ref response) if response.error.is_none()) {
         "success"
     } else {
         "failed"
@@ -622,11 +668,13 @@ fn finalize_job_state(
         .intel_report_tasks(job_id)?
         .into_iter()
         .any(|t| t.status == "failed");
+    let drafts_done = sections
+        .iter()
+        .filter(|s| s.status == "draft" && !s.markdown.is_empty())
+        .count() as i64;
     let state = if sections_done == job.sections_total && coverage_complete(&elements) {
         "completed"
-    } else if failed_tasks {
-        "partial"
-    } else if sections_done > 0 {
+    } else if failed_tasks || sections_done > 0 || drafts_done > 0 {
         "partial"
     } else {
         "failed"

@@ -137,7 +137,8 @@ enum ReconCommand {
         max_rounds: Option<u8>,
         #[arg(long)]
         max_calls: Option<u8>,
-        #[arg(long)]
+        /// Deprecated. Elapsed-time limits no longer terminate a turn.
+        #[arg(long, hide = true)]
         turn_seconds: Option<u16>,
         #[arg(long)]
         firecrawl_credits: Option<u32>,
@@ -166,14 +167,19 @@ enum ReconCommand {
         hunter_call_cost: Option<u32>,
         #[arg(long)]
         sociavault_call_cost: Option<u32>,
+        /// Prepaid Whoxy WHOIS-history lookups (default 0).
+        #[arg(long)]
+        whoxy_credits: Option<u32>,
+        #[arg(long)]
+        whoxy_call_cost: Option<u32>,
         /// NewsAPI calls per turn (default 2).
         #[arg(long)]
         news_calls_per_turn: Option<u32>,
         /// CourtListener calls per turn (default 3).
         #[arg(long)]
         legal_calls_per_turn: Option<u32>,
-        /// Hard ceiling for one turn, in seconds (default 900, range 120..1800).
-        #[arg(long)]
+        /// Deprecated. Elapsed-time limits no longer terminate a turn.
+        #[arg(long, hide = true)]
         max_turn_seconds: Option<u16>,
     },
 }
@@ -729,6 +735,8 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             firecrawl_scrape_cost,
             hunter_call_cost,
             sociavault_call_cost,
+            whoxy_credits,
+            whoxy_call_cost,
             news_calls_per_turn,
             legal_calls_per_turn,
             max_turn_seconds,
@@ -750,6 +758,9 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                     (300..=900).contains(&value),
                     "turn-seconds must be 300..900"
                 );
+                eprintln!(
+                    "warning: --turn-seconds is deprecated; elapsed-time limits no longer terminate a turn"
+                );
                 settings.recon_limits.turn_seconds = value;
                 changed = true;
             }
@@ -758,6 +769,9 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                     (provider::MIN_MAX_TURN_SECONDS..=provider::MAX_MAX_TURN_SECONDS)
                         .contains(&value),
                     "max-turn-seconds must be 120..1800"
+                );
+                eprintln!(
+                    "warning: --max-turn-seconds is deprecated; elapsed-time limits no longer terminate a turn"
                 );
                 settings.recon_limits.max_turn_seconds = value;
                 changed = true;
@@ -816,6 +830,16 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             assign(
                 &mut settings.recon_limits.sociavault_call_cost,
                 sociavault_call_cost,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.whoxy_credits,
+                whoxy_credits,
+                &mut changed,
+            );
+            assign(
+                &mut settings.recon_limits.whoxy_call_cost,
+                whoxy_call_cost,
                 &mut changed,
             );
             for (slot, value, name) in [
@@ -959,13 +983,15 @@ async fn ask_thread(thread_id: &str, question: &str) -> Result<()> {
 /// Synthesis tokens go to stderr as they arrive. Stdout stays the final JSON from `print_json`.
 fn write_turn_event(event: &recon::TurnEvent, out: &mut impl std::io::Write) {
     match event {
-        recon::TurnEvent::AnswerDelta(text) => {
+        recon::TurnEvent::AnswerDelta(text) | recon::TurnEvent::AnswerReplacement(text) => {
             let _ = write!(out, "{text}");
             let _ = out.flush();
         }
-        recon::TurnEvent::Stage(text)
-        | recon::TurnEvent::AnswerNote(text)
-        | recon::TurnEvent::Deadline(text) => {
+        recon::TurnEvent::AnswerReset => {
+            let _ = write!(out, "\r\x1b[2K");
+            let _ = out.flush();
+        }
+        recon::TurnEvent::Stage(text) | recon::TurnEvent::AnswerNote(text) => {
             let _ = writeln!(out, "{text}");
         }
     }
@@ -999,10 +1025,6 @@ mod tests {
     fn synthesis_deltas_go_to_the_event_stream_without_a_newline_between_tokens() {
         let mut out = Vec::new();
         write_turn_event(&recon::TurnEvent::Stage("synthesizing".into()), &mut out);
-        write_turn_event(
-            &recon::TurnEvent::Deadline("Deadline 6m 10s: 11 calls, ~52k chars evidence".into()),
-            &mut out,
-        );
         write_turn_event(&recon::TurnEvent::AnswerDelta("Hel".into()), &mut out);
         write_turn_event(&recon::TurnEvent::AnswerDelta("lo".into()), &mut out);
         write_turn_event(
@@ -1011,7 +1033,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "synthesizing\nDeadline 6m 10s: 11 calls, ~52k chars evidence\nHellofixing citations…\n"
+            "synthesizing\nHellofixing citations…\n"
         );
     }
 

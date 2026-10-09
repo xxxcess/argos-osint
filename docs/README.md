@@ -44,7 +44,7 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | Doc | What it is |
 | --- | --- |
 | [../AGENTS.md](../AGENTS.md) | Commands, graphify, planning-with-files, scratch rules |
-| [opencode-v2.md](opencode-v2.md) | Graph-first OpenCode plugins and ECC commands |
+| [opencode-v2.md](opencode-v2.md) | Primary tool list, graph-first plugins, and ECC commands |
 | [ui-interaction-audit.md](ui-interaction-audit.md) | TUI surfaces, fields, focus, overflow |
 | [investigation-harness.md](investigation-harness.md) | Unified investigation task graph |
 | [jev-decision-gates.md](jev-decision-gates.md) | Tool-picker decisions transport |

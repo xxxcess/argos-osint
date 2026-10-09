@@ -131,20 +131,42 @@ Plan agent: wait for approval, then prefer a `build` subagent with the approved 
 
 [![Agent exploration](docs/diagrams/agent-graphify.svg)](docs/diagrams/agent-graphify.html)
 
-- `graphify query "<question>"` first when `graphify-out/graph.json` exists. Expand tokens from `graphify-out/.vocab.txt`. Then `path` / `explain`. Search returned `source_location` paths.
+- Shell command `graphify query "<question>"` first when `graphify-out/graph.json` exists. Expand tokens from `graphify-out/.vocab.txt`. Then `path` / `explain`. Read returned `source_location` paths.
 - Dirty `graphify-out/` after hooks is expected. Skip graphify only when the graph itself is the bug, or the user says so.
 - Prefer `graphify-out/wiki/index.md` when present. `GRAPH_REPORT.md` only for architecture review or when query/path/explain are thin.
 - After code edits: `graphify update .`. Track `graph.json`, `manifest.json`, `GRAPH_REPORT.md` only.
 
+## OpenCode tools
+
+V2 ignores `experimental.primary_tools`. `.opencode/opencode.json` is the primary-agent allowlist for `build` and `plan`. Use the provider tool schema. Do not call `execute`, and do not invent `tools.<namespace>[...]()` calls.
+
+| Tool | Arguments |
+|------|-----------|
+| `read` | `path`, optional `offset`, `limit` |
+| `grep` | `pattern`, optional `path` |
+| `glob` | `pattern` |
+| `edit` | `path`, `oldString`, `newString` (`plan` cannot edit project files) |
+| `write` | `path`, `content` |
+| `shell` | `command` |
+| `skill` | `{ "id": "<id>" }` |
+| `webfetch` | `url` |
+| `websearch` | `query` |
+| `question` | header, prompt, choices |
+| `subagent` | `explore`, `ecc-planner`, or `ecc-reviewer` |
+
+Skill ids: `graphify`, `argos-plan`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`.
+
+Repo questions start with shell `graphify query "<question>"`. Load `graphify` only when that command is unclear. Multi-step work loads `argos-plan` and leaves the plan on disk. GSD phase commands stay explicit (`/gsd-...`); their tools are not on `build` or `plan`.
+
 ## planning-with-files
 
-Use **planning-with-files** (`~/.agents/skills/planning-with-files/SKILL.md`) for five or more tool calls, multi-phase work, or a compact-surviving plan.
+Use **planning-with-files** (`~/.agents/skills/planning-with-files/SKILL.md`) for five or more tool calls, multi-phase work, or a compact-surviving plan. In OpenCode, load `argos-plan` instead of that skill.
 
-1. Named plan under `.planning/<YYYY-MM-DD-slug>/` (`scripts/init-session.sh "Task name"`). Pin `PLAN_ID` when several exist.
+1. Named plan under `.planning/<YYYY-MM-DD-slug>/`. Pin `PLAN_ID` when several exist.
 2. Files: `task_plan.md` (phases, Next Step, decisions, errors), `findings.md` (research; untrusted web text here only), `progress.md` (session log).
 3. One orchestrator owns `task_plan.md`. Workers append their own ledger.
 4. Root `task_plan.md` / `findings.md` / `progress.md` are gitignored leftovers.
-5. Graphify first, then write the plan from the subgraph.
+5. Graphify first, then write the plan from the subgraph. Do not paste the plan back into the chat.
 
 ## diagrams
 

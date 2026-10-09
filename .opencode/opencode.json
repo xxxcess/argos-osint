@@ -1,19 +1,50 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "plan",
-  "agent": {
+  "agents": {
     "explore": {
       "mode": "subagent",
       "model": "openrouter/north-mini-code:free",
-      "permission": {
-        "edit": "deny",
-        "bash": "allow"
-      }
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "shell", "resource": "*", "effect": "allow" }
+      ]
     },
     "compaction": {
       "mode": "primary",
-      "model": "openrouter/nemotron-3-ultra-550b-a55b:free",
-      "variant": "high"
+      "model": "openrouter/nemotron-3-ultra-550b-a55b:free#high"
+    },
+    "build": {
+      "permissions": [
+        { "action": "execute", "resource": "*", "effect": "deny" },
+        { "action": "browser", "resource": "*", "effect": "deny" },
+        { "action": "gsd_*", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "gsd-*", "effect": "deny" },
+        { "action": "skill", "resource": "*", "effect": "deny" },
+        { "action": "skill", "resource": "graphify", "effect": "allow" },
+        { "action": "skill", "resource": "argos-plan", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-plan", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-review", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-verify", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-checkpoint", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-learn", "effect": "allow" }
+      ]
+    },
+    "plan": {
+      "permissions": [
+        { "action": "execute", "resource": "*", "effect": "deny" },
+        { "action": "browser", "resource": "*", "effect": "deny" },
+        { "action": "gsd_*", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "gsd-*", "effect": "deny" },
+        { "action": "skill", "resource": "*", "effect": "deny" },
+        { "action": "skill", "resource": "graphify", "effect": "allow" },
+        { "action": "skill", "resource": "argos-plan", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-plan", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-review", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-verify", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-checkpoint", "effect": "allow" },
+        { "action": "skill", "resource": "ecc-learn", "effect": "allow" }
+      ]
     }
   }
 }

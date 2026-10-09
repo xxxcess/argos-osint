@@ -1,11 +1,11 @@
 ---
 name: graphify
-description: Query the project graph before broad codebase exploration; build or refresh it when requested.
+description: Before a repo-wide search, call shell with graphify query "<question>".
 ---
 
 # Graphify in Argos
 
-For a codebase question, run `graphify query "<question>"` first when `graphify-out/graph.json` exists. Use `graphify explain "<symbol>"` for a focused concept and `graphify path "<A>" "<B>"` for relationships. Search the returned paths to verify source details. If the graph is absent or unusable, use scoped source search and explain how to bootstrap it.
+For a codebase question, call the shell tool with `graphify query "<question>"` first when `graphify-out/graph.json` exists. There is no separate graphify tool. Use `graphify explain "<symbol>"` for a focused concept and `graphify path "<A>" "<B>"` for relationships. Read the returned paths to verify source details. If the graph is absent or unusable, use a path-scoped grep or glob and explain how to bootstrap the graph.
 
 For `/graphify --help`, show these commands and stop:
 

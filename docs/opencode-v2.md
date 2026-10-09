@@ -2,6 +2,23 @@
 
 GSD still owns phases and milestones in `.planning/`. Project plugins under `.opencode/plugins/` add graph-first navigation, a GSD hook bridge, and a short session handoff.
 
+## Primary tools
+
+OpenCode V2 ignores `experimental.primary_tools`. `build` and `plan` in `.opencode/opencode.json` deny Code Mode (`execute`), the browser catalog, GSD MCP tools, GSD subagents, and every skill except the list below. Call the provider schema for these tools. Do not invent `tools.<namespace>[...]()` calls.
+
+| Tool | Use |
+| --- | --- |
+| `shell` | `graphify query "<question>"` before a repo-wide search |
+| `read`, `grep`, `glob` | Paths the query returns, or a path-scoped search |
+| `edit`, `write` | `build` only. `plan` cannot edit project files |
+| `skill` | `{ "id": "<id>" }` |
+| `webfetch`, `websearch`, `question` | One URL, one query, or one user choice |
+| `subagent` | `explore`, `ecc-planner`, or `ecc-reviewer` |
+
+Skill ids: `graphify`, `argos-plan`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`.
+
+`argos-plan` writes `.planning/<YYYY-MM-DD-slug>/` and keeps that text out of the chat. Load `graphify` only when the shell command above is unclear. `/gsd-...` still runs GSD with its own tools.
+
 ## Graph first
 
 [![Agent exploration](diagrams/agent-graphify.svg)](diagrams/agent-graphify.html)
@@ -10,7 +27,7 @@ Tracked graph: `graphify-out/graph.json`.
 
 | Command | Use |
 | --- | --- |
-| `graphify query "<question>"` | Before the first broad search |
+| `graphify query "<question>"` | Shell tool, before the first broad search |
 | `graphify explain "<concept>"` | One symbol |
 | `graphify path "<A>" "<B>"` | Relationship |
 | `graphify update .` | After code edits (AST only) |

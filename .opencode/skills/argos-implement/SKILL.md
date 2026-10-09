@@ -19,12 +19,12 @@ Run this on the `build` agent. `plan` does not launch `ecc-edit`.
 
 Do not set `model`. Do not poll. Do not edit those files in the parent while a child owns them.
 
-3. After the children finish, run the checks in this session with shell `timeout` set to `600000` and `ARGOS_EMBED` unset:
+3. After the children finish, run the checks in this session with shell `timeout` set to `600000` and `ARGOS_EMBED` unset. Do not enable the `lancedb` feature.
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+cargo test --workspace --locked --no-default-features
 ```
 
 4. On failure, map each error to the unit that owns the file. Launch `ecc-edit` again the same way. Pass `sessionID` to continue the editor that already owns those files, and put the failing command plus the relevant output in `prompt`.

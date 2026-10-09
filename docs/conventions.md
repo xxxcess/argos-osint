@@ -4,7 +4,7 @@ Rules that keep Argos and agent work aligned. Product behavior lives in [archite
 
 ## Checks
 
-Order matches CI: `cargo fmt --all --check` → `cargo clippy --workspace --all-targets -- -D warnings` → `cargo test --workspace` (offline, `ARGOS_EMBED` unset). MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
+Order matches CI: `cargo fmt --all --check` → `cargo clippy --workspace --all-targets --no-default-features -- -D warnings` → `cargo test --workspace --no-default-features` (offline, `ARGOS_EMBED` unset, no LanceDB). Local default builds include the `lancedb` feature. MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
 
 ## TUI
 

@@ -24,7 +24,7 @@ cargo test --workspace
 ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm
 ```
 
-**Command order matters:** `fmt -> clippy -> test` (matches CI)
+**Command order matters:** `fmt -> clippy -> test` (matches CI). OpenCode agents do not use the build, clippy, or test lines above. They use **OpenCode builds**.
 
 ## Toolchain & Build Quirks
 - Rust **1.94.0** pinned in `rust-toolchain.toml` (workspace `rust-version = "1.91"` minimum)
@@ -107,7 +107,7 @@ argos memories reindex   # rebuild LanceDB index
 ## CI (`.github/workflows/ci.yml`)
 Targets: macos-15-intel, macos-14, ubuntu-24.04, ubuntu-24.04-arm.
 
-Steps: `cargo fetch` → `cargo build --locked` → `cargo test --workspace --locked` → `cargo clippy --workspace --all-targets --locked -- -D warnings` → ignored MiniLM (`ARGOS_EMBED=1`).
+Steps: `cargo fetch` → `cargo build --locked --no-default-features` → `cargo test --workspace --locked --no-default-features` → `cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings`. That build omits the `lancedb` feature. Local default builds still include LanceDB. MiniLM (`ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm`) stays a local check.
 
 ## Key Files to Read for Context
 - `docs/README.md` — documentation map
@@ -135,6 +135,18 @@ Plan agent: wait for approval, then prefer a `build` subagent with the approved 
 - Dirty `graphify-out/` after hooks is expected. Skip graphify only when the graph itself is the bug, or the user says so.
 - Prefer `graphify-out/wiki/index.md` when present. `GRAPH_REPORT.md` only for architecture review or when query/path/explain are thin.
 - After code edits: `graphify update .`. Track `graph.json`, `manifest.json`, `GRAPH_REPORT.md` only.
+
+## OpenCode builds
+
+Every OpenCode agent (`build`, `plan`, `explore`, `ecc-edit`, `ecc-planner`, and `ecc-reviewer`) compiles and tests without LanceDB. Pass `--locked --no-default-features` on every `cargo build`, `cargo test`, and `cargo clippy`. Leave `ARGOS_EMBED` unset. Do not add `--features lancedb`.
+
+```sh
+cargo build --locked --no-default-features
+cargo test --workspace --locked --no-default-features
+cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+```
+
+Order stays `fmt` check, then clippy, then test. `ecc-edit` only runs `cargo fmt -- <paths>` for the Rust files it changed. The parent agent runs the three commands above, with shell `timeout` `600000`.
 
 ## OpenCode tools
 
@@ -176,7 +188,7 @@ On `build`, load `argos-implement` and send the current phase's code edits to `e
 
 3. Stop until those children finish. Do not edit their files in the parent while they run, and do not poll them.
 4. `ecc-edit` formats the Rust files it changed with `cargo fmt -- <paths>` and does not run tests.
-5. The parent then runs, with shell `timeout` `600000` and `ARGOS_EMBED` unset: `cargo fmt --all --check`, then `cargo clippy --workspace --all-targets -- -D warnings`, then `cargo test --workspace`.
+5. The parent then runs the **OpenCode builds** commands, with shell `timeout` `600000`: `cargo fmt --all --check`, then `cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings`, then `cargo test --workspace --locked --no-default-features`.
 6. On failure, map each error to its unit. Launch `ecc-edit` again the same way. Pass `sessionID` to continue the editor that already owns those files, and include the failing command and the relevant output in `prompt`.
 7. Re-run the failed command, then the full trio. After it passes, run `graphify update .`.
 

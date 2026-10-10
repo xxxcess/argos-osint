@@ -22,7 +22,7 @@ pub struct PathLine {
 
 /// Graph above, Related (left) and Summary (right) below; stacked when narrow.
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
-    let areas = brain_detail::areas(area, brain_detail::pane_of(app.focus));
+    let areas = brain_detail::areas_for(app, area);
     let claim = app.detail_claim();
     brain_detail::draw_nav(frame, app, &areas, claim);
     draw_path(frame, app, areas.path, claim);

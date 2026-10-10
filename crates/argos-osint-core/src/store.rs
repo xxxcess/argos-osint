@@ -146,6 +146,17 @@ fn boost_with_passage_hybrid(
 }
 
 impl Store {
+    /// Analytics worker connection: no migrations, vector index, or writes.
+    pub fn open_profile_reader(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("open profile reader {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_millis(250))?;
+        Ok(Self {
+            conn,
+            vectors: None,
+        })
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -2676,6 +2687,29 @@ pub struct AtlasArticleClaim {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_reader_cannot_write_or_create_a_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.db");
+        assert!(Store::open_profile_reader(&path).is_err());
+        let writer = Store::open(&path).unwrap();
+        let reader = Store::open_profile_reader(&path).unwrap();
+        assert!(reader
+            .profile_snapshot(
+                &profile_stats::Period::H24,
+                &profile_stats::StatFilters::default()
+            )
+            .is_ok());
+        assert!(reader
+            .connection()
+            .execute("CREATE TABLE forbidden (id INTEGER)", [])
+            .is_err());
+        assert!(writer
+            .connection()
+            .prepare("SELECT * FROM forbidden")
+            .is_err());
+    }
 
     mod vectors {
         use super::*;

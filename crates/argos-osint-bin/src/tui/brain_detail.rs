@@ -145,6 +145,23 @@ pub fn pane_of(focus: Target) -> DetailPane {
     }
 }
 
+pub fn areas_for(app: &App, area: Rect) -> DetailAreas {
+    let mut layout = areas(area, pane_of(app.focus));
+    let page = app.compact_pages[super::app::ModuleId::Brain.index()];
+    if page > 0 {
+        let content = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(1),
+        );
+        layout.path = if page == 1 { content } else { Rect::default() };
+        layout.related = if page == 2 { content } else { Rect::default() };
+        layout.summary = if page == 3 { content } else { Rect::default() };
+    }
+    layout
+}
+
 pub fn areas(area: Rect, focus: DetailPane) -> DetailAreas {
     let nav = Rect {
         height: 1.min(area.height),
@@ -386,7 +403,19 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// One-line strip above the graph: Back, mode, title, history depth.
-pub fn draw_nav(frame: &mut Frame, app: &App, areas: &DetailAreas, claim: bool) {
+pub fn draw_nav(frame: &mut Frame, app: &App, areas: &DetailAreas, _claim: bool) {
+    let selectors = Rect::new(
+        areas.nav.x + areas.back.width,
+        areas.nav.y,
+        areas.nav.width.saturating_sub(areas.back.width),
+        areas.nav.height,
+    );
+    super::ui::pane_tabs(
+        frame,
+        app,
+        selectors,
+        &["Split", "Graph", "Related", "Summary"],
+    );
     app.layout
         .borrow_mut()
         .register(Target::Button(ButtonId::BrainDetailBack), areas.back);
@@ -398,36 +427,6 @@ pub fn draw_nav(frame: &mut Frame, app: &App, areas: &DetailAreas, claim: bool) 
     frame.render_widget(
         Paragraph::new(Span::styled("‹ Back", back_style)),
         areas.back,
-    );
-    let rest = Rect {
-        x: areas.nav.x + areas.back.width,
-        width: areas.nav.width.saturating_sub(areas.back.width),
-        ..areas.nav
-    };
-    let title = app
-        .brain_detail
-        .memory
-        .as_ref()
-        .map(|memory| memory.text.lines().next().unwrap_or("").to_string())
-        .unwrap_or_default();
-    let depth = app.brain_detail.history.len();
-    let back_to = if depth == 0 {
-        "memories".to_string()
-    } else {
-        format!("{depth} back")
-    };
-    let text = format!(
-        "{} · {}  ({})",
-        if claim { "Claim path" } else { "Recon path" },
-        title,
-        back_to
-    );
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            fit(&text, rest.width as usize),
-            theme::muted(),
-        )),
-        rest,
     );
 }
 

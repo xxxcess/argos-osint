@@ -29,3 +29,5 @@ cargo test --workspace --locked --no-default-features
 
 4. On failure, map each error to the unit that owns the file. Launch `ecc-edit` again the same way. Pass `sessionID` to continue the editor that already owns those files, and put the failing command plus the relevant output in `prompt`.
 5. Re-run the failed command, then the full trio. After the trio passes, run `graphify update .`.
+
+For UI phases, load the relevant `docs/tui-components.md` entries and `docs/tui-design-spec.md`. Child prompts include chosen components/preset, concise API contracts, exact owned files, read-only references, and visual acceptance checks. Preserve disjoint ownership.

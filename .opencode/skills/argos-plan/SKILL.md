@@ -11,3 +11,5 @@ Write the plan to disk and keep the chat to the current step.
 4. Re-read the next step before starting a phase. Do not paste those files back into the chat.
 5. Do not load another planning skill. Phase and milestone state stays in `.planning/`.
 6. Code for the current phase is implemented on the `build` agent with the `argos-implement` skill.
+
+UI phases read `docs/tui-design-spec.md` and relevant `docs/tui-components.md` entries. Identify chosen components, layout preset, affected screens, and viewport/interaction/data acceptance checks before editing.

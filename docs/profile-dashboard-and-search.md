@@ -11,9 +11,7 @@ Nothing here invents a number. A metric the installation never collected renders
 | **Overview** (default) | Filter strip, section navigator, 35 telemetry widgets |
 | **System** | Host, Paths, **Refresh hardware**, and the **Configs** export/import popup |
 
-`Tab` switches tabs. Only a bare `Tab` does: `Ctrl+Tab` still cycles modules and `Tab` inside a field still moves focus. The two tabs split the old single System pane — they do not add a pane beside it.
-
-The System tab renders the Host pane, the Paths pane and the Refresh hardware button. **Logs** remains its own module next to Profile, as before; the module doc comment in `crates/argos-osint-bin/src/tui/profile.rs` mentions Logs among the System tab contents, but the rendered tab does not include it. The `?` help card for Profile also still describes only hardware and storage paths.
+Tab/Shift+Tab traverse controls; Enter activates the selected Overview/System tab, or `t` switches tabs. The System view provides Host, Paths and Refresh hardware; compact screens use registered Host/Paths selectors. Configs is reachable through `x` and the tab-row action. Contextual help includes analytics and report controls.
 
 ## The 35 widgets
 
@@ -81,20 +79,17 @@ Every widget is registered once in `WIDGETS` (`crates/argos-osint-bin/src/tui/pr
 | `tools.evidence` | Evidence contribution | Successful nonempty invocations, invocations yielding ≥1 accepted evidence item, acceptance %, distinct evidence items, citations by completed reports |
 | `tools.failure_causes` | Failure causes | Ranked terminal failure causes with count and share of finished invocations |
 
-## Filter strip
+## Analytics controls
 
-One line above the section navigator.
+Overview begins at All apps, with one primary card per app. App views expose all 35 registered reports. The [component catalog](tui-components.md) defines the grid and report geometry; the [design contract](tui-design-spec.md) defines coverage and interaction requirements.
 
-| Control | Action |
-| --- | --- |
-| `period` | `1h` / `24h` / `7d` / `30d`. The default is the last 24 h |
-| `app`, `provider`, `role`, `mode`, `tool`, `category` | Bounded dimension filters. An empty value reads `any` |
-| `[c] clear` | Clears every dimension, keeping the selected period |
-| `[f] filters` | Shown instead of the strip on a narrow viewport (below 72 columns). `n` cycles the open dimension |
+Tab/Shift+Tab traverse registered controls; Enter activates them. `t` switches Overview/System. `0` selects All apps; `1`–`5` selects Intel, Recon, Atlas, Models, Tools; `[`/`]` cycles app views. App selection is independent of the telemetry app dimension.
 
-The **period is a view choice**, not a filter: it changes the window and the bucket width (1 h → 5-minute buckets, 24 h → hourly, 7 d → 6-hour, 30 d → daily), so it never makes `clear` necessary. The six **dimensions are filters**; each one narrows every widget that carries that dimension.
+Arrows or `j`/`k` select cards, Enter or `m` opens a full report, Esc restores the grid. Report Left/Right selects buckets; PageUp/PageDown and wheel scroll the complete detail dataset.
 
-Filter popups only offer values the installation actually recorded (`profile_stats::filter_options`), so the strip never proposes a value that selects nothing. A changed filter drops the cached snapshot and the `see more` pages.
+`p` selects 1h/24h/7d/30d. `f` opens a searchable picker for app, provider, role, mode, tool and category. Tab/Shift+Tab changes dimensions, arrows choose an observed value, Enter applies it; Esc closes. `c` clears every dimension while preserving period. `r` refreshes statistics in Overview and hardware in System. `x` opens Configs.
+
+Snapshots load on a background reader, at most once per second while visible. Refresh retains the last good snapshot and visibly labels stale data and errors; obsolete filter generations are discarded. Live capacity and job counts ignore historical filters. Historical controls remain fixed while report details scroll.
 
 ## Metric dictionary
 

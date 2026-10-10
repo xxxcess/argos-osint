@@ -607,6 +607,15 @@ pub enum ButtonId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
+    PaneTab(usize),
+    ProfileTab(usize),
+    ProfileApp(usize),
+    ProfileAction(usize),
+    ProfileCard(usize),
+    ProfileChoice(usize),
+    ProfileBucket(usize),
+    ProfileReport,
+    ProfileSystem(usize),
     App(usize),
     Home,
     ProviderTab(ProviderPage),
@@ -690,6 +699,12 @@ enum ProviderEvent {
 
 #[derive(Debug)]
 enum WorkEvent {
+    ProfileLoaded {
+        generation: u64,
+        filters: argos_osint_core::profile_stats::StatFilters,
+        outcome: Result<Box<argos_osint_core::profile_stats::ProfileSnapshot>, String>,
+        options: Vec<(String, Vec<String>)>,
+    },
     ReconStage {
         thread_id: String,
         stage: String,
@@ -789,6 +804,7 @@ pub struct FocusEntry {
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct LayoutRegistry {
+    pub view_stamp: String,
     pub entries: Vec<FocusEntry>,
     pub scopes: Vec<ratatui::layout::Rect>,
     pub current_scope: usize,
@@ -796,19 +812,23 @@ pub struct LayoutRegistry {
 
 impl LayoutRegistry {
     pub fn clear(&mut self) {
+        self.view_stamp.clear();
         self.entries.clear();
         self.scopes.clear();
         self.current_scope = 0;
     }
 
     pub fn push_scope(&mut self, rect: ratatui::layout::Rect) -> usize {
-        let id = self.scopes.len();
+        let id = self.scopes.len() + 1;
         self.scopes.push(rect);
         self.current_scope = id;
         id
     }
 
     pub fn register(&mut self, target: Target, rect: ratatui::layout::Rect) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
         self.entries.push(FocusEntry {
             target,
             rect,
@@ -846,6 +866,8 @@ pub struct App {
     pub threads: Vec<recon::Thread>,
     pub thread_states: HashMap<String, String>,
     pub messages: Vec<recon::Message>,
+    pub investigation_events: Vec<argos_osint_core::investigation::InvestigationEvent>,
+    pub compact_pages: [usize; 9],
     pub calls: Vec<recon::Call>,
     pub thread_sel: usize,
     pub tool_sel: usize,
@@ -1252,6 +1274,8 @@ impl App {
             threads,
             thread_states,
             messages,
+            investigation_events: Vec::new(),
+            compact_pages: [0; 9],
             calls,
             thread_sel: 0,
             tool_sel: 0,
@@ -1551,10 +1575,35 @@ impl App {
     /// One Profile snapshot, on the 1 Hz cadence the dashboards already share.
     /// The read is on the store's own connection, so it never blocks recording.
     pub(crate) fn reload_profile(&mut self) {
-        if !self.profile.due() {
+        if !self.profile.due()
+            || self.profile.loading
+            || self.profile.tab != super::profile::SystemTab::Overview
+        {
             return;
         }
-        self.profile.reload(&self.store);
+        self.profile.loading = true;
+        let generation = self.profile.generation;
+        let filters = self.profile.filters.clone();
+        let tx = self.work_tx.clone();
+        let db = paths::db_path();
+        std::thread::spawn(move || {
+            let (outcome, options) = match Store::open_profile_reader(&db) {
+                Ok(store) => (
+                    store
+                        .profile_snapshot(&filters.period, &filters)
+                        .map(Box::new)
+                        .map_err(|err| format!("{err:#}")),
+                    store.profile_filter_options(),
+                ),
+                Err(err) => (Err(format!("{err:#}")), Vec::new()),
+            };
+            let _ = tx.send(WorkEvent::ProfileLoaded {
+                generation,
+                filters,
+                outcome,
+                options,
+            });
+        });
     }
 
     pub(crate) fn reload_logs(&mut self) {
@@ -2724,6 +2773,9 @@ impl App {
             Some(ModuleId::Jobs) => Target::Field(FieldId::JobsSearch),
             Some(ModuleId::Logs) if !self.logs.rows.is_empty() => Target::LogLine(self.logs.sel),
             Some(ModuleId::Logs) => Target::Field(FieldId::LogsSearch),
+            Some(ModuleId::System) if self.profile.tab == super::profile::SystemTab::Overview => {
+                Target::ProfileCard(self.profile.focus)
+            }
             _ => Target::Button(ButtonId::RefreshHardware),
         });
         self.persist_view_session();
@@ -4680,6 +4732,27 @@ impl App {
 
     fn on_work_event(&mut self, event: WorkEvent) -> bool {
         match event {
+            WorkEvent::ProfileLoaded {
+                generation,
+                filters,
+                outcome,
+                options,
+            } => {
+                self.profile.loading = false;
+                if generation != self.profile.generation || filters != self.profile.filters {
+                    return true;
+                }
+                self.profile.loaded_at = Some(Instant::now());
+                self.profile.options = options;
+                match outcome {
+                    Ok(snapshot) => {
+                        self.profile.snapshot_filters = Some(filters);
+                        self.profile.accept_snapshot(*snapshot);
+                    }
+                    Err(error) => self.profile.error = Some(error),
+                }
+                true
+            }
             WorkEvent::ReconStage { thread_id, stage } => {
                 self.push_log("info", format!("Recon {stage}"));
                 self.recon_stages.insert(thread_id.clone(), stage.clone());
@@ -5629,6 +5702,7 @@ impl App {
     fn refresh_selected(&mut self) -> Result<()> {
         if let Some(tid) = &self.selected_thread {
             self.messages = self.store.list_messages(tid)?;
+            self.investigation_events = self.store.list_investigation_events(tid)?;
             self.calls = self.store.all_calls_for_thread(tid)?;
             self.runs = self.store.runs_for_thread(tid)?;
             self.answer_memories = self.store.answer_memories(tid)?;
@@ -6279,6 +6353,7 @@ impl App {
             ButtonId::SummaryModels => {
                 self.select(ModuleId::Providers.index());
                 self.provider_page = ProviderPage::Defaults;
+                self.compact_pages[ModuleId::Providers.index()] = 1;
                 if self.defaults_role != DefaultsRole::Summarization {
                     self.defaults_role = DefaultsRole::Summarization;
                     self.model_catalog.clear();
@@ -6374,6 +6449,7 @@ impl App {
                     self.save_session_tabs();
                     self.selected_thread = None;
                     self.messages.clear();
+                    self.investigation_events.clear();
                     self.input.clear();
                     self.recon_chat = false;
                     self.refresh_threads()?;
@@ -6742,6 +6818,7 @@ impl App {
                 Ok("News".into())
             }
             ButtonId::DefaultRole(role) => {
+                self.compact_pages[ModuleId::Providers.index()] = 1;
                 if self.defaults_role != role {
                     self.defaults_role = role;
                     self.fallback_sel = 0;
@@ -7261,6 +7338,23 @@ impl App {
 
     fn activate_target(&mut self, target: Target) {
         match target {
+            Target::PaneTab(index) => {
+                if let Some(module) = self.module {
+                    self.compact_pages[module.index()] = index;
+                }
+                self.set_focus(target);
+            }
+            Target::ProfileTab(_)
+            | Target::ProfileApp(_)
+            | Target::ProfileAction(_)
+            | Target::ProfileCard(_)
+            | Target::ProfileChoice(_)
+            | Target::ProfileBucket(_)
+            | Target::ProfileReport
+            | Target::ProfileSystem(_) => {
+                self.set_focus(target);
+                super::profile::activate(self, target);
+            }
             Target::App(index) => self.select(index),
             Target::Home => self.go_home(),
             Target::ProviderTab(page) => {
@@ -7637,6 +7731,7 @@ impl App {
             self.save_session_tabs();
             self.selected_thread = None;
             self.messages.clear();
+            self.investigation_events.clear();
             self.recon_chat = false;
             self.refresh_threads()?;
             if let Some(next) = self.threads.first().map(|t| t.id.clone()) {
@@ -7682,6 +7777,13 @@ impl App {
         if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
             return self.on_interrupt();
         }
+        if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
+            return self.arm_quit();
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K')) {
+            self.open_palette();
+            return true;
+        }
         // The Configs popup owns the keyboard while it is open.
         if self.overlay == Overlay::Configs {
             // The open tab owns its own field, so typing never leaks into the
@@ -7698,13 +7800,6 @@ impl App {
             && self.overlay == Overlay::None
             && super::profile::handle_key(self, key)
         {
-            return true;
-        }
-        if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
-            return self.arm_quit();
-        }
-        if ctrl && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K')) {
-            self.open_palette();
             return true;
         }
         if let Overlay::ResumeSession(ref session) = self.overlay {
@@ -8119,6 +8214,7 @@ impl App {
             KeyCode::Up => self.move_vertical(-1),
             KeyCode::Down => self.move_vertical(1),
             KeyCode::Tab => self.focus_next(key.modifiers.contains(KeyModifiers::SHIFT)),
+            KeyCode::BackTab => self.focus_next(true),
             _ => {}
         }
         if matches!(key.code, KeyCode::Char(_))
@@ -9088,6 +9184,8 @@ mod tests {
             threads: Vec::new(),
             thread_states: HashMap::new(),
             messages: Vec::new(),
+            investigation_events: Vec::new(),
+            compact_pages: [0; 9],
             calls: Vec::new(),
             thread_sel: 0,
             tool_sel: 0,
@@ -9755,6 +9853,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         app.select(ModuleId::Providers.index());
+        app.compact_pages[ModuleId::Providers.index()] = 1;
         for (page, target) in [
             (ProviderPage::Google, Target::Button(ButtonId::GoogleSave)),
             (ProviderPage::Nvidia, Target::Button(ButtonId::NvidiaSave)),
@@ -9810,6 +9909,7 @@ mod tests {
         app.google_key = "google-key".into();
         app.select(ModuleId::Providers.index());
         app.provider_page = ProviderPage::Defaults;
+        click(&mut app, Target::PaneTab(1));
         click(&mut app, Target::Button(ButtonId::AddFallback));
         assert_eq!(app.overlay, Overlay::AddFallback);
         app.on_work_event(WorkEvent::CatalogDone {
@@ -9874,6 +9974,7 @@ mod tests {
         app.auth.set_account(router);
         click(&mut app, Target::App(ModuleId::Providers.index()));
         click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
+        click(&mut app, Target::PaneTab(1));
         click(&mut app, Target::Field(FieldId::ReconProvider));
         assert!(matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)));
         let ids: Vec<_> = app
@@ -9931,6 +10032,7 @@ mod tests {
         assert_eq!(app.recon_model, "beta");
         assert!(matches!(app.overlay, Overlay::None));
 
+        click(&mut app, Target::PaneTab(0));
         click(
             &mut app,
             Target::Button(ButtonId::DefaultRole(DefaultsRole::Synthesis)),
@@ -10048,6 +10150,7 @@ mod tests {
         assert!(hit(&app, Target::Button(ButtonId::ResumeRun)));
         assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
         app.select(ModuleId::Osint.index());
+        app.compact_pages[ModuleId::Osint.index()] = 1;
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
             Target::Button(ButtonId::OsintRun),
@@ -10255,6 +10358,7 @@ mod tests {
         assert!(app.logs.scroll < bottom);
         // System no longer shows or routes the event log.
         app.select(ModuleId::System.index());
+        app.profile.tab = super::super::profile::SystemTab::System;
         assert_eq!(
             super::super::ui::focus_order(&app)
                 .into_iter()
@@ -10733,7 +10837,7 @@ mod tests {
         // Overview is the activity tab: telemetry widgets, never host details.
         let overview = buffer_text(&render(&mut app, 120, 34));
         assert!(
-            overview.contains(" period ") && overview.contains("[Tab] switch"),
+            overview.contains("[p]") && overview.contains("Overview"),
             "the overview tab shows the filter strip and the tab switch: {overview}"
         );
         assert!(
@@ -10742,7 +10846,7 @@ mod tests {
         );
 
         // A bare Tab moves to the System tab, which keeps the panes it always had.
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
         assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::System);
         let system = buffer_text(&render(&mut app, 120, 34));
         assert!(system.contains("Refresh hardware"), "{system}");
@@ -10756,7 +10860,7 @@ mod tests {
         assert_eq!(app.status, "Hardware refreshed");
 
         // Tab moves back to Overview, so the two tabs really are one pane.
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
         assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::Overview);
 
         // Logs keeps its own clear action and its own retention label.
@@ -13677,17 +13781,26 @@ mod tests {
     /// render the dashboard rather than a blank pane.
     #[test]
     fn profile_overview_renders_at_every_required_viewport() {
-        for (width, height) in [(160u16, 50u16), (100, 32), (80, 24), (64, 18)] {
+        for (width, height) in [
+            (160u16, 50u16),
+            (120, 40),
+            (104, 36),
+            (103, 36),
+            (100, 36),
+            (80, 24),
+            (40, 20),
+            (100, 24),
+        ] {
             let mut app = app();
             app.select(ModuleId::System.index());
             seed_profile(&mut app);
             let text = buffer_text(&render(&mut app, width, height));
             assert!(
-                text.contains(" period "),
+                text.contains("[p]"),
                 "{width}x{height}: the filter strip must render: {text}"
             );
             assert!(
-                text.contains("[Tab] switch"),
+                text.contains("Overview"),
                 "{width}x{height}: the tab switch must render: {text}"
             );
             // The status strip names the reviewed inventory instead of guessing.
@@ -13709,11 +13822,11 @@ mod tests {
         // it needs more room rather than rendering half a chart.
         let text = buffer_text(&render(&mut app, 44, 14));
         assert!(
-            text.contains("[Tab] switch"),
+            text.contains("Overview"),
             "the tab strip survives a narrow viewport: {text}"
         );
         assert!(
-            text.contains("wider") || text.contains(" period "),
+            text.contains("wider") || text.contains("[p]"),
             "the Overview either explains itself or still renders: {text}"
         );
     }
@@ -13832,5 +13945,193 @@ mod tests {
         // The numeric shortcuts jump straight to a section.
         app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
         assert_eq!(app.profile.section, crate::tui::profile::Section::Atlas);
+    }
+
+    fn analytics_fixture() -> argos_osint_core::profile_stats::ProfileSnapshot {
+        use argos_osint_core::profile_stats::*;
+        let mut snapshot = ProfileSnapshot {
+            captured_at: "2026-10-10T12:00:00Z".into(),
+            observed_since: "2026-10-08T00:00:00Z".into(),
+            ..Default::default()
+        };
+        snapshot.status.collection_health = "ok".into();
+        snapshot.intel.volume = (0..24)
+            .map(|hour| VolumeBucket {
+                bucket: format!("2026-10-10T{hour:02}"),
+                total: hour,
+                by_tag: vec![("politics".into(), hour), ("economy".into(), hour)],
+                untagged: 0,
+            })
+            .collect();
+        snapshot.tools.top_tools = (0..140)
+            .map(|i| ToolCount {
+                tool_id: format!("tool_{i:03}"),
+                category: "web".into(),
+                invocations: i + 1,
+                remote: i + 1,
+                ..Default::default()
+            })
+            .collect();
+        snapshot.models.latency = vec![LatencyBucket {
+            bucket: "2026-10-10T11".into(),
+            p50_ms: Some(1234),
+            p95_ms: None,
+            n: 3,
+            ..Default::default()
+        }];
+        snapshot
+    }
+
+    #[test]
+    fn profile_all_35_reports_have_registered_keyboard_and_mouse_routes() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        app.profile.accept_snapshot(analytics_fixture());
+        let mut ids = HashSet::new();
+        for section in 1..=5 {
+            app.handle_key(KeyEvent::new(
+                KeyCode::Char(char::from_digit(section, 10).unwrap()),
+                KeyModifiers::NONE,
+            ));
+            for index in 0..app.profile.focused_widgets().len() {
+                app.profile.focus = index;
+                app.set_focus(Target::ProfileCard(index));
+                render(&mut app, 120, 40);
+                assert!(hit(&app, Target::ProfileCard(index)));
+                app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                let id = app.profile.report.unwrap();
+                ids.insert(id);
+                render(&mut app, 120, 40);
+                assert!(super::super::ui::focus_order(&app).contains(&Target::ProfileReport));
+                app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                assert_eq!(app.profile.focus, index);
+                assert!(app.profile.report.is_none());
+            }
+        }
+        assert_eq!(ids.len(), 35);
+    }
+
+    #[test]
+    fn profile_scrolls_past_64_records_and_global_chords_keep_their_owners() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        app.profile.accept_snapshot(analytics_fixture());
+        app.profile.report = Some("tools.usage");
+        app.set_focus(Target::ProfileReport);
+        render(&mut app, 120, 40);
+        for _ in 0..60 {
+            app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("tool_139"), "{text}");
+        assert!(app.profile.report_scroll.offset > 64);
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_ne!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn profile_filters_period_picker_and_obsolete_results() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        app.profile.accept_snapshot(analytics_fixture());
+        app.profile.options = vec![("category".into(), vec!["web".into()])];
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.profile.filters.period,
+            argos_osint_core::profile_stats::Period::H7
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        for expected in ["provider", "role", "mode", "tool", "category"] {
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            assert_eq!(app.profile.filter_popup, Some(expected));
+        }
+        // Typing c belongs to the field and does not clear the period/dimensions.
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.profile.filters.category, "web");
+        let before = app.profile.snapshot.clone();
+        app.profile.loading = true;
+        app.on_work_event(WorkEvent::ProfileLoaded {
+            generation: 0,
+            filters: Default::default(),
+            outcome: Ok(Box::default()),
+            options: Vec::new(),
+        });
+        assert_eq!(app.profile.snapshot, before);
+        assert!(!app.profile.loading);
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(app.profile.filters.category.is_empty());
+        assert_eq!(
+            app.profile.filters.period,
+            argos_osint_core::profile_stats::Period::H7
+        );
+    }
+
+    #[test]
+    fn compact_home_and_recon_pages_keep_controls_reachable() {
+        let mut app = app();
+        app.go_home();
+        render(&mut app, 40, 12);
+        let order = super::super::ui::focus_order(&app);
+        for index in 0..9 {
+            assert!(order.contains(&Target::App(index)), "missing app {index}");
+        }
+        assert!(order.contains(&Target::Field(FieldId::Composer)));
+        app.select(ModuleId::Recon.index());
+        app.recon_chat = true;
+        app.recon_context_enabled = true;
+        render(&mut app, 80, 24);
+        assert!(super::super::ui::focus_order(&app).contains(&Target::PaneTab(1)));
+        app.activate_target(Target::PaneTab(1));
+        render(&mut app, 80, 24);
+        assert!(super::super::ui::focus_order(&app).contains(&Target::ReconContext));
+    }
+
+    #[test]
+    fn analytics_viewports_and_data_states() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        app.profile.accept_snapshot(analytics_fixture());
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (104, 36),
+            (103, 36),
+            (100, 36),
+            (80, 24),
+            (40, 20),
+            (100, 24),
+        ] {
+            for (name, report) in [
+                ("grid", None),
+                ("report", Some("intel.volume")),
+                ("small-sample", Some("models.latency")),
+            ] {
+                app.profile.report = report;
+                let buffer = render(&mut app, width, height);
+                assert!(!super::super::ui::focus_order(&app).is_empty());
+                if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let cells:Vec<_>=(0..height).map(|y|(0..width).map(|x|{let cell=&buffer[(x,y)];serde_json::json!({"s":cell.symbol(),"fg":format!("{:?}",cell.fg),"bg":format!("{:?}",cell.bg),"b":cell.modifier.contains(ratatui::style::Modifier::BOLD),"u":false})}).collect::<Vec<_>>()).collect();
+                    std::fs::write(
+                        format!("{dir}/profile-{name}-{width}x{height}.json"),
+                        serde_json::json!({"width":width,"height":height,"cells":cells})
+                            .to_string(),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        app.profile.error = Some("fixture read failed".into());
+        let stale = buffer_text(&render(&mut app, 80, 24));
+        assert!(stale.contains("Stale") && stale.contains("fixture read failed"));
+        app.profile.error = None;
+        app.profile.snapshot = None;
+        app.profile.loading = true;
+        assert!(buffer_text(&render(&mut app, 80, 24)).contains("Loading"));
     }
 }

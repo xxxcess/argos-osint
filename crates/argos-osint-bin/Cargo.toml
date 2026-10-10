@@ -27,6 +27,8 @@ serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true
 url.workspace = true
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
 
 [dev-dependencies]
 argos-osint-core = { path = "../argos-osint-core", default-features = false, features = ["fixtures"] }

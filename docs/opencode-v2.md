@@ -81,3 +81,5 @@ Incompatible global GSD V1 was moved from `~/.config/opencode/plugins/gsd-core.j
 ```sh
 node --test .opencode/tests/*.test.mjs
 ```
+
+TUI phases follow the [design contract](tui-design-spec.md) and [component catalog](tui-components.md). Planner/editor prompts name components, preset, owned files, read-only references and viewport/data/interaction acceptance checks; reviewers verify shared geometry and reachability.

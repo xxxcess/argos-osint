@@ -70,22 +70,22 @@ Pipeline and quotas: [architecture.md](architecture.md#atlas).
 
 ### Profile
 
-Two tabs. `Tab` switches them (a bare `Tab` only: `Ctrl+Tab` still cycles apps, `Tab` in a field still moves focus).
+Overview starts at All apps. Tab/Shift+Tab traverse controls; Enter activates, and `t` switches Overview/System.
 
 | Keys | Action |
 | --- | --- |
-| `Tab` | Overview ↔ System |
-| `1`–`5` | Jump to a section (Intel → Tools) |
-| `[` `]` | Previous / next section |
-| `j` `k` / `↑` `↓` | Next / previous widget in the focused section |
-| `m` | `see more` — grow the focused widget's page |
-| `c` | Clear dimension filters (the period stays) |
-| `f` | Filter popup, then `n` cycles its dimension (narrow viewports) |
-| `r` | Refresh hardware |
+| `0`, `1`–`5`, `[` / `]` | All apps, app views, previous/next app |
+| Arrows / `j` / `k` | Select cards |
+| Enter / `m` | Open full report |
+| Left/Right in report | Select original buckets or page duration points |
+| PageUp/PageDown / wheel | Scroll report details |
+| `p`, `f`, `c` | Choose period, edit six dimensions, clear dimensions |
+| `r` | Refresh analytics in Overview, hardware in System |
 | `x` | Configs |
-| Esc | Home |
+| Esc | Restore grid or return Home |
 
-**Overview** is the activity dashboard: a filter strip (period plus the bounded dimensions) above a section navigator, and the focused section's widgets. **System** keeps Host, Paths and Refresh hardware, and adds the **Configs** popup.
+Overview uses aligned summary cards and complete reports, following the [design contract](tui-design-spec.md) and [component catalog](tui-components.md). System provides scrollable Host and Paths. Short screens use metric lists and pane selectors. Typing inside pickers belongs to the search field; Tab changes filter dimension, arrows select a recorded value and Enter applies it.
+
 
 **Configs** (`x`) — Export writes the portable schema-v1 document; Import merges one in. The file contains saved API keys, so treat it as a secret and never commit it.
 

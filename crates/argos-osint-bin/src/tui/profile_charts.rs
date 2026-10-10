@@ -18,6 +18,273 @@ use ratatui::text::{Line, Span};
 
 use super::theme;
 
+/// Stable series identity, including semantic outcome colours.
+pub fn series_style(key: &str) -> Style {
+    let color = match key {
+        "completed" | "completed_nonempty" | "completed_with_evidence" => theme::GREEN,
+        "failed" => theme::RED,
+        "partial" | "blocked" => theme::WARN,
+        "cancelled" | "unknown" => theme::MUTED,
+        _ => theme::series(key.bytes().fold(0usize, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(byte as usize)
+        })),
+    };
+    Style::default().fg(color).bg(theme::BG)
+}
+
+#[derive(Clone, Debug)]
+pub struct TimeBucket {
+    pub start: String,
+    pub end: String,
+    pub series: Vec<(String, u64)>,
+    /// False before collection/retention coverage. It is not a measured zero.
+    pub available: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SeriesPoint {
+    pub start: String,
+    pub end: String,
+    pub series: Vec<(String, Option<f64>)>,
+    pub n: u64,
+}
+
+/// Duration/ratio points page around the selection. No percentile is averaged
+/// and no missing observation is interpolated.
+pub fn series_plot(
+    points: &[SeriesPoint],
+    width: usize,
+    height: usize,
+    selected: usize,
+) -> Vec<Line<'static>> {
+    if width < 14 || height < 5 || points.is_empty() {
+        return Vec::new();
+    }
+    let capacity = ((width - 7) / 3).max(1);
+    let start = selected.min(points.len() - 1) / capacity * capacity;
+    let page = &points[start..(start + capacity).min(points.len())];
+    let peak = page
+        .iter()
+        .flat_map(|point| point.series.iter().filter_map(|(_, value)| *value))
+        .filter(|value| value.is_finite())
+        .fold(0.0, f64::max)
+        .max(1.0);
+    let scale = nice_scale(peak.ceil().min(u64::MAX as f64) as u64) as f64;
+    let rows = height - 3;
+    let mut lines = Vec::new();
+    for row in (0..rows).rev() {
+        let mut spans = vec![Span::styled(
+            if row == rows - 1 {
+                format!("{:>5.0} │", scale)
+            } else {
+                "      │".into()
+            },
+            theme::dim(),
+        )];
+        for (index, point) in page.iter().enumerate() {
+            let mark = point.series.iter().find(|(_, value)| {
+                value.is_some_and(|value| {
+                    value.is_finite()
+                        && ((value / scale * (rows - 1) as f64).round() as usize) == row
+                })
+            });
+            spans.push(match mark {
+                Some((key, _)) => Span::styled(
+                    "●  ",
+                    if start + index == selected {
+                        series_style(key).bg(theme::SELECT)
+                    } else {
+                        series_style(key)
+                    },
+                ),
+                None => Span::raw("   "),
+            });
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(Span::styled(
+        format!("    0 └{}", "─".repeat(width - 7)),
+        theme::dim(),
+    )));
+    lines.push(Line::raw(super::components::clip_text(
+        &format!(
+            "Points {}–{} / {}",
+            start + 1,
+            start + page.len(),
+            points.len()
+        ),
+        width,
+    )));
+    let stamp = page[0].start.get(5..).unwrap_or(&page[0].start);
+    lines.push(Line::raw(super::components::clip_text(stamp, width)));
+    lines
+}
+
+impl TimeBucket {
+    pub fn total(&self) -> u64 {
+        self.series.iter().map(|(_, value)| *value).sum()
+    }
+}
+
+/// Count buckets coarsen by sums, retaining both ends of the complete window.
+pub fn coarsen_counts(buckets: &[TimeBucket], capacity: usize) -> Vec<TimeBucket> {
+    let group = buckets.len().div_ceil(capacity.max(1)).max(1);
+    buckets
+        .chunks(group)
+        .map(|chunk| {
+            let mut series = std::collections::BTreeMap::<String, u64>::new();
+            for bucket in chunk {
+                for (key, value) in &bucket.series {
+                    *series.entry(key.clone()).or_default() += value;
+                }
+            }
+            TimeBucket {
+                start: chunk[0].start.clone(),
+                end: chunk[chunk.len() - 1].end.clone(),
+                series: series.into_iter().collect(),
+                available: chunk.iter().all(|bucket| bucket.available),
+            }
+        })
+        .collect()
+}
+
+fn nice_scale(peak: u64) -> u64 {
+    let mut base = 1u64;
+    while base.saturating_mul(10) < peak && base <= u64::MAX / 10 {
+        base *= 10;
+    }
+    [1u64, 2, 5, 10]
+        .into_iter()
+        .map(|step| base.saturating_mul(step))
+        .find(|scale| *scale >= peak)
+        .unwrap_or(u64::MAX)
+}
+
+/// Measured TimePlot. Selection refers to original buckets, never an averaged point.
+pub fn time_plot(
+    buckets: &[TimeBucket],
+    width: usize,
+    height: usize,
+    selected: usize,
+) -> Vec<Line<'static>> {
+    if buckets.is_empty() {
+        return vec![Line::raw("Empty window")];
+    }
+    if width < 14 || height < 4 {
+        return Vec::new();
+    }
+    let axis = 7;
+    let capacity = (width - axis) / 3;
+    let visible = coarsen_counts(buckets, capacity);
+    let group = buckets.len().div_ceil(capacity.max(1)).max(1);
+    let peak = nice_scale(
+        visible
+            .iter()
+            .map(TimeBucket::total)
+            .max()
+            .unwrap_or(0)
+            .max(1),
+    );
+    let rows = height - 4;
+    let mut out = Vec::new();
+    let mut totals = vec![Span::raw(" ".repeat(axis))];
+    for bucket in &visible {
+        let value = if bucket.available {
+            bucket.total().to_string()
+        } else {
+            " · ".into()
+        };
+        totals.push(Span::styled(
+            if value.len() <= 3 {
+                format!("{value:<3}")
+            } else {
+                "   ".into()
+            },
+            theme::dim(),
+        ));
+    }
+    out.push(Line::from(totals));
+    for row in (0..rows).rev() {
+        let label = if row == rows - 1 {
+            format!("{peak:>5} │")
+        } else {
+            "      │".into()
+        };
+        let mut spans = vec![Span::styled(label, theme::dim())];
+        for (index, bucket) in visible.iter().enumerate() {
+            let amount = if bucket.available {
+                (bucket.total() as u128 * rows as u128 * 8 / peak as u128) as usize
+            } else {
+                0
+            };
+            let fill = amount.saturating_sub(row * 8).min(8);
+            let glyph = if fill == 0 { " " } else { VBLOCKS[fill - 1] };
+            let position =
+                ((row * 8 + fill / 2) as u128 * peak as u128 / (rows * 8) as u128) as u64;
+            let mut sum = 0;
+            let key = bucket
+                .series
+                .iter()
+                .find_map(|(key, value)| {
+                    sum += value;
+                    (sum > position).then_some(key.as_str())
+                })
+                .unwrap_or("total");
+            let style = if index == selected / group {
+                series_style(key).bg(theme::SELECT)
+            } else {
+                series_style(key)
+            };
+            spans.push(Span::styled(format!("{glyph}{glyph} "), style));
+        }
+        out.push(Line::from(spans));
+    }
+    out.push(Line::from(Span::styled(
+        format!("    0 └{}", "─".repeat(width - axis)),
+        theme::dim(),
+    )));
+    let mut labels = vec![Span::raw(" ".repeat(axis))];
+    for index in 0..visible.len() {
+        labels.push(Span::styled(
+            if index == selected / group {
+                "▲  "
+            } else {
+                "   "
+            },
+            theme::accent(),
+        ));
+    }
+    out.push(Line::from(labels));
+    let short = |stamp: &str| {
+        if stamp.len() >= 13 {
+            format!("{} {}", &stamp[5..10], &stamp[11..13])
+        } else if stamp.len() >= 10 {
+            stamp[5..10].to_owned()
+        } else {
+            stamp.to_owned()
+        }
+    };
+    let first = short(&buckets[0].start);
+    let last = short(&buckets[buckets.len() - 1].end);
+    let remaining = width.saturating_sub(axis);
+    let label = if first.len() + last.len() < remaining {
+        let gap = (visible.len() * 3)
+            .min(remaining)
+            .saturating_sub(first.len() + last.len())
+            .max(1);
+        format!("{first}{}{last}", " ".repeat(gap))
+    } else if first.len() <= remaining {
+        first
+    } else {
+        String::new()
+    };
+    out.push(Line::from(Span::styled(
+        format!("{}{label}", " ".repeat(axis)),
+        theme::dim(),
+    )));
+    out
+}
+
 /// Full- and part-width block glyphs, coarse to fine. `BLOCKS[0]` fills a whole
 /// cell and `BLOCKS[7]` a single eighth of one.
 const BLOCKS: [&str; 8] = ["█", "▉", "▊", "▋", "▌", "▍", "▎", "▏"];
@@ -78,11 +345,6 @@ pub fn sample_size(n: u64) -> String {
     format!("n={}", count(n))
 }
 
-/// Bounds a usize width so a render never panics on a narrow viewport.
-pub fn bounded(width: usize, min: usize, max: usize) -> usize {
-    width.clamp(min, max.max(min))
-}
-
 /// The single shared stacked-bar renderer.
 ///
 /// Renders one row: `label` padded to `label_width`, a space, then a bar of at
@@ -120,13 +382,13 @@ pub fn stacked_bar(
         // stays flush with the track even when every fraction is dropped.
         let final_index = series.iter().rposition(|(_, value)| *value > 0);
         let mut segments: Vec<(Style, u64)> = Vec::with_capacity(series.len());
-        for (index, (_, value)) in series.iter().enumerate() {
+        for (index, (key, value)) in series.iter().enumerate() {
             if *value == 0 || denominator == 0 {
                 continue;
             }
             let fractional = Some(index) != final_index;
             segments.push((
-                theme::series_style(index),
+                series_style(key),
                 eighths(*value, denominator, bar_cells, fractional),
             ));
         }
@@ -149,32 +411,26 @@ pub fn rank_bar(value: u64, max: u64, width: usize) -> Line<'static> {
 /// A small vertical column block for a trend series (one column per bucket,
 /// newest last). `height` rows, `width` columns; `width` larger than
 /// `values.len()` is padded on the left with blank columns, `width` smaller
-/// truncates from the left. Column `i` uses `VBLOCKS` scaled to `height`.
+/// coarsens count buckets by summing. Column `i` uses `VBLOCKS` scaled to `height`.
 /// Returns `height` `Line`s, top row first.
 pub fn trend_columns(values: &[u64], width: usize, height: u16) -> Vec<Line<'static>> {
     let rows = height as usize;
     if rows == 0 || width == 0 {
         return Vec::new();
     }
-    // Newest bucket last, so the chart reads left to right in time: a short
-    // series is padded on the LEFT (its oldest buckets are not on screen yet) and
-    // a long one drops its oldest buckets off the left edge.
-    let visible: Vec<Option<u64>> = if values.len() >= width {
-        (0..width)
-            .map(|column| values.get(values.len() - width + column).copied())
-            .collect()
-    } else {
-        let pad = width - values.len();
-        (0..width)
-            .map(|column| {
-                if column < pad {
-                    None
-                } else {
-                    values.get(column - pad).copied()
-                }
-            })
-            .collect()
-    };
+    let group = values.len().div_ceil(width).max(1);
+    let coarsened: Vec<u64> = values
+        .chunks(group)
+        .map(|chunk| chunk.iter().sum())
+        .collect();
+    let pad = width.saturating_sub(coarsened.len());
+    let visible: Vec<Option<u64>> = (0..width)
+        .map(|column| {
+            column
+                .checked_sub(pad)
+                .and_then(|index| coarsened.get(index).copied())
+        })
+        .collect();
     let peak = visible.iter().flatten().copied().max().unwrap_or(0);
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows);
     for (index, row) in (0..rows).rev().enumerate() {
@@ -296,63 +552,80 @@ fn column_cell(value: u64, peak: u64, rows: usize, row: usize) -> (&'static str,
 // Single-cell text helpers
 // ---------------------------------------------------------------------------
 
-/// Cells taken by one character: control characters take none, wide characters
-/// take two, everything else one.
-fn cell_width(ch: char) -> usize {
-    if ch.is_control() {
-        return 0;
-    }
-    let code = ch as u32;
-    let wide = (0x1100..=0x115F).contains(&code)
-        || (0x2E80..=0xA4CF).contains(&code)
-        || (0xAC00..=0xD7A3).contains(&code)
-        || (0xF900..=0xFAFF).contains(&code)
-        || (0xFE10..=0xFE19).contains(&code)
-        || (0xFE30..=0xFE6F).contains(&code)
-        || (0xFF00..=0xFF60).contains(&code)
-        || (0xFFE0..=0xFFE6).contains(&code)
-        || (0x1F300..=0x1FAFF).contains(&code);
-    if wide {
-        2
-    } else {
-        1
-    }
-}
-
-/// Display cells taken by `text`.
 fn text_width(text: &str) -> usize {
-    text.chars().map(cell_width).sum()
+    super::components::text_width(text)
 }
-
-/// `text` at exactly `width` cells: padded on the right when it fits, cut with
-/// `…` when it does not, so a label can never push a chart sideways.
 fn fit_label(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    if text_width(text) <= width {
-        let mut out = text.to_string();
-        out.push_str(&" ".repeat(width - text_width(text)));
-        return out;
-    }
-    let keep = width - 1;
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in text.chars() {
-        let w = cell_width(ch);
-        if used + w > keep {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push('…');
-    out
+    let text = super::components::clip_text(text, width);
+    format!(
+        "{text}{}",
+        " ".repeat(width.saturating_sub(text_width(&text)))
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_coarsening_preserves_totals_boundaries_and_unknown_history() {
+        let buckets: Vec<_> = (0..101)
+            .map(|i| TimeBucket {
+                start: format!("start-{i}"),
+                end: format!("end-{i}"),
+                series: vec![("completed".into(), i)],
+                available: i > 0,
+            })
+            .collect();
+        let coarse = coarsen_counts(&buckets, 7);
+        assert!(coarse.len() <= 7);
+        assert_eq!(coarse.iter().map(TimeBucket::total).sum::<u64>(), 5050);
+        assert_eq!(coarse.first().unwrap().start, "start-0");
+        assert_eq!(coarse.last().unwrap().end, "end-100");
+        assert!(!coarse[0].available);
+    }
+
+    #[test]
+    fn time_plot_fits_actual_rectangle() {
+        let buckets: Vec<_> = (0..101)
+            .map(|i| TimeBucket {
+                start: format!("2026-10-10T{i:02}"),
+                end: "2026-10-11T00:00:00Z".into(),
+                series: vec![("completed".into(), i)],
+                available: true,
+            })
+            .collect();
+        for width in [14, 20, 40, 80, 160] {
+            for height in [5, 8, 12] {
+                let lines = time_plot(&buckets, width, height, 100);
+                assert!(lines.len() <= height, "height {height}: {}", lines.len());
+                assert!(
+                    lines.iter().all(|line| line.width() <= width),
+                    "width {width}: {lines:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_series_colours_survive_filter_reordering() {
+        let a = stacked_bar(
+            "",
+            0,
+            &[("failed".into(), 1), ("completed".into(), 1)],
+            8,
+            2,
+        );
+        let b = stacked_bar(
+            "",
+            0,
+            &[("completed".into(), 1), ("failed".into(), 1)],
+            8,
+            2,
+        );
+        assert_eq!(a.spans[1].style.fg, b.spans[2].style.fg);
+        assert_eq!(a.spans[1].style.fg, Some(theme::RED));
+    }
 
     fn text(line: &Line<'_>) -> String {
         line.spans
@@ -382,8 +655,8 @@ mod tests {
         assert_eq!(cells(&exact), 8);
         let short = stacked_bar("l", 0, &[segment("a", 2), segment("b", 2)], 8, 3);
         assert_eq!(text(&short), "████████");
-        assert_eq!(short.spans[1].style.fg, Some(theme::series(0)));
-        assert_eq!(short.spans[2].style.fg, Some(theme::series(1)));
+        assert_eq!(short.spans[1].style.fg, series_style("a").fg);
+        assert_eq!(short.spans[2].style.fg, series_style("b").fg);
     }
 
     #[test]
@@ -421,7 +694,7 @@ mod tests {
         assert_eq!(line.spans[2].content, "▎");
         assert_eq!(line.spans[1].style.fg, line.spans[2].style.fg);
         assert_eq!(line.spans[3].content, "██████");
-        assert_eq!(line.spans[3].style.fg, Some(theme::series(1)));
+        assert_eq!(line.spans[3].style.fg, series_style("b").fg);
         assert_eq!(text(&line), "███▎██████");
         assert_eq!(cells(&line), 10);
     }
@@ -477,11 +750,11 @@ mod tests {
     }
 
     #[test]
-    fn trend_columns_truncates_a_long_series_from_the_left() {
-        // Newest bucket last: the first three buckets drop off the left edge.
+    fn trend_columns_sums_a_long_count_series_without_dropping_history() {
+        // All six counts survive as paired sums: 3, 7, 11.
         let columns = trend_columns(&[1, 2, 3, 4, 5, 6], 3, 2);
-        assert_eq!(text(&columns[0]), "▂▅█");
-        assert_eq!(text(&columns[1]), "███");
+        assert_eq!(text(&columns[0]), " ▂█");
+        assert_eq!(text(&columns[1]), "▄██");
     }
 
     #[test]
@@ -586,16 +859,6 @@ mod tests {
         assert_eq!(sample_size(128), "n=128");
         assert_eq!(sample_size(0), "n=0");
         assert_eq!(sample_size(12_345), "n=12,345");
-    }
-
-    #[test]
-    fn bounded_clamps_widths_for_a_narrow_viewport() {
-        assert_eq!(bounded(100, 20, 240), 100);
-        assert_eq!(bounded(5, 20, 240), 20);
-        assert_eq!(bounded(400, 20, 240), 240);
-        assert_eq!(bounded(0, 0, 0), 0);
-        // A reversed bound still leaves a usable width instead of panicking.
-        assert_eq!(bounded(5, 240, 20), 240);
     }
 
     #[test]

@@ -8,7 +8,7 @@ Order matches CI: `cargo fmt --all --check` → `cargo clippy --workspace --all-
 
 ## TUI
 
-- Layout, hit-test, and Tab order share rectangles. `LayoutRegistry` fills during `draw`. Overlay-none Tab order rasterizes the current module so it stays valid before the next paint. Figure: [tui-shell.html](diagrams/tui-shell.html).
+- Layout, hit-test, and Tab order share rectangles. `LayoutRegistry` fills during `draw`. Focus order uses registered targets from the active layout scope. Figure: [tui-shell.html](diagrams/tui-shell.html).
 - Internal IDs stay `Osint` / `Providers` / `System` even when the labels are Tools / Models / Profile.
 - Empty focused fields keep their placeholder until the user types. Placeholders are never saved. Keys stay masked.
 - Long panes own an offset, a wrapped extent, and a `see more` footer. Offsets are not `u16`-truncated page math.
@@ -46,3 +46,5 @@ Query `graphify-out/graph.json` before broad exploration. Expand query tokens fr
 ## Diagrams
 
 New figures follow [diagrams.md](diagrams.md): self-contained HTML + SVG, no Mermaid, no shadows, accent on at most two nodes. Link each figure from this index and the matching Markdown doc.
+
+TUI changes follow [the design contract](tui-design-spec.md) and [component catalog](tui-components.md). Name the components/preset before editing; preserve metric semantics, widget IDs and palette. Profile uses registered geometry and independent grid/report scrolling.

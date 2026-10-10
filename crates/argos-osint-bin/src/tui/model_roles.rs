@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, DefaultsRole};
+use super::app::{App, ButtonId, DefaultsRole, Target};
 use super::theme;
 use argos_osint_core::provider;
 
@@ -160,9 +160,28 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
         .split(area);
 
-    let list_area = chunks[0];
-    let editor_area = chunks[1];
+    let list_area = if area.width < 100 { area } else { chunks[0] };
+    let editor_area = if area.width < 100 {
+        Rect::default()
+    } else {
+        chunks[1]
+    };
 
+    for (index, role) in DefaultsRole::ALL
+        .iter()
+        .enumerate()
+        .take(list_area.height.saturating_sub(2) as usize)
+    {
+        app.layout.borrow_mut().register(
+            Target::Button(ButtonId::DefaultRole(*role)),
+            Rect::new(
+                list_area.x + 1,
+                list_area.y + 1 + index as u16,
+                list_area.width.saturating_sub(2),
+                1,
+            ),
+        );
+    }
     // Left pane: 9 roles scrollable list
     let items: Vec<ListItem> = DefaultsRole::ALL
         .iter()

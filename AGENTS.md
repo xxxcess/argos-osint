@@ -1,5 +1,7 @@
 # Argos OSINT — Agent Instructions
 
+For changes under crates/argos-osint-bin/src/tui/, read docs/tui-design-spec.md and the relevant docs/tui-components.md entries. Name the components and layout preset before editing. Extend shared components when required. Preserve theme tokens, widget IDs, and metric semantics. Drawing, focus, and mouse targets must share geometry. Verify relevant viewport snapshots and interaction/data states. Child prompts carry chosen components, preset, owned files, read-only references, and acceptance checks.
+
 ## Project Structure
 Rust workspace with two crates:
 - `crates/argos-osint-core` — core library: Brain (memory/recall), OSINT registry/executor, provider routing, Recon orchestration, SQLite + LanceDB persistence

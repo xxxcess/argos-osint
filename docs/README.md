@@ -53,3 +53,5 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 ## Checklists (historical)
 
 Phase checklists under `docs/*-checklist.md` record completed Atlas/Brain/system-app work. Prefer architecture and conventions for current behavior.
+
+TUI presentation: [design contract](tui-design-spec.md) · [component APIs and presets](tui-components.md).

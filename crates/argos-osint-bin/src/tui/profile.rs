@@ -1,29 +1,27 @@
 //! Profile dashboard: the Overview and System tabs.
 //!
-//! Overview renders the reviewed 35 widgets from [`ProfileSnapshot`], one section
-//! at a time, through the single shared chart renderer in
-//! [`crate::tui::profile_charts`]. System keeps Host, Paths and Logs exactly
-//! where they were — the two tabs replace the old single System pane rather
-//! than growing a second pane next to it.
-//!
-//! Nothing here renders a number it was not given: an unavailable metric is
-//! `N/A`, never zero, and an empty window is an empty section rather than a
-//! fabricated baseline. The snapshot is read from the store on a 1 Hz cadence
-//! through its own connection, so a dashboard refresh never blocks recording.
+//! Overview renders all 35 stable metrics as aligned cards and scrollable reports.
+//! System exposes Host and Paths; Configs retains its existing import/export flow.
+//! Rendering consumes immutable snapshots delivered by one background read at a
+//! time. Missing history, measured zero, empty windows and stale errors remain
+//! distinct, and exact values take precedence over decorative plot labels.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use argos_osint_core::profile_stats::{self, ProfileSnapshot, StatFilters};
+#[cfg(test)]
 use argos_osint_core::store::Store;
 
 use super::app::App;
+use super::components::{self, ScrollPane};
 use super::profile_charts as charts;
+use super::profile_layout::{AnalyticsLayout, ReportLayout};
 use super::theme;
 
 /// Which Profile tab is on screen.
@@ -100,6 +98,712 @@ pub struct WidgetSpec {
     pub title: &'static str,
     /// Lower renders first inside a section.
     pub priority: u8,
+    pub renderer: RendererKind,
+    pub unit: &'static str,
+    pub series_keys: &'static [&'static str],
+    pub applicable_filters: &'static [&'static str],
+    pub detail_columns: &'static [&'static str],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererKind {
+    Time,
+    Ranked,
+    Comparison,
+    Meter,
+    Table,
+}
+const fn same_id(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+const fn renderer_kind(id: &str) -> RendererKind {
+    if same_id(id, "intel.volume") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "intel.confidence") {
+        return RendererKind::Comparison;
+    }
+    if same_id(id, "intel.origins") {
+        return RendererKind::Ranked;
+    }
+    if same_id(id, "intel.enrichment") {
+        return RendererKind::Table;
+    }
+    if same_id(id, "intel.reports") {
+        return RendererKind::Table;
+    }
+    if same_id(id, "intel.publishers") {
+        return RendererKind::Ranked;
+    }
+    if same_id(id, "intel.freshness") {
+        return RendererKind::Ranked;
+    }
+    if same_id(id, "recon.outcomes") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "recon.stages") {
+        return RendererKind::Comparison;
+    }
+    if same_id(id, "recon.recall") {
+        return RendererKind::Meter;
+    }
+    if same_id(id, "recon.workload") {
+        return RendererKind::Table;
+    }
+    if same_id(id, "recon.diversity") {
+        return RendererKind::Meter;
+    }
+    if same_id(id, "recon.directives") {
+        return RendererKind::Meter;
+    }
+    if same_id(id, "recon.unresolved") {
+        return RendererKind::Table;
+    }
+    if same_id(id, "atlas.cycles") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "atlas.hot_zones") {
+        return RendererKind::Ranked;
+    }
+    if same_id(id, "atlas.temperature") {
+        return RendererKind::Comparison;
+    }
+    if same_id(id, "atlas.cycle_time") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "atlas.discovery") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "atlas.backlog") {
+        return RendererKind::Table;
+    }
+    if same_id(id, "models.capacity") {
+        return RendererKind::Meter;
+    }
+    if same_id(id, "models.by_role") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "models.latency") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "models.queue") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "models.performance") {
+        return RendererKind::Table;
+    }
+    if same_id(id, "models.fallback") {
+        return RendererKind::Table;
+    }
+    if same_id(id, "models.amplification") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "models.failures") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "tools.usage") {
+        return RendererKind::Ranked;
+    }
+    if same_id(id, "tools.attribution") {
+        return RendererKind::Ranked;
+    }
+    if same_id(id, "tools.outcomes") {
+        return RendererKind::Time;
+    }
+    if same_id(id, "tools.reliability") {
+        return RendererKind::Table;
+    }
+    if same_id(id, "tools.search_health") {
+        return RendererKind::Table;
+    }
+    if same_id(id, "tools.evidence") {
+        return RendererKind::Meter;
+    }
+    if same_id(id, "tools.failure_causes") {
+        return RendererKind::Ranked;
+    }
+    RendererKind::Table
+}
+const fn widget_unit(id: &str) -> &'static str {
+    if same_id(id, "intel.volume") {
+        return "articles";
+    }
+    if same_id(id, "intel.confidence") {
+        return "confidence (0–1)";
+    }
+    if same_id(id, "intel.origins") {
+        return "articles";
+    }
+    if same_id(id, "intel.enrichment") {
+        return "articles / coverage";
+    }
+    if same_id(id, "intel.reports") {
+        return "reports / ms";
+    }
+    if same_id(id, "intel.publishers") {
+        return "articles";
+    }
+    if same_id(id, "intel.freshness") {
+        return "articles / delay";
+    }
+    if same_id(id, "recon.outcomes") {
+        return "terminal runs";
+    }
+    if same_id(id, "recon.stages") {
+        return "ms";
+    }
+    if same_id(id, "recon.recall") {
+        return "queries / memories";
+    }
+    if same_id(id, "recon.workload") {
+        return "runs / ms";
+    }
+    if same_id(id, "recon.diversity") {
+        return "scopes";
+    }
+    if same_id(id, "recon.directives") {
+        return "assessments";
+    }
+    if same_id(id, "recon.unresolved") {
+        return "directives";
+    }
+    if same_id(id, "atlas.cycles") {
+        return "terminal cycles";
+    }
+    if same_id(id, "atlas.hot_zones") {
+        return "articles / temperature";
+    }
+    if same_id(id, "atlas.temperature") {
+        return "temperature change";
+    }
+    if same_id(id, "atlas.cycle_time") {
+        return "ms";
+    }
+    if same_id(id, "atlas.discovery") {
+        return "candidate occurrences";
+    }
+    if same_id(id, "atlas.backlog") {
+        return "Live units";
+    }
+    if same_id(id, "models.capacity") {
+        return "Live requests / minute";
+    }
+    if same_id(id, "models.by_role") {
+        return "wire sends";
+    }
+    if same_id(id, "models.latency") {
+        return "ms";
+    }
+    if same_id(id, "models.queue") {
+        return "ms";
+    }
+    if same_id(id, "models.performance") {
+        return "attempts / operations";
+    }
+    if same_id(id, "models.fallback") {
+        return "operations / ms";
+    }
+    if same_id(id, "models.amplification") {
+        return "sends / terminal operation";
+    }
+    if same_id(id, "models.failures") {
+        return "failed wire attempts";
+    }
+    if same_id(id, "tools.usage") {
+        return "invocations";
+    }
+    if same_id(id, "tools.attribution") {
+        return "invocations";
+    }
+    if same_id(id, "tools.outcomes") {
+        return "invocations";
+    }
+    if same_id(id, "tools.reliability") {
+        return "invocations / requests / ms";
+    }
+    if same_id(id, "tools.search_health") {
+        return "fetches / results";
+    }
+    if same_id(id, "tools.evidence") {
+        return "invocations / evidence";
+    }
+    if same_id(id, "tools.failure_causes") {
+        return "failed invocations";
+    }
+    "values"
+}
+const fn series_keys(id: &str) -> &'static [&'static str] {
+    if same_id(id, "intel.volume") {
+        return &["total"];
+    }
+    if same_id(id, "intel.confidence") {
+        return &[];
+    }
+    if same_id(id, "intel.origins") {
+        return &[];
+    }
+    if same_id(id, "intel.enrichment") {
+        return &[];
+    }
+    if same_id(id, "intel.reports") {
+        return &[];
+    }
+    if same_id(id, "intel.publishers") {
+        return &[];
+    }
+    if same_id(id, "intel.freshness") {
+        return &[];
+    }
+    if same_id(id, "recon.outcomes") {
+        return &[
+            "completed_with_evidence",
+            "completed_zero_evidence",
+            "partial",
+            "failed",
+            "cancelled",
+        ];
+    }
+    if same_id(id, "recon.stages") {
+        return &[];
+    }
+    if same_id(id, "recon.recall") {
+        return &[];
+    }
+    if same_id(id, "recon.workload") {
+        return &[];
+    }
+    if same_id(id, "recon.diversity") {
+        return &[];
+    }
+    if same_id(id, "recon.directives") {
+        return &[];
+    }
+    if same_id(id, "recon.unresolved") {
+        return &[];
+    }
+    if same_id(id, "atlas.cycles") {
+        return &["completed", "partial", "failed", "cancelled"];
+    }
+    if same_id(id, "atlas.hot_zones") {
+        return &[];
+    }
+    if same_id(id, "atlas.temperature") {
+        return &[];
+    }
+    if same_id(id, "atlas.cycle_time") {
+        return &[];
+    }
+    if same_id(id, "atlas.discovery") {
+        return &[
+            "retained_new",
+            "retained_existing",
+            "duplicate",
+            "rejected",
+            "pending",
+        ];
+    }
+    if same_id(id, "atlas.backlog") {
+        return &[];
+    }
+    if same_id(id, "models.capacity") {
+        return &[];
+    }
+    if same_id(id, "models.by_role") {
+        return &["role"];
+    }
+    if same_id(id, "models.latency") {
+        return &[];
+    }
+    if same_id(id, "models.queue") {
+        return &[];
+    }
+    if same_id(id, "models.performance") {
+        return &[];
+    }
+    if same_id(id, "models.fallback") {
+        return &[];
+    }
+    if same_id(id, "models.amplification") {
+        return &[];
+    }
+    if same_id(id, "models.failures") {
+        return &["failure_category"];
+    }
+    if same_id(id, "tools.usage") {
+        return &[];
+    }
+    if same_id(id, "tools.attribution") {
+        return &[];
+    }
+    if same_id(id, "tools.outcomes") {
+        return &[
+            "completed_nonempty",
+            "verified_zero",
+            "partial",
+            "failed",
+            "blocked",
+        ];
+    }
+    if same_id(id, "tools.reliability") {
+        return &[];
+    }
+    if same_id(id, "tools.search_health") {
+        return &[];
+    }
+    if same_id(id, "tools.evidence") {
+        return &[];
+    }
+    if same_id(id, "tools.failure_causes") {
+        return &[];
+    }
+    &[]
+}
+const fn applicable_filters(id: &str) -> &'static [&'static str] {
+    if same_id(id, "models.capacity") || same_id(id, "atlas.backlog") {
+        return &[];
+    }
+    &["app", "provider", "role", "mode", "tool", "category"]
+}
+
+const fn detail_columns(id: &str) -> &'static [&'static str] {
+    if same_id(id, "intel.volume") {
+        return &["bucket", "total", "by_tag", "untagged"];
+    }
+    if same_id(id, "intel.confidence") {
+        return &[
+            "bands",
+            "paired_n",
+            "mean_initial",
+            "mean_current",
+            "median_initial",
+            "median_current",
+            "coverage_note",
+        ];
+    }
+    if same_id(id, "intel.origins") {
+        return &["origin", "articles", "share", "is_other", "is_unknown"];
+    }
+    if same_id(id, "intel.enrichment") {
+        return &[
+            "tag",
+            "articles",
+            "body_pct",
+            "claims_pct",
+            "report_pct",
+            "mean_initial_confidence",
+            "initial_n",
+            "mean_brief_rating",
+            "brief_n",
+        ];
+    }
+    if same_id(id, "intel.reports") {
+        return &[
+            "mode",
+            "completed",
+            "partial",
+            "failed",
+            "waiting",
+            "blocked",
+            "mean_wall_ms",
+            "p95_wall_ms",
+            "mean_active_ms",
+            "n",
+        ];
+    }
+    if same_id(id, "intel.publishers") {
+        return &[
+            "domain",
+            "articles",
+            "share",
+            "is_other",
+            "is_unknown",
+            "top3_concentration",
+        ];
+    }
+    if same_id(id, "intel.freshness") {
+        return &["buckets", "missing", "future"];
+    }
+    if same_id(id, "recon.outcomes") {
+        return &[
+            "bucket",
+            "mode",
+            "completed_with_evidence",
+            "completed_zero_evidence",
+            "partial",
+            "failed",
+            "cancelled",
+        ];
+    }
+    if same_id(id, "recon.stages") {
+        return &["stage", "mode", "mean_exec_ms", "mean_wait_ms", "n"];
+    }
+    if same_id(id, "recon.recall") {
+        return &[
+            "mode",
+            "queries",
+            "with_candidates",
+            "with_accepted",
+            "retention_pct",
+            "accepted_per_run",
+            "rejection_reason",
+        ];
+    }
+    if same_id(id, "recon.workload") {
+        return &[
+            "mode",
+            "runs",
+            "directives_per_run",
+            "calls_per_run",
+            "categories_per_run",
+            "accepted_memories_per_run",
+            "median_wall_ms",
+            "p95_wall_ms",
+        ];
+    }
+    if same_id(id, "recon.diversity") {
+        return &[
+            "category",
+            "eligible_scopes",
+            "scopes_with_two_attempted",
+            "scopes_with_two_successful",
+            "source_groups_per_scope",
+            "top_shortfall_reason",
+            "eligible",
+        ];
+    }
+    if same_id(id, "recon.directives") {
+        return &[
+            "mode",
+            "answered",
+            "partial",
+            "unresolved",
+            "blocked",
+            "unknown",
+            "n",
+        ];
+    }
+    if same_id(id, "recon.unresolved") {
+        return &[
+            "run_id",
+            "mode",
+            "label",
+            "reason",
+            "evidence_count",
+            "last_progress",
+            "next_action",
+        ];
+    }
+    if same_id(id, "atlas.cycles") {
+        return &["bucket", "completed", "partial", "failed", "cancelled"];
+    }
+    if same_id(id, "atlas.hot_zones") {
+        return &[
+            "origin",
+            "articles",
+            "latest_temperature",
+            "mean_temperature",
+            "latest_tier",
+            "tier1_share",
+            "tier2_share",
+            "tier3_share",
+            "snapshots",
+            "latest_at",
+        ];
+    }
+    if same_id(id, "atlas.temperature") {
+        return &[
+            "origin",
+            "previous_temperature",
+            "current_temperature",
+            "delta",
+            "latest_tier",
+            "articles",
+            "comparable",
+            "label",
+        ];
+    }
+    if same_id(id, "atlas.cycle_time") {
+        return &["bucket", "mean_ms", "p95_ms", "n", "mean_queue_ms"];
+    }
+    if same_id(id, "atlas.discovery") {
+        return &[
+            "bucket",
+            "fetched",
+            "retained_new",
+            "retained_existing",
+            "duplicate_in_cycle",
+            "rejected",
+            "pending",
+        ];
+    }
+    if same_id(id, "atlas.backlog") {
+        return &[
+            "stage",
+            "unit",
+            "queued",
+            "running",
+            "waiting",
+            "blocked",
+            "oldest_pending_ms",
+            "completed_in_period",
+            "latest_error_category",
+        ];
+    }
+    if same_id(id, "models.capacity") {
+        return &[
+            "capacity",
+            "capacity_available",
+            "by_role",
+            "latency",
+            "queue_delay",
+            "performance",
+            "fallback",
+            "amplification",
+            "failures",
+            "attempts",
+            "note",
+        ];
+    }
+    if same_id(id, "models.by_role") {
+        return &["bucket", "by_role", "total"];
+    }
+    if same_id(id, "models.latency") {
+        return &[
+            "bucket",
+            "p50_ms",
+            "p95_ms",
+            "n",
+            "p50_first_header_ms",
+            "p50_first_content_ms",
+        ];
+    }
+    if same_id(id, "models.queue") {
+        return &["bucket", "p50_ms", "p95_ms", "n"];
+    }
+    if same_id(id, "models.performance") {
+        return &[
+            "provider",
+            "model",
+            "role",
+            "sends",
+            "completed_attempts",
+            "attempt_error_pct",
+            "http_429",
+            "final_operation_failure_pct",
+            "mean_exec_ms",
+            "p95_exec_ms",
+            "n",
+            "is_model_row",
+        ];
+    }
+    if same_id(id, "models.fallback") {
+        return &[
+            "role",
+            "primary_provider",
+            "primary_model",
+            "effective_provider",
+            "effective_model",
+            "trigger_reason",
+            "triggered_operations",
+            "recovered_operations",
+            "recovery_pct",
+            "median_ttoutcome_ms",
+            "p95_ttoutcome_ms",
+            "recovered_n",
+            "failed_n",
+        ];
+    }
+    if same_id(id, "models.amplification") {
+        return &[
+            "bucket",
+            "sends",
+            "terminal_operations",
+            "ratio",
+            "in_flight_operations",
+        ];
+    }
+    if same_id(id, "models.failures") {
+        return &["bucket", "by_category", "total_failed", "pct_of_finished"];
+    }
+    if same_id(id, "tools.usage") {
+        return &[
+            "tool_id",
+            "category",
+            "invocations",
+            "remote",
+            "local",
+            "cache",
+        ];
+    }
+    if same_id(id, "tools.outcomes") {
+        return &[
+            "bucket",
+            "completed_nonempty",
+            "verified_zero",
+            "partial",
+            "failed",
+            "blocked",
+        ];
+    }
+    if same_id(id, "tools.reliability") {
+        return &[
+            "tool_id",
+            "category",
+            "invocations",
+            "wire_requests",
+            "cache_hit_pct",
+            "verified_zero_pct",
+            "error_pct",
+            "mean_ms",
+            "p95_ms",
+            "dominant_trigger",
+            "dominant_mode",
+        ];
+    }
+    if same_id(id, "tools.search_health") {
+        return &[
+            "engine",
+            "fetches",
+            "valid_serps",
+            "verified_zero",
+            "challenge",
+            "parser_mismatch",
+            "transport_failure",
+            "usable_per_fetch",
+            "cache_hits",
+            "last_success",
+            "parser_version",
+        ];
+    }
+    if same_id(id, "tools.evidence") {
+        return &[
+            "tool_id",
+            "category",
+            "successful_nonempty",
+            "with_evidence",
+            "acceptance_pct",
+            "distinct_evidence",
+            "cited_by_completed_reports",
+            "coverage_n",
+            "nonadditive",
+        ];
+    }
+    if same_id(id, "tools.failure_causes") {
+        return &["cause", "invocations", "share", "rank"];
+    }
+    &[]
 }
 
 macro_rules! widget {
@@ -109,6 +813,11 @@ macro_rules! widget {
             section: $section,
             title: $title,
             priority: $priority,
+            renderer: renderer_kind($id),
+            unit: widget_unit($id),
+            series_keys: series_keys($id),
+            applicable_filters: applicable_filters($id),
+            detail_columns: detail_columns($id),
         }
     };
 }
@@ -262,11 +971,20 @@ mod registry_tests {
 #[derive(Clone, Debug)]
 pub struct ProfileView {
     pub tab: SystemTab,
+    pub all_apps: bool,
+    pub report: Option<&'static str>,
+    pub grid_scroll: ScrollPane,
+    pub report_scroll: ScrollPane,
+    pub system_scroll: [ScrollPane; 2],
+    pub selected_bucket: HashMap<&'static str, usize>,
+    pub period_popup: bool,
+    pub picker_selection: usize,
+    pub generation: u64,
+    pub loading: bool,
+    pub snapshot_filters: Option<StatFilters>,
     pub section: Section,
     /// Focused widget index inside the focused section.
     pub focus: usize,
-    /// Rendered rows for the focused widget (`see more` grows it).
-    pub pages: HashMap<&'static str, usize>,
     pub filters: StatFilters,
     pub snapshot: Option<ProfileSnapshot>,
     pub error: Option<String>,
@@ -284,9 +1002,19 @@ impl Default for ProfileView {
     fn default() -> Self {
         Self {
             tab: SystemTab::Overview,
+            all_apps: true,
+            report: None,
+            grid_scroll: ScrollPane::default(),
+            report_scroll: ScrollPane::default(),
+            system_scroll: [ScrollPane::default(), ScrollPane::default()],
+            selected_bucket: HashMap::new(),
+            period_popup: false,
+            picker_selection: 0,
+            generation: 0,
+            loading: false,
+            snapshot_filters: None,
             section: Section::Intel,
             focus: 0,
-            pages: HashMap::new(),
             filters: StatFilters::default(),
             snapshot: None,
             error: None,
@@ -309,7 +1037,20 @@ impl ProfileView {
     }
 
     pub fn focused_widgets(&self) -> Vec<&'static WidgetSpec> {
-        self.section.widgets()
+        if self.all_apps {
+            [
+                "intel.volume",
+                "recon.outcomes",
+                "atlas.cycles",
+                "models.by_role",
+                "tools.outcomes",
+            ]
+            .iter()
+            .filter_map(|id| WIDGETS.iter().find(|w| w.id == *id))
+            .collect()
+        } else {
+            self.section.widgets()
+        }
     }
 
     pub fn focused_widget(&self) -> Option<&'static WidgetSpec> {
@@ -319,21 +1060,74 @@ impl ProfileView {
             .copied()
     }
 
-    /// Page size for one widget; `see more` raises it.
-    pub fn page(&self, id: &'static str) -> usize {
-        self.pages.get(id).copied().unwrap_or(6)
+    pub fn accept_snapshot(&mut self, snapshot: ProfileSnapshot) {
+        for (id, index) in &mut self.selected_bucket {
+            if let Some(widget) = WIDGETS.iter().find(|widget| widget.id == *id) {
+                let stamps = |snapshot: &ProfileSnapshot| {
+                    let buckets = count_buckets(widget, snapshot);
+                    if buckets.is_empty() {
+                        series_points(widget, snapshot)
+                            .into_iter()
+                            .map(|point| point.start)
+                            .collect::<Vec<_>>()
+                    } else {
+                        buckets.into_iter().map(|bucket| bucket.start).collect()
+                    }
+                };
+                if let Some(previous) = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|old| stamps(old).get(*index).cloned())
+                {
+                    let next = stamps(&snapshot);
+                    *index = next
+                        .iter()
+                        .position(|stamp| stamp == &previous)
+                        .unwrap_or_else(|| (*index).min(next.len().saturating_sub(1)));
+                }
+            }
+        }
+        self.snapshot_filters = Some(snapshot.filters.clone());
+        self.snapshot = Some(snapshot);
+        self.error = None;
     }
 
-    pub fn see_more(&mut self, id: &'static str) {
-        let next = (self.page(id) + 8).min(64);
-        self.pages.insert(id, next);
+    pub fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.loaded_at = None;
+    }
+
+    pub fn picker_choices(&self) -> Vec<String> {
+        if self.period_popup {
+            return profile_stats::Period::ALL
+                .iter()
+                .map(|p| p.label().to_owned())
+                .collect();
+        }
+        let mut choices = vec![String::new()];
+        if let Some(dimension) = self.filter_popup {
+            if let Some((_, values)) = self.options.iter().find(|(name, _)| name == dimension) {
+                choices.extend(
+                    values
+                        .iter()
+                        .filter(|value| {
+                            value
+                                .to_lowercase()
+                                .contains(&self.filter_edit.to_lowercase())
+                        })
+                        .cloned(),
+                );
+            }
+        }
+        choices
     }
 
     /// Reads one snapshot. Read-only: the writer is never locked.
+    #[cfg(test)]
     pub fn reload(&mut self, store: &Store) {
         match store.profile_snapshot(&self.filters.period, &self.filters) {
             Ok(snapshot) => {
-                self.snapshot = Some(snapshot);
+                self.accept_snapshot(snapshot);
                 self.error = None;
                 self.loaded_at = Some(Instant::now());
             }
@@ -358,6 +1152,8 @@ impl ProfileView {
     pub fn next_section(&mut self) {
         let all = Section::all();
         let next = (self.section_index() + 1) % all.len();
+        self.all_apps = false;
+        self.grid_scroll.offset = 0;
         self.section = all[next];
         self.focus = 0;
     }
@@ -365,6 +1161,8 @@ impl ProfileView {
     pub fn prev_section(&mut self) {
         let all = Section::all();
         let prev = (self.section_index() + all.len() - 1) % all.len();
+        self.all_apps = false;
+        self.grid_scroll.offset = 0;
         self.section = all[prev];
         self.focus = 0;
     }
@@ -381,25 +1179,6 @@ impl ProfileView {
         if count > 0 {
             self.focus = (self.focus + count - 1) % count;
         }
-    }
-
-    /// Cycles a bounded dimension in the filter strip to its next value.
-    pub fn cycle_filter(&mut self, dimension: &str) {
-        let options = self
-            .options
-            .iter()
-            .find(|(name, _)| name == dimension)
-            .map(|(_, values)| values.clone())
-            .unwrap_or_default();
-        let current = self.filter_value(dimension);
-        let mut choices = vec![String::new()];
-        choices.extend(options);
-        let next = choices
-            .iter()
-            .position(|value| value == &current)
-            .map(|index| (index + 1) % choices.len())
-            .unwrap_or(0);
-        self.set_filter(dimension, &choices[next]);
     }
 
     pub fn filter_value(&self, dimension: &str) -> String {
@@ -426,8 +1205,7 @@ impl ProfileView {
             _ => return,
         }
         // A changed filter invalidates the snapshot and the see-more pages.
-        self.pages.clear();
-        self.loaded_at = None;
+        self.invalidate();
     }
 }
 
@@ -437,23 +1215,36 @@ impl ProfileView {
 
 /// Draws the Profile module: the tab strip, then the active tab's body.
 pub fn draw_profile(frame: &mut Frame, app: &App, area: Rect) {
-    let tab_area = strip(area, 0, 1);
-    let body = strip(area, 1, area.height.saturating_sub(3));
-    draw_tab_strip(frame, app, tab_area);
+    let layout = AnalyticsLayout::new(area);
+    draw_tab_strip(frame, app, layout.tabs);
     match app.profile.tab {
-        SystemTab::Overview => draw_overview(frame, app, body),
-        SystemTab::System => draw_system_tab(frame, app, body),
+        SystemTab::Overview => {
+            draw_filter_strip(frame, app, layout.controls);
+            draw_section_navigator(frame, app, layout.apps);
+            draw_section_body(frame, app, layout.content);
+        }
+        SystemTab::System => {
+            draw_system_tab(frame, app, strip(area, 1, area.height.saturating_sub(2)))
+        }
     }
-    draw_status_strip(frame, app, strip(area, area.height.saturating_sub(1), 1));
+    draw_status_strip(frame, app, layout.status);
+    if app.profile.filter_popup.is_some() || app.profile.period_popup {
+        draw_picker(frame, app, area);
+    }
 }
 
 /// The System tab: Host and Paths, the panes this module always had. Logs stays
 /// its own module with its own clear action and retention label; the two tabs
 /// split the System pane, they do not take Logs over.
+fn system_lines(app: &App, pane: usize, width: u16) -> Vec<Line<'static>> {
+    let lines = if pane == 0 {
+        super::ui::system_host_lines(&app.hardware)
+    } else {
+        super::ui::system_path_lines()
+    };
+    components::measured_lines(lines.into_iter().map(Line::raw).collect(), width)
+}
 fn draw_system_tab(frame: &mut Frame, app: &App, area: Rect) {
-    if area.height < 3 {
-        return;
-    }
     let (content, actions) = super::ui::system_areas(area);
     super::ui::draw_button(
         frame,
@@ -462,23 +1253,44 @@ fn draw_system_tab(frame: &mut Frame, app: &App, area: Rect) {
         "Refresh hardware",
         super::ui::system_button(actions),
     );
-    let host = super::ui::system_host_lines(&app.hardware);
-    let host_h = (host.len() as u16 + 2).min(content.height);
-    let rows = rows(content, &[host_h, 0]);
-    frame.render_widget(
-        Paragraph::new(host.join("\n"))
-            .style(theme::text())
-            .block(super::ui::pane(" host "))
-            .wrap(Wrap { trim: true }),
-        rows[0],
-    );
-    frame.render_widget(
-        Paragraph::new(super::ui::system_path_lines().join("\n"))
-            .style(theme::text())
-            .block(super::ui::pane(" paths "))
-            .wrap(Wrap { trim: true }),
-        rows[1],
-    );
+    let panes = if content.height < 27 {
+        super::ui::pane_tabs(
+            frame,
+            app,
+            Rect::new(content.x, content.y, content.width, 1),
+            &["Host", "Paths"],
+        );
+        let selected = app.compact_pages[super::app::ModuleId::System.index()] % 2;
+        vec![(
+            selected,
+            Rect::new(
+                content.x,
+                content.y + 1,
+                content.width,
+                content.height.saturating_sub(1),
+            ),
+        )]
+    } else {
+        let host_h = (system_lines(app, 0, content.width.saturating_sub(2)).len() + 2)
+            .min(content.height as usize / 2) as u16;
+        let areas = rows(content, &[host_h, 0]);
+        vec![(0, areas[0]), (1, areas[1])]
+    };
+    for (index, area) in panes {
+        let block = theme::panel(if index == 0 { " host " } else { " paths " });
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        app.layout
+            .borrow_mut()
+            .register(Target::ProfileSystem(index), area);
+        let lines = system_lines(app, index, inner.width);
+        let mut pane = app.profile.system_scroll[index].clone();
+        pane.scroll(0, lines.len(), inner.height as usize);
+        frame.render_widget(
+            Paragraph::new(pane.visible(&lines, inner.height as usize).to_vec()),
+            inner,
+        );
+    }
 }
 
 /// One row inside a frame body.
@@ -515,188 +1327,982 @@ fn rows(area: Rect, heights: &[u16]) -> Vec<Rect> {
     out
 }
 
-fn draw_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
-    let mut spans = Vec::new();
-    for (index, tab) in SystemTab::all().iter().enumerate() {
-        let selected = app.profile.tab == *tab;
-        let style = if selected {
-            theme::selected()
-        } else {
-            theme::dim()
-        };
-        let marker = if selected { "▸" } else { " " };
-        spans.push(Span::styled(format!("{marker} {} ", tab.label()), style));
-        if index + 1 < SystemTab::all().len() {
-            spans.push(Span::styled("│ ", theme::muted()));
+fn draw_actions(frame: &mut Frame, app: &App, area: Rect, actions: &[(Target, String)]) {
+    let labels: Vec<&str> = actions.iter().map(|(_, label)| label.as_str()).collect();
+    for ((target, label), rect) in actions.iter().zip(components::action_rects(area, &labels)) {
+        if rect.width == 0 {
+            continue;
         }
+        app.layout.borrow_mut().register(*target, rect);
+        let active = match target {
+            Target::ProfileTab(index) => {
+                *index == usize::from(app.profile.tab == SystemTab::System)
+            }
+            Target::ProfileApp(index) => {
+                *index
+                    == if app.profile.all_apps {
+                        0
+                    } else {
+                        app.profile.section_index() + 1
+                    }
+            }
+            _ => false,
+        };
+        frame.render_widget(
+            Paragraph::new(label.as_str()).style(if app.focus == *target || active {
+                theme::selected()
+            } else {
+                theme::dim()
+            }),
+            rect,
+        );
     }
-    spans.push(Span::styled("   [Tab] switch  ", theme::muted()));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+fn draw_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
+    draw_actions(
+        frame,
+        app,
+        area,
+        &[
+            (
+                Target::ProfileTab(0),
+                format!(" {} ", SystemTab::all()[0].label()),
+            ),
+            (
+                Target::ProfileTab(1),
+                format!(" {} ", SystemTab::all()[1].label()),
+            ),
+            (Target::ProfileAction(3), " Configs [x] ".into()),
+        ],
+    );
 }
 
 fn draw_status_strip(frame: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
     }
-    let line = match app.profile.snapshot.as_ref() {
-        Some(snapshot) => {
-            let health = snapshot.status.collection_health.as_str();
-            let health_style = match health {
-                "ok" => theme::accent(),
-                "stale" => theme::warn(),
-                _ => theme::muted(),
-            };
-            let jobs = snapshot.status.active_jobs;
-            let queued = if snapshot.status.provider_capacity_available {
-                charts::count(snapshot.status.queued_requests as u64)
+    let line = if let Some(error) = &app.profile.error {
+        Line::from(Span::styled(format!("Stale · {error}"), theme::error()))
+    } else if app
+        .profile
+        .snapshot_filters
+        .as_ref()
+        .is_some_and(|filters| filters != &app.profile.filters)
+    {
+        Line::from(Span::styled(
+            "Stale · filters changed · awaiting refresh",
+            theme::warn(),
+        ))
+    } else if app.profile.loading {
+        Line::from(Span::styled(
+            if app.profile.snapshot.is_some() {
+                "Refreshing · showing previous snapshot"
             } else {
-                charts::unavailable().to_string()
-            };
-            Line::from(vec![
-                Span::styled(health, health_style),
-                Span::styled(" · jobs ", theme::muted()),
-                Span::styled(charts::count(jobs as u64), theme::text()),
-                Span::styled(" · queued ", theme::muted()),
-                Span::styled(queued, theme::text()),
-                Span::styled(" · widgets ", theme::muted()),
-                Span::styled(charts::count(WIDGET_COUNT as u64), theme::text()),
-                Span::styled(" · updated ", theme::muted()),
-                Span::styled(snapshot.status.last_updated.clone(), theme::dim()),
-            ])
+                "Loading statistics"
+            },
+            theme::warn(),
+        ))
+    } else {
+        match app.profile.snapshot.as_ref() {
+            Some(snapshot) => {
+                let health = snapshot.status.collection_health.as_str();
+                let health_style = match health {
+                    "ok" => theme::accent(),
+                    "stale" => theme::warn(),
+                    _ => theme::muted(),
+                };
+                let jobs = snapshot.status.active_jobs;
+                let queued = if snapshot.status.provider_capacity_available {
+                    charts::count(snapshot.status.queued_requests as u64)
+                } else {
+                    charts::unavailable().to_string()
+                };
+                Line::from(vec![
+                    Span::styled(health, health_style),
+                    Span::styled(" · jobs ", theme::muted()),
+                    Span::styled(charts::count(jobs as u64), theme::text()),
+                    Span::styled(" · queued ", theme::muted()),
+                    Span::styled(queued, theme::text()),
+                    Span::styled(" · widgets ", theme::muted()),
+                    Span::styled(charts::count(WIDGET_COUNT as u64), theme::text()),
+                    Span::styled(" · updated ", theme::muted()),
+                    Span::styled(snapshot.status.last_updated.clone(), theme::dim()),
+                ])
+            }
+            None => Line::from(Span::styled(
+                app.profile
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "collecting".to_string()),
+                theme::muted(),
+            )),
         }
-        None => Line::from(Span::styled(
-            app.profile
-                .error
-                .clone()
-                .unwrap_or_else(|| "collecting".to_string()),
-            theme::muted(),
-        )),
     };
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_overview(frame: &mut Frame, app: &App, area: Rect) {
-    if area.height < 4 || area.width < 20 {
-        frame.render_widget(
-            Paragraph::new("Profile needs a wider terminal")
-                .style(theme::muted())
-                .wrap(Wrap { trim: true }),
-            area,
-        );
-        return;
-    }
-    let split = rows(area, &[1, 1, area.height.saturating_sub(2).max(3)]);
-    let (filter_area, nav_area, body) = (split[0], split[1], split[2]);
-    draw_filter_strip(frame, app, filter_area);
-    draw_section_navigator(frame, app, nav_area);
-    draw_section_body(frame, app, body);
-}
-
 fn draw_filter_strip(frame: &mut Frame, app: &App, area: Rect) {
-    let mut spans = vec![
-        Span::styled(" period ", theme::muted()),
-        Span::styled(app.profile.filters.period.label(), theme::accent()),
-    ];
-    let mut narrow = area.width < 72;
-    let dimensions = ["app", "provider", "role", "mode"];
-    for dimension in dimensions {
-        let value = app.profile.filter_value(dimension);
-        let label = if value.trim().is_empty() {
-            "any".to_string()
-        } else {
-            value.clone()
-        };
-        spans.push(Span::styled(format!(" · {dimension} "), theme::muted()));
-        spans.push(Span::styled(label, theme::text()));
-        if !narrow && value.trim().is_empty() {
-            narrow = false;
-        }
-    }
-    if narrow {
-        // A narrow viewport offers the popup filters instead of the full strip.
-        spans.push(Span::styled(" · [f] filters", theme::muted()));
-    } else {
-        spans.push(Span::styled(" · [c] clear", theme::muted()));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-fn draw_section_navigator(frame: &mut Frame, app: &App, area: Rect) {
-    let mut spans = Vec::new();
-    for section in Section::all() {
-        let selected = app.profile.section == section;
-        let style = if selected {
-            theme::selected()
-        } else {
-            theme::dim()
-        };
-        spans.push(Span::styled(format!(" {} ", section.label()), style));
-        spans.push(Span::styled(" ", theme::muted()));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-fn draw_section_body(frame: &mut Frame, app: &App, area: Rect) {
-    let widgets = app.profile.focused_widgets();
-    // Lazily rendered: only the focused widget's section is laid out, and the
-    // unfocused widgets collapse to a one-line summary.
-    let constraints: Vec<Constraint> = widgets
+    let active: Vec<String> = ["app", "provider", "role", "mode", "tool", "category"]
         .iter()
-        .map(|widget| {
-            let focused = app.profile.focused_widget().map(|f| f.id) == Some(widget.id);
-            if focused {
-                Constraint::Min(6)
-            } else {
-                Constraint::Length(1)
-            }
+        .filter_map(|name| {
+            let value = app.profile.filter_value(name);
+            (!value.is_empty()).then(|| format!("{name}={value}"))
         })
         .collect();
-    let rows = ratatui::layout::Layout::default()
-        .constraints(constraints)
-        .split(area);
-    for (index, widget) in widgets.iter().enumerate() {
-        let row = rows[index];
-        if row.height == 0 {
-            continue;
-        }
-        let focused = app.profile.focused_widget().map(|f| f.id) == Some(widget.id);
-        if focused {
-            draw_widget_panel(frame, app, widget, row);
+    let compact = area.width < 55;
+    let labels = if compact {
+        vec![
+            (
+                Target::ProfileAction(0),
+                format!(" [p]{} ", app.profile.filters.period.label()),
+            ),
+            (Target::ProfileAction(1), format!(" [f]{} ", active.len())),
+            (Target::ProfileAction(2), " [c] ".into()),
+            (Target::ProfileAction(4), " [r] ".into()),
+        ]
+    } else {
+        vec![
+            (
+                Target::ProfileAction(0),
+                format!(" [p] {} ", app.profile.filters.period.label()),
+            ),
+            (
+                Target::ProfileAction(1),
+                format!(
+                    " [f] filters{} ",
+                    if active.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", active.len())
+                    }
+                ),
+            ),
+            (Target::ProfileAction(2), " [c] clear ".into()),
+            (Target::ProfileAction(4), " [r] ".into()),
+        ]
+    };
+    let used = labels
+        .iter()
+        .map(|(_, label)| components::text_width(label))
+        .sum::<usize>() as u16;
+    draw_actions(frame, app, area, &labels);
+    if !active.is_empty() {
+        let x = area.x.saturating_add(used).min(area.right());
+        frame.render_widget(
+            Paragraph::new(active.join(" · ")).style(theme::accent()),
+            Rect::new(x, area.y, area.right() - x, area.height),
+        );
+    }
+}
+fn draw_section_navigator(frame: &mut Frame, app: &App, area: Rect) {
+    // On compact screens expose a measured current-app selector; activation cycles all six choices.
+    if area.width < 66 {
+        let label = if app.profile.all_apps {
+            "All apps"
         } else {
-            let marker = if index == app.profile.focus {
-                "▸"
+            app.profile.section.label()
+        };
+        draw_actions(
+            frame,
+            app,
+            area,
+            &[(Target::ProfileApp(6), format!(" {label} [0–5, [, ]] "))],
+        );
+    } else {
+        let mut actions = vec![(Target::ProfileApp(0), " All apps ".into())];
+        actions.extend(
+            Section::all()
+                .iter()
+                .enumerate()
+                .map(|(i, section)| (Target::ProfileApp(i + 1), format!(" {} ", section.label()))),
+        );
+        draw_actions(frame, app, area, &actions);
+    }
+}
+fn content_layout(app: &App) -> AnalyticsLayout {
+    AnalyticsLayout::new(super::ui::body_rect(app))
+}
+fn grid_offset(app: &App, layout: &AnalyticsLayout) -> usize {
+    let mut pane = app.profile.grid_scroll.clone();
+    pane.reveal(
+        layout.focus_start(app.profile.focus),
+        if layout.compact {
+            1
+        } else {
+            layout.card_height
+        },
+        layout.content.height as usize,
+    );
+    pane.offset
+}
+fn draw_section_body(frame: &mut Frame, app: &App, area: Rect) {
+    let widgets = app.profile.focused_widgets();
+    if let Some(id) = app.profile.report {
+        if let Some(widget) = WIDGETS.iter().find(|w| w.id == id) {
+            draw_report(frame, app, widget, area);
+        }
+        return;
+    }
+    let layout = content_layout(app);
+    let offset = grid_offset(app, &layout);
+    for (index, widget) in widgets.iter().enumerate() {
+        if let Some(rect) = layout.card(index, offset) {
+            app.layout
+                .borrow_mut()
+                .register(Target::ProfileCard(index), rect);
+            if layout.compact {
+                frame.render_widget(
+                    Paragraph::new(format!(
+                        "{} {} · {}",
+                        if index == app.profile.focus {
+                            "▸"
+                        } else {
+                            " "
+                        },
+                        widget.section.label(),
+                        widget.title
+                    ))
+                    .style(if index == app.profile.focus {
+                        theme::accent()
+                    } else {
+                        theme::text()
+                    }),
+                    rect,
+                );
             } else {
-                " "
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(format!("{marker} "), theme::muted()),
-                    Span::styled(widget.title.to_string(), theme::dim()),
-                ])),
-                row,
-            );
+                draw_widget_panel(frame, app, widget, rect);
+            }
         }
     }
 }
-
+fn widget_data(widget: &WidgetSpec, snapshot: &ProfileSnapshot) -> serde_json::Value {
+    match widget.id {
+        "intel.volume" => serde_json::to_value(&snapshot.intel.volume).unwrap_or_default(),
+        "intel.confidence" => serde_json::to_value(&snapshot.intel.confidence).unwrap_or_default(),
+        "intel.origins" => serde_json::to_value(&snapshot.intel.origins).unwrap_or_default(),
+        "intel.enrichment" => serde_json::to_value(&snapshot.intel.enrichment).unwrap_or_default(),
+        "intel.reports" => serde_json::to_value(&snapshot.intel.reports).unwrap_or_default(),
+        "intel.publishers" => serde_json::to_value(&snapshot.intel.publishers).unwrap_or_default(),
+        "intel.freshness" => serde_json::to_value(&snapshot.intel.freshness).unwrap_or_default(),
+        "recon.outcomes" => serde_json::to_value(&snapshot.recon.outcomes).unwrap_or_default(),
+        "recon.stages" => serde_json::to_value(&snapshot.recon.stages).unwrap_or_default(),
+        "recon.recall" => serde_json::to_value(&snapshot.recon.recall).unwrap_or_default(),
+        "recon.workload" => serde_json::to_value(&snapshot.recon.workload).unwrap_or_default(),
+        "recon.diversity" => serde_json::to_value(&snapshot.recon.diversity).unwrap_or_default(),
+        "recon.directives" => serde_json::to_value(&snapshot.recon.directives).unwrap_or_default(),
+        "recon.unresolved" => serde_json::to_value(&snapshot.recon.unresolved).unwrap_or_default(),
+        "atlas.cycles" => serde_json::to_value(&snapshot.atlas.cycle_outcomes).unwrap_or_default(),
+        "atlas.hot_zones" => serde_json::to_value(&snapshot.atlas.origins).unwrap_or_default(),
+        "atlas.temperature" => {
+            serde_json::to_value(&snapshot.atlas.temperature_changes).unwrap_or_default()
+        }
+        "atlas.cycle_time" => serde_json::to_value(&snapshot.atlas.cycle_times).unwrap_or_default(),
+        "atlas.discovery" => serde_json::to_value(&snapshot.atlas.discovery).unwrap_or_default(),
+        "atlas.backlog" => serde_json::to_value(&snapshot.atlas.backlog).unwrap_or_default(),
+        "models.capacity" => serde_json::to_value(&snapshot.models.capacity).unwrap_or_default(),
+        "models.by_role" => serde_json::to_value(&snapshot.models.by_role).unwrap_or_default(),
+        "models.latency" => serde_json::to_value(&snapshot.models.latency).unwrap_or_default(),
+        "models.queue" => serde_json::to_value(&snapshot.models.queue_delay).unwrap_or_default(),
+        "models.performance" => {
+            serde_json::to_value(&snapshot.models.performance).unwrap_or_default()
+        }
+        "models.fallback" => serde_json::to_value(&snapshot.models.fallback).unwrap_or_default(),
+        "models.amplification" => {
+            serde_json::to_value(&snapshot.models.amplification).unwrap_or_default()
+        }
+        "models.failures" => serde_json::to_value(&snapshot.models.failures).unwrap_or_default(),
+        "tools.usage" => serde_json::to_value(&snapshot.tools.top_tools).unwrap_or_default(),
+        "tools.attribution" => {
+            serde_json::to_value(&snapshot.tools.categories_by_trigger).unwrap_or_default()
+        }
+        "tools.outcomes" => serde_json::to_value(&snapshot.tools.outcomes).unwrap_or_default(),
+        "tools.reliability" => {
+            serde_json::to_value(&snapshot.tools.reliability).unwrap_or_default()
+        }
+        "tools.search_health" => {
+            serde_json::to_value(&snapshot.tools.engine_health).unwrap_or_default()
+        }
+        "tools.evidence" => serde_json::to_value(&snapshot.tools.evidence).unwrap_or_default(),
+        "tools.failure_causes" => {
+            serde_json::to_value(&snapshot.tools.failure_causes).unwrap_or_default()
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+fn count_buckets(widget: &WidgetSpec, snapshot: &ProfileSnapshot) -> Vec<charts::TimeBucket> {
+    let data = widget_data(widget, snapshot);
+    let Some(rows) = data.as_array() else {
+        return Vec::new();
+    };
+    let _stable_keys = widget.series_keys;
+    let keys: &[&str] = match widget.id {
+        "intel.volume" => &["total"],
+        "recon.outcomes" => &[
+            "completed_with_evidence",
+            "completed_zero_evidence",
+            "partial",
+            "failed",
+            "cancelled",
+        ],
+        "atlas.cycles" => &["completed", "partial", "failed", "cancelled"],
+        "tools.outcomes" => &[
+            "completed_nonempty",
+            "verified_zero",
+            "partial",
+            "failed",
+            "blocked",
+        ],
+        "models.by_role" | "models.failures" => &[],
+        "atlas.discovery" => &[
+            "retained_new",
+            "retained_existing",
+            "duplicate_in_cycle",
+            "rejected",
+            "pending",
+        ],
+        _ => return Vec::new(),
+    };
+    let mut merged =
+        std::collections::BTreeMap::<String, std::collections::BTreeMap<String, u64>>::new();
+    for row in rows {
+        let start = row["bucket"].as_str().unwrap_or("").to_owned();
+        let series = merged.entry(start).or_default();
+        for key in keys {
+            *series.entry((*key).to_owned()).or_default() += row[*key].as_u64().unwrap_or(0);
+        }
+        if widget.id == "models.by_role" || widget.id == "models.failures" {
+            if let Some(roles) = row[if widget.id == "models.by_role" {
+                "by_role"
+            } else {
+                "by_category"
+            }]
+            .as_array()
+            {
+                for role in roles {
+                    *series
+                        .entry(role[0].as_str().unwrap_or("unknown").to_owned())
+                        .or_default() += role[1].as_u64().unwrap_or(0);
+                }
+            }
+        }
+    }
+    let captured = chrono::DateTime::parse_from_rfc3339(&snapshot.captured_at)
+        .map(|time| time.with_timezone(&chrono::Utc))
+        .ok();
+    let Some(now) = captured else {
+        return merged
+            .into_iter()
+            .map(|(start, series)| charts::TimeBucket {
+                end: bucket_end(&start, snapshot.filters.period.bucket_seconds()),
+                start: bucket_start(&start),
+                series: series.into_iter().collect(),
+                available: true,
+            })
+            .collect();
+    };
+    let period = &snapshot.filters.period;
+    let seconds = period.bucket_seconds();
+    let first = period.start(now).timestamp().div_euclid(seconds) * seconds;
+    let last = period.end(now).timestamp();
+    let observed = chrono::DateTime::parse_from_rfc3339(&snapshot.observed_since)
+        .ok()
+        .map(|time| time.timestamp());
+    let retained = chrono::DateTime::parse_from_rfc3339(&snapshot.retention.oldest_rollup)
+        .ok()
+        .or_else(|| chrono::DateTime::parse_from_rfc3339(&snapshot.retention.oldest_raw).ok())
+        .map(|time| time.timestamp());
+    let mut buckets = Vec::new();
+    let mut timestamp = first;
+    while timestamp < last {
+        let Some(time) = chrono::DateTime::from_timestamp(timestamp, 0) else {
+            break;
+        };
+        let format = if seconds < 3600 {
+            "%Y-%m-%dT%H:%M"
+        } else if seconds < 86400 {
+            "%Y-%m-%dT%H"
+        } else {
+            "%Y-%m-%d"
+        };
+        let start = time.format(format).to_string();
+        let values = merged.remove(&start);
+        let available = values
+            .as_ref()
+            .is_some_and(|series| series.values().any(|value| *value > 0))
+            || observed.is_some_and(|since| timestamp + seconds > since)
+                && retained.is_none_or(|since| timestamp + seconds > since);
+        buckets.push(charts::TimeBucket {
+            end: bucket_end(&start, seconds),
+            start: bucket_start(&start),
+            series: values
+                .map(|values| values.into_iter().collect())
+                .unwrap_or_else(|| {
+                    widget
+                        .series_keys
+                        .iter()
+                        .map(|key| ((*key).to_owned(), 0))
+                        .collect()
+                }),
+            available,
+        });
+        timestamp = timestamp.saturating_add(seconds);
+    }
+    buckets
+}
+fn series_points(widget: &WidgetSpec, snapshot: &ProfileSnapshot) -> Vec<charts::SeriesPoint> {
+    let keys: &[&str] = match widget.id {
+        "atlas.cycle_time" => &["mean_ms", "p95_ms", "mean_queue_ms"],
+        "models.latency" => &[
+            "p50_ms",
+            "p95_ms",
+            "p50_first_header_ms",
+            "p50_first_content_ms",
+        ],
+        "models.queue" => &["p50_ms", "p95_ms"],
+        "models.amplification" => &["ratio"],
+        _ => return Vec::new(),
+    };
+    let data = widget_data(widget, snapshot);
+    data.as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| charts::SeriesPoint {
+            start: bucket_start(row["bucket"].as_str().unwrap_or("")),
+            end: bucket_end(
+                row["bucket"].as_str().unwrap_or(""),
+                snapshot.filters.period.bucket_seconds(),
+            ),
+            series: keys
+                .iter()
+                .map(|key| ((*key).to_owned(), row[*key].as_f64()))
+                .collect(),
+            n: row["n"]
+                .as_u64()
+                .or_else(|| row["terminal_operations"].as_u64())
+                .unwrap_or(0),
+        })
+        .collect()
+}
+fn point_count(widget: &WidgetSpec, snapshot: &ProfileSnapshot) -> usize {
+    let buckets = count_buckets(widget, snapshot);
+    if buckets.is_empty() {
+        series_points(widget, snapshot).len()
+    } else {
+        buckets.len()
+    }
+}
+fn bucket_start(start: &str) -> String {
+    match start.len() {
+        10 => format!("{start}T00:00:00Z"),
+        13 => format!("{start}:00:00Z"),
+        16 => format!("{start}:00Z"),
+        _ => start.to_owned(),
+    }
+}
+fn bucket_end(start: &str, seconds: i64) -> String {
+    let padded = match start.len() {
+        10 => format!("{start}T00:00:00Z"),
+        13 => format!("{start}:00:00Z"),
+        16 => format!("{start}:00Z"),
+        _ => start.to_owned(),
+    };
+    chrono::DateTime::parse_from_rfc3339(&padded)
+        .map(|time| (time + chrono::Duration::seconds(seconds)).to_rfc3339())
+        .unwrap_or_else(|_| start.to_owned())
+}
+fn analytics_lines(
+    app: &App,
+    widget: &WidgetSpec,
+    width: u16,
+    height: usize,
+    report: bool,
+) -> Vec<Line<'static>> {
+    let Some(snapshot) = &app.profile.snapshot else {
+        return vec![Line::raw(if app.profile.error.is_some() {
+            "Unavailable: snapshot read failed"
+        } else {
+            "Loading statistics"
+        })];
+    };
+    let buckets = if widget.renderer == RendererKind::Time {
+        count_buckets(widget, snapshot)
+    } else {
+        Vec::new()
+    };
+    let selected = app
+        .profile
+        .selected_bucket
+        .get(widget.id)
+        .copied()
+        .unwrap_or(buckets.len().saturating_sub(1))
+        .min(buckets.len().saturating_sub(1));
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "{} · {} buckets · {}",
+            snapshot.filters.period.label(),
+            snapshot.filters.period.bucket_label(),
+            widget.unit
+        ),
+        theme::dim(),
+    ))];
+    if report {
+        lines.extend(components::measured_lines(
+            vec![Line::raw(format!(
+                "Observed since {} · retained raw {} days / rollups {} days",
+                if snapshot.observed_since.is_empty() {
+                    "unavailable"
+                } else {
+                    &snapshot.observed_since
+                },
+                snapshot.retention.raw_days,
+                snapshot.retention.rollup_days
+            ))],
+            width,
+        ));
+    }
+    if !buckets.is_empty() {
+        let total: u64 = buckets.iter().map(charts::TimeBucket::total).sum();
+        let headline = if buckets.iter().all(|bucket| !bucket.available) {
+            "Unavailable history".into()
+        } else if total == 0 {
+            format!("Empty window · 0 {}", widget.unit)
+        } else {
+            format!("{} {}", charts::count(total), widget.title)
+        };
+        lines.push(Line::from(Span::styled(headline, theme::accent())));
+        // Exact selected values take precedence over decorative plot labels.
+        let bucket = &buckets[selected];
+        lines.extend(components::measured_lines(
+            vec![
+                Line::raw(format!(
+                    "Selected {} → {} · N={}{}",
+                    bucket.start,
+                    bucket.end,
+                    bucket.total(),
+                    if bucket.available {
+                        ""
+                    } else {
+                        " · unavailable history"
+                    }
+                )),
+                Line::from(
+                    bucket
+                        .series
+                        .iter()
+                        .map(|(key, value)| {
+                            Span::styled(
+                                format!("{key}={}  ", charts::count(*value)),
+                                charts::series_style(key),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            ],
+            width,
+        ));
+        let available = height.saturating_sub(lines.len() + 2);
+        let plot = charts::time_plot(&buckets, width as usize, available.min(10), selected);
+        lines.extend(components::measured_lines(plot, width));
+        if widget.id == "intel.volume" {
+            lines.extend(components::measured_lines(
+                vec![Line::raw(
+                    "Distinct articles; tags overlap and are shown separately in the report",
+                )],
+                width,
+            ));
+        }
+    } else if !report && width < 70 {
+        lines.extend(components::detail_table(
+            &widget_data(widget, snapshot),
+            widget.detail_columns,
+            width,
+        ));
+    } else if !report {
+        lines.extend(components::measured_lines(
+            widget_lines(widget, snapshot, width as usize, 6),
+            width,
+        ));
+    }
+    if report {
+        lines.push(Line::raw(format!(
+            "Details · {}",
+            widget.detail_columns.join(" / ")
+        )));
+        lines.extend(components::detail_table(
+            &widget_data(widget, snapshot),
+            widget.detail_columns,
+            width,
+        ));
+    }
+    if widget.applicable_filters.is_empty() {
+        lines.insert(0, Line::raw("Live · historical filters do not apply"));
+    }
+    if lines.len() <= 2 {
+        lines.push(Line::raw("Empty window / unavailable history"));
+    }
+    lines
+}
 fn draw_widget_panel(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
-    let block = theme::panel(&format!(" {} ", widget.title));
+    let focused = app
+        .profile
+        .focused_widget()
+        .is_some_and(|w| w.id == widget.id);
+    let inner = components::analytics_card(
+        frame,
+        area,
+        &format!(" {} · {} ", widget.section.label(), widget.title),
+        focused,
+    );
+    let lines = analytics_lines(app, widget, inner.width, inner.height as usize, false);
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .take(inner.height as usize)
+                .collect::<Vec<_>>(),
+        ),
+        inner,
+    );
+}
+fn report_layout(app: &App, widget: &WidgetSpec, inner: Rect) -> ReportLayout {
+    let mut layout = ReportLayout::new(inner, selected_lines(app, widget, inner.width).len());
+    if widget.renderer == RendererKind::Table {
+        layout.details.y = layout.plot.y.min(layout.details.y);
+        layout.details.x = inner.x;
+        layout.details.width = inner.width;
+        layout.details.height = layout.position.y.saturating_sub(layout.details.y);
+        layout.plot = Rect::default();
+    }
+    layout
+}
+fn categorical_plot(
+    widget: &WidgetSpec,
+    snapshot: &ProfileSnapshot,
+    width: u16,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let (label, value) = match widget.id {
+        "intel.origins" | "atlas.hot_zones" => ("origin", "articles"),
+        "intel.publishers" => ("domain", "articles"),
+        "tools.usage" => ("tool_id", "invocations"),
+        "tools.attribution" => ("category", "total"),
+        "tools.failure_causes" => ("cause", "invocations"),
+        _ => {
+            return components::measured_lines(
+                widget_lines(widget, snapshot, width as usize, height.max(1)),
+                width,
+            )
+            .into_iter()
+            .take(height)
+            .collect();
+        }
+    };
+    let data = widget_data(widget, snapshot);
+    let Some(rows) = data.as_array() else {
+        return Vec::new();
+    };
+    let peak = rows
+        .iter()
+        .filter_map(|row| row[value].as_u64())
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    for row in rows.iter().take(height / 2) {
+        let count = row[value].as_u64().unwrap_or(0);
+        lines.push(Line::raw(format!(
+            "{} · {value}={count}",
+            components::clip_text(
+                row[label].as_str().unwrap_or("unknown"),
+                usize::from(width).saturating_sub(value.len() + count.to_string().len() + 5)
+            ),
+        )));
+        lines.push(charts::rank_bar(count, peak, width as usize));
+    }
+    lines
+}
+fn report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
+    let Some(snapshot) = &app.profile.snapshot else {
+        return vec![Line::raw("Loading statistics")];
+    };
+    let mut lines =
+        components::detail_table(&widget_data(widget, snapshot), widget.detail_columns, width);
+    if lines.is_empty() {
+        lines.push(Line::raw("Empty window · no recorded rows"));
+    }
+    if widget.id == "models.capacity" && !snapshot.models.capacity_available {
+        lines.insert(
+            0,
+            Line::raw("Unavailable · provider companion has not published capacity"),
+        );
+    }
+    let note = match widget.section {
+        Section::Intel => &snapshot.intel.note,
+        Section::Recon => &snapshot.recon.note,
+        Section::Atlas => &snapshot.atlas.note,
+        Section::Models => &snapshot.models.note,
+        Section::Tools => &snapshot.tools.note,
+    };
+    lines.extend(components::measured_lines(
+        vec![
+            Line::raw(note.clone()),
+            Line::raw(format!(
+                "Observed since {} · raw {} days / rollups {} days",
+                if snapshot.observed_since.is_empty() {
+                    "unavailable"
+                } else {
+                    &snapshot.observed_since
+                },
+                snapshot.retention.raw_days,
+                snapshot.retention.rollup_days
+            )),
+        ],
+        width,
+    ));
+    lines
+}
+fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
+    let Some(snapshot) = &app.profile.snapshot else {
+        return vec![Line::raw("Loading statistics")];
+    };
+    let buckets = count_buckets(widget, snapshot);
+    let selected = app
+        .profile
+        .selected_bucket
+        .get(widget.id)
+        .copied()
+        .unwrap_or(buckets.len().saturating_sub(1))
+        .min(buckets.len().saturating_sub(1));
+    let mut lines = vec![Line::raw(format!(
+        "{} · {} buckets · {}",
+        snapshot.filters.period.label(),
+        snapshot.filters.period.bucket_label(),
+        widget.unit
+    ))];
+    if let Some(bucket) = buckets.get(selected) {
+        lines.push(Line::raw(format!(
+            "{} → {} · N={}{}",
+            bucket.start,
+            bucket.end,
+            bucket.total(),
+            if bucket.available {
+                ""
+            } else {
+                " · unavailable history"
+            }
+        )));
+        lines.push(Line::from(
+            bucket
+                .series
+                .iter()
+                .map(|(key, value)| {
+                    Span::styled(
+                        format!("{key}={}  ", charts::count(*value)),
+                        charts::series_style(key),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ));
+    }
+    if widget.id == "intel.volume" {
+        if let Some(bucket) = buckets.get(selected) {
+            if let Some(row) = snapshot
+                .intel
+                .volume
+                .iter()
+                .find(|row| bucket_start(&row.bucket) == bucket.start)
+            {
+                lines.push(Line::raw(format!(
+                    "Tags (overlap): {} · untagged={}",
+                    row.by_tag
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    row.untagged
+                )));
+            }
+        }
+    }
+    if buckets.is_empty() {
+        let points = series_points(widget, snapshot);
+        let selected = app
+            .profile
+            .selected_bucket
+            .get(widget.id)
+            .copied()
+            .unwrap_or(points.len().saturating_sub(1))
+            .min(points.len().saturating_sub(1));
+        if let Some(point) = points.get(selected) {
+            lines.push(Line::raw(format!(
+                "{} → {} · N={}{}",
+                point.start,
+                point.end,
+                point.n,
+                small_sample(point.n)
+                    .map(|_| " (small sample; p95 suppressed)")
+                    .unwrap_or("")
+            )));
+            lines.push(Line::from(
+                point
+                    .series
+                    .iter()
+                    .map(|(key, value)| {
+                        Span::styled(
+                            format!(
+                                "{key}={}  ",
+                                value
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| "N/A".into())
+                            ),
+                            charts::series_style(key),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+        }
+    }
+    components::measured_lines(lines, width)
+}
+fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
+    let block = theme::panel(&format!(" {} · Esc grid · ←/→ bucket ", widget.title));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-    let lines = match app.profile.snapshot.as_ref() {
-        Some(snapshot) => {
-            let page = app.profile.page(widget.id);
-            widget_lines(widget, snapshot, inner.width as usize, page)
+    let selected = selected_lines(app, widget, inner.width);
+    let layout = report_layout(app, widget, inner);
+    frame.render_widget(Paragraph::new(selected), layout.selected);
+    app.layout
+        .borrow_mut()
+        .register(Target::ProfileReport, layout.details);
+    if let Some(snapshot) = &app.profile.snapshot {
+        let buckets = count_buckets(widget, snapshot);
+        let points = series_points(widget, snapshot);
+        let selected = app
+            .profile
+            .selected_bucket
+            .get(widget.id)
+            .copied()
+            .unwrap_or(point_count(widget, snapshot).saturating_sub(1));
+        let lines = if widget.renderer != RendererKind::Time {
+            categorical_plot(
+                widget,
+                snapshot,
+                layout.plot.width,
+                layout.plot.height as usize,
+            )
+        } else if buckets.is_empty() {
+            charts::series_plot(
+                &points,
+                layout.plot.width as usize,
+                layout.plot.height as usize,
+                selected,
+            )
+        } else {
+            charts::time_plot(
+                &buckets,
+                layout.plot.width as usize,
+                layout.plot.height as usize,
+                selected,
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(components::measured_lines(lines, layout.plot.width)),
+            layout.plot,
+        );
+        if !points.is_empty() && layout.plot.width >= 14 && layout.plot.height >= 5 {
+            let capacity = ((layout.plot.width as usize - 7) / 3).max(1);
+            let start = selected.min(points.len() - 1) / capacity * capacity;
+            for index in start..(start + capacity).min(points.len()) {
+                app.layout.borrow_mut().register(
+                    Target::ProfileBucket(index),
+                    Rect::new(
+                        layout.plot.x + 7 + (index - start) as u16 * 3,
+                        layout.plot.y,
+                        2,
+                        layout.plot.height,
+                    ),
+                );
+            }
         }
-        None => match app.profile.error.as_ref() {
-            Some(err) => vec![Line::from(Span::styled(err.clone(), theme::error()))],
-            None => vec![Line::from(Span::styled("collecting", theme::muted()))],
-        },
-    };
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+        if !buckets.is_empty() && layout.plot.width >= 14 && layout.plot.height >= 4 {
+            let capacity = (usize::from(layout.plot.width) - 7) / 3;
+            let group = buckets.len().div_ceil(capacity.max(1)).max(1);
+            for (i, _) in buckets.chunks(group).enumerate() {
+                app.layout.borrow_mut().register(
+                    Target::ProfileBucket(i * group),
+                    Rect::new(
+                        layout.plot.x + 7 + i as u16 * 3,
+                        layout.plot.y,
+                        2,
+                        layout.plot.height,
+                    ),
+                );
+            }
+        }
+    }
+    let lines = report_detail_lines(app, widget, layout.details.width);
+    let mut pane = app.profile.report_scroll.clone();
+    pane.scroll(0, lines.len(), layout.details.height as usize);
+    frame.render_widget(
+        Paragraph::new(
+            pane.visible(&lines, layout.details.height as usize)
+                .to_vec(),
+        ),
+        layout.details,
+    );
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Rows {}–{} / {} · PgUp/PgDn · wheel",
+            pane.offset + 1,
+            (pane.offset + layout.details.height as usize).min(lines.len()),
+            lines.len()
+        ))
+        .style(theme::dim()),
+        layout.position,
+    );
+}
+fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
+    use ratatui::widgets::Clear;
+    let popup = Rect::new(
+        area.x + 2,
+        area.y + 2,
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(4),
+    );
+    app.layout.borrow_mut().push_scope(popup);
+    frame.render_widget(Clear, popup);
+    let dimension = app.profile.filter_popup.unwrap_or("period");
+    let block = theme::panel(&format!(" {dimension} · Tab dimension · Esc close "));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(format!("Search: {}", app.profile.filter_edit)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let choices = app.profile.picker_choices();
+    let room = inner.height.saturating_sub(2) as usize;
+    let start = app
+        .profile
+        .picker_selection
+        .saturating_sub(room.saturating_sub(1));
+    for (i, label) in choices.iter().enumerate().skip(start).take(room) {
+        let rect = Rect::new(inner.x, inner.y + 1 + (i - start) as u16, inner.width, 1);
+        app.layout
+            .borrow_mut()
+            .register(Target::ProfileChoice(i), rect);
+        frame.render_widget(
+            Paragraph::new(if label.is_empty() {
+                "any"
+            } else {
+                label.as_str()
+            })
+            .style(if i == app.profile.picker_selection {
+                theme::selected()
+            } else {
+                theme::text()
+            }),
+            rect,
+        );
+    }
 }
 
 /// The line list for one widget. Every widget renders through this single
@@ -707,7 +2313,6 @@ fn widget_lines(
     width: usize,
     page: usize,
 ) -> Vec<Line<'static>> {
-    let width = charts::bounded(width, 20, 240);
     let page = page.max(3);
     match widget.id {
         // ---- Intel ----
@@ -767,100 +2372,316 @@ use super::app::Target;
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// Profile keys when no overlay is open. Returns true when the key was consumed.
-pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
-    let in_field = matches!(app.focus, Target::Field(_));
-    match key.code {
-        // Tab switches the Overview/System tabs, but only for a bare Tab: the
-        // module-cycling Ctrl+Tab and the field-traversal Tab keep their meaning.
-        KeyCode::Tab if key.modifiers.is_empty() && !in_field => {
-            app.profile.tab = match app.profile.tab {
-                SystemTab::Overview => SystemTab::System,
-                SystemTab::System => SystemTab::Overview,
-            };
-            true
+pub fn activate(app: &mut App, target: Target) {
+    match target {
+        Target::ProfileTab(index) => {
+            app.profile.tab = if index == 0 {
+                SystemTab::Overview
+            } else {
+                SystemTab::System
+            }
         }
-        KeyCode::Char('1'..='5') if app.profile.tab == SystemTab::Overview && !in_field => {
-            let index = match key.code {
-                KeyCode::Char('1') => 0,
-                KeyCode::Char('2') => 1,
-                KeyCode::Char('3') => 2,
-                KeyCode::Char('4') => 3,
-                _ => 4,
+        Target::ProfileApp(index) => {
+            let index = if index == 6 {
+                if app.profile.all_apps {
+                    1
+                } else {
+                    (app.profile.section_index() + 2) % 6
+                }
+            } else {
+                index
             };
-            app.profile.section = Section::all()[index];
+            app.profile.all_apps = index == 0;
+            if index > 0 {
+                app.profile.section = Section::all()[(index - 1).min(4)];
+            }
             app.profile.focus = 0;
-            true
+            app.profile.grid_scroll.offset = 0;
+            app.profile.report = None;
         }
-        KeyCode::Char('[') if app.profile.tab == SystemTab::Overview && !in_field => {
-            app.profile.prev_section();
-            true
-        }
-        KeyCode::Char(']') if app.profile.tab == SystemTab::Overview && !in_field => {
-            app.profile.next_section();
-            true
-        }
-        KeyCode::Char('j') | KeyCode::Down
-            if app.profile.tab == SystemTab::Overview && !in_field =>
-        {
-            app.profile.next_widget();
-            true
-        }
-        KeyCode::Char('k') | KeyCode::Up if app.profile.tab == SystemTab::Overview && !in_field => {
-            app.profile.prev_widget();
-            true
-        }
-        // `see more` grows the focused widget's page.
-        KeyCode::Char('m') if app.profile.tab == SystemTab::Overview && !in_field => {
+        Target::ProfileCard(index) => {
+            app.profile.focus = index;
             if let Some(widget) = app.profile.focused_widget() {
-                let id = widget.id;
-                app.profile.see_more(id);
+                app.profile.report = Some(widget.id);
+                app.profile.report_scroll.offset = 0;
             }
-            true
         }
-        KeyCode::Char('r') if !in_field => {
-            app.hardware = argos_osint_core::hardware::profile_cached(true);
-            app.profile.loaded_at = None;
-            app.status = "Hardware refreshed".into();
-            true
+        Target::ProfileAction(0) => {
+            app.profile.period_popup = true;
+            app.profile.picker_selection = 0;
         }
-        KeyCode::Char('c') if !in_field => {
+        Target::ProfileAction(1) => {
+            app.profile.filter_popup = Some("app");
+            app.profile.filter_edit.clear();
+            app.profile.picker_selection = 0;
+        }
+        Target::ProfileAction(2) => {
             app.profile.filters.clear();
-            app.profile.loaded_at = None;
-            true
+            app.profile.invalidate();
         }
-        KeyCode::Char('f') if !in_field => {
-            // A narrow viewport offers the popup filters instead of the strip.
-            let dimensions = ["app", "provider", "role", "mode", "tool", "category"];
-            let section = app.profile.section_index().min(5);
-            let current = app.profile.filter_popup;
-            let next = match current {
-                None => Some(dimensions[section]),
-                Some(value) if value == dimensions[section] => None,
-                Some(_) => Some("app"),
-            };
-            app.profile.filter_popup = next;
-            if let Some(dimension) = next {
-                app.profile.filter_edit = app.profile.filter_value(dimension);
-            }
-            true
-        }
-        // The filter popup cycles its dimension to the next observed value, so a
-        // narrow viewport still reaches every bounded filter.
-        KeyCode::Char('n') if app.profile.filter_popup.is_some() && !in_field => {
-            if let Some(dimension) = app.profile.filter_popup {
-                app.profile.cycle_filter(dimension);
-                app.profile.filter_edit = app.profile.filter_value(dimension);
-                app.profile.loaded_at = None;
-            }
-            true
-        }
-        KeyCode::Char('x') if !in_field => {
+        Target::ProfileAction(3) => {
             app.profile_config.open();
             app.profile.config_open = true;
             app.overlay = super::app::Overlay::Configs;
-            // The open tab owns its field from the first frame, so typing never
-            // leaks into the module shortcuts underneath.
             app.set_focus(Target::Field(super::app::FieldId::ProfileExportPath));
+        }
+        Target::ProfileAction(4) => app.profile.loaded_at = None,
+        Target::ProfileBucket(index) => {
+            if let Some(id) = app.profile.report {
+                app.profile.selected_bucket.insert(id, index);
+            }
+        }
+        Target::ProfileChoice(index) => {
+            if app.profile.period_popup {
+                app.profile.filters.period = profile_stats::Period::ALL[index.min(3)].clone();
+                app.profile.invalidate();
+            } else if let Some(dimension) = app.profile.filter_popup {
+                if let Some(value) = app.profile.picker_choices().get(index).cloned() {
+                    app.profile.set_filter(dimension, &value);
+                }
+            }
+            app.profile.period_popup = false;
+            app.profile.filter_popup = None;
+            app.set_focus(Target::ProfileAction(1));
+        }
+        _ => {}
+    }
+}
+pub fn scroll(app: &mut App, delta: isize) {
+    let layout = content_layout(app);
+    if app.profile.tab == SystemTab::System {
+        let index = match app.focus {
+            Target::ProfileSystem(index) => index,
+            _ => app.compact_pages[super::app::ModuleId::System.index()] % 2,
+        };
+        let lines = system_lines(app, index, layout.content.width.saturating_sub(2));
+        app.profile.system_scroll[index].scroll(
+            delta,
+            lines.len(),
+            layout.content.height.saturating_sub(3) as usize,
+        );
+        return;
+    }
+    if let Some(id) = app.profile.report {
+        if let Some(widget) = WIDGETS.iter().find(|w| w.id == id) {
+            let inner = Rect::new(
+                layout.content.x + 1,
+                layout.content.y + 1,
+                layout.content.width.saturating_sub(2),
+                layout.content.height.saturating_sub(2),
+            );
+            let report = report_layout(app, widget, inner);
+            let lines = report_detail_lines(app, widget, report.details.width);
+            app.profile
+                .report_scroll
+                .scroll(delta, lines.len(), report.details.height as usize);
+        }
+    } else {
+        let offset = grid_offset(app, &layout);
+        app.profile.grid_scroll.offset = offset;
+        app.profile.grid_scroll.scroll(
+            delta,
+            layout.extent(app.profile.focused_widgets().len()),
+            layout.content.height as usize,
+        );
+        let stride = if layout.compact {
+            1
+        } else {
+            layout.card_height + 1
+        };
+        app.profile.focus = (app.profile.grid_scroll.offset.div_ceil(stride) * layout.columns)
+            .min(app.profile.focused_widgets().len().saturating_sub(1));
+    }
+}
+pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    if key
+        .modifiers
+        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+    {
+        return false;
+    }
+    if app.profile.filter_popup.is_some() || app.profile.period_popup {
+        match key.code {
+            KeyCode::Esc => {
+                app.profile.filter_popup = None;
+                app.profile.period_popup = false;
+                app.set_focus(Target::ProfileAction(1));
+            }
+            KeyCode::Tab | KeyCode::BackTab if !app.profile.period_popup => {
+                let dimensions = ["app", "provider", "role", "mode", "tool", "category"];
+                let index = dimensions
+                    .iter()
+                    .position(|d| Some(*d) == app.profile.filter_popup)
+                    .unwrap_or(0);
+                app.profile.filter_popup =
+                    Some(dimensions[(index + if key.code == KeyCode::Tab { 1 } else { 5 }) % 6]);
+                app.profile.filter_edit.clear();
+                app.profile.picker_selection = 0;
+            }
+            KeyCode::Down => {
+                app.profile.picker_selection = (app.profile.picker_selection + 1)
+                    .min(app.profile.picker_choices().len().saturating_sub(1))
+            }
+            KeyCode::Up => {
+                app.profile.picker_selection = app.profile.picker_selection.saturating_sub(1)
+            }
+            KeyCode::Enter => activate(app, Target::ProfileChoice(app.profile.picker_selection)),
+            KeyCode::Char(ch) if !app.profile.period_popup => {
+                app.profile.filter_edit.push(ch);
+                app.profile.picker_selection = 0;
+            }
+            KeyCode::Backspace => {
+                app.profile.filter_edit.pop();
+                app.profile.picker_selection = 0;
+            }
+            _ => {}
+        }
+        return true;
+    }
+    if matches!(app.focus, Target::Field(_)) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('t') => {
+            activate(
+                app,
+                Target::ProfileTab(usize::from(app.profile.tab == SystemTab::Overview)),
+            );
+            true
+        }
+        KeyCode::Char('x') => {
+            activate(app, Target::ProfileAction(3));
+            true
+        }
+        KeyCode::Char('r') => {
+            if app.profile.tab == SystemTab::System {
+                app.hardware = argos_osint_core::hardware::profile_cached(true);
+            } else {
+                activate(app, Target::ProfileAction(4));
+            }
+            true
+        }
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Up | KeyCode::Down
+            if app.profile.tab == SystemTab::System =>
+        {
+            scroll(
+                app,
+                match key.code {
+                    KeyCode::PageUp => -10,
+                    KeyCode::PageDown => 10,
+                    KeyCode::Up => -1,
+                    _ => 1,
+                },
+            );
+            true
+        }
+        _ if app.profile.tab == SystemTab::System => false,
+        KeyCode::Char('0'..='5') => {
+            if let KeyCode::Char(ch) = key.code {
+                activate(app, Target::ProfileApp(ch as usize - '0' as usize));
+            }
+            true
+        }
+        KeyCode::Char('[') => {
+            app.profile.prev_section();
+            true
+        }
+        KeyCode::Char(']') => {
+            app.profile.next_section();
+            true
+        }
+        KeyCode::Char('p') => {
+            activate(app, Target::ProfileAction(0));
+            true
+        }
+        KeyCode::Char('f') => {
+            activate(app, Target::ProfileAction(1));
+            true
+        }
+        KeyCode::Char('c') => {
+            activate(app, Target::ProfileAction(2));
+            true
+        }
+        KeyCode::Esc if app.profile.report.is_some() => {
+            app.profile.report = None;
+            app.set_focus(Target::ProfileCard(app.profile.focus));
+            true
+        }
+        KeyCode::Left | KeyCode::Right if app.profile.report.is_some() => {
+            let id = app.profile.report.unwrap();
+            let count = app
+                .profile
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    WIDGETS
+                        .iter()
+                        .find(|w| w.id == id)
+                        .map(|w| point_count(w, snapshot))
+                })
+                .unwrap_or(0);
+            let selected = app
+                .profile
+                .selected_bucket
+                .entry(id)
+                .or_insert(count.saturating_sub(1));
+            *selected = if key.code == KeyCode::Left {
+                selected.saturating_sub(1)
+            } else {
+                selected.saturating_add(1).min(count.saturating_sub(1))
+            };
+            true
+        }
+        KeyCode::PageUp | KeyCode::PageDown => {
+            scroll(
+                app,
+                if key.code == KeyCode::PageUp {
+                    -(content_layout(app).content.height as isize)
+                } else {
+                    content_layout(app).content.height as isize
+                },
+            );
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.profile.report.is_some() {
+                scroll(app, 1);
+            } else {
+                app.profile.next_widget();
+                app.set_focus(Target::ProfileCard(app.profile.focus));
+            }
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.profile.report.is_some() {
+                scroll(app, -1);
+            } else {
+                app.profile.prev_widget();
+                app.set_focus(Target::ProfileCard(app.profile.focus));
+            }
+            true
+        }
+        KeyCode::Left | KeyCode::Right => {
+            if key.code == KeyCode::Left {
+                app.profile.prev_widget();
+            } else {
+                app.profile.next_widget();
+            }
+            app.set_focus(Target::ProfileCard(app.profile.focus));
+            true
+        }
+        KeyCode::Enter => match app.focus {
+            Target::ProfileTab(_)
+            | Target::ProfileApp(_)
+            | Target::ProfileAction(_)
+            | Target::ProfileCard(_) => {
+                activate(app, app.focus);
+                true
+            }
+            _ => false,
+        },
+        KeyCode::Char('m') => {
+            activate(app, Target::ProfileCard(app.profile.focus));
             true
         }
         _ => false,
@@ -902,17 +2723,10 @@ fn volume_lines(
     let mut out = Vec::new();
     // The trend strip is the same shared renderer the other charts use.
     let totals: Vec<u64> = volume.iter().map(|b| b.total as u64).collect();
-    let width = charts::bounded(width.saturating_sub(4), 8, 48);
+    let width = width.saturating_sub(4);
     out.extend(charts::trend_columns(&totals, width, 4));
     for bucket in shown {
-        let mut series: Vec<(String, u64)> = bucket
-            .by_tag
-            .iter()
-            .map(|(tag, count)| (tag.clone(), *count as u64))
-            .collect();
-        if bucket.untagged > 0 {
-            series.push(("untagged".to_string(), bucket.untagged as u64));
-        }
+        let series = vec![("total".to_owned(), bucket.total as u64)];
         out.push(charts::stacked_bar(
             &bucket.bucket,
             10,
@@ -944,25 +2758,30 @@ fn confidence_lines(
         "band          initial  current".to_string(),
         theme::dim(),
     ))];
+    let max = distribution
+        .bands
+        .iter()
+        .map(|band| band.initial.max(band.current) as u64)
+        .max()
+        .unwrap_or(0);
     for band in &distribution.bands {
-        let initial = charts::rank_bar(band.initial as u64, 16, width.saturating_sub(34));
-        let current = charts::rank_bar(band.current as u64, 16, width.saturating_sub(34));
-        let mut row = vec![Span::styled(format!("{:<12}", band.label), theme::text())];
-        row.extend(initial.spans);
-        row.extend(current.spans);
-        out.push(Line::from(row));
+        for (key, value) in [("initial", band.initial), ("current", band.current)] {
+            let label = format!("{} {key}={value}", band.label);
+            out.push(Line::raw(label));
+            let mut bar = charts::rank_bar(value as u64, max, width);
+            for span in &mut bar.spans {
+                span.style = charts::series_style(key);
+            }
+            out.push(bar);
+        }
     }
-    let mean = |value: Option<f64>| match value {
-        Some(v) => format!("{v:.2}"),
-        None => charts::unavailable().to_string(),
-    };
     out.push(Line::from(vec![
         Span::styled("mean  ", theme::dim()),
         Span::styled(
             format!(
                 "{}  {}",
-                mean(distribution.mean_initial),
-                mean(distribution.mean_current)
+                charts::percent(distribution.mean_initial),
+                charts::percent(distribution.mean_current)
             ),
             theme::text(),
         ),

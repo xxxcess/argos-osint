@@ -154,7 +154,7 @@ pub fn intel_category_short(id: &str) -> &'static str {
 
 #[derive(Clone, Debug, Default)]
 pub struct Scrolls {
-    pub chat: u16,
+    pub chat: usize,
     pub threads: u16,
     pub memories: u16,
     pub tools: u16,
@@ -558,6 +558,8 @@ pub enum ButtonId {
     IntelReconStart,
     IntelBodyRetry,
     IntelBodyRefresh,
+    IntelVisit,
+    JumpLatest,
     IntelJobOpen,
     IntelJobPause,
     IntelJobResume,
@@ -617,14 +619,19 @@ pub enum Target {
     ProfilePanelBucket(usize, usize),
     ProfilePanelRow(usize, usize),
     ProfileReport,
+    ProfileTable(usize),
+    ProfileTableRow(usize, usize),
     ProfileRow(usize),
     ProfileSystem(usize),
+    ConfigAction(usize),
     App(usize),
     Home,
     ProviderTab(ProviderPage),
     Memory(usize),
     Thread(usize),
     Tool(usize),
+    ToolCategory(&'static str),
+    OsintResponse,
     Field(FieldId),
     Button(ButtonId),
     Transcript,
@@ -675,6 +682,7 @@ pub enum Target {
     BrainRecall,
     /// The Intel briefing extracted left stack (scroll focus).
     IntelLeftColumn,
+    IntelPreview,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
@@ -853,6 +861,10 @@ pub struct App {
     pub recon_search: String,
     pub intel_search: String,
     pub osint_search: String,
+    pub tool_expanded: HashSet<&'static str>,
+    pub response_scroll: usize,
+    pub intel_preview_scroll: usize,
+    pub tool_dataset_status: String,
     pub osint_input: String,
     pub firecrawl_key: String,
     pub firecrawl_fallback: String,
@@ -983,6 +995,8 @@ pub struct App {
     pub choice_sel: usize,
     pub choice_note: String,
     pub palette_query: String,
+    pub palette_recent: Vec<String>,
+    pub palette_restore: Option<Target>,
     pub palette_sel: usize,
     pub google_key: String,
     pub google_endpoint: String,
@@ -1046,6 +1060,7 @@ pub struct App {
     pub intel_day: String,
     pub intel_days: Vec<String>,
     pub intel_articles: Vec<AtlasArticleRow>,
+    pub article_images: crate::tui::article_image::ArticleImages,
     pub intel_sel: usize,
     pub intel_claims: Vec<AtlasArticleClaim>,
     pub intel_relations: Vec<(String, String, String)>,
@@ -1130,7 +1145,17 @@ fn atlas_log_level(text: &str) -> &'static str {
     }
 }
 
+fn valid_browser_url(value: &str) -> bool {
+    url::Url::parse(value)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+}
+
 fn open_external_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url)?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+        "Article URL must use HTTP or HTTPS"
+    );
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open").arg(url).spawn()?;
@@ -1143,8 +1168,8 @@ fn open_external_url(url: &str) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
             .spawn()?;
         return Ok(());
     }
@@ -1205,7 +1230,7 @@ impl App {
         let chat_scroll = selected_thread
             .as_ref()
             .and_then(|id| store.get_thread(id).ok().flatten())
-            .map(|t| t.scroll.clamp(0, i64::from(u16::MAX)) as u16)
+            .map(|t| t.scroll.max(0) as usize)
             .unwrap_or_default();
         let calls = selected_thread
             .as_ref()
@@ -1250,6 +1275,10 @@ impl App {
             recon_search: String::new(),
             intel_search: String::new(),
             osint_search: String::new(),
+            tool_expanded: crate::tui::tool_catalog::initial_expansion(),
+            response_scroll: 0,
+            intel_preview_scroll: 0,
+            tool_dataset_status: String::new(),
             osint_input: osint::registry()
                 .first()
                 .map(|t| t.example_input().to_string())
@@ -1380,6 +1409,9 @@ impl App {
             choice_sel: 0,
             choice_note: String::new(),
             palette_query: String::new(),
+            article_images: crate::tui::article_image::ArticleImages::default(),
+            palette_recent: Vec::new(),
+            palette_restore: None,
             palette_sel: 0,
             google_key: provider::account_secret(&auth, "google")
                 .api_key
@@ -2188,7 +2220,7 @@ impl App {
     }
 
     pub fn palette_items(&self) -> Vec<PaletteItem> {
-        super::commands::matching(&self.palette_query, self.module)
+        let mut items = super::commands::matching(&self.palette_query, self.module)
             .into_iter()
             .filter(|command| command.module.is_none() || command.module == self.module)
             .map(|command| PaletteItem {
@@ -2198,6 +2230,23 @@ impl App {
                 shortcut: command.shortcut.into(),
                 category: command.category.into(),
                 enabled: match command.id {
+                    "intel-visit" => self
+                        .intel_articles
+                        .get(self.intel_sel)
+                        .is_some_and(|article| valid_browser_url(&article.url)),
+                    "next-tab" | "prev-tab" | "close-tab" => !self.tab_ids.is_empty(),
+                    "reopen-tab" => !self.tab_recently_closed.is_empty(),
+                    "rename-investigation"
+                    | "evidence"
+                    | "thinking"
+                    | "details"
+                    | "trace"
+                    | "directives"
+                    | "jump-latest"
+                        if !self.recon_chat =>
+                    {
+                        false
+                    }
                     "cancel" => self
                         .selected_thread
                         .as_ref()
@@ -2222,13 +2271,40 @@ impl App {
                     _ => true,
                 },
                 disabled_reason: match command.id {
+                    "intel-visit" => "Article URL must use HTTP or HTTPS".into(),
                     "cancel" => "No running turn".into(),
                     "resume" => "No interrupted or failed run to resume".into(),
                     "evidence" => "Select a completed evidence activity".into(),
                     _ => String::new(),
                 },
             })
-            .collect()
+            .collect::<Vec<_>>();
+        for item in &mut items {
+            item.category = if self.palette_recent.contains(&item.id) {
+                "Recently used"
+            } else if super::commands::COMMANDS
+                .iter()
+                .find(|command| command.id == item.id)
+                .is_some_and(|command| command.module.is_some())
+            {
+                "Current app shortcuts"
+            } else {
+                "Universal"
+            }
+            .into();
+        }
+        items.sort_by_key(|item| match item.category.as_str() {
+            "Recently used" => (
+                0,
+                self.palette_recent
+                    .iter()
+                    .position(|id| id == &item.id)
+                    .unwrap_or(8),
+            ),
+            "Current app shortcuts" => (1, 0),
+            _ => (2, 0),
+        });
+        items
     }
 
     fn open_palette(&mut self) {
@@ -2236,6 +2312,7 @@ impl App {
             self.overlay = Overlay::None;
             return;
         }
+        self.palette_restore = Some(self.focus);
         self.overlay = Overlay::Palette;
         self.palette_query.clear();
         self.palette_sel = 0;
@@ -2304,6 +2381,12 @@ impl App {
     }
 
     fn run_palette(&mut self, id: &str) {
+        if let Some(item) = self.palette_items().iter().find(|item| item.id == id) {
+            if !item.enabled {
+                self.status = item.disabled_reason.clone();
+                return;
+            }
+        }
         self.overlay = Overlay::None;
         match id {
             "home" => self.go_home(),
@@ -2407,12 +2490,34 @@ impl App {
             "atlas-auto" => self.activate_button(ButtonId::AtlasAuto),
             "atlas-resume" => self.activate_button(ButtonId::AtlasResume),
             "atlas-repair" => self.activate_button(ButtonId::AtlasRepair),
+            "configs" => {
+                self.select(ModuleId::System.index());
+                super::profile::activate(self, Target::ProfileAction(3));
+            }
+            "intel-visit" => self.activate_button(ButtonId::IntelVisit),
+            "previous-turn" => super::ui::navigate_turn(self, false),
+            "next-turn" => super::ui::navigate_turn(self, true),
+            "jump-latest" => {
+                self.chat_follow = true;
+                super::ui::normalize(self);
+            }
             "intel-search" => self.set_focus(Target::Field(FieldId::IntelSearch)),
             "intel-recon" => self.activate_button(ButtonId::IntelReports),
             "intel-refresh" => self.activate_button(ButtonId::IntelBodyRefresh),
             "intel-retry" => self.activate_button(ButtonId::IntelBodyRetry),
             "intel-job" => self.activate_button(ButtonId::IntelJobOpen),
+            "thinking" | "details" | "trace" | "directives" => {
+                let _ = self.run_slash(&format!("/{id}"));
+            }
             _ => {}
+        }
+        if super::commands::COMMANDS
+            .iter()
+            .any(|command| command.id == id)
+        {
+            self.palette_recent.retain(|recent| recent != id);
+            self.palette_recent.insert(0, id.into());
+            self.palette_recent.truncate(8);
         }
     }
 
@@ -2558,10 +2663,6 @@ impl App {
         self.select(next);
     }
 
-    pub(crate) fn config_tab(&self) -> super::profile_config::ConfigTab {
-        self.profile_config.tab
-    }
-
     pub(crate) fn config(&self) -> &super::profile_config::ConfigView {
         &self.profile_config
     }
@@ -2572,147 +2673,156 @@ impl App {
         super::ui::draw_field(frame, self, FieldId::ProfileExportPath, "destination", area);
     }
 
-    /// Keys inside the Profile > System > Configs popup.
-    ///
-    /// Enter inserts a newline in the editor — the user commits with Ctrl+Enter,
-    /// which validates and imports only when the document is valid, so the
-    /// button is always the explicit commit.
+    /// Explicit Configs buttons keep verification separate from commit.
+    fn config_action(&mut self, action: usize) {
+        match action {
+            0 => {
+                if !self.profile_config.export_confirm {
+                    self.profile_config.check_export_path();
+                    if self.profile_config.export_confirm {
+                        self.status = "Export again to confirm overwrite".into();
+                        return;
+                    }
+                }
+                if let Err(error) = self.profile_config.run_export() {
+                    self.profile_config.export_error = Some(error.to_string());
+                }
+            }
+            1 => self.profile_config.validate(),
+            2 => match self.profile_config.run_import() {
+                Ok(generation) => {
+                    match (SettingsFile::load(), AuthFile::load()) {
+                        (Ok(settings), Ok(auth)) => {
+                            self.settings = settings;
+                            self.auth = auth;
+                            self.reload_configuration_fields();
+                        }
+                        _ => {
+                            self.status = "Configuration saved; reload failed".into();
+                            return;
+                        }
+                    }
+                    self.status = format!("Applied configuration revision {generation}");
+                }
+                Err(error) => self.profile_config.import_error = Some(error.to_string()),
+            },
+            _ => {}
+        }
+    }
+
+    fn reload_configuration_fields(&mut self) {
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "recon") {
+            self.recon_provider = provider::effective_kind(&secret);
+            self.recon_model = secret.model;
+        }
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "tool-picker") {
+            self.picker_provider = provider::effective_kind(&secret);
+            self.picker_model = secret.model;
+        }
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "synthesis") {
+            self.synthesis_provider = provider::effective_kind(&secret);
+            self.synthesis_model = secret.model;
+        }
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "classifier") {
+            self.classifier_provider = provider::effective_kind(&secret);
+            self.classifier_model = secret.model;
+        }
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "summarization") {
+            self.summarization_provider = provider::effective_kind(&secret);
+            self.summarization_model = secret.model;
+        }
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "evidence_curator") {
+            self.evidence_curator_provider = provider::effective_kind(&secret);
+            self.evidence_curator_model = secret.model;
+        }
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "entity_resolver") {
+            self.entity_resolver_provider = provider::effective_kind(&secret);
+            self.entity_resolver_model = secret.model;
+        }
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "claim_assessor") {
+            self.claim_assessor_provider = provider::effective_kind(&secret);
+            self.claim_assessor_model = secret.model;
+        }
+        if let Ok(secret) =
+            provider::role_secret(&self.auth, &self.settings, "investigation_controller")
+        {
+            self.investigation_controller_provider = provider::effective_kind(&secret);
+            self.investigation_controller_model = secret.model;
+        }
+        let secret = provider::account_secret(&self.auth, "openrouter");
+        self.router_key = secret.api_key.unwrap_or_default();
+        self.router_endpoint = secret.base_url;
+        let secret = provider::account_secret(&self.auth, "google");
+        self.google_key = secret.api_key.unwrap_or_default();
+        self.google_endpoint = secret.base_url;
+        let secret = provider::account_secret(&self.auth, "nvidia");
+        self.nvidia_key = secret.api_key.unwrap_or_default();
+        self.nvidia_endpoint = secret.base_url;
+        self.firecrawl_key = self.settings.provider_key("firecrawl");
+        self.hunter_key = self.settings.provider_key("hunter");
+        self.sociavault_key = self.settings.provider_key("sociavault");
+        self.newsapi_key = self.settings.provider_key("newsapi");
+        self.courtlistener_key = self.settings.provider_key("courtlistener");
+        self.gnews_key = self.settings.provider_key("gnews");
+        self.newsdata_key = self.settings.provider_key("newsdata");
+        self.currents_key = self.settings.provider_key("currents");
+        self.whoxy_key = self.settings.provider_key("whoxy");
+        self.catalog_cache.clear();
+        self.model_catalog.clear();
+    }
+
     fn profile_config_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.focus_next(key.code == KeyCode::BackTab);
+                return true;
+            }
+            KeyCode::Esc => {
+                self.profile_config.close();
+                self.overlay = Overlay::None;
+                self.profile.tab = super::profile::SystemTab::Overview;
+                self.set_focus(Target::ProfileTab(2));
+                return true;
+            }
+            KeyCode::Enter | KeyCode::Char(' ')
+                if matches!(self.focus, Target::ConfigAction(_)) =>
+            {
+                if let Target::ConfigAction(action) = self.focus {
+                    self.config_action(action);
+                }
+                return true;
+            }
+            _ => {}
+        }
+        if self.focus == Target::Field(FieldId::ProfileExportPath) {
+            self.profile_config.export_confirm = false;
+            return false;
+        }
+        if self.focus != Target::Field(FieldId::ProfileImportEditor) {
+            return false;
+        }
         let config = &mut self.profile_config;
         match key.code {
-            KeyCode::Esc => {
-                config.close();
-                self.profile.config_open = false;
-                self.overlay = Overlay::None;
-                true
+            KeyCode::Enter => config.newline(),
+            KeyCode::Backspace => config.backspace(),
+            KeyCode::Delete => config.delete(),
+            KeyCode::Home => config.home(),
+            KeyCode::End => config.end(),
+            KeyCode::Left => config.import.caret = config.import.caret.saturating_sub(1),
+            KeyCode::Right => {
+                config.import.caret =
+                    (config.import.caret + 1).min(config.import.text.chars().count())
             }
-            KeyCode::Tab | KeyCode::BackTab => {
-                config.next_tab();
-                // The newly open tab owns its field, so the caret moves with it.
-                let tab = config.tab;
-                self.set_focus(Target::Field(match tab {
-                    super::profile_config::ConfigTab::Export => FieldId::ProfileExportPath,
-                    super::profile_config::ConfigTab::Import => FieldId::ProfileImportEditor,
-                }));
-                true
+            KeyCode::Up => config.import.move_vertical(-1),
+            KeyCode::PageUp => config.import.scroll_by(-8, 1),
+            KeyCode::Down => config.import.move_vertical(1),
+            KeyCode::PageDown => config.import.scroll_by(8, 1),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                config.insert(&c.to_string())
             }
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if config.tab == crate::tui::profile_config::ConfigTab::Import {
-                    config.validate();
-                    if config.plan.is_some() {
-                        match config.run_import() {
-                            Ok(generation) => {
-                                self.status =
-                                    format!("Imported configuration revision {generation}");
-                            }
-                            Err(err) => {
-                                self.status = format!("Import failed: {err}");
-                            }
-                        }
-                    }
-                } else {
-                    config.check_export_path();
-                }
-                true
-            }
-            KeyCode::Enter => match config.tab {
-                crate::tui::profile_config::ConfigTab::Import => {
-                    config.newline();
-                    true
-                }
-                super::profile_config::ConfigTab::Export => {
-                    // Enter runs the export, with a second Enter confirming an
-                    // existing destination.
-                    if config.export_confirm {
-                        match config.run_export() {
-                            Ok(_) => {
-                                self.status = config
-                                    .export_status
-                                    .clone()
-                                    .unwrap_or_else(|| "Exported".into());
-                            }
-                            Err(err) => self.status = format!("Export failed: {err}"),
-                        }
-                    } else {
-                        config.check_export_path();
-                        if config.export_error.is_none() && !config.export_confirm {
-                            match config.run_export() {
-                                Ok(_) => {
-                                    self.status = config
-                                        .export_status
-                                        .clone()
-                                        .unwrap_or_else(|| "Exported".into());
-                                }
-                                Err(err) => self.status = format!("Export failed: {err}"),
-                            }
-                        } else {
-                            self.status = config
-                                .export_error
-                                .clone()
-                                .unwrap_or_else(|| "Confirm the overwrite".into());
-                        }
-                    }
-                    true
-                }
-            },
-            KeyCode::Backspace if config.tab == crate::tui::profile_config::ConfigTab::Import => {
-                config.backspace();
-                true
-            }
-            KeyCode::Delete if config.tab == crate::tui::profile_config::ConfigTab::Import => {
-                config.delete();
-                true
-            }
-            KeyCode::Home if config.tab == crate::tui::profile_config::ConfigTab::Import => {
-                config.home();
-                true
-            }
-            KeyCode::End if config.tab == crate::tui::profile_config::ConfigTab::Import => {
-                config.end();
-                true
-            }
-            KeyCode::Left if config.tab == crate::tui::profile_config::ConfigTab::Import => {
-                if config.import.caret > 0 {
-                    config.import.caret -= 1;
-                }
-                true
-            }
-            KeyCode::Right if config.tab == crate::tui::profile_config::ConfigTab::Import => {
-                if config.import.caret < config.import.text.chars().count() {
-                    config.import.caret += 1;
-                }
-                true
-            }
-            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
-                if config.tab == crate::tui::profile_config::ConfigTab::Import =>
-            {
-                let delta = match key.code {
-                    KeyCode::Up => -1,
-                    KeyCode::PageUp => -10,
-                    KeyCode::PageDown => 10,
-                    _ => 1,
-                };
-                let height = 12;
-                config.import.scroll_by(delta, height);
-                true
-            }
-            KeyCode::Char(c)
-                if config.tab == crate::tui::profile_config::ConfigTab::Import
-                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                config.insert(&c.to_string());
-                true
-            }
-            KeyCode::Char(c)
-                if config.tab == super::profile_config::ConfigTab::Export
-                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                config.export_path.push(c);
-                config.export_confirm = false;
-                true
-            }
-            _ => false,
+            _ => {}
         }
+        true
     }
 
     pub(crate) fn select(&mut self, index: usize) {
@@ -2932,6 +3042,9 @@ impl App {
             self.profile.focus = index;
             super::profile::reveal_focus(self);
         }
+        if let Target::ProfileTable(index) = target {
+            super::profile::reveal_table(self, index);
+        }
         self.cursor = match target {
             Target::Field(field) => self.field(field).chars().count(),
             _ => 0,
@@ -2994,6 +3107,9 @@ impl App {
                 .insert(old.id.into(), self.osint_input.clone());
         }
         if let Some(tool) = osint::registry().get(index) {
+            self.tool_expanded.insert(tool.category);
+            self.response_scroll = 0;
+            self.scrolls.detail = 0;
             self.tool_sel = index;
             self.osint_input = self
                 .osint_inputs
@@ -3014,7 +3130,43 @@ impl App {
                 self.osint_result = None;
             }
             self.set_focus(Target::Tool(index));
+            let rows = super::tool_catalog::rows(&self.osint_search, &self.tool_expanded);
+            if let Some(position) = rows
+                .iter()
+                .position(|(target, _)| *target == Target::Tool(index))
+            {
+                let room = super::ui::tool_room_for(self);
+                super::ui::reveal_index(&mut self.scrolls.tools, position, room);
+            }
+            self.refresh_tool_dataset_status();
         }
+    }
+
+    fn refresh_tool_dataset_status(&mut self) {
+        self.tool_dataset_status = match osint::registry().get(self.tool_sel).map(|tool| tool.id) {
+            Some("whatsmyname_lookup") => {
+                let status = osint::whatsmyname::status();
+                if status.is_available {
+                    format!(
+                        "\nDataset: {} · {} supported sites · checked {}",
+                        status.active_version.as_deref().unwrap_or("unknown"),
+                        status.supported_count,
+                        status.last_checked.as_deref().unwrap_or("unknown")
+                    )
+                } else {
+                    "\nDataset not loaded · Refresh downloads the official catalog".into()
+                }
+            }
+            Some("dork_generate") => {
+                let status = osint::dork_generator::status();
+                format!(
+                    "\nTemplate catalog: {} · checked {}",
+                    status.active_version.as_deref().unwrap_or("embedded seed"),
+                    status.last_checked.as_deref().unwrap_or("embedded seed")
+                )
+            }
+            _ => String::new(),
+        };
     }
 
     pub(crate) fn open_profile_intel_job(&mut self, id: &str) -> Result<()> {
@@ -3059,8 +3211,11 @@ impl App {
     fn open_thread_with_history(&mut self, id: &str, record: bool) -> Result<()> {
         if self.module == Some(ModuleId::Recon) {
             if let Some(previous) = &self.selected_thread {
-                self.store
-                    .save_draft(previous, &self.input, i64::from(self.scrolls.chat))?;
+                self.store.save_draft(
+                    previous,
+                    &self.input,
+                    i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
+                )?;
                 self.draft_dirty = false;
             }
         }
@@ -3073,7 +3228,7 @@ impl App {
         self.messages = self.store.list_messages(id)?;
         self.refresh_selected()?;
         self.input = thread.draft;
-        self.scrolls.chat = thread.scroll.clamp(0, i64::from(u16::MAX)) as u16;
+        self.scrolls.chat = thread.scroll.max(0) as usize;
         self.chat_follow = self.scrolls.chat == 0;
         self.chat_sel = usize::MAX;
         self.recon_stage = self
@@ -3112,8 +3267,11 @@ impl App {
         if self.selected_thread.as_deref() == Some(tid) {
             self.input.clear();
             self.cursor = 0;
-            self.store
-                .save_draft(tid, "", i64::from(self.scrolls.chat))?;
+            self.store.save_draft(
+                tid,
+                "",
+                i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
+            )?;
             self.live_answers.remove(tid);
             self.chat_follow = true;
         }
@@ -4082,6 +4240,7 @@ impl App {
             return;
         }
         let last = self.intel_articles.len() as i32 - 1;
+        self.intel_preview_scroll = 0;
         self.intel_sel = (self.intel_sel as i32 + delta).clamp(0, last) as usize;
         self.set_focus(Target::IntelArticle(self.intel_sel));
         let room = super::ui::intel_list_room(self).max(1);
@@ -4906,6 +5065,7 @@ impl App {
             }
             WorkEvent::DatasetRefreshDone { dataset, outcome } => {
                 self.dataset_refresh_running = None;
+                self.refresh_tool_dataset_status();
                 self.dataset_refresh_cancel = None;
                 match outcome {
                     Ok(msg) => {
@@ -6983,6 +7143,19 @@ impl App {
                 self.start_intel_report_from_popup();
                 return;
             }
+            ButtonId::JumpLatest => {
+                self.chat_follow = true;
+                super::ui::normalize(self);
+                return;
+            }
+            ButtonId::IntelVisit => {
+                if let Some(article) = self.intel_articles.get(self.intel_sel) {
+                    if let Err(error) = open_external_url(&article.url) {
+                        self.status = format!("Could not open {}: {error}", article.url);
+                    }
+                }
+                return;
+            }
             ButtonId::IntelBodyRetry | ButtonId::IntelBodyRefresh => {
                 self.ensure_article_body_fetch(true);
                 return;
@@ -7374,6 +7547,10 @@ impl App {
 
     pub(crate) fn activate_target(&mut self, target: Target) {
         match target {
+            Target::ConfigAction(action) => {
+                self.set_focus(target);
+                self.config_action(action);
+            }
             Target::PaneTab(index) => {
                 if let Some(module) = self.module {
                     self.compact_pages[module.index()] = index;
@@ -7389,6 +7566,8 @@ impl App {
             | Target::ProfilePanelBucket(_, _)
             | Target::ProfilePanelRow(_, _)
             | Target::ProfileReport
+            | Target::ProfileTable(_)
+            | Target::ProfileTableRow(_, _)
             | Target::ProfileRow(_)
             | Target::ProfileSystem(_) => {
                 self.set_focus(target);
@@ -7413,6 +7592,13 @@ impl App {
                         .unwrap_or_else(|e| e.to_string());
                 }
             }
+            Target::ToolCategory(category) => {
+                if !self.tool_expanded.remove(category) {
+                    self.tool_expanded.insert(category);
+                }
+                self.set_focus(Target::ToolCategory(category));
+            }
+            Target::OsintResponse => self.set_focus(target),
             Target::Tool(index) => self.select_tool(index),
             Target::Field(field) if is_picker_field(field) => {
                 self.set_focus(target);
@@ -7499,7 +7685,7 @@ impl App {
                 self.set_focus(Target::JobRow(self.jobs.sel));
             }
             Target::JobDetail => self.set_focus(Target::JobDetail),
-            Target::IntelLeftColumn => self.set_focus(Target::IntelLeftColumn),
+            Target::IntelLeftColumn | Target::IntelPreview => self.set_focus(target),
             Target::Choice(index) if self.overlay == Overlay::Palette => {
                 if let Some(id) = self
                     .palette_items()
@@ -7516,6 +7702,8 @@ impl App {
             Target::CloseOverlay => {
                 let restore = if self.overlay == Overlay::AddFallback {
                     self.fallback_popup_restore.take()
+                } else if self.overlay == Overlay::Palette {
+                    self.palette_restore.take()
                 } else {
                     None
                 };
@@ -7571,8 +7759,10 @@ impl App {
     fn edit_paste(&mut self, pasted: &str) {
         // The Configs import editor owns the keyboard while the popup is open,
         // and it is the one field that must accept a whole document.
-        if self.overlay == Overlay::Configs {
-            if self.profile_config.tab == crate::tui::profile_config::ConfigTab::Import {
+        if self.focus == Target::Field(FieldId::ProfileImportEditor) {
+            if self.profile.tab == super::profile::SystemTab::Configs
+                || self.overlay == Overlay::Configs
+            {
                 self.profile_config.insert(pasted);
             }
             return;
@@ -7823,17 +8013,13 @@ impl App {
             self.open_palette();
             return true;
         }
-        // The Configs popup owns the keyboard while it is open.
-        if self.overlay == Overlay::Configs {
-            // The open tab owns its own field, so typing never leaks into the
-            // module shortcuts underneath.
-            self.set_focus(Target::Field(match self.profile_config.tab {
-                super::profile_config::ConfigTab::Export => FieldId::ProfileExportPath,
-                crate::tui::profile_config::ConfigTab::Import => FieldId::ProfileImportEditor,
-            }));
-            if self.profile_config_key(key) {
-                return true;
-            }
+        if (self.overlay == Overlay::Configs
+            || (self.module == Some(ModuleId::System)
+                && self.profile.tab == super::profile::SystemTab::Configs
+                && self.overlay == Overlay::None))
+            && self.profile_config_key(key)
+        {
+            return true;
         }
         if self.module == Some(ModuleId::System)
             && self.overlay == Overlay::None
@@ -7915,7 +8101,7 @@ impl App {
                 {
                     self.palette_sel = self.palette_sel.saturating_sub(1);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down | KeyCode::Tab => {
                     let last = self.palette_items().len().saturating_sub(1);
                     self.palette_sel = (self.palette_sel + 1).min(last);
                 }
@@ -7929,12 +8115,24 @@ impl App {
                     }
                 }
                 KeyCode::Backspace => {
+                    let selected = self
+                        .palette_items()
+                        .get(self.palette_sel)
+                        .map(|item| item.id.clone());
                     self.palette_query.pop();
-                    self.palette_sel = 0;
+                    self.palette_sel = selected
+                        .and_then(|id| self.palette_items().iter().position(|item| item.id == id))
+                        .unwrap_or(0);
                 }
                 KeyCode::Char(c) if !c.is_control() => {
+                    let selected = self
+                        .palette_items()
+                        .get(self.palette_sel)
+                        .map(|item| item.id.clone());
                     self.palette_query.push(c);
-                    self.palette_sel = 0;
+                    self.palette_sel = selected
+                        .and_then(|id| self.palette_items().iter().position(|item| item.id == id))
+                        .unwrap_or(0);
                 }
                 _ => {}
             }
@@ -8008,6 +8206,55 @@ impl App {
                     },
                 );
             }
+            return true;
+        }
+        if !ctrl && matches!(key.code, KeyCode::Left | KeyCode::Right) {
+            if let Target::ToolCategory(category) = self.focus {
+                if key.code == KeyCode::Left {
+                    self.tool_expanded.remove(category);
+                } else {
+                    self.tool_expanded.insert(category);
+                }
+                return true;
+            }
+            if matches!(
+                self.focus,
+                Target::PaneTab(_)
+                    | Target::ProfileTab(_)
+                    | Target::ProfileApp(_)
+                    | Target::ProviderTab(_)
+                    | Target::IntelTab(_)
+            ) {
+                let order = super::ui::focus_order(self);
+                let same_row = |target: &Target| {
+                    std::mem::discriminant(target) == std::mem::discriminant(&self.focus)
+                };
+                let row: Vec<_> = match self.focus {
+                    Target::ProfileApp(_) => (0..6).map(Target::ProfileApp).collect(),
+                    Target::ProfileTab(_) => (0..3).map(Target::ProfileTab).collect(),
+                    _ => order.into_iter().filter(same_row).collect(),
+                };
+                if let Some(pos) = row.iter().position(|target| *target == self.focus) {
+                    let next = pos
+                        .saturating_add_signed(if key.code == KeyCode::Left { -1 } else { 1 })
+                        .min(row.len() - 1);
+                    self.set_focus(row[next]);
+                }
+                return true;
+            }
+        }
+        if key.code == KeyCode::Char(' ')
+            && matches!(
+                self.focus,
+                Target::ToolCategory(_)
+                    | Target::PaneTab(_)
+                    | Target::ProfileTab(_)
+                    | Target::ProfileApp(_)
+                    | Target::ProviderTab(_)
+                    | Target::IntelTab(_)
+            )
+        {
+            self.activate_target(self.focus);
             return true;
         }
         if self.on_atlas_history()
@@ -8536,7 +8783,7 @@ impl App {
                 super::ui::move_chat(self, delta);
             }
             Target::Memory(_) => self.move_memory(delta),
-            Target::Tool(_) => self.move_tool(delta),
+            Target::Tool(_) | Target::ToolCategory(_) => self.move_tool(delta),
             Target::LogLine(_) => self.move_log(delta),
             Target::JobRow(_) => self.move_job(delta),
             Target::JobDetail => {
@@ -8626,13 +8873,22 @@ impl App {
     }
 
     fn move_tool(&mut self, delta: i32) {
-        let ids = self.filtered_tool_ids();
-        if ids.is_empty() {
+        let rows = super::tool_catalog::rows(&self.osint_search, &self.tool_expanded);
+        if rows.is_empty() {
             return;
         }
-        let pos = ids.iter().position(|id| *id == self.tool_sel).unwrap_or(0) as i32;
-        let next = (pos + delta).clamp(0, ids.len() as i32 - 1) as usize;
-        self.select_tool(ids[next]);
+        let pos = rows
+            .iter()
+            .position(|(target, _)| *target == self.focus)
+            .unwrap_or(0);
+        let next = pos
+            .saturating_add_signed(delta as isize)
+            .min(rows.len() - 1);
+        let target = rows[next].0;
+        match target {
+            Target::Tool(index) => self.select_tool(index),
+            _ => self.set_focus(target),
+        }
         let room = super::ui::tool_room_for(self);
         super::ui::reveal_index(&mut self.scrolls.tools, next, room);
     }
@@ -8706,9 +8962,11 @@ impl App {
         }
         self.draft_dirty = false;
         if let Some(id) = &self.selected_thread {
-            let _ = self
-                .store
-                .save_draft(id, &self.input, i64::from(self.scrolls.chat));
+            let _ = self.store.save_draft(
+                id,
+                &self.input,
+                i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
+            );
         }
     }
 
@@ -8981,6 +9239,7 @@ pub async fn run(mut app: App) -> Result<()> {
     )?;
     let mut terminal: Terminal<ratatui::backend::CrosstermBackend<Stdout>> =
         Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
+    app.article_images.detect();
     // Durable local workers (index outbox + summary flush), each claiming only
     // its own pool. Stopped when dropped at the end of the session.
     let _workers = argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
@@ -9007,6 +9266,25 @@ pub async fn run(mut app: App) -> Result<()> {
                 app.reload_memories();
                 dirty = true;
             }
+        }
+        let image_area = super::ui::article_image_area(&app);
+        let image_article = if app.module == Some(ModuleId::Intel) && app.overlay == Overlay::None {
+            app.intel_articles
+                .get(app.intel_sel)
+                .map(|article| (article.id.as_str(), article.image_url.as_str()))
+        } else {
+            None
+        };
+        if app.article_images.update(image_article, image_area) {
+            dirty = true;
+        }
+        if app.article_images.clear_graphics {
+            use std::io::Write;
+            // Kitty delete-all is ignored by other protocols; clearing the cell
+            // buffer also erases Sixel/iTerm and half-block leftovers.
+            let _ = std::io::stdout().write_all(b"\x1b_Ga=d,d=A;\x1b\\");
+            terminal.clear()?;
+            app.article_images.clear_graphics = false;
         }
         if dirty {
             if let Ok(size) = terminal.size() {
@@ -9199,6 +9477,10 @@ mod tests {
             recon_search: String::new(),
             intel_search: String::new(),
             osint_search: String::new(),
+            tool_expanded: crate::tui::tool_catalog::initial_expansion(),
+            response_scroll: 0,
+            intel_preview_scroll: 0,
+            tool_dataset_status: String::new(),
             osint_input: osint::registry()[0].example_input().to_string(),
             osint_inputs: HashMap::new(),
             firecrawl_key: String::new(),
@@ -9293,6 +9575,9 @@ mod tests {
             choice_sel: 0,
             choice_note: String::new(),
             palette_query: String::new(),
+            article_images: crate::tui::article_image::ArticleImages::default(),
+            palette_recent: Vec::new(),
+            palette_restore: None,
             palette_sel: 0,
             google_key: String::new(),
             google_endpoint: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
@@ -10189,7 +10474,7 @@ mod tests {
         assert!(hit(&app, Target::Button(ButtonId::ResumeRun)));
         assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
         app.select(ModuleId::Osint.index());
-        app.compact_pages[ModuleId::Osint.index()] = 1;
+        app.compact_pages[ModuleId::Osint.index()] = 2;
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
             Target::Button(ButtonId::OsintRun),
@@ -13878,7 +14163,8 @@ mod tests {
 
         // Keyboard: `x` opens the Configs popup, and Tab moves its field focus.
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert_eq!(app.overlay, Overlay::Configs);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::Configs);
         let keyboard_focus = app.focus;
         assert!(
             matches!(keyboard_focus, Target::Field(FieldId::ProfileExportPath)),
@@ -13890,7 +14176,9 @@ mod tests {
         click(&mut app, Target::Field(FieldId::ProfileExportPath));
         assert_eq!(app.focus, keyboard_focus);
 
-        // Tab moves to the import editor, and its own field is clickable too.
+        // Tab visits Export before Import, in visual order.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Target::ConfigAction(0));
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(
             app.focus,
@@ -13907,10 +14195,8 @@ mod tests {
         app.select(ModuleId::System.index());
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(
-            app.profile_config.tab,
-            crate::tui::profile_config::ConfigTab::Import
-        );
+        app.set_focus(Target::Field(FieldId::ProfileImportEditor));
+        assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::Configs);
 
         let document = "{\n  \"schema_version\": 1,\n  \"providers\": [],\n}";
         app.edit_paste(document);
@@ -13934,18 +14220,22 @@ mod tests {
 
     /// The Configs popup covers about 85% of the viewport and is bounded by it.
     #[test]
-    fn profile_configs_popup_covers_most_of_the_viewport() {
+    fn profile_configs_page_uses_the_body_and_has_visible_actions() {
         let mut app = app();
         app.select(ModuleId::System.index());
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        let area = crate::tui::ui::configs_area(&app, app.screen);
-        let fraction = f64::from(area.width) / f64::from(app.screen.width.max(1));
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::Configs);
         assert!(
-            fraction > 0.7 && fraction <= 0.9,
-            "the popup covers about 85%: {fraction}"
+            text.contains("Import JSON")
+                && text.contains("Verify")
+                && text.contains("Save and apply"),
+            "{text}"
         );
-        assert!(area.width <= app.screen.width);
-        assert!(area.height <= app.screen.height);
+        assert!(hit(&app, Target::ConfigAction(0)));
+        assert!(hit(&app, Target::ConfigAction(1)));
+        assert!(!hit(&app, Target::ConfigAction(2)));
     }
 
     /// Closing the popup clears the pasted secret buffer.
@@ -14301,7 +14591,7 @@ mod tests {
                 n: 24,
             })
             .collect();
-        snapshot.tools.reliability = (0..140)
+        snapshot.tools.reliability = (0..240)
             .map(|i| ReliabilityRow {
                 tool_id: format!("tool_{i:03}"),
                 category: "web".into(),
@@ -14482,14 +14772,26 @@ mod tests {
         app.select(ModuleId::System.index());
         app.profile.accept_snapshot(analytics_fixture());
         app.profile.report = Some("tools.reliability");
+        let first = buffer_text(&render(&mut app, 160, 50));
+        assert!(first.contains("Rows 1–10 / 240"), "{first}");
+        app.profile.report = Some("models.latency");
+        let compact = buffer_text(&render(&mut app, 60, 18));
+        assert!(compact.contains("Rows 1–3 / 24"), "{compact}");
+        app.profile.report = Some("tools.reliability");
         app.set_focus(Target::ProfileReport);
         render(&mut app, 120, 40);
-        for _ in 0..60 {
-            app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        }
+        app.set_focus(Target::ProfileTable(0));
+        crate::tui::profile::scroll(&mut app, 100_000);
         let text = buffer_text(&render(&mut app, 120, 40));
-        assert!(text.contains("tool_139"), "{text}");
-        assert!(app.profile.report_scroll.offset > 64);
+        assert!(text.contains("tool_239"), "{text}");
+        assert!(app.profile.table_offsets[&("tools.reliability", 0)] > 200);
+        assert_eq!(app.profile.report_scroll.offset, 0);
+        let first_offset = app.profile.table_offsets[&("tools.reliability", 0)];
+        app.set_focus(Target::ProfileTable(1));
+        assert_eq!(
+            app.profile.table_offsets[&("tools.reliability", 0)],
+            first_offset
+        );
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
         assert_ne!(app.overlay, Overlay::None);
     }
@@ -14739,5 +15041,319 @@ mod tests {
         if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
             dump_cells(&mut app, &dir, "profile-system-80x24", 80, 24);
         }
+    }
+    #[test]
+    fn overhaul_tabs_focus_without_activating_and_configs_suspend_reads() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        render(&mut app, 160, 50);
+        app.set_focus(Target::ProfileTab(1));
+        assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::Overview);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.focus, Target::ProfileTab(2));
+        assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::Overview);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::Configs);
+        assert!(!app.profile_analytics_visible());
+        let order = crate::tui::ui::focus_order(&app);
+        assert!(!order
+            .iter()
+            .any(|target| matches!(target, Target::ProfileCard(_))));
+        assert!(order.contains(&Target::ConfigAction(1)));
+        assert!(!order.contains(&Target::ConfigAction(2)));
+    }
+
+    #[test]
+    fn overhaul_palette_recency_and_disabled_dispatch() {
+        let mut app = app();
+        app.run_palette("tools");
+        app.run_palette("home");
+        app.run_palette("tools");
+        assert_eq!(app.palette_recent, vec!["tools", "home"]);
+        assert_eq!(app.palette_items()[0].category, "Recently used");
+        app.select(ModuleId::Recon.index());
+        let before = app.palette_recent.clone();
+        app.run_palette("cancel");
+        assert_eq!(app.palette_recent, before);
+        assert!(app
+            .palette_items()
+            .iter()
+            .all(|item| item.category != "Intel"));
+    }
+
+    #[test]
+    fn overhaul_tool_category_collapse_preserves_identity_and_search_state() {
+        let mut app = app();
+        app.select(ModuleId::Osint.index());
+        let category = osint::registry()[app.tool_sel].category;
+        app.activate_target(Target::ToolCategory(category));
+        assert_eq!(app.focus, Target::ToolCategory(category));
+        let selected = app.tool_sel;
+        let expanded = app.tool_expanded.clone();
+        app.osint_search = osint::registry()[selected].id.into();
+        assert!(
+            crate::tui::tool_catalog::rows(&app.osint_search, &app.tool_expanded)
+                .iter()
+                .any(|(target, _)| *target == Target::Tool(selected))
+        );
+        app.osint_search.clear();
+        assert_eq!(app.tool_expanded, expanded);
+        assert_eq!(app.tool_sel, selected);
+    }
+
+    #[test]
+    fn overhaul_configs_control_enter_never_commits() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        crate::tui::profile::activate(&mut app, Target::ProfileAction(3));
+        app.set_focus(Target::Field(FieldId::ProfileImportEditor));
+        app.edit_paste("{\n  \"schema_version\": 999\n}");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(app.profile_config.plan.is_none());
+        assert!(app.profile_config.import_status.is_none());
+        app.config_action(1);
+        assert!(app.profile_config.import_error.is_some());
+        assert!(app.profile_config.plan.is_none());
+    }
+
+    #[test]
+    fn overhaul_browser_url_validation() {
+        assert!(valid_browser_url("https://example.com/article?q=a&b=c"));
+        for value in [
+            "",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "--help",
+            "https://",
+        ] {
+            assert!(!valid_browser_url(value));
+        }
+    }
+
+    #[test]
+    fn dump_overhaul_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 32),
+            (80, 24),
+            (60, 18),
+            (40, 20),
+        ] {
+            let mut app = app();
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("home-{width}x{height}"),
+                width,
+                height,
+            );
+            for module in ModuleId::ALL {
+                app.select(module.index());
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("app-{}-{width}x{height}", module.index()),
+                    width,
+                    height,
+                );
+            }
+            app.select(ModuleId::Osint.index());
+            for page in 0..3 {
+                app.compact_pages[ModuleId::Osint.index()] = page;
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("tools-page-{page}-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+            app.select(ModuleId::System.index());
+            crate::tui::profile::activate(&mut app, Target::ProfileAction(3));
+            app.set_focus(Target::Field(FieldId::ProfileImportEditor));
+            app.profile_config
+                .insert("{\n  \"schema_version\": 1,\n  \"providers\": []\n}");
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("configs-draft-{width}x{height}"),
+                width,
+                height,
+            );
+            app.profile_config.insert(", invalid");
+            app.profile_config.validate();
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("configs-error-{width}x{height}"),
+                width,
+                height,
+            );
+            app.open_palette();
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("palette-{width}x{height}"),
+                width,
+                height,
+            );
+            app.overlay = Overlay::Help;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("help-{width}x{height}"),
+                width,
+                height,
+            );
+            app.overlay = Overlay::Block {
+                title: "Full record".into(),
+                body: (0..200)
+                    .map(|i| format!("Record {i}: Unicode 東京 🛰 and complete data\n"))
+                    .collect(),
+            };
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("record-{width}x{height}"),
+                width,
+                height,
+            );
+            for (name, overlay) in [
+                (
+                    "memories",
+                    Overlay::Memories {
+                        message_id: "fixture-answer".into(),
+                    },
+                ),
+                ("choice", Overlay::Choice(ChoiceKind::Model)),
+                ("intel-recon", Overlay::IntelRecon),
+                ("fallback", Overlay::AddFallback),
+                (
+                    "resume",
+                    Overlay::ResumeSession(Box::new(LastViewSession {
+                        module: Some("recon".into()),
+                        intel_page: None,
+                        intel_article_id: None,
+                        intel_article_title: None,
+                        recon_thread_id: Some("fixture-thread".into()),
+                        recon_thread_title: Some("Saved investigation".into()),
+                        memory_id: None,
+                        memory_title: None,
+                        atlas_page: None,
+                        osint_tool_id: None,
+                        providers_page: None,
+                        updated_at: "2026-10-10T12:00:00Z".into(),
+                    })),
+                ),
+            ] {
+                app.overlay = overlay;
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("overlay-{name}-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+            app.overlay = Overlay::None;
+            app.module = Some(ModuleId::Recon);
+            app.recon_chat = true;
+            app.selected_thread = Some("fixture-thread".into());
+            app.messages = vec![
+                recon::Message { id: "fixture-query".into(), thread_id: "fixture-thread".into(), sequence: 1, role: "user".into(), content: "Investigate the publisher ownership. Include evidence and coverage. 東京".into(), run_id: None, created_at: String::new() },
+                recon::Message { id: "fixture-answer".into(), thread_id: "fixture-thread".into(), sequence: 2, role: "assistant".into(), content: "## Findings\n\nTwo independent records agree on ownership.\n\n- Captured evidence E1\n- Verify the remaining coverage gap\n\n### Coverage\n\nThe retained records support this conclusion.".into(), run_id: None, created_at: String::new() },
+            ];
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("recon-transcript-{width}x{height}"),
+                width,
+                height,
+            );
+            app.chat_follow = false;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("recon-history-{width}x{height}"),
+                width,
+                height,
+            );
+            app.overlay = Overlay::None;
+            app.select(ModuleId::Intel.index());
+            app.intel_articles.push(AtlasArticleRow {
+                run_id: "fixture".into(), id: "fixture-article".into(), title: "Article imagery and browser actions".into(), description: "Deterministic article preview. Image opens the article URL. Secondary stories remain reachable.".into(),
+                url: "https://example.com/article".into(), country: "US".into(), source_name: "Fixture".into(), source_domain: "example.com".into(), published_at: "2026-10-10T12:00:00Z".into(), provider: "fixture".into(), temperature: 0.5,
+                category: "world".into(), seen_at: "2026-10-10T12:00:00Z".into(), author: "Fixture author".into(), image_url: "https://example.com/image.png".into(),
+            });
+            app.intel_sel = app.intel_articles.len() - 1;
+            render(&mut app, width, height);
+            let image_area = crate::tui::ui::article_image_area(&app);
+            if image_area.width > 0 && image_area.height > 0 {
+                app.article_images.fixture(
+                    "fixture-article",
+                    "https://example.com/image.png",
+                    image_area,
+                );
+            }
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("intel-image-{width}x{height}"),
+                width,
+                height,
+            );
+            app.intel_page = IntelPage::Briefing;
+            app.compact_pages[ModuleId::Intel.index()] = 1;
+            let image_area = crate::tui::ui::article_image_area(&app);
+            if image_area.width > 0 && image_area.height > 0 {
+                app.article_images.fixture(
+                    "fixture-article",
+                    "https://example.com/image.png",
+                    image_area,
+                );
+            }
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("intel-brief-image-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+    }
+    #[test]
+    fn overhaul_transcript_scroll_exceeds_u16_and_keeps_history_anchor() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.recon_context_enabled = false;
+        app.selected_thread = Some("long-history".into());
+        app.messages = vec![recon::Message {
+            id: "answer".into(),
+            thread_id: "long-history".into(),
+            sequence: 1,
+            role: "assistant".into(),
+            content: (0..70_000).map(|i| format!("Row {i} 東京\n")).collect(),
+            run_id: None,
+            created_at: String::new(),
+        }];
+        app.chat_follow = true;
+        render(&mut app, 80, 24);
+        crate::tui::ui::normalize(&mut app);
+        assert!(app.scrolls.chat > 65_535);
+        app.chat_follow = false;
+        app.scrolls.chat = 66_000;
+        let before = app.scrolls.chat;
+        app.messages[0].content.push_str("Incoming tail\n");
+        crate::tui::ui::normalize(&mut app);
+        assert!(!app.chat_follow);
+        assert_eq!(app.scrolls.chat, before);
+        let text = buffer_text(&render(&mut app, 80, 24));
+        assert!(text.contains("Jump to latest"));
     }
 }

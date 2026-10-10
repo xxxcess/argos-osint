@@ -33,17 +33,19 @@ pub enum SystemTab {
     Overview,
     /// Host, Paths, Logs.
     System,
+    Configs,
 }
 impl SystemTab {
     pub fn label(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::System => "System",
+            Self::Configs => "Configs",
         }
     }
 
-    pub fn all() -> [Self; 2] {
-        [Self::Overview, Self::System]
+    pub fn all() -> [Self; 3] {
+        [Self::Overview, Self::System, Self::Configs]
     }
 }
 
@@ -1061,6 +1063,8 @@ pub struct ProfileView {
     pub report: Option<&'static str>,
     pub grid_scroll: ScrollPane,
     pub report_scroll: ScrollPane,
+    pub table_offsets: HashMap<(&'static str, usize), usize>,
+    pub table_rows: HashMap<(&'static str, usize), usize>,
     pub panel_scroll: HashMap<&'static str, ScrollPane>,
     pub table_view: bool,
     pub sort_descending: bool,
@@ -1092,8 +1096,6 @@ pub struct ProfileView {
     pub filter_edit: String,
     /// The bounded option lists for every dimension.
     pub options: Vec<(String, Vec<String>)>,
-    /// True while the Configs popup is open, so the module keys stand down.
-    pub config_open: bool,
 }
 
 impl Default for ProfileView {
@@ -1104,6 +1106,8 @@ impl Default for ProfileView {
             report: None,
             grid_scroll: ScrollPane::default(),
             report_scroll: ScrollPane::default(),
+            table_offsets: HashMap::new(),
+            table_rows: HashMap::new(),
             panel_scroll: HashMap::new(),
             table_view: false,
             sort_descending: false,
@@ -1132,7 +1136,6 @@ impl Default for ProfileView {
             filter_popup: None,
             filter_edit: String::new(),
             options: Vec::new(),
-            config_open: false,
         }
     }
 }
@@ -1379,8 +1382,25 @@ pub fn draw_profile(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         }
-        SystemTab::System => {
-            draw_system_tab(frame, app, strip(area, 1, area.height.saturating_sub(2)))
+        SystemTab::System => draw_system_tab(
+            frame,
+            app,
+            strip(
+                area,
+                layout.tabs.height,
+                area.height.saturating_sub(layout.tabs.height),
+            ),
+        ),
+        SystemTab::Configs => {
+            super::profile_config::draw(
+                frame,
+                app,
+                strip(
+                    area,
+                    layout.tabs.height,
+                    area.height.saturating_sub(layout.tabs.height),
+                ),
+            );
         }
     }
     if app.profile.filter_popup.is_some() || app.profile.period_popup {
@@ -1499,36 +1519,45 @@ fn rows(area: Rect, heights: &[u16]) -> Vec<Rect> {
 }
 
 fn draw_actions(frame: &mut Frame, app: &App, area: Rect, actions: &[(Target, String)]) {
-    let labels: Vec<&str> = actions.iter().map(|(_, label)| label.as_str()).collect();
-    for ((target, label), rect) in actions.iter().zip(components::action_rects(area, &labels)) {
+    let presented: Vec<_> = actions
+        .iter()
+        .map(|(target, label)| {
+            let active = match target {
+                Target::ProfileTab(index) => SystemTab::all().get(*index) == Some(&app.profile.tab),
+                Target::ProfileApp(index) => {
+                    *index
+                        == if app.profile.all_apps {
+                            0
+                        } else {
+                            app.profile.section_index() + 1
+                        }
+                }
+                _ => false,
+            };
+            let label = if active && matches!(target, Target::ProfileApp(_)) {
+                format!("● {}", label.trim())
+            } else {
+                label.trim().to_owned()
+            };
+            (*target, label, active)
+        })
+        .collect();
+    let labels: Vec<_> = presented
+        .iter()
+        .map(|(_, label, _)| label.as_str())
+        .collect();
+    let reveal = presented
+        .iter()
+        .position(|(target, _, _)| *target == app.focus)
+        .or_else(|| presented.iter().position(|(_, _, active)| *active))
+        .unwrap_or(0);
+    let rects = components::tab_rects(area, &labels, reveal);
+    for ((target, label, active), rect) in presented.iter().zip(rects) {
         if rect.width == 0 {
             continue;
         }
         app.layout.borrow_mut().register(*target, rect);
-        let active = match target {
-            Target::ProfileTab(index) => {
-                *index == usize::from(app.profile.tab == SystemTab::System)
-            }
-            Target::ProfileApp(index) => {
-                *index
-                    == if app.profile.all_apps {
-                        0
-                    } else {
-                        app.profile.section_index() + 1
-                    }
-            }
-            _ => false,
-        };
-        frame.render_widget(
-            Paragraph::new(label.as_str()).style(if app.focus == *target || active {
-                ratatui::style::Style::default()
-                    .fg(theme::BG)
-                    .bg(theme::ACCENT)
-            } else {
-                theme::dim()
-            }),
-            rect,
-        );
+        components::tab_button(frame, rect, label, *active, app.focus == *target);
     }
 }
 fn draw_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
@@ -1545,7 +1574,7 @@ fn draw_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
                 Target::ProfileTab(1),
                 format!(" {} ", SystemTab::all()[1].label()),
             ),
-            (Target::ProfileAction(3), " Configs [x] ".into()),
+            (Target::ProfileTab(2), " Configs ".into()),
         ],
     );
 }
@@ -1685,29 +1714,14 @@ fn draw_filter_strip(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 fn draw_section_navigator(frame: &mut Frame, app: &App, area: Rect) {
-    // On compact screens expose a measured current-app selector; activation cycles all six choices.
-    if area.width < 66 {
-        let label = if app.profile.all_apps {
-            "Summary"
-        } else {
-            app.profile.section.label()
-        };
-        draw_actions(
-            frame,
-            app,
-            area,
-            &[(Target::ProfileApp(6), format!(" {label} [0–5, [, ]] "))],
-        );
-    } else {
-        let mut actions = vec![(Target::ProfileApp(0), " Summary ".into())];
-        actions.extend(
-            Section::all()
-                .iter()
-                .enumerate()
-                .map(|(i, section)| (Target::ProfileApp(i + 1), format!(" {} ", section.label()))),
-        );
-        draw_actions(frame, app, area, &actions);
-    }
+    let mut actions = vec![(Target::ProfileApp(0), "Summary".into())];
+    actions.extend(
+        Section::all()
+            .iter()
+            .enumerate()
+            .map(|(i, section)| (Target::ProfileApp(i + 1), section.label().into())),
+    );
+    draw_actions(frame, app, area, &actions);
 }
 pub fn reveal_focus(app: &mut App) {
     let layout = content_layout(app);
@@ -3332,56 +3346,15 @@ fn report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'
     cache.insert(key, lines.clone());
     lines
 }
-fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
+fn report_datasets(app: &App, widget: &WidgetSpec) -> Vec<(&'static str, serde_json::Value)> {
     let Some(snapshot) = &app.profile.snapshot else {
-        return vec![Line::raw("Loading statistics")];
+        return Vec::new();
     };
-    let rows = sorted_rows(app, widget, snapshot);
-    let keys = if widget.id == ATTENTION.id {
-        vec!["app", "owner_id", "item_id", "reason", "age_ms", "action"]
-    } else {
-        widget.detail_columns.to_vec()
-    };
-    let proportions = vec![1; keys.len()];
-    let mut lines = Vec::new();
-    if !rows.is_empty() {
-        lines.push(panels::table_row(
-            &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
-            &proportions,
-            width as usize,
-            false,
-        ));
-        let selected = app
-            .profile
-            .selected_row
-            .get(widget.id)
-            .copied()
-            .unwrap_or(0);
-        for (i, row) in rows.iter().enumerate() {
-            lines.push(panels::table_row(
-                &keys
-                    .iter()
-                    .map(|k| format_cell(k, &row[*k]))
-                    .collect::<Vec<_>>(),
-                &proportions,
-                width as usize,
-                i == selected,
-            ));
-        }
-        if let Some(row) = rows.get(selected) {
-            lines.push(Line::styled(
-                "Selected row · full values / prose",
-                theme::accent(),
-            ));
-            lines.extend(components::detail_records(row, width));
-        }
-    } else {
-        lines.extend(components::detail_records(
-            &widget_data(widget, snapshot),
-            width,
-        ));
-    }
-    let merged: Vec<(&str, serde_json::Value)> = match widget.id {
+    let mut datasets = vec![(
+        "Supporting data",
+        serde_json::Value::Array(sorted_rows(app, widget, snapshot)),
+    )];
+    let merged: Vec<(&'static str, serde_json::Value)> = match widget.id {
         "intel.enrichment" => vec![
             (
                 "Distinct ingestion",
@@ -3448,9 +3421,28 @@ fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<
         ],
         _ => Vec::new(),
     };
-    for (label, data) in merged {
-        lines.push(Line::styled(label.to_owned(), theme::accent()));
-        lines.extend(components::detail_table(&data, &[], width));
+    datasets.extend(merged);
+    datasets
+}
+
+fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
+    let Some(snapshot) = &app.profile.snapshot else {
+        return vec![Line::raw("Loading statistics")];
+    };
+    let rows = sorted_rows(app, widget, snapshot);
+    let mut lines = Vec::new();
+    if let Some(row) = rows.get(
+        app.profile
+            .selected_row
+            .get(widget.id)
+            .copied()
+            .unwrap_or(0),
+    ) {
+        lines.push(Line::styled(
+            "Selected record · full values / prose",
+            theme::accent(),
+        ));
+        lines.extend(components::detail_table(row, &[], width));
     }
     let retained_plot = match widget.id {
         "atlas.cycles" => Some(widget!(
@@ -3499,6 +3491,7 @@ fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<
         Section::Models => &snapshot.models.note,
         Section::Tools => &snapshot.tools.note,
     };
+    lines.push(Line::styled("Coverage", theme::accent()));
     lines.extend(components::measured_lines(
         vec![
             Line::raw(note.clone()),
@@ -3529,12 +3522,15 @@ fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'stati
         .copied()
         .unwrap_or(buckets.len().saturating_sub(1))
         .min(buckets.len().saturating_sub(1));
-    let mut lines = vec![Line::raw(format!(
-        "{} · {} buckets · {}",
-        snapshot.filters.period.label(),
-        snapshot.filters.period.bucket_label(),
-        widget.unit
-    ))];
+    let mut lines = vec![
+        Line::styled("Selection / metadata", theme::accent()),
+        Line::raw(format!(
+            "{} · {} buckets · {}",
+            snapshot.filters.period.label(),
+            snapshot.filters.period.bucket_label(),
+            widget.unit
+        )),
+    ];
     if let Some(error) = &app.profile.error {
         lines.push(Line::styled(format!("Stale · {error}"), theme::warn()));
     } else if app.profile.loading {
@@ -3739,39 +3735,160 @@ fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
             }
         }
     }
-    let lines = report_detail_lines(app, widget, layout.details.width);
-    let mut pane = app.profile.report_scroll.clone();
-    pane.scroll(0, lines.len(), layout.details.height as usize);
-    if let Some(snapshot) = &app.profile.snapshot {
-        let rows = sorted_rows(app, widget, snapshot);
-        for i in 0..rows.len() {
-            let row = i + 1;
-            if row >= pane.offset && row < pane.offset + layout.details.height as usize {
-                app.layout.borrow_mut().register(
-                    Target::ProfileRow(i),
-                    Rect::new(
-                        layout.details.x,
-                        layout.details.y + (row - pane.offset) as u16,
-                        layout.details.width,
-                        1,
-                    ),
-                );
-            }
+    let datasets = report_datasets(app, widget);
+    let sections = super::profile_layout::ReportSectionsLayout::new(
+        layout.details,
+        datasets.len() + 1,
+        app.profile.report_scroll.offset,
+        app.screen.height >= 40,
+    );
+    for section in &sections.sections {
+        if section.index == datasets.len() {
+            let lines = report_detail_lines(app, widget, section.rect.width);
+            let viewport = section.rect.height as usize;
+            let offset = app
+                .profile
+                .table_offsets
+                .get(&(widget.id, section.index))
+                .copied()
+                .unwrap_or(0)
+                .min(lines.len().saturating_sub(viewport));
+            frame.render_widget(
+                Paragraph::new(
+                    lines
+                        .into_iter()
+                        .skip(offset)
+                        .take(viewport)
+                        .collect::<Vec<_>>(),
+                ),
+                section.rect,
+            );
+            app.layout
+                .borrow_mut()
+                .register(Target::ProfileTable(section.index), section.rect);
+            continue;
+        }
+        let (title, data) = &datasets[section.index];
+        let rows = data
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![data.clone()]);
+        let keys: Vec<String> = if section.index == 0 && !widget.detail_columns.is_empty() {
+            widget
+                .detail_columns
+                .iter()
+                .map(|key| (*key).to_owned())
+                .collect()
+        } else {
+            rows.first()
+                .and_then(|row| row.as_object())
+                .map(|row| row.keys().cloned().collect())
+                .unwrap_or_else(|| vec!["value".into()])
+        };
+        let selected = if section.index == 0 {
+            app.profile
+                .selected_row
+                .get(widget.id)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            app.profile
+                .table_rows
+                .get(&(widget.id, section.index))
+                .copied()
+                .unwrap_or(0)
+        }
+        .min(rows.len().saturating_sub(1));
+        let viewport = (section.rect.height.saturating_sub(3) as usize)
+            .min(if app.screen.height >= 40 { 10 } else { 3 });
+        let offset = app
+            .profile
+            .table_offsets
+            .get(&(widget.id, section.index))
+            .copied()
+            .unwrap_or(0)
+            .min(rows.len().saturating_sub(viewport));
+        let focused = app.focus == Target::ProfileTable(section.index);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{title}{}",
+                if focused { " • focused" } else { "" }
+            ))
+            .style(theme::accent()),
+            Rect::new(section.rect.x, section.rect.y, section.rect.width, 1),
+        );
+        if section.rect.height > 1 {
+            frame.render_widget(
+                Paragraph::new(panels::table_row(
+                    &keys,
+                    &vec![1; keys.len()],
+                    section.rect.width as usize,
+                    false,
+                )),
+                Rect::new(section.rect.x, section.rect.y + 1, section.rect.width, 1),
+            );
+        }
+        app.layout
+            .borrow_mut()
+            .register(Target::ProfileTable(section.index), section.rect);
+        for (local, row) in rows.iter().enumerate().skip(offset).take(viewport) {
+            let rect = Rect::new(
+                section.rect.x,
+                section.rect.y + 2 + (local - offset) as u16,
+                section.rect.width,
+                1,
+            );
+            let values = keys
+                .iter()
+                .map(|key| {
+                    if key == "value" {
+                        format_cell(key, row)
+                    } else {
+                        format_cell(key, &row[key])
+                    }
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                Paragraph::new(panels::table_row(
+                    &values,
+                    &vec![1; keys.len()],
+                    rect.width as usize,
+                    local == selected,
+                )),
+                rect,
+            );
+            app.layout.borrow_mut().register(
+                if section.index == 0 {
+                    Target::ProfileRow(local)
+                } else {
+                    Target::ProfileTableRow(section.index, local)
+                },
+                rect,
+            );
+        }
+        if section.rect.height >= 3 {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Rows {}–{} / {} · Enter full record",
+                    offset + usize::from(!rows.is_empty()),
+                    (offset + viewport).min(rows.len()),
+                    rows.len()
+                ))
+                .style(theme::dim()),
+                Rect::new(
+                    section.rect.x,
+                    section.rect.bottom() - 1,
+                    section.rect.width,
+                    1,
+                ),
+            );
         }
     }
     frame.render_widget(
-        Paragraph::new(
-            pane.visible(&lines, layout.details.height as usize)
-                .to_vec(),
-        ),
-        layout.details,
-    );
-    frame.render_widget(
         Paragraph::new(format!(
-            "Rows {}–{} / {} · PgUp/PgDn · wheel",
-            pane.offset + 1,
-            (pane.offset + layout.details.height as usize).min(lines.len()),
-            lines.len()
+            "Sections · {} / {} · Tab next · PgUp/PgDn · wheel",
+            app.profile.report_scroll.offset + 1,
+            sections.extent
         ))
         .style(theme::dim()),
         layout.position,
@@ -3906,10 +4023,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 pub fn activate(app: &mut App, target: Target) {
     match target {
         Target::ProfileTab(index) => {
-            app.profile.tab = if index == 0 {
-                SystemTab::Overview
-            } else {
-                SystemTab::System
+            app.profile.tab = SystemTab::all()[index.min(2)];
+            if app.profile.tab == SystemTab::Configs {
+                app.profile_config.open();
             }
         }
         Target::ProfileApp(index) => {
@@ -3961,9 +4077,8 @@ pub fn activate(app: &mut App, target: Target) {
             app.profile.invalidate();
         }
         Target::ProfileAction(3) => {
+            app.profile.tab = SystemTab::Configs;
             app.profile_config.open();
-            app.profile.config_open = true;
-            app.overlay = super::app::Overlay::Configs;
             app.set_focus(Target::Field(super::app::FieldId::ProfileExportPath));
         }
         Target::ProfileAction(4) => app.profile.loaded_at = None,
@@ -4033,6 +4148,35 @@ pub fn activate(app: &mut App, target: Target) {
                 Target::ProfileAction(1)
             });
         }
+        Target::ProfileTable(index) => {
+            app.set_focus(Target::ProfileTable(index));
+            if let Some(widget) = app.profile.report.and_then(view_spec) {
+                let popup = expanded_area(super::ui::body_rect(app));
+                let inner = theme::panel(" report ").inner(popup);
+                let details = report_layout(app, widget, inner).details;
+                let sections = super::profile_layout::ReportSectionsLayout::new(
+                    details,
+                    report_datasets(app, widget).len() + 1,
+                    0,
+                    app.screen.height >= 40,
+                );
+                app.profile.report_scroll.reveal(
+                    index * sections.section_height,
+                    sections.section_height.min(details.height as usize),
+                    details.height as usize,
+                );
+            }
+        }
+        Target::ProfileTableRow(section, index) => {
+            if let Some(widget) = app.profile.report.and_then(view_spec) {
+                if section == 0 {
+                    remember_row(app, widget.id, index);
+                } else {
+                    app.profile.table_rows.insert((widget.id, section), index);
+                }
+                app.set_focus(Target::ProfileTable(section));
+            }
+        }
         Target::ProfileRow(index) => {
             if let Some(id) = app.profile.report {
                 remember_row(app, id, index);
@@ -4040,6 +4184,29 @@ pub fn activate(app: &mut App, target: Target) {
             }
         }
         _ => {}
+    }
+}
+pub fn report_table_count(app: &App) -> usize {
+    app.profile
+        .report
+        .and_then(view_spec)
+        .map_or(0, |widget| report_datasets(app, widget).len() + 1)
+}
+pub fn reveal_table(app: &mut App, index: usize) {
+    if let Some(widget) = app.profile.report.and_then(view_spec) {
+        let popup = expanded_area(super::ui::body_rect(app));
+        let details = report_layout(app, widget, theme::panel(" report ").inner(popup)).details;
+        let sections = super::profile_layout::ReportSectionsLayout::new(
+            details,
+            report_table_count(app),
+            0,
+            app.screen.height >= 40,
+        );
+        app.profile.report_scroll.reveal(
+            index * sections.section_height,
+            sections.section_height.min(details.height as usize),
+            details.height as usize,
+        );
     }
 }
 pub fn scroll(app: &mut App, delta: isize) {
@@ -4074,10 +4241,44 @@ pub fn scroll(app: &mut App, delta: isize) {
                 popup.height.saturating_sub(2),
             );
             let report = report_layout(app, widget, inner);
-            let lines = report_detail_lines(app, widget, report.details.width);
-            app.profile
-                .report_scroll
-                .scroll(delta, lines.len(), report.details.height as usize);
+            let datasets = report_datasets(app, widget);
+            let sections = super::profile_layout::ReportSectionsLayout::new(
+                report.details,
+                datasets.len() + 1,
+                app.profile.report_scroll.offset,
+                app.screen.height >= 40,
+            );
+            if let Target::ProfileTable(index) = app.focus {
+                if index == datasets.len() {
+                    let lines = report_detail_lines(app, widget, report.details.width);
+                    let viewport = sections.section_height.min(report.details.height as usize);
+                    let offset = app.profile.table_offsets.entry((id, index)).or_default();
+                    let next = offset
+                        .saturating_add_signed(delta)
+                        .min(lines.len().saturating_sub(viewport));
+                    if next != *offset {
+                        *offset = next;
+                        return;
+                    }
+                }
+                if let Some((_, data)) = datasets.get(index) {
+                    let count = data.as_array().map_or(1, Vec::len);
+                    let viewport = sections.section_height.saturating_sub(4);
+                    let offset = app.profile.table_offsets.entry((id, index)).or_default();
+                    let next = offset
+                        .saturating_add_signed(delta)
+                        .min(count.saturating_sub(viewport));
+                    if *offset != next {
+                        *offset = next;
+                        return;
+                    }
+                }
+            }
+            app.profile.report_scroll.scroll(
+                delta,
+                sections.extent,
+                report.details.height as usize,
+            );
         }
     } else {
         if let Some(w) = app.profile.focused_widget() {
@@ -4209,6 +4410,87 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if matches!(app.focus, Target::Field(_)) {
         return false;
     }
+    if matches!(app.focus, Target::ProfileTab(_) | Target::ProfileApp(_))
+        && matches!(
+            key.code,
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+        )
+    {
+        return false;
+    }
+    if let (Some(widget), Target::ProfileTable(index)) =
+        (app.profile.report.and_then(view_spec), app.focus)
+    {
+        let datasets = report_datasets(app, widget);
+        if index == datasets.len() && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            scroll(app, if key.code == KeyCode::Up { -1 } else { 1 });
+            return true;
+        }
+        if let Some((_, data)) = datasets.get(index) {
+            let rows = data
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| vec![data.clone()]);
+            if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                let current = if index == 0 {
+                    app.profile
+                        .selected_row
+                        .get(widget.id)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    app.profile
+                        .table_rows
+                        .get(&(widget.id, index))
+                        .copied()
+                        .unwrap_or(0)
+                };
+                let selected = current
+                    .saturating_add_signed(if key.code == KeyCode::Up { -1 } else { 1 })
+                    .min(rows.len().saturating_sub(1));
+                if index == 0 {
+                    remember_row(app, widget.id, selected);
+                } else {
+                    app.profile.table_rows.insert((widget.id, index), selected);
+                }
+                let offset = app
+                    .profile
+                    .table_offsets
+                    .entry((widget.id, index))
+                    .or_default();
+                let room = if app.screen.height >= 40 { 10 } else { 3 };
+                if selected < *offset {
+                    *offset = selected;
+                } else if selected >= *offset + room {
+                    *offset = selected + 1 - room;
+                }
+                return true;
+            }
+            if key.code == KeyCode::Enter {
+                let selected = if index == 0 {
+                    app.profile
+                        .selected_row
+                        .get(widget.id)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    app.profile
+                        .table_rows
+                        .get(&(widget.id, index))
+                        .copied()
+                        .unwrap_or(0)
+                };
+                if let Some(row) = rows.get(selected) {
+                    app.overlay = super::app::Overlay::Block {
+                        title: "Selected record · full values".into(),
+                        body: serde_json::to_string_pretty(row).unwrap_or_default(),
+                    };
+                    app.scrolls.popup = 0;
+                }
+                return true;
+            }
+        }
+    }
     match key.code {
         KeyCode::Char('t') => {
             activate(
@@ -4243,7 +4525,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             );
             true
         }
-        _ if app.profile.tab == SystemTab::System => false,
+        _ if app.profile.tab != SystemTab::Overview => false,
         KeyCode::Char('0'..='5') => {
             if let KeyCode::Char(ch) = key.code {
                 activate(app, Target::ProfileApp(ch as usize - '0' as usize));

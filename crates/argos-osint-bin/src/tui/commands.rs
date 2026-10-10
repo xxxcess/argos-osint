@@ -33,6 +33,46 @@ const fn local(
 }
 
 pub const COMMANDS: &[CommandDefinition] = &[
+    local(
+        "previous-turn",
+        "Previous turn",
+        "Select the previous user query",
+        "",
+        "Investigation",
+        ModuleId::Recon,
+    ),
+    local(
+        "next-turn",
+        "Next turn",
+        "Select the next user query",
+        "",
+        "Investigation",
+        ModuleId::Recon,
+    ),
+    local(
+        "configs",
+        "Configs",
+        "Export, verify and apply portable configuration",
+        "x",
+        "Profile",
+        ModuleId::System,
+    ),
+    local(
+        "intel-visit",
+        "Visit article site",
+        "Open the selected article URL",
+        "",
+        "Intel",
+        ModuleId::Intel,
+    ),
+    local(
+        "jump-latest",
+        "Jump to latest",
+        "Resume following investigation output",
+        "End",
+        "Investigation",
+        ModuleId::Recon,
+    ),
     CommandDefinition {
         id: "home",
         label: "Home",
@@ -565,11 +605,11 @@ pub fn matching(query: &str, current: Option<ModuleId>) -> Vec<&'static CommandD
         })
         .collect();
     commands.sort_by_key(|command| match command.module {
-        Some(module) if Some(module) == current => 0,
+        Some(module) if Some(module) == current => 1,
         None if command.id == "new" && current == Some(ModuleId::Recon) => 0,
-        None if command.category == "Navigation" => 1,
-        None => 2,
-        _ => 3,
+        None if command.category == "Navigation" => 2,
+        None => 3,
+        _ => 4,
     });
     commands
 }

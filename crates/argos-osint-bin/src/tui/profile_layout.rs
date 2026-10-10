@@ -29,7 +29,7 @@ pub struct LayoutResult {
 impl LayoutResult {
     pub fn new(area: Rect, page: DashboardPage, count: usize, offset: usize) -> Self {
         let tall = area.height >= 38;
-        let nav_height = if tall { 2 } else { 1 };
+        let nav_height = if tall { 3 } else { 1 };
         let kpi_height = if tall {
             6
         } else if area.width >= 80 {
@@ -201,18 +201,56 @@ impl ReportLayout {
     }
 }
 
+/// Fixed-height nested datasets share geometry across drawing and input.
+pub struct ReportSectionsLayout {
+    pub sections: Vec<PanelRect>,
+    pub extent: usize,
+    pub section_height: usize,
+}
+impl ReportSectionsLayout {
+    pub fn new(area: Rect, count: usize, offset: usize, tall: bool) -> Self {
+        // Title, sticky header, 3–10 data rows, position and gutter.
+        let data_rows = if tall { 10 } else { 3 };
+        let section_height = data_rows + 4;
+        let extent = count * section_height;
+        let sections = (0..count)
+            .filter_map(|index| {
+                let start = index * section_height;
+                let top = start.max(offset);
+                let bottom = (start + section_height).min(offset + area.height as usize);
+                (bottom > top).then(|| PanelRect {
+                    index,
+                    rect: Rect::new(
+                        area.x,
+                        area.y + (top - offset) as u16,
+                        area.width,
+                        (bottom - top) as u16,
+                    ),
+                    height: section_height,
+                    source_offset: top - start,
+                })
+            })
+            .collect();
+        Self {
+            sections,
+            extent,
+            section_height,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn reference_geometry_and_responsive_panels() {
         let l = LayoutResult::new(Rect::new(0, 1, 160, 48), DashboardPage::Summary, 4, 0);
-        assert_eq!(l.content, Rect::new(0, 12, 160, 37));
-        assert_eq!(l.panels[0].rect, Rect::new(0, 12, 79, 18));
-        assert_eq!(l.panels[1].rect, Rect::new(80, 12, 80, 18));
-        assert_eq!(l.panels[2].rect.y, 31);
+        assert_eq!(l.content, Rect::new(0, 14, 160, 35));
+        assert_eq!(l.panels[0].rect, Rect::new(0, 14, 79, 18));
+        assert_eq!(l.panels[1].rect, Rect::new(80, 14, 80, 18));
+        assert_eq!(l.panels[2].rect.y, 33);
         let l = LayoutResult::new(Rect::new(0, 1, 160, 48), DashboardPage::Recon, 5, 0);
-        assert_eq!(l.panels[4].rect, Rect::new(0, 36, 160, 13));
+        assert_eq!(l.panels[4].rect, Rect::new(0, 38, 160, 11));
         for (w, h) in [(120, 40), (100, 32), (80, 24), (60, 18), (40, 12)] {
             let l = LayoutResult::new(Rect::new(0, 1, w, h - 2), DashboardPage::Recon, 5, 0);
             assert_eq!(l.columns, if w >= 120 { 2 } else { 1 });

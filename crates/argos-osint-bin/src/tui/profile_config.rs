@@ -14,13 +14,12 @@
 
 use std::path::PathBuf;
 
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::text::Line;
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use argos_osint_core::config_transfer::{
-    self, ConfigurationSnapshot, CredentialSource, ImportPlan, ProfileConfig, QuotaSettingsFile,
-    SCHEMA_VERSION,
+    self, ConfigurationSnapshot, ImportPlan, ProfileConfig, QuotaSettingsFile, SCHEMA_VERSION,
 };
 use argos_osint_core::paths;
 use argos_osint_core::provider::SettingsFile;
@@ -28,25 +27,6 @@ use argos_osint_core::secrets::AuthFile;
 
 use super::app::App;
 use super::theme;
-
-/// Which side of the Configs pane is open.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ConfigTab {
-    /// Write the live configuration to a portable file.
-    #[default]
-    Export,
-    /// Merge a portable file into the live configuration.
-    Import,
-}
-
-impl ConfigTab {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Export => "Export",
-            Self::Import => "Import",
-        }
-    }
-}
 
 /// One validation problem to show in the Import editor: a line, a column and a
 /// JSON pointer, never a value.
@@ -78,7 +58,6 @@ pub struct ImportBuffer {
 /// The Configs popup state.
 #[derive(Clone, Debug)]
 pub struct ConfigView {
-    pub tab: ConfigTab,
     pub open: bool,
     /// Export destination, before `~` expansion.
     pub export_path: String,
@@ -96,13 +75,14 @@ pub struct ConfigView {
     pub import_status: Option<String>,
     pub import_error: Option<String>,
     /// Focused control inside the popup.
-    pub focus: usize,
+    /// Redacted changes computed by Verify, never by the renderer.
+    pub change_summary: Vec<String>,
+    validated_text: Option<String>,
 }
 
 impl Default for ConfigView {
     fn default() -> Self {
         Self {
-            tab: ConfigTab::Export,
             open: false,
             export_path: "~/argos-config.json".to_string(),
             export_resolved: None,
@@ -114,7 +94,8 @@ impl Default for ConfigView {
             exported: None,
             import_status: None,
             import_error: None,
-            focus: 0,
+            change_summary: Vec::new(),
+            validated_text: None,
         }
     }
 }
@@ -171,7 +152,7 @@ impl ImportBuffer {
         self.text.replace_range(byte..end, "");
     }
 
-    /// Enter inserts a newline; Ctrl+Enter validates and imports.
+    /// Enter inserts a newline; applying requires explicit button activation.
     pub fn newline(&mut self) {
         self.insert("\n");
     }
@@ -199,6 +180,20 @@ impl ImportBuffer {
         let max = total.saturating_sub(height);
         let next = self.scroll as i32 + delta;
         self.scroll = next.clamp(0, max as i32) as usize;
+    }
+
+    pub fn move_vertical(&mut self, delta: isize) {
+        let (line, column) = self.caret_position();
+        let lines: Vec<_> = self.text.split('\n').collect();
+        let next = (line - 1)
+            .saturating_add_signed(delta)
+            .min(lines.len().saturating_sub(1));
+        self.caret = lines
+            .iter()
+            .take(next)
+            .map(|line| line.chars().count() + 1)
+            .sum::<usize>()
+            + (column - 1).min(lines[next].chars().count());
     }
 }
 
@@ -238,6 +233,8 @@ impl ConfigView {
     /// matches what was validated must never commit.
     fn disarm(&mut self) {
         self.plan = None;
+        self.validated_text = None;
+        self.change_summary.clear();
         self.import.warnings.clear();
     }
 
@@ -253,14 +250,9 @@ impl ConfigView {
         self.open = false;
         // The pasted secret buffer never outlives the popup.
         self.import.paste.clear();
-    }
-
-    pub fn next_tab(&mut self) {
-        self.tab = match self.tab {
-            ConfigTab::Export => ConfigTab::Import,
-            ConfigTab::Import => ConfigTab::Export,
-        };
-        self.focus = 0;
+        self.import.text.clear();
+        self.import.caret = 0;
+        self.disarm();
     }
 
     /// Expands a leading `~` and reports the resolved destination.
@@ -306,11 +298,15 @@ impl ConfigView {
     /// Runs the export. Returns the document so the caller can log a redacted
     /// summary.
     pub fn run_export(&mut self) -> anyhow::Result<ProfileConfig> {
+        let confirmed = self
+            .export_confirm
+            .then(|| self.export_resolved.clone())
+            .flatten();
         self.check_export_path();
         if self.export_error.is_some() {
             anyhow::bail!("the destination is not writable");
         }
-        if self.export_confirm {
+        if self.export_confirm && confirmed != self.export_resolved {
             // The caller must have confirmed; a stale confirmation is refused.
             anyhow::bail!("confirm the overwrite first");
         }
@@ -366,6 +362,23 @@ impl ConfigView {
                     .map(|warning| warning.to_string())
                     .collect();
                 self.plan = Some(plan);
+                match ConfigurationSnapshot::load() {
+                    Ok(snapshot) => {
+                        self.change_summary = self
+                            .changes(&snapshot)
+                            .iter()
+                            .map(|change| {
+                                format!("{} {}: {}", change.area, change.id, change.summary)
+                            })
+                            .collect();
+                        self.validated_text = Some(self.import.text.clone());
+                    }
+                    Err(_) => {
+                        self.plan = None;
+                        self.import_error =
+                            Some("Could not load the current configuration baseline".into());
+                    }
+                }
             }
             Err(err) => {
                 self.import.error = Some(locate(&self.import.text, &err.to_string()));
@@ -386,6 +399,10 @@ impl ConfigView {
 
     /// Applies the validated plan and commits all three files as one revision.
     pub fn run_import(&mut self) -> anyhow::Result<u64> {
+        if self.validated_text.as_deref() != Some(self.import.text.as_str()) {
+            self.disarm();
+            anyhow::bail!("verify this editor revision first");
+        }
         let Some(plan) = self.plan.clone() else {
             anyhow::bail!("validate the document first");
         };
@@ -425,16 +442,16 @@ fn expand_home(raw: &str) -> PathBuf {
 fn locate(text: &str, message: &str) -> EditorError {
     let mut line = 1;
     let mut column = 1;
-    for token in message.split_whitespace() {
-        if let Some(rest) = token.strip_prefix("line ") {
-            if let Ok(value) = rest.trim_end_matches(|c: char| !c.is_ascii_digit()).parse() {
-                line = value;
-            }
-        }
-        if let Some(rest) = token.strip_prefix("column ") {
-            if let Ok(value) = rest.trim_end_matches(|c: char| !c.is_ascii_digit()).parse() {
-                column = value;
-            }
+    let tokens: Vec<_> = message.split_whitespace().collect();
+    for pair in tokens.windows(2) {
+        let value = pair[1]
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .parse()
+            .ok();
+        match (pair[0], value) {
+            ("line", Some(value)) => line = value,
+            ("column", Some(value)) => column = value,
+            _ => {}
         }
     }
     let pointer = message
@@ -464,204 +481,166 @@ impl EditorError {
     }
 }
 
-/// The credential summary the Export tab shows before writing: which fields
-/// travel, without any value.
-pub fn credential_summary(document: &ProfileConfig) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        format!("providers: {}", document.providers.len()),
-        theme::text(),
-    ))];
-    for entry in &document.providers {
-        let label = match entry.credential.source {
-            CredentialSource::Inline => "key travels".to_string(),
-            CredentialSource::Env => "environment reference".to_string(),
-            CredentialSource::None => "keyless".to_string(),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {:<16}", entry.id), theme::dim()),
-            Span::styled(format!("{:<24}", label), theme::text()),
-            Span::styled(entry.default_model.to_string(), theme::muted()),
-        ]));
-    }
-    lines.push(Line::from(Span::styled(
-        format!("tool credentials: {}", document.tool_credentials.len()),
-        theme::text(),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("roles: 10   rate limits: {}", document.rate_limits.len()),
-        theme::text(),
-    )));
-    lines
-}
-
 /// The warning the popup shows on the credential export path.
 pub const SECRET_WARNING: &str =
     "This file contains saved API keys. Treat it as a secret and never commit it.";
 
-/// Draws the Configs popup. The area must already be the centred overlay.
+/// Configs page: Export precedes the independent multiline Import editor.
+/// Rendering consumes the validation summary prepared by Verify.
 pub fn draw(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    frame.render_widget(Clear, area);
-    let block = theme::card(&format!(
-        " Profile · Configs · {} ",
-        app.config_tab().label()
-    ));
+    use super::app::{FieldId, Target};
+    use super::components;
+    use ratatui::layout::Rect;
+    let config = app.config();
+    let block = theme::card(" Configs ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.height < 6 {
-        frame.render_widget(Paragraph::new(SECRET_WARNING).style(theme::warn()), inner);
+    if inner.height < 10 {
+        frame.render_widget(
+            Paragraph::new("Configs needs more height · resize to edit").style(theme::warn()),
+            inner,
+        );
         return;
     }
-    let header = Line::from(Span::styled(SECRET_WARNING, theme::warn()));
-    frame.render_widget(Paragraph::new(header), strip(inner, 0, 1));
-    let body = strip(inner, 1, inner.height - 1);
-    match app.config_tab() {
-        ConfigTab::Export => draw_export(frame, app, body),
-        ConfigTab::Import => draw_import(frame, app, body),
-    }
-}
-
-/// Splits a body into `count` rows from the top; the final row absorbs whatever
-/// is left so the layout never runs past the popup.
-fn rows_at(area: ratatui::layout::Rect, heights: &[u16]) -> Vec<ratatui::layout::Rect> {
-    let mut out = Vec::with_capacity(heights.len());
-    let mut y = area.y;
-    for (index, height) in heights.iter().enumerate() {
-        let height = if index + 1 == heights.len() {
-            area.height.saturating_sub(*height).max(1)
-        } else {
-            (*height).min(area.height.saturating_sub(y - area.y))
-        };
-        out.push(strip(area, y - area.y, height));
-        y += height;
-    }
-    out
-}
-
-fn draw_export(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let config = app.config();
-    let rows = rows_at(area, &[1, 1, 1, 6, 1, 1, 1, 1, 1, 1, 1, 1]);
-    // The destination is a real field, so a click focuses it just like the
-    // keyboard does.
-    app.draw_export_field(frame, rows[0]);
-    let resolved = config
-        .export_resolved
-        .clone()
-        .unwrap_or_else(|| config.resolve_export_path());
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("resolves to  ", theme::dim()),
-            Span::styled(resolved.display().to_string(), theme::muted()),
-        ])),
-        rows[1],
+        Paragraph::new(SECRET_WARNING).style(theme::warn()),
+        strip(inner, 0, 1),
     );
-    if let Some(error) = &config.export_error {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(error.clone(), theme::error()))),
-            rows[2],
-        );
-    } else if config.export_confirm {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "The destination exists. Export again to confirm the overwrite.",
-                theme::warn(),
-            ))),
-            rows[2],
-        );
-    } else if let Some(status) = &config.export_status {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(status.clone(), theme::accent()))),
-            rows[2],
-        );
-    }
-    // What travelled, without a value: fields, never a key.
-    if let Some(document) = &config.exported {
-        let lines = credential_summary(document);
-        frame.render_widget(Paragraph::new(lines), rows[3]);
-    }
-    let hint = Line::from(Span::styled(
-        "Enter export · Esc cancel · Tab switch",
-        theme::muted(),
-    ));
-    frame.render_widget(Paragraph::new(hint), rows[11]);
-}
-
-fn draw_import(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let config = app.config();
-    // Editor, status, two warnings, summary, hint: seven rows, the editor taking
-    // whatever is left.
-    let rows = rows_at(area, &[1, 1, 1, 1, 1, 1, 1]);
-    let editor = rows[0];
-    let text = if config.import.text.is_empty() {
-        "Paste a portable configuration document (schema v1).\nCtrl+Enter validates and imports."
-            .to_string()
-    } else {
-        config.import.text.clone()
-    };
-    let style = if config.import.text.is_empty() {
-        theme::muted()
-    } else {
-        theme::text()
-    };
+    let button_width = 12.min(inner.width);
+    let field = Rect::new(
+        inner.x,
+        inner.y + 1,
+        inner.width.saturating_sub(button_width + 1),
+        3,
+    );
+    let export = Rect::new(field.right() + 1, field.y, button_width, 3);
+    app.draw_export_field(frame, field);
+    app.layout
+        .borrow_mut()
+        .register(Target::ConfigAction(0), export);
+    components::tab_button(
+        frame,
+        export,
+        "Export",
+        false,
+        app.focus == Target::ConfigAction(0),
+    );
+    let status = config
+        .export_error
+        .as_ref()
+        .or(config.export_status.as_ref())
+        .cloned()
+        .unwrap_or_else(|| {
+            if config.export_confirm {
+                "Destination exists · Export again to overwrite".into()
+            } else {
+                config
+                    .export_resolved
+                    .as_ref()
+                    .map_or_else(|| config.export_path.clone(), |p| p.display().to_string())
+            }
+        });
     frame.render_widget(
-        Paragraph::new(text)
-            .style(style)
-            .wrap(Wrap { trim: false })
-            .scroll((config.import.scroll as u16, 0)),
-        editor,
+        Paragraph::new(status).style(theme::muted()),
+        strip(inner, 4, 1),
     );
+    let editor_height = inner.height.saturating_sub(11).max(3);
+    let editor = strip(inner, 5, editor_height);
+    let focused = app.focus == Target::Field(FieldId::ProfileImportEditor);
+    let block = super::ui::focused_pane(" Import JSON ", focused);
+    let viewport = block.inner(editor);
+    frame.render_widget(block, editor);
+    app.layout
+        .borrow_mut()
+        .register(Target::Field(FieldId::ProfileImportEditor), editor);
     let (line, column) = config.import.caret_position();
-    let (label, style) = match (&config.plan, &config.import.error) {
-        (Some(_), _) => ("valid".to_string(), theme::accent()),
-        (None, Some(err)) => (err.message.clone(), theme::error()),
-        (None, None) => ("not validated".to_string(), theme::muted()),
+    let offset = if focused {
+        config
+            .import
+            .scroll
+            .min(line.saturating_sub(1))
+            .max(line.saturating_sub(viewport.height as usize))
+    } else {
+        config.import.scroll
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!("{line}:{column}  "), theme::dim()),
-            Span::styled(label, style),
-        ])),
-        rows[1],
+    let text: Vec<Line<'static>> = if config.import.text.is_empty() {
+        vec![Line::styled("Paste schema v1 JSON here", theme::muted())]
+    } else {
+        config
+            .import
+            .text
+            .split('\n')
+            .skip(offset)
+            .take(viewport.height as usize)
+            .map(|line| Line::raw(components::clip_text(line, viewport.width as usize)))
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(text), viewport);
+    if focused && line > offset && line - offset <= viewport.height as usize && viewport.width > 0 {
+        let current_line = config.import.text.split('\n').nth(line - 1).unwrap_or("");
+        let before: String = current_line.chars().take(column - 1).collect();
+        frame.set_cursor_position((
+            viewport.x + (components::text_width(&before) as u16).min(viewport.width - 1),
+            viewport.y + (line - offset - 1) as u16,
+        ));
+    }
+    let y = 5 + editor_height;
+    let buttons = strip(inner, y, 1);
+    let verify = Rect::new(buttons.x, buttons.y, 10.min(buttons.width), 1);
+    let save = Rect::new(
+        verify.right(),
+        buttons.y,
+        buttons.width.saturating_sub(verify.width).min(24),
+        1,
     );
-    for (index, warning) in config.import.warnings.iter().take(2).enumerate() {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(warning.clone(), theme::warn()))),
-            rows[2 + index],
-        );
-    }
-    if let Some(status) = &config.import_status {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(status.clone(), theme::accent()))),
-            rows[4],
-        );
-    } else if config.plan.is_some() {
-        // The redacted change summary the user commits against.
-        let snapshot = ConfigurationSnapshot::load().unwrap_or_default();
-        let changes = config.changes(&snapshot);
-        let header = if changes.is_empty() {
-            "nothing changes".to_string()
-        } else {
-            format!("{} change(s) to commit", changes.len())
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(header, theme::accent()))),
-            rows[4],
-        );
-        for change in changes.iter().take(2) {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!("{} {}: {}", change.area, change.id, change.summary),
-                    theme::text(),
-                ))),
-                rows[5],
-            );
+    for (action, rect, label) in [(1, verify, "Verify"), (2, save, "Save and apply")] {
+        if action == 1 || config.plan.is_some() {
+            app.layout
+                .borrow_mut()
+                .register(Target::ConfigAction(action), rect);
         }
+        components::tab_button(
+            frame,
+            rect,
+            label,
+            false,
+            app.focus == Target::ConfigAction(action),
+        );
     }
+    let validation = config
+        .import_error
+        .as_ref()
+        .or(config.import_status.as_ref())
+        .cloned()
+        .unwrap_or_else(|| {
+            if config.plan.is_some() {
+                format!(
+                    "Verified · {} redacted changes",
+                    config.change_summary.len()
+                )
+            } else {
+                "Save disabled · verify this revision first".into()
+            }
+        });
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "Enter newline · Ctrl+Enter validate+import · Esc cancel · Tab switch",
-            theme::muted(),
-        ))),
-        rows[6],
+        Paragraph::new(validation).style(theme::muted()),
+        strip(inner, y + 1, 1),
+    );
+    let summary: Vec<Line<'static>> = config
+        .import
+        .warnings
+        .iter()
+        .chain(config.change_summary.iter())
+        .map(|line| Line::raw(line.clone()))
+        .collect();
+    frame.render_widget(
+        Paragraph::new(summary).wrap(Wrap { trim: false }),
+        strip(inner, y + 2, inner.height.saturating_sub(y + 3)),
+    );
+    frame.render_widget(
+        Paragraph::new("Tab focus · Enter newline in JSON · Verify → Save and apply · Esc discard")
+            .style(theme::dim()),
+        strip(inner, inner.height - 1, 1),
     );
 }
 
@@ -691,7 +670,6 @@ mod tests {
     #[test]
     fn an_oversize_document_is_refused_before_anything_is_applied() {
         let mut config = ConfigView {
-            tab: ConfigTab::Import,
             ..Default::default()
         };
         config.import.text = "x".repeat(config_transfer::MAX_DOCUMENT_BYTES + 1);
@@ -708,7 +686,6 @@ mod tests {
     #[test]
     fn a_directory_target_is_an_actionable_error_not_a_crash() {
         let mut config = ConfigView {
-            tab: ConfigTab::Export,
             ..Default::default()
         };
         config.export_path = "/".to_string();
@@ -720,7 +697,6 @@ mod tests {
     #[test]
     fn editing_the_buffer_disarms_the_import_button() {
         let mut config = ConfigView {
-            tab: ConfigTab::Import,
             ..Default::default()
         };
         config.insert("{}");
@@ -756,5 +732,34 @@ mod tests {
             config.import.paste.is_empty(),
             "no secret survives the popup"
         );
+    }
+    #[test]
+    fn syntax_error_location_uses_actual_line_and_column() {
+        let error = locate("", "expected value at line 7 column 12");
+        assert_eq!((error.line, error.column), (7, 12));
+    }
+    #[test]
+    fn confirmed_export_overwrites_the_same_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "old").unwrap();
+        let mut view = ConfigView {
+            export_path: path.display().to_string(),
+            ..Default::default()
+        };
+        assert!(view.run_export().is_err());
+        assert!(view.export_confirm);
+        assert!(view.run_export().is_ok());
+        assert!(std::fs::read_to_string(path)
+            .unwrap()
+            .contains("schema_version"));
+    }
+    #[test]
+    fn direct_buffer_change_invalidates_commit_revision() {
+        let mut view = ConfigView::default();
+        view.import.text = "edited without Verify".into();
+        assert!(view.run_import().is_err());
+        assert!(view.plan.is_none());
+        assert_eq!(view.import.text, "edited without Verify");
     }
 }

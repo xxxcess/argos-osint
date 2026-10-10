@@ -1,6 +1,111 @@
 //! Shared cell-measured presentation primitives. Components never read storage.
 use ratatui::{layout::Rect, text::Line};
 
+/// TabBar separates the selected page from keyboard focus at every height.
+pub fn tab_button(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    label: &str,
+    active: bool,
+    focused: bool,
+) {
+    use ratatui::{
+        layout::Alignment,
+        style::Modifier,
+        widgets::{Block, Borders, Paragraph},
+    };
+    let theme = super::theme::text();
+    let style = if focused {
+        super::theme::selected()
+    } else if active {
+        super::theme::accent().add_modifier(Modifier::BOLD)
+    } else {
+        super::theme::dim()
+    };
+    let label = clip_text(label, area.width.saturating_sub(2) as usize);
+    if area.height >= 3 {
+        frame.render_widget(
+            Paragraph::new(label)
+                .alignment(Alignment::Center)
+                .style(style)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .style(theme)
+                        .border_style(if active {
+                            super::theme::accent()
+                        } else {
+                            super::theme::dim()
+                        }),
+                ),
+            area,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(format!("[{label}]"))
+                .alignment(Alignment::Center)
+                .style(style),
+            area,
+        );
+    }
+}
+
+/// Cell-measured tab geometry reveals the chosen button when a row overflows.
+/// Empty rectangles are deliberately omitted from the focus registry.
+pub fn tab_rects(area: Rect, labels: &[&str], reveal: usize) -> Vec<Rect> {
+    let widths: Vec<_> = labels
+        .iter()
+        .map(|label| text_width(label).saturating_add(3))
+        .collect();
+    let total: usize = widths.iter().sum();
+    if total <= area.width as usize && area.height < 3 {
+        let measured: Vec<_> = labels.iter().map(|label| format!("[{label}] ")).collect();
+        let labels: Vec<_> = measured.iter().map(String::as_str).collect();
+        return action_rects(area, &labels)
+            .into_iter()
+            .map(|mut rect| {
+                rect.width = rect.width.saturating_sub(1);
+                rect
+            })
+            .collect();
+    }
+    if total <= area.width as usize && area.height >= 3 {
+        return (0..labels.len())
+            .map(|index| {
+                let start = area.width as usize * index / labels.len().max(1);
+                let end = area.width as usize * (index + 1) / labels.len().max(1);
+                Rect::new(
+                    area.x + start as u16,
+                    area.y,
+                    (end - start) as u16,
+                    area.height,
+                )
+            })
+            .collect();
+    }
+    let end: usize = widths.iter().take(reveal.saturating_add(1)).sum();
+    let offset = end.saturating_sub(area.width as usize);
+    let mut start = 0;
+    widths
+        .into_iter()
+        .map(|width| {
+            let top = start.max(offset);
+            let bottom = (start + width).min(offset + area.width as usize);
+            start += width;
+            if bottom <= top {
+                Rect::default()
+            } else {
+                Rect::new(
+                    area.x + (top - offset) as u16,
+                    area.y,
+                    (bottom - top).saturating_sub(1) as u16,
+                    area.height,
+                )
+            }
+        })
+        .collect()
+}
+
 /// AnalyticsCard owns the plain border and one cell of inner padding.
 pub fn analytics_card(frame: &mut ratatui::Frame, area: Rect, title: &str, focused: bool) -> Rect {
     let block = super::theme::panel(title).border_style(if focused {

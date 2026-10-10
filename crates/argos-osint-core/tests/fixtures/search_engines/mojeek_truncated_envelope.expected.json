@@ -1,0 +1,9 @@
+{
+  "tool": "firecrawl_mojeek_search",
+  "query": "partial body",
+  "limit": 5,
+  "outcome": "response_too_large",
+  "items": 0,
+  "accepted": 0,
+  "note": "A truncated envelope must never be parsed as a valid empty page."
+}

@@ -223,6 +223,11 @@ pub fn canonical_tool_id(id: &str) -> &str {
 }
 
 /// Canonical cache key identity for a tool and its arguments.
+///
+/// The three named engine tools use identity v2 (spec §9 fix 7): the parser
+/// version, the fetch contract version and the canonical query/locale/limit are
+/// part of the key, so a parser upgrade invalidates legacy v1 entries without
+/// deleting them and a reworded query never reuses another query's page.
 pub fn cache_identity(tool_id: &str, inputs: &serde_json::Value) -> String {
     let canonical = canonical_tool_id(tool_id);
     if canonical == "whoxy_whois_history" {
@@ -230,6 +235,11 @@ pub fn cache_identity(tool_id: &str, inputs: &serde_json::Value) -> String {
             let normalized = whoxy::normalize_domain(domain)
                 .unwrap_or_else(|_| domain.trim().to_ascii_lowercase());
             return format!("{canonical}:v1:{{\"domain\":\"{normalized}\"}}");
+        }
+    }
+    if search_engines::is_named_engine_tool(canonical) {
+        if let Ok(serp) = serp_request_for(canonical, inputs) {
+            return format!("{canonical}:v2:{}", search_engines::cache_fragment(&serp));
         }
     }
     let serialized = serde_json::to_string(inputs).unwrap_or_else(|_| inputs.to_string());
@@ -1082,11 +1092,181 @@ fn sociavault_card(value: &Value) -> Value {
         "links": links,
     })
 }
+// ---------------------------------------------------------------------------
+// Named search-engine SERP handling (spec §9)
+// ---------------------------------------------------------------------------
+
+/// Requested organic results for one named SERP query: a single page of five.
+const NAMED_SERP_LIMIT: usize = 5;
+
+/// Body cap for every tool that is not a named search engine. The named SERP
+/// engines read the larger [`search_engines::SERP_MAX_BODY_BYTES`] instead.
+const DEFAULT_BODY_BYTES: usize = 1_000_000;
+
+/// Wait before the single allowed SERP recovery fetch (spec §9 fix 6). The sleep
+/// is cancelled when the enclosing task is dropped, so a shutdown never spends an
+/// extra engine request.
+const SERP_RECOVERY_WAIT: Duration = Duration::from_secs(1);
+
+/// The `limit` one named SERP query asks for: the optional `limit` input, bounded
+/// to [`NAMED_SERP_LIMIT`], else the default page of five.
+fn named_serp_limit(inputs: &Value) -> usize {
+    inputs
+        .get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(NAMED_SERP_LIMIT)
+        .clamp(1, NAMED_SERP_LIMIT)
+}
+
+/// Request context for a named engine query, carried from the ORIGINAL tool input
+/// (spec §9 fix 2). The query is read once, before any redirect, so a redirected
+/// URL can never rewrite what was asked.
+fn serp_request_for(tool_id: &str, inputs: &Value) -> Result<search_engines::SerpRequest> {
+    let query = str_arg(inputs, "query")?;
+    search_engines::SerpRequest::for_tool(tool_id, query, named_serp_limit(inputs))
+}
+
+/// Body cap for one tool: a named SERP engine reads up to 8 MiB, everything else
+/// keeps the flat 1 MB limit.
+fn body_cap(id: &str) -> usize {
+    if search_engines::is_named_engine_tool(id) {
+        search_engines::SERP_MAX_BODY_BYTES
+    } else {
+        DEFAULT_BODY_BYTES
+    }
+}
+
+/// Terminal status for one typed SERP outcome. Only a verified zero reaches
+/// `no_results`: an unrecognised page, a challenge wall, a rate limit, a provider
+/// failure and an oversize body are all failures (spec §9 fix 1).
+fn serp_status(outcome: search_engines::SerpOutcome) -> &'static str {
+    use search_engines::SerpOutcome;
+    match outcome {
+        SerpOutcome::Valid => "completed",
+        SerpOutcome::VerifiedZero => "completed",
+        SerpOutcome::Challenge | SerpOutcome::Consent => "blocked",
+        SerpOutcome::RateLimited => "rate_limited",
+        SerpOutcome::ParserMismatch
+        | SerpOutcome::UpstreamFailure
+        | SerpOutcome::ResponseTooLarge => "failed",
+    }
+}
+
+/// Machine reason for one typed SERP failure. Never the words "no results": the
+/// outcome says exactly what the engine or the provider did.
+fn serp_reason(outcome: search_engines::SerpOutcome) -> &'static str {
+    use search_engines::SerpOutcome;
+    match outcome {
+        SerpOutcome::Challenge => "serp_challenge: engine served a challenge page",
+        SerpOutcome::Consent => "serp_consent: engine served a consent page",
+        SerpOutcome::RateLimited => "serp_rate_limited: engine rate limited the request",
+        SerpOutcome::ParserMismatch => {
+            "serp_parser_mismatch: engine page layout not recognised, result count unknown"
+        }
+        SerpOutcome::UpstreamFailure => "serp_upstream_failure: provider or engine request failed",
+        SerpOutcome::ResponseTooLarge => {
+            "serp_response_too_large: engine response exceeded the body bound"
+        }
+        SerpOutcome::Valid | SerpOutcome::VerifiedZero => "serp_ok",
+    }
+}
+
+/// Observations for a named SERP query whose body never reached the parser: over
+/// the body bound, or a provider HTTP failure. The typed outcome is always
+/// present, so the payload can never be read as a verified zero.
+fn serp_unparsed_observations(
+    serp: Option<&search_engines::SerpRequest>,
+    outcome: search_engines::SerpOutcome,
+    detail: &str,
+) -> Value {
+    let empty: Vec<search_engines::EngineSearchResult> = Vec::new();
+    json!({
+        "engine": serp.map(|req| req.engine.clone()).unwrap_or_default(),
+        "query": serp.map(|req| req.query.clone()).unwrap_or_default(),
+        "serp_url": serp.map(|req| req.serp_url.clone()).unwrap_or_default(),
+        "items": empty.clone(),
+        "results": empty,
+        "outcome": outcome.as_str(),
+        "result_count": 0,
+        "usable_results": 0,
+        "recoverable": false,
+        "parser_version": search_engines::PARSER_VERSION,
+        "parser_input": search_engines::ParserInput::Missing.as_str(),
+        "status_region": "unparsed",
+        "provider_error": clip_text(detail),
+        "evidence_form": "serp",
+    })
+}
+
+/// Typed observations for one parsed named SERP page. The outcome is a machine
+/// field, never inferred from an empty array: only `VerifiedZero` proves the
+/// engine returned nothing, and `ParserMismatch` proves nothing at all.
+fn serp_observations(req: &search_engines::SerpRequest, raw: &Value) -> Result<(Value, bool)> {
+    let parsed = search_engines::parse_serp_response(req, raw)?;
+    let search_engines::SerpParse {
+        items,
+        outcome,
+        diagnostics,
+    } = parsed;
+    let usable = items.len();
+    let truncated = matches!(outcome, search_engines::SerpOutcome::ResponseTooLarge);
+    // Bounded recovery is decided against the real diagnostics (spec §9 fix 6):
+    // a links-only payload would re-request the same shape, so it is not retried.
+    let recoverable = search_engines::retry_allowed(outcome, &diagnostics);
+    let rejections = diagnostics
+        .rejections
+        .iter()
+        .map(|(reason, count)| json!({"reason": reason, "count": count}))
+        .collect::<Vec<_>>();
+    Ok((
+        json!({
+            "engine": req.engine.clone(),
+            "query": req.query.clone(),
+            "serp_url": req.serp_url.clone(),
+            "items": items.clone(),
+            "results": items,
+            "outcome": outcome.as_str(),
+            "result_count": usable,
+            "usable_results": usable,
+            "recoverable": recoverable,
+            "parser_version": search_engines::PARSER_VERSION,
+            "fetch_contract_version": search_engines::FETCH_CONTRACT_VERSION,
+            "parser_input": diagnostics.parser_input.as_str(),
+            "target_status": diagnostics.target_status,
+            "final_url": diagnostics.final_url,
+            "requested_url": diagnostics.requested_url,
+            "input_bytes": diagnostics.input_bytes,
+            "dom_candidates": diagnostics.dom_candidates,
+            "status_region": diagnostics.status_region,
+            "rejections": rejections,
+            "provider_warning": diagnostics.provider_warning,
+            "provider_error": diagnostics.provider_error,
+            "evidence_form": "serp",
+        }),
+        truncated,
+    ))
+}
+
+/// Call sites that carry no request context: every tool except the three named
+/// search engines, which pass their original request to [`parse_observations_with`].
+#[cfg(test)]
 fn parse_observations(
     id: &str,
     raw: &str,
     content_type: &str,
     ndjson: bool,
+) -> Result<(Value, bool)> {
+    parse_observations_with(id, raw, content_type, ndjson, None)
+}
+
+/// Named SERP tools pass the original request so the parser is not rebuilt from a redirect.
+fn parse_observations_with(
+    id: &str,
+    raw: &str,
+    content_type: &str,
+    ndjson: bool,
+    serp: Option<&search_engines::SerpRequest>,
 ) -> Result<(Value, bool)> {
     let id = canonical_tool_id(id);
     ensure!(
@@ -1177,7 +1357,12 @@ fn parse_observations(
         id,
         "firecrawl_google_search" | "firecrawl_yandex_search" | "firecrawl_mojeek_search"
     ) {
-        return search_engines::parse_serp_response(id, &v, "", 5);
+        // The outcome contract is typed: an unrecognised page is a parser
+        // mismatch, never a zero (spec §9 fix 1).
+        let Some(req) = serp else {
+            return Err(anyhow!("named engine request context is missing"));
+        };
+        return serp_observations(req, &v);
     }
     if id == "firecrawl_scrape" {
         if v.get("success").and_then(Value::as_bool) == Some(false) {
@@ -1291,7 +1476,23 @@ fn parse_observations(
     }
     Ok((v, false))
 }
-fn no_results(id: &str, value: &Value) -> bool {
+/// True when the observations prove the tool genuinely returned nothing.
+///
+/// A named search engine is deliberately stricter (spec §9 fix 1): only a
+/// recognized engine status region with a supported phrase is a verified zero.
+/// An empty array never is.
+pub(crate) fn no_results(id: &str, value: &Value) -> bool {
+    // Spec §9 fix 1: an empty array alone is never proof of zero for a named
+    // search engine. Only a recognized engine status region with a supported
+    // phrase becomes a verified zero; every other outcome is a failure or a
+    // block, classified before the generic rules below.
+    if search_engines::is_named_engine_tool(id) {
+        return value
+            .get("outcome")
+            .and_then(Value::as_str)
+            .and_then(search_engines::SerpOutcome::parse)
+            .is_some_and(|outcome| outcome == search_engines::SerpOutcome::VerifiedZero);
+    }
     if value.is_null() || value.as_array().is_some_and(Vec::is_empty) {
         return true;
     }
@@ -1358,13 +1559,6 @@ fn no_results(id: &str, value: &Value) -> bool {
         }
         _ => {}
     }
-    if matches!(
-        id,
-        "firecrawl_google_search" | "firecrawl_yandex_search" | "firecrawl_mojeek_search"
-    ) {
-        return value.get("outcome").and_then(Value::as_str) == Some("zero_results")
-            || empty("items") && empty("results");
-    }
     if id == "firecrawl_scrape" {
         return value
             .get("markdown")
@@ -1423,6 +1617,98 @@ fn no_results(id: &str, value: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some_and(Vec::is_empty)
 }
+
+// ---------------------------------------------------------------------------
+// Best-effort tool telemetry (spec §10)
+// ---------------------------------------------------------------------------
+
+/// Writes one telemetry event and forgets any failure. Instrumentation never
+/// fails a tool run, and a tool run never creates a state directory as a side
+/// effect of trying to observe itself.
+fn note_telemetry(event: crate::telemetry::TelemetryEvent) {
+    let path = crate::paths::db_path();
+    if !path.exists() {
+        return;
+    }
+    let _ = crate::telemetry::record(&path, &event);
+}
+
+/// One remote tool request or poll. Wire requests are counted separately from the
+/// logical invocation, so a retry or a recovery fetch is never hidden inside a
+/// single row.
+fn note_wire_request(id: &str, request: u32, status: u16, duration_ms: i64) {
+    let event = crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::ToolWireRequest)
+        .tool(id)
+        .provider(primary_provider(id).unwrap_or_default())
+        // The executor never sees the prompt that asked, so the trigger is
+        // unknown rather than inferred.
+        .trigger(crate::telemetry::Trigger::Unknown)
+        .outcome(if (200..400).contains(&status) {
+            "http_ok"
+        } else {
+            "http_error"
+        })
+        .reason(format!("http_{status}"))
+        .duration_ms(Some(duration_ms))
+        .payload(json!({"request": request, "http_status": status}));
+    note_telemetry(event);
+}
+
+/// Terminal outcome class for one typed SERP outcome, so the dashboard's
+/// completion, block and mismatch groupings cover the named engines too.
+fn serp_tool_outcome(outcome: search_engines::SerpOutcome) -> crate::telemetry::ToolOutcome {
+    use crate::telemetry::ToolOutcome;
+    use search_engines::SerpOutcome;
+    match outcome {
+        SerpOutcome::Valid => ToolOutcome::CompletedNonEmpty,
+        SerpOutcome::VerifiedZero => ToolOutcome::CompletedVerifiedZero,
+        SerpOutcome::Challenge | SerpOutcome::Consent => ToolOutcome::Blocked,
+        SerpOutcome::RateLimited => ToolOutcome::Blocked,
+        SerpOutcome::ParserMismatch => ToolOutcome::ParserMismatch,
+        SerpOutcome::UpstreamFailure | SerpOutcome::ResponseTooLarge => ToolOutcome::Failed,
+    }
+}
+
+/// One named-engine query with its typed outcome, usable result count, parser
+/// version and cache-hit flag (spec §10).
+fn note_engine_query(
+    req: &search_engines::SerpRequest,
+    observations: &Value,
+    duration_ms: Option<i64>,
+    cache_hit: bool,
+) {
+    let Some(outcome) = observations
+        .get("outcome")
+        .and_then(Value::as_str)
+        .and_then(search_engines::SerpOutcome::parse)
+    else {
+        return;
+    };
+    let usable = observations
+        .get("usable_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let event = crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::ToolEngineQuery)
+        .tool(&req.engine_tool)
+        .provider("firecrawl")
+        .engine(&req.engine)
+        .trigger(crate::telemetry::Trigger::Unknown)
+        .outcome(outcome.as_str())
+        // The parser version is a rollup dimension, so a parser upgrade is visible
+        // in the dashboard instead of silently rewriting history.
+        .reason(search_engines::PARSER_VERSION)
+        .duration_ms(duration_ms)
+        .payload(json!({
+            "parser_version": search_engines::PARSER_VERSION,
+            "fetch_contract_version": search_engines::FETCH_CONTRACT_VERSION,
+            "usable_results": usable,
+            "cache_hit": cache_hit,
+            "limit": req.limit,
+            "tool_outcome": serp_tool_outcome(outcome).as_str(),
+        }));
+    note_telemetry(event);
+}
+
 fn url(base: &str, path: &[&str], query: &[(&str, &str)]) -> Result<Url> {
     let mut u = Url::parse(base)?;
     {
@@ -2695,6 +2981,13 @@ impl Executor {
         };
         // A keyed tool with neither account fails here, before any provider request.
         provider_credential(id, keys)?;
+        // Original request context for a named SERP query, read once from the
+        // original tool input before any redirect (spec §9 fix 2).
+        let serp = if search_engines::is_named_engine_tool(id) {
+            Some(serp_request_for(id, &inputs)?)
+        } else {
+            None
+        };
         let req = request(id, &inputs)?;
         let host = req.url.host_str().unwrap_or("").to_string();
         if let Some(locked) = providers::locked_host(id) {
@@ -2727,14 +3020,19 @@ impl Executor {
             let url = req.url.clone();
             (url, None, None)
         };
-        let mut attempts = 0;
+        let mut attempts = 0u32;
         let mut redirects = 0;
         let mut verifying = 0;
+        // One fresh same-engine SERP retry is counted here when the parser asks for it.
+        let mut serp_recovered = false;
         let headers = request_headers(id, user_agent);
         // NewsAPI and CourtListener 429s are not retried: their daily quotas are tiny.
         let retry_429 = news_legal::provider(id).is_none() && atlas_news::provider(id).is_none();
+        // A named SERP engine reads a larger body than every other tool.
+        let cap = body_cap(id);
         loop {
             attempts += 1;
+            let sent_at = crate::telemetry::Measured::start();
             let mut builder = if let Some(body) = &req.body {
                 self.client.post(url.clone()).json(body)
             } else if let Some(form) = &req.form {
@@ -2812,7 +3110,7 @@ impl Executor {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_string();
-            let (raw, truncated) = read_body(response, 1_000_000).await?;
+            let (raw, truncated) = read_body(response, cap).await?;
             let raw = redact(raw, &credential);
             let credits_reported = reported_credits(&raw);
             let mut result = ToolResult {
@@ -2829,11 +3127,49 @@ impl Executor {
                 credits_charged: 0,
                 credits_reported,
             };
+            // One wire attempt, counted separately from the logical invocation.
+            note_wire_request(id, attempts, status.as_u16(), sent_at.elapsed_ms());
+            // A truncated SERP body is never parsed as a valid empty page
+            // (spec §9 fix 6): the envelope cut mid-payload proves nothing.
+            if truncated && serp.is_some() {
+                let outcome = search_engines::SerpOutcome::ResponseTooLarge;
+                result.observations = serp_unparsed_observations(
+                    serp.as_ref(),
+                    outcome,
+                    &format!(
+                        "engine response exceeded the {} byte body bound",
+                        search_engines::SERP_MAX_BODY_BYTES
+                    ),
+                );
+                result.status = serp_status(outcome).into();
+                result.error = Some(serp_reason(outcome).to_string());
+                redact_key(&mut result, &credential);
+                if let Some(req) = serp.as_ref() {
+                    note_engine_query(req, &result.observations, None, false);
+                }
+                return Ok(result);
+            }
             if status.as_u16() == 451 && id.starts_with("hunter_") {
                 claimed_email(&mut result);
                 return Ok(result);
             }
             if status.as_u16() == 404 {
+                // A provider 404 is a failure for the named engines, never a
+                // `no_results` (spec §9 fix 1). Every other tool keeps its
+                // 404-is-empty reading.
+                if let Some(req) = serp.as_ref() {
+                    let outcome = search_engines::SerpOutcome::UpstreamFailure;
+                    result.observations = serp_unparsed_observations(
+                        Some(req),
+                        outcome,
+                        &format!("provider returned HTTP {status}"),
+                    );
+                    result.status = serp_status(outcome).into();
+                    result.error = Some(serp_reason(outcome).to_string());
+                    redact_key(&mut result, &credential);
+                    note_engine_query(req, &result.observations, None, false);
+                    return Ok(result);
+                }
                 result.status = "no_results".into();
                 return Ok(result);
             }
@@ -2844,6 +3180,25 @@ impl Executor {
                     "failed"
                 }
                 .into();
+                if let Some(req) = serp.as_ref() {
+                    // Behind a named engine a provider HTTP error is a failure with
+                    // a typed outcome, never an unexplained empty page.
+                    let outcome = if status.as_u16() == 429 {
+                        search_engines::SerpOutcome::RateLimited
+                    } else {
+                        search_engines::SerpOutcome::UpstreamFailure
+                    };
+                    result.observations = serp_unparsed_observations(
+                        Some(req),
+                        outcome,
+                        &format!("provider returned HTTP {status}"),
+                    );
+                    result.status = serp_status(outcome).into();
+                    result.error = Some(serp_reason(outcome).to_string());
+                    redact_key(&mut result, &credential);
+                    note_engine_query(req, &result.observations, None, false);
+                    return Ok(result);
+                }
                 result.error = Some(
                     news_legal::http_error(id, status.as_u16(), &result.raw)
                         .or_else(|| atlas_news::http_error(id, status.as_u16(), &result.raw))
@@ -2870,7 +3225,7 @@ impl Executor {
             let mut partial = false;
             if let Some(base) = req.poll {
                 match self
-                    .poll_job(base, &result.raw, &credential, def.timeout_seconds)
+                    .poll_job(id, base, &result.raw, &credential, def.timeout_seconds)
                     .await
                 {
                     Ok((raw, done)) => {
@@ -2885,7 +3240,9 @@ impl Executor {
                     }
                 }
             }
-            match parse_observations(id, &result.raw, &content_type, req.ndjson) {
+            let mut serp_retry = false;
+            match parse_observations_with(id, &result.raw, &content_type, req.ndjson, serp.as_ref())
+            {
                 Ok((value, cut)) => {
                     result.observations = value;
                     result.truncated |= cut;
@@ -2907,6 +3264,40 @@ impl Executor {
                             }
                         }
                     }
+                    if let Some(req) = serp.as_ref() {
+                        // Typed status mapping (spec §9 fix 1). An empty item list
+                        // never reaches `no_results` on its own.
+                        let outcome = result
+                            .observations
+                            .get("outcome")
+                            .and_then(Value::as_str)
+                            .and_then(search_engines::SerpOutcome::parse);
+                        if let Some(outcome) = outcome {
+                            result.status = serp_status(outcome).into();
+                            if outcome.is_failure() {
+                                result.error = Some(serp_reason(outcome).to_string());
+                                redact_key(&mut result, &credential);
+                            }
+                        }
+                        // Bounded recovery (spec §9 fix 6): exactly one fresh
+                        // same-engine fetch, for a real page the parser did not
+                        // recognise, still inside this tool's request allowance.
+                        // Never for a challenge, a consent wall, a rate limit, a
+                        // links-only payload or an oversize body.
+                        serp_retry = !serp_recovered
+                            && attempts < 3
+                            && result
+                                .observations
+                                .get("recoverable")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                        note_engine_query(
+                            req,
+                            &result.observations,
+                            Some(sent_at.elapsed_ms()),
+                            false,
+                        );
+                    }
                 }
                 Err(e) => {
                     result.status = if e.to_string().contains("quota")
@@ -2918,6 +3309,16 @@ impl Executor {
                     }
                     .into();
                     result.error = Some(e.to_string());
+                    if let Some(req) = serp.as_ref() {
+                        // No parsable envelope is a provider failure for a named
+                        // engine, never an empty result set.
+                        let outcome = search_engines::SerpOutcome::UpstreamFailure;
+                        result.observations =
+                            serp_unparsed_observations(Some(req), outcome, &e.to_string());
+                        result.status = serp_status(outcome).into();
+                        result.error = Some(serp_reason(outcome).to_string());
+                        note_engine_query(req, &result.observations, None, false);
+                    }
                     redact_key(&mut result, &credential);
                     if using_primary
                         && !switched
@@ -2935,6 +3336,12 @@ impl Executor {
                     }
                     return Ok(result);
                 }
+            }
+            if serp_retry {
+                serp_recovered = true;
+                // Bounded, cancellable wait before the one recovery fetch.
+                tokio::time::sleep(SERP_RECOVERY_WAIT).await;
+                continue;
             }
             annotate(id, &inputs, &mut result);
             if partial {
@@ -2955,6 +3362,7 @@ impl Executor {
     /// last status payload is returned with `false`, so the call is recorded as partial.
     async fn poll_job(
         &self,
+        id: &str,
         base: &'static str,
         started: &str,
         credential: &Option<(reqwest::header::HeaderName, String)>,
@@ -2963,7 +3371,9 @@ impl Executor {
         let status_url = job_status_url(base, started)?;
         let deadline = std::time::Instant::now() + Duration::from_secs(timeout);
         let mut last = String::new();
+        let mut polls = 0u32;
         while std::time::Instant::now() < deadline {
+            polls += 1;
             tokio::time::sleep(Duration::from_secs(2)).await;
             let mut builder = self
                 .client
@@ -2972,10 +3382,13 @@ impl Executor {
             if let Some((name, value)) = credential {
                 builder = builder.header(name, value);
             }
+            let sent_at = crate::telemetry::Measured::start();
             let Ok(response) = builder.send().await else {
                 continue;
             };
             let code = response.status();
+            // Every poll is a wire request, counted separately from the POST.
+            note_wire_request(id, polls, code.as_u16(), sent_at.elapsed_ms());
             if code.as_u16() == 429 || code.is_server_error() {
                 continue;
             }
@@ -3146,6 +3559,7 @@ mod tests {
         );
     }
 
+    use super::search_engines::{ParserInput, SerpOutcome};
     use super::*;
     #[test]
     fn a_claimed_email_keeps_no_person_data() {
@@ -3569,5 +3983,436 @@ mod tests {
             projected.observations["snapshots"][0]["query_time"],
             "2016-01-01 00:00:00"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Named SERP outcome contract (spec §9)
+    // -----------------------------------------------------------------------
+
+    /// A Google SERP envelope with `dom` as the fetched page.
+    fn google_envelope(dom: &str, serp_url: &str) -> Value {
+        json!({
+            "success": true,
+            "data": {
+                "rawHtml": dom,
+                "links": ["https://link-only.example.org/"],
+                "metadata": {"sourceURL": serp_url, "statusCode": 200}
+            }
+        })
+    }
+
+    fn google_query() -> search_engines::SerpRequest {
+        search_engines::SerpRequest::for_tool("firecrawl_google_search", "rust ownership", 5)
+            .expect("named engine request")
+    }
+
+    fn parse_google(dom: &str) -> Value {
+        let req = google_query();
+        let raw = google_envelope(dom, &req.serp_url).to_string();
+        let (observations, truncated) = parse_observations_with(
+            "firecrawl_google_search",
+            &raw,
+            "application/json",
+            false,
+            Some(&req),
+        )
+        .unwrap();
+        assert!(!truncated, "a small page is never a truncated one");
+        observations
+    }
+
+    /// A page nobody recognises proves nothing. It is a parser mismatch, never a
+    /// `no_results`, and never a result that may be cached as a zero.
+    #[test]
+    fn unknown_serp_html_is_not_no_results() {
+        let observations = parse_google(
+            "<!DOCTYPE html><html><body><div class=\"unknown-drifted-shape\">\
+             <a href=\"https://drift.example.org/x\">link only</a></div></body></html>",
+        );
+        assert_eq!(
+            observations["outcome"].as_str(),
+            Some("parser_mismatch"),
+            "{observations}"
+        );
+        assert_eq!(observations["usable_results"], 0);
+        assert_eq!(observations["parser_input"], "raw_html");
+        assert!(
+            observations["results"]
+                .as_array()
+                .is_some_and(|rows| rows.is_empty()),
+            "no card is invented from an unrecognised page"
+        );
+        assert!(
+            !no_results("firecrawl_google_search", &observations),
+            "an unrecognised page must never be cached or reported as a zero"
+        );
+        assert_eq!(serp_status(SerpOutcome::ParserMismatch), "failed");
+        let reason = serp_reason(SerpOutcome::ParserMismatch);
+        assert!(reason.contains("not recognised"), "{reason}");
+        assert!(
+            !reason.to_ascii_lowercase().contains("no result"),
+            "a machine reason, not the words \"no results\": {reason}"
+        );
+        let result = ToolResult {
+            tool_id: "firecrawl_google_search".into(),
+            inputs: json!({"query": "rust ownership"}),
+            status: "failed".into(),
+            source_url: google_query().serp_url,
+            retrieved_at: "2026-10-09T00:00:00Z".into(),
+            observations: observations.clone(),
+            raw: String::new(),
+            error: Some(reason.to_string()),
+            cached: false,
+            truncated: false,
+            credits_charged: 1,
+            credits_reported: None,
+        };
+        assert_eq!(
+            classify_output_quality(&result),
+            OutputQuality::ParserMismatch
+        );
+    }
+
+    /// Only a recognized engine status region with a supported phrase and zero
+    /// accepted cards is a verified zero (spec §9 fix 1).
+    #[test]
+    fn verified_zero_maps_to_no_results() {
+        let observations = parse_google(
+            "<!DOCTYPE html><html><body><div id=\"main\">\
+             <p>Your search - rust ownership - did not match any documents.</p>\
+             </div></body></html>",
+        );
+        assert_eq!(
+            observations["outcome"].as_str(),
+            Some("verified_zero"),
+            "{observations}"
+        );
+        assert!(no_results("firecrawl_google_search", &observations));
+        assert_eq!(serp_status(SerpOutcome::VerifiedZero), "completed");
+        let result = ToolResult {
+            tool_id: "firecrawl_google_search".into(),
+            inputs: json!({"query": "rust ownership"}),
+            status: "completed".into(),
+            source_url: google_query().serp_url,
+            retrieved_at: "2026-10-09T00:00:00Z".into(),
+            observations,
+            raw: String::new(),
+            error: None,
+            cached: false,
+            truncated: false,
+            credits_charged: 1,
+            credits_reported: None,
+        };
+        assert_eq!(
+            classify_output_quality(&result),
+            OutputQuality::NoResults,
+            "a recognized status region is a zero"
+        );
+    }
+
+    /// A real SERP with a card is `Valid`, gets a rank and a title, and is not a
+    /// zero even though the engine's internal links are dropped.
+    #[test]
+    fn valid_serp_cards_are_not_a_zero() {
+        let observations = parse_google(
+            "<!DOCTYPE html><html><body><div class=\"g\">\
+             <a href=\"https://alpha.example.org/docs\"><h3>Alpha heading</h3></a>\
+             <div class=\"VwiC3b\">Alpha snippet text.</div></div></body></html>",
+        );
+        assert_eq!(observations["outcome"].as_str(), Some("valid"));
+        assert_eq!(observations["usable_results"], 1);
+        assert_eq!(observations["results"][0]["title"], "Alpha heading");
+        assert_eq!(observations["results"][0]["snippet"], "Alpha snippet text.");
+        assert_eq!(observations["results"][0]["rank"], 1);
+        assert_eq!(observations["recoverable"], false);
+        assert!(!no_results("firecrawl_google_search", &observations));
+    }
+
+    /// Cache identity v2 carries the parser and fetch contract versions and the
+    /// canonical query, so a parser upgrade or a reworded query can never reuse a
+    /// legacy entry (spec §9 fix 7).
+    #[test]
+    fn named_serp_cache_identity_includes_parser_version() {
+        let a = cache_identity(
+            "firecrawl_google_search",
+            &json!({"query": "Rust  Ownership"}),
+        );
+        let b = cache_identity(
+            "firecrawl_google_search",
+            &json!({"query": "async rust traits"}),
+        );
+        let same_words = cache_identity(
+            "firecrawl_google_search",
+            &json!({"query": "rust   ownership"}),
+        );
+        assert_ne!(a, b, "two different queries must not share a cache entry");
+        assert!(!a.contains("Rust"), "the canonical query is lowercased");
+        assert!(a.contains("rust ownership"), "{a}");
+        assert_eq!(
+            a, same_words,
+            "whitespace collapses into the canonical query"
+        );
+        assert!(a.contains(":v2:"), "{a}");
+        assert!(
+            a.contains(search_engines::PARSER_VERSION),
+            "{a} must carry the parser version"
+        );
+        assert!(
+            a.contains(search_engines::FETCH_CONTRACT_VERSION),
+            "{a} must carry the fetch contract version"
+        );
+        assert!(a.contains("named_serp"), "{a}");
+        assert!(b.contains("async rust traits"), "{b}");
+        // The v2 identity is the tool, the version pair and the canonical
+        // query/locale/limit fragment, so a parser upgrade invalidates legacy v1
+        // entries without deleting them.
+        let fragment = search_engines::cache_fragment(
+            &serp_request_for(
+                "firecrawl_google_search",
+                &json!({"query": "rust ownership"}),
+            )
+            .expect("named engine request"),
+        );
+        assert_eq!(a, format!("firecrawl_google_search:v2:{fragment}"));
+        assert!(
+            fragment.starts_with(&format!(
+                "serp:{}:{}",
+                search_engines::PARSER_VERSION,
+                search_engines::FETCH_CONTRACT_VERSION
+            )),
+            "{fragment}"
+        );
+        assert!(fragment.ends_with(":5"), "{fragment}: the bounded limit");
+        // A legacy v1 identity never matches, so old entries are never reused.
+        assert_ne!(
+            a,
+            format!("firecrawl_google_search:v1:{{\"query\":\"rust ownership\"}}")
+        );
+        // Every other tool keeps the generic v1 path.
+        let generic = cache_identity("firecrawl_search", &json!({"query": "rust ownership"}));
+        assert!(generic.contains(":v1:"), "{generic}");
+        assert!(!generic.contains("serp:"), "{generic}");
+        let whoxy = cache_identity("whoxy_whois_history", &json!({"domain": "Example.ORG."}));
+        assert_eq!(
+            whoxy,
+            cache_identity("whoxy_whois_history", &json!({"domain": "example.org"})),
+            "the whoxy special case is unchanged"
+        );
+        assert!(whoxy.contains(":v1:"), "{whoxy}");
+    }
+
+    /// A named SERP body may be 8 MiB; a 9 MiB response is refused instead of
+    /// being parsed as a valid empty page (spec §9 fix 6).
+    #[test]
+    fn named_serp_body_cap_refuses_an_oversize_response() {
+        assert_eq!(search_engines::SERP_MAX_BODY_BYTES, 8 * 1024 * 1024);
+        assert_eq!(
+            body_cap("firecrawl_google_search"),
+            search_engines::SERP_MAX_BODY_BYTES
+        );
+        assert_eq!(
+            body_cap("firecrawl_yandex_search"),
+            search_engines::SERP_MAX_BODY_BYTES
+        );
+        assert_eq!(
+            body_cap("firecrawl_mojeek_search"),
+            search_engines::SERP_MAX_BODY_BYTES
+        );
+        // Every other tool keeps the flat 1 MB limit.
+        assert_eq!(body_cap("firecrawl_search"), 1_000_000);
+        assert_eq!(body_cap("firecrawl_scrape"), 1_000_000);
+        assert_eq!(body_cap("crtsh_certificates"), 1_000_000);
+
+        let req = google_query();
+        let huge = "x".repeat(search_engines::SERP_MAX_BODY_BYTES + 64 * 1024);
+        assert!(huge.len() > search_engines::SERP_MAX_BODY_BYTES);
+        let raw = google_envelope(&huge, &req.serp_url).to_string();
+        let (observations, _) = parse_observations_with(
+            "firecrawl_google_search",
+            &raw,
+            "application/json",
+            false,
+            Some(&req),
+        )
+        .unwrap();
+        assert_eq!(
+            observations["outcome"].as_str(),
+            Some("response_too_large"),
+            "{:?}",
+            observations["outcome"]
+        );
+        assert!(
+            !no_results("firecrawl_google_search", &observations),
+            "an oversize body is a failure, never a verified zero"
+        );
+        assert_eq!(
+            serp_status(SerpOutcome::ResponseTooLarge),
+            "failed",
+            "an oversize body must fail the call"
+        );
+        // Everything else still parses below the bound.
+        let small = "x".repeat(4096);
+        let raw = google_envelope(&small, &req.serp_url).to_string();
+        let (observations, _) = parse_observations_with(
+            "firecrawl_google_search",
+            &raw,
+            "application/json",
+            false,
+            Some(&req),
+        )
+        .unwrap();
+        assert_eq!(observations["outcome"].as_str(), Some("parser_mismatch"));
+    }
+
+    /// Every typed outcome maps to exactly one status, one machine reason and one
+    /// terminal outcome class (spec §9 fix 1). Nothing unexpected may become
+    /// `no_results`.
+    #[test]
+    fn every_typed_outcome_maps_to_one_status_reason_and_class() {
+        use crate::telemetry::ToolOutcome;
+        // `serp_status`, `serp_reason` and `serp_tool_outcome` each match over
+        // every `SerpOutcome` variant, so adding one breaks this build.
+        let wanted: [(SerpOutcome, &str, &str, ToolOutcome); 8] = [
+            (
+                SerpOutcome::Valid,
+                "completed",
+                "serp_ok",
+                ToolOutcome::CompletedNonEmpty,
+            ),
+            (
+                SerpOutcome::VerifiedZero,
+                "completed",
+                "serp_ok",
+                ToolOutcome::CompletedVerifiedZero,
+            ),
+            (
+                SerpOutcome::Challenge,
+                "blocked",
+                "serp_challenge",
+                ToolOutcome::Blocked,
+            ),
+            (
+                SerpOutcome::Consent,
+                "blocked",
+                "serp_consent",
+                ToolOutcome::Blocked,
+            ),
+            (
+                SerpOutcome::RateLimited,
+                "rate_limited",
+                "serp_rate_limited",
+                ToolOutcome::Blocked,
+            ),
+            (
+                SerpOutcome::ParserMismatch,
+                "failed",
+                "serp_parser_mismatch",
+                ToolOutcome::ParserMismatch,
+            ),
+            (
+                SerpOutcome::UpstreamFailure,
+                "failed",
+                "serp_upstream_failure",
+                ToolOutcome::Failed,
+            ),
+            (
+                SerpOutcome::ResponseTooLarge,
+                "failed",
+                "serp_response_too_large",
+                ToolOutcome::Failed,
+            ),
+        ];
+        for (outcome, status, reason, class) in wanted {
+            assert_eq!(serp_status(outcome), status, "{outcome:?}");
+            let said = serp_reason(outcome);
+            // A success is a bare machine token; a failure is `token: detail`,
+            // so the reason is always the leading field. It never spells out
+            // "no results": the outcome already says what the engine did.
+            assert!(
+                said == reason || said.starts_with(&format!("{reason}:")),
+                "{outcome:?}: {said}"
+            );
+            assert!(
+                !said.to_ascii_lowercase().contains("no result"),
+                "{outcome:?}: a machine reason, never \"no results\": {said}"
+            );
+            assert_eq!(serp_tool_outcome(outcome), class, "{outcome:?}");
+        }
+    }
+
+    /// A provider 404 and a provider HTTP 500 are failures for the named engines,
+    /// never `no_results` (spec §9 fix 1).
+    #[test]
+    fn provider_http_failures_are_not_a_zero() {
+        let req = google_query();
+        let raw = json!({"success": true, "code": 404}).to_string();
+        let (observations, _) = parse_observations_with(
+            "firecrawl_google_search",
+            &raw,
+            "application/json",
+            false,
+            Some(&req),
+        )
+        .unwrap();
+        assert_eq!(observations["outcome"].as_str(), Some("upstream_failure"));
+        assert!(!no_results("firecrawl_google_search", &observations));
+    }
+
+    /// Recovery is offered exactly once, for a real unrecognised page, and never
+    /// for a links-only payload, a wall or an oversize body (spec §9 fix 6).
+    #[test]
+    fn bounded_recovery_is_offered_once_for_an_unrecognised_page_only() {
+        let recoverable = |outcome: SerpOutcome, parser_input: ParserInput| {
+            let diagnostics = search_engines::SerpDiagnostics {
+                target_status: None,
+                requested_url: String::new(),
+                final_url: String::new(),
+                provider_warning: String::new(),
+                provider_error: String::new(),
+                input_bytes: 0,
+                parser_input,
+                dom_candidates: 0,
+                accepted: 0,
+                rejections: Vec::new(),
+                status_region: String::new(),
+            };
+            search_engines::retry_allowed(outcome, &diagnostics)
+        };
+        assert!(recoverable(
+            SerpOutcome::ParserMismatch,
+            ParserInput::RawHtml
+        ));
+        assert!(
+            !recoverable(SerpOutcome::ParserMismatch, ParserInput::LinksOnly),
+            "a links-only payload would re-request the same shape"
+        );
+        assert!(recoverable(
+            SerpOutcome::ParserMismatch,
+            ParserInput::CleanHtml
+        ));
+        for outcome in [
+            SerpOutcome::Challenge,
+            SerpOutcome::Consent,
+            SerpOutcome::RateLimited,
+            SerpOutcome::UpstreamFailure,
+            SerpOutcome::ResponseTooLarge,
+            SerpOutcome::VerifiedZero,
+            SerpOutcome::Valid,
+        ] {
+            assert!(
+                !recoverable(outcome, ParserInput::RawHtml),
+                "{outcome:?} must not spend another request"
+            );
+        }
+        // The parsed observations carry the same answer, so the executor can
+        // honour the bound without rebuilding the diagnostics.
+        let observations = parse_google(
+            "<!DOCTYPE html><html><body><div class=\"unknown-drifted-shape\">\
+             <a href=\"https://drift.example.org/x\">link only</a></div></body></html>",
+        );
+        assert_eq!(observations["recoverable"], true);
+        // A recovery flag is only ever set on a real page, so the executor's
+        // single retry cannot be talked into a loop.
+        assert_eq!(serp_status(SerpOutcome::ParserMismatch), "failed");
     }
 }

@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "data": {
+    "rawHtml": "<!DOCTYPE html><html lang=\"en\"><head><title>boundary - Google Search</title></head><body><div id=\"search\"><div class=\"g\"><a href=\"https://example.com/a\"><h3>Result A</h3></a></div><div class=\"g\"><a href=\"https://example.com/b\"><h3>Result B</h3></a></div><div class=\"g\"><a href=\"https://example.com/c\"><h3>Result C</h3></a></div></div></body></html>",
+    "metadata": {
+      "sourceURL": "https://www.google.com/search?q=a%3Fb%26c%3Dd+%2Be",
+      "statusCode": 200
+    }
+  }
+}

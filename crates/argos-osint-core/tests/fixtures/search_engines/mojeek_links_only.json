@@ -1,0 +1,11 @@
+{
+  "success": true,
+  "data": {
+    "html": "",
+    "links": ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
+    "metadata": {
+      "sourceURL": "https://www.mojeek.com/search?q=links+only",
+      "statusCode": 200
+    }
+  }
+}

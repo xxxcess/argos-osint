@@ -1,0 +1,11 @@
+{
+  "tool": "firecrawl_mojeek_search",
+  "query": "independent search engines",
+  "limit": 5,
+  "outcome": "valid",
+  "parser_input": "raw_html",
+  "items": 3,
+  "accepted": 3,
+  "first_destination": "https://duckduckgo.com/",
+  "first_title": "DuckDuckGo"
+}

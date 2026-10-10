@@ -1,0 +1,10 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "server error query",
+  "limit": 5,
+  "outcome": "upstream_failure",
+  "parser_input": "raw_html",
+  "items": 0,
+  "accepted": 0,
+  "target_status": 500
+}

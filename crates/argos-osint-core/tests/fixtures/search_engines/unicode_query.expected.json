@@ -1,0 +1,11 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "café résumé",
+  "limit": 5,
+  "outcome": "valid",
+  "parser_input": "raw_html",
+  "items": 1,
+  "accepted": 1,
+  "first_destination": "https://example.com/caf%C3%A9",
+  "first_title": "Café résumé"
+}

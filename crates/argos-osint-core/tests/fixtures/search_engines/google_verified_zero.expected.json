@@ -1,0 +1,11 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "zzqqxxwwvv",
+  "limit": 5,
+  "dom_key": "html",
+  "outcome": "verified_zero",
+  "parser_input": "clean_html",
+  "items": 0,
+  "accepted": 0,
+  "status_region": "topstuff"
+}

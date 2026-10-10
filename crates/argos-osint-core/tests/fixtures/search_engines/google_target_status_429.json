@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "data": {
+    "rawHtml": "<!DOCTYPE html><html lang=\"en\"><head><title>rate limited query - Google Search</title></head><body><div id=\"search\"><div class=\"g\"><a href=\"https://example.com/limited\"><h3>Limited heading</h3></a></div></div></body></html>",
+    "metadata": {
+      "sourceURL": "https://www.google.com/search?q=rate+limited+query",
+      "statusCode": 429
+    }
+  }
+}

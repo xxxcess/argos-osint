@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "data": {
+    "rawHtml": "<!DOCTYPE html><html><head><title>deleted page - Mojeek Search</title></head><body><ul class=\"results-standard\"><li><h2><a class=\"title\" href=\"https://example.com/gone\">Gone</a></h2></li></ul></body></html>",
+    "metadata": {
+      "sourceURL": "https://www.mojeek.com/search?q=deleted+page",
+      "statusCode": 404
+    }
+  }
+}

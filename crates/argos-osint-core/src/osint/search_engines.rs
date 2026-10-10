@@ -1,13 +1,17 @@
-//! Explicit search-engine SERP scraping adapters via Firecrawl `/v2/scrape` (§5).
+//! Named search-engine SERP adapters via Firecrawl `/v2/scrape` (§9).
 //!
-//! Provides canonical tools:
-//! - `firecrawl_google_search`
-//! - `firecrawl_yandex_search`
-//! - `firecrawl_mojeek_search`
+//! Per spec `ARGOS_PROVIDER_QUEUE_AND_PROFILE_DASHBOARD_SPEC.md` §9 this module
+//! owns the truthful outcome contract for the three named engine tools:
+//! `firecrawl_google_search`, `firecrawl_yandex_search`, `firecrawl_mojeek_search`.
 //!
-//! Uses DOM parsing via `scraper` to parse HTML SERP responses, extract grounded
-//! public destination URLs and snippets, normalize wrappers, and detect genuine
-//! zero-results or challenges/consent walls.
+//! Rules that are load-bearing here:
+//! - Unknown/empty HTML is **never** a verified zero. It is `ParserMismatch`.
+//! - No-results is only recognised inside a recognized engine status region,
+//!   against a supported phrase list, with zero accepted organic cards.
+//! - Challenge/consent is detected structurally (forms, iframes, meta refresh),
+//!   never by scanning the whole document's script/snippet text.
+//! - The original query/limit/engine/requested URL come from [`SerpRequest`],
+//!   never from a redirected URL.
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -23,9 +27,196 @@ pub const FIRECRAWL_GOOGLE_SEARCH: &str = "firecrawl_google_search";
 pub const FIRECRAWL_YANDEX_SEARCH: &str = "firecrawl_yandex_search";
 pub const FIRECRAWL_MOJEEK_SEARCH: &str = "firecrawl_mojeek_search";
 
-pub const PARSER_VERSION: &str = "1.0";
+/// Boundary marker for DOM-shape changes. Included in the cache identity so a
+/// parser upgrade invalidates legacy v1 entries without deleting them.
+pub const PARSER_VERSION: &str = "2.0";
 
-/// A single extracted search result item.
+/// The fetch contract (formats requested, cache policy) carried in cache identity.
+pub const FETCH_CONTRACT_VERSION: &str = "2.0";
+
+/// Named SERP bodies are capped at 8 MiB (spec §9 fix 6).
+pub const SERP_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// The three named engine tools, in catalog order.
+pub const NAMED_SERP_TOOLS: [&str; 3] = [
+    FIRECRAWL_GOOGLE_SEARCH,
+    FIRECRAWL_YANDEX_SEARCH,
+    FIRECRAWL_MOJEEK_SEARCH,
+];
+
+/// Maximum number of distinct rejection reasons kept in a diagnostics snapshot.
+const MAX_REJECTION_REASONS: usize = 16;
+
+/// Maximum characters kept for a bounded text field in diagnostics.
+const MAX_DIAGNOSTIC_TEXT: usize = 240;
+
+/// Maximum characters kept for a single item title/snippet.
+const MAX_ITEM_TEXT: usize = 600;
+
+/// Maximum engine-redirect unwrap depth (spec §9 fix 5).
+const MAX_REDIRECT_DEPTH: usize = 3;
+
+/// Engine short names.
+const GOOGLE: &str = "google";
+const YANDEX: &str = "yandex";
+const MOJEEK: &str = "mojeek";
+
+/// True when `tool_id` is one of the three named engine tools.
+pub fn is_named_engine_tool(tool_id: &str) -> bool {
+    NAMED_SERP_TOOLS.contains(&tool_id)
+}
+
+/// Engine short name for a tool id, or `None` when the tool is not a named engine.
+fn engine_for_tool(tool_id: &str) -> Option<&'static str> {
+    match tool_id {
+        FIRECRAWL_GOOGLE_SEARCH => Some(GOOGLE),
+        FIRECRAWL_YANDEX_SEARCH => Some(YANDEX),
+        FIRECRAWL_MOJEEK_SEARCH => Some(MOJEEK),
+        _ => None,
+    }
+}
+
+/// Stable family of the tool for telemetry grouping. Named engines group under
+/// `named_serp`; everything else keeps its own family so a fallback such as
+/// `firecrawl_search` is never attributed to an engine.
+pub fn engine_family(tool_id: &str) -> &'static str {
+    if is_named_engine_tool(tool_id) {
+        "named_serp"
+    } else {
+        "other"
+    }
+}
+
+/// One typed terminal outcome. Only `Valid` and `VerifiedZero` are successes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SerpOutcome {
+    /// At least one accepted organic card.
+    Valid,
+    /// A recognized engine status region with an explicit supported no-results
+    /// phrase and zero accepted cards.
+    VerifiedZero,
+    /// A real challenge interstitial (captcha/sorry form or widget).
+    Challenge,
+    /// A real consent interstitial.
+    Consent,
+    /// Target status 429 or an explicit rate-limit phrase in a status region.
+    RateLimited,
+    /// Page present but nothing recognized: unknown DOM, links-only, missing HTML.
+    ParserMismatch,
+    /// Provider/envelope failure: `success == false`, non-2xx/3xx target status,
+    /// HTTP 404, or an explicit provider error.
+    UpstreamFailure,
+    /// Input bytes exceeded [`SERP_MAX_BODY_BYTES`] or the envelope says truncated.
+    ResponseTooLarge,
+}
+
+impl SerpOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::VerifiedZero => "verified_zero",
+            Self::Challenge => "challenge",
+            Self::Consent => "consent",
+            Self::RateLimited => "rate_limited",
+            Self::ParserMismatch => "parser_mismatch",
+            Self::UpstreamFailure => "upstream_failure",
+            Self::ResponseTooLarge => "response_too_large",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "valid" => Some(Self::Valid),
+            "verified_zero" => Some(Self::VerifiedZero),
+            "challenge" => Some(Self::Challenge),
+            "consent" => Some(Self::Consent),
+            "rate_limited" => Some(Self::RateLimited),
+            "parser_mismatch" => Some(Self::ParserMismatch),
+            "upstream_failure" => Some(Self::UpstreamFailure),
+            "response_too_large" => Some(Self::ResponseTooLarge),
+            _ => None,
+        }
+    }
+
+    /// Only `Valid` and `VerifiedZero` are successes.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Valid | Self::VerifiedZero)
+    }
+
+    pub fn is_failure(&self) -> bool {
+        !self.is_success()
+    }
+}
+
+/// Which parser input was used, for provenance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParserInput {
+    /// Non-empty `rawHtml` was used.
+    RawHtml,
+    /// `rawHtml` was empty; cleaned `html` was used.
+    CleanHtml,
+    /// Only a `links` array was present, so no ranked result can be produced.
+    LinksOnly,
+    /// No DOM payload at all.
+    #[default]
+    Missing,
+}
+
+impl ParserInput {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RawHtml => "raw_html",
+            Self::CleanHtml => "clean_html",
+            Self::LinksOnly => "links_only",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+/// Bounded redacted diagnostics. NEVER contains key material, prompts or full HTML.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SerpDiagnostics {
+    pub target_status: Option<u16>,
+    pub requested_url: String,
+    pub final_url: String,
+    pub provider_warning: String,
+    pub provider_error: String,
+    pub input_bytes: usize,
+    pub parser_input: ParserInput,
+    pub dom_candidates: usize,
+    pub accepted: usize,
+    /// `(reason, count)` pairs, bounded by [`MAX_REJECTION_REASONS`].
+    pub rejections: Vec<(String, usize)>,
+    pub status_region: String,
+}
+
+impl SerpDiagnostics {
+    /// Records one rejection reason, bounded by [`MAX_REJECTION_REASONS`].
+    pub fn record_rejection(&mut self, reason: &str) {
+        let reason = reason.trim();
+        let reason = if reason.is_empty() { "unknown" } else { reason };
+        if let Some((_, count)) = self.rejections.iter_mut().find(|(r, _)| r == reason) {
+            *count = count.saturating_add(1);
+            return;
+        }
+        if self.rejections.len() >= MAX_REJECTION_REASONS {
+            return;
+        }
+        self.rejections.push((reason.to_string(), 1));
+    }
+
+    /// Count of rejections recorded for `reason`.
+    pub fn rejection(&self, reason: &str) -> usize {
+        self.rejections
+            .iter()
+            .find(|(r, _)| r == reason)
+            .map_or(0, |(_, count)| *count)
+    }
+}
+
+/// One extracted result. `title` is the heading text when present.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct EngineSearchResult {
     pub query: String,
@@ -36,9 +227,45 @@ pub struct EngineSearchResult {
     pub destination: String,
     #[serde(default)]
     pub url: String,
+    pub title: String,
     pub snippet: String,
     pub parser_version: String,
     pub outcome: String,
+}
+
+/// Request context that must never be reconstructed from a redirected URL.
+#[derive(Clone, Debug)]
+pub struct SerpRequest {
+    pub engine_tool: String,
+    pub engine: String,
+    pub query: String,
+    pub limit: usize,
+    pub serp_url: String,
+}
+
+impl SerpRequest {
+    /// Builds a request for a named engine tool. `query`, `limit`, `engine` and the
+    /// requested SERP URL are carried verbatim from the original tool input.
+    pub fn for_tool(engine_tool: &str, query: &str, limit: usize) -> Result<Self> {
+        let engine = engine_for_tool(engine_tool)
+            .ok_or_else(|| anyhow!("unsupported search engine tool: {engine_tool}"))?;
+        let serp_url = build_serp_url(engine_tool, query)?;
+        Ok(Self {
+            engine_tool: engine_tool.to_string(),
+            engine: engine.to_string(),
+            query: query.to_string(),
+            limit,
+            serp_url,
+        })
+    }
+}
+
+/// Parse result: items, typed outcome and diagnostics.
+#[derive(Clone, Debug)]
+pub struct SerpParse {
+    pub items: Vec<EngineSearchResult>,
+    pub outcome: SerpOutcome,
+    pub diagnostics: SerpDiagnostics,
 }
 
 /// Constructs the SERP URL for an engine and query.
@@ -64,687 +291,991 @@ pub fn build_serp_url(engine_tool: &str, query: &str) -> Result<String> {
 }
 
 /// Constructs the Firecrawl `/v2/scrape` request body for a SERP.
+///
+/// Contract v2 (spec §9 fix 3): request `rawHtml` first with `html` fallback, keep
+/// `onlyMainContent: false` so the results region is never stripped, keep `links`
+/// for diagnostics only, and set `maxAge: 0` because Argos owns its own cache.
 pub fn build_scrape_body(engine_tool: &str, query: &str) -> Result<Value> {
     let serp_url = build_serp_url(engine_tool, query)?;
     Ok(json!({
         "url": serp_url,
-        "formats": ["html", "links"],
-        "onlyMainContent": false
+        "formats": ["rawHtml", "html", "links"],
+        "onlyMainContent": false,
+        "maxAge": 0
     }))
 }
 
-/// Normalizes and cleans a destination URL, rejecting search-engine internal links,
-/// private networks, ads, and malformed wrappers.
-pub fn normalize_destination_url(raw: &str, engine: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
+/// Canonical query for cache identity: trimmed, whitespace-collapsed, lowercased.
+fn canonical_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
 
-    // Handle Google redirect wrappers: /url?q=<target>&... or /url?esrc=...&q=<target>
-    let dest_str = if engine == "google" && trimmed.contains("/url?") {
-        if let Ok(u) = Url::parse(&format!("https://www.google.com{trimmed}")) {
-            u.query_pairs()
-                .find(|(k, _)| k == "q")
-                .map(|(_, v)| v.into_owned())
-                .unwrap_or_else(|| trimmed.to_string())
-        } else if let Ok(u) = Url::parse(trimmed) {
-            u.query_pairs()
-                .find(|(k, _)| k == "q")
-                .map(|(_, v)| v.into_owned())
-                .unwrap_or_else(|| trimmed.to_string())
-        } else {
-            trimmed.to_string()
-        }
-    } else {
-        trimmed.to_string()
+/// Locale signals carried by the SERP URL (`hl`, `lang`, `setlang`, `lr`, `gl`).
+/// Two SERPs differing only in locale are different cache entries.
+fn serp_locale(serp_url: &str) -> String {
+    let Ok(parsed) = Url::parse(serp_url) else {
+        return String::new();
     };
+    for key in ["hl", "lang", "setlang", "lr", "gl"] {
+        let value = parsed
+            .query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned());
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            return format!("{key}={value}");
+        }
+    }
+    String::new()
+}
 
-    let parsed = Url::parse(&dest_str).ok()?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return None;
+/// Canonical cache identity fragment: parser + fetch contract + canonical
+/// query/locale/limit. Legacy v1 entries miss on the version pair.
+pub fn cache_fragment(req: &SerpRequest) -> String {
+    format!(
+        "serp:{}:{}:{}:{}:{}:{}",
+        PARSER_VERSION,
+        FETCH_CONTRACT_VERSION,
+        engine_family(&req.engine_tool),
+        canonical_query(&req.query),
+        serp_locale(&req.serp_url),
+        req.limit
+    )
+}
+
+/// True when a fresh same-engine fetch retry is allowed for this outcome.
+///
+/// Bounded recovery (spec §9 fix 6): only `ParserMismatch` from a DOM that was
+/// actually present. A `LinksOnly` retry would re-request the same shape.
+pub fn retry_allowed(outcome: SerpOutcome, diagnostics: &SerpDiagnostics) -> bool {
+    outcome == SerpOutcome::ParserMismatch && diagnostics.parser_input != ParserInput::LinksOnly
+}
+
+/// Truncates a bounded diagnostic string.
+fn clip_diag(s: &str) -> String {
+    s.trim().chars().take(MAX_DIAGNOSTIC_TEXT).collect()
+}
+
+/// Collapses whitespace in extracted DOM text.
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clip_item_text(s: &str) -> String {
+    collapse_ws(s).chars().take(MAX_ITEM_TEXT).collect()
+}
+
+/// Joins the text of a selector-matched element.
+fn text_of(el: scraper::ElementRef) -> String {
+    clip_item_text(&el.text().collect::<Vec<_>>().join(" "))
+}
+
+/// Reads a non-empty string field from a JSON object pointer.
+fn str_at<'a>(v: &'a Value, path: &str) -> Option<&'a str> {
+    v.pointer(path)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Reads a numeric status from a JSON object pointer.
+fn num_at(v: &Value, path: &str) -> Option<u16> {
+    v.pointer(path)
+        .and_then(Value::as_u64)
+        .and_then(|n| u16::try_from(n).ok())
+}
+
+/// Supported per-engine phrase lists. Nothing here is matched against the whole page.
+struct EnginePolicy {
+    zero_phrases: &'static [&'static str],
+    rate_limit_phrases: &'static [&'static str],
+    /// Recognized engine status regions (CSS selectors).
+    status_regions: &'static [&'static str],
+    /// Hosts the engine owns, used for internal-link and SERP-host checks.
+    hosts: &'static [&'static str],
+    /// Organic card selectors.
+    cards: &'static [&'static str],
+    /// Structural heading-link fallback selectors.
+    fallback_cards: &'static [&'static str],
+}
+
+const GOOGLE_POLICY: EnginePolicy = EnginePolicy {
+    zero_phrases: &[
+        "did not match any documents",
+        "no results found for",
+        "did not match any",
+    ],
+    rate_limit_phrases: &[
+        "unusual traffic from your computer network",
+        "unusual traffic",
+        "rate limit",
+        "too many requests",
+    ],
+    status_regions: &["#topstuff", "#main"],
+    hosts: &["google.com", "www.google.com", "googleusercontent.com"],
+    cards: &["div.g", "div.tF2Cxc", "div[data-snc]", "div.MjjYud"],
+    fallback_cards: &["h3 a[href]"],
+};
+
+const YANDEX_POLICY: EnginePolicy = EnginePolicy {
+    zero_phrases: &[
+        "did not match any documents",
+        "ничего не нашлось",
+        "ничего не найдено",
+        "no results found",
+    ],
+    rate_limit_phrases: &["too many requests", "rate limit", "quota exceeded"],
+    status_regions: &[".misspell__message", ".serp-list"],
+    hosts: &["yandex.com", "yandex.ru", "ya.ru"],
+    cards: &["li.serp-item", "div.Organic", "div.serp-item"],
+    fallback_cards: &["h2 a[href]"],
+};
+
+const MOJEEK_POLICY: EnginePolicy = EnginePolicy {
+    zero_phrases: &[
+        "no results found",
+        "did not match any documents",
+        "no results",
+        "0 results",
+    ],
+    rate_limit_phrases: &[
+        "too many requests",
+        "rate limit",
+        "access blocked",
+        "temporarily blocked",
+    ],
+    status_regions: &["#results", ".message", "#results p"],
+    hosts: &["mojeek.com", "www.mojeek.com"],
+    cards: &[
+        "ul.results-standard > li",
+        "div.results-standard > li",
+        ".results-standard li",
+        "li.result",
+    ],
+    fallback_cards: &["a.title", "a.ob", "h2 a[href]"],
+};
+
+fn policy_for(engine: &str) -> &'static EnginePolicy {
+    match engine {
+        GOOGLE => &GOOGLE_POLICY,
+        YANDEX => &YANDEX_POLICY,
+        MOJEEK => &MOJEEK_POLICY,
+        _ => &GOOGLE_POLICY,
+    }
+}
+
+/// True when `host` is the engine host or a subdomain of it.
+fn host_is(host: &str, base: &str) -> bool {
+    if host == base {
+        return true;
+    }
+    let suffix = format!(".{base}");
+    host.len() > suffix.len() && host.ends_with(&suffix)
+}
+
+fn host_in_any(host: &str, bases: &[&str]) -> bool {
+    bases.iter().any(|base| host_is(host, base))
+}
+
+/// Lowercased host of a parsed URL.
+fn url_host(u: &Url) -> String {
+    u.host_str().unwrap_or_default().to_lowercase()
+}
+
+/// True when the URL's path looks like a SERP results page for `engine`.
+fn is_serp_path(engine: &str, path: &str) -> bool {
+    match engine {
+        GOOGLE | YANDEX | MOJEEK => path.starts_with("/search"),
+        _ => false,
+    }
+}
+
+/// Structural interstitial detection. Returns `Some(true)` for a challenge wall,
+/// `Some(false)` for a consent wall, `None` when no interstitial shape was found.
+///
+/// Only structural evidence is used: forms whose action points at a wall, iframes
+/// or links whose host is a consent/captcha host, a recaptcha widget element, and
+/// `noscript` meta refreshes to a consent host.
+fn detect_interstitial(doc: &Html, final_url: &str) -> Option<bool> {
+    let final_host = Url::parse(final_url)
+        .map(|u| url_host(&u))
+        .unwrap_or_default();
+
+    // A redirect onto a consent host is a consent wall, whatever the body says.
+    if !final_host.is_empty() && host_is_consent(&final_host) {
+        return Some(false);
     }
 
-    let host_str = parsed.host_str()?.to_lowercase();
-    if host_str.is_empty() || host_str == "localhost" {
-        return None;
+    if let Ok(forms) = Selector::parse("form") {
+        for form in doc.select(&forms) {
+            let action = form
+                .value()
+                .attr("action")
+                .unwrap_or_default()
+                .to_lowercase();
+            if action.is_empty() {
+                continue;
+            }
+            if action.contains("captcha") || action.contains("/sorry") {
+                return Some(true);
+            }
+            if action.contains("consent") {
+                return Some(false);
+            }
+        }
     }
 
-    // Reject private IP destinations
-    if let Ok(ip) = host_str.parse::<IpAddr>() {
-        match ip {
-            IpAddr::V4(v4) => {
-                if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
-                    return None;
+    // Iframes or anchors whose host is a consent or captcha host.
+    for sel in ["iframe[src]", "a[href]"] {
+        if let Ok(selector) = Selector::parse(sel) {
+            for el in doc.select(&selector) {
+                let raw = if sel.starts_with("iframe") {
+                    el.value().attr("src")
+                } else {
+                    el.value().attr("href")
                 }
+                .unwrap_or_default();
+                if raw.is_empty() {
+                    continue;
+                }
+                let lower = raw.to_lowercase();
+                let host = if raw.starts_with("//") {
+                    Url::parse(&format!("https:{raw}"))
+                        .map(|u| url_host(&u))
+                        .unwrap_or_default()
+                } else if raw.contains("://") {
+                    Url::parse(raw).map(|u| url_host(&u)).unwrap_or_default()
+                } else {
+                    continue;
+                };
+                if host.is_empty() {
+                    continue;
+                }
+                if lower.contains("captcha") || host_is_captcha(&host) {
+                    return Some(true);
+                }
+                if host_is_consent(&host) {
+                    return Some(false);
+                }
+            }
+        }
+    }
+
+    // A recaptcha widget element.
+    for sel in [
+        ".g-recaptcha",
+        "#recaptcha",
+        "[class*=\"recaptcha\"]",
+        "[class*=\"smartcaptcha\"]",
+        "[class*=\"SmartCaptcha\"]",
+    ] {
+        if let Ok(selector) = Selector::parse(sel) {
+            if doc.select(&selector).next().is_some() {
+                return Some(true);
+            }
+        }
+    }
+
+    // A meta refresh to a consent host, wherever the tag sits.
+    if let Ok(meta) = Selector::parse("meta[http-equiv=\"refresh\"]") {
+        for el in doc.select(&meta) {
+            let content = el.value().attr("content").unwrap_or_default();
+            if meta_refresh_is_consent(content) {
+                return Some(false);
+            }
+        }
+    }
+
+    // The European-Google wall wraps that tag in `<noscript>`
+    // (`<noscript><meta http-equiv="refresh" content="0;url=https://consent.google.com/save?..."></noscript>`).
+    // html5ever parses `<noscript>` as raw text, so the tag inside it never
+    // reaches the element tree; reading the text node directly is the only way
+    // to see it. It is still structural evidence — a redirect to a consent host
+    // — so it stays a consent wall rather than a parser problem.
+    if let Ok(noscript) = Selector::parse("noscript") {
+        for el in doc.select(&noscript) {
+            let raw: String = el.text().collect();
+            if meta_refresh_is_consent(&raw) {
+                return Some(false);
+            }
+        }
+    }
+    None
+}
+
+/// True when a meta-refresh `content` value redirects to a consent host.
+fn meta_refresh_is_consent(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    if !lower.contains("consent") {
+        return false;
+    }
+    let Some(url_part) = lower.split("url=").nth(1) else {
+        return false;
+    };
+    let target = url_part.split_whitespace().next().unwrap_or_default();
+    if !target.contains("://") {
+        return false;
+    }
+    match Url::parse(target) {
+        Ok(url) => host_is_consent(&url_host(&url)),
+        Err(_) => false,
+    }
+}
+
+/// True for hosts that only host consent walls.
+fn host_is_consent(host: &str) -> bool {
+    host == "consent.google.com" || host == "consent.youtube.com" || host == "consent.yahoo.com"
+}
+
+/// True for hosts that only host challenge walls.
+fn host_is_captcha(host: &str) -> bool {
+    host == "captcha.google.com" || host == "smartcaptcha.yandex.com"
+}
+
+/// True when `phrase` appears in `haystack` as a standalone token sequence.
+///
+/// The word boundaries are what make count boundaries safe: `0 results` matches a
+/// real zero but not `10 results`, `100 results` or `1,000 results`, because the
+/// preceding character is a digit.
+fn contains_phrase(haystack: &str, phrase: &str) -> bool {
+    let hay = haystack.to_lowercase();
+    let needle = phrase.to_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0usize;
+    while let Some(pos) = hay[from..].find(&needle) {
+        let start = from + pos;
+        let end = start + needle.len();
+        let before_ok = start == 0
+            || !hay[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric());
+        let after_ok = end == hay.len()
+            || !hay[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Recognizes an explicit no-results/rate-limit phrase inside a status region only.
+/// Returns `Some(true)` for rate limited, `Some(false)` for verified zero.
+fn classify_status_region(region_text: &str, policy: &EnginePolicy) -> Option<bool> {
+    if policy
+        .rate_limit_phrases
+        .iter()
+        .any(|p| contains_phrase(region_text, p))
+    {
+        return Some(true);
+    }
+    if policy
+        .zero_phrases
+        .iter()
+        .any(|p| contains_phrase(region_text, p))
+    {
+        return Some(false);
+    }
+    None
+}
+
+/// Text of every recognized engine status region, plus the region names matched.
+fn status_region_text(doc: &Html, policy: &EnginePolicy) -> (Vec<String>, String) {
+    let mut names: Vec<String> = Vec::new();
+    let mut out = String::new();
+    for sel in policy.status_regions {
+        if let Ok(selector) = Selector::parse(sel) {
+            for el in doc.select(&selector) {
+                names.push((*sel).to_string());
+                out.push(' ');
+                out.push_str(&text_of(el));
+            }
+        }
+    }
+    (names, out)
+}
+
+/// True when `host` is a literal private/internal address or a non-public hostname.
+fn is_private_host(host: &str) -> bool {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
             }
             IpAddr::V6(v6) => {
-                if v6.is_loopback() {
-                    return None;
-                }
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
             }
+        };
+    }
+    matches!(host, "localhost" | "local")
+        || host.ends_with(".local")
+        || host.ends_with(".localhost")
+        || host.ends_with(".internal")
+        || host.ends_with(".home.arpa")
+        || host.is_empty()
+        || !host.contains('.')
+}
+
+/// Recognized ad hosts, rejected as `ad_host`.
+fn is_ad_host(host: &str) -> bool {
+    host == "doubleclick.net"
+        || host.ends_with(".doubleclick.net")
+        || host == "googleadservices.com"
+        || host.ends_with(".googleadservices.com")
+        || host == "googlesyndication.com"
+        || host.ends_with(".googlesyndication.com")
+        || host == "adservice.google.com"
+        || host.ends_with(".an.yandex.ru")
+        || host.ends_with(".ads.mojeek.com")
+}
+
+/// Unwraps recognized engine redirect wrappers, bounded to depth 3.
+///
+/// `query_pairs` performs the percent decoding, so `q`/`url` values are decoded
+/// exactly once and destination query parameters survive.
+fn unwrap_redirect(url: &Url, engine: &str, base: &Url) -> Url {
+    let mut current = url.clone();
+    for _ in 0..MAX_REDIRECT_DEPTH {
+        let host = url_host(&current);
+        let looks_like_wrapper = match engine {
+            GOOGLE => {
+                host.contains("google")
+                    && (current.path().starts_with("/url")
+                        || current.path().starts_with("/imgres")
+                        || current.path().starts_with("/aclk"))
+            }
+            YANDEX => {
+                host.contains("yandex")
+                    && (current.path().starts_with("/clck") || current.path().starts_with("/redir"))
+            }
+            MOJEEK => host.contains("mojeek") && current.path().starts_with("/redir"),
+            _ => false,
+        };
+        if !looks_like_wrapper {
+            return current;
+        }
+        let target = current
+            .query_pairs()
+            .find(|(k, _)| k == "q" || k == "url")
+            .map(|(_, v)| v.into_owned());
+        let Some(target) = target else { return current };
+        let next = Url::parse(target.trim())
+            .or_else(|_| Url::parse(&format!("https://{}", target.trim())))
+            .or_else(|_| base.join(target.trim()));
+        match next {
+            Ok(u) if u.scheme() == "http" || u.scheme() == "https" => current = u,
+            _ => return current,
         }
     }
+    current
+}
 
-    let is_engine_domain = |base: &str| -> bool {
-        host_str == base
-            || host_str.starts_with(&format!("{base}."))
-            || host_str.ends_with(&format!(".{base}"))
-            || host_str.contains(&format!(".{base}."))
+/// Normalizes a destination URL against a base, recording every rejection reason.
+///
+/// Rejects engine-internal links, ad hosts, private/internal destinations, unsafe
+/// schemes, credentials, malformed URLs and duplicates. Preserves legitimate
+/// destination query parameters.
+pub fn normalize_destination(
+    raw: &str,
+    engine: &str,
+    base: &Url,
+    diag: &mut SerpDiagnostics,
+) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        diag.record_rejection("malformed");
+        return None;
+    }
+    // Relative and protocol-relative URLs resolve against the parsed SERP URL.
+    // Only a real scheme prefix marks an absolute URL: a relative path can carry
+    // `://` inside its query (`/url?q=https://target`), and parsing that as
+    // absolute would reject a valid wrapper link.
+    let is_absolute = trimmed.split_once(':').is_some_and(|(scheme, rest)| {
+        !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            && rest.starts_with("//")
+    });
+    let parsed_abs = if is_absolute {
+        Url::parse(trimmed).ok()
+    } else {
+        base.join(trimmed).ok()
     };
-
-    // Reject search engine self-links, ads, and consent walls
-    match engine {
-        "google" => {
-            if is_engine_domain("google")
-                || is_engine_domain("googleadservices")
-                || (is_engine_domain("youtube") && parsed.path() == "/redirect")
-            {
-                return None;
-            }
-        }
-        "yandex" => {
-            if is_engine_domain("yandex")
-                || is_engine_domain("ya")
-                || (is_engine_domain("kinopoisk") && parsed.path().contains("/clck/"))
-            {
-                return None;
-            }
-        }
-        "mojeek" => {
-            if is_engine_domain("mojeek") {
-                return None;
-            }
-        }
-        _ => {}
+    let Some(parsed_abs) = parsed_abs else {
+        diag.record_rejection("malformed");
+        return None;
+    };
+    if parsed_abs.scheme() != "http" && parsed_abs.scheme() != "https" {
+        diag.record_rejection("unsafe_scheme");
+        return None;
     }
-
-    // Clean fragment
-    let mut clean = parsed;
+    if !parsed_abs.username().is_empty() || parsed_abs.password().is_some() {
+        diag.record_rejection("credentials");
+        return None;
+    }
+    let unwrapped = unwrap_redirect(&parsed_abs, engine, base);
+    let host = url_host(&unwrapped);
+    if is_private_host(&host) {
+        diag.record_rejection("private_ip");
+        return None;
+    }
+    if is_ad_host(&host) {
+        diag.record_rejection("ad_host");
+        return None;
+    }
+    let policy = policy_for(engine);
+    if host_in_any(&host, policy.hosts) {
+        diag.record_rejection("engine_internal");
+        return None;
+    }
+    // A host the engine does not own but which is clearly a consent/interstitial host.
+    if host_is(&host, "consent.google.com") || host_is(&host, "consent.youtube.com") {
+        diag.record_rejection("engine_internal");
+        return None;
+    }
+    let mut clean = unwrapped;
     clean.set_fragment(None);
     Some(clean.to_string())
 }
 
-/// Parses Google SERP HTML.
-pub fn parse_google_serp(
-    html_str: &str,
-    query: &str,
-    serp_url: &str,
-    limit: usize,
-) -> (Vec<EngineSearchResult>, String) {
-    let lower = html_str.to_lowercase();
-    if lower.contains("unusual traffic from your computer network")
-        || lower.contains("consent.google.com")
-        || lower.contains("before you continue to google")
-        || lower.contains("recaptcha")
-    {
-        return (Vec::new(), "challenge".into());
-    }
+/// Backwards-compatible wrapper over [`normalize_destination`] with the engine's
+/// canonical SERP as base.
+pub fn normalize_destination_url(raw: &str, engine: &str) -> Option<String> {
+    let tool = match engine {
+        GOOGLE => FIRECRAWL_GOOGLE_SEARCH,
+        YANDEX => FIRECRAWL_YANDEX_SEARCH,
+        MOJEEK => FIRECRAWL_MOJEEK_SEARCH,
+        _ => return None,
+    };
+    let Ok(serp) = build_serp_url(tool, "argos") else {
+        return None;
+    };
+    let Ok(base) = Url::parse(&serp) else {
+        return None;
+    };
+    let mut diag = SerpDiagnostics::default();
+    normalize_destination(raw, engine, &base, &mut diag)
+}
 
-    if lower.contains("did not match any documents")
-        || lower.contains("no results found for")
-        || lower.contains("your search -") && lower.contains("- did not match")
-    {
-        return (Vec::new(), "zero_results".into());
-    }
-
-    let document = Html::parse_document(html_str);
-    let mut results = Vec::new();
-    let mut seen = HashSet::new();
-
-    // Select container elements or search headings
-    let item_selector = Selector::parse("div.g, div.tF2Cxc, div[data-snc]").unwrap();
-    let a_selector = Selector::parse("a[href]").unwrap();
-    let h3_selector = Selector::parse("h3").unwrap();
-    let snippet_selector = Selector::parse("div.VwiC3b, span.aCOpRe, div.yXK7lf").unwrap();
-
-    let now_str = Utc::now().to_rfc3339();
-
-    for el in document.select(&item_selector) {
-        if results.len() >= limit {
-            break;
-        }
-
-        let link_el = match el
-            .select(&a_selector)
-            .find(|a| a.select(&h3_selector).next().is_some())
-            .or_else(|| el.select(&a_selector).next())
-        {
-            Some(a) => a,
-            None => continue,
-        };
-
-        let raw_href = match link_el.value().attr("href") {
-            Some(h) => h,
-            None => continue,
-        };
-
-        let dest = match normalize_destination_url(raw_href, "google") {
-            Some(d) => d,
-            None => continue,
-        };
-
-        if seen.contains(&dest) {
-            continue;
-        }
-        seen.insert(dest.clone());
-
-        let snippet = el
-            .select(&snippet_selector)
-            .next()
-            .map(|s| s.text().collect::<Vec<_>>().join(" "))
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        results.push(EngineSearchResult {
-            query: query.to_string(),
-            engine: "google".into(),
-            serp_url: serp_url.to_string(),
-            fetched_time: now_str.clone(),
-            rank: results.len() + 1,
-            destination: dest.clone(),
-            url: dest,
-            snippet,
-            parser_version: PARSER_VERSION.into(),
-            outcome: "valid".into(),
-        });
-    }
-
-    // Fallback parser if structural classes were obfuscated by Google
-    if results.is_empty() {
-        for a_el in document.select(&a_selector) {
-            if results.len() >= limit {
-                break;
-            }
-            if a_el.select(&h3_selector).next().is_none() {
-                continue;
-            }
-            let href = match a_el.value().attr("href") {
-                Some(h) => h,
-                None => continue,
-            };
-            if let Some(dest) = normalize_destination_url(href, "google") {
-                if !seen.contains(&dest) {
-                    seen.insert(dest.clone());
-                    results.push(EngineSearchResult {
-                        query: query.to_string(),
-                        engine: "google".into(),
-                        serp_url: serp_url.to_string(),
-                        fetched_time: now_str.clone(),
-                        rank: results.len() + 1,
-                        destination: dest.clone(),
-                        url: dest,
-                        snippet: String::new(),
-                        parser_version: PARSER_VERSION.into(),
-                        outcome: "valid".into(),
-                    });
+/// Snippet text for a card element: first non-empty supported snippet container.
+fn card_snippet(card: &scraper::ElementRef) -> String {
+    for sel in [
+        "div.VwiC3b",
+        "span.aCOpRe",
+        "div.OrganicTextContent",
+        "p.s",
+        "div.s",
+        "p",
+    ] {
+        if let Ok(selector) = Selector::parse(sel) {
+            for el in card.select(&selector) {
+                let text = collapse_ws(&el.text().collect::<Vec<_>>().join(" "));
+                if !text.is_empty() {
+                    return clip_item_text(&text);
                 }
             }
         }
     }
-
-    let outcome = if !results.is_empty() {
-        "valid".into()
-    } else {
-        "unknown_html".into()
-    };
-
-    (results, outcome)
+    String::new()
 }
 
-/// Parses Yandex SERP HTML.
-pub fn parse_yandex_serp(
-    html_str: &str,
-    query: &str,
-    serp_url: &str,
-    limit: usize,
-) -> (Vec<EngineSearchResult>, String) {
-    let lower = html_str.to_lowercase();
-    if lower.contains("smartcaptcha")
-        || lower.contains("show that you're not a robot")
-        || lower.contains("checkbox-captcha")
-    {
-        return (Vec::new(), "challenge".into());
+/// Extracted candidate link: href, heading text and snippet.
+struct Candidate {
+    href: String,
+    title: String,
+    snippet: String,
+}
+
+/// Collects organic candidates from the document, in document order.
+///
+/// Only card containers are scanned. A conservative structural fallback
+/// (heading-link only) runs when the card selectors matched nothing, so DOM
+/// drift still produces rankable results without turning every external link
+/// on the page into a result.
+fn collect_candidates(doc: &Html, policy: &EnginePolicy) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let Ok(link_sel) = Selector::parse("a[href]") else {
+        return out;
+    };
+    for card_sel in policy.cards {
+        let Ok(selector) = Selector::parse(card_sel) else {
+            continue;
+        };
+        for card in doc.select(&selector) {
+            // Prefer the first link that carries a heading; otherwise keep the
+            // first link in the card so a missing heading is not an automatic loss.
+            let mut fallback: Option<String> = None;
+            let mut chosen: Option<String> = None;
+            for link in card.select(&link_sel) {
+                let Some(href) = link.value().attr("href") else {
+                    continue;
+                };
+                if fallback.is_none() {
+                    fallback = Some(href.to_string());
+                }
+                if !collapse_ws(&link.text().collect::<Vec<_>>().join(" ")).is_empty() {
+                    chosen = Some(href.to_string());
+                    break;
+                }
+            }
+            let Some(href) = chosen.or(fallback) else {
+                continue;
+            };
+            if !seen.insert(href.clone()) {
+                continue;
+            }
+            let title = link_heading(doc, &href, &link_sel);
+            let snippet = if title.is_empty() {
+                String::new()
+            } else {
+                card_snippet(&card)
+            };
+            out.push(Candidate {
+                href,
+                title: clip_item_text(&title),
+                snippet,
+            });
+        }
     }
-
-    if lower.contains("ничего не нашлось")
-        || lower.contains("ничего не найдено")
-        || lower.contains("not found")
-    {
-        return (Vec::new(), "zero_results".into());
+    if !out.is_empty() {
+        return out;
     }
+    for fallback_sel in policy.fallback_cards {
+        let Ok(selector) = Selector::parse(fallback_sel) else {
+            continue;
+        };
+        for link in doc.select(&selector) {
+            let Some(href) = link.value().attr("href") else {
+                continue;
+            };
+            if !seen.insert(href.to_string()) {
+                continue;
+            }
+            let title = collapse_ws(&link.text().collect::<Vec<_>>().join(" "));
+            out.push(Candidate {
+                href: href.to_string(),
+                title: clip_item_text(&title),
+                snippet: String::new(),
+            });
+        }
+    }
+    out
+}
 
-    let document = Html::parse_document(html_str);
-    let mut results = Vec::new();
-    let mut seen = HashSet::new();
+/// Heading text of the link that owns `href`, looked up in `link_sel` order.
+fn link_heading(doc: &Html, href: &str, link_sel: &Selector) -> String {
+    for link in doc.select(link_sel) {
+        if link.value().attr("href") == Some(href) {
+            return link.text().collect::<Vec<_>>().join(" ");
+        }
+    }
+    String::new()
+}
 
-    let item_selector = Selector::parse("li.serp-item, div.Organic, div.serp-item").unwrap();
-    let link_selector = Selector::parse("a.OrganicTitle-Link, a.link_theme_outer, h2 a").unwrap();
-    let snippet_selector =
-        Selector::parse("div.OrganicTextContent, div.organic__text, div.Organic-Content").unwrap();
-    let now_str = Utc::now().to_rfc3339();
+/// Counts DOM candidates before filtering, for diagnostics.
+fn dom_candidate_count(doc: &Html, policy: &EnginePolicy) -> usize {
+    let mut count = 0usize;
+    for card_sel in policy.cards {
+        if let Ok(selector) = Selector::parse(card_sel) {
+            count += doc.select(&selector).count();
+        }
+    }
+    if count == 0 {
+        for fallback_sel in policy.fallback_cards {
+            if let Ok(selector) = Selector::parse(fallback_sel) {
+                count += doc.select(&selector).count();
+            }
+        }
+    }
+    count
+}
 
-    for el in document.select(&item_selector) {
-        if results.len() >= limit {
+/// Builds the ranked item list from a parsed document.
+fn extract_items(
+    doc: &Html,
+    engine: &str,
+    policy: &EnginePolicy,
+    req: &SerpRequest,
+    base: &Url,
+    diag: &mut SerpDiagnostics,
+) -> Vec<EngineSearchResult> {
+    let mut items: Vec<EngineSearchResult> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let now = Utc::now().to_rfc3339();
+    for candidate in collect_candidates(doc, policy) {
+        if items.len() >= req.limit {
             break;
         }
-
-        let link_el = match el.select(&link_selector).next() {
-            Some(l) => l,
-            None => continue,
+        let Some(dest) = normalize_destination(&candidate.href, engine, base, diag) else {
+            continue;
         };
-
-        let raw_href = match link_el.value().attr("href") {
-            Some(h) => h,
-            None => continue,
-        };
-
-        let dest = match normalize_destination_url(raw_href, "yandex") {
-            Some(d) => d,
-            None => continue,
-        };
-
         if seen.contains(&dest) {
+            diag.record_rejection("duplicate");
             continue;
         }
         seen.insert(dest.clone());
-
-        let snippet = el
-            .select(&snippet_selector)
-            .next()
-            .map(|s| s.text().collect::<Vec<_>>().join(" "))
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        results.push(EngineSearchResult {
-            query: query.to_string(),
-            engine: "yandex".into(),
-            serp_url: serp_url.to_string(),
-            fetched_time: now_str.clone(),
-            rank: results.len() + 1,
+        items.push(EngineSearchResult {
+            query: req.query.clone(),
+            engine: req.engine.clone(),
+            serp_url: req.serp_url.clone(),
+            fetched_time: now.clone(),
+            rank: items.len() + 1,
             destination: dest.clone(),
             url: dest,
-            snippet,
-            parser_version: PARSER_VERSION.into(),
-            outcome: "valid".into(),
+            title: candidate.title.clone(),
+            snippet: candidate.snippet.clone(),
+            parser_version: PARSER_VERSION.to_string(),
+            outcome: SerpOutcome::Valid.as_str().to_string(),
         });
     }
-
-    let outcome = if !results.is_empty() {
-        "valid".into()
-    } else {
-        "unknown_html".into()
-    };
-
-    (results, outcome)
+    diag.accepted = items.len();
+    items
 }
 
-/// Parses Mojeek SERP HTML.
-pub fn parse_mojeek_serp(
-    html_str: &str,
-    query: &str,
-    serp_url: &str,
-    limit: usize,
-) -> (Vec<EngineSearchResult>, String) {
-    let lower = html_str.to_lowercase();
-    if lower.contains("too many requests")
-        || lower.contains("access blocked")
-        || lower.contains("captcha")
-    {
-        return (Vec::new(), "challenge".into());
-    }
-
-    if lower.contains("no results found")
-        || lower.contains("did not match any documents")
-        || lower.contains("0 results")
-    {
-        return (Vec::new(), "zero_results".into());
-    }
-
-    let document = Html::parse_document(html_str);
-    let mut results = Vec::new();
-    let mut seen = HashSet::new();
-
-    let item_selector = Selector::parse(
-        "ul.results-standard > li, div.results-standard > li, .results-standard li, li.result",
-    )
-    .unwrap();
-    let link_selector = Selector::parse("a.title, a.ob, h2 a").unwrap();
-    let snippet_selector = Selector::parse("p.s, p.snippet, .s").unwrap();
-    let now_str = Utc::now().to_rfc3339();
-
-    for el in document.select(&item_selector) {
-        if results.len() >= limit {
-            break;
-        }
-
-        let link_el = match el.select(&link_selector).next() {
-            Some(l) => l,
-            None => continue,
-        };
-
-        let raw_href = match link_el.value().attr("href") {
-            Some(h) => h,
-            None => continue,
-        };
-
-        let dest = match normalize_destination_url(raw_href, "mojeek") {
-            Some(d) => d,
-            None => continue,
-        };
-
-        if seen.contains(&dest) {
-            continue;
-        }
-        seen.insert(dest.clone());
-
-        let snippet = el
-            .select(&snippet_selector)
-            .next()
-            .map(|s| s.text().collect::<Vec<_>>().join(" "))
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        results.push(EngineSearchResult {
-            query: query.to_string(),
-            engine: "mojeek".into(),
-            serp_url: serp_url.to_string(),
-            fetched_time: now_str.clone(),
-            rank: results.len() + 1,
-            destination: dest.clone(),
-            url: dest,
-            snippet,
-            parser_version: PARSER_VERSION.into(),
-            outcome: "valid".into(),
-        });
-    }
-
-    let outcome = if !results.is_empty() {
-        "valid".into()
-    } else {
-        "unknown_html".into()
+/// Entry point. Never returns an error for a parsable-but-unrecognized page;
+/// the caller reads `outcome` instead.
+pub fn parse_serp_response(req: &SerpRequest, raw_json: &Value) -> Result<SerpParse> {
+    let engine = &req.engine;
+    let policy = policy_for(engine);
+    let mut diag = SerpDiagnostics {
+        parser_input: ParserInput::Missing,
+        requested_url: clip_diag(&req.serp_url),
+        ..Default::default()
     };
 
-    (results, outcome)
-}
-
-/// Parses the outer Firecrawl `/v2/scrape` JSON envelope and then parses the embedded SERP HTML.
-pub fn parse_serp_response(
-    engine_tool: &str,
-    raw_json: &Value,
-    query: &str,
-    limit: usize,
-) -> Result<(Value, bool)> {
+    // Envelope failure: never a zero, never a parser problem.
     if raw_json.get("success").and_then(Value::as_bool) == Some(false) {
-        let msg = raw_json
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("Firecrawl SERP scrape failed");
-        return Err(anyhow!("{msg}"));
+        diag.provider_error = clip_diag(
+            str_at(raw_json, "/error")
+                .or_else(|| str_at(raw_json, "/data/error"))
+                .unwrap_or("provider reported success=false"),
+        );
+        return Ok(SerpParse {
+            items: Vec::new(),
+            outcome: SerpOutcome::UpstreamFailure,
+            diagnostics: diag,
+        });
+    }
+    // HTTP 404 on the provider request is a failure for these tools.
+    if matches!(raw_json.get("code").and_then(Value::as_u64), Some(404)) {
+        diag.provider_error = "provider returned HTTP 404".to_string();
+        return Ok(SerpParse {
+            items: Vec::new(),
+            outcome: SerpOutcome::UpstreamFailure,
+            diagnostics: diag,
+        });
     }
 
     let data = raw_json.get("data").unwrap_or(raw_json);
-    let html_content = data
-        .get("html")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("Firecrawl response missing HTML format for SERP scrape"))?;
-
-    let serp_url = data
-        .get("metadata")
-        .and_then(|m| m.get("sourceURL").or_else(|| m.get("url")))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .or_else(|| {
-            if !query.is_empty() {
-                build_serp_url(engine_tool, query).ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| build_serp_url(engine_tool, query).unwrap_or_default());
-
-    let effective_query = if query.is_empty() {
-        Url::parse(&serp_url)
-            .ok()
-            .and_then(|u| {
-                u.query_pairs()
-                    .find(|(k, _)| k == "q" || k == "text")
-                    .map(|(_, v)| v.into_owned())
-            })
-            .unwrap_or_default()
-    } else {
-        query.to_string()
-    };
-
-    let (items, outcome) = match engine_tool {
-        FIRECRAWL_GOOGLE_SEARCH => {
-            parse_google_serp(html_content, &effective_query, &serp_url, limit)
-        }
-        FIRECRAWL_YANDEX_SEARCH => {
-            parse_yandex_serp(html_content, &effective_query, &serp_url, limit)
-        }
-        FIRECRAWL_MOJEEK_SEARCH => {
-            parse_mojeek_serp(html_content, &effective_query, &serp_url, limit)
-        }
-        _ => return Err(anyhow!("unsupported search engine tool: {engine_tool}")),
-    };
-
-    if outcome == "challenge" {
-        return Err(anyhow!(
-            "search engine challenge/consent encountered on {engine_tool}"
-        ));
+    if let Some(err) = str_at(data, "/error") {
+        diag.provider_error = clip_diag(err);
+        return Ok(SerpParse {
+            items: Vec::new(),
+            outcome: SerpOutcome::UpstreamFailure,
+            diagnostics: diag,
+        });
+    }
+    if let Some(warning) = str_at(data, "/warning").or_else(|| str_at(data, "/metadata/warning")) {
+        diag.provider_warning = clip_diag(warning);
+    }
+    if let Some(err) = str_at(data, "/metadata/error") {
+        diag.provider_error = clip_diag(err);
+        return Ok(SerpParse {
+            items: Vec::new(),
+            outcome: SerpOutcome::UpstreamFailure,
+            diagnostics: diag,
+        });
     }
 
-    let truncated = items.len() >= limit;
-    let engine_name = match engine_tool {
-        FIRECRAWL_GOOGLE_SEARCH => "google",
-        FIRECRAWL_YANDEX_SEARCH => "yandex",
-        FIRECRAWL_MOJEEK_SEARCH => "mojeek",
-        _ => "unknown",
+    diag.target_status = num_at(data, "/metadata/statusCode");
+    diag.final_url = clip_diag(
+        str_at(data, "/metadata/sourceURL")
+            .or_else(|| str_at(data, "/metadata/url"))
+            .or_else(|| str_at(data, "/metadata/finalUrl"))
+            .unwrap_or(&req.serp_url),
+    );
+
+    // Input provenance: prefer non-empty rawHtml, fall back to cleaned html.
+    let raw_html = str_at(data, "/rawHtml").unwrap_or("");
+    let clean_html = str_at(data, "/html").unwrap_or("");
+    let (html_str, parser_input) = if !raw_html.is_empty() {
+        (raw_html, ParserInput::RawHtml)
+    } else if !clean_html.is_empty() {
+        (clean_html, ParserInput::CleanHtml)
+    } else {
+        ("", ParserInput::Missing)
     };
+    diag.parser_input = parser_input;
+    diag.input_bytes = html_str.len();
 
-    let items_val = serde_json::to_value(&items)?;
-    let obs = json!({
-        "items": items_val,
-        "results": items_val, // Compatible with generic extract_search_results
-        "engine": engine_name,
-        "query": effective_query,
-        "serp_url": serp_url,
-        "outcome": outcome,
-        "parser_version": PARSER_VERSION,
-    });
+    // Target-side HTTP failure behind an outer 200, evaluated before the payload
+    // shape: a 403/404/500/429 is an envelope fact, not a parsing problem.
+    if let Some(status) = diag.target_status {
+        if status == 404 {
+            diag.provider_error = format!("target returned HTTP {status}");
+            return Ok(SerpParse {
+                items: Vec::new(),
+                outcome: SerpOutcome::UpstreamFailure,
+                diagnostics: diag,
+            });
+        }
+        if status == 429 {
+            return Ok(SerpParse {
+                items: Vec::new(),
+                outcome: SerpOutcome::RateLimited,
+                diagnostics: diag,
+            });
+        }
+        if !(200..400).contains(&status) {
+            diag.provider_error = format!("target returned HTTP {status}");
+            return Ok(SerpParse {
+                items: Vec::new(),
+                outcome: SerpOutcome::UpstreamFailure,
+                diagnostics: diag,
+            });
+        }
+    }
 
-    Ok((obs, truncated))
+    // Truncated / oversize envelope: never parsed as a valid empty page.
+    if data.get("truncated").and_then(Value::as_bool) == Some(true)
+        || data.pointer("/metadata/truncated").and_then(Value::as_bool) == Some(true)
+        || diag.input_bytes > SERP_MAX_BODY_BYTES
+    {
+        return Ok(SerpParse {
+            items: Vec::new(),
+            outcome: SerpOutcome::ResponseTooLarge,
+            diagnostics: diag,
+        });
+    }
+
+    // No DOM at all: links-only or nothing. Neither can rank, so neither is a zero.
+    if parser_input == ParserInput::Missing {
+        let links_bytes = data
+            .get("links")
+            .and_then(Value::as_array)
+            .map_or(0, |links| {
+                links.iter().map(|l| l.as_str().map_or(0, str::len)).sum()
+            });
+        if links_bytes > 0 {
+            diag.parser_input = ParserInput::LinksOnly;
+            diag.input_bytes = links_bytes;
+        }
+        return Ok(SerpParse {
+            items: Vec::new(),
+            outcome: SerpOutcome::ParserMismatch,
+            diagnostics: diag,
+        });
+    }
+
+    let document = Html::parse_document(html_str);
+    diag.dom_candidates = dom_candidate_count(&document, policy);
+
+    // Structural interstitial: real challenge/consent wall.
+    if let Some(is_challenge) = detect_interstitial(&document, &diag.final_url) {
+        diag.status_region = "interstitial".to_string();
+        return Ok(SerpParse {
+            items: Vec::new(),
+            outcome: if is_challenge {
+                SerpOutcome::Challenge
+            } else {
+                SerpOutcome::Consent
+            },
+            diagnostics: diag,
+        });
+    }
+
+    // Validate the final URL against the expected engine SERP host/path.
+    let final_url_ok = Url::parse(&diag.final_url)
+        .map(|u| host_in_any(&url_host(&u), policy.hosts) && is_serp_path(engine, u.path()))
+        .unwrap_or(true);
+    let requested_url_ok = Url::parse(&req.serp_url)
+        .map(|u| host_in_any(&url_host(&u), policy.hosts) && is_serp_path(engine, u.path()))
+        .unwrap_or(true);
+    if !requested_url_ok {
+        diag.status_region = "requested_url_off_host".to_string();
+        return Ok(SerpParse {
+            items: Vec::new(),
+            outcome: SerpOutcome::UpstreamFailure,
+            diagnostics: diag,
+        });
+    }
+
+    let base = Url::parse(&diag.final_url)
+        .or_else(|_| Url::parse(&req.serp_url))
+        .unwrap_or_else(|_| Url::parse("https://example.com/").expect("static url"));
+
+    let items = extract_items(&document, engine, policy, req, &base, &mut diag);
+
+    // Only a recognized status region with a supported phrase can be a zero.
+    if items.is_empty() {
+        let (regions, region) = status_region_text(&document, policy);
+        if !region.trim().is_empty() {
+            if let Some(is_rate_limited) = classify_status_region(&region, policy) {
+                diag.status_region = clip_diag(&regions.join("|"));
+                return Ok(SerpParse {
+                    items,
+                    outcome: if is_rate_limited {
+                        SerpOutcome::RateLimited
+                    } else {
+                        SerpOutcome::VerifiedZero
+                    },
+                    diagnostics: diag,
+                });
+            }
+            diag.status_region = "status_region_unmatched".to_string();
+        }
+    }
+
+    if items.is_empty() {
+        // Unknown but non-empty DOM is never a zero: it is a parser mismatch.
+        diag.status_region = "no_matching_status_region".to_string();
+        let outcome = if !final_url_ok {
+            SerpOutcome::UpstreamFailure
+        } else {
+            SerpOutcome::ParserMismatch
+        };
+        return Ok(SerpParse {
+            items,
+            outcome,
+            diagnostics: diag,
+        });
+    }
+
+    // Host mismatch on a page that did yield organic cards: keep the items we
+    // extracted, but the outcome is not a clean Valid.
+    if !final_url_ok {
+        diag.status_region = "final_url_off_host".to_string();
+        return Ok(SerpParse {
+            items,
+            outcome: SerpOutcome::UpstreamFailure,
+            diagnostics: diag,
+        });
+    }
+
+    Ok(SerpParse {
+        items,
+        outcome: SerpOutcome::Valid,
+        diagnostics: diag,
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_serp_url_construction() {
-        let g = build_serp_url(FIRECRAWL_GOOGLE_SEARCH, "elon musk tesla").unwrap();
-        assert_eq!(g, "https://www.google.com/search?q=elon+musk+tesla");
-
-        let y = build_serp_url(FIRECRAWL_YANDEX_SEARCH, "spacex launch").unwrap();
-        assert_eq!(y, "https://yandex.com/search/?text=spacex+launch");
-
-        let m = build_serp_url(FIRECRAWL_MOJEEK_SEARCH, "open source intelligence").unwrap();
-        assert_eq!(
-            m,
-            "https://www.mojeek.com/search?q=open+source+intelligence"
-        );
-    }
-
-    #[test]
-    fn test_google_serp_parser_valid_html() {
-        let html = r#"
-        <!DOCTYPE html>
-        <html>
-        <body>
-            <div class="g">
-                <a href="https://example.com/target-page">
-                    <h3>Example Target Title</h3>
-                </a>
-                <div class="VwiC3b">This is the search snippet for example target.</div>
-            </div>
-            <div class="g">
-                <a href="/url?q=https://secondary.com/page&amp;sa=U">
-                    <h3>Secondary Page</h3>
-                </a>
-                <div class="VwiC3b">Snippet for secondary page.</div>
-            </div>
-            <!-- Internal link that should be filtered -->
-            <div class="g">
-                <a href="https://www.google.com/search?q=more">
-                    <h3>More results</h3>
-                </a>
-            </div>
-        </body>
-        </html>
-        "#;
-
-        let (results, outcome) = parse_google_serp(
-            html,
-            "test query",
-            "https://www.google.com/search?q=test",
-            5,
-        );
-        assert_eq!(outcome, "valid");
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].destination, "https://example.com/target-page");
-        assert_eq!(
-            results[0].snippet,
-            "This is the search snippet for example target."
-        );
-        assert_eq!(results[0].rank, 1);
-        assert_eq!(results[1].destination, "https://secondary.com/page");
-        assert_eq!(results[1].rank, 2);
-    }
-
-    #[test]
-    fn test_google_serp_parser_zero_results() {
-        let html = r#"
-        <!DOCTYPE html>
-        <html>
-        <body>
-            <div id="topstuff">
-                <p>Your search - <b>kajshdkjashdkjahskd</b> - did not match any documents.</p>
-            </div>
-        </body>
-        </html>
-        "#;
-
-        let (results, outcome) = parse_google_serp(
-            html,
-            "nonsense",
-            "https://www.google.com/search?q=nonsense",
-            5,
-        );
-        assert_eq!(outcome, "zero_results");
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_google_serp_parser_challenge() {
-        let html = r#"
-        <!DOCTYPE html>
-        <html>
-        <body>
-            <h1>Before you continue to Google</h1>
-            <p>We use cookies and data to deliver and maintain Google services...</p>
-        </body>
-        </html>
-        "#;
-
-        let (results, outcome) =
-            parse_google_serp(html, "query", "https://www.google.com/search?q=query", 5);
-        assert_eq!(outcome, "challenge");
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_yandex_serp_parser_valid_html() {
-        let html = r#"
-        <!DOCTYPE html>
-        <html>
-        <body>
-            <li class="serp-item">
-                <div class="Organic">
-                    <h2><a class="OrganicTitle-Link" href="https://target-yandex.org/doc">Target Document</a></h2>
-                    <div class="OrganicTextContent">Yandex snippet describing document.</div>
-                </div>
-            </li>
-            <li class="serp-item">
-                <div class="Organic">
-                    <h2><a class="OrganicTitle-Link" href="https://yandex.ru/adv">Yandex Ad Link</a></h2>
-                </div>
-            </li>
-        </body>
-        </html>
-        "#;
-
-        let (results, outcome) = parse_yandex_serp(
-            html,
-            "yandex query",
-            "https://yandex.com/search/?text=yandex",
-            5,
-        );
-        assert_eq!(outcome, "valid");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].destination, "https://target-yandex.org/doc");
-        assert_eq!(results[0].snippet, "Yandex snippet describing document.");
-    }
-
-    #[test]
-    fn test_mojeek_serp_parser_valid_html() {
-        let html = r#"
-        <!DOCTYPE html>
-        <html>
-        <body>
-            <ul class="results-standard">
-                <li>
-                    <h2><a class="title" href="https://mojeek-hit.com/info">Mojeek Result</a></h2>
-                    <p class="s">Mojeek independent index snippet.</p>
-                </li>
-            </ul>
-        </body>
-        </html>
-        "#;
-
-        let (results, outcome) = parse_mojeek_serp(
-            html,
-            "mojeek query",
-            "https://www.mojeek.com/search?q=mojeek",
-            5,
-        );
-        assert_eq!(outcome, "valid");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].destination, "https://mojeek-hit.com/info");
-        assert_eq!(results[0].snippet, "Mojeek independent index snippet.");
-    }
-
-    #[test]
-    fn test_parse_serp_response_envelope() {
-        let raw = json!({
-            "success": true,
-            "data": {
-                "html": "<ul class=\"results-standard\"><li><a class=\"title\" href=\"https://target.com\">Title</a><p class=\"s\">Snippet</p></li></ul>"
-            }
-        });
-
-        let (obs, truncated) =
-            parse_serp_response(FIRECRAWL_MOJEEK_SEARCH, &raw, "target", 5).unwrap();
-        assert!(!truncated);
-        assert_eq!(obs["engine"], "mojeek");
-        assert_eq!(obs["outcome"], "valid");
-        assert_eq!(obs["items"][0]["destination"], "https://target.com/");
-    }
-}
+mod tests;

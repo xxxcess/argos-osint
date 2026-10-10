@@ -1,0 +1,11 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "éclair recipes",
+  "limit": 5,
+  "outcome": "valid",
+  "parser_input": "raw_html",
+  "items": 2,
+  "accepted": 2,
+  "first_destination": "https://en.wikipedia.org/wiki/%C3%89clair",
+  "first_title": "Éclair"
+}

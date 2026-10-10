@@ -1,0 +1,8 @@
+{
+  "tool": "firecrawl_yandex_search",
+  "query": "auth failure",
+  "limit": 5,
+  "outcome": "upstream_failure",
+  "items": 0,
+  "accepted": 0
+}

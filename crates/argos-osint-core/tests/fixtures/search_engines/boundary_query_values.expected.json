@@ -1,0 +1,12 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "a?b&c=d +e",
+  "limit": 2,
+  "outcome": "valid",
+  "parser_input": "raw_html",
+  "items": 2,
+  "accepted": 2,
+  "truncated": true,
+  "first_destination": "https://example.com/a",
+  "note": "The limit is honoured and truncation is reported, not treated as a zero."
+}

@@ -1,0 +1,13 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "wrapper links",
+  "limit": 5,
+  "dom_key": "html",
+  "outcome": "valid",
+  "parser_input": "clean_html",
+  "items": 2,
+  "accepted": 2,
+  "first_destination": "https://example.com/direct",
+  "first_title": "Direct q wrapper",
+  "note": "Engine redirect wrappers are unwrapped with bounded depth; destination query parameters are preserved."
+}

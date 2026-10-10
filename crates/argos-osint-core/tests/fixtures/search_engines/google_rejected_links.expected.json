@@ -1,0 +1,17 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "rejected links",
+  "limit": 5,
+  "dom_key": "html",
+  "outcome": "parser_mismatch",
+  "parser_input": "clean_html",
+  "items": 0,
+  "accepted": 0,
+  "rejections": {
+    "ad_host": 1,
+    "private_ip": 2,
+    "unsafe_scheme": 1,
+    "credentials": 1
+  },
+  "note": "Rejections are recorded; a page of rejected links is not a verified zero."
+}

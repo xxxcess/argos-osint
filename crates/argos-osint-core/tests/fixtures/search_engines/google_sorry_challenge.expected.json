@@ -1,0 +1,10 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "challenge page",
+  "limit": 5,
+  "dom_key": "html",
+  "outcome": "challenge",
+  "parser_input": "clean_html",
+  "items": 0,
+  "accepted": 0
+}

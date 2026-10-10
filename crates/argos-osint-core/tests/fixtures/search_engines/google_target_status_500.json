@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "data": {
+    "rawHtml": "<!DOCTYPE html><html lang=\"en\"><head><title>server error query - Google Search</title></head><body><h1>500 Internal Server Error</h1></body></html>",
+    "metadata": {
+      "sourceURL": "https://www.google.com/search?q=server+error+query",
+      "statusCode": 500
+    }
+  }
+}

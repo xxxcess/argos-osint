@@ -1,0 +1,12 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "serp parser versions",
+  "limit": 5,
+  "dom_key": "html",
+  "outcome": "valid",
+  "parser_input": "clean_html",
+  "items": 2,
+  "accepted": 2,
+  "first_destination": "https://semver.org/",
+  "first_title": "Semantic Versioning"
+}

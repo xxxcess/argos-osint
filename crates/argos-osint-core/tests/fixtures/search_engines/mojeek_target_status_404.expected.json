@@ -1,0 +1,11 @@
+{
+  "tool": "firecrawl_mojeek_search",
+  "query": "deleted page",
+  "limit": 5,
+  "outcome": "upstream_failure",
+  "parser_input": "raw_html",
+  "items": 0,
+  "accepted": 0,
+  "target_status": 404,
+  "note": "Provider/API 404 is a failure for these tools, never a verified zero."
+}

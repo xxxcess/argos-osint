@@ -1,0 +1,11 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "noscript consent wall",
+  "limit": 5,
+  "dom_key": "html",
+  "outcome": "consent",
+  "parser_input": "clean_html",
+  "items": 0,
+  "accepted": 0,
+  "note": "A noscript-wrapped consent meta refresh is a block, never a zero: html5ever keeps noscript as raw text, so the tag never reaches the element tree."
+}

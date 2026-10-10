@@ -1,0 +1,9 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "missing page",
+  "limit": 5,
+  "outcome": "upstream_failure",
+  "items": 0,
+  "accepted": 0,
+  "note": "Envelope success=false is a failure, not an empty SERP."
+}

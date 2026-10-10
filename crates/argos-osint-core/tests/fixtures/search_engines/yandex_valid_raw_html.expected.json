@@ -1,0 +1,14 @@
+{
+  "tool": "firecrawl_yandex_search",
+  "query": "rust ownership",
+  "limit": 5,
+  "outcome": "valid",
+  "parser_input": "raw_html",
+  "items": 2,
+  "accepted": 2,
+  "first_destination": "https://stepik.org/course/63054/promo",
+  "first_title": "Rust для действующих разработчиков",
+  "rejections": {
+    "engine_internal": 1
+  }
+}

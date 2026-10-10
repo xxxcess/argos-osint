@@ -1,0 +1,12 @@
+{
+  "success": true,
+  "data": {
+    "rawHtml": "<!DOCTYPE html><html><head><title>partial - Mojeek Search</title></head><body><ul class=\"results-standard\"><li><h2><a class=\"title\" href=\"https://example.com/partial\">Partial</a></h2></li></ul>",
+    "metadata": {
+      "sourceURL": "https://www.mojeek.com/search?q=partial+body",
+      "statusCode": 200,
+      "truncated": true
+    },
+    "truncated": true
+  }
+}

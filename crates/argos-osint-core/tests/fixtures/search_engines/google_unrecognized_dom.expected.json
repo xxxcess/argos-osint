@@ -1,0 +1,9 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "unknown layout fixture",
+  "limit": 5,
+  "outcome": "parser_mismatch",
+  "parser_input": "raw_html",
+  "items": 0,
+  "accepted": 0
+}

@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "data": {
+    "rawHtml": "<!DOCTYPE html><html lang=\"en\"><head><title>blocked query - Google Search</title></head><body><div id=\"search\"><div class=\"g\"><a href=\"https://example.com/blocked\"><h3>Blocked heading</h3></a></div></div></body></html>",
+    "metadata": {
+      "sourceURL": "https://www.google.com/search?q=blocked+query",
+      "statusCode": 403
+    }
+  }
+}

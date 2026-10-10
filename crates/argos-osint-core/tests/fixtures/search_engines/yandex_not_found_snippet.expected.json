@@ -1,0 +1,13 @@
+{
+  "tool": "firecrawl_yandex_search",
+  "query": "file not found",
+  "limit": 5,
+  "dom_key": "html",
+  "outcome": "valid",
+  "parser_input": "clean_html",
+  "items": 1,
+  "accepted": 1,
+  "first_destination": "https://example.com/http-404",
+  "first_title": "Fixing a 404 file not found",
+  "note": "Ordinary result text must never be read as a zero-results signal."
+}

@@ -1,0 +1,10 @@
+{
+  "tool": "firecrawl_mojeek_search",
+  "query": "links only",
+  "limit": 5,
+  "outcome": "parser_mismatch",
+  "parser_input": "links_only",
+  "items": 0,
+  "accepted": 0,
+  "note": "A links array alone is not a ranked results page."
+}

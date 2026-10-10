@@ -1,0 +1,14 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "rust ownership",
+  "limit": 5,
+  "outcome": "valid",
+  "parser_input": "raw_html",
+  "items": 3,
+  "accepted": 3,
+  "first_destination": "https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html",
+  "first_title": "What Is Ownership? - The Rust Programming Language",
+  "rejections": {
+    "engine_internal": 1
+  }
+}

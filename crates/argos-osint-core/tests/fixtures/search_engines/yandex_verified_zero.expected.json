@@ -1,0 +1,10 @@
+{
+  "tool": "firecrawl_yandex_search",
+  "query": "несуществующий запрос",
+  "limit": 5,
+  "dom_key": "html",
+  "outcome": "verified_zero",
+  "parser_input": "clean_html",
+  "items": 0,
+  "accepted": 0
+}

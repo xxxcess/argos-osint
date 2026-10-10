@@ -1,0 +1,11 @@
+{
+  "tool": "firecrawl_mojeek_search",
+  "query": "open source intelligence",
+  "limit": 5,
+  "outcome": "valid",
+  "parser_input": "raw_html",
+  "items": 2,
+  "accepted": 2,
+  "first_destination": "https://osintframework.com/",
+  "first_title": "OSINT Framework"
+}

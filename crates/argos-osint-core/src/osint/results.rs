@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::search_engines::SerpOutcome;
 use super::ToolResult;
 
 /// Quality classification for a tool's output.
@@ -15,6 +16,9 @@ pub enum OutputQuality {
     MissingBinding,
     TransientFailure,
     Blocked,
+    /// A named search engine answered with a page the parser does not recognise,
+    /// so the result count is unknown. Never a verified zero (spec §9 fix 1).
+    ParserMismatch,
 }
 
 impl OutputQuality {
@@ -27,11 +31,35 @@ impl OutputQuality {
             Self::MissingBinding => "missing_binding",
             Self::TransientFailure => "transient_failure",
             Self::Blocked => "blocked",
+            Self::ParserMismatch => "parser_mismatch",
         }
     }
 
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Usable | Self::Partial)
+    }
+}
+
+/// Quality implied by a named engine's typed outcome, or `None` for every other
+/// tool and for a page that parsed cleanly.
+///
+/// An empty item list is never evidence of a zero here: the engine said what it
+/// did, and `ParserMismatch` says the count is unknown (spec §9 fix 1).
+fn serp_quality(observations: &Value) -> Option<OutputQuality> {
+    match observations
+        .get("outcome")
+        .and_then(Value::as_str)
+        .and_then(SerpOutcome::parse)?
+    {
+        SerpOutcome::Valid => None,
+        SerpOutcome::VerifiedZero => Some(OutputQuality::NoResults),
+        SerpOutcome::Challenge | SerpOutcome::Consent | SerpOutcome::RateLimited => {
+            Some(OutputQuality::Blocked)
+        }
+        SerpOutcome::ParserMismatch => Some(OutputQuality::ParserMismatch),
+        SerpOutcome::UpstreamFailure | SerpOutcome::ResponseTooLarge => {
+            Some(OutputQuality::TransientFailure)
+        }
     }
 }
 
@@ -175,6 +203,12 @@ pub fn extract_observation_items(observations: &Value) -> Vec<Value> {
 
 /// Classify the output quality of a completed or failed tool result.
 pub fn classify_output_quality(result: &ToolResult) -> OutputQuality {
+    // A typed SERP outcome is authoritative and is read before the generic rules:
+    // an unrecognised engine page is never read as a verified zero, and a challenge
+    // or consent wall is a block (spec §9 fix 1).
+    if let Some(quality) = serp_quality(&result.observations) {
+        return quality;
+    }
     if let Some(err) = &result.error {
         let err_lower = err.to_ascii_lowercase();
         if err_lower.contains("401")
@@ -211,7 +245,16 @@ pub fn classify_output_quality(result: &ToolResult) -> OutputQuality {
         .unwrap_or(false);
 
     if items.is_empty() && !has_text {
-        return OutputQuality::NoResults;
+        // Only a genuine verified zero is `NoResults`. An empty array alone is
+        // not proof of one: for a tool whose zero test is stricter, the payload is
+        // simply not a shape this module recognises (spec §9 fix 1).
+        if super::no_results(
+            super::canonical_tool_id(&result.tool_id),
+            &result.observations,
+        ) {
+            return OutputQuality::NoResults;
+        }
+        return OutputQuality::ParserMismatch;
     }
 
     if result.truncated {
@@ -245,6 +288,9 @@ pub fn normalize_tool_result(result: &ToolResult) -> NormalizedToolResult {
         match quality {
             OutputQuality::NoResults => "no records found".to_string(),
             OutputQuality::Blocked => "provider access blocked".to_string(),
+            OutputQuality::ParserMismatch => {
+                "search engine layout not recognised — results unknown".to_string()
+            }
             OutputQuality::TransientFailure => result
                 .error
                 .clone()
@@ -368,5 +414,113 @@ mod tests {
             classify_output_quality(&no_results),
             OutputQuality::NoResults
         );
+    }
+
+    /// An engine page nobody recognises is a parser mismatch: the result count is
+    /// unknown, so it must never be reported as a verified zero (spec §9 fix 1).
+    #[test]
+    fn unrecognised_serp_page_is_a_parser_mismatch_never_a_zero() {
+        for outcome in ["parser_mismatch", "upstream_failure", "challenge"] {
+            let mismatch = ToolResult {
+                tool_id: "firecrawl_google_search".into(),
+                inputs: json!({"query": "rust ownership"}),
+                status: "failed".into(),
+                source_url: "".into(),
+                retrieved_at: "".into(),
+                observations: json!({
+                    "items": [],
+                    "results": [],
+                    "outcome": outcome,
+                }),
+                raw: "".into(),
+                error: Some("serp_parser_mismatch: engine page layout not recognised".into()),
+                cached: false,
+                truncated: false,
+                credits_charged: 1,
+                credits_reported: None,
+            };
+            let quality = classify_output_quality(&mismatch);
+            assert_ne!(quality, OutputQuality::NoResults, "{outcome}");
+            assert!(!quality.is_success(), "{outcome}");
+        }
+        assert_eq!(
+            classify_output_quality(&ToolResult {
+                tool_id: "firecrawl_google_search".into(),
+                inputs: json!({"query": "rust ownership"}),
+                status: "failed".into(),
+                source_url: "".into(),
+                retrieved_at: "".into(),
+                observations: json!({"items": [], "results": [], "outcome": "parser_mismatch"}),
+                raw: "".into(),
+                error: None,
+                cached: false,
+                truncated: false,
+                credits_charged: 1,
+                credits_reported: None,
+            }),
+            OutputQuality::ParserMismatch
+        );
+        assert_eq!(
+            classify_output_quality(&ToolResult {
+                tool_id: "firecrawl_mojeek_search".into(),
+                inputs: json!({"query": "rust ownership"}),
+                status: "blocked".into(),
+                source_url: "".into(),
+                retrieved_at: "".into(),
+                observations: json!({"items": [], "results": [], "outcome": "consent"}),
+                raw: "".into(),
+                error: None,
+                cached: false,
+                truncated: false,
+                credits_charged: 1,
+                credits_reported: None,
+            }),
+            OutputQuality::Blocked
+        );
+        // Only a recognized engine status region with zero cards is a zero.
+        assert_eq!(
+            classify_output_quality(&ToolResult {
+                tool_id: "firecrawl_yandex_search".into(),
+                inputs: json!({"query": "zzzzz qqqq"}),
+                status: "no_results".into(),
+                source_url: "".into(),
+                retrieved_at: "".into(),
+                observations: json!({"items": [], "results": [], "outcome": "verified_zero"}),
+                raw: "".into(),
+                error: None,
+                cached: false,
+                truncated: false,
+                credits_charged: 1,
+                credits_reported: None,
+            }),
+            OutputQuality::NoResults
+        );
+    }
+
+    /// The mismatch variant is bounded, is not a success, and says what happened.
+    #[test]
+    fn parser_mismatch_is_a_distinct_non_success_quality() {
+        assert_eq!(OutputQuality::ParserMismatch.as_str(), "parser_mismatch");
+        assert!(!OutputQuality::ParserMismatch.is_success());
+        let normalized = normalize_tool_result(&ToolResult {
+            tool_id: "firecrawl_google_search".into(),
+            inputs: json!({"query": "rust ownership"}),
+            status: "failed".into(),
+            source_url: "".into(),
+            retrieved_at: "".into(),
+            observations: json!({"items": [], "results": [], "outcome": "parser_mismatch"}),
+            raw: "".into(),
+            error: None,
+            cached: false,
+            truncated: false,
+            credits_charged: 1,
+            credits_reported: None,
+        });
+        assert_eq!(normalized.quality, OutputQuality::ParserMismatch);
+        assert_eq!(
+            normalized.summary,
+            "search engine layout not recognised — results unknown"
+        );
+        assert!(normalized.items.is_empty() && normalized.search_results.is_empty());
     }
 }

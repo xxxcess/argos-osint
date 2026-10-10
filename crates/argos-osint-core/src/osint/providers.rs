@@ -2014,6 +2014,95 @@ mod tests {
         );
     }
 
+    /// The three named SERP tools scrape a real engine results page under fetch
+    /// contract v2 (spec §9 fix 3): `rawHtml` first with an `html` fallback, the
+    /// results region kept, and the provider cache disabled so Argos owns it.
+    #[test]
+    fn named_serp_tools_request_raw_html_and_skip_the_provider_cache() {
+        for (id, wanted_url, engine) in [
+            (
+                "firecrawl_google_search",
+                "https://www.google.com/search?q=rust+ownership",
+                "google",
+            ),
+            (
+                "firecrawl_yandex_search",
+                "https://yandex.com/search/?text=rust+ownership",
+                "yandex",
+            ),
+            (
+                "firecrawl_mojeek_search",
+                "https://www.mojeek.com/search?q=rust+ownership",
+                "mojeek",
+            ),
+        ] {
+            let req = post(id, json!({"query": "rust ownership", "limit": 5}));
+            assert_eq!(req.url.path(), "/v2/scrape", "{id}");
+            assert_eq!(req.poll, None, "{id}: not a job");
+            assert!(req.form.is_none(), "{id}: JSON body");
+            let body = req.body.unwrap();
+            let formats: Vec<&str> = body["formats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert_eq!(formats, ["rawHtml", "html", "links"], "{id}");
+            assert_eq!(body["onlyMainContent"], json!(false), "{id}");
+            assert_eq!(body["maxAge"], json!(0), "{id}");
+            assert_eq!(body["url"], wanted_url, "{id}");
+            assert!(body["url"].as_str().unwrap().contains(engine), "{id}");
+            // The engine URL is built from a fixed template, so a hostile query
+            // cannot steer the scrape off the provider host.
+            let hostile = request(id, &json!({"query": "https://evil.example/x"}))
+                .unwrap_or_else(|err| panic!("{id}: {err}"));
+            assert_host_locked(id, &hostile);
+            let hostile_url = hostile.body.unwrap()["url"].as_str().unwrap().to_string();
+            let parsed = Url::parse(&hostile_url).unwrap_or_else(|err| panic!("{id}: {err}"));
+            assert_eq!(parsed.scheme(), "https", "{id}: {hostile_url}");
+            // The scrape target is built from a fixed template, so a hostile
+            // query is escaped into a parameter and never becomes the host. The
+            // three engine hosts are `www.google.com`, `yandex.com` and
+            // `www.mojeek.com`; the point is the target stays on its own host.
+            assert!(
+                parsed.host_str().is_some_and(|host| {
+                    host == engine
+                        || host == format!("www.{engine}.com")
+                        || host == format!("{engine}.com")
+                }),
+                "{id}: the scrape target stays on {engine}: {hostile_url}"
+            );
+            assert!(
+                hostile_url.contains("evil.example"),
+                "{id}: the hostile query is escaped as a parameter: {hostile_url}"
+            );
+        }
+
+        // The cache skip is scoped to the named engines: the batch and scrape
+        // tools still hand the freshness decision to Firecrawl, so a page one of
+        // them fetched is reused instead of being re-scraped (spec §9 fix 3
+        // changes the named-SERP fetch contract only).
+        let scrape = post(
+            "firecrawl_scrape",
+            json!({"url": "https://acmerobotics.com/about"}),
+        );
+        assert_eq!(scrape.url.path(), "/v2/scrape");
+        let scrape = scrape.body.unwrap();
+        assert_eq!(scrape["formats"], json!(["markdown"]));
+        assert_eq!(scrape["onlyMainContent"], json!(true));
+        assert!(scrape.get("maxAge").is_none(), "{scrape}");
+
+        let batch = post(
+            "firecrawl_batch_scrape",
+            json!({"urls": ["https://acmerobotics.com/about"]}),
+        );
+        assert_eq!(batch.url.path(), "/v2/batch/scrape");
+        let batch = batch.body.unwrap();
+        assert_eq!(batch["formats"], json!(["markdown"]));
+        assert_eq!(batch["ignoreInvalidURLs"], json!(true));
+        assert!(batch.get("maxAge").is_none(), "{batch}");
+    }
+
     fn hunter(id: &str, args: Value, path: &str, pairs: &[(&str, &str)]) {
         let req = request(id, &args).unwrap_or_else(|err| panic!("{id}: {err}"));
         assert_host_locked(id, &req);

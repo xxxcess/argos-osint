@@ -1,0 +1,13 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "duplicate links",
+  "limit": 5,
+  "dom_key": "html",
+  "outcome": "valid",
+  "parser_input": "clean_html",
+  "items": 2,
+  "accepted": 2,
+  "first_destination": "https://example.com/dup",
+  "first_title": "First duplicate",
+  "note": "A repeated destination is collected once and never double counted."
+}

@@ -1,0 +1,10 @@
+{
+  "tool": "firecrawl_google_search",
+  "query": "rate limited query",
+  "limit": 5,
+  "outcome": "rate_limited",
+  "parser_input": "raw_html",
+  "items": 0,
+  "accepted": 0,
+  "target_status": 429
+}

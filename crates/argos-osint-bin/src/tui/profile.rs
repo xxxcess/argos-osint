@@ -1264,11 +1264,11 @@ impl ProfileView {
         }
     }
 
-    /// 1 Hz cadence, throttled by the caller.
+    /// Automatic snapshots refresh every 20 seconds, throttled by the caller.
     pub fn due(&self) -> bool {
         match self.loaded_at {
             None => true,
-            Some(at) => at.elapsed() >= std::time::Duration::from_secs(1),
+            Some(at) => at.elapsed() >= std::time::Duration::from_secs(20),
         }
     }
 

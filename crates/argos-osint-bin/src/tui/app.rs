@@ -1575,7 +1575,7 @@ impl App {
         true
     }
 
-    /// One Profile snapshot, on the 1 Hz cadence the dashboards already share.
+    /// One Profile snapshot when its 20-second automatic refresh is due.
     /// The read is on the store's own connection, so it never blocks recording.
     pub(crate) fn reload_profile(&mut self) {
         if !self.profile.due()

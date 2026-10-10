@@ -92,3 +92,54 @@ pub fn card_dim() -> Style {
 pub fn card_accent() -> Style {
     Style::default().fg(ACCENT).bg(SURFACE)
 }
+
+/// Categorical series palette for the Profile dashboard charts. Eight distinct
+/// hues ordered around the colour wheel, so adjacent series stay separable on a
+/// 256-colour and on a true-colour terminal. Entries 1, 3, 4 and 6 reuse the
+/// semantic ACCENT, GREEN, WARN and RED hues, so a chart, its legend and the
+/// rest of the shell agree.
+pub const SERIES: [Color; 8] = [
+    ACCENT,                    // sky
+    Color::Rgb(80, 200, 200),  // teal
+    GREEN,                     // green
+    WARN,                      // amber
+    Color::Rgb(232, 152, 72),  // orange
+    RED,                       // red
+    Color::Rgb(198, 120, 221), // violet
+    Color::Rgb(245, 169, 197), // pink
+];
+
+/// Series colour by index, wrapping for more than eight series.
+pub fn series(index: usize) -> Color {
+    SERIES[index % SERIES.len()]
+}
+
+/// Style for one series segment: the series hue on the app background.
+pub fn series_style(index: usize) -> Style {
+    Style::default().fg(series(index)).bg(BG)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn series_palette_is_eight_distinct_hues() {
+        assert_eq!(SERIES.len(), 8);
+        for (a, first) in SERIES.iter().enumerate() {
+            for (b, second) in SERIES.iter().enumerate().skip(a + 1) {
+                assert_ne!(first, second, "SERIES[{a}] repeats SERIES[{b}]");
+            }
+        }
+    }
+
+    #[test]
+    fn series_index_wraps_after_eight() {
+        assert_eq!(series(0), SERIES[0]);
+        assert_eq!(series(7), SERIES[7]);
+        assert_eq!(series(8), series(0));
+        assert_eq!(series(9), series(1));
+        assert_eq!(series_style(8).fg, Some(SERIES[0]));
+        assert_eq!(series_style(8).bg, Some(BG));
+    }
+}

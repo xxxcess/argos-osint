@@ -422,7 +422,7 @@ fn osint_areas(area: Rect, with_key: bool) -> OsintLayout {
 }
 
 /// System: the Refresh hardware action row, then host and path panes.
-fn system_areas(area: Rect) -> (Rect, Rect) {
+pub(crate) fn system_areas(area: Rect) -> (Rect, Rect) {
     let rows = split_vertical(area, [Constraint::Length(ACTION_H), Constraint::Min(0)]);
     (rows[1], rows[0])
 }
@@ -449,6 +449,25 @@ fn popup_area(area: Rect) -> Rect {
         y: area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
+    }
+}
+
+/// The Configs popup covers about 85% of the viewport, bounded by the terminal:
+/// large enough for the import editor, never larger than the screen.
+pub(crate) fn configs_area(app: &App, area: Rect) -> Rect {
+    if matches!(&app.overlay, Overlay::Configs) {
+        let width = (area.width as f32 * 0.85) as u16;
+        let height = (area.height as f32 * 0.85) as u16;
+        let width = width.clamp(40, 140).min(area.width);
+        let height = height.clamp(12, 48).min(area.height);
+        Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        }
+    } else {
+        area
     }
 }
 
@@ -3524,7 +3543,7 @@ fn system_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     contains(system_button(actions), x, y).then_some(Target::Button(ButtonId::RefreshHardware))
 }
 
-fn system_button(actions: Rect) -> Rect {
+pub(crate) fn system_button(actions: Rect) -> Rect {
     let width = 22.min(actions.width);
     Rect { width, ..actions }
 }
@@ -3978,7 +3997,7 @@ fn value_area_or_composer(area: Rect, field: FieldId) -> Rect {
     }
 }
 
-fn draw_button(frame: &mut Frame, app: &App, button: ButtonId, label: &str, area: Rect) {
+pub(crate) fn draw_button(frame: &mut Frame, app: &App, button: ButtonId, label: &str, area: Rect) {
     draw_button_state(frame, app, button, label, area, false);
 }
 
@@ -4061,7 +4080,7 @@ fn draw_tabs<T: Copy>(
     }
 }
 
-pub(super) fn pane(title: &str) -> Block<'static> {
+pub(crate) fn pane(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
@@ -8675,36 +8694,16 @@ pub(crate) fn system_path_lines() -> Vec<String> {
     lines
 }
 
+/// Profile: the Overview/System tabs plus the Configs popup.
 fn draw_system(frame: &mut Frame, app: &App, area: Rect) {
-    let (content, actions) = system_areas(area);
-    draw_button(
-        frame,
-        app,
-        ButtonId::RefreshHardware,
-        "Refresh hardware",
-        system_button(actions),
-    );
-    let host = system_host_lines(&app.hardware);
-    let host_h = (host.len() as u16 + 2).min(content.height);
-    let rows = split_vertical(content, [Constraint::Length(host_h), Constraint::Min(0)]);
-    frame.render_widget(
-        Paragraph::new(host.join("\n"))
-            .style(theme::text())
-            .block(pane(" host "))
-            .wrap(Wrap { trim: true }),
-        rows[0],
-    );
-    frame.render_widget(
-        Paragraph::new(system_path_lines().join("\n"))
-            .style(theme::text())
-            .block(pane(" paths "))
-            .wrap(Wrap { trim: true }),
-        rows[1],
-    );
+    // The Profile module owns its whole body, including the tab strip: the two
+    // tabs split the old System pane rather than adding a pane beside it.
+    super::profile::draw_profile(frame, app, area);
 }
 
 fn popup_text(app: &App) -> String {
     match &app.overlay {
+        Overlay::Configs => String::new(),
         Overlay::Help => {
             let mut lines = vec![
                 format!("# {} commands", app.module.map_or("Home", ModuleId::title)),
@@ -9140,6 +9139,11 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         draw_palette(frame, app);
         return;
     }
+    if app.overlay == Overlay::Configs {
+        let area = configs_area(app, frame.area());
+        super::profile_config::draw(frame, app, area);
+        return;
+    }
     if matches!(app.overlay, Overlay::AddFallback) {
         draw_add_fallback(frame, app);
         return;
@@ -9167,6 +9171,7 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         | Overlay::IntelRecon
         | Overlay::Palette
         | Overlay::AddFallback
+        | Overlay::Configs
         | Overlay::None => " ",
     };
     let run_card = atlas_run_card(app);

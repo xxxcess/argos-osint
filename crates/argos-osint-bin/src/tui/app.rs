@@ -21,6 +21,7 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::Rect;
+use ratatui::Frame;
 use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -219,13 +220,20 @@ pub struct LastViewSession {
 pub enum Overlay {
     None,
     Help,
-    Memories { message_id: String },
-    Block { title: String, body: String },
+    Memories {
+        message_id: String,
+    },
+    Block {
+        title: String,
+        body: String,
+    },
     Choice(ChoiceKind),
     IntelRecon,
     Palette,
     AddFallback,
     ResumeSession(Box<LastViewSession>),
+    /// Profile > System > Configs: portable export/import.
+    Configs,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,6 +332,10 @@ pub enum FieldId {
     RouterModelFilter,
     FallbackFilter,
     Composer,
+    /// Profile > System > Configs: export destination path.
+    ProfileExportPath,
+    /// Profile > System > Configs: import document editor.
+    ProfileImportEditor,
 }
 
 /// The model role the Defaults tab is editing.
@@ -1066,6 +1078,10 @@ pub struct App {
     pub auth: AuthFile,
     pub settings: SettingsFile,
     pub hardware: HardwareProfile,
+    /// Profile dashboard: Overview widgets and the System tab.
+    pub profile: super::profile::ProfileView,
+    /// Profile > System > Configs: portable export/import popup state.
+    pub profile_config: super::profile_config::ConfigView,
     auth_path: PathBuf,
     settings_path: PathBuf,
     pub store: Store,
@@ -1134,6 +1150,8 @@ impl App {
     }
     pub fn boot() -> Result<Self> {
         paths::ensure_home()?;
+        // Finish any configuration commit a previous process left half applied.
+        let _ = argos_osint_core::config_commit::recover_at_startup();
         let store = Store::open(&paths::db_path())?;
         store.recover_runs()?;
         let threads = store.list_threads("")?;
@@ -1428,6 +1446,8 @@ impl App {
             auth,
             settings,
             hardware: hardware::profile_cached(false),
+            profile: super::profile::ProfileView::default(),
+            profile_config: super::profile_config::ConfigView::default(),
             auth_path: paths::auth_path(),
             settings_path: paths::config_path(),
             store,
@@ -1522,9 +1542,19 @@ impl App {
         match self.module {
             Some(ModuleId::Logs) => self.reload_logs(),
             Some(ModuleId::Jobs) => self.reload_jobs(),
+            Some(ModuleId::System) => self.reload_profile(),
             _ => self.logs.refresh_counts(&self.store),
         }
         true
+    }
+
+    /// One Profile snapshot, on the 1 Hz cadence the dashboards already share.
+    /// The read is on the store's own connection, so it never blocks recording.
+    pub(crate) fn reload_profile(&mut self) {
+        if !self.profile.due() {
+            return;
+        }
+        self.profile.reload(&self.store);
     }
 
     pub(crate) fn reload_logs(&mut self) {
@@ -2473,11 +2503,175 @@ impl App {
         self.select(next);
     }
 
+    pub(crate) fn config_tab(&self) -> super::profile_config::ConfigTab {
+        self.profile_config.tab
+    }
+
+    pub(crate) fn config(&self) -> &super::profile_config::ConfigView {
+        &self.profile_config
+    }
+
+    /// Draws the Configs export destination as a real field, so the mouse and
+    /// the keyboard reach the same target.
+    pub(crate) fn draw_export_field(&self, frame: &mut Frame, area: Rect) {
+        super::ui::draw_field(frame, self, FieldId::ProfileExportPath, "destination", area);
+    }
+
+    /// Keys inside the Profile > System > Configs popup.
+    ///
+    /// Enter inserts a newline in the editor — the user commits with Ctrl+Enter,
+    /// which validates and imports only when the document is valid, so the
+    /// button is always the explicit commit.
+    fn profile_config_key(&mut self, key: KeyEvent) -> bool {
+        let config = &mut self.profile_config;
+        match key.code {
+            KeyCode::Esc => {
+                config.close();
+                self.profile.config_open = false;
+                self.overlay = Overlay::None;
+                true
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                config.next_tab();
+                // The newly open tab owns its field, so the caret moves with it.
+                let tab = config.tab;
+                self.set_focus(Target::Field(match tab {
+                    super::profile_config::ConfigTab::Export => FieldId::ProfileExportPath,
+                    super::profile_config::ConfigTab::Import => FieldId::ProfileImportEditor,
+                }));
+                true
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if config.tab == crate::tui::profile_config::ConfigTab::Import {
+                    config.validate();
+                    if config.plan.is_some() {
+                        match config.run_import() {
+                            Ok(generation) => {
+                                self.status =
+                                    format!("Imported configuration revision {generation}");
+                            }
+                            Err(err) => {
+                                self.status = format!("Import failed: {err}");
+                            }
+                        }
+                    }
+                } else {
+                    config.check_export_path();
+                }
+                true
+            }
+            KeyCode::Enter => match config.tab {
+                crate::tui::profile_config::ConfigTab::Import => {
+                    config.newline();
+                    true
+                }
+                super::profile_config::ConfigTab::Export => {
+                    // Enter runs the export, with a second Enter confirming an
+                    // existing destination.
+                    if config.export_confirm {
+                        match config.run_export() {
+                            Ok(_) => {
+                                self.status = config
+                                    .export_status
+                                    .clone()
+                                    .unwrap_or_else(|| "Exported".into());
+                            }
+                            Err(err) => self.status = format!("Export failed: {err}"),
+                        }
+                    } else {
+                        config.check_export_path();
+                        if config.export_error.is_none() && !config.export_confirm {
+                            match config.run_export() {
+                                Ok(_) => {
+                                    self.status = config
+                                        .export_status
+                                        .clone()
+                                        .unwrap_or_else(|| "Exported".into());
+                                }
+                                Err(err) => self.status = format!("Export failed: {err}"),
+                            }
+                        } else {
+                            self.status = config
+                                .export_error
+                                .clone()
+                                .unwrap_or_else(|| "Confirm the overwrite".into());
+                        }
+                    }
+                    true
+                }
+            },
+            KeyCode::Backspace if config.tab == crate::tui::profile_config::ConfigTab::Import => {
+                config.backspace();
+                true
+            }
+            KeyCode::Delete if config.tab == crate::tui::profile_config::ConfigTab::Import => {
+                config.delete();
+                true
+            }
+            KeyCode::Home if config.tab == crate::tui::profile_config::ConfigTab::Import => {
+                config.home();
+                true
+            }
+            KeyCode::End if config.tab == crate::tui::profile_config::ConfigTab::Import => {
+                config.end();
+                true
+            }
+            KeyCode::Left if config.tab == crate::tui::profile_config::ConfigTab::Import => {
+                if config.import.caret > 0 {
+                    config.import.caret -= 1;
+                }
+                true
+            }
+            KeyCode::Right if config.tab == crate::tui::profile_config::ConfigTab::Import => {
+                if config.import.caret < config.import.text.chars().count() {
+                    config.import.caret += 1;
+                }
+                true
+            }
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+                if config.tab == crate::tui::profile_config::ConfigTab::Import =>
+            {
+                let delta = match key.code {
+                    KeyCode::Up => -1,
+                    KeyCode::PageUp => -10,
+                    KeyCode::PageDown => 10,
+                    _ => 1,
+                };
+                let height = 12;
+                config.import.scroll_by(delta, height);
+                true
+            }
+            KeyCode::Char(c)
+                if config.tab == crate::tui::profile_config::ConfigTab::Import
+                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                config.insert(&c.to_string());
+                true
+            }
+            KeyCode::Char(c)
+                if config.tab == super::profile_config::ConfigTab::Export
+                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                config.export_path.push(c);
+                config.export_confirm = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn select(&mut self, index: usize) {
         self.flush_draft();
         let _ = self.flush_home_draft();
         self.launcher_sel = index;
         self.module = Some(ModuleId::ALL[index]);
+        if self.module == Some(ModuleId::System) {
+            // A fresh Profile entry reads one snapshot immediately.
+            self.profile.loaded_at = None;
+        }
+        if self.module == Some(ModuleId::System) && self.overlay == Overlay::Configs {
+            self.overlay = Overlay::None;
+        }
         if self.module == Some(ModuleId::Recon) {
             self.recon_chat = false;
             self.input = self
@@ -2594,6 +2788,8 @@ impl App {
             FieldId::RouterModelFilter => &self.router_model_filter,
             FieldId::FallbackFilter => &self.fallback_popup_filter,
             FieldId::Composer => &self.input,
+            FieldId::ProfileExportPath => &self.profile_config.export_path,
+            FieldId::ProfileImportEditor => "",
         }
     }
 
@@ -2656,10 +2852,14 @@ impl App {
             FieldId::RouterModelFilter => &mut self.router_model_filter,
             FieldId::FallbackFilter => &mut self.fallback_popup_filter,
             FieldId::Composer => &mut self.input,
+            FieldId::ProfileExportPath => &mut self.profile_config.export_path,
+            // The import editor owns its own cursor and paste buffer; it is
+            // reached through `profile_config` rather than a flat string field.
+            FieldId::ProfileImportEditor => &mut self.profile_config.import.text,
         }
     }
 
-    fn set_focus(&mut self, target: Target) {
+    pub(crate) fn set_focus(&mut self, target: Target) {
         if self.focus == Target::Field(FieldId::Composer)
             && target != Target::Field(FieldId::Composer)
         {
@@ -7236,6 +7436,14 @@ impl App {
     }
 
     fn edit_paste(&mut self, pasted: &str) {
+        // The Configs import editor owns the keyboard while the popup is open,
+        // and it is the one field that must accept a whole document.
+        if self.overlay == Overlay::Configs {
+            if self.profile_config.tab == crate::tui::profile_config::ConfigTab::Import {
+                self.profile_config.insert(pasted);
+            }
+            return;
+        }
         let Target::Field(field) = self.focus else {
             return;
         };
@@ -7473,6 +7681,24 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
             return self.on_interrupt();
+        }
+        // The Configs popup owns the keyboard while it is open.
+        if self.overlay == Overlay::Configs {
+            // The open tab owns its own field, so typing never leaks into the
+            // module shortcuts underneath.
+            self.set_focus(Target::Field(match self.profile_config.tab {
+                super::profile_config::ConfigTab::Export => FieldId::ProfileExportPath,
+                crate::tui::profile_config::ConfigTab::Import => FieldId::ProfileImportEditor,
+            }));
+            if self.profile_config_key(key) {
+                return true;
+            }
+        }
+        if self.module == Some(ModuleId::System)
+            && self.overlay == Overlay::None
+            && super::profile::handle_key(self, key)
+        {
+            return true;
         }
         if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
             return self.arm_quit();
@@ -9017,6 +9243,8 @@ mod tests {
             auth: AuthFile::default(),
             settings: SettingsFile::default(),
             hardware: HardwareProfile::unknown(),
+            profile: crate::tui::profile::ProfileView::default(),
+            profile_config: crate::tui::profile_config::ConfigView::default(),
             auth_path: PathBuf::new(),
             settings_path: PathBuf::new(),
             store: Store::memory().unwrap(),
@@ -10498,20 +10726,40 @@ mod tests {
     }
 
     #[test]
-    fn system_shows_only_hardware_and_paths_and_logs_own_clear() {
+    fn profile_splits_into_overview_and_system_tabs_and_logs_own_clear() {
         let mut app = app();
         app.select(ModuleId::System.index());
-        let text = buffer_text(&render(&mut app, 120, 34));
-        assert!(text.contains("Refresh hardware"));
-        assert!(text.contains(" host ") && text.contains(" paths "));
-        assert!(text.contains("Database:") && text.contains("Config:"));
+
+        // Overview is the activity tab: telemetry widgets, never host details.
+        let overview = buffer_text(&render(&mut app, 120, 34));
         assert!(
-            !text.contains("event log") && !text.contains("Clear"),
-            "{text}"
+            overview.contains(" period ") && overview.contains("[Tab] switch"),
+            "the overview tab shows the filter strip and the tab switch: {overview}"
+        );
+        assert!(
+            !overview.contains("Database:") && !overview.contains("Refresh hardware"),
+            "host and paths belong to the System tab: {overview}"
+        );
+
+        // A bare Tab moves to the System tab, which keeps the panes it always had.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::System);
+        let system = buffer_text(&render(&mut app, 120, 34));
+        assert!(system.contains("Refresh hardware"), "{system}");
+        assert!(system.contains(" host ") && system.contains(" paths "));
+        assert!(system.contains("Database:") && system.contains("Config:"));
+        assert!(
+            !system.contains("event log") && !system.contains("Clear"),
+            "{system}"
         );
         click(&mut app, Target::Button(ButtonId::RefreshHardware));
         assert_eq!(app.status, "Hardware refreshed");
 
+        // Tab moves back to Overview, so the two tabs really are one pane.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::Overview);
+
+        // Logs keeps its own clear action and its own retention label.
         register(&app, "job-c", "brain", "Graph summary");
         job_event(
             &app,
@@ -13368,5 +13616,221 @@ mod tests {
         (0..app.screen.height)
             .flat_map(|y| (0..app.screen.width).map(move |x| (x, y)))
             .any(|(x, y)| super::super::ui::hit_test(app, x, y) == Some(target))
+    }
+
+    /// Seeds one observation per widget family so a snapshot has content.
+    fn seed_profile(app: &mut App) {
+        let conn = app.store.connection();
+        let now = chrono::Utc::now().to_rfc3339();
+        let record = |event: argos_osint_core::telemetry::TelemetryEvent| {
+            let _ = argos_osint_core::telemetry::insert(conn, &event);
+        };
+        record(
+            argos_osint_core::telemetry::TelemetryEvent::new(
+                argos_osint_core::telemetry::EventKind::ReconRun,
+            )
+            .at(now.clone())
+            .app("tui")
+            .mode("deep")
+            .outcome("completed"),
+        );
+        record(
+            argos_osint_core::telemetry::TelemetryEvent::new(
+                argos_osint_core::telemetry::EventKind::ToolInvocation,
+            )
+            .at(now.clone())
+            .app("tui")
+            .provider("firecrawl")
+            .role("recon")
+            .mode("remote")
+            .tool("firecrawl_scrape")
+            .category("web")
+            .engine("google")
+            .outcome("completed_nonempty")
+            .duration_ms(Some(420)),
+        );
+        record(
+            argos_osint_core::telemetry::TelemetryEvent::new(
+                argos_osint_core::telemetry::EventKind::AtlasCycle,
+            )
+            .at(now.clone())
+            .run("run-1")
+            .outcome("completed"),
+        );
+        record(
+            argos_osint_core::telemetry::TelemetryEvent::new(
+                argos_osint_core::telemetry::EventKind::ModelAttempt,
+            )
+            .at(now)
+            .app("tui")
+            .provider("openrouter")
+            .role("recon")
+            .model("gpt-4o-mini")
+            .outcome("succeeded")
+            .duration_ms(Some(310)),
+        );
+        app.profile.loaded_at = None;
+        app.profile.reload(&app.store);
+    }
+
+    /// The four viewports the spec requires, plus a narrow one that must still
+    /// render the dashboard rather than a blank pane.
+    #[test]
+    fn profile_overview_renders_at_every_required_viewport() {
+        for (width, height) in [(160u16, 50u16), (100, 32), (80, 24), (64, 18)] {
+            let mut app = app();
+            app.select(ModuleId::System.index());
+            seed_profile(&mut app);
+            let text = buffer_text(&render(&mut app, width, height));
+            assert!(
+                text.contains(" period "),
+                "{width}x{height}: the filter strip must render: {text}"
+            );
+            assert!(
+                text.contains("[Tab] switch"),
+                "{width}x{height}: the tab switch must render: {text}"
+            );
+            // The status strip names the reviewed inventory instead of guessing.
+            assert!(
+                text.contains("35"),
+                "{width}x{height}: the widget count must render: {text}"
+            );
+        }
+    }
+
+    /// A viewport too small for the Overview keeps the tab strip and says so
+    /// instead of drawing a mangled layout.
+    #[test]
+    fn profile_narrow_viewport_explains_itself_instead_of_going_blank() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        seed_profile(&mut app);
+        // A 40-wide body is still below the Overview's floor, so the pane says
+        // it needs more room rather than rendering half a chart.
+        let text = buffer_text(&render(&mut app, 44, 14));
+        assert!(
+            text.contains("[Tab] switch"),
+            "the tab strip survives a narrow viewport: {text}"
+        );
+        assert!(
+            text.contains("wider") || text.contains(" period "),
+            "the Overview either explains itself or still renders: {text}"
+        );
+    }
+
+    /// Keyboard and mouse must reach the same target.
+    #[test]
+    fn profile_keyboard_and_mouse_focus_agree() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        seed_profile(&mut app);
+
+        // Keyboard: `x` opens the Configs popup, and Tab moves its field focus.
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.overlay, Overlay::Configs);
+        let keyboard_focus = app.focus;
+        assert!(
+            matches!(keyboard_focus, Target::Field(FieldId::ProfileExportPath)),
+            "the export tab focuses its path field: {keyboard_focus:?}"
+        );
+
+        // Mouse: the same field is reachable by clicking, and the hit test
+        // resolves it to the same target.
+        click(&mut app, Target::Field(FieldId::ProfileExportPath));
+        assert_eq!(app.focus, keyboard_focus);
+
+        // Tab moves to the import editor, and its own field is clickable too.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.focus,
+            Target::Field(FieldId::ProfileImportEditor),
+            "Tab moves the Configs popup to the editor"
+        );
+    }
+
+    /// Bracketed paste reaches the import editor with newlines intact, and a
+    /// keyed editor inserts a whole document in one event.
+    #[test]
+    fn profile_import_editor_accepts_a_pasted_multiline_document() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.profile_config.tab,
+            crate::tui::profile_config::ConfigTab::Import
+        );
+
+        let document = "{\n  \"schema_version\": 1,\n  \"providers\": [],\n}";
+        app.edit_paste(document);
+        assert_eq!(app.profile_config.import.text, document);
+        // Newlines survive, so the caret sits at the end of the last line.
+        let (line, _) = app.profile_config.import.caret_position();
+        assert_eq!(line, 4);
+
+        // Validation keeps the caret's line for the error pointer.
+        app.profile_config.validate();
+        assert!(app.profile_config.import.error.is_some());
+        let error = app.profile_config.import.error.clone().unwrap();
+        assert!(!error.message.is_empty());
+        // The document is not valid, so the Import button is never armed.
+        assert!(app.profile_config.plan.is_none());
+
+        // Backspace removes one character, never a whole line.
+        app.profile_config.backspace();
+        assert_eq!(app.profile_config.import.text.len(), document.len() - 1);
+    }
+
+    /// The Configs popup covers about 85% of the viewport and is bounded by it.
+    #[test]
+    fn profile_configs_popup_covers_most_of_the_viewport() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let area = crate::tui::ui::configs_area(&app, app.screen);
+        let fraction = f64::from(area.width) / f64::from(app.screen.width.max(1));
+        assert!(
+            fraction > 0.7 && fraction <= 0.9,
+            "the popup covers about 85%: {fraction}"
+        );
+        assert!(area.width <= app.screen.width);
+        assert!(area.height <= app.screen.height);
+    }
+
+    /// Closing the popup clears the pasted secret buffer.
+    #[test]
+    fn profile_configs_popup_clears_the_pasted_secret_on_close() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.profile_config.import.paste = "sk-secret-value-123".to_string();
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(
+            app.profile_config.import.paste.is_empty(),
+            "a pasted secret never outlives the popup"
+        );
+    }
+
+    /// Every section reports its reviewed widget count, and the section
+    /// navigator reaches all five.
+    #[test]
+    fn profile_sections_and_widgets_match_the_reviewed_inventory() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        seed_profile(&mut app);
+        let mut seen = Vec::new();
+        for _ in 0..crate::tui::profile::Section::all().len() {
+            seen.push(app.profile.section);
+            app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
+        }
+        assert_eq!(seen.len(), 5);
+        // All five sections are reachable, and the navigator wraps.
+        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+        assert_eq!(app.profile.section, seen[4]);
+        // The numeric shortcuts jump straight to a section.
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert_eq!(app.profile.section, crate::tui::profile::Section::Atlas);
     }
 }

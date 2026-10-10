@@ -68,6 +68,34 @@ Pipeline and quotas: [architecture.md](architecture.md#atlas).
 
 [![Atlas news cycle](diagrams/atlas-pipeline.svg)](diagrams/atlas-pipeline.html)
 
+### Profile
+
+Two tabs. `Tab` switches them (a bare `Tab` only: `Ctrl+Tab` still cycles apps, `Tab` in a field still moves focus).
+
+| Keys | Action |
+| --- | --- |
+| `Tab` | Overview ↔ System |
+| `1`–`5` | Jump to a section (Intel → Tools) |
+| `[` `]` | Previous / next section |
+| `j` `k` / `↑` `↓` | Next / previous widget in the focused section |
+| `m` | `see more` — grow the focused widget's page |
+| `c` | Clear dimension filters (the period stays) |
+| `f` | Filter popup, then `n` cycles its dimension (narrow viewports) |
+| `r` | Refresh hardware |
+| `x` | Configs |
+| Esc | Home |
+
+**Overview** is the activity dashboard: a filter strip (period plus the bounded dimensions) above a section navigator, and the focused section's widgets. **System** keeps Host, Paths and Refresh hardware, and adds the **Configs** popup.
+
+**Configs** (`x`) — Export writes the portable schema-v1 document; Import merges one in. The file contains saved API keys, so treat it as a secret and never commit it.
+
+| Tab | Keys |
+| --- | --- |
+| Export | Type the destination (`~` expands), Enter checks it and exports. Enter again confirms an overwrite |
+| Import | Paste the document. Enter inserts a newline; Ctrl+Enter validates and, only when valid, imports |
+
+The redacted change summary lists what moves before you commit. Every surface here — widget ids, the filter strip, the metric dictionary, the portable configuration contract, validation and the commit — is documented in [profile-dashboard-and-search.md](profile-dashboard-and-search.md).
+
 ### Other apps
 
 | App | Role |
@@ -77,7 +105,7 @@ Pipeline and quotas: [architecture.md](architecture.md#atlas).
 | Models (`Providers`) | Defaults (primary + ordered fallbacks), OpenRouter, Google, Nvidia |
 | Jobs | Background work ([lifecycle](diagrams/jobs-lifecycle.html)) |
 | Logs | Durable events |
-| Profile (`System`) | Hardware and storage paths |
+| Profile (`System`) | Activity dashboard, host and storage paths, portable configuration |
 
 Module ids vs labels: [concepts.md](concepts.md). TUI contracts: [conventions.md](conventions.md). Surface audit: [ui-interaction-audit.md](ui-interaction-audit.md).
 

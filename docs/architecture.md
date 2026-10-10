@@ -395,6 +395,52 @@ Launch:
 
 Answer-step 429: run failed, tool results kept, resume skips completed steps.
 
+## Profile dashboard and config transfer
+
+Profile (internal id `System`) is read-only observability plus one configuration transaction. Widgets, metric denominators and the portable document: [profile-dashboard-and-search.md](profile-dashboard-and-search.md). Keys: [usage.md](usage.md#profile).
+
+### Snapshot path
+
+```
+tick (1 Hz) → Store::profile_snapshot → profile_stats::snapshot(&store.conn, period, filters, now)
+            → ProfileSnapshot (immutable) → tui/profile.rs renders
+```
+
+- `App::reload_profile` asks `ProfileView::due()` first, so a snapshot is built at most once per second while Profile is on screen.
+- The read runs on the **store's own connection** (`Store::connection`), never a second writer and never a pooled checkout, so a dashboard refresh cannot block recording. A failed read keeps the last good snapshot and reports the error instead.
+- `profile_stats::snapshot` performs no writes, no network calls and no model calls; it merges `telemetry_events` with `telemetry_hourly` / `telemetry_daily`, reads a rollup bucket only when the whole bucket predates the raw retention boundary, and returns `N/A` rather than `0` wherever the denominator is zero.
+- Rendering consumes the cached snapshot only. Only the focused section is laid out; the other sections collapse to one-line summaries.
+
+### Module layout
+
+| File | Owns |
+| --- | --- |
+| `crates/argos-osint-core/src/telemetry.rs` | Event kinds, outcomes, triggers, retention constants, mergeable duration bins |
+| `crates/argos-osint-core/src/profile_stats.rs` | `ProfileSnapshot` and every section aggregate (`snapshot`, `filter_options`) |
+| `crates/argos-osint-core/src/provider_metrics.rs` | Read-only capacity and quota DTOs; no scheduler or admission policy |
+| `crates/argos-osint-bin/src/tui/profile.rs` | `SystemTab`, `Section`, the 35-entry `WIDGETS` registry, filter strip, keys |
+| `crates/argos-osint-bin/src/tui/profile_charts.rs` | The one shared hand-drawn chart renderer |
+| `crates/argos-osint-bin/src/tui/profile_config.rs` | The Configs export/import popups |
+
+Every widget renders through a single entry point (`tui/profile.rs::widget_lines`), and every chart goes through `tui/profile_charts.rs`: stacked bars, ranked bars, trend columns and meters. `ratatui::Chart` / `BarChart` are deliberately unused — a narrow viewport must never panic, and a segment fill has to carry the exact series colour. One renderer also means a widget cannot smuggle in its own geometry, the same precedent as `tui/atlas_table.rs`.
+
+### Config transfer and the commit
+
+`config_transfer::parse_document` validates the whole schema-v1 document, then `apply_import` merges it by stable id into the in-memory snapshot. Publishing is `config_transfer::commit_profile_config`:
+
+```
+ConfigLock::acquire()            # .argos-config.lock, heartbeat + stale takeover, app-wide
+  → commit_files([settings → config.toml,
+                  auth      → auth.json,
+                  quota     → quota.json])
+      commit journal (.argos-config-journal.json) marks state: pending
+      each file: write_secure  (0600 sibling temp file → fsync → atomic rename)
+  → success: generation id +1, reload epoch notifies subscribers
+  → failure: whole batch rolls back from its backups; nothing is published
+```
+
+`config.toml`, `auth.json` and `quota.json` are one configuration, so a provider change moves all three or none of them. The journal holds paths and state only — never a body and never key material — and `config_commit::recover_at_startup()` finishes a rollback left `pending` by a process that died mid-commit; it runs at TUI boot (`App::boot`) and on CLI start. Export uses the same secure primitive, and a failed import writes nothing.
+
 ## Intel reports
 
 [![Intel report job](diagrams/intel-report.svg)](diagrams/intel-report.html)

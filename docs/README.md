@@ -12,6 +12,7 @@ Deep investigation: [architecture.md](architecture.md). Keys and roles: [provide
 | [usage.md](usage.md) | TUI navigation, CLI, state directory |
 | [architecture.md](architecture.md) | Recon turn, binder, picker, persistence, Atlas, news/legal |
 | [providers.md](providers.md) | Model accounts (Defaults, OpenRouter, Google, Nvidia) and OSINT keys |
+| [profile-dashboard-and-search.md](profile-dashboard-and-search.md) | Profile dashboard widgets, metric dictionary, portable configuration, named search engines |
 | [concepts.md](concepts.md) | Glossary: apps vs IDs, roles, bindings, Intel jobs, schema |
 | [conventions.md](conventions.md) | TUI, schema, tests, agent scratch, planning files |
 | [diagrams.md](diagrams.md) | Editorial diagram language and figures |

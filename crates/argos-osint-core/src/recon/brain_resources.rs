@@ -429,9 +429,144 @@ pub fn is_brain_binding(binding: &Binding) -> bool {
     binding.evidence_id.starts_with("brain:")
 }
 
+/// Bounded facts for one Brain recall query, recorded at the recall relevance
+/// gate. Counts and short labels only: never recalled text, entities or the
+/// prompt that produced the query.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecallQueryFacts {
+    /// Candidates the recall surfaced before the relevance gate.
+    pub candidates: usize,
+    /// Hits the gate accepted.
+    pub accepted: usize,
+    /// Short machine label for the rejection, empty when nothing was dropped.
+    pub rejection_reason: String,
+    /// Recon report mode, when the caller classified one before the recall.
+    pub mode: String,
+    /// Parent run id, when the recall belongs to a run.
+    pub run_id: String,
+    /// Thread the recall ran for.
+    pub thread_id: String,
+}
+
+impl RecallQueryFacts {
+    /// Attach the bounded rejection label.
+    pub fn because(mut self, reason: &str) -> Self {
+        self.rejection_reason = reason.to_string();
+        self
+    }
+
+    /// A query counts as a hit when the gate accepted at least one memory.
+    pub fn hit(&self) -> bool {
+        self.accepted > 0
+    }
+}
+
+/// Bounded rejection labels for the recall relevance gate. Long prose reasons are
+/// reduced here so the dashboard can aggregate a flat label set.
+pub fn recall_gate_rejection(
+    candidates: usize,
+    accepted: usize,
+    dropped_for_policy: usize,
+) -> String {
+    if candidates == 0 {
+        return "no_candidates".into();
+    }
+    if accepted == 0 {
+        return "admission_policy".into();
+    }
+    if dropped_for_policy > 0 {
+        return "admission_policy".into();
+    }
+    String::new()
+}
+
+/// Record one completed recall query at the relevance gate. Best effort: a
+/// telemetry failure never fails a recon turn.
+pub fn note_recall_query(store: &Store, facts: &RecallQueryFacts) {
+    let event = crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::RecallQuery)
+        .at(chrono::Utc::now().to_rfc3339())
+        .app("recon")
+        .trigger(crate::telemetry::Trigger::ReconPrompt)
+        .mode(&facts.mode)
+        .outcome(if facts.hit() { "hit" } else { "miss" })
+        .reason(&facts.rejection_reason)
+        .run(&facts.run_id)
+        .thread(&facts.thread_id)
+        .count(1)
+        .payload(serde_json::json!({
+            "candidate_hits": facts.candidates,
+            "accepted_hits": facts.accepted,
+            "rejection_reason": facts.rejection_reason,
+        }));
+    let _ = crate::telemetry::insert(&store.conn, &event);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recall_gate_facts_are_bounded_and_report_a_hit() {
+        let facts = RecallQueryFacts {
+            candidates: 7,
+            accepted: 3,
+            ..RecallQueryFacts::default()
+        };
+        assert!(facts.hit());
+        assert_eq!(recall_gate_rejection(7, 3, 4), "admission_policy");
+        // Nothing dropped means no rejection label at all.
+        assert_eq!(recall_gate_rejection(3, 3, 0), "");
+        assert_eq!(recall_gate_rejection(0, 0, 0), "no_candidates");
+        assert_eq!(recall_gate_rejection(5, 0, 5), "admission_policy");
+
+        let miss = RecallQueryFacts::default().because("no_candidates");
+        assert!(!miss.hit());
+        assert_eq!(miss.rejection_reason, "no_candidates");
+    }
+
+    #[test]
+    fn note_recall_query_records_one_row_per_completed_query() {
+        let store = Store::memory().unwrap();
+        let facts = RecallQueryFacts {
+            candidates: 5,
+            accepted: 2,
+            rejection_reason: "admission_policy".into(),
+            mode: "verify".into(),
+            run_id: "run-1".into(),
+            thread_id: "t1".into(),
+        };
+        note_recall_query(&store, &facts);
+        note_recall_query(&store, &facts);
+
+        let rows: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM telemetry_events WHERE event_type = 'recall_query'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2, "one row per completed recall query");
+        let payload: String = store
+            .conn
+            .query_row(
+                "SELECT payload_json FROM telemetry_events WHERE event_type = 'recall_query' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(payload.contains("\"accepted_hits\":2"), "{payload}");
+        assert!(payload.contains("\"candidate_hits\":5"), "{payload}");
+        let mode: String = store
+            .conn
+            .query_row(
+                "SELECT mode FROM telemetry_events WHERE event_type = 'recall_query' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "verify");
+    }
 
     fn hit(kind: &'static str, value: &str, memory_id: &str, claim: &str) -> BrainResourceHit {
         BrainResourceHit {

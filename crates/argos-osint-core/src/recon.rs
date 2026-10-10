@@ -3334,7 +3334,8 @@ impl Service {
                     results.push((id, result));
                 }
             }
-            let (recalled, _, _) = orchestrate::recall_for_turn(&store, &run.thread_id, &question)?;
+            let (recalled, _, _) =
+                orchestrate::recall_for_turn(&store, &run.thread_id, &question, "", &run.id)?;
             let prior = orchestrate::previous_synthesis(&store, &run.thread_id)?;
             drop(store);
             let max_calls = usize::from(run.max_calls);
@@ -4994,6 +4995,7 @@ mod tests {
         assert_eq!(s.list_memories().unwrap().len(), 2);
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn recon_claims_and_deletions_use_the_durable_index_outbox() {
         let _fake = crate::embed::testing::fake();

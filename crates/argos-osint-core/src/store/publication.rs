@@ -1293,6 +1293,7 @@ mod tests {
         assert_eq!(claims, 0);
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn indexing_is_verified_by_exact_id_and_revision() {
         let _fake = testing::fake();
@@ -1336,6 +1337,7 @@ mod tests {
             .complete());
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn embedding_failure_keeps_memories_visible_and_retry_reaches_verified() {
         let _fake = testing::fake();
@@ -1388,6 +1390,7 @@ mod tests {
             .complete());
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn stale_work_cannot_overwrite_a_newer_revision() {
         let _fake = testing::fake();
@@ -1423,6 +1426,7 @@ mod tests {
         assert!(hit[0].1 > 0.99, "newest text stays indexed: {hit:?}");
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn deletion_during_indexing_is_not_resurrected() {
         let _fake = testing::fake();
@@ -1487,6 +1491,7 @@ mod tests {
         assert_eq!(repair.accepted_claims, 0);
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn reused_claims_with_damaged_rows_are_repaired_and_reindexed() {
         let _fake = testing::fake();
@@ -1554,6 +1559,7 @@ mod tests {
         assert_eq!(runs, 2);
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn text_changed_mid_index_write_reruns_on_the_new_revision() {
         let _fake = testing::fake();
@@ -1724,6 +1730,7 @@ mod tests {
         assert!(watch.poll(&store).is_some(), "deletes notify too");
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn worker_killed_after_the_lance_write_is_recovered_by_revision() {
         let _fake = testing::fake();

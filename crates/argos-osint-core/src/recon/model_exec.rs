@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::provider::{self, ChatMessage, SettingsFile};
 use crate::provider_attempt::{self, Deadlines, Transport};
@@ -23,6 +23,12 @@ use crate::provider_chain::{self, ChainReport, DispatchError, ExecuteOptions, Ro
 use crate::provider_diag::{Category, ProviderFailure, Stage};
 use crate::secrets::{AuthFile, ProviderSecret};
 use crate::store::Store;
+use crate::telemetry::{self, EventKind, TelemetryEvent, Trigger};
+
+/// App dimension on every telemetry row written from this module.
+const TELEMETRY_APP: &str = "recon";
+/// Model traffic dispatched here is Recon turn traffic; never inferred from text.
+const TELEMETRY_TRIGGER: Trigger = Trigger::ReconPrompt;
 
 /// Stable runtime for role execution.
 #[derive(Clone, Debug)]
@@ -246,6 +252,333 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// Best-effort telemetry write. Instrumentation never fails a recon turn, so
+/// every recorded event is discarded on error.
+fn note(db_path: Option<&Path>, event: &TelemetryEvent) {
+    if let Some(path) = db_path {
+        let _ = telemetry::record(path, event);
+    }
+}
+
+/// Canonical id for one wire attempt. Stable across replay, resume and retry so
+/// telemetry cannot count the same attempt twice.
+pub fn canonical_attempt_id(
+    operation_id: &str,
+    generation: u32,
+    route_index: u32,
+    attempt: u32,
+) -> String {
+    format!("{operation_id}-{generation}-{route_index}-{attempt}")
+}
+
+/// Measured per-attempt timing facts (the additive schema-27 columns).
+///
+/// The wall-clock stamps exist for the durable record; every *duration* is
+/// measured on a monotonic clock, never by subtracting wall-clock stamps.
+#[derive(Clone, Debug, Default)]
+pub struct AttemptTimings {
+    /// When the logical operation was enqueued, before the chain dispatched it.
+    pub queued_at: String,
+    /// When this attempt was admitted onto its route.
+    pub admitted_at: String,
+    /// When this attempt's request went on the wire.
+    pub sent_at: String,
+    /// First progress or first chunk, on success as well as on failure.
+    pub first_response_at: String,
+    /// Measured monotonic attempt duration.
+    pub elapsed_ms: i64,
+    /// Measured monotonic queue residence (`sent_at` − `queued_at`).
+    pub queue_ms: i64,
+    /// Measured monotonic time to first response (`first_response_at` − `sent_at`).
+    pub ttfb_ms: i64,
+    /// Prompt tokens when the adapter reports usage.
+    pub prompt_tokens: Option<i64>,
+    /// Completion tokens when the adapter reports usage.
+    pub completion_tokens: Option<i64>,
+    /// Whether the streamed response ran to its end.
+    pub stream_completed: i64,
+    queued_instant: Option<Instant>,
+    sent_instant: Option<Instant>,
+    first_response_instant: Option<Instant>,
+    /// First-response latency reported by the adapter, used when no chunk leaked.
+    reported_ttfb_ms: Option<i64>,
+}
+
+impl AttemptTimings {
+    /// Timings for an attempt that inherits the operation's queue stamp.
+    pub fn queued(queued_at: &str, queued_instant: Instant) -> Self {
+        Self {
+            queued_at: queued_at.to_string(),
+            queued_instant: Some(queued_instant),
+            ..Self::default()
+        }
+    }
+
+    /// The chain admitted this attempt and handed it to the dispatch closure.
+    pub fn admitted(&mut self) {
+        self.admitted_at = now_rfc3339();
+    }
+
+    /// The request is about to be sent.
+    pub fn sent(&mut self) {
+        self.sent_at = now_rfc3339();
+        self.sent_instant = Some(Instant::now());
+    }
+
+    /// First progress or first chunk, whichever arrived first. Keeps the first one.
+    pub fn first_response(&mut self, at: &str, instant: Instant) {
+        if self.first_response_instant.is_none() {
+            self.first_response_at = at.to_string();
+            self.first_response_instant = Some(instant);
+        }
+    }
+
+    /// Adapter-reported first-response latency (failures carry one).
+    pub fn reported_ttfb_ms(&mut self, ms: Option<u64>) {
+        self.reported_ttfb_ms = ms.map(|value| value as i64);
+    }
+
+    /// Adapter-reported token usage. Adapters that report nothing leave the
+    /// columns at their defaults rather than guessing.
+    pub fn usage(&mut self, prompt_tokens: Option<i64>, completion_tokens: Option<i64>) {
+        if let Some(prompt) = prompt_tokens {
+            self.prompt_tokens = Some(prompt);
+        }
+        if let Some(completion) = completion_tokens {
+            self.completion_tokens = Some(completion);
+        }
+    }
+
+    /// Freeze the measured durations at the end of the attempt.
+    pub fn finish(&mut self, elapsed_ms: u64, stream_completed: bool) {
+        self.elapsed_ms = i64::try_from(elapsed_ms).unwrap_or(i64::MAX);
+        if let (Some(sent), Some(queued)) = (self.sent_instant, self.queued_instant) {
+            self.queue_ms = sent.saturating_duration_since(queued).as_millis() as i64;
+        }
+        self.ttfb_ms = match (self.first_response_instant, self.sent_instant) {
+            (Some(first), Some(sent)) => first.saturating_duration_since(sent).as_millis() as i64,
+            // No chunk arrived: keep whatever the adapter measured, else nothing.
+            _ => self.reported_ttfb_ms.unwrap_or_default(),
+        };
+        self.stream_completed = i64::from(stream_completed);
+    }
+}
+
+/// Terminal facts of one wire attempt, recorded on `recon_model_attempts`.
+#[derive(Clone, Debug, Default)]
+pub struct AttemptOutcome {
+    /// `ok`, `fail` or `cancel`.
+    pub outcome: String,
+    /// Provider failure category, when the attempt failed.
+    pub category: Option<String>,
+    pub http_status: Option<u16>,
+    pub request_id: Option<String>,
+    pub finish_reason: Option<String>,
+    pub char_count: u64,
+    /// Retry/backoff wait charged to this attempt (policy, not measured latency).
+    pub wait_ms: u64,
+    pub error_message: Option<String>,
+}
+
+impl AttemptOutcome {
+    /// A completed, validated attempt.
+    pub fn ok(finish_reason: Option<&str>, char_count: u64, elapsed_ms: u64) -> Self {
+        Self {
+            outcome: "ok".into(),
+            finish_reason: finish_reason.map(str::to_string),
+            char_count,
+            wait_ms: elapsed_ms,
+            ..Self::default()
+        }
+    }
+
+    /// A transport or protocol failure.
+    pub fn failed(
+        outcome: &str,
+        category: &str,
+        http_status: Option<u16>,
+        request_id: Option<&str>,
+        finish_reason: Option<&str>,
+        char_count: u64,
+        elapsed_ms: u64,
+        error_message: &str,
+    ) -> Self {
+        Self {
+            outcome: outcome.into(),
+            category: Some(category.into()),
+            http_status,
+            request_id: request_id.map(str::to_string),
+            finish_reason: finish_reason.map(str::to_string),
+            char_count,
+            wait_ms: elapsed_ms,
+            error_message: Some(error_message.into()),
+        }
+    }
+}
+
+/// Facts shared by every telemetry row of one model operation. Owned so a
+/// long-lived attribution never borrows values the attempt later moves.
+#[derive(Clone, Debug)]
+struct AttemptFacts {
+    operation_id: String,
+    generation: u32,
+    role: String,
+    run_id: String,
+    provider: String,
+    account: String,
+    model: String,
+    transport: String,
+    route_index: u32,
+    attempt: u32,
+}
+
+impl AttemptFacts {
+    fn new(
+        operation_id: &str,
+        generation: u32,
+        role: &str,
+        run_id: &str,
+        route: &Route,
+        transport: &str,
+        route_index: u32,
+        attempt: u32,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.to_string(),
+            generation,
+            role: role.to_string(),
+            run_id: run_id.to_string(),
+            provider: route.provider.clone(),
+            account: route.account.clone(),
+            model: route.model.clone(),
+            transport: transport.to_string(),
+            route_index,
+            attempt,
+        }
+    }
+}
+
+/// Exactly one `model_attempt` row per wire attempt, keyed by the canonical
+/// attempt id so a replay or resume cannot double count it.
+fn note_attempt(
+    db_path: Option<&Path>,
+    attempt_id: &str,
+    facts: &AttemptFacts,
+    outcome: &AttemptOutcome,
+    timings: &AttemptTimings,
+) {
+    let Some(db_path) = db_path else {
+        return;
+    };
+    let event = TelemetryEvent::new(EventKind::ModelAttempt)
+        .with_id(attempt_id)
+        .canonical(attempt_id)
+        .at(now_rfc3339())
+        .app(TELEMETRY_APP)
+        .trigger(TELEMETRY_TRIGGER)
+        .provider(&facts.provider)
+        .role(&facts.role)
+        .model(&facts.model)
+        .mode(&facts.transport)
+        .outcome(&outcome.outcome)
+        .reason(outcome.category.as_deref().unwrap_or_default())
+        .run(&facts.run_id)
+        .duration_ms(Some(timings.elapsed_ms))
+        .payload(json!({
+            "operation_id": facts.operation_id,
+            "generation": facts.generation,
+            "route_index": facts.route_index,
+            "attempt": facts.attempt,
+            "account": facts.account,
+            "queue_ms": timings.queue_ms,
+            "ttfb_ms": timings.ttfb_ms,
+            "stream_completed": timings.stream_completed,
+            "wait_ms": outcome.wait_ms,
+            "http_status": outcome.http_status,
+            "chars": outcome.char_count,
+        }));
+    note(Some(db_path), &event);
+}
+
+/// Exactly one `model_operation` row per terminal logical operation. A logical
+/// operation's many wire attempts never count as many jobs.
+fn note_operation(
+    db_path: Option<&Path>,
+    scope: &OperationScope<'_>,
+    status: &str,
+    routes: &[Route],
+    history: &[provider_chain::AttemptRecord],
+    effective_route: Option<u32>,
+    effective_model: &str,
+) {
+    let Some(db_path) = db_path else {
+        return;
+    };
+    let effective_provider = effective_route
+        .and_then(|index| routes.get(index as usize))
+        .map(|route| route.provider.clone())
+        .unwrap_or_default();
+    let routes_tried: Vec<serde_json::Value> = history
+        .iter()
+        .filter(|record| record.dispatched)
+        .map(|record| {
+            json!({
+                "route_index": record.route_index,
+                "attempt": record.attempt,
+                "model": record.model,
+                "outcome": record.outcome,
+            })
+        })
+        .collect();
+    let skipped: Vec<serde_json::Value> = history
+        .iter()
+        .filter(|record| !record.dispatched)
+        .map(|record| json!({"route_index": record.route_index, "reason": record.reason}))
+        .collect();
+    let event = TelemetryEvent::new(EventKind::ModelOperation)
+        .with_id(format!(
+            "model-op-{}-{}",
+            scope.operation_id, scope.generation
+        ))
+        .canonical(scope.operation_id)
+        .at(now_rfc3339())
+        .app(TELEMETRY_APP)
+        .trigger(TELEMETRY_TRIGGER)
+        .provider(effective_provider)
+        .role(scope.role)
+        .model(effective_model)
+        .outcome(status)
+        .run(scope.run_id.unwrap_or_default())
+        .count(1)
+        .payload(json!({
+            "routes_tried": routes_tried,
+            "routes_skipped": skipped,
+            "wire_attempts": routes_tried.len(),
+            "effective_route": effective_route,
+        }));
+    note(Some(db_path), &event);
+}
+
+/// Freeze one attempt's measured timings, persist them on the durable attempt
+/// row, and emit exactly one `model_attempt` telemetry row. Best-effort: a
+/// telemetry failure never fails the attempt.
+fn finish_attempt(
+    db_path: Option<&Path>,
+    attempt_id: &str,
+    facts: &AttemptFacts,
+    outcome: &AttemptOutcome,
+    timings: &mut AttemptTimings,
+    elapsed_ms: u64,
+    stream_completed: bool,
+) {
+    // No adapter in this module reports token usage yet, so the columns stay at
+    // their defaults rather than being guessed.
+    timings.usage(None, None);
+    timings.finish(elapsed_ms, stream_completed);
+    let _ = record_attempt_finish(db_path, attempt_id, outcome, timings);
+    note_attempt(db_path, attempt_id, facts, outcome, timings);
+}
+
 /// Persist an operation record as pending/running if db is present.
 pub fn ensure_operation(
     db_path: Option<&Path>,
@@ -318,11 +651,9 @@ fn record_attempt_start(
     attempt: u32,
     route: &Route,
     transport: &str,
+    queued_at: &str,
 ) -> Result<String> {
-    let attempt_id = format!(
-        "{}-{}-{}-{}",
-        operation_id, generation, route_index, attempt
-    );
+    let attempt_id = canonical_attempt_id(operation_id, generation, route_index, attempt);
     let Some(db_path) = db_path else {
         return Ok(attempt_id);
     };
@@ -332,10 +663,11 @@ fn record_attempt_start(
         "INSERT INTO recon_model_attempts (
            id, operation_id, generation, route_index, attempt,
            provider, account, model, transport, dispatched,
-           outcome, started_at, finished_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'running', ?10, '')
+           outcome, queued_at, admitted_at, started_at, finished_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'running', ?10, ?11, ?11, '')
          ON CONFLICT(operation_id, generation, route_index, attempt) DO UPDATE SET
-           outcome = 'running', started_at = excluded.started_at, finished_at = ''",
+           outcome = 'running', queued_at = excluded.queued_at, admitted_at = excluded.admitted_at,
+            started_at = excluded.started_at, finished_at = ''",
         rusqlite::params![
             attempt_id,
             operation_id,
@@ -346,24 +678,19 @@ fn record_attempt_start(
             route.account,
             route.model,
             transport,
+            queued_at,
             now,
         ],
     )?;
     Ok(attempt_id)
 }
 
-/// Record the completion of an attempt.
+/// Record the completion of an attempt with its measured timings.
 fn record_attempt_finish(
     db_path: Option<&Path>,
     attempt_id: &str,
-    outcome: &str,
-    category: Option<&str>,
-    http_status: Option<u16>,
-    request_id: Option<&str>,
-    finish_reason: Option<&str>,
-    char_count: u64,
-    wait_ms: u64,
-    error_message: Option<&str>,
+    outcome: &AttemptOutcome,
+    timings: &AttemptTimings,
 ) -> Result<()> {
     let Some(db_path) = db_path else {
         return Ok(());
@@ -380,18 +707,38 @@ fn record_attempt_finish(
            char_count = ?6,
            wait_ms = ?7,
            error_message = ?8,
-           finished_at = ?9
-         WHERE id = ?10",
+           finished_at = ?9,
+           queued_at = ?10,
+           admitted_at = ?11,
+           sent_at = ?12,
+           first_response_at = ?13,
+           elapsed_ms = ?14,
+           queue_ms = ?15,
+           ttfb_ms = ?16,
+           prompt_tokens = ?17,
+           completion_tokens = ?18,
+           stream_completed = ?19
+         WHERE id = ?20",
         rusqlite::params![
-            outcome,
-            category.unwrap_or(""),
-            http_status,
-            request_id.unwrap_or(""),
-            finish_reason.unwrap_or(""),
-            char_count,
-            wait_ms,
-            error_message.unwrap_or(""),
+            outcome.outcome,
+            outcome.category.as_deref().unwrap_or(""),
+            outcome.http_status,
+            outcome.request_id.as_deref().unwrap_or(""),
+            outcome.finish_reason.as_deref().unwrap_or(""),
+            outcome.char_count,
+            outcome.wait_ms,
+            outcome.error_message.as_deref().unwrap_or(""),
             now,
+            timings.queued_at,
+            timings.admitted_at,
+            timings.sent_at,
+            timings.first_response_at,
+            timings.elapsed_ms,
+            timings.queue_ms,
+            timings.ttfb_ms,
+            timings.prompt_tokens,
+            timings.completion_tokens,
+            timings.stream_completed,
             attempt_id,
         ],
     )?;
@@ -425,6 +772,10 @@ where
     let generation = scope.generation;
     let db_path_owned = db_path.map(Path::to_path_buf);
     let validator = Arc::new(validator);
+    let role = scope.role.to_string();
+    let run_id = scope.run_id.unwrap_or_default().to_string();
+    let queued_at = now_rfc3339();
+    let queued_instant = Instant::now();
 
     let dispatch = |route_idx: usize, route: &Route| {
         last_route_idx = route_idx;
@@ -443,6 +794,9 @@ where
         let route_cloned = route.clone();
         let op_id = op_id.clone();
         let db_path_buf = db_path_owned.clone();
+        let role = role.clone();
+        let run_id = run_id.clone();
+        let queued_at = queued_at.clone();
 
         async move {
             let attempt_db_id = record_attempt_start(
@@ -453,8 +807,19 @@ where
                 attempt_num,
                 &route_cloned,
                 transport.as_str(),
+                &queued_at,
             )
             .unwrap_or_default();
+            let facts = AttemptFacts::new(
+                &op_id,
+                generation,
+                &role,
+                &run_id,
+                &route_cloned,
+                transport.as_str(),
+                route_idx as u32,
+                attempt_num,
+            );
 
             // Notify attempt start
             if let Some(sink) = &on_event_step {
@@ -471,6 +836,8 @@ where
             }
 
             let start_t = Instant::now();
+            let mut timings = AttemptTimings::queued(&queued_at, queued_instant);
+            timings.admitted();
             let streamed_acc = Arc::new(std::sync::Mutex::new(String::new()));
             let streamed_for_obs = streamed_acc.clone();
             let obs_db = db_path_buf.clone();
@@ -489,18 +856,40 @@ where
                     cb(delta);
                 })
             });
+            // First-response timing is captured on success as well as on failure:
+            // the adapter only reports a latency when the attempt fails.
+            let first_at: Arc<std::sync::Mutex<Option<(String, Instant)>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let observer = {
+                let first_at = first_at.clone();
+                let inner = obs_wrapper.clone();
+                Arc::new(move |delta: &str| {
+                    if let Ok(mut slot) = first_at.lock() {
+                        if slot.is_none() {
+                            *slot = Some((now_rfc3339(), Instant::now()));
+                        }
+                    }
+                    if let Some(inner) = &inner {
+                        inner(delta);
+                    }
+                }) as Arc<dyn Fn(&str) + Send + Sync>
+            };
 
+            timings.sent();
             let rep = provider_attempt::attempt_with_observer(
                 &secret,
                 &messages_vec,
                 transport,
                 Deadlines::default(),
-                obs_wrapper
-                    .as_ref()
-                    .map(|o| o.as_ref() as &(dyn Fn(&str) + Send + Sync)),
+                Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
             )
             .await;
 
+            if let Ok(slot) = first_at.lock() {
+                if let Some((at, instant)) = slot.as_ref() {
+                    timings.first_response(at, *instant);
+                }
+            }
             let elapsed_ms = start_t.elapsed().as_millis() as u64;
             let partial = streamed_acc.lock().map(|s| s.clone()).unwrap_or_default();
             if !partial.is_empty() {
@@ -520,17 +909,24 @@ where
                             Category::Empty,
                             "empty completion output",
                         );
-                        let _ = record_attempt_finish(
-                            db_path_buf.as_deref(),
-                            &attempt_db_id,
+                        let outcome = AttemptOutcome::failed(
                             "fail",
-                            Some("empty"),
+                            "empty",
                             None,
                             None,
                             finish_reason.as_deref(),
                             chars,
                             elapsed_ms,
-                            Some("empty completion"),
+                            "empty completion",
+                        );
+                        finish_attempt(
+                            db_path_buf.as_deref(),
+                            &attempt_db_id,
+                            &facts,
+                            &outcome,
+                            &mut timings,
+                            elapsed_ms,
+                            false,
                         );
                         if let Some(sink) = &on_event_step {
                             sink(ModelExecEvent::AttemptReset {
@@ -556,17 +952,24 @@ where
                             format!("validation failed: {val_err}"),
                         );
                         f.causes.push(val_err.clone());
-                        let _ = record_attempt_finish(
-                            db_path_buf.as_deref(),
-                            &attempt_db_id,
+                        let outcome = AttemptOutcome::failed(
                             "fail",
-                            Some("invalid_result"),
+                            "invalid_result",
                             None,
                             None,
                             finish_reason.as_deref(),
                             chars,
                             elapsed_ms,
-                            Some(&val_err),
+                            &val_err,
+                        );
+                        finish_attempt(
+                            db_path_buf.as_deref(),
+                            &attempt_db_id,
+                            &facts,
+                            &outcome,
+                            &mut timings,
+                            elapsed_ms,
+                            false,
                         );
                         if let Some(sink) = &on_event_step {
                             sink(ModelExecEvent::AttemptReset {
@@ -586,17 +989,15 @@ where
                     }
 
                     // Success!
-                    let _ = record_attempt_finish(
+                    let outcome = AttemptOutcome::ok(finish_reason.as_deref(), chars, elapsed_ms);
+                    finish_attempt(
                         db_path_buf.as_deref(),
                         &attempt_db_id,
-                        "ok",
-                        None,
-                        None,
-                        None,
-                        finish_reason.as_deref(),
-                        chars,
+                        &facts,
+                        &outcome,
+                        &mut timings,
                         elapsed_ms,
-                        None,
+                        matches!(transport, Transport::Stream) && finish_reason.is_some(),
                     );
                     if let Some(sink) = &on_event_step {
                         sink(ModelExecEvent::AttemptFinish {
@@ -620,18 +1021,25 @@ where
                     let chars = failure.stream.partial_chars;
                     let msg = failure.summary();
                     let err = DispatchError::from_failure(failure.clone());
-
-                    let _ = record_attempt_finish(
-                        db_path_buf.as_deref(),
-                        &attempt_db_id,
+                    timings.reported_ttfb_ms(failure.first_response_ms);
+                    let outcome = AttemptOutcome::failed(
                         if err.cancelled { "cancel" } else { "fail" },
-                        Some(&cat),
+                        &cat,
                         failure.http_status,
                         failure.request_id.as_deref(),
                         finish_r.as_deref(),
                         chars,
                         elapsed_ms,
-                        Some(&msg),
+                        &msg,
+                    );
+                    finish_attempt(
+                        db_path_buf.as_deref(),
+                        &attempt_db_id,
+                        &facts,
+                        &outcome,
+                        &mut timings,
+                        elapsed_ms,
+                        failure.stream.done_marker,
                     );
 
                     if let Some(sink) = &on_event_step {
@@ -667,6 +1075,25 @@ where
     };
 
     let report = provider_chain::execute(&routes, dispatch, opts).await;
+
+    // One terminal row per logical operation: its many wire attempts are
+    // attempts, never extra jobs.
+    let terminal_status = if report.value.is_some() {
+        "final"
+    } else if report.cancelled {
+        "cancelled"
+    } else {
+        "failed"
+    };
+    note_operation(
+        db_path,
+        scope,
+        terminal_status,
+        &routes,
+        &report.history,
+        report.effective_route,
+        &report.effective_model,
+    );
 
     if let Some(value) = report.value.clone() {
         let _ = save_operation_draft(db_path, scope.operation_id, &value);
@@ -716,6 +1143,10 @@ where
     let op_id = scope.operation_id.to_string();
     let generation = scope.generation;
     let db_path_owned = db_path.map(Path::to_path_buf);
+    let role = scope.role.to_string();
+    let run_id = scope.run_id.unwrap_or_default().to_string();
+    let queued_at = now_rfc3339();
+    let queued_instant = Instant::now();
 
     let dispatch = |route_idx: usize, route: &Route| {
         attempt_counter += 1;
@@ -729,6 +1160,9 @@ where
         let route_cloned = route.clone();
         let op_id = op_id.clone();
         let db_path_buf = db_path_owned.clone();
+        let role = role.clone();
+        let run_id = run_id.clone();
+        let queued_at = queued_at.clone();
 
         async move {
             let attempt_db_id = record_attempt_start(
@@ -739,8 +1173,19 @@ where
                 attempt_num,
                 &route_cloned,
                 transport,
+                &queued_at,
             )
             .unwrap_or_default();
+            let facts = AttemptFacts::new(
+                &op_id,
+                generation,
+                &role,
+                &run_id,
+                &route_cloned,
+                transport,
+                route_idx as u32,
+                attempt_num,
+            );
 
             if let Some(sink) = &on_event_step {
                 sink(ModelExecEvent::AttemptStart {
@@ -756,6 +1201,9 @@ where
             }
 
             let start_t = Instant::now();
+            let mut timings = AttemptTimings::queued(&queued_at, queued_instant);
+            timings.admitted();
+            timings.sent();
 
             if is_native {
                 let (native_state, native_questions) = adapter.compile_native();
@@ -764,17 +1212,15 @@ where
                         let elapsed_ms = start_t.elapsed().as_millis() as u64;
                         match adapter.parse_native(&resp) {
                             Ok(val) => {
-                                let _ = record_attempt_finish(
+                                let outcome = AttemptOutcome::ok(None, 0, elapsed_ms);
+                                finish_attempt(
                                     db_path_buf.as_deref(),
                                     &attempt_db_id,
-                                    "ok",
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                    0,
+                                    &facts,
+                                    &outcome,
+                                    &mut timings,
                                     elapsed_ms,
-                                    None,
+                                    false,
                                 );
                                 if let Some(sink) = &on_event_step {
                                     sink(ModelExecEvent::AttemptFinish {
@@ -794,17 +1240,24 @@ where
                                     Category::MalformedPayload,
                                     format!("failed to parse Jev decision: {parse_err}"),
                                 );
-                                let _ = record_attempt_finish(
-                                    db_path_buf.as_deref(),
-                                    &attempt_db_id,
+                                let outcome = AttemptOutcome::failed(
                                     "fail",
-                                    Some("malformed_payload"),
+                                    "malformed_payload",
                                     None,
                                     None,
                                     None,
                                     0,
                                     elapsed_ms,
-                                    Some(&parse_err),
+                                    &parse_err,
+                                );
+                                finish_attempt(
+                                    db_path_buf.as_deref(),
+                                    &attempt_db_id,
+                                    &facts,
+                                    &outcome,
+                                    &mut timings,
+                                    elapsed_ms,
+                                    false,
                                 );
                                 if let Some(sink) = &on_event_step {
                                     sink(ModelExecEvent::AttemptReset {
@@ -828,17 +1281,25 @@ where
                         let elapsed_ms = start_t.elapsed().as_millis() as u64;
                         let f = ProviderFailure::from_anyhow(Stage::Response, &decide_err);
                         let err = DispatchError::from_failure(f.clone());
-                        let _ = record_attempt_finish(
-                            db_path_buf.as_deref(),
-                            &attempt_db_id,
+                        timings.reported_ttfb_ms(f.first_response_ms);
+                        let outcome = AttemptOutcome::failed(
                             if err.cancelled { "cancel" } else { "fail" },
-                            Some(f.category.as_str()),
+                            f.category.as_str(),
                             f.http_status,
                             f.request_id.as_deref(),
                             None,
                             0,
                             elapsed_ms,
-                            Some(&f.summary()),
+                            &f.summary(),
+                        );
+                        finish_attempt(
+                            db_path_buf.as_deref(),
+                            &attempt_db_id,
+                            &facts,
+                            &outcome,
+                            &mut timings,
+                            elapsed_ms,
+                            false,
                         );
                         if let Some(sink) = &on_event_step {
                             sink(ModelExecEvent::AttemptReset {
@@ -879,17 +1340,19 @@ where
                         let chars = completion.content.chars().count() as u64;
                         match adapter.parse_chat(&completion.content) {
                             Ok(val) => {
-                                let _ = record_attempt_finish(
-                                    db_path_buf.as_deref(),
-                                    &attempt_db_id,
-                                    "ok",
-                                    None,
-                                    None,
-                                    None,
+                                let outcome = AttemptOutcome::ok(
                                     completion.finish_reason.as_deref(),
                                     chars,
                                     elapsed_ms,
-                                    None,
+                                );
+                                finish_attempt(
+                                    db_path_buf.as_deref(),
+                                    &attempt_db_id,
+                                    &facts,
+                                    &outcome,
+                                    &mut timings,
+                                    elapsed_ms,
+                                    false,
                                 );
                                 if let Some(sink) = &on_event_step {
                                     sink(ModelExecEvent::AttemptFinish {
@@ -909,17 +1372,24 @@ where
                                     Category::MalformedPayload,
                                     format!("failed to parse chat decision: {parse_err}"),
                                 );
-                                let _ = record_attempt_finish(
-                                    db_path_buf.as_deref(),
-                                    &attempt_db_id,
+                                let outcome = AttemptOutcome::failed(
                                     "fail",
-                                    Some("malformed_payload"),
+                                    "malformed_payload",
                                     None,
                                     None,
                                     completion.finish_reason.as_deref(),
                                     chars,
                                     elapsed_ms,
-                                    Some(&parse_err),
+                                    &parse_err,
+                                );
+                                finish_attempt(
+                                    db_path_buf.as_deref(),
+                                    &attempt_db_id,
+                                    &facts,
+                                    &outcome,
+                                    &mut timings,
+                                    elapsed_ms,
+                                    false,
                                 );
                                 if let Some(sink) = &on_event_step {
                                     sink(ModelExecEvent::AttemptReset {
@@ -945,18 +1415,26 @@ where
                         let chars = failure.stream.partial_chars;
                         let msg = failure.summary();
                         let err = DispatchError::from_failure(failure.clone());
+                        timings.reported_ttfb_ms(failure.first_response_ms);
 
-                        let _ = record_attempt_finish(
-                            db_path_buf.as_deref(),
-                            &attempt_db_id,
+                        let outcome = AttemptOutcome::failed(
                             if err.cancelled { "cancel" } else { "fail" },
-                            Some(&cat),
+                            &cat,
                             failure.http_status,
                             failure.request_id.as_deref(),
                             finish_r.as_deref(),
                             chars,
                             elapsed_ms,
-                            Some(&msg),
+                            &msg,
+                        );
+                        finish_attempt(
+                            db_path_buf.as_deref(),
+                            &attempt_db_id,
+                            &facts,
+                            &outcome,
+                            &mut timings,
+                            elapsed_ms,
+                            failure.stream.done_marker,
                         );
 
                         if let Some(sink) = &on_event_step {
@@ -993,6 +1471,25 @@ where
 
     let report = provider_chain::execute(&routes, dispatch, opts).await;
 
+    // One terminal row per logical operation: its many wire attempts are
+    // attempts, never extra jobs.
+    let terminal_status = if report.value.is_some() {
+        "final"
+    } else if report.cancelled {
+        "cancelled"
+    } else {
+        "failed"
+    };
+    note_operation(
+        db_path,
+        scope,
+        terminal_status,
+        &routes,
+        &report.history,
+        report.effective_route,
+        &report.effective_model,
+    );
+
     if let Some(value) = report.value.clone() {
         Ok((value, report))
     } else if report.cancelled {
@@ -1007,5 +1504,83 @@ where
             "model chain exhausted: {}",
             report.failure_message()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_attempt_id_is_stable_across_replay() {
+        let first = canonical_attempt_id("run-1-synthesis", 2, 1, 3);
+        assert_eq!(first, canonical_attempt_id("run-1-synthesis", 2, 1, 3));
+        assert_eq!(first, "run-1-synthesis-2-1-3");
+        // A different route, attempt or generation is a different wire attempt.
+        assert_ne!(first, canonical_attempt_id("run-1-synthesis", 2, 2, 3));
+        assert_ne!(first, canonical_attempt_id("run-1-synthesis", 2, 1, 4));
+        assert_ne!(first, canonical_attempt_id("run-1-synthesis", 3, 1, 3));
+    }
+
+    #[test]
+    fn measured_timings_are_monotonic_and_never_negative() {
+        let queued_at = now_rfc3339();
+        let queued_instant = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        let mut timings = AttemptTimings::queued(&queued_at, queued_instant);
+        timings.admitted();
+        assert!(!timings.admitted_at.is_empty());
+        std::thread::sleep(Duration::from_millis(5));
+        timings.sent();
+        assert!(!timings.sent_at.is_empty());
+        // First response is captured on success as well as on failure.
+        timings.first_response(&now_rfc3339(), Instant::now());
+        std::thread::sleep(Duration::from_millis(2));
+        timings.reported_ttfb_ms(Some(999));
+        timings.finish(42, true);
+
+        assert_eq!(timings.elapsed_ms, 42);
+        assert_eq!(timings.stream_completed, 1);
+        assert!(timings.queue_ms >= 10, "{timings:?}");
+        assert!(
+            timings.ttfb_ms < 999,
+            "observed first response wins: {timings:?}"
+        );
+        assert!(!timings.first_response_at.is_empty());
+    }
+
+    #[test]
+    fn adapter_reported_first_response_is_kept_when_no_chunk_arrived() {
+        let mut timings = AttemptTimings::queued(&now_rfc3339(), Instant::now());
+        timings.sent();
+        timings.reported_ttfb_ms(Some(640));
+        timings.finish(800, false);
+        assert_eq!(timings.ttfb_ms, 640);
+        assert_eq!(
+            timings.queue_ms, 0,
+            "no send stamp means no queue residence"
+        );
+        assert_eq!(timings.prompt_tokens, None);
+        assert_eq!(timings.completion_tokens, None);
+    }
+
+    #[test]
+    fn attempt_outcome_keeps_the_failure_category_for_the_reason_dimension() {
+        let outcome = AttemptOutcome::failed(
+            "fail",
+            "rate_limit",
+            Some(429),
+            Some("req-1"),
+            Some("stop"),
+            12,
+            30,
+            "slow down",
+        );
+        assert_eq!(outcome.outcome, "fail");
+        assert_eq!(outcome.category.as_deref(), Some("rate_limit"));
+        assert_eq!(outcome.http_status, Some(429));
+        assert_eq!(outcome.wait_ms, 30);
+        assert_eq!(AttemptOutcome::ok(Some("stop"), 4, 7).outcome, "ok");
+        assert!(AttemptOutcome::default().category.is_none());
     }
 }

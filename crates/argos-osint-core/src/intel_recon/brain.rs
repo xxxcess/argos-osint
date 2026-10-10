@@ -153,6 +153,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn intel_recon_publishes_durably_with_provenance_and_no_atlas_receipt() {
         let _fake = crate::embed::testing::fake();

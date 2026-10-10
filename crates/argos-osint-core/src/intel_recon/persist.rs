@@ -2,8 +2,17 @@
 
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
+use serde_json::json;
 
+use crate::investigation::evidence::{evidence_item_event, EvidenceAttribution};
 use crate::store::Store;
+use crate::telemetry::{EventKind, TelemetryEvent, Trigger};
+
+/// Terminal states of one Intel report revision. Waiting and blocked are not
+/// terminal: they are current state, not a completion.
+fn is_terminal_report_state(state: &str) -> bool {
+    matches!(state, "completed" | "partial" | "failed" | "cancelled")
+}
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -646,7 +655,7 @@ impl Store {
         warning: &str,
         error: &str,
     ) -> Result<()> {
-        let finished = if matches!(state, "completed" | "failed" | "cancelled" | "partial") {
+        let finished = if is_terminal_report_state(state) {
             now()
         } else {
             String::new()
@@ -670,6 +679,9 @@ impl Store {
                 finished
             ],
         )?;
+        if is_terminal_report_state(state) {
+            record_report_telemetry(self, id, state, error);
+        }
         Ok(())
     }
 
@@ -761,6 +773,9 @@ impl Store {
                 now()
             ],
         )?;
+        if let Ok(ids) = serde_json::from_str::<Vec<String>>(evidence_ids_json) {
+            record_cited_evidence(self, job_id, &ids);
+        }
         Ok(())
     }
 
@@ -1190,6 +1205,199 @@ impl Store {
     }
 }
 
+/// The report outcome vocabulary. Completed/partial/failed are completions;
+/// waiting/blocked/cancelled stay separate so they are never counted as either.
+fn report_outcome_label(state: &str) -> &'static str {
+    match state {
+        "completed" => "completed",
+        "partial" => "partial",
+        "failed" => "failed",
+        "waiting" => "waiting",
+        "blocked" => "blocked",
+        "cancelled" => "cancelled",
+        _ => "unknown",
+    }
+}
+
+/// Coarse terminal cause for a non-successful report. Only the class is
+/// recorded: provider or model prose never reaches telemetry.
+fn report_error_class(error: &str) -> &'static str {
+    let lower = error.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return "none";
+    }
+    if lower.contains("cancel") {
+        return "cancelled";
+    }
+    if lower.contains("quota") || lower.contains("rate limit") || lower.contains("429") {
+        return "quota";
+    }
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return "timeout";
+    }
+    if lower.contains("auth") || lower.contains("api key") || lower.contains("401") {
+        return "auth";
+    }
+    if lower.contains("budget") || lower.contains("exhaust") {
+        return "budget";
+    }
+    if lower.contains("parser") || lower.contains("malformed") || lower.contains("json") {
+        return "invalid_output";
+    }
+    "unknown"
+}
+
+/// Milliseconds between two RFC 3339 stamps, or `None` when either is missing.
+fn rfc_span_ms(from: &str, to: &str) -> Option<i64> {
+    let parse = |raw: &str| {
+        chrono::DateTime::parse_from_rfc3339(raw.trim())
+            .ok()
+            .map(|stamp| stamp.with_timezone(&chrono::Utc))
+    };
+    Some((parse(to)? - parse(from)?).num_milliseconds())
+}
+
+/// One terminal `IntelReport` row per report job, keyed to
+/// `(article_id, report_mode)` and carrying the latest-revision marker, so a
+/// dashboard counts each article/mode pair once by default and keeps revision
+/// history in the attempt view. Full-assessment parents are flagged and stay out
+/// of child-report totals. Wall duration is completion minus start; active
+/// duration is the sum of the job's own attempts and never includes queue wait.
+///
+/// The event id is the job id, so a job that reaches another terminal state
+/// replaces its row exactly once. Best-effort: never fails the report.
+fn record_report_telemetry(store: &Store, job_id: &str, state: &str, error: &str) {
+    let Ok(Some(job)) = store.intel_report_job(job_id) else {
+        return;
+    };
+    let attempts: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM intel_report_attempts WHERE job_id=?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let active_ms: i64 = store
+        .conn
+        .query_row(
+            "SELECT COALESCE(SUM(MAX(0, CAST((julianday(IFNULL(NULLIF(finished_at,''),started_at))
+                     - julianday(started_at)) * 86400000 AS INTEGER))), 0)
+             FROM intel_report_attempts WHERE job_id=?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let latest_revision: i64 = store
+        .conn
+        .query_row(
+            "SELECT COALESCE(MAX(revision), 0) FROM intel_report_jobs
+             WHERE article_id=?1 AND mode=?2",
+            params![job.article_id.as_str(), job.mode.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let finished_at = if job.finished_at.trim().is_empty() {
+        now()
+    } else {
+        job.finished_at.clone()
+    };
+    let wall_ms = rfc_span_ms(&job.started_at, &finished_at);
+    let event = TelemetryEvent::new(EventKind::IntelReport)
+        .at(finished_at.clone())
+        .trigger(Trigger::IntelBrief)
+        .app("intel")
+        .job(&job.id)
+        .article(&job.article_id)
+        .mode(&job.mode)
+        .outcome(report_outcome_label(state))
+        .reason(report_error_class(error))
+        .duration_ms(wall_ms)
+        .count(1)
+        // Payload markers: `latest_revision` counts each
+        // (article_id, report_mode) pair once by default, and
+        // `is_parent`/`parent_job` mark a row that belongs under a parent —
+        // a full-assessment parent stays counted in its own mode and is never
+        // added into child-report totals.
+        .payload(json!({
+            "revision": job.revision,
+            "mode": job.mode.clone(),
+            "attempt": attempts,
+            "generation": job.generation,
+            "latest_revision": job.revision >= latest_revision,
+            "wall_ms": wall_ms,
+            "active_ms": active_ms,
+            "error_class": report_error_class(error),
+            "is_parent": job.parent_job_id.is_some(),
+            "parent_job": job.parent_job_id.clone().unwrap_or_default(),
+            "stage": job.stage,
+            "sections_done": job.sections_done,
+            "sections_total": job.sections_total,
+            "tool_calls_done": job.tool_calls_done,
+            "tool_calls_allowance": job.tool_calls_allowance,
+        }))
+        .with_id(format!("intel-report-{}", job.id));
+    let _ = crate::telemetry::insert(&store.conn, &event);
+}
+
+/// One `EvidenceItem` row per evidence id a report revision cites.
+///
+/// Provenance (tool, call) comes from the stored evidence row, so a fetched
+/// result is never equated with accepted evidence, and the report revision
+/// identity travels on `canonical_ref` for the join. Multi-source citations stay
+/// nonadditive: every item is credited once and records how many the citation
+/// credited. Best-effort: never fails the report.
+fn record_cited_evidence(store: &Store, job_id: &str, evidence_ids: &[String]) {
+    if evidence_ids.is_empty() {
+        return;
+    }
+    let Ok(Some(job)) = store.intel_report_job(job_id) else {
+        return;
+    };
+    let revision = format!("{}:{}", job.id, job.revision);
+    for item_id in evidence_ids {
+        let item_id = item_id.trim();
+        if item_id.is_empty() {
+            continue;
+        }
+        let row = store.conn.query_row(
+            "SELECT source_domain, stance, tool_id, call_id FROM intel_evidence
+             WHERE id=?1 AND investigation_id=?2",
+            params![item_id, job.investigation_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        );
+        let Ok((source_domain, stance, tool_id, call_id)) = row else {
+            continue;
+        };
+        let attribution = EvidenceAttribution {
+            tool_id,
+            call_id,
+            report_revision: revision.clone(),
+            report_mode: job.mode.clone(),
+            article_id: job.article_id.clone(),
+            job_id: job.id.clone(),
+            citations: evidence_ids.len(),
+        };
+        let stance = crate::investigation::ClaimStance::parse(&stance);
+        let built = evidence_item_event(
+            item_id,
+            &job.investigation_id,
+            &source_domain,
+            stance,
+            &attribution,
+        );
+        let event = crate::investigation::evidence::stamped(built);
+        let _ = crate::telemetry::insert(&store.conn, &event);
+    }
+}
+
 fn article_body_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleBodyRow> {
     Ok(ArticleBodyRow {
         id: row.get(0)?,
@@ -1369,5 +1577,197 @@ mod tests {
         let sections = store.intel_report_sections(&job.id).unwrap();
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].section_key, "bluf");
+    }
+
+    #[test]
+    fn terminal_report_revisions_are_keyed_to_article_and_mode() {
+        let store = Store::memory().unwrap();
+        let inv = store
+            .ensure_intel_investigation("art-1", "run-1", "https://example.com/a", "{}")
+            .unwrap();
+        let job = store
+            .insert_report_job(&inv.id, "art-1", "verify", 1, "{}", "{}", 6, 0, 12, None)
+            .unwrap();
+        store
+            .update_report_job(&job.id, "running", "planning", 0, 0, "", "")
+            .unwrap();
+        // A non-terminal state is not a completion and must not be recorded.
+        let rows = store
+            .conn
+            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='intel_report'")
+            .unwrap()
+            .query_row([], |r| r.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        store
+            .update_report_job(&job.id, "completed", "done", 6, 3, "", "")
+            .unwrap();
+        let conn = &store.conn;
+        let (id, outcome, wall_ms, count): (String, String, Option<i64>, i64) = conn
+            .query_row(
+                "SELECT id, outcome, metric_ms, count FROM telemetry_events
+                 WHERE event_type='intel_report'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(id, format!("intel-report-{}", job.id));
+        assert_eq!(outcome, "completed");
+        assert!(wall_ms.unwrap_or(0) >= 0);
+        assert_eq!(count, 1);
+        // A second terminal write for the same job replaces its row.
+        store
+            .update_report_job(&job.id, "partial", "done", 4, 2, "", "")
+            .unwrap();
+        let rows = conn
+            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='intel_report'")
+            .unwrap()
+            .query_row([], |r| r.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn full_assessment_parents_are_flagged_for_child_report_totals() {
+        let store = Store::memory().unwrap();
+        let inv = store
+            .ensure_intel_investigation("art-2", "run-1", "https://example.com/b", "{}")
+            .unwrap();
+        let parent = store
+            .insert_report_job(
+                &inv.id,
+                "art-2",
+                "full_assessment",
+                1,
+                "{}",
+                "{}",
+                9,
+                0,
+                20,
+                None,
+            )
+            .unwrap();
+        store
+            .insert_report_job(
+                &inv.id,
+                "art-2",
+                "verify",
+                1,
+                "{}",
+                "{}",
+                6,
+                0,
+                12,
+                Some(&parent.id),
+            )
+            .unwrap();
+        store
+            .update_report_job(&parent.id, "completed", "done", 9, 0, "", "")
+            .unwrap();
+        let payload: String = store
+            .conn
+            .query_row(
+                "SELECT payload_json FROM telemetry_events WHERE id=?1",
+                [format!("intel-report-{}", parent.id)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["is_parent"], false);
+        assert_eq!(payload["mode"], "full_assessment");
+    }
+
+    #[test]
+    fn cited_evidence_keeps_provenance_and_revision_identity() {
+        let store = Store::memory().unwrap();
+        let inv = store
+            .ensure_intel_investigation("art-3", "run-1", "https://example.com/c", "{}")
+            .unwrap();
+        let job = store
+            .insert_report_job(&inv.id, "art-3", "verify", 2, "{}", "{}", 6, 0, 12, None)
+            .unwrap();
+        let one = store
+            .insert_evidence(
+                &inv.id,
+                "https://a.example/story",
+                "a.example",
+                "Acme expanded into robotics.",
+                "search",
+                "[]",
+                "",
+                "",
+                "support",
+                "search",
+                "firecrawl_search",
+                "call-1",
+                "",
+            )
+            .unwrap();
+        let two = store
+            .insert_evidence(
+                &inv.id,
+                "https://b.example/story",
+                "b.example",
+                "Acme announced a robotics line.",
+                "search",
+                "[]",
+                "",
+                "",
+                "support",
+                "search",
+                "firecrawl_search",
+                "call-2",
+                "",
+            )
+            .unwrap();
+        let ids = serde_json::to_string(&vec![one.clone(), two.clone()]).unwrap();
+        store
+            .upsert_report_section_markdown(
+                &job.id, "bluf", "## BLUF", "complete", &ids, "{}", 1, "",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, String, String)> = store
+            .conn
+            .prepare(
+                "SELECT id, tool_id, call_id, canonical_ref FROM telemetry_events
+                 WHERE event_type='evidence_item' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        // One row per cited item, each credited exactly once, both pointing at
+        // the same report revision.
+        for (index, (id, tool, call, canonical)) in rows.iter().enumerate() {
+            assert_eq!(
+                id,
+                &format!("intel-evidence-{}", [one.clone(), two.clone()][index])
+            );
+            assert_eq!(tool, "firecrawl_search");
+            assert_eq!(call, &format!("call-{}", index + 1));
+            assert_eq!(canonical, &format!("{}:{}", job.id, job.revision));
+        }
+        // Re-citing the same items replaces the rows; nothing is double counted.
+        store
+            .upsert_report_section_markdown(
+                &job.id,
+                "bluf",
+                "## BLUF v2",
+                "complete",
+                &ids,
+                "{}",
+                2,
+                "",
+            )
+            .unwrap();
+        let count: i64 = store
+            .conn
+            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='evidence_item'")
+            .unwrap()
+            .query_row([], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
     }
 }

@@ -13,12 +13,14 @@
 //!    ([`MemoryPhase`]); the cycle outcome is derived from them, so a save
 //!    failure can never be reported as completed.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::atlas_insights::InsightStats;
 use crate::events::{self, NewEvent, Severity};
@@ -27,6 +29,7 @@ use crate::store::{
     PublicationVerification, PublishOptions, RejectedClaim, Store,
 };
 use crate::tasks;
+use crate::telemetry::{EventKind, TelemetryEvent, Trigger};
 
 /// Revision used for receipts reconstructed from pre-checkpoint data.
 pub const LEGACY_REVISION: &str = "legacy";
@@ -90,6 +93,123 @@ impl CycleOutcome {
             Self::Failed => "failed",
         }
     }
+}
+
+/// Memory-lifecycle stage names. These are the stage vocabulary every Atlas
+/// stage row uses, so the backlog view reads one spelling for the work-unit
+/// ledger and the memory state machine.
+pub const MEMORY_STAGE_EXTRACTION: &str = "extraction";
+pub const MEMORY_STAGE_PUBLICATION: &str = "publication";
+pub const MEMORY_STAGE_INDEXING: &str = "indexing";
+
+/// The memory stages in the order the lifecycle runs them.
+pub const MEMORY_STAGES: [&str; 3] = [
+    MEMORY_STAGE_EXTRACTION,
+    MEMORY_STAGE_PUBLICATION,
+    MEMORY_STAGE_INDEXING,
+];
+
+/// Current state plus the counts one memory stage owns.
+fn memory_step(phase: &MemoryPhase, stage: &str) -> Option<(StepState, serde_json::Value)> {
+    let (state, counts) = match stage {
+        MEMORY_STAGE_EXTRACTION => (
+            phase.extraction,
+            json!({
+                "extracted": phase.extracted,
+                "revision": phase.revision,
+            }),
+        ),
+        MEMORY_STAGE_PUBLICATION => (
+            phase.publication,
+            json!({
+                "accepted": phase.accepted,
+                "created": phase.created,
+                "reused": phase.reused,
+                "repaired": phase.repaired,
+                "rejected": phase.rejected,
+                "brief": phase.brief,
+            }),
+        ),
+        MEMORY_STAGE_INDEXING => (
+            phase.indexing,
+            json!({
+                "required": phase.required,
+                "indexed": phase.indexed,
+                "pending": phase.pending,
+            }),
+        ),
+        _ => return None,
+    };
+    Some((state, counts))
+}
+
+/// Stage telemetry for the memory lifecycle. Emits one row per child step whose
+/// state changed since `previous`, so the pipeline-backlog view can show
+/// queued / running / waiting / blocked memory units and the moment each one
+/// entered that state. Exactly one row per step transition; a resumed cycle
+/// appends the next transition instead of rewriting history.
+/// Best-effort: a write failure never fails the cycle.
+pub fn record_memory_stage_telemetry(
+    db_path: &Path,
+    run_id: &str,
+    previous: &MemoryPhase,
+    current: &MemoryPhase,
+) {
+    if run_id.trim().is_empty() {
+        return;
+    }
+    for stage in MEMORY_STAGES {
+        let Some((state, counts)) = memory_step(current, stage) else {
+            continue;
+        };
+        let Some((before, _)) = memory_step(previous, stage) else {
+            continue;
+        };
+        if before == state {
+            continue;
+        }
+        let seq = crate::atlas_work::next_stage_seq(db_path, run_id, stage);
+        let event = TelemetryEvent::new(EventKind::AtlasStage)
+            .at(chrono::Utc::now().to_rfc3339())
+            .trigger(Trigger::AtlasCycle)
+            .app("atlas")
+            .run(run_id)
+            .outcome(state.label())
+            .count(1)
+            .payload(json!({
+                "stage": stage,
+                "unit": "memory",
+                "state": state.label(),
+                "revision": current.revision,
+                "detail": current.detail,
+                "counts": counts,
+            }));
+        let event = event.with_id(format!("atlas-stage-{run_id}-{stage}-{seq}"));
+        let _ = crate::telemetry::record(db_path, &event);
+    }
+}
+
+/// The memory contribution to a terminal cycle row. Durable child states are
+/// written out verbatim, so a failed save can never be reported as completed.
+pub fn memory_cycle_payload(phase: &MemoryPhase) -> serde_json::Value {
+    json!({
+        "extraction": phase.extraction.label(),
+        "publication": phase.publication.label(),
+        "indexing": phase.indexing.label(),
+        "revision": phase.revision,
+        "detail": phase.detail,
+        "extracted": phase.extracted,
+        "accepted": phase.accepted,
+        "created": phase.created,
+        "reused": phase.reused,
+        "repaired": phase.repaired,
+        "rejected": phase.rejected,
+        "brief": phase.brief,
+        "required": phase.required,
+        "indexed": phase.indexed,
+        "pending": phase.pending,
+        "cycle_outcome": phase.outcome().as_state(),
+    })
 }
 
 /// Phase-4/5 memory bookkeeping persisted inside `RunStats` (additive; absent
@@ -310,6 +430,14 @@ pub struct Checkpoint {
     pub partial: bool,
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Raw pre-adjustment claim confidence by fingerprint, captured before
+    /// `apply_admiralty_evaluation` scaled it. Kept beside the scaled
+    /// `claims` so an "average initial confidence" can never reverse the
+    /// adjusted score. Absent on checkpoints written before this field, and
+    /// absent for claims recovered from an older published cycle, which stay
+    /// N/A rather than being given a fabricated initial value.
+    #[serde(default)]
+    pub initial_confidences: std::collections::BTreeMap<String, f64>,
 }
 
 /// Inputs for [`save_checkpoint`].
@@ -321,6 +449,8 @@ pub struct CheckpointInput<'a> {
     pub stats: &'a InsightStats,
     pub partial: bool,
     pub notes: Vec<String>,
+    /// Raw pre-adjustment confidence by fingerprint; see [`Checkpoint`].
+    pub initial_confidences: std::collections::BTreeMap<String, f64>,
 }
 
 /// Persist the validated extraction before publication. Idempotent per
@@ -340,6 +470,7 @@ pub fn save_checkpoint(
         stats: input.stats.clone(),
         partial: input.partial,
         notes: input.notes,
+        initial_confidences: input.initial_confidences.clone(),
     };
     store.conn.execute(
         "INSERT INTO argos_atlas_checkpoints(run_id,revision,payload_json,accepted,rejected,created_at)
@@ -1218,8 +1349,6 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -1272,6 +1401,7 @@ mod tests {
                 relations: Vec::new(),
                 brief: "Cycle brief: Acme and Globex expand in Portugal.".into(),
                 entity_path: String::new(),
+                initial_confidences: std::collections::BTreeMap::new(),
             },
             extract_error: partial.then(|| "packet 2 timed out".to_string()),
             peer_error: None,
@@ -1392,6 +1522,7 @@ mod tests {
             .count()
     }
 
+    #[cfg(feature = "lancedb")]
     #[tokio::test]
     async fn successful_run_publishes_indexes_verifies_and_completes() {
         let _fake = embed_testing::fake();
@@ -1443,6 +1574,7 @@ mod tests {
         assert!(load_checkpoint(&store, RUN).unwrap().is_some());
     }
 
+    #[cfg(feature = "lancedb")]
     #[tokio::test]
     async fn publication_failure_is_failed_not_completed_and_retry_uses_the_checkpoint() {
         let _fake = embed_testing::fake();
@@ -1504,6 +1636,7 @@ mod tests {
         assert_eq!(jobs.len(), 3, "one parent, phases 4 and 5: {jobs:?}");
     }
 
+    #[cfg(feature = "lancedb")]
     #[tokio::test]
     async fn embedding_failure_keeps_memories_visible_reports_partial_and_retry_verifies() {
         let _fake = embed_testing::fake();
@@ -1576,6 +1709,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(feature = "lancedb")]
     #[tokio::test]
     async fn background_indexing_then_refresh_upgrades_a_partial_run() {
         let _fake = embed_testing::fake();
@@ -1678,6 +1812,7 @@ mod tests {
         assert!(note.contains("none"), "{note}");
     }
 
+    #[cfg(feature = "lancedb")]
     #[tokio::test]
     async fn partial_extraction_is_partial_and_keeps_saved_results() {
         let _fake = embed_testing::fake();
@@ -1694,6 +1829,7 @@ mod tests {
         assert_eq!(atlas_memory_count(&store), 3);
     }
 
+    #[cfg(feature = "lancedb")]
     #[tokio::test]
     async fn crash_after_checkpoint_resumes_without_reextracting() {
         let _fake = embed_testing::fake();
@@ -1714,6 +1850,7 @@ mod tests {
                     stats: &x.settled.stats,
                     partial: false,
                     notes: Vec::new(),
+                    initial_confidences: x.settled.initial_confidences.clone(),
                 },
             )
             .unwrap();
@@ -1727,6 +1864,7 @@ mod tests {
         assert_eq!(atlas_memory_count(&store), 3);
     }
 
+    #[cfg(feature = "lancedb")]
     #[tokio::test]
     async fn pause_in_phase5_parks_then_resumes_from_the_stored_receipt() {
         let _fake = embed_testing::fake();
@@ -1746,6 +1884,7 @@ mod tests {
                     stats: &x.settled.stats,
                     partial: false,
                     notes: Vec::new(),
+                    initial_confidences: x.settled.initial_confidences.clone(),
                 },
             )
             .unwrap();
@@ -1802,6 +1941,7 @@ mod tests {
         assert_eq!(atlas_memory_count(&store), 3);
     }
 
+    #[cfg(feature = "lancedb")]
     #[tokio::test]
     async fn enabling_embeddings_resumes_outstanding_work_and_upgrades_the_run() {
         let dir = tempfile::tempdir().unwrap();
@@ -1883,6 +2023,7 @@ mod tests {
         Store::open(&dir.path().join("argos.db")).unwrap()
     }
 
+    #[cfg(feature = "lancedb")]
     #[test]
     fn repair_requeues_vectors_for_a_false_completed_cycle_without_rewriting_it() {
         let _fake = embed_testing::fake();
@@ -1935,6 +2076,7 @@ mod tests {
                 stats: &x.settled.stats,
                 partial: false,
                 notes: Vec::new(),
+                initial_confidences: x.settled.initial_confidences.clone(),
             },
         )
         .unwrap();

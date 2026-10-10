@@ -10,12 +10,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::brain::{hybrid_recall, normalize_category, recall, Memory, MemorySource, ScoredMemory};
 use crate::brain_lance::{self, BrainIndex};
+use crate::profile_stats;
 
 mod graph_summaries;
 mod publication;
 pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
-#[cfg(test)]
-pub(crate) use publication::fault as publication_fault;
 pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
 pub use publication::{
     memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
@@ -38,12 +37,18 @@ pub struct GraphSummary {
 }
 
 /// Schema version this build writes. 26 adds model operations/attempts,
-/// coverage ledger, and intel task lease epoch.
-pub const SCHEMA_VERSION: i64 = 26;
+/// coverage ledger, and intel task lease epoch. 27 adds the telemetry and
+/// activity-history tables plus additive timing columns on the model attempt
+/// and tool call records; every schema-26 fact is preserved unchanged.
+pub const SCHEMA_VERSION: i64 = 27;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
 pub const AUTO_REBUILD_HINT: usize = 64;
+
+/// Telemetry and activity-history tables, applied once at schema 27 and reused
+/// by the in-memory stores used in tests.
+pub const SCHEMA_TELEMETRY_SQL: &str = include_str!("schema_telemetry.sql");
 
 pub struct Store {
     pub(crate) conn: Connection,
@@ -146,7 +151,7 @@ impl Store {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-        let vectors = crate::embed::enabled()
+        let vectors = (cfg!(feature = "lancedb") && crate::embed::enabled())
             .then(|| BrainIndex::shared(&crate::paths::lancedb_dir_for(path)));
         let store = Self { conn, vectors };
         store.ensure_schema()?;
@@ -638,6 +643,74 @@ impl Store {
                     "ALTER TABLE intel_report_tasks ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0",
                     [],
                 );
+            }
+
+            // Schema 27: telemetry, activity history, and additive timing columns.
+            // Everything below is idempotent so a database that already carries
+            // the tables (or a partial upgrade) reopens cleanly.
+            if version < 27 {
+                self.conn.execute_batch(SCHEMA_TELEMETRY_SQL)?;
+
+                let add_missing = |conn: &Connection, table: &str, column: &str, ddl: &str| {
+                    let mut stmt = match conn.prepare(&format!("PRAGMA table_info({table})")) {
+                        Ok(stmt) => stmt,
+                        Err(_) => return,
+                    };
+                    let rows = stmt.query([]);
+                    if let Ok(mut rows) = rows {
+                        while let Ok(Some(row)) = rows.next() {
+                            let name: String = row.get(1).unwrap_or_default();
+                            if name == column {
+                                return;
+                            }
+                        }
+                    }
+                    let _ = conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"), []);
+                };
+
+                // Per-wire-attempt timing. `wait_ms` waits are retry waits and do
+                // not establish queue residence, so the measured columns are separate.
+                let attempt_columns = [
+                    ("queued_at", "queued_at TEXT NOT NULL DEFAULT ''"),
+                    ("admitted_at", "admitted_at TEXT NOT NULL DEFAULT ''"),
+                    ("sent_at", "sent_at TEXT NOT NULL DEFAULT ''"),
+                    (
+                        "first_response_at",
+                        "first_response_at TEXT NOT NULL DEFAULT ''",
+                    ),
+                    ("elapsed_ms", "elapsed_ms INTEGER NOT NULL DEFAULT 0"),
+                    ("queue_ms", "queue_ms INTEGER NOT NULL DEFAULT 0"),
+                    ("ttfb_ms", "ttfb_ms INTEGER NOT NULL DEFAULT 0"),
+                    ("prompt_tokens", "prompt_tokens INTEGER"),
+                    ("completion_tokens", "completion_tokens INTEGER"),
+                    (
+                        "stream_completed",
+                        "stream_completed INTEGER NOT NULL DEFAULT 0",
+                    ),
+                ];
+                for (column, ddl) in attempt_columns {
+                    add_missing(&self.conn, "recon_model_attempts", column, ddl);
+                }
+
+                // Tool-call attribution on the canonical call record.
+                let call_columns = [
+                    ("app", "app TEXT NOT NULL DEFAULT ''"),
+                    ("trigger", "trigger TEXT NOT NULL DEFAULT ''"),
+                    ("mode", "mode TEXT NOT NULL DEFAULT ''"),
+                    ("category", "category TEXT NOT NULL DEFAULT ''"),
+                    (
+                        "remote_requests",
+                        "remote_requests INTEGER NOT NULL DEFAULT 0",
+                    ),
+                    ("duration_ms", "duration_ms INTEGER NOT NULL DEFAULT 0"),
+                    ("outcome", "outcome TEXT NOT NULL DEFAULT ''"),
+                    ("reason", "reason TEXT NOT NULL DEFAULT ''"),
+                ];
+                for (column, ddl) in call_columns {
+                    add_missing(&self.conn, "osint_calls", column, ddl);
+                }
+
+                self.conn.pragma_update(None, "user_version", 27)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
@@ -1322,7 +1395,9 @@ impl Store {
         if self.vectors.is_some() {
             return None;
         }
-        let reason = if crate::embed::enabled() {
+        let reason = if !cfg!(feature = "lancedb") {
+            "semantic indexing disabled (built without LanceDB)"
+        } else if crate::embed::enabled() {
             "semantic indexing unavailable for this store (in-memory)"
         } else {
             "semantic indexing disabled (ARGOS_EMBED=0)"
@@ -1624,6 +1699,26 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Read-only handle for dashboard and diagnostics reads. Never locks the
+    /// writer, so a render never blocks recording.
+    pub fn connection(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
+    /// One dashboard snapshot over this store.
+    pub fn profile_snapshot(
+        &self,
+        period: &profile_stats::Period,
+        filters: &profile_stats::StatFilters,
+    ) -> anyhow::Result<profile_stats::ProfileSnapshot> {
+        profile_stats::snapshot(&self.conn, period, filters, chrono::Utc::now())
+    }
+
+    /// The bounded filter option lists for the Profile filter strip.
+    pub fn profile_filter_options(&self) -> Vec<(String, Vec<String>)> {
+        profile_stats::filter_options(&self.conn)
     }
 
     pub fn atlas_delete_run(&self, id: &str) -> Result<bool> {
@@ -2618,6 +2713,47 @@ mod tests {
             assert!(!has_table(&store.conn, "memory_vec"));
         }
 
+        #[test]
+        fn schema_27_adds_telemetry_and_keeps_schema_26_columns() {
+            let store = Store::memory().unwrap();
+            assert_eq!(version(&store.conn), 27);
+            for name in [
+                "telemetry_events",
+                "telemetry_hourly",
+                "telemetry_daily",
+                "telemetry_meta",
+                "recon_model_operations",
+                "recon_model_attempts",
+                "recon_coverage",
+            ] {
+                assert!(has_table(&store.conn, name), "{name}");
+            }
+            let columns = |table: &str| -> Vec<String> {
+                let mut stmt = store
+                    .conn
+                    .prepare(&format!("PRAGMA table_info({table})"))
+                    .unwrap();
+                stmt.query_map([], |row| row.get::<_, String>(1))
+                    .unwrap()
+                    .map(|row| row.unwrap())
+                    .collect()
+            };
+            let attempts = columns("recon_model_attempts");
+            for name in [
+                "outcome",
+                "wait_ms",
+                "queued_at",
+                "first_response_at",
+                "elapsed_ms",
+            ] {
+                assert!(attempts.iter().any(|column| column == name), "{name}");
+            }
+            let coverage = columns("recon_coverage");
+            for name in ["scope", "generation", "category", "payload_json"] {
+                assert!(coverage.iter().any(|column| column == name), "{name}");
+            }
+        }
+
         /// x3cess's unreleased local build used user_version 17 for sqlite-vec. Opening
         /// such a DB (vec0 table we cannot load, shadow tables, a differently shaped
         /// meta table) must clean up and keep the memories.
@@ -2746,6 +2882,7 @@ mod tests {
             );
         }
 
+        #[cfg(feature = "lancedb")]
         #[test]
         fn reindex_creates_lance_dir_and_hooks_track_writes() {
             let _fake = testing::fake();
@@ -2802,6 +2939,7 @@ mod tests {
             assert_eq!(hits[0].memory.id, c.id);
         }
 
+        #[cfg(feature = "lancedb")]
         #[test]
         fn fingerprint_mismatch_rebuilds_and_drift_is_reconciled() {
             let _fake = testing::fake();
@@ -2848,6 +2986,7 @@ mod tests {
         }
 
         /// Recon calls the sync `Store::recall` from inside its async turn.
+        #[cfg(feature = "lancedb")]
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn recall_works_inside_a_multi_thread_runtime() {
             let _fake = testing::fake();
@@ -2861,6 +3000,7 @@ mod tests {
             assert!(store.vectors.as_ref().unwrap().is_ready());
         }
 
+        #[cfg(feature = "lancedb")]
         #[tokio::test(flavor = "current_thread")]
         async fn recall_works_inside_a_current_thread_runtime() {
             let _fake = testing::fake();
@@ -2878,6 +3018,7 @@ mod tests {
 
         /// Real MiniLM + LanceDB. Downloads the model on first run:
         /// `ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm`
+        #[cfg(feature = "lancedb")]
         #[test]
         #[ignore = "downloads all-MiniLM-L6-v2; set ARGOS_EMBED=1 and pass --ignored"]
         fn minilm_lance_upsert_then_search_returns_same_id() {

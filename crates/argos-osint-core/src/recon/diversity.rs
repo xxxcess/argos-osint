@@ -4,7 +4,7 @@
 //! candidate preference ranking by independent upstream dataset,
 //! and persists coverage records in SQLite (`recon_coverage`).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -14,6 +14,7 @@ use crate::osint::contracts::IntelligenceCategory;
 use crate::osint::{self, ProviderKeys, ToolResult};
 use crate::provider::ReconLimits;
 use crate::recon::{Binding, PlanCall, Store};
+use crate::telemetry::{EventKind, TelemetryEvent};
 
 /// Authorship and verification state for an intelligence category within a turn.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -268,10 +269,7 @@ pub fn update_coverage_with_results(
 pub fn save_coverage_record(store: &Store, record: &CoverageRecord) -> Result<()> {
     let payload = serde_json::to_string(record)?;
     let now = Utc::now().to_rfc3339();
-    let id = format!(
-        "{}:{}:{}:{}",
-        record.scope, record.generation, record.directive_index, record.category
-    );
+    let id = coverage_record_id(record);
     store.conn.execute(
         "INSERT INTO recon_coverage(id, scope, generation, directive_index, category, payload_json, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -288,7 +286,196 @@ pub fn save_coverage_record(store: &Store, record: &CoverageRecord) -> Result<()
             now,
         ],
     )?;
+    note_coverage(store, record);
     Ok(())
+}
+
+/// Durable id of one coverage record; the same key the table's unique index uses.
+pub fn coverage_record_id(record: &CoverageRecord) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        record.scope, record.generation, record.directive_index, record.category
+    )
+}
+
+/// Aggregate-friendly view of one coverage record, for the Profile dashboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoverageStats {
+    /// Eligible candidate tools considered for this category.
+    pub eligible_tools: usize,
+    /// Tools planned for execution (the two-distinct-tools target).
+    pub planned_tools: usize,
+    /// Tools that actually ran.
+    pub attempted_tools: usize,
+    /// Tools that completed with usable output.
+    pub successful_tools: usize,
+    /// Independent upstream source groups that produced evidence.
+    pub independent_source_groups: usize,
+    /// Two distinct eligible tools were attempted.
+    pub two_tools_attempted: bool,
+    /// Two distinct eligible tools completed.
+    pub two_tools_successful: bool,
+    /// Two independent upstream datasets supported the claim.
+    pub independent_claim_support: bool,
+    /// The scope carried the two-eligible-tools target, so it may contribute a
+    /// coverage rate. Scopes with fewer eligible tools are marked ineligible and
+    /// must not be averaged into one.
+    pub eligible_for_rate: bool,
+    /// Bounded label of the most frequent shortfall, when a target was missed.
+    pub shortfall_reason: Option<&'static str>,
+}
+
+/// Coverage counts and the most frequent shortfall reason for one record.
+/// Provider diversity and independent upstream sources are counted separately.
+pub fn coverage_stats(record: &CoverageRecord) -> CoverageStats {
+    let eligible_tools = record.candidates.iter().filter(|c| c.eligible).count();
+    let stats = CoverageStats {
+        eligible_tools,
+        planned_tools: record.planned_tools.len(),
+        attempted_tools: record.attempted_tools.len(),
+        successful_tools: record.successful_tools.len(),
+        independent_source_groups: record.independent_source_groups.len(),
+        two_tools_attempted: record.two_tools_attempted,
+        two_tools_successful: record.two_tools_successful,
+        independent_claim_support: record.independent_claim_support,
+        eligible_for_rate: eligible_tools >= 2,
+        shortfall_reason: None,
+    };
+    CoverageStats {
+        shortfall_reason: top_shortfall_reason(record, &stats),
+        ..stats
+    }
+}
+
+/// A scope met every recorded target: two tools planned, two attempted, two
+/// successful and two independent upstream source groups.
+fn targets_met(stats: &CoverageStats) -> bool {
+    stats.planned_tools >= 2
+        && stats.two_tools_attempted
+        && stats.two_tools_successful
+        && stats.independent_source_groups >= 2
+}
+
+/// The most frequent shortfall reason for one record, as a bounded label.
+///
+/// A record that met every target has no shortfall at all. Otherwise the
+/// record's own `coverage_gap` is authoritative: it is written while the category
+/// is planned, which is the only point at which a gap recorded before any tool
+/// ran can be seen — counts re-derived after the fact cannot recover it. When no
+/// gap was persisted the candidate rejection reasons are counted instead, the
+/// most frequent wins, and a lexicographic tie-break keeps aggregation over
+/// records deterministic.
+fn top_shortfall_reason(record: &CoverageRecord, stats: &CoverageStats) -> Option<&'static str> {
+    if targets_met(stats) {
+        return None;
+    }
+    if let Some(label) = record.coverage_gap.as_deref().and_then(shortfall_label) {
+        return Some(label);
+    }
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for candidate in record.candidates.iter().filter(|c| !c.eligible) {
+        if let Some(reason) = candidate.rejection_reason.as_deref() {
+            if let Some(label) = shortfall_label(reason) {
+                *counts.entry(label).or_default() += 1;
+            }
+        }
+    }
+    if !counts.is_empty() {
+        // Most frequent first, then lexicographic, so the winner never depends
+        // on candidate order.
+        let mut ranked: Vec<(&'static str, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        return ranked.first().map(|(label, _)| *label);
+    }
+    Some(derived_shortfall_reason(stats))
+}
+
+/// Re-derived reason for a record that persisted no gap: the same
+/// most-specific-first order the dashboard label set is built from.
+fn derived_shortfall_reason(stats: &CoverageStats) -> &'static str {
+    if stats.planned_tools == 0 {
+        "no_eligible_tool"
+    } else if stats.planned_tools < 2 {
+        "second_distinct_tool_unavailable"
+    } else if !stats.two_tools_attempted {
+        "single_tool_attempted"
+    } else if !stats.two_tools_successful {
+        "second_tool_unsuccessful"
+    } else {
+        "single_source_group"
+    }
+}
+
+/// Bounded label for a recorded coverage gap or candidate rejection reason.
+///
+/// `plan_category_diversity` keeps prose so a human can read why a category
+/// fell short; aggregation needs a flat label set, so the leading clause is
+/// mapped onto a label. Prose this does not recognise keeps a stable `other`
+/// label instead of leaking unbounded text into analytics.
+fn shortfall_label(reason: &str) -> Option<&'static str> {
+    let head = reason
+        .split([':', ';'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if head.is_empty() {
+        return None;
+    }
+    if head.contains("no eligible tool") {
+        Some("no_eligible_tool")
+    } else if head.contains("second distinct tool unavailable") {
+        Some("second_distinct_tool_unavailable")
+    } else if head.contains("credit allowance") {
+        Some("credit_allowance_exhausted")
+    } else if head.contains("missing api key") {
+        Some("missing_api_key")
+    } else if head.contains("missing bindings") {
+        Some("missing_bindings")
+    } else if head.contains("disabled in catalog") {
+        Some("disabled_in_catalog")
+    } else {
+        Some("other")
+    }
+}
+
+/// One `recon_stage`-adjacent row per saved coverage record. The row is keyed by
+/// the durable record id, so a save and its later update cannot both count, and
+/// it carries counts rather than prose.
+fn note_coverage(store: &Store, record: &CoverageRecord) {
+    let stats = coverage_stats(record);
+    let id = format!("coverage-{}", coverage_record_id(record));
+    let event = TelemetryEvent::new(EventKind::ReconStage)
+        .with_id(id)
+        .canonical(coverage_record_id(record))
+        .run(&record.scope)
+        .category(&record.category)
+        .mode("coverage")
+        .outcome(if stats.shortfall_reason.is_some() {
+            "coverage_gap"
+        } else {
+            "covered"
+        })
+        .reason(stats.shortfall_reason.unwrap_or_default())
+        .count(1)
+        .payload(serde_json::json!({
+            "scope": record.scope,
+            "generation": record.generation,
+            "directive_index": record.directive_index,
+            "eligible_tools": stats.eligible_tools,
+            "planned_tools": stats.planned_tools,
+            "attempted_tools": stats.attempted_tools,
+            "successful_tools": stats.successful_tools,
+            "independent_source_groups": stats.independent_source_groups,
+            "two_tools_attempted": stats.two_tools_attempted,
+            "two_tools_successful": stats.two_tools_successful,
+            "independent_claim_support": stats.independent_claim_support,
+            "eligible_for_rate": stats.eligible_for_rate,
+            "provider_datasets": record.provider_datasets.len(),
+            "shortfall_reason": stats.shortfall_reason,
+        }));
+    // Best effort: a telemetry failure never fails coverage persistence.
+    let _ = crate::telemetry::insert(&store.conn, &event);
 }
 
 /// Load all coverage records for a scope and generation.
@@ -458,5 +645,114 @@ mod tests {
         assert!(record.two_tools_successful);
         assert!(record.independent_claim_support);
         assert_eq!(record.evidence_ids.len(), 2);
+    }
+
+    fn covered_record() -> CoverageRecord {
+        let mut record = CoverageRecord {
+            scope: "run-stats".into(),
+            generation: 1,
+            directive_index: 0,
+            category: "DomainNetwork".into(),
+            candidates: vec![
+                CoverageCandidate {
+                    tool_id: "crtsh_certificates".into(),
+                    canonical_id: "crtsh_certificates".into(),
+                    provider: "public".into(),
+                    dataset_id: "crtsh".into(),
+                    eligible: true,
+                    rejection_reason: None,
+                    cost_credits: 0,
+                },
+                CoverageCandidate {
+                    tool_id: "mnemonic_passive_dns".into(),
+                    canonical_id: "mnemonic_passive_dns".into(),
+                    provider: "public".into(),
+                    dataset_id: "mnemonic".into(),
+                    eligible: false,
+                    rejection_reason: Some("missing API key".into()),
+                    cost_credits: 0,
+                },
+            ],
+            planned_tools: vec!["crtsh_certificates".into()],
+            attempted_tools: vec!["crtsh_certificates".into()],
+            successful_tools: vec!["crtsh_certificates".into()],
+            independent_source_groups: vec!["crtsh".into()],
+            coverage_gap: Some("second distinct tool unavailable".into()),
+            ..CoverageRecord::default()
+        };
+        record.two_tools_attempted = record.attempted_tools.len() >= 2;
+        record.two_tools_successful = record.successful_tools.len() >= 2;
+        record.independent_claim_support = record.independent_source_groups.len() >= 2;
+        record
+    }
+
+    #[test]
+    fn test_coverage_stats_reports_the_top_shortfall_reason() {
+        let stats = coverage_stats(&covered_record());
+        assert_eq!(stats.eligible_tools, 1);
+        assert_eq!(stats.planned_tools, 1);
+        assert_eq!(stats.attempted_tools, 1);
+        assert_eq!(stats.successful_tools, 1);
+        assert_eq!(stats.independent_source_groups, 1);
+        assert!(!stats.two_tools_attempted);
+        assert_eq!(
+            stats.shortfall_reason,
+            Some("second_distinct_tool_unavailable")
+        );
+
+        // A record that met every target has no shortfall at all.
+        let mut full = covered_record();
+        full.planned_tools = vec!["crtsh_certificates".into(), "mnemonic_passive_dns".into()];
+        full.attempted_tools = full.planned_tools.clone();
+        full.successful_tools = full.planned_tools.clone();
+        full.independent_source_groups = vec!["crtsh".into(), "mnemonic".into()];
+        full.two_tools_attempted = true;
+        full.two_tools_successful = true;
+        full.independent_claim_support = true;
+        let stats = coverage_stats(&full);
+        assert!(stats.two_tools_attempted && stats.two_tools_successful);
+        assert_eq!(stats.independent_source_groups, 2);
+        assert_eq!(stats.shortfall_reason, None);
+
+        // Nothing eligible is reported before any tool runs.
+        let empty = CoverageRecord {
+            coverage_gap: Some("no eligible tool".into()),
+            ..covered_record()
+        };
+        assert_eq!(
+            coverage_stats(&empty).shortfall_reason,
+            Some("no_eligible_tool")
+        );
+    }
+
+    #[test]
+    fn test_save_coverage_record_writes_one_telemetry_row() {
+        let store = Store::memory().unwrap();
+        let record = covered_record();
+        save_coverage_record(&store, &record).unwrap();
+        // A later update of the same record must not double count.
+        let mut updated = record.clone();
+        updated.successful_tools = vec!["crtsh_certificates".into()];
+        save_coverage_record(&store, &updated).unwrap();
+
+        let id = coverage_record_id(&record);
+        let rows: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM telemetry_events WHERE id = ?1",
+                [format!("coverage-{id}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "one authoritative row per coverage record");
+        let category: String = store
+            .conn
+            .query_row(
+                "SELECT category FROM telemetry_events WHERE id = ?1",
+                [format!("coverage-{id}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(category, "DomainNetwork");
     }
 }

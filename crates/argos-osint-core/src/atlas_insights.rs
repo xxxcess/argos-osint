@@ -3,6 +3,7 @@
 //! elements, then use that peer set for fact, inference, and link support before
 //! storing them where Brain recall already looks.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
@@ -19,6 +20,7 @@ use crate::secrets::ProviderSecret;
 use crate::store::{
     insight_fingerprint, AtlasArticleRow, AtlasInsightClaim, AtlasStoredClaim, Store,
 };
+use crate::telemetry::{EventKind, TelemetryEvent, Trigger};
 
 /// Articles sent in one extract call. Kept small so synthesis streams stay short.
 pub const PACKET_LIMIT: usize = 4;
@@ -175,6 +177,12 @@ pub struct KeptClaim {
     pub admiralty: String,
     /// WP:RSP status code when listed (`gr`, `gu`, …).
     pub rsp_status: String,
+    /// Raw model confidence captured **before** `apply_admiralty_evaluation`
+    /// scaled it. Additive: absent (N/A) on claims recovered from an older
+    /// published cycle, so a historical gap is never filled with the adjusted
+    /// score. Never reverse the scaled `confidence` from this value.
+    #[serde(default)]
+    pub initial_confidence: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +211,10 @@ pub struct Settled {
     pub relations: Vec<(String, String, String)>,
     pub brief: String,
     pub entity_path: String,
+    /// Raw pre-adjustment confidence by claim fingerprint, captured before
+    /// source scaling. Claims recovered from an older cycle are absent, which
+    /// is an explicit N/A rather than a fabricated initial score.
+    pub initial_confidences: BTreeMap<String, f64>,
 }
 
 /// Category is the only significance filter. Every non-unk article is kept, at every tier.
@@ -406,6 +418,15 @@ pub fn finish_insights(
     let mut claims = lead;
     claims.extend(context);
     let relations = link_claims(&claims);
+    // Snapshot the raw pre-adjustment confidence for every claim that still has
+    // one, before source scaling rewrites `confidence`. Claims recovered from an
+    // older published cycle carry no initial value and stay N/A.
+    let mut initial_confidences: BTreeMap<String, f64> = BTreeMap::new();
+    for claim in claims.iter() {
+        if let Some(raw) = claim.initial_confidence {
+            initial_confidences.insert(fingerprint(claim), raw);
+        }
+    }
     apply_admiralty_evaluation(&mut claims, &articles, &relations);
     let lead_claims: Vec<&KeptClaim> = claims.iter().filter(|claim| !claim.context).collect();
     let context_claims: Vec<&KeptClaim> = claims.iter().filter(|claim| claim.context).collect();
@@ -444,6 +465,7 @@ pub fn finish_insights(
         relations,
         brief,
         entity_path,
+        initial_confidences,
     }
 }
 
@@ -581,7 +603,40 @@ fn fit_cell(value: &str, width: usize) -> String {
 /// classifier which cycle articles are most relevant to those elements, then
 /// use that peer set for fact, inference, and link support.
 /// `progress` receives `(done, total)` work units as each extract step finishes.
+///
+/// Article-level telemetry (first sighting, brief rating) is recorded here so
+/// every return path reports it. Best-effort: telemetry never changes the
+/// extraction result.
 pub async fn extract(
+    db_path: &Path,
+    run_id: &str,
+    synthesis: &ProviderSecret,
+    fallbacks: &[ProviderSecret],
+    classifier: Option<&ProviderSecret>,
+    articles: &[AtlasArticleRow],
+    origins: &[OriginStat],
+    context_required: bool,
+    progress: impl FnMut(u32, u32),
+) -> Result<Extraction> {
+    let outcome = extract_inner(
+        db_path,
+        run_id,
+        synthesis,
+        fallbacks,
+        classifier,
+        articles,
+        origins,
+        context_required,
+        progress,
+    )
+    .await;
+    if let Ok(extraction) = &outcome {
+        record_article_telemetry(db_path, run_id, articles, origins, &extraction.settled);
+    }
+    outcome
+}
+
+async fn extract_inner(
     db_path: &Path,
     run_id: &str,
     synthesis: &ProviderSecret,
@@ -883,6 +938,154 @@ pub async fn extract(
         warnings,
         diagnostics,
     })
+}
+
+/// The Brief rating for one claim set: the mean of the claims' current
+/// confidence, using exactly the semantics the Intel mode classifier already
+/// uses (`ModeClassifyInput::from_article`): the confidences are summed and
+/// divided by the count, never an average of averages. `None` when no valid
+/// confidence remains, so a no-claim brief stays excluded instead of being
+/// scored zero.
+///
+/// The raw sum/count mean is quantised to 1e-9 so one claim set always yields
+/// the same rating: without it two runs over the same briefs can differ in the
+/// last binary digit (0.8 and 0.4 sum to 1.2000000000000002), which is noise in
+/// a dashboard, not information.
+pub fn brief_rating_mean(confidences: &[f64]) -> Option<f64> {
+    let valid: Vec<f64> = confidences
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        .collect();
+    if valid.is_empty() {
+        return None;
+    }
+    let mean = valid.iter().sum::<f64>() / valid.len() as f64;
+    Some((mean * 1e9).round() / 1e9)
+}
+
+/// Article-level telemetry for one settled extraction: a first-sighting row per
+/// canonical article id (using the stored `seen_at`, so a repeated cycle never
+/// invents a new first sighting) and one Brief rating row per significant
+/// article. Best-effort by construction: every failure is ignored here so a
+/// telemetry problem can never fail the memory phase.
+fn record_article_telemetry(
+    db_path: &Path,
+    run_id: &str,
+    articles: &[AtlasArticleRow],
+    origins: &[OriginStat],
+    settled: &Settled,
+) {
+    // Current (post-scaling) and raw (pre-scaling) confidence per article.
+    let mut current: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    let mut initial: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    for claim in &settled.claims {
+        current
+            .entry(claim.article_id.as_str())
+            .or_default()
+            .push(claim.confidence);
+        if let Some(raw) = settled
+            .initial_confidences
+            .get(&claim.fingerprint)
+            .copied()
+            .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        {
+            initial
+                .entry(claim.article_id.as_str())
+                .or_default()
+                .push(raw);
+        }
+    }
+    let known = seen_article_ids(db_path);
+    let stamp = chrono::Utc::now().to_rfc3339();
+    for article in select_significant(articles, origins) {
+        let claim_count = current.get(article.id.as_str()).map(Vec::len).unwrap_or(0);
+        let rating = brief_rating_mean(
+            current
+                .get(article.id.as_str())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        );
+        let first_seen = if article.seen_at.trim().is_empty() {
+            stamp.clone()
+        } else {
+            article.seen_at.trim().to_string()
+        };
+        // First sighting only: a headline that is already retained from an
+        // earlier cycle is never counted as new volume again.
+        if !known.contains(article.id.as_str()) {
+            let event = TelemetryEvent::new(EventKind::IntelArticle)
+                .at(first_seen.clone())
+                .trigger(Trigger::AtlasCycle)
+                .app("atlas")
+                .run(run_id)
+                .article(&article.id)
+                .origin(&article.country)
+                .category(crate::atlas::category_tag(&article.category))
+                .count(1)
+                .payload(serde_json::json!({
+                    "source_domain": article.source_domain,
+                    "published_at": article.published_at,
+                    "first_seen_at": first_seen,
+                    "tag": crate::atlas::category_tag(&article.category),
+                    "initial_confidence": brief_rating_mean(
+                        initial.get(article.id.as_str()).map(Vec::as_slice).unwrap_or(&[])
+                    ),
+                    "claim_count": claim_count,
+                    "has_claims": claim_count > 0,
+                }));
+            let event = event.with_id(format!("intel-article-{}", article.id));
+            let _ = crate::telemetry::record(db_path, &event);
+        }
+        let event = TelemetryEvent::new(EventKind::IntelBriefRating)
+            .at(stamp.clone())
+            .trigger(Trigger::AtlasCycle)
+            .app("atlas")
+            .run(run_id)
+            .article(&article.id)
+            .category(crate::atlas::category_tag(&article.category))
+            .mode("atlas_brief")
+            .outcome(if claim_count > 0 {
+                "rated"
+            } else {
+                "no_claims"
+            })
+            .count(1)
+            .payload(serde_json::json!({
+                "rating": rating,
+                "claims": claim_count,
+                "mean_confidence": rating,
+                "claim_count": claim_count,
+                "initial_confidence": brief_rating_mean(
+                    initial.get(article.id.as_str()).map(Vec::as_slice).unwrap_or(&[])
+                ),
+                "has_claims": claim_count > 0,
+                "tag": crate::atlas::category_tag(&article.category),
+            }));
+        let event = event.with_id(format!("intel-brief-{run_id}-{}", article.id));
+        let _ = crate::telemetry::record(db_path, &event);
+    }
+}
+
+/// Canonical article ids that already have a first-sighting row. Retention keeps
+/// raw events for 90 days, so an id missing here is genuinely unseen inside the
+/// observable window. Best-effort: an unreadable database reports nothing known
+/// and the caller records first sightings again (they replace, never add).
+fn seen_article_ids(db_path: &Path) -> std::collections::HashSet<String> {
+    rusqlite::Connection::open(db_path)
+        .ok()
+        .and_then(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT article_id FROM telemetry_events WHERE event_type='intel_article'")
+                .ok()?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .ok()?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .ok()?;
+            Some(rows.into_iter().collect())
+        })
+        .unwrap_or_default()
 }
 
 /// Re-extract lean elements from one article using title, description, and cleaned body.
@@ -1452,6 +1655,8 @@ fn accept_one(evidence: &[AtlasArticleRow], raw: &RawClaim, mode: AcceptMode) ->
         info_credibility: 0,
         admiralty: String::new(),
         rsp_status: String::new(),
+        // Raw model confidence, captured before Admiralty scaling.
+        initial_confidence: Some(raw.confidence.clamp(0.0, 1.0)),
     })
 }
 
@@ -1731,6 +1936,9 @@ fn recover_legacy_packet(
             info_credibility: c.info_credibility,
             admiralty: c.admiralty.clone(),
             rsp_status: c.rsp_status.clone(),
+            // Stored claims already carry the scaled score; the raw initial
+            // value was never persisted, so it stays N/A.
+            initial_confidence: None,
         })
         .collect();
     if kept.is_empty() {
@@ -1760,7 +1968,7 @@ fn persist_packet(
         attempt_history.push(chrono::Utc::now().to_rfc3339());
     }
     let store = Store::open(db_path)?;
-    store.atlas_save_unit_manifest(&crate::atlas_work::UnitManifest {
+    let manifest = crate::atlas_work::UnitManifest {
         run_id: run_id.to_string(),
         unit_id: unit_id.to_string(),
         stage: crate::atlas_work::STAGE_EXTRACT,
@@ -1777,7 +1985,10 @@ fn persist_packet(
         output_json: serde_json::to_string(kept)?,
         disposition: disposition.into(),
         receipt_json: serde_json::json!({ "dropped": dropped }).to_string(),
-    })?;
+    };
+    store.atlas_save_unit_manifest(&manifest)?;
+    // One work-unit transition, one telemetry row, keyed by the unit id.
+    crate::atlas_work::record_unit_stage_telemetry(db_path, &manifest);
     Ok(())
 }
 
@@ -2123,6 +2334,7 @@ mod tests {
             info_credibility: 0,
             admiralty: String::new(),
             rsp_status: String::new(),
+            initial_confidence: Some(0.5),
         }
     }
 
@@ -2168,6 +2380,85 @@ mod tests {
         assert_eq!(claims[0].admiralty, "B1");
         assert_eq!(claims[0].rsp_status, RspStatus::GenerallyReliable.as_str());
         assert!(claims[0].confidence > before);
+    }
+
+    #[test]
+    fn raw_initial_confidence_is_captured_before_source_scaling() {
+        use crate::osint::wikipedia_rsp::{install_index, parse_rsp_wikitext, RspIndex};
+        // A generally reliable domain, so `scale_confidence` moves the score.
+        let sample = r#"
+ |- class="s-gr" id="Wire"
+ | [[Wire]]
+ | {{WP:RSPSTATUS|gr}}
+ | [[WP:x|1]]
+ | {{WP:RSPLAST|2022}}
+ | Wire is generally reliable for news reporting according to community consensus discussions.
+ | {{WP:RSPUSES|wire.example}}
+"#;
+        install_index(RspIndex::build(parse_rsp_wikitext(sample), "t".into()));
+        let mut art = article(
+            "a1",
+            "military",
+            "us",
+            "Alpha met Beta today",
+            "Alpha met Beta in Geneva",
+            1.0,
+        );
+        art.source_domain = "wire.example".into();
+        let claims = vec![kept("alpha", "met", "beta", "military", "a1", "us", false)];
+        let settled = finish_insights(1, 0, &[art.clone()], claims, &[], &[]);
+        let stored = &settled.claims[0];
+        // The adjusted score survives for every existing consumer.
+        assert!(stored.confidence > 0.0);
+        // The raw pre-adjustment value is kept beside it and is never the
+        // adjusted score, so an "average initial confidence" cannot reverse it.
+        let raw = settled
+            .initial_confidences
+            .get(&stored.fingerprint)
+            .copied()
+            .expect("initial confidence must be captured");
+        assert_eq!(raw, 0.5);
+        assert_ne!(raw, stored.confidence);
+        assert!(settled
+            .initial_confidences
+            .values()
+            .all(|value| (0.0..=1.0).contains(value)));
+    }
+
+    #[test]
+    fn brief_rating_uses_the_existing_mean_and_excludes_no_claim_briefs() {
+        // Same semantics as `ModeClassifyInput::from_article`: mean of the
+        // claims' current confidence, summed and divided, never an average of
+        // averages. No-claim briefs return None rather than scoring zero.
+        assert_eq!(brief_rating_mean(&[0.8, 0.4]).unwrap(), 0.6);
+        assert_eq!(brief_rating_mean(&[]), None);
+        assert_eq!(brief_rating_mean(&[f64::NAN]), None);
+        assert_eq!(brief_rating_mean(&[1.0, 1.0, 1.0]).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn recover_legacy_packet_has_no_initial_confidence() {
+        let art = article("a1", "military", "us", "Alpha met Beta", "", 1.0);
+        let stored = AtlasInsightClaim {
+            fingerprint: "fp".into(),
+            entity: "alpha".into(),
+            namespace: "org".into(),
+            predicate: "met".into(),
+            object: "beta".into(),
+            topic: "military".into(),
+            claim: "Alpha met Beta.".into(),
+            classification: "inference".into(),
+            confidence: 0.42,
+            article_id: "a1".into(),
+            source_url: "https://example.com/a1".into(),
+            published_at: String::new(),
+            reliability: "B".into(),
+            info_credibility: 2,
+            admiralty: "B2".into(),
+            rsp_status: String::new(),
+        };
+        let recovered = recover_legacy_packet(&[stored], &[art], false).expect("recovered");
+        assert_eq!(recovered[0].initial_confidence, None);
     }
 
     #[test]

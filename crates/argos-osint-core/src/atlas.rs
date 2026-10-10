@@ -24,6 +24,7 @@ use crate::osint::ProviderKeys;
 use crate::provider::{self, DecisionsResponse};
 use crate::secrets::ProviderSecret;
 use crate::store::{AtlasArticleRow, AtlasRunRow, Store};
+use crate::telemetry::{self, EventKind, TelemetryEvent, Trigger};
 
 /// Country-coded headlines collected from each phase-1 source.
 const PHASE1_TARGET: u32 = 50;
@@ -425,6 +426,271 @@ pub fn domain_rank(host: &str) -> i32 {
         .find(|(domain, _)| host == *domain || host.ends_with(&format!(".{domain}")))
         .map(|(_, rank)| *rank)
         .unwrap_or(0)
+}
+
+/// Version of the origin scoring method (bands, tiers, temperatures). Two
+/// origin snapshots are only comparable when this value matches.
+pub const ORIGIN_SCORING_VERSION: &str = "atlas-origin-v1";
+
+/// Milliseconds between two RFC 3339 stamps. `None` when either is missing or
+/// unparsable, so a missing timestamp is N/A rather than zero.
+fn rfc_ms(from: &str, to: &str) -> Option<i64> {
+    let parse = |raw: &str| {
+        chrono::DateTime::parse_from_rfc3339(raw.trim())
+            .ok()
+            .map(|stamp| stamp.with_timezone(&chrono::Utc))
+    };
+    let start = parse(from)?;
+    let end = parse(to)?;
+    Some((end - start).num_milliseconds())
+}
+
+/// One open Atlas stage interval, closed on the next transition or at cycle end.
+struct OpenStage {
+    name: &'static str,
+    unit: &'static str,
+    seq: i64,
+    started_at: String,
+}
+
+/// Telemetry for one Atlas cycle.
+///
+/// Every write is best-effort: a failure is dropped here so instrumentation can
+/// never break a cycle. Event ids are the logical key of the fact they describe,
+/// so a resumed or replayed cycle replaces a row instead of double counting it.
+struct CycleTelemetry {
+    db: std::path::PathBuf,
+    run_id: String,
+    mode: String,
+    started_at: String,
+    clock: telemetry::Measured,
+    candidates: i64,
+    stage: Option<OpenStage>,
+}
+
+impl CycleTelemetry {
+    fn new(db: &Path, run_id: &str, mode: &str, started_at: String) -> Self {
+        // Continue the occurrence numbering so a resumed cycle appends.
+        let candidates = rusqlite::Connection::open(db)
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM telemetry_events WHERE id GLOB ?1",
+                    rusqlite::params![format!("atlas-cand-{run_id}-*")],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok()
+            })
+            .unwrap_or(0)
+            .max(0);
+        Self {
+            db: db.to_path_buf(),
+            run_id: run_id.to_string(),
+            mode: mode.to_string(),
+            started_at,
+            clock: telemetry::Measured::start(),
+            candidates,
+            stage: None,
+        }
+    }
+
+    /// Opens a stage, closing the previous interval with the counts known now.
+    /// A stage a resumed cursor skips simply never opens, so it is never reported
+    /// as zero work.
+    fn enter_stage(&mut self, name: &'static str, unit: &'static str, stats: &RunStats) {
+        if self.stage.as_ref().map(|open| open.name) == Some(name) {
+            return;
+        }
+        self.close_stage("completed", stats);
+        let seq = crate::atlas_work::next_stage_seq(&self.db, &self.run_id, name);
+        self.stage = Some(OpenStage {
+            name,
+            unit,
+            seq,
+            started_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
+    /// Closes the open interval. `state` is `completed` or `interrupted` so a
+    /// stage a pause cut short is not reported as finished work.
+    fn close_stage(&mut self, state: &str, stats: &RunStats) {
+        let Some(open) = self.stage.take() else {
+            return;
+        };
+        let ended_at = chrono::Utc::now().to_rfc3339();
+        let duration = rfc_ms(&open.started_at, &ended_at);
+        let event = TelemetryEvent::new(EventKind::AtlasStage)
+            .at(ended_at.clone())
+            .trigger(Trigger::AtlasCycle)
+            .app("atlas")
+            .run(&self.run_id)
+            .tool(open.name)
+            .call("cycle")
+            .category(open.unit)
+            .outcome(state)
+            .duration_ms(duration)
+            .count(1)
+            .payload(serde_json::json!({
+                "stage": open.name,
+                "unit": open.unit,
+                "state": state,
+                "unit_id": "cycle",
+                "started_at": open.started_at,
+                "ended_at": ended_at,
+                "error_category": if state == "interrupted" { "interrupted" } else { "none" },
+                "counts": stage_counts(stats),
+            }));
+        let event = event.with_id(format!(
+            "atlas-stage-{}-{}-{}",
+            self.run_id, open.name, open.seq
+        ));
+        let _ = telemetry::record(&self.db, &event);
+    }
+
+    /// One candidate article occurrence, with exactly one mutually exclusive
+    /// disposition. A repeated headline is never recounted as new volume.
+    fn candidate(
+        &mut self,
+        article: &FeedArticle,
+        provider: &str,
+        disposition: &str,
+        replaced: Option<&str>,
+        first_seen: Option<&str>,
+    ) {
+        self.candidates += 1;
+        let event = TelemetryEvent::new(EventKind::AtlasCandidate)
+            .at(if article.seen_at.trim().is_empty() {
+                chrono::Utc::now().to_rfc3339()
+            } else {
+                article.seen_at.trim().to_string()
+            })
+            .trigger(Trigger::AtlasCycle)
+            .app("atlas")
+            .run(&self.run_id)
+            .article(&article.id)
+            .origin(&article.country)
+            .provider(provider)
+            .category(category_tag(&article.category))
+            .outcome(disposition)
+            .count(1)
+            .payload(serde_json::json!({
+                "disposition": disposition,
+                "source_domain": article.source_domain,
+                "url_hash": crate::atlas::url_hash(&article.url),
+                "replaced": replaced.unwrap_or_default(),
+                "first_seen_at": first_seen.unwrap_or_default(),
+                "tag": category_tag(&article.category),
+                "temperature": article.temperature,
+            }));
+        let event = event.with_id(format!(
+            "atlas-cand-{}-{}-{}",
+            self.run_id, article.id, self.candidates
+        ));
+        let _ = telemetry::record(&self.db, &event);
+    }
+
+    /// One origin observation in the cycle snapshot, never one per repaint.
+    /// `comparable` marks whether the snapshot may be diffed against others.
+    fn origin_snapshot(&self, origins: &[OriginStat], snapshot_at: &str, comparable: bool) {
+        for row in origins {
+            let event = TelemetryEvent::new(EventKind::AtlasOriginSnapshot)
+                .at(snapshot_at.to_string())
+                .trigger(Trigger::AtlasCycle)
+                .app("atlas")
+                .run(&self.run_id)
+                .origin(&row.country)
+                .outcome(if comparable { "scored" } else { "incomparable" })
+                .count(i64::from(row.articles))
+                .payload(serde_json::json!({
+                    "tier": row.tier,
+                    "temperature": row.temperature,
+                    "volume": row.volume,
+                    "articles": row.articles,
+                    "version": ORIGIN_SCORING_VERSION,
+                    "scoring_version": ORIGIN_SCORING_VERSION,
+                    "eligible": comparable,
+                    "comparable": comparable,
+                    "snapshot_at": snapshot_at,
+                }));
+            let event = event.with_id(format!("atlas-origin-{}-{}", self.run_id, row.country));
+            let _ = telemetry::record(&self.db, &event);
+        }
+    }
+
+    /// Mean queue residence for this cycle's registry job, when the job recorded
+    /// both a queue and an admission timestamp. Never derived from retry waits.
+    fn queue_wait_ms(&self) -> Option<i64> {
+        let conn = rusqlite::Connection::open(&self.db).ok()?;
+        let job = crate::job_registry::job_for_run(&conn, "atlas_cycle", &self.run_id)
+            .ok()
+            .flatten()?;
+        let (queued, active): (String, String) = conn
+            .query_row(
+                "SELECT queued_at, active_since FROM argos_jobs WHERE id=?1",
+                [job.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok()?;
+        rfc_ms(&queued, &active)
+    }
+
+    /// The terminal cycle row. The event id is the run key, so a cycle that is
+    /// finished again (indexing caught up later) replaces its row exactly once.
+    fn cycle(&self, outcome: &str, stats: &RunStats) {
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let active_ms = self.clock.elapsed_ms();
+        // A healthy cycle carries no reason; anything else carries a coarse
+        // class, never the stored lifecycle prose.
+        let reason = match outcome {
+            "completed" => "none",
+            "waiting" => "incomplete_work",
+            "blocked" => "configuration",
+            "failed" => "publication_failed",
+            _ => "unknown",
+        };
+        let event = TelemetryEvent::new(EventKind::AtlasCycle)
+            .at(finished_at.clone())
+            .trigger(Trigger::AtlasCycle)
+            .app("atlas")
+            .run(&self.run_id)
+            .mode(&self.mode)
+            .outcome(outcome)
+            .reason(reason)
+            .duration_ms(Some(active_ms))
+            .count(1)
+            .payload(serde_json::json!({
+                "outcome": outcome,
+                "mode": self.mode,
+                "started_at": self.started_at,
+                "finished_at": finished_at,
+                "wall_ms": rfc_ms(&self.started_at, &finished_at),
+                "active_ms": active_ms,
+                "queue_ms": self.queue_wait_ms(),
+                "discovered": stats.counts.values().sum::<u32>(),
+                "retained": stats.article_total(),
+                "candidates": self.candidates,
+                "origins": stats.origins.len(),
+                "scoring_version": ORIGIN_SCORING_VERSION,
+                "memories": crate::atlas_memory::memory_cycle_payload(&stats.memories),
+            }));
+        let event = event.with_id(format!("atlas-cycle-{}", self.run_id));
+        let _ = telemetry::record(&self.db, &event);
+    }
+}
+
+/// Counts reported on every stage row. Articles, packets and memories stay in
+/// their own fields and are never summed into one total.
+fn stage_counts(stats: &RunStats) -> serde_json::Value {
+    serde_json::json!({
+        "discovered": stats.counts.values().sum::<u32>(),
+        "articles": stats.article_total(),
+        "origins": stats.origins.len(),
+        "memories_extracted": stats.memories.extracted,
+        "memories_accepted": stats.memories.accepted,
+        "memories_required": stats.memories.required,
+        "memories_indexed": stats.memories.indexed,
+        "memories_pending": stats.memories.pending,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1129,6 +1395,7 @@ fn apply_hits(
     emit: &mut impl FnMut(AtlasEvent),
     store: &Store,
     run_id: &str,
+    tel: &mut CycleTelemetry,
 ) -> Result<()> {
     if provider == "gnews" || provider == "newsdata" {
         for hit in hits {
@@ -1149,6 +1416,13 @@ fn apply_hits(
         }
         return Ok(());
     }
+    // Already-retained rows for this run, with the ingestion time first seen, so
+    // a repeated headline is reported as retained-existing instead of new volume.
+    let mut retained: HashMap<String, String> = store
+        .atlas_list_articles(run_id)?
+        .into_iter()
+        .map(|row| (row.id, row.seen_at))
+        .collect();
     for hit in hits {
         let temperature = stats
             .origins
@@ -1158,7 +1432,18 @@ fn apply_hits(
             .unwrap_or(0.0);
         let article = article_from(hit, provider, temperature);
         match judge(&article, seen) {
-            Verdict::Drop => {}
+            Verdict::Drop => {
+                // A headline with no usable title or URL is a rejected candidate;
+                // everything else that judge drops is a repeat.
+                let disposition =
+                    if article.title.trim().is_empty() || article.url.trim().is_empty() {
+                        "rejected"
+                    } else {
+                        "duplicate_in_cycle"
+                    };
+                let first_seen = retained.get(&article.id).cloned();
+                tel.candidate(&article, provider, disposition, None, first_seen.as_deref());
+            }
             Verdict::Keep => {
                 if let Some(row) = stats
                     .origins
@@ -1167,19 +1452,30 @@ fn apply_hits(
                 {
                     row.articles += 1;
                 }
+                let disposition = if retained.contains_key(&article.id) {
+                    "retained_existing"
+                } else {
+                    "retained_new"
+                };
                 remember(seen, &article, None);
                 store.atlas_upsert_article(&article_row(run_id, &article))?;
+                retained.insert(article.id.clone(), article.seen_at.clone());
+                tel.candidate(&article, provider, disposition, None, None);
                 emit(AtlasEvent::Article(article));
             }
             Verdict::Replace(id) => {
                 // Only replace inside this run. A hit already stored in another
                 // retained run is ignored so TTL history is not reprocessed.
                 if store.atlas_article(run_id, &id)?.is_none() {
+                    tel.candidate(&article, provider, "duplicate_in_cycle", None, None);
                     continue;
                 }
                 store.atlas_delete_article(run_id, &id)?;
                 remember(seen, &article, Some(&id));
                 store.atlas_upsert_article(&article_row(run_id, &article))?;
+                retained.remove(&id);
+                retained.insert(article.id.clone(), article.seen_at.clone());
+                tel.candidate(&article, provider, "retained_new", Some(id.as_str()), None);
                 emit(AtlasEvent::Replaced { id, article });
             }
         }
@@ -1519,6 +1815,24 @@ where
     if cursor.from.is_empty() {
         cursor.from = lookback_from();
     }
+    // Cycle telemetry. `started_at` is the durable run start, so wall duration is
+    // completion minus start even when this invocation is a resume.
+    let cycle_started_at = store
+        .atlas_list_runs()?
+        .into_iter()
+        .find(|run| run.id == run_id)
+        .map(|run| run.started_at)
+        .unwrap_or_default();
+    let cycle_mode = if resume {
+        if resume_id.is_some() {
+            "repair"
+        } else {
+            "resumed"
+        }
+    } else {
+        "fresh"
+    };
+    let mut tel = CycleTelemetry::new(db_path, &run_id, cycle_mode, cycle_started_at);
     if cursor.phase <= 1 {
         require_either(&keys.gnews, &keys.gnews_fallback, "GNews API key")?;
         require_either(&keys.newsdata, &keys.newsdata_fallback, "NewsData API key")?;
@@ -1547,6 +1861,7 @@ where
 
     if cursor.phase <= 1 {
         track(1);
+        tel.enter_stage("collection", "article", &stats);
         let providers = ["gnews", "newsdata"];
         let start = providers
             .iter()
@@ -1572,7 +1887,7 @@ where
                     kept,
                 };
                 if pause.load(Ordering::Relaxed) {
-                    return park(&store, &run_id, &here, &stats, &mut emit);
+                    return park(&store, &run_id, &here, &stats, &mut emit, &mut tel);
                 }
                 let (primary, fallback) = keys.pair(provider);
                 let Some(key) = open_key(&store, provider, primary, fallback)? else {
@@ -1624,7 +1939,7 @@ where
                                 kept += hits.len() as u32;
                                 apply_hits(
                                     &hits, provider, &mut stats, &mut seen, &mut emit, &store,
-                                    &run_id,
+                                    &run_id, &mut tel,
                                 )?;
                                 token = if provider == "newsdata" {
                                     more.clone().unwrap_or_default()
@@ -1695,10 +2010,15 @@ where
         };
         save(&store, &run_id, &cursor, &stats)?;
         emit(AtlasEvent::Stats(stats.clone()));
+        // One origin snapshot per cycle, taken here where the bands are computed,
+        // never once per repaint.
+        let snapshot_at = chrono::Utc::now().to_rfc3339();
+        tel.origin_snapshot(&stats.origins, &snapshot_at, !stats.counts.is_empty());
     }
 
     if cursor.phase == 2 {
         track(2);
+        tel.enter_stage("collection", "article", &stats);
         require_either(&keys.newsapi, &keys.newsapi_fallback, "NewsAPI key")?;
         require_either(&keys.currents, &keys.currents_fallback, "Currents API key")?;
         if stats.origins.is_empty() {
@@ -1711,6 +2031,8 @@ where
             emit(AtlasEvent::Status(
                 "No flashpoints in the 48-hour window".into(),
             ));
+            tel.close_stage("completed", &stats);
+            tel.cycle("completed", &stats);
             return Ok(Stop::Finished);
         }
         let countries: Vec<String> = stats
@@ -1753,6 +2075,7 @@ where
                     &cursor_at(job, &cursor.from),
                     &stats,
                     &mut emit,
+                    &mut tel,
                 );
             }
             let country = &countries[job.country];
@@ -1808,6 +2131,7 @@ where
                         &mut emit,
                         &store,
                         &run_id,
+                        &mut tel,
                     )?,
                     Err(err) => emit(parse_fault(job.provider, err.to_string(), &body)),
                 },
@@ -1858,6 +2182,8 @@ where
 
     if cursor.phase == 3 {
         track(3);
+        // Classification is part of article collection; it never opens a stage of
+        // its own so stage units stay comparable.
         let articles = store.atlas_list_articles(&run_id)?;
         if !articles.is_empty() && classifier.is_none() {
             emit(AtlasEvent::Note(
@@ -1872,7 +2198,7 @@ where
                     cursor.country = index;
                     cursor.phase = 3;
                     cursor.leg = "classify".into();
-                    return park(&store, &run_id, &cursor, &stats, &mut emit);
+                    return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
                 }
                 emit(AtlasEvent::Status(format!(
                     "Classifying {}/{total}",
@@ -1926,11 +2252,15 @@ where
         cursor.leg = "insights".into();
         save(&store, &run_id, &cursor, &stats)?;
     }
+    // Snapshot of the memory lifecycle before phase 4/5 touch it, so only the
+    // child steps that actually changed get a stage row.
+    let mut memories_before = stats.memories.clone();
 
     if cursor.phase == 4 && cursor.leg != "publish" {
         track(4);
+        tel.enter_stage("extraction", "packet", &stats);
         if pause.load(Ordering::Relaxed) {
-            return park(&store, &run_id, &cursor, &stats, &mut emit);
+            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
         }
         stats.memories = atlas_memory::MemoryPhase {
             extraction: StepState::Running,
@@ -2059,6 +2389,7 @@ where
                                     stats: &settled.stats,
                                     partial,
                                     notes,
+                                    initial_confidences: settled.initial_confidences.clone(),
                                 },
                             )?;
                             stats.insights = extraction.settled.stats;
@@ -2104,26 +2435,29 @@ where
             _ => {}
         }
         save(&store, &run_id, &cursor, &stats)?;
+        record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
         if matches!(
             stats.memories.extraction,
             StepState::Failed | StepState::Blocked
         ) {
             // Cursor stays on extraction: a resume after fixing the cause re-extracts.
-            return finish(&store, &run_id, &stats, &mut emit);
+            return finish(&store, &run_id, &stats, &mut emit, &mut tel);
         }
     }
 
     if cursor.phase == 4 && cursor.leg == "publish" {
         track(4);
+        tel.enter_stage("publication", "memory", &stats);
         if pause.load(Ordering::Relaxed) {
-            return park(&store, &run_id, &cursor, &stats, &mut emit);
+            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
         }
         let Some(checkpoint) = atlas_memory::load_checkpoint(&store, &run_id)? else {
             stats.memories.extraction = StepState::Failed;
             stats.memories.detail = atlas_memory::MISSING_PAYLOAD_LINE.into();
             cursor.leg = "insights".into();
             save(&store, &run_id, &cursor, &stats)?;
-            return finish(&store, &run_id, &stats, &mut emit);
+            record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
+            return finish(&store, &run_id, &stats, &mut emit, &mut tel);
         };
         if !stats.memories.started() {
             stats.memories.extraction = if checkpoint.partial {
@@ -2149,6 +2483,7 @@ where
                 // `insights_done` only after durable publication exists.
                 cursor = phase5_cursor(&cursor);
                 save(&store, &run_id, &cursor, &stats)?;
+                record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
             }
             Err(err) => {
                 let message = format!("{err:#}");
@@ -2158,15 +2493,17 @@ where
                 stats.memories.publication = StepState::Failed;
                 stats.memories.detail = format!("insights were not saved ({message})");
                 save(&store, &run_id, &cursor, &stats)?;
-                return finish(&store, &run_id, &stats, &mut emit);
+                record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
+                return finish(&store, &run_id, &stats, &mut emit, &mut tel);
             }
         }
     }
 
     if cursor.phase == 5 {
         track(5);
+        tel.enter_stage("indexing", "memory", &stats);
         if pause.load(Ordering::Relaxed) {
-            return park(&store, &run_id, &cursor, &stats, &mut emit);
+            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
         }
         let receipt = match store.atlas_publication_receipt(&run_id)? {
             Some(receipt) => receipt,
@@ -2194,13 +2531,26 @@ where
         )?;
         stats.memories.apply_verification(&report.verification);
         if report.paused {
-            return park(&store, &run_id, &cursor, &stats, &mut emit);
+            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
         }
         cursor.leg = "verified".into();
         save(&store, &run_id, &cursor, &stats)?;
+        record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
     }
 
-    finish(&store, &run_id, &stats, &mut emit)
+    finish(&store, &run_id, &stats, &mut emit, &mut tel)
+}
+
+/// Records the memory-lifecycle stage rows that changed, then advances the
+/// snapshot so the same transition is never written twice.
+fn record_memory_stages(
+    db_path: &Path,
+    run_id: &str,
+    before: &mut atlas_memory::MemoryPhase,
+    current: &atlas_memory::MemoryPhase,
+) {
+    atlas_memory::record_memory_stage_telemetry(db_path, run_id, before, current);
+    *before = current.clone();
 }
 
 fn phase5_cursor(cursor: &Cursor) -> Cursor {
@@ -2223,6 +2573,7 @@ fn finish(
     run_id: &str,
     stats: &RunStats,
     emit: &mut impl FnMut(AtlasEvent),
+    tel: &mut CycleTelemetry,
 ) -> Result<Stop> {
     let work = store
         .atlas_get_all_unit_manifests(run_id)
@@ -2268,6 +2619,20 @@ fn finish(
     };
     emit(AtlasEvent::Status(status));
     emit(AtlasEvent::Stats(stats.clone()));
+    // Terminal cycle telemetry: one row per run, written after the durable state
+    // so the recorded outcome is the state the run actually reached.
+    tel.close_stage(
+        if matches!(outcome, atlas_memory::CycleOutcome::Failed) {
+            "interrupted"
+        } else {
+            "completed"
+        },
+        stats,
+    );
+    tel.cycle(
+        crate::atlas_work::cycle_outcome_label(outcome.as_state()),
+        stats,
+    );
     Ok(match outcome {
         atlas_memory::CycleOutcome::Failed => Stop::Failed(if note.is_empty() {
             "Atlas memory publication failed".into()
@@ -2369,9 +2734,13 @@ fn park(
     cursor: &Cursor,
     stats: &RunStats,
     emit: &mut impl FnMut(AtlasEvent),
+    tel: &mut CycleTelemetry,
 ) -> Result<Stop> {
     save(store, id, cursor, stats)?;
     store.atlas_set_state(id, "paused", "Paused", false)?;
+    // The open stage interval is closed as interrupted, so the age of work a
+    // pause stopped mid-flight is derivable from its start timestamp.
+    tel.close_stage("interrupted", stats);
     emit(AtlasEvent::Stats(stats.clone()));
     emit(AtlasEvent::Status("Paused".into()));
     Ok(Stop::Paused)
@@ -2534,6 +2903,184 @@ pub fn charge_newsapi(store: &Store) {
 
 pub fn charge_quota(store: &Store, bucket: &str) {
     let _ = store.atlas_quota_bump(bucket, &utc_day());
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+
+    fn db() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("argos.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(crate::store::SCHEMA_TELEMETRY_SQL)
+            .unwrap();
+        (dir, path)
+    }
+
+    fn stats() -> RunStats {
+        RunStats {
+            scored: true,
+            origins: vec![OriginStat {
+                country: "us".into(),
+                tier: 1,
+                temperature: 1.0,
+                volume: 12,
+                articles: 3,
+            }],
+            ..RunStats::default()
+        }
+    }
+
+    #[test]
+    fn cycle_event_id_is_the_run_key_so_replay_never_double_counts() {
+        let (_dir, path) = db();
+        let tel = CycleTelemetry::new(&path, "atlas-run-1", "fresh", String::new());
+        tel.cycle("completed", &stats());
+        // A later terminal write for the same run replaces the row.
+        tel.cycle("partial", &stats());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='atlas_cycle'")
+            .unwrap();
+        assert_eq!(stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        let mut stmt = conn
+            .prepare("SELECT outcome FROM telemetry_events WHERE id='atlas-cycle-atlas-run-1'")
+            .unwrap();
+        assert_eq!(
+            stmt.query_row([], |r| r.get::<_, String>(0)).unwrap(),
+            "partial"
+        );
+    }
+
+    #[test]
+    fn origin_snapshots_are_one_row_per_origin_per_cycle() {
+        let (_dir, path) = db();
+        let tel = CycleTelemetry::new(&path, "atlas-run-2", "fresh", String::new());
+        tel.origin_snapshot(&stats().origins, "2026-10-09T00:00:00Z", true);
+        // Snapshotting again must never add a second observation per repaint.
+        tel.origin_snapshot(&stats().origins, "2026-10-09T00:00:00Z", true);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT COUNT(*) FROM telemetry_events WHERE event_type='atlas_origin_snapshot'",
+            )
+            .unwrap();
+        assert_eq!(stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        let mut stmt = conn
+            .prepare(
+                "SELECT payload_json FROM telemetry_events WHERE id='atlas-origin-atlas-run-2-us'",
+            )
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&stmt.query_row([], |r| r.get::<_, String>(0)).unwrap()).unwrap();
+        assert_eq!(payload["scoring_version"], ORIGIN_SCORING_VERSION);
+        assert_eq!(payload["comparable"], true);
+        assert_eq!(payload["tier"], 1);
+        assert_eq!(payload["volume"], 12);
+    }
+
+    #[test]
+    fn stage_intervals_carry_start_and_end_and_stay_one_row_each() {
+        let (_dir, path) = db();
+        let mut tel = CycleTelemetry::new(&path, "atlas-run-3", "fresh", String::new());
+        let here = stats();
+        tel.enter_stage("collection", "article", &here);
+        tel.enter_stage("extraction", "packet", &here);
+        tel.close_stage("completed", &here);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='atlas_stage'")
+            .unwrap();
+        assert_eq!(stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        let mut stmt = conn
+            .prepare("SELECT payload_json FROM telemetry_events ORDER BY id DESC LIMIT 1")
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&stmt.query_row([], |r| r.get::<_, String>(0)).unwrap()).unwrap();
+        assert_eq!(payload["stage"], "extraction");
+        assert_eq!(payload["unit"], "packet");
+        assert!(payload["started_at"].is_string());
+        assert!(payload["ended_at"].is_string());
+        // Closing twice must not write a third row.
+        tel.close_stage("interrupted", &here);
+        let mut stmt = conn
+            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='atlas_stage'")
+            .unwrap();
+        assert_eq!(stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 2);
+    }
+
+    #[test]
+    fn each_candidate_occurrence_gets_exactly_one_disposition() {
+        let (_dir, path) = db();
+        let mut tel = CycleTelemetry::new(&path, "atlas-run-4", "fresh", String::new());
+        let article = FeedArticle {
+            id: "art-1".into(),
+            title: "Joint military exercise begins".into(),
+            description: String::new(),
+            url: "https://example.com/drill".into(),
+            country: "us".into(),
+            source_name: "Wire".into(),
+            source_domain: "example.com".into(),
+            author: String::new(),
+            image_url: String::new(),
+            published_at: String::new(),
+            provider: "newsapi".into(),
+            temperature: 1.0,
+            seen_at: "2026-10-09T01:00:00Z".into(),
+            category: "military".into(),
+        };
+        tel.candidate(&article, "newsapi", "retained_new", None, None);
+        tel.candidate(&article, "newsapi", "duplicate_in_cycle", None, None);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT id, outcome FROM telemetry_events WHERE event_type='atlas_candidate' ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1, "retained_new");
+        assert_eq!(rows[1].1, "duplicate_in_cycle");
+        assert_ne!(rows[0].0, rows[1].0);
+    }
+
+    #[test]
+    fn a_resumed_cycle_continues_candidate_numbering() {
+        let (_dir, path) = db();
+        let article = FeedArticle {
+            id: "art-9".into(),
+            title: "Sanctions widen".into(),
+            description: String::new(),
+            url: "https://example.com/sanctions".into(),
+            country: "us".into(),
+            source_name: "Wire".into(),
+            source_domain: "example.com".into(),
+            author: String::new(),
+            image_url: String::new(),
+            published_at: String::new(),
+            provider: "newsapi".into(),
+            temperature: 0.5,
+            seen_at: String::new(),
+            category: "economic".into(),
+        };
+        {
+            let mut first = CycleTelemetry::new(&path, "atlas-run-5", "fresh", String::new());
+            first.candidate(&article, "newsapi", "retained_new", None, None);
+        }
+        {
+            let mut second = CycleTelemetry::new(&path, "atlas-run-5", "resumed", String::new());
+            second.candidate(&article, "newsapi", "duplicate_in_cycle", None, None);
+        }
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let rows: i64 = conn
+            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='atlas_candidate'")
+            .unwrap()
+            .query_row([], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+    }
 }
 
 #[cfg(test)]

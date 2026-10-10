@@ -57,6 +57,29 @@ impl ModeClassifyInput {
     }
 }
 
+/// The Brief rating for one article: the mean of its claims' current
+/// confidence, summed and divided.
+///
+/// This is the *same* computation `ModeClassifyInput::from_article` already
+/// performs, so the Intel dashboard never needs a second score. `None` when the
+/// article has no claims, so a no-claim brief is excluded from averages and
+/// shown as coverage instead of being scored zero. Never average pre-averaged
+/// values: pass raw per-claim confidences.
+pub fn brief_rating(claims: &[AtlasArticleClaim]) -> Option<f64> {
+    if claims.is_empty() {
+        return None;
+    }
+    let valid: Vec<f64> = claims
+        .iter()
+        .map(|claim| claim.confidence)
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        .collect();
+    if valid.is_empty() {
+        return None;
+    }
+    Some(valid.iter().sum::<f64>() / valid.len() as f64)
+}
+
 /// Inputs the classifier uses to choose a recon mode for a chat Recon prompt.
 #[derive(Clone, Debug, Default)]
 pub struct PromptModeClassifyInput {
@@ -494,5 +517,51 @@ mod tests {
         assert_eq!(input.inference_count, 1);
         assert!((input.mean_confidence - 0.6).abs() < 1e-9);
         assert_eq!(input.admiralty_sample, "B2");
+    }
+
+    #[test]
+    fn brief_rating_reuses_the_existing_mean_semantics() {
+        let article = AtlasArticleRow {
+            run_id: "r".into(),
+            id: "a".into(),
+            title: "Sanctions hit fleet".into(),
+            description: "Owners face new restrictions.".into(),
+            url: "https://ex.com".into(),
+            country: "US".into(),
+            source_name: "Ex".into(),
+            source_domain: "ex.com".into(),
+            published_at: "2026-10-01".into(),
+            provider: "news".into(),
+            temperature: 0.5,
+            category: "geopolitical".into(),
+            seen_at: "".into(),
+            author: "".into(),
+            image_url: "".into(),
+        };
+        let claim = |confidence: f64| AtlasArticleClaim {
+            fingerprint: "f".into(),
+            entity: "acme".into(),
+            predicate: "sanctioned".into(),
+            object: "fleet".into(),
+            topic: "geopolitical".into(),
+            classification: "inference".into(),
+            confidence,
+            claim: "Acme fleet sanctioned.".into(),
+            source_url: "".into(),
+            published_at: "".into(),
+            article_id: "a".into(),
+            reliability: "B".into(),
+            info_credibility: 2,
+            admiralty: "B2".into(),
+            rsp_status: "gr".into(),
+        };
+        let claims = vec![claim(0.8), claim(0.4)];
+        // Exactly the value the mode classifier already computes, so the
+        // dashboard never introduces a competing score.
+        let expected = ModeClassifyInput::from_article(&article, &claims).mean_confidence;
+        assert_eq!(brief_rating(&claims), Some(expected));
+        assert!((brief_rating(&claims).unwrap() - 0.6).abs() < 1e-9);
+        // No claims is coverage, not a zero score.
+        assert_eq!(brief_rating(&[]), None);
     }
 }

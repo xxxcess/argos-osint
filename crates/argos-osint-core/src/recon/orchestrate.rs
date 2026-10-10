@@ -3,7 +3,7 @@
 //! binding and fallbacks, then synthesize.
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc},
 };
 
@@ -20,11 +20,327 @@ use crate::{
     osint::ToolResult,
     provider::{self, SettingsFile},
     secrets::ProviderSecret,
+    telemetry::{self, EventKind, TelemetryEvent, Trigger},
 };
 use std::sync::atomic::AtomicBool;
 
 /// One recorded input: (input name, value, source).
 type InputGround = (String, Value, String);
+
+/// Terminal recon run outcomes. Exactly one applies to a run.
+pub(crate) const RUN_OUTCOME_COMPLETED_WITH_EVIDENCE: &str = "completed_with_evidence";
+/// The run finished and found evidence, but not for every directive.
+pub(crate) const RUN_OUTCOME_PARTIAL: &str = "partial";
+/// The run finished and every source it reached reported zero usable results.
+pub(crate) const RUN_OUTCOME_COMPLETED_ZERO_EVIDENCE: &str = "completed_zero_evidence";
+pub(crate) const RUN_OUTCOME_FAILED: &str = "failed";
+pub(crate) const RUN_OUTCOME_CANCELLED: &str = "cancelled";
+
+/// One recon stage's measured lifetime. Records a `recon_stage` row when the
+/// stage ends, including when a turn returns early through `?`.
+pub(crate) struct StageClock {
+    db_path: PathBuf,
+    run_id: String,
+    mode: String,
+    stage: String,
+    started: telemetry::Measured,
+    recorded: bool,
+}
+
+impl StageClock {
+    pub(crate) fn start(db_path: &Path, run_id: &str, mode: &str, stage: &str) -> Self {
+        Self {
+            db_path: db_path.to_path_buf(),
+            run_id: run_id.to_string(),
+            mode: mode.to_string(),
+            stage: stage.to_string(),
+            started: telemetry::Measured::start(),
+            recorded: false,
+        }
+    }
+
+    /// Close this stage and open the next one. Stage retries are separate
+    /// attempts, so each start earns its own row.
+    pub(crate) fn record(&mut self) {
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
+        // A resumed or replayed stage is a new attempt, so the ordinal is
+        // derived from the rows already written for this run and stage.
+        let attempt = stage_attempt(&self.db_path, &self.run_id, &self.stage);
+        let event = TelemetryEvent::new(EventKind::ReconStage)
+            .with_id(format!("{}:{}:{}", self.run_id, self.stage, attempt))
+            .canonical(format!("{}:{}", self.run_id, self.stage))
+            .at(now_stamp())
+            .app("recon")
+            .trigger(Trigger::ReconPrompt)
+            .category(&self.stage)
+            .mode(&self.mode)
+            .outcome("completed")
+            .run(&self.run_id)
+            .duration_ms(Some(self.started.elapsed_ms()))
+            .count(1)
+            .payload(json!({
+                "stage": self.stage,
+                "mode": self.mode,
+                "attempt": attempt,
+                "resumed": attempt > 1,
+            }));
+        let _ = telemetry::record(&self.db_path, &event);
+    }
+}
+
+impl Drop for StageClock {
+    fn drop(&mut self) {
+        self.record();
+    }
+}
+
+/// Close the stage in `slot`, then open `stage` under `mode`. Best effort: a
+/// telemetry failure never fails a turn.
+pub(crate) fn advance_stage(
+    slot: &mut Option<StageClock>,
+    db_path: &Path,
+    run_id: &str,
+    mode: &str,
+    stage: &str,
+) {
+    if let Some(previous) = slot.take() {
+        drop(previous);
+    }
+    *slot = Some(StageClock::start(db_path, run_id, mode, stage));
+}
+
+/// How many `recon_stage` rows already exist for this run and stage, so the next
+/// one is a separate attempt rather than a rewritten fact.
+fn stage_attempt(db_path: &Path, run_id: &str, stage: &str) -> i64 {
+    let Ok(conn) = rusqlite::Connection::open(db_path) else {
+        return 1;
+    };
+    let prefix = format!("{run_id}:{stage}:");
+    conn.query_row(
+        "SELECT COUNT(DISTINCT id) FROM telemetry_events
+         WHERE event_type = 'recon_stage' AND id >= ?1 AND id < ?2",
+        rusqlite::params![prefix, format!("{prefix}\u{10ffff}")],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        + 1
+}
+
+fn now_stamp() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// One directive's terminal assessment, derived from the plan's durable calls.
+pub(crate) struct DirectiveAssessment {
+    pub directive_id: String,
+    /// `answered`, `partially_answered`, `unresolved` or `blocked`.
+    pub outcome: &'static str,
+    /// Bounded machine label, never the directive text.
+    pub reason: &'static str,
+}
+
+/// Assess every directive from the calls that actually ran. Similarity alone is
+/// never completion: only a cited completed call counts as evidence.
+pub(crate) fn directive_assessments(plan: &Plan) -> Vec<DirectiveAssessment> {
+    plan.directives
+        .iter()
+        .map(|directive| {
+            let serving: Vec<&PlanCall> = plan
+                .calls
+                .iter()
+                .filter(|call| call_serves(call, &directive.id))
+                .collect();
+            let completed = serving
+                .iter()
+                .any(|call| call.status == "completed" && !call.call_id.is_empty());
+            let verified_zero = serving
+                .iter()
+                .any(|call| call.status == "no_results" && !call.call_id.is_empty());
+            let failed = serving.iter().any(|call| {
+                matches!(
+                    call.status.as_str(),
+                    "failed" | "timeout" | "rate_limited" | "cancelled"
+                )
+            });
+            let dispatched = serving.iter().any(|call| !call.call_id.is_empty());
+            let (outcome, reason) = if completed {
+                ("answered", "evidence_cited")
+            } else if verified_zero {
+                ("partially_answered", "verified_zero_only")
+            } else if failed {
+                ("blocked", "call_failed")
+            } else if dispatched {
+                ("unresolved", "no_usable_evidence")
+            } else {
+                ("unresolved", "not_dispatched")
+            };
+            DirectiveAssessment {
+                directive_id: directive.id.clone(),
+                outcome,
+                reason,
+            }
+        })
+        .collect()
+}
+
+/// Whether a plan call serves this directive, using the same directive-token
+/// rule the coverage scorer uses.
+fn call_serves(call: &PlanCall, directive_id: &str) -> bool {
+    call.reason
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .any(|token| token == directive_id)
+}
+
+/// Record one `directive_assessed` row per directive of a run. Keyed by run and
+/// directive id so a resumed turn reassesses instead of double counting.
+pub(crate) fn note_directives(
+    db_path: &Path,
+    run_id: &str,
+    turn_id: &str,
+    plan: &Plan,
+) -> Vec<DirectiveAssessment> {
+    let assessments = directive_assessments(plan);
+    for assessment in &assessments {
+        let event = TelemetryEvent::new(EventKind::DirectiveAssessed)
+            .with_id(format!("{run_id}:{}", assessment.directive_id))
+            .canonical(format!("{run_id}:{}", assessment.directive_id))
+            .at(now_stamp())
+            .app("recon")
+            .trigger(Trigger::ReconPrompt)
+            .mode(&plan.report_mode)
+            .outcome(assessment.outcome)
+            .reason(assessment.reason)
+            .run(run_id)
+            .turn(turn_id)
+            .count(1);
+        let _ = telemetry::record(db_path, &event);
+    }
+    assessments
+}
+
+/// Whether any result in this run carried usable evidence.
+fn run_has_evidence(results: &[(String, ToolResult)]) -> bool {
+    results.iter().any(|(_, result)| {
+        result.status == "completed"
+            && !crate::osint::extract_observation_items(&result.observations).is_empty()
+    })
+}
+
+/// Terminal recon run facts. A run that finished is not a failure, and a
+/// zero-evidence run is not evidence.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RunFacts {
+    pub directives: usize,
+    pub answered: usize,
+    pub partially_answered: usize,
+    pub unresolved: usize,
+    pub blocked: usize,
+    pub calls_completed: usize,
+    pub calls_zero_results: usize,
+    pub calls_failed: usize,
+    pub calls_deferred: usize,
+    pub calls_skipped: usize,
+}
+
+pub(crate) fn run_facts(plan: &Plan, assessments: &[DirectiveAssessment]) -> RunFacts {
+    let mut facts = RunFacts {
+        directives: assessments.len(),
+        ..RunFacts::default()
+    };
+    for assessment in assessments {
+        match assessment.outcome {
+            "answered" => facts.answered += 1,
+            "partially_answered" => facts.partially_answered += 1,
+            "blocked" => facts.blocked += 1,
+            _ => facts.unresolved += 1,
+        }
+    }
+    for call in &plan.calls {
+        match call.status.as_str() {
+            "completed" => facts.calls_completed += 1,
+            "no_results" => facts.calls_zero_results += 1,
+            "failed" | "timeout" | "rate_limited" | "cancelled" => facts.calls_failed += 1,
+            "deferred" => facts.calls_deferred += 1,
+            "skipped" => facts.calls_skipped += 1,
+            _ => {}
+        }
+    }
+    facts
+}
+
+/// Record the terminal transition of one recon run, keyed by the run id so a
+/// resumed or replayed turn rewrites one row instead of counting twice.
+pub(crate) fn note_run(
+    db_path: &Path,
+    run: &Run,
+    plan: &Plan,
+    results: &[(String, ToolResult)],
+    outcome: &Result<Option<String>>,
+) {
+    let run_id = run.id.as_str();
+    let assessments = note_directives(db_path, run_id, &run.turn_id, plan);
+    let facts = run_facts(plan, &assessments);
+    let state = match outcome {
+        Err(err) if cancelled(err) => RUN_OUTCOME_CANCELLED,
+        Err(_) => RUN_OUTCOME_FAILED,
+        Ok(Some(_)) => RUN_OUTCOME_PARTIAL,
+        Ok(None) if run_has_evidence(results) => RUN_OUTCOME_COMPLETED_WITH_EVIDENCE,
+        Ok(None) => RUN_OUTCOME_COMPLETED_ZERO_EVIDENCE,
+    };
+    let event = TelemetryEvent::new(EventKind::ReconRun)
+        .with_id(run_id)
+        .canonical(run_id)
+        .at(now_stamp())
+        .app("recon")
+        .trigger(Trigger::ReconPrompt)
+        .mode(&plan.report_mode)
+        .outcome(state)
+        .reason(
+            outcome
+                .as_ref()
+                .err()
+                .map(|err| bounded_reason(err))
+                .unwrap_or_default(),
+        )
+        .run(run_id)
+        .thread(&run.thread_id)
+        .count(1)
+        .payload(json!({
+            "directives": facts.directives,
+            "directives_answered": facts.answered,
+            "directives_partially_answered": facts.partially_answered,
+            "directives_unresolved": facts.unresolved,
+            "directives_blocked": facts.blocked,
+            "calls_completed": facts.calls_completed,
+            "calls_zero_results": facts.calls_zero_results,
+            "calls_failed": facts.calls_failed,
+            "calls_deferred": facts.calls_deferred,
+            "calls_skipped": facts.calls_skipped,
+            "evidence": run_has_evidence(results),
+            "strategy": plan.strategy,
+            "planning_mode": plan.planning_mode,
+        }));
+    let _ = telemetry::record(db_path, &event);
+}
+
+/// Short machine label for a failure reason. Never the full error text.
+fn bounded_reason(err: &anyhow::Error) -> String {
+    let text = err.to_string().to_ascii_lowercase();
+    if text.contains("cancelled") {
+        "cancelled".into()
+    } else if text.contains("timed out") || text.contains("timeout") {
+        "timeout".into()
+    } else if text.contains("key missing") || text.contains("api key") {
+        "configuration".into()
+    } else if text.contains("exhaust") {
+        "budget_exhausted".into()
+    } else {
+        "error".into()
+    }
+}
 
 /// Result of trying to run plan calls under the local provider credit ledger.
 pub struct BudgetedOutcome {
@@ -161,6 +477,14 @@ pub async fn run_turn(
     clock: &Arc<std::sync::Mutex<super::budget::TurnClock>>,
     progress: &mut (impl FnMut(super::TurnEvent) + Send),
 ) -> Result<Option<String>> {
+    let mut stage_slot: Option<StageClock> = None;
+    advance_stage(
+        &mut stage_slot,
+        &service.db_path,
+        &run.id,
+        "",
+        "deriving directives",
+    );
     stage(progress, "deriving directives");
     let store = Store::open(&service.db_path)?;
     store.set_run(&run.id, "running", "deriving directives", None, None)?;
@@ -169,7 +493,7 @@ pub async fn run_turn(
     }
     // Brain recall stays first. Recalled insights are known facts, not instructions.
     let (recalled, unfamiliar, brain_resources) =
-        recall_for_turn(&store, &run.thread_id, question)?;
+        recall_for_turn(&store, &run.thread_id, question, "", &run.id)?;
     let brain_resource_line = brain_resources.prompt_line();
     let history = store.list_messages(&run.thread_id)?;
     let opening = !history.iter().any(|message| message.role == "assistant");
@@ -216,6 +540,13 @@ pub async fn run_turn(
     let thread = thread_subject(&opened, &run.thread_id, &run.id)?;
     let prior = previous_synthesis(&opened, &run.thread_id)?;
     drop(opened);
+    advance_stage(
+        &mut stage_slot,
+        &service.db_path,
+        &run.id,
+        "",
+        "classifying mode",
+    );
     stage(progress, "classifying mode");
     Store::open(&service.db_path)?.set_run(&run.id, "running", "classifying mode", None, None)?;
     let report_mode = classify_turn_mode(service, question, &prior, &known).await;
@@ -246,6 +577,13 @@ pub async fn run_turn(
         report_mode: report_mode.as_str().into(),
         ..Plan::default()
     };
+    advance_stage(
+        &mut stage_slot,
+        &service.db_path,
+        &run.id,
+        &plan.report_mode,
+        "picking tools",
+    );
     publish(&gate, &mut plan, progress);
     stage(progress, "picking tools");
     Store::open(&service.db_path)?.set_run(
@@ -366,6 +704,13 @@ pub async fn run_turn(
     plan.picker_cost = picker.cost;
     sync_budget(&plan, &gate);
     publish(&gate, &mut plan, progress);
+    advance_stage(
+        &mut stage_slot,
+        &service.db_path,
+        &run.id,
+        &plan.report_mode,
+        "picking tools",
+    );
     Store::open(&service.db_path)?.set_run(
         &run.id,
         "running",
@@ -388,6 +733,7 @@ pub async fn run_turn(
         &mut picker,
         cancel,
         progress,
+        &mut stage_slot,
     )
     .await?;
     let store = Store::open(&service.db_path)?;
@@ -401,6 +747,13 @@ pub async fn run_turn(
     }
     drop(store);
     refresh_directive_coverage(&mut plan);
+    advance_stage(
+        &mut stage_slot,
+        &service.db_path,
+        &run.id,
+        &plan.report_mode,
+        "synthesizing",
+    );
     Store::open(&service.db_path)?.set_run(
         &run.id,
         "running",
@@ -408,7 +761,7 @@ pub async fn run_turn(
         Some(&plan),
         None,
     )?;
-    service
+    let outcome = service
         .finish_answer(
             AnswerContext {
                 run,
@@ -425,7 +778,12 @@ pub async fn run_turn(
             },
             progress,
         )
-        .await
+        .await;
+    // Terminal facts for this run: directive assessments, directive totals and the
+    // terminal state transition, keyed by the run id so a resumed or replayed turn
+    // rewrites one row instead of counting twice.
+    note_run(&service.db_path, run, &plan, &results, &outcome);
+    outcome
 }
 
 /// Resume of a tool-picker plan: completed steps are skipped and the next step runs with
@@ -451,6 +809,14 @@ pub async fn continue_turn(
     picker.bind_clock(clock.clone());
     let gate = ModelGate::default();
     gate.bind_clock(clock.clone(), service.db_path.clone());
+    let mut stage_slot: Option<StageClock> = None;
+    advance_stage(
+        &mut stage_slot,
+        &service.db_path,
+        &run.id,
+        &plan.report_mode,
+        "resuming tools",
+    );
     stage(progress, "resuming tools");
     let mut results = execute_ordered(
         service,
@@ -467,6 +833,7 @@ pub async fn continue_turn(
         &mut picker,
         cancel,
         progress,
+        &mut stage_slot,
     )
     .await?;
     refresh_directive_coverage(&mut plan);
@@ -479,7 +846,8 @@ pub async fn continue_turn(
             results.insert(0, (call.id, result));
         }
     }
-    let (recalled, _, _) = recall_for_turn(&store, &run.thread_id, question)?;
+    let (recalled, _, _) =
+        recall_for_turn(&store, &run.thread_id, question, &plan.report_mode, &run.id)?;
     let opening = !store
         .list_messages(&run.thread_id)?
         .iter()
@@ -501,7 +869,14 @@ pub async fn continue_turn(
         store.set_run(&run.id, "running", "synthesizing", Some(&plan), None)?;
         drop(store);
     }
-    service
+    advance_stage(
+        &mut stage_slot,
+        &service.db_path,
+        &run.id,
+        &plan.report_mode,
+        "synthesizing",
+    );
+    let outcome = service
         .finish_answer(
             AnswerContext {
                 run,
@@ -518,7 +893,9 @@ pub async fn continue_turn(
             },
             progress,
         )
-        .await
+        .await;
+    note_run(&service.db_path, run, &plan, &results, &outcome);
+    outcome
 }
 
 fn picker_secret(service: &super::Service, run: &Run) -> Result<ProviderSecret> {
@@ -794,6 +1171,7 @@ async fn execute_ordered(
     picker: &mut picker::Picker<'_>,
     cancel: &Arc<AtomicBool>,
     progress: &mut (impl FnMut(super::TurnEvent) + Send),
+    stage_slot: &mut Option<StageClock>,
 ) -> Result<Vec<(String, ToolResult)>> {
     let missing = missing_keys(service);
     let env = StepEnv {
@@ -813,6 +1191,9 @@ async fn execute_ordered(
     let run_id = run.id.clone();
     let mut persist = move |plan: &Plan, stage: &str| -> Result<()> {
         Store::open(&db)?.set_run(&run_id, "running", stage, Some(plan), None)?;
+        // Stage retries are separate attempts: each stage start earns its own
+        // measured row rather than rewriting the previous one.
+        advance_stage(stage_slot, &db, &run_id, &plan.report_mode, stage);
         Ok(())
     };
     let runner = |call: PlanCall| {
@@ -2365,6 +2746,8 @@ pub(crate) fn recall_for_turn(
     store: &Store,
     thread_id: &str,
     question: &str,
+    mode: &str,
+    run_id: &str,
 ) -> Result<(Vec<super::RecallInsight>, bool, BrainResourceSummary)> {
     let thread_entities = store.thread_entities(thread_id)?;
     let query = crate::brain_query::BrainQuery {
@@ -2406,6 +2789,22 @@ pub(crate) fn recall_for_turn(
         admitted_count += 1;
     }
     let resources = brain_resources::summarize_for_recall(store, &recalled, question)?;
+    // The recall relevance gate: one row per completed recall query, with the
+    // candidate and accepted hit counts and a bounded rejection label.
+    let candidates = text_hits.len();
+    let facts = brain_resources::RecallQueryFacts {
+        candidates,
+        accepted: admitted_count,
+        rejection_reason: brain_resources::recall_gate_rejection(
+            candidates,
+            admitted_count,
+            candidates.saturating_sub(admitted_count),
+        ),
+        mode: mode.to_string(),
+        run_id: run_id.to_string(),
+        thread_id: thread_id.to_string(),
+    };
+    brain_resources::note_recall_query(store, &facts);
     Ok((recalled, unfamiliar, resources))
 }
 
@@ -3427,6 +3826,7 @@ mod tests {
 
     /// `recall_for_turn` stays sync and runs inside the async Recon turn; with the
     /// Lance index on, its sync wrapper must not panic inside the runtime.
+    #[cfg(feature = "lancedb")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recall_for_turn_uses_lance_inside_the_turn_runtime() {
         let _fake = crate::embed::testing::fake();
@@ -3446,7 +3846,7 @@ mod tests {
             )
             .unwrap();
         let (recalled, _, _) =
-            recall_for_turn(&store, "no-thread", "northwind ferry timetable").unwrap();
+            recall_for_turn(&store, "no-thread", "northwind ferry timetable", "", "").unwrap();
         assert!(recalled.iter().any(|item| item.memory_id == memory.id));
         assert!(dir.path().join("memory_lancedb").is_dir());
     }

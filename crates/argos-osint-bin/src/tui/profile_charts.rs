@@ -21,8 +21,16 @@ use super::theme;
 /// Stable series identity, including semantic outcome colours.
 pub fn series_style(key: &str) -> Style {
     let color = match key {
-        "completed" | "completed_nonempty" | "completed_with_evidence" => theme::GREEN,
-        "failed" => theme::RED,
+        "completed" | "completed_nonempty" | "completed_with_evidence" | "answered" => theme::GREEN,
+        "completed_empty"
+        | "completed_zero"
+        | "completed_zero_evidence"
+        | "completed_without_evidence"
+        | "verified_zero" => theme::series(1),
+        "p50" | "p50_ms" | "mean_ms" | "execution" => theme::ACCENT,
+        "p95" | "p95_ms" => theme::series(1),
+        "wait" | "mean_queue_ms" => theme::WARN,
+        "failed" | "unresolved" => theme::RED,
         "partial" | "blocked" => theme::WARN,
         "cancelled" | "unknown" => theme::MUTED,
         _ => theme::series(key.bytes().fold(0usize, |hash, byte| {
@@ -49,62 +57,133 @@ pub struct SeriesPoint {
     pub n: u64,
 }
 
-/// Duration/ratio points page around the selection. No percentile is averaged
-/// and no missing observation is interpolated.
+/// Geometry shared by chart drawing and bucket mouse/focus registration.
+/// Each result is (original bucket index, x offset, cell width). Count buckets
+/// merge by summed groups; duration buckets page without merging percentiles.
+pub fn plot_targets(
+    count: usize,
+    width: usize,
+    selected: usize,
+    series: bool,
+) -> Vec<(usize, usize, usize)> {
+    if count == 0 || width < 14 {
+        return Vec::new();
+    }
+    let axis = if series { 8 } else { 7 };
+    let room = width - axis;
+    let capacity = (room / if series { 2 } else { 3 }).max(1);
+    let (start, group, visible) = if series {
+        let start = selected.min(count - 1) / capacity * capacity;
+        (start, 1, (count - start).min(capacity))
+    } else {
+        let group = count.div_ceil(capacity).max(1);
+        (0, group, count.div_ceil(group))
+    };
+    (0..visible)
+        .map(|index| {
+            let left = index * room / visible;
+            let right = (index + 1) * room / visible;
+            (start + index * group, axis + left, right - left)
+        })
+        .collect()
+}
+
+/// Connected measured duration/ratio lines. Pagination is explicit because the
+/// snapshot contains percentiles, not the samples needed to rebucket them.
+/// Missing observations break a line; raster connectors are not new samples.
 pub fn series_plot(
     points: &[SeriesPoint],
     width: usize,
     height: usize,
     selected: usize,
 ) -> Vec<Line<'static>> {
-    if width < 14 || height < 5 || points.is_empty() {
+    if width < 14 || height < 6 || points.is_empty() {
         return Vec::new();
     }
-    let capacity = ((width - 7) / 3).max(1);
-    let start = selected.min(points.len() - 1) / capacity * capacity;
-    let page = &points[start..(start + capacity).min(points.len())];
-    let peak = page
+    let axis = 8;
+    let plot_width = width - axis;
+    let targets = plot_targets(points.len(), width, selected, true);
+    let start = targets[0].0;
+    let page = &points[start..start + targets.len()];
+    let milliseconds = points
         .iter()
-        .flat_map(|point| point.series.iter().filter_map(|(_, value)| *value))
-        .filter(|value| value.is_finite())
+        .flat_map(|point| &point.series)
+        .any(|(key, _)| key.ends_with("_ms"));
+    let value_at = |point: &SeriesPoint, key: &str| {
+        if key.starts_with("p95") && point.n < argos_osint_core::profile_stats::SMALL_SAMPLE_MIN {
+            return None;
+        }
+        point
+            .series
+            .iter()
+            .find(|(name, _)| name == key)
+            .and_then(|(_, value)| *value)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| if milliseconds { value / 1_000.0 } else { value })
+    };
+    let keys: std::collections::BTreeSet<_> = points
+        .iter()
+        .flat_map(|point| point.series.iter().map(|(key, _)| key.as_str()))
+        .collect();
+    let peak = points
+        .iter()
+        .flat_map(|point| keys.iter().filter_map(|key| value_at(point, key)))
         .fold(0.0, f64::max)
         .max(1.0);
     let scale = nice_scale(peak.ceil().min(u64::MAX as f64) as u64) as f64;
-    let rows = height - 3;
-    let mut lines = Vec::new();
-    for row in (0..rows).rev() {
-        let mut spans = vec![Span::styled(
-            if row == rows - 1 {
-                format!("{:>5.0} │", scale)
+    let rows = height - 4;
+    let mut canvas = vec![vec![(' ', theme::dim()); plot_width]; rows];
+    let y_at = |value: f64| rows - 1 - (value / scale * (rows - 1) as f64).round() as usize;
+    for key in &keys {
+        let style = series_style(key);
+        let mut previous = None;
+        for (index, point) in page.iter().enumerate() {
+            let (_, left, slot_width) = targets[index];
+            let x = left - axis + slot_width / 2;
+            if let Some(value) = value_at(point, key) {
+                let y = y_at(value);
+                if let Some((old_x, old_y)) = previous {
+                    connect_cells(&mut canvas, old_x, old_y, x, y, style);
+                }
+                canvas[y][x] = (
+                    '●',
+                    if start + index == selected {
+                        style.bg(theme::SELECT)
+                    } else {
+                        style
+                    },
+                );
+                previous = Some((x, y));
             } else {
-                "      │".into()
+                previous = None;
+            }
+        }
+    }
+    let mut lines = Vec::new();
+    for (row, cells) in canvas.into_iter().enumerate() {
+        let mut spans = vec![Span::styled(
+            if row == 0 {
+                format!("{:>5.0}{} │", scale, if milliseconds { "s" } else { "×" })
+            } else if row == rows - 1 {
+                format!("    0{} │", if milliseconds { "s" } else { "×" })
+            } else {
+                "       │".into()
             },
             theme::dim(),
         )];
-        for (index, point) in page.iter().enumerate() {
-            let mark = point.series.iter().find(|(_, value)| {
-                value.is_some_and(|value| {
-                    value.is_finite()
-                        && ((value / scale * (rows - 1) as f64).round() as usize) == row
-                })
-            });
-            spans.push(match mark {
-                Some((key, _)) => Span::styled(
-                    "●  ",
-                    if start + index == selected {
-                        series_style(key).bg(theme::SELECT)
-                    } else {
-                        series_style(key)
-                    },
-                ),
-                None => Span::raw("   "),
-            });
+        for (glyph, style) in cells {
+            spans.push(Span::styled(glyph.to_string(), style));
         }
         lines.push(Line::from(spans));
     }
     lines.push(Line::from(Span::styled(
-        format!("    0 └{}", "─".repeat(width - 7)),
+        format!("       └{}", "─".repeat(plot_width)),
         theme::dim(),
+    )));
+    lines.push(Line::raw(time_range(
+        &page[0].start,
+        &page[page.len() - 1].end,
+        width,
     )));
     lines.push(Line::raw(super::components::clip_text(
         &format!(
@@ -115,9 +194,63 @@ pub fn series_plot(
         ),
         width,
     )));
-    let stamp = page[0].start.get(5..).unwrap_or(&page[0].start);
-    lines.push(Line::raw(super::components::clip_text(stamp, width)));
-    lines
+    let mut legend = Vec::new();
+    for key in keys {
+        legend.push(Span::styled(
+            format!("● {}  ", key.trim_end_matches("_ms")),
+            series_style(key),
+        ));
+    }
+    lines.push(Line::from(legend));
+    super::components::measured_lines(lines, width.min(u16::MAX as usize) as u16)
+}
+
+fn time_range(first: &str, last: &str, width: usize) -> String {
+    let short = |stamp: &str| stamp.get(5..16).unwrap_or(stamp).replace('T', " ");
+    super::components::clip_text(&format!("{} → {}", short(first), short(last)), width)
+}
+
+/// Rasterize only the connector between two real observations. Callers reset
+/// adjacency at gaps; this function never creates an observation or percentile.
+fn connect_cells(
+    canvas: &mut [Vec<(char, Style)>],
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    style: Style,
+) {
+    let mut x = x0 as isize;
+    let mut y = y0 as isize;
+    let dx = x1 as isize - x;
+    let dy = -(y1 as isize - y).abs();
+    let sy = if y < y1 as isize { 1 } else { -1 };
+    let mut error = dx + dy;
+    while x != x1 as isize || y != y1 as isize {
+        let twice = 2 * error;
+        let horizontal = twice >= dy;
+        let vertical = twice <= dx;
+        if horizontal {
+            error += dy;
+            x += 1;
+        }
+        if vertical {
+            error += dx;
+            y += sy;
+        }
+        if x == x1 as isize && y == y1 as isize {
+            break;
+        }
+        let glyph = match (horizontal, vertical) {
+            (true, true) if sy > 0 => '╲',
+            (true, true) => '╱',
+            (true, false) => '─',
+            _ => '│',
+        };
+        if canvas[y as usize][x as usize].0 != '●' {
+            canvas[y as usize][x as usize] = (glyph, style);
+        }
+    }
 }
 
 impl TimeBucket {
@@ -175,6 +308,7 @@ pub fn time_plot(
     }
     let axis = 7;
     let capacity = (width - axis) / 3;
+    let targets = plot_targets(buckets.len(), width, selected, false);
     let visible = coarsen_counts(buckets, capacity);
     let group = buckets.len().div_ceil(capacity.max(1)).max(1);
     let peak = nice_scale(
@@ -186,19 +320,23 @@ pub fn time_plot(
             .max(1),
     );
     let rows = height - 4;
+    let allocations: Vec<_> = visible
+        .iter()
+        .map(|bucket| stack_cells(&bucket.series, peak, rows * 8))
+        .collect();
     let mut out = Vec::new();
     let mut totals = vec![Span::raw(" ".repeat(axis))];
-    for bucket in &visible {
+    for (bucket, (_, _, slot_width)) in visible.iter().zip(&targets) {
         let value = if bucket.available {
             bucket.total().to_string()
         } else {
             " · ".into()
         };
         totals.push(Span::styled(
-            if value.len() <= 3 {
-                format!("{value:<3}")
+            if text_width(&value) <= *slot_width {
+                fit_label(&value, *slot_width)
             } else {
-                "   ".into()
+                " ".repeat(*slot_width)
             },
             theme::dim(),
         ));
@@ -213,19 +351,19 @@ pub fn time_plot(
         let mut spans = vec![Span::styled(label, theme::dim())];
         for (index, bucket) in visible.iter().enumerate() {
             let amount = if bucket.available {
-                (bucket.total() as u128 * rows as u128 * 8 / peak as u128) as usize
+                allocations[index].iter().sum()
             } else {
                 0
             };
             let fill = amount.saturating_sub(row * 8).min(8);
             let glyph = if fill == 0 { " " } else { VBLOCKS[fill - 1] };
-            let position =
-                ((row * 8 + fill / 2) as u128 * peak as u128 / (rows * 8) as u128) as u64;
+            let position = row * 8 + fill / 2;
             let mut sum = 0;
             let key = bucket
                 .series
                 .iter()
-                .find_map(|(key, value)| {
+                .zip(&allocations[index])
+                .find_map(|((key, _), value)| {
                     sum += value;
                     (sum > position).then_some(key.as_str())
                 })
@@ -235,7 +373,11 @@ pub fn time_plot(
             } else {
                 series_style(key)
             };
-            spans.push(Span::styled(format!("{glyph}{glyph} "), style));
+            let slot_width = targets[index].2;
+            spans.push(Span::styled(
+                format!("{glyph}{glyph}{}", " ".repeat(slot_width.saturating_sub(2))),
+                style,
+            ));
         }
         out.push(Line::from(spans));
     }
@@ -244,12 +386,12 @@ pub fn time_plot(
         theme::dim(),
     )));
     let mut labels = vec![Span::raw(" ".repeat(axis))];
-    for index in 0..visible.len() {
+    for (index, (_, _, slot_width)) in targets.iter().enumerate() {
         labels.push(Span::styled(
             if index == selected / group {
-                "▲  "
+                format!("▲{}", " ".repeat(slot_width.saturating_sub(1)))
             } else {
-                "   "
+                " ".repeat(*slot_width)
             },
             theme::accent(),
         ));
@@ -268,10 +410,7 @@ pub fn time_plot(
     let last = short(&buckets[buckets.len() - 1].end);
     let remaining = width.saturating_sub(axis);
     let label = if first.len() + last.len() < remaining {
-        let gap = (visible.len() * 3)
-            .min(remaining)
-            .saturating_sub(first.len() + last.len())
-            .max(1);
+        let gap = remaining.saturating_sub(first.len() + last.len()).max(1);
         format!("{first}{}{last}", " ".repeat(gap))
     } else if first.len() <= remaining {
         first
@@ -322,6 +461,14 @@ pub fn percent(value: Option<f64>) -> String {
     }
 }
 
+/// Sends per terminal operation, expressed as a raw multiplier.
+pub fn ratio(value: Option<f64>) -> String {
+    match value {
+        Some(value) if value.is_finite() && value >= 0.0 => format!("{value:.1}×"),
+        _ => unavailable().to_string(),
+    }
+}
+
 /// Formats an optional duration in milliseconds as `1.2s`/`450ms`/`2m 05s`.
 /// `None`, and any negative input, renders "N/A".
 pub fn duration_ms(value: Option<i64>) -> String {
@@ -350,10 +497,11 @@ pub fn sample_size(n: u64) -> String {
 /// Renders one row: `label` padded to `label_width`, a space, then a bar of at
 /// most `bar_cells` cells whose segments are proportional to `series` over
 /// `total` (when `total` is 0 or `total < sum(series)`, fall back to the sum of
-/// the series as the denominator). Each segment is `BLOCKS[0]` repeated, with a
-/// single fractional `BLOCKS[k]` at the trailing edge of a non-final segment
-/// when the proportional width has a remainder. The label is `theme::dim()`,
-/// segment `i` is `theme::series(i)`.
+/// the series as the denominator). Callers use a common maximum for absolute
+/// comparisons, and each row's eligible N only for explicit 100% views. Whole
+/// cells use largest-remainder allocation, including the unfilled track, so
+/// early fractional segments cannot consume later segments' cells. Colours
+/// follow stable series identity.
 ///
 /// Unfilled cells are a `theme::dim()` mid-dot `·` so the track stays visible.
 /// The line is at most `label_width + 1 + bar_cells` cells wide.
@@ -369,32 +517,137 @@ pub fn stacked_bar(
         spans.push(Span::styled(" ".to_string(), theme::dim()));
     }
     if bar_cells > 0 {
-        let sum: u64 = series.iter().map(|(_, value)| *value).sum();
-        // The caller's total only bounds the bar when it covers the series; a
-        // partial breakdown falls back to the series sum, so the bar still
-        // fills and the ratio between segments stays true.
-        let denominator = if total > 0 && total >= sum {
-            total
-        } else {
-            sum
-        };
-        // The trailing segment leaves its fraction behind: the end of the bar
-        // stays flush with the track even when every fraction is dropped.
-        let final_index = series.iter().rposition(|(_, value)| *value > 0);
-        let mut segments: Vec<(Style, u64)> = Vec::with_capacity(series.len());
-        for (index, (key, value)) in series.iter().enumerate() {
-            if *value == 0 || denominator == 0 {
-                continue;
+        let allocations = stack_cells(series, total, bar_cells);
+        let mut used = 0;
+        for ((key, _), cells) in series.iter().zip(allocations) {
+            if cells > 0 {
+                spans.push(Span::styled(BLOCKS[0].repeat(cells), series_style(key)));
+                used += cells;
             }
-            let fractional = Some(index) != final_index;
-            segments.push((
-                series_style(key),
-                eighths(*value, denominator, bar_cells, fractional),
-            ));
         }
-        spans.extend(render_segments(&segments, bar_cells));
+        if used < bar_cells {
+            spans.push(Span::styled(TRACK.repeat(bar_cells - used), theme::dim()));
+        }
     }
     Line::from(spans)
+}
+
+fn stack_cells(series: &[(String, u64)], maximum: u64, cells: usize) -> Vec<usize> {
+    let sum: u128 = series.iter().map(|(_, value)| *value as u128).sum();
+    let denominator = (maximum as u128).max(sum);
+    if denominator == 0 || cells == 0 {
+        return vec![0; series.len()];
+    }
+    let mut entries: Vec<_> = series
+        .iter()
+        .enumerate()
+        .map(|(index, (key, value))| {
+            let scaled = *value as u128 * cells as u128;
+            (
+                index,
+                key.as_str(),
+                (scaled / denominator) as usize,
+                scaled % denominator,
+            )
+        })
+        .collect();
+    let track = (denominator - sum) * cells as u128;
+    entries.push((
+        series.len(),
+        "\u{10ffff}",
+        (track / denominator) as usize,
+        track % denominator,
+    ));
+    let used: usize = entries.iter().map(|entry| entry.2).sum();
+    entries.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.1.cmp(b.1)));
+    for entry in entries.iter_mut().take(cells.saturating_sub(used)) {
+        entry.2 += 1;
+    }
+    let mut result = vec![0; series.len()];
+    for (index, _, allocation, _) in entries {
+        if index < result.len() {
+            result[index] = allocation;
+        }
+    }
+    result
+}
+
+/// Execution and wait share one maximum but occupy separate rows. Durations
+/// are means in milliseconds; missing timing stays N/A and colours are fixed.
+pub fn paired_bars(
+    label: &str,
+    label_width: usize,
+    execution_ms: Option<i64>,
+    wait_ms: Option<i64>,
+    max_ms: i64,
+    bar_cells: usize,
+) -> Vec<Line<'static>> {
+    [("execution", execution_ms), ("wait", wait_ms)]
+        .into_iter()
+        .map(|(key, value)| {
+            let mut line = Line::from(Span::styled(
+                fit_label(&format!("{label} {key}"), label_width),
+                theme::dim(),
+            ));
+            if label_width > 0 {
+                line.spans.push(Span::raw(" "));
+            }
+            let value = value.filter(|value| *value >= 0);
+            if let Some(value) = value {
+                line.spans.extend(render_segments(
+                    &[(
+                        series_style(key),
+                        eighths(value as u64, max_ms.max(value) as u64, bar_cells, true),
+                    )],
+                    bar_cells,
+                ));
+            } else {
+                line.spans
+                    .push(Span::styled(fit_label("N/A", bar_cells), theme::dim()));
+            }
+            line.spans.push(Span::styled(
+                format!(" {}", duration_ms(value)),
+                theme::text(),
+            ));
+            line
+        })
+        .collect()
+}
+
+/// A signed points delta centred on zero. Positive/negative values use equal
+/// scales; zero keeps a visible baseline and missing comparisons render N/A.
+pub fn diverging_bar(value: Option<f64>, maximum: f64, width: usize) -> Line<'static> {
+    if width == 0 {
+        return Line::default();
+    }
+    let Some(value) = value.filter(|value| value.is_finite()) else {
+        return Line::from(Span::styled(fit_label("N/A", width), theme::dim()));
+    };
+    let half = width.saturating_sub(1) / 2;
+    let right = width - half - 1;
+    let scale = maximum.abs().max(value.abs());
+    let filled = if scale > 0.0 {
+        (value.abs() / scale * half as f64).round() as usize
+    } else {
+        0
+    };
+    let style = if value >= 0.0 {
+        theme::series_style(0)
+    } else {
+        theme::warn()
+    };
+    let (left_fill, right_fill) = if value < 0.0 {
+        (filled, 0)
+    } else {
+        (0, filled)
+    };
+    Line::from(vec![
+        Span::styled(TRACK.repeat(half - left_fill), theme::dim()),
+        Span::styled("█".repeat(left_fill), style),
+        Span::styled("│", theme::dim()),
+        Span::styled("█".repeat(right_fill), style),
+        Span::styled(TRACK.repeat(right - right_fill), theme::dim()),
+    ])
 }
 
 /// A ranked horizontal bar for table columns: `value/max` of `width` cells.
@@ -568,6 +821,127 @@ mod tests {
     use super::*;
 
     #[test]
+    fn absolute_stacks_compare_one_and_one_hundred_on_one_scale() {
+        let small = stacked_bar("", 0, &[segment("completed", 1)], 100, 100);
+        let large = stacked_bar(
+            "",
+            0,
+            &[segment("completed", 50), segment("failed", 50)],
+            100,
+            100,
+        );
+        assert_eq!(text(&small).matches('█').count(), 1);
+        assert_eq!(text(&large).matches('█').count(), 100);
+        assert_eq!(
+            stack_cells(&[segment("a", 1), segment("b", 1), segment("c", 1)], 3, 2),
+            [1, 1, 0]
+        );
+        assert_eq!(
+            stack_cells(&[segment("c", 1), segment("b", 1), segment("a", 1)], 3, 2),
+            [0, 1, 1]
+        );
+    }
+
+    fn point(index: usize, p50: Option<f64>, p95: Option<f64>, n: u64) -> SeriesPoint {
+        SeriesPoint {
+            start: format!("2026-10-10T{index:02}:00:00Z"),
+            end: format!("2026-10-10T{:02}:00:00Z", index + 1),
+            series: vec![("p50_ms".into(), p50), ("p95_ms".into(), p95)],
+            n,
+        }
+    }
+
+    #[test]
+    fn duration_lines_connect_real_neighbors_and_preserve_gaps() {
+        let measured = vec![
+            point(0, Some(1_000.0), None, 1),
+            point(1, Some(1_000.0), None, 1),
+        ];
+        let lines = series_plot(&measured, 30, 9, 1);
+        assert!(lines[..5]
+            .iter()
+            .any(|line| text(line).matches('●').count() == 2 && text(line).contains('─')));
+        assert!(text(&lines[0]).contains("1s"));
+        let gapped = vec![
+            measured[0].clone(),
+            point(1, None, None, 0),
+            point(2, Some(1_000.0), None, 1),
+        ];
+        let lines = series_plot(&gapped, 30, 9, 2);
+        let (_, gap_left, gap_width) = plot_targets(gapped.len(), 30, 2, true)[1];
+        for line in &lines[..5] {
+            let chars: Vec<_> = text(line).chars().collect();
+            assert!(
+                chars[gap_left..gap_left + gap_width]
+                    .iter()
+                    .all(|glyph| *glyph == ' '),
+                "gap must have no connector: {chars:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn low_sample_p95_is_suppressed_and_duration_axes_show_seconds() {
+        let lines = series_plot(&[point(0, Some(2_000.0), Some(9_000.0), 1)], 30, 8, 0);
+        assert!(text(&lines[0]).contains("2s"));
+        assert!(!lines[..4]
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| span.content.contains('●') && span.style.fg == series_style("p95_ms").fg));
+        assert_eq!(series_style("p50_ms").fg, Some(theme::ACCENT));
+        assert_eq!(series_style("p95_ms").fg, Some(theme::series(1)));
+    }
+
+    #[test]
+    fn signed_points_bars_and_paired_durations_share_scales() {
+        let positive = text(&diverging_bar(Some(5.0), 10.0, 9));
+        let negative = text(&diverging_bar(Some(-5.0), 10.0, 9));
+        assert_eq!(positive, "····│██··");
+        assert_eq!(negative, "··██│····");
+        assert_eq!(text(&diverging_bar(Some(0.0), 10.0, 9)), "····│····");
+        assert!(text(&diverging_bar(None, 10.0, 9)).contains("N/A"));
+        let pair = paired_bars("", 0, Some(1_000), Some(2_000), 2_000, 8);
+        assert_eq!(pair[0].spans[0].style.fg, Some(theme::DIM));
+        assert!(text(&pair[0]).starts_with("████····"));
+        assert!(text(&pair[1]).starts_with("████████"));
+        assert_eq!(ratio(Some(1.0)), "1.0×");
+        assert_eq!(ratio(Some(2.0)), "2.0×");
+        assert_eq!(ratio(None), "N/A");
+    }
+
+    #[test]
+    fn duration_pagination_reports_all_history_without_averaging_percentiles() {
+        let points: Vec<_> = (0..30)
+            .map(|index| point(index, Some(index as f64 * 1_000.0), None, 1))
+            .collect();
+        let lines = series_plot(&points, 20, 8, 29);
+        assert!(text(&lines[6]).contains("25–30 / 30"));
+        for line in &lines {
+            assert!(line.width() <= 20);
+        }
+    }
+
+    #[test]
+    fn plot_targets_fill_the_measured_width_and_share_drawing_buckets() {
+        let targets = plot_targets(24, 75, 23, true);
+        assert_eq!(targets.len(), 24);
+        assert_eq!(targets[0].0, 0);
+        assert_eq!(targets[0].1, 8);
+        assert_eq!(
+            targets.last().map(|(_, left, width)| left + width),
+            Some(75)
+        );
+        assert_eq!(targets.iter().map(|(_, _, width)| width).sum::<usize>(), 67);
+        let targets = plot_targets(24, 75, 23, false);
+        assert_eq!(targets.len(), 12);
+        assert_eq!(targets[0], (0, 7, 5));
+        assert_eq!(
+            targets.last().map(|(_, left, width)| left + width),
+            Some(75)
+        );
+    }
+
+    #[test]
     fn count_coarsening_preserves_totals_boundaries_and_unknown_history() {
         let buckets: Vec<_> = (0..101)
             .map(|i| TimeBucket {
@@ -625,6 +999,9 @@ mod tests {
         );
         assert_eq!(a.spans[1].style.fg, b.spans[2].style.fg);
         assert_eq!(a.spans[1].style.fg, Some(theme::RED));
+        assert_eq!(series_style("answered").fg, Some(theme::GREEN));
+        assert_eq!(series_style("unresolved").fg, Some(theme::RED));
+        assert_eq!(series_style("blocked").fg, Some(theme::WARN));
     }
 
     fn text(line: &Line<'_>) -> String {
@@ -684,18 +1061,14 @@ mod tests {
     }
 
     #[test]
-    fn stacked_bar_rounds_the_trailing_edge_of_a_non_final_segment() {
-        // 1/3 of 10 cells is 3 cells + 2 eighths, so the first segment ends in
-        // one part block; the final segment drops its own fraction.
+    fn stacked_bar_allocates_remainder_without_consuming_a_neighbor() {
         let line = stacked_bar("l", 0, &[segment("a", 1), segment("b", 2)], 10, 3);
-        assert_eq!(line.spans.len(), 4); // label, segment, part block, segment
+        assert_eq!(line.spans.len(), 3); // label plus apportioned series
         assert_eq!(line.spans[0].content, "");
         assert_eq!(line.spans[1].content, "███");
-        assert_eq!(line.spans[2].content, "▎");
-        assert_eq!(line.spans[1].style.fg, line.spans[2].style.fg);
-        assert_eq!(line.spans[3].content, "██████");
-        assert_eq!(line.spans[3].style.fg, series_style("b").fg);
-        assert_eq!(text(&line), "███▎██████");
+        assert_eq!(line.spans[2].content, "███████");
+        assert_eq!(line.spans[2].style.fg, series_style("b").fg);
+        assert_eq!(text(&line), "██████████");
         assert_eq!(cells(&line), 10);
     }
 

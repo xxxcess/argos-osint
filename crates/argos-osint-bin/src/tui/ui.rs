@@ -2497,6 +2497,16 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
     let body = chrome(app.screen, app).body;
     if app.module == Some(ModuleId::System) {
         if app.profile.filter_popup.is_none() && !app.profile.period_popup {
+            if let Some(
+                Target::ProfileCard(index)
+                | Target::ProfilePanelBucket(index, _)
+                | Target::ProfilePanelRow(index, _),
+            ) = hit_test(app, x, y)
+            {
+                if app.focus != Target::ProfileCard(index) {
+                    app.set_focus(Target::ProfileCard(index));
+                }
+            }
             super::profile::scroll(app, delta as isize * 3);
         }
         return;
@@ -3201,12 +3211,45 @@ pub fn focus_order(app: &App) -> Vec<Target> {
     ensure_registered_layout(app);
     let registry = app.layout.borrow();
     let mut entries = registry.entries.clone();
-    entries.retain(|e| e.scope == registry.current_scope);
+    entries.retain(|e| {
+        e.scope == registry.current_scope
+            && !matches!(
+                e.target,
+                Target::ProfileBucket(_)
+                    | Target::ProfilePanelBucket(_, _)
+                    | Target::ProfilePanelRow(_, _)
+                    | Target::ProfileRow(_)
+            )
+    });
     drop(registry);
     if app.overlay != Overlay::None && entries.is_empty() {
         return vec![Target::CloseOverlay];
     }
     entries.sort_by_key(|e| (e.rect.y, e.rect.x));
+    if app.module == Some(ModuleId::System)
+        && app.overlay == Overlay::None
+        && app.profile.tab == super::profile::SystemTab::Overview
+        && app.profile.report.is_none()
+        && app.profile.filter_popup.is_none()
+        && !app.profile.period_popup
+    {
+        let mut order: Vec<_> = entries
+            .iter()
+            .map(|e| e.target)
+            .filter(|t| {
+                !matches!(
+                    t,
+                    Target::ProfileCard(_)
+                        | Target::ProfilePanelBucket(_, _)
+                        | Target::ProfilePanelRow(_, _)
+                        | Target::ProfileBucket(_)
+                        | Target::ProfileRow(_)
+                )
+            })
+            .collect();
+        order.extend((0..app.profile.focused_widgets().len()).map(Target::ProfileCard));
+        return order;
+    }
 
     let mut order = Vec::new();
     let mut seen = HashSet::new();
@@ -4339,7 +4382,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if layout.tab_strip.height > 0 {
         draw_tab_strip(frame, app, layout.tab_strip);
     }
-    if area.width < 40 || area.height < 12 {
+    if (area.width < 40 || area.height < 12) && app.module != Some(ModuleId::System) {
         frame.render_widget(
             Paragraph::new(
                 "Resize terminal to at least 40×12\nCtrl+K commands · ? help · Ctrl+Q quit",
@@ -4785,7 +4828,7 @@ fn footer_line(app: &App) -> Paragraph<'static> {
                 "↑↓ job · Enter detail · l logs · r retry · c cancel · s status · Esc home"
             }
             (Some(ModuleId::System), _) => {
-                "Tab focus · t tabs · p period · f filters · Enter report · Esc · Ctrl+K"
+                "Tab focus · ↑↓ row · Enter detail · v chart/table · f filters · r refresh · ? help"
             }
             _ => "Tab next · 1–9 apps · Enter · Ctrl+K · Esc home",
         }
@@ -9224,7 +9267,7 @@ fn help_text(app: &App) -> &'static str {
         Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 60 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 60 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, Repair memories, and Delete sit between the map and those panes. Resume continues the selected cycle when it stopped while saving or indexing memories. Repair memories rechecks saved cycles and requeues missing memories or vectors (progress in Jobs). When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon investigation\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between transcript and prompt\n↑↓ select a query, plan, evidence activity, or answer\n←→ or h/l fold the selected Plan or activity\nEnter toggles that fold · o inspects the captured source · f opens full text\n◉ brain opens memories used by Synthesis\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
-        Some(ModuleId::System) => "Profile\n\nTab / Shift+Tab traverse controls; Enter activates\nt switches Overview / System · x Configs\n0 All apps · 1–5 Intel/Recon/Atlas/Models/Tools · [ / ] apps\nArrows or j/k select cards · Enter or m opens full report\nLeft/Right selects report buckets · PageUp/PageDown or wheel scroll\np period · f six dimension filters · c clears filters\nPicker: type to search, Tab dimension, arrows select, Enter apply\nr refreshes statistics in Overview, hardware in System\nEsc restores grid or returns home · Ctrl+K commands",
+        Some(ModuleId::System) => "Profile\n\nTab / Shift+Tab traverse controls; Enter activates\nt switches Overview / System · x Configs\n0 Summary · 1–5 Intel/Recon/Atlas/Models/Tools · [ / ] apps\nTab reveals panels · Arrows select rows/buckets · Enter or m expands\nLeft/Right selects buckets · v chart/table · s sort · g provider fold · PageUp/PageDown or wheel scroll\np period · f six dimension filters · c clears filters\nPicker: type to search, Tab dimension, arrows select, Enter apply\nr refreshes statistics in Overview, hardware in System\nEsc restores grid or returns home · Ctrl+K commands",
         Some(ModuleId::Logs) => "Logs\n\nDurable events from every app and background worker, kept 24 hours\nThe header counts errors, warnings, and failures in the last hour\nFilter narrows by text. Level, App, and the job filter narrow further\n↑↓ select an event · Enter or click folds its detail\nf toggles live follow. Moving off the newest event pauses it\no or Open job shows the event's job in Jobs\nOpened from Jobs, Esc or Back to job returns there\nClear events removes events only; jobs, results, and memories stay\nCtrl+U/Ctrl+D and the wheel scroll the list",
         Some(ModuleId::Jobs) => "Jobs\n\nBackground work with timing, attempts, and errors\nActive work is listed first, then recent history, then service workers\nStatus and App filter the table. Filter matches title, id, operation, or error\n↑↓ select a job · Enter opens its detail (full screen when narrow)\nl or View logs opens Logs filtered to the job and its phases\nRetry failed requeues only failed index or summary tasks; completed work is kept\nOpen source jumps to the Atlas cycle or investigation when there is one\nUnknown historic timing shows Unavailable\nEsc closes the detail, then returns home",
         Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe detail shows the path graph on top, Related on the left, and Summary on the right\nNarrow terminals stack Related above Summary; the focused one gets more room\nRelated lists other memories: linked ones (shared claim relation, source, entity, or investigation) first, then similar ones, which are not evidence\nTab moves between Back, the graph, Related, and Summary\n↑↓ select a related memory · Enter or click opens it, even when Find hides it\nEsc or Back returns to the previous memory, then to the list with its Find and selection\nThe list keeps its selection and Find when memories change elsewhere\nIf memories cannot be read, the last loaded list stays and the error is shown and logged\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",

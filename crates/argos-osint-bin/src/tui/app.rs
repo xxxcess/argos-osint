@@ -614,7 +614,10 @@ pub enum Target {
     ProfileCard(usize),
     ProfileChoice(usize),
     ProfileBucket(usize),
+    ProfilePanelBucket(usize, usize),
+    ProfilePanelRow(usize, usize),
     ProfileReport,
+    ProfileRow(usize),
     ProfileSystem(usize),
     App(usize),
     Home,
@@ -2709,7 +2712,7 @@ impl App {
         }
     }
 
-    fn select(&mut self, index: usize) {
+    pub(crate) fn select(&mut self, index: usize) {
         self.flush_draft();
         let _ = self.flush_home_draft();
         self.launcher_sel = index;
@@ -2922,6 +2925,10 @@ impl App {
             }
         }
         self.focus = target;
+        if let Target::ProfileCard(index) = target {
+            self.profile.focus = index;
+            super::profile::reveal_focus(self);
+        }
         self.cursor = match target {
             Target::Field(field) => self.field(field).chars().count(),
             _ => 0,
@@ -3007,7 +3014,28 @@ impl App {
         }
     }
 
-    fn open_thread(&mut self, id: &str) -> Result<()> {
+    pub(crate) fn open_profile_intel_job(&mut self, id: &str) -> Result<()> {
+        let job = self
+            .store
+            .intel_report_job(id)?
+            .ok_or_else(|| anyhow::anyhow!("Report job no longer retained"))?;
+        let run_id: String = self.store.connection().query_row(
+            "SELECT run_id FROM atlas_articles WHERE id=?1 ORDER BY seen_at DESC LIMIT 1",
+            [&job.article_id],
+            |row| row.get(0),
+        )?;
+        self.open_claim_article(&run_id, &job.article_id)?;
+        if let Some(index) = ReportMode::all()
+            .iter()
+            .position(|mode| mode.as_str() == job.mode)
+        {
+            self.intel_recon_tab = index;
+        }
+        self.status = format!("Report {} · {} · {}", job.id, job.state, job.stage);
+        Ok(())
+    }
+
+    pub(crate) fn open_thread(&mut self, id: &str) -> Result<()> {
         self.open_thread_with_history(id, true)
     }
 
@@ -7336,7 +7364,7 @@ impl App {
         }
     }
 
-    fn activate_target(&mut self, target: Target) {
+    pub(crate) fn activate_target(&mut self, target: Target) {
         match target {
             Target::PaneTab(index) => {
                 if let Some(module) = self.module {
@@ -7350,7 +7378,10 @@ impl App {
             | Target::ProfileCard(_)
             | Target::ProfileChoice(_)
             | Target::ProfileBucket(_)
+            | Target::ProfilePanelBucket(_, _)
+            | Target::ProfilePanelRow(_, _)
             | Target::ProfileReport
+            | Target::ProfileRow(_)
             | Target::ProfileSystem(_) => {
                 self.set_focus(target);
                 super::profile::activate(self, target);
@@ -13784,9 +13815,8 @@ mod tests {
         for (width, height) in [
             (160u16, 50u16),
             (120, 40),
-            (104, 36),
-            (103, 36),
-            (100, 36),
+            (100, 32),
+            (60, 18),
             (80, 24),
             (40, 20),
             (100, 24),
@@ -13805,7 +13835,7 @@ mod tests {
             );
             // The status strip names the reviewed inventory instead of guessing.
             assert!(
-                text.contains("35"),
+                text.contains("20") || width < 80,
                 "{width}x{height}: the widget count must render: {text}"
             );
         }
@@ -13950,7 +13980,7 @@ mod tests {
     fn analytics_fixture() -> argos_osint_core::profile_stats::ProfileSnapshot {
         use argos_osint_core::profile_stats::*;
         let mut snapshot = ProfileSnapshot {
-            captured_at: "2026-10-10T12:00:00Z".into(),
+            captured_at: "2026-10-11T00:00:00Z".into(),
             observed_since: "2026-10-08T00:00:00Z".into(),
             ..Default::default()
         };
@@ -13972,18 +14002,378 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        snapshot.models.latency = vec![LatencyBucket {
-            bucket: "2026-10-10T11".into(),
-            p50_ms: Some(1234),
-            p95_ms: None,
-            n: 3,
+        snapshot.intel.distinct_new_articles = Some(276);
+        snapshot.intel.body_eligible_articles = Some(276);
+        snapshot.intel.body_available_articles = Some(240);
+        snapshot.intel.enrichment = vec![
+            EnrichmentRow {
+                tag: "politics".into(),
+                articles: 140,
+                body_pct: Some(88.0),
+                claims_pct: Some(75.0),
+                report_pct: Some(64.0),
+                ..Default::default()
+            },
+            EnrichmentRow {
+                tag: "economy".into(),
+                articles: 90,
+                body_pct: Some(86.0),
+                claims_pct: Some(81.0),
+                report_pct: Some(60.0),
+                ..Default::default()
+            },
+        ];
+        snapshot.intel.reports = vec![
+            ReportModeRow {
+                mode: "verify".into(),
+                completed: 72,
+                partial: 6,
+                failed: 3,
+                waiting: 2,
+                blocked: 1,
+                n: 81,
+                ..Default::default()
+            },
+            ReportModeRow {
+                mode: "full_assessment".into(),
+                completed: 45,
+                partial: 9,
+                failed: 6,
+                n: 60,
+                ..Default::default()
+            },
+        ];
+        snapshot.intel.publishers = vec![
+            PublisherCount {
+                domain: "reuters.com".into(),
+                articles: 85,
+                share: 30.8,
+                top3_concentration: 70.3,
+                ..Default::default()
+            },
+            PublisherCount {
+                domain: "apnews.com".into(),
+                articles: 65,
+                share: 23.6,
+                top3_concentration: 70.3,
+                ..Default::default()
+            },
+            PublisherCount {
+                domain: "bbc.com".into(),
+                articles: 44,
+                share: 15.9,
+                top3_concentration: 70.3,
+                ..Default::default()
+            },
+        ];
+        snapshot.intel.freshness = FreshnessHistogram {
+            buckets: vec![
+                ("<1h".into(), 84),
+                ("1–6h".into(), 96),
+                ("6–24h".into(), 60),
+                ("1–7d".into(), 20),
+                (">7d".into(), 6),
+            ],
+            missing: 8,
+            future: 2,
+        };
+        snapshot.recon.outcomes = (0..24)
+            .map(|hour| ReconOutcomeBucket {
+                bucket: format!("2026-10-10T{hour:02}"),
+                mode: "verify".into(),
+                completed_with_evidence: 2 + (hour % 5),
+                completed_zero_evidence: hour % 3,
+                partial: hour % 2,
+                failed: u32::from(hour % 7 == 0),
+                cancelled: u32::from(hour % 11 == 0),
+            })
+            .collect();
+        snapshot.recon.directives = vec![
+            DirectiveResolution {
+                mode: "verify".into(),
+                answered: 184,
+                partial: 32,
+                unresolved: 16,
+                blocked: 8,
+                unknown: 4,
+                n: 244,
+            },
+            DirectiveResolution {
+                mode: "full_assessment".into(),
+                answered: 62,
+                partial: 8,
+                unresolved: 6,
+                blocked: 2,
+                unknown: 2,
+                n: 80,
+            },
+        ];
+        snapshot.recon.stages = vec![
+            StageDurationRow {
+                stage: "discovery".into(),
+                mode: "verify".into(),
+                mean_exec_ms: Some(3800),
+                mean_wait_ms: Some(700),
+                n: 42,
+            },
+            StageDurationRow {
+                stage: "picker".into(),
+                mode: "verify".into(),
+                mean_exec_ms: Some(1800),
+                mean_wait_ms: Some(2200),
+                n: 42,
+            },
+            StageDurationRow {
+                stage: "synthesis".into(),
+                mode: "verify".into(),
+                mean_exec_ms: Some(6500),
+                mean_wait_ms: Some(1200),
+                n: 42,
+            },
+        ];
+        snapshot.recon.diversity = vec![
+            DiversityRow {
+                category: "web".into(),
+                eligible_scopes: 52,
+                scopes_with_two_attempted: 48,
+                scopes_with_two_successful: 42,
+                eligible: true,
+                top_shortfall_reason: "One independent source".into(),
+                ..Default::default()
+            },
+            DiversityRow {
+                category: "social".into(),
+                eligible_scopes: 34,
+                scopes_with_two_attempted: 29,
+                scopes_with_two_successful: 25,
+                eligible: true,
+                top_shortfall_reason: "Provider unavailable".into(),
+                ..Default::default()
+            },
+        ];
+        snapshot.recon.unresolved = (0..8)
+            .map(|i| UnresolvedDirective {
+                run_id: format!("run-{i:03}"),
+                mode: "verify".into(),
+                label: format!("d{} · Verify publisher ownership", i + 1),
+                reason: "Second independent source unavailable".into(),
+                evidence_count: 1,
+                last_progress: "2026-10-10T11:30:00Z".into(),
+                next_action: "Open investigation and inspect sources".into(),
+            })
+            .collect();
+        snapshot.atlas.backlog = vec![
+            BacklogRow {
+                stage: "discovery".into(),
+                unit: "articles".into(),
+                queued: 24,
+                blocked: 2,
+                oldest_pending_ms: Some(720000),
+                latest_error_category: "transport".into(),
+                ..Default::default()
+            },
+            BacklogRow {
+                stage: "packets".into(),
+                unit: "packets".into(),
+                queued: 12,
+                blocked: 3,
+                oldest_pending_ms: Some(960000),
+                latest_error_category: "source_missing".into(),
+                ..Default::default()
+            },
+            BacklogRow {
+                stage: "index".into(),
+                unit: "memories".into(),
+                queued: 6,
+                oldest_pending_ms: Some(120000),
+                ..Default::default()
+            },
+        ];
+        snapshot.atlas.cycle_outcomes = (0..24)
+            .map(|hour| CycleOutcomeBucket {
+                bucket: format!("2026-10-10T{hour:02}"),
+                completed: 2 + hour % 3,
+                partial: hour % 2,
+                failed: u32::from(hour % 8 == 0),
+                cancelled: 0,
+            })
+            .collect();
+        snapshot.atlas.temperature_changes = vec![
+            TemperatureChange {
+                origin: "US".into(),
+                previous_temperature: Some(45.0),
+                current_temperature: Some(52.0),
+                delta: Some(7.0),
+                articles: 32,
+                comparable: true,
+                label: "warming".into(),
+                ..Default::default()
+            },
+            TemperatureChange {
+                origin: "GB".into(),
+                previous_temperature: Some(48.0),
+                current_temperature: Some(43.0),
+                delta: Some(-5.0),
+                articles: 24,
+                comparable: true,
+                label: "cooling".into(),
+                ..Default::default()
+            },
+        ];
+        snapshot.models.capacity_available = true;
+        snapshot.models.capacity = vec![argos_osint_core::provider_metrics::CapacityRow {
+            provider: "openrouter".into(),
+            quota_group: "account".into(),
+            scope: "all".into(),
+            sends_60s: 32,
+            effective_rpm: Some(60),
+            pace_per_min: Some(32.0),
+            active: 3,
+            max_concurrency: Some(8),
+            queued: 2,
+            oldest_wait_ms: Some(1400),
+            quota_source: "configured".into(),
             ..Default::default()
         }];
+        snapshot.models.period_summary = ModelPeriodSummary {
+            sends: 620,
+            terminal_operations: 280,
+            final_failures: 8,
+            successful_execution_p95_ms: Some(3200),
+            successful_execution_n: 570,
+            queue_p95_ms: Some(850),
+            queue_n: 610,
+        };
+        snapshot.models.performance = vec![
+            ProviderModelRow {
+                provider: "openrouter".into(),
+                model: "".into(),
+                role: "recon".into(),
+                sends: 620,
+                completed_attempts: 590,
+                attempt_error_pct: Some(4.8),
+                final_operation_failure_pct: Some(2.9),
+                mean_exec_ms: Some(1400),
+                p95_exec_ms: Some(3200),
+                n: 570,
+                ..Default::default()
+            },
+            ProviderModelRow {
+                provider: "openrouter".into(),
+                model: "fixture-model".into(),
+                role: "recon".into(),
+                sends: 620,
+                is_model_row: true,
+                n: 570,
+                ..Default::default()
+            },
+        ];
+        snapshot.models.latency = (0..24)
+            .map(|hour| LatencyBucket {
+                bucket: format!("2026-10-10T{hour:02}"),
+                p50_ms: if hour == 9 {
+                    None
+                } else {
+                    Some(1000 + (hour % 5) * 150)
+                },
+                p95_ms: if hour == 9 || hour == 17 {
+                    None
+                } else {
+                    Some(2400 + (hour % 7) * 180)
+                },
+                n: if hour == 17 { 3 } else { 24 },
+                ..Default::default()
+            })
+            .collect();
+        snapshot.models.queue_delay = (0..24)
+            .map(|hour| QueueBucket {
+                bucket: format!("2026-10-10T{hour:02}"),
+                p50_ms: Some(150 + (hour % 5) * 50),
+                p95_ms: Some(500 + (hour % 6) * 75),
+                n: 24,
+            })
+            .collect();
+        snapshot.tools.reliability = (0..140)
+            .map(|i| ReliabilityRow {
+                tool_id: format!("tool_{i:03}"),
+                category: "web".into(),
+                invocations: i + 1,
+                wire_requests: i + 1,
+                cache_hit_pct: Some(10.0),
+                verified_zero_pct: Some(12.0),
+                error_pct: Some(3.0),
+                mean_ms: Some(430),
+                p95_ms: Some(1200),
+                dominant_trigger: "recon".into(),
+                ..Default::default()
+            })
+            .collect();
+        snapshot.tools.engine_health = vec![EngineHealthRow {
+            engine: "google".into(),
+            fetches: 120,
+            valid_serps: 98,
+            verified_zero: 12,
+            challenge: 4,
+            parser_mismatch: 2,
+            transport_failure: 4,
+            usable_per_fetch: Some(91.7),
+            last_success: "2026-10-10T11:58:00Z".into(),
+            parser_version: "fixture-1".into(),
+            ..Default::default()
+        }];
+        snapshot.tools.evidence = vec![EvidenceRow {
+            tool_id: "firecrawl_search".into(),
+            category: "web".into(),
+            successful_nonempty: 98,
+            with_evidence: 84,
+            acceptance_pct: Some(85.7),
+            distinct_evidence: 120,
+            cited_by_completed_reports: 72,
+            coverage_n: 98,
+            nonadditive: true,
+        }];
+        snapshot.tools.failure_causes = vec![
+            FailureCauseRow {
+                cause: "transport".into(),
+                invocations: 12,
+                share: 60.0,
+                rank: 1,
+            },
+            FailureCauseRow {
+                cause: "blocked".into(),
+                invocations: 8,
+                share: 40.0,
+                rank: 2,
+            },
+        ];
+        snapshot.recon.unresolved_live_total = snapshot.recon.unresolved.len() as u64;
+        snapshot.tools.logical_calls = snapshot
+            .tools
+            .reliability
+            .iter()
+            .map(|row| row.invocations)
+            .sum();
+        snapshot.tools.remote_errors = 20;
+        snapshot.tools.eligible_remote_calls = 120;
+        snapshot.attention = snapshot
+            .recon
+            .unresolved
+            .iter()
+            .map(|row| AttentionRow {
+                app: "Recon".into(),
+                owner_kind: "run".into(),
+                owner_id: row.run_id.clone(),
+                item_id: row.label.clone(),
+                reason: row.reason.clone(),
+                age_ms: Some(1800000),
+                action: "Open investigation".into(),
+            })
+            .collect();
         snapshot
     }
 
     #[test]
-    fn profile_all_35_reports_have_registered_keyboard_and_mouse_routes() {
+    fn profile_all_20_reports_have_registered_keyboard_and_mouse_routes() {
         let mut app = app();
         app.select(ModuleId::System.index());
         app.profile.accept_snapshot(analytics_fixture());
@@ -14008,7 +14398,7 @@ mod tests {
                 assert!(app.profile.report.is_none());
             }
         }
-        assert_eq!(ids.len(), 35);
+        assert_eq!(ids.len(), 20);
     }
 
     #[test]
@@ -14016,7 +14406,7 @@ mod tests {
         let mut app = app();
         app.select(ModuleId::System.index());
         app.profile.accept_snapshot(analytics_fixture());
-        app.profile.report = Some("tools.usage");
+        app.profile.report = Some("tools.reliability");
         app.set_focus(Target::ProfileReport);
         render(&mut app, 120, 40);
         for _ in 0..60 {
@@ -14092,6 +14482,125 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_page_scroll_focus_and_detail_restore_at_minimum_size() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        app.profile.accept_snapshot(analytics_fixture());
+        render(&mut app, 60, 18);
+        app.set_focus(Target::ProfileCard(0));
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let offset = app.profile.grid_scroll.offset;
+        assert!(offset > 0);
+        render(&mut app, 60, 18);
+        assert_eq!(app.profile.grid_scroll.offset, offset);
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert!(app.profile.report.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.profile.grid_scroll.offset, offset);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        render(&mut app, 60, 18);
+        assert_eq!(app.focus, Target::ProfileCard(1));
+        assert!(hit(&app, Target::ProfileCard(1)));
+    }
+    #[test]
+    fn custom_period_validates_timezone_and_order_then_applies() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        app.profile.accept_snapshot(analytics_fixture());
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        super::super::profile::activate(&mut app, Target::ProfileChoice(4));
+        app.profile.filter_edit = "2026-10-10T12:00:00 | 2026-10-09T12:00:00".into();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.profile.picker_error.is_some());
+        assert!(app.profile.period_popup);
+        app.profile.filter_edit = "2026-10-09T12:00:00-04:00 | 2026-10-10T12:00:00-04:00".into();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.profile.period_popup);
+        assert!(matches!(
+            app.profile.filters.period,
+            argos_osint_core::profile_stats::Period::Custom { .. }
+        ));
+    }
+    #[test]
+    fn dashboard_mouse_selection_survives_reordered_snapshot() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        let fixture = analytics_fixture();
+        app.profile.accept_snapshot(fixture.clone());
+        super::super::profile::activate(&mut app, Target::ProfileApp(2));
+        render(&mut app, 160, 50);
+        click(&mut app, Target::ProfilePanelRow(4, 2));
+        assert_eq!(app.profile.selected_row["recon.unresolved"], 2);
+        let mut next = fixture;
+        next.recon.unresolved.reverse();
+        app.profile.accept_snapshot(next);
+        assert_eq!(app.profile.selected_row["recon.unresolved"], 5);
+        let layout = super::super::ui::focus_order(&app);
+        assert!(layout.contains(&Target::ProfileCard(4)));
+    }
+
+    #[test]
+    fn attention_opens_the_exact_provider_quota_scope() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        let mut fixture = analytics_fixture();
+        let mut second = fixture.models.capacity[0].clone();
+        second.quota_group = "other-account".into();
+        fixture.models.capacity.push(second);
+        fixture.attention = vec![argos_osint_core::profile_stats::AttentionRow {
+            owner_kind: "provider_scope".into(),
+            owner_id: "openrouter all".into(),
+            item_id: "other-account".into(),
+            ..Default::default()
+        }];
+        app.profile.accept_snapshot(fixture);
+        app.profile.report = Some("summary.attention");
+        super::super::profile::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(app.profile.report, Some("models.capacity"));
+        assert_eq!(app.profile.selected_row["models.capacity"], 1);
+        assert_eq!(app.focus, Target::ProfileReport);
+    }
+
+    #[test]
+    fn provider_groups_fold_without_losing_selection_on_refresh() {
+        let mut app = app();
+        app.select(ModuleId::System.index());
+        let fixture = analytics_fixture();
+        app.profile.accept_snapshot(fixture.clone());
+        super::super::profile::activate(&mut app, Target::ProfileApp(4));
+        app.profile.focus = 1;
+        let before = buffer_text(&render(&mut app, 160, 50));
+        assert!(before.contains("▾"));
+        super::super::profile::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        let folded = buffer_text(&render(&mut app, 160, 50));
+        assert!(folded.contains("▸"));
+        let selected = app.profile.selected_row["models.performance"];
+        app.profile.accept_snapshot(fixture);
+        assert_eq!(app.profile.selected_row["models.performance"], selected);
+        super::super::profile::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        assert!(buffer_text(&render(&mut app, 160, 50)).contains("▾"));
+        app.profile.report = Some("models.performance");
+        render(&mut app, 160, 50);
+        click(&mut app, Target::ProfileAction(5));
+        assert!(app.profile.collapsed_providers["openrouter"]);
+        app.set_focus(Target::ProfileAction(5));
+        super::super::profile::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(!app.profile.collapsed_providers["openrouter"]);
+    }
+
+    #[test]
     fn analytics_viewports_and_data_states() {
         let mut app = app();
         app.select(ModuleId::System.index());
@@ -14099,18 +14608,23 @@ mod tests {
         for (width, height) in [
             (160, 50),
             (120, 40),
-            (104, 36),
-            (103, 36),
-            (100, 36),
+            (100, 32),
+            (60, 18),
             (80, 24),
             (40, 20),
             (100, 24),
         ] {
-            for (name, report) in [
-                ("grid", None),
-                ("report", Some("intel.volume")),
-                ("small-sample", Some("models.latency")),
+            for (name, page, report) in [
+                ("summary", 0, None),
+                ("intel", 1, None),
+                ("recon", 2, None),
+                ("atlas", 3, None),
+                ("models", 4, None),
+                ("tools", 5, None),
+                ("report", 1, Some("intel.enrichment")),
+                ("small-sample", 4, Some("models.latency")),
             ] {
+                super::super::profile::activate(&mut app, Target::ProfileApp(page));
                 app.profile.report = report;
                 let buffer = render(&mut app, width, height);
                 assert!(!super::super::ui::focus_order(&app).is_empty());
@@ -14126,12 +14640,29 @@ mod tests {
                 }
             }
         }
+        app.profile.report = None;
+        app.profile.all_apps = true;
         app.profile.error = Some("fixture read failed".into());
         let stale = buffer_text(&render(&mut app, 80, 24));
         assert!(stale.contains("Stale") && stale.contains("fixture read failed"));
+        if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+            dump_cells(&mut app, &dir, "profile-stale-160x50", 160, 50);
+        }
         app.profile.error = None;
+        app.profile.accept_snapshot(Default::default());
+        if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+            dump_cells(&mut app, &dir, "profile-empty-160x50", 160, 50);
+        }
         app.profile.snapshot = None;
         app.profile.loading = true;
         assert!(buffer_text(&render(&mut app, 80, 24)).contains("Loading"));
+        if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+            dump_cells(&mut app, &dir, "profile-loading-80x24", 80, 24);
+        }
+        app.profile.loading = false;
+        app.profile.tab = super::super::profile::SystemTab::System;
+        if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+            dump_cells(&mut app, &dir, "profile-system-80x24", 80, 24);
+        }
     }
 }

@@ -6,15 +6,15 @@ pub fn analytics_card(frame: &mut ratatui::Frame, area: Rect, title: &str, focus
     let block = super::theme::panel(title).border_style(if focused {
         super::theme::accent()
     } else {
-        super::theme::muted()
+        ratatui::style::Style::default().fg(super::theme::BORDER)
     });
     let inner = block.inner(area);
     frame.render_widget(block, area);
     Rect::new(
         inner.x + 1,
-        inner.y + 1,
+        inner.y,
         inner.width.saturating_sub(2),
-        inner.height.saturating_sub(2),
+        inner.height,
     )
 }
 

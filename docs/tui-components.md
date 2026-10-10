@@ -1,59 +1,62 @@
 # TUI components
 
-The [design contract](tui-design-spec.md) preserves the palette in `theme.rs` and all 35 Profile widget IDs. Components render immutable data; storage reads belong to application refresh delivery.
+The [design contract](tui-design-spec.md) preserves the palette in `theme.rs`. Profile follows the [20-view dashboard contract](profile-analytics-dashboard.md) and retains metric semantics/history in [profile-dashboard-and-search.md](profile-dashboard-and-search.md). Components render immutable data; storage reads belong to background refresh/detail delivery.
 
-## AnalyticsCard and grid preset
+## AnalyticsCard and Dashboard preset
 
-`profile_layout::AnalyticsLayout::new(Rect)` allocates fixed tabs, controls, app selector, content and status. `card(index, offset)` returns only whole visible cards. The grid uses two columns at 104 content cells, four cells between columns, one row between cards, and equal heights clamped to 16–24. Short viewports show a selectable report list.
+`profile_layout::LayoutResult::new(area, page, count, offset)` is the pure shared geometry result for the **Dashboard** preset: tabs, section navigation, controls, KPI cards, visible analytic panels, scroll extent and status. Drawing, focus registration and pointer routing consume those same rectangles. `PanelRect` includes visible `rect`, virtual `height` and `source_offset`, preserving panel geometry while cropping scrolled rows. `profile_components::{kpi, panel, table_row, clipped}` composes reusable Profile KPI/chart/table panels; general text/editor/transcript primitives stay in `components`.
 
 ```rust,ignore
-let layout = AnalyticsLayout::new(body);
-if let Some(rect) = layout.card(index, offset) {
-    registry.register(Target::ProfileCard(index), rect);
-    // Render the AnalyticsCard in this same rect.
+let layout = LayoutResult::new(area, DashboardPage::Summary, 4, page_offset);
+for geometry in &layout.panels {
+    profile_components::panel(frame, geometry, title, focused, lines);
 }
 ```
 
-`components::analytics_card(frame, area, title, focused)` draws the border and returns its padded content rectangle. Profile's `draw_widget_panel` owns the AnalyticsCard composition: title, period/unit, headline, exact selected bucket, TimePlot and legend. Card borders use the focused accent and one cell of inner padding.
+The body has two columns at ≥120 cells and one otherwise, with a one-cell column/row gutter. KPIs use four columns ≥120, two at 80–119 and compact two-column values below 80. Summary pairs 18-row panels; Recon pairs 11-row panels with a full-width 13-row unresolved table. Other page arrangements follow the dashboard matrix. Chart minimum height is 11, table minimum 9; reduce chrome and scroll instead of squeezing. Below 60×18 retain navigation and a size notice.
+
+**AnalyticsCard** owns the plain thin border and one-cell horizontal inner padding. Titles are left-aligned ACCENT on the border; focused cards add an ACCENT border and `• focused`. Panel content comprises summary/unit, measured chart or table, selected readout and legend. Selection does not alter another panel's size. Only visible panels are drawn.
 
 ## TimePlot
 
-`profile_charts::TimeBucket` contains `start`, `end`, stable `(series_key, count)` pairs and coverage availability. `time_plot(buckets, width, height, selected)` returns measured plot lines. `coarsen_counts` sums counts and preserves group boundaries; missing history remains unavailable. `SeriesPoint` and `series_plot(points, width, height, selected)` page original duration and ratio observations around selection; missing values remain gaps. They never average percentiles.
+The shared `profile_charts` renderer provides count columns, line series, grouped stage bars and signed diverging temperature bars. Time/count data carries bucket boundaries, stable series keys, coverage and selection; duration data retains optional values.
 
-```rust,ignore
-let plot = charts::time_plot(&buckets, width, height, selected);
-```
+`time_plot` / `coarsen_counts` cover the selected range by summing count buckets and preserving boundaries with common scales. `series_plot` keeps missing duration points as gaps and never averages percentile points. Duration points page explicitly when underlying samples are unavailable. `plot_targets(count, width, selected, series)` returns original bucket index, x offset and cell width; drawing and mouse targets share these values. Rebucket duration data only when authoritative underlying samples/bins are available.
 
-`series_style(key)` assigns stable categorical colours and semantic outcome colours. Intel plots distinct totals; overlapping tags stay in detail records.
+Every plot exposes unit, common zero-based scale where appropriate, range, sparse ticks, legend and selected-point readout. Absolute stacks share a maximum; only explicitly 100% views normalize. Allocate stack cells with largest remainder. `series_style(key)` maps stable identity to color across filters and refreshes. Intel's distinct totals do not sum overlapping tags. p95 is suppressed below the existing sample threshold.
 
 ## RankedBars, ComparisonBars and Meter
 
-The existing `rank_bar(value, max, width)`, `stacked_bar(label, label_width, series, bar_cells, total)` and `meter(ratio, width)` APIs share the chart renderer. Callers supply exact values and denominators beside the marks. Pair comparison bars by explicit series identity; stack mutually exclusive values only.
+`rank_bar(value, max, width)`, `stacked_bar(label, label_width, series, bar_cells, total)` and `meter(ratio, width)` share chart rendering. Supply exact values and denominators beside marks; caller-provided common maxima keep panels comparable. Paired stage bars use execution ACCENT and wait WARN, and stack only mutually exclusive values.
 
 ```rust,ignore
 let mark = charts::meter(Some(accepted as f64 / eligible as f64), 12);
 ```
 
-## DetailTable and report preset
+**Meter** displays N/A for unknown/disabled denominators. Quota is sends in 60 seconds/effective limit, concurrency active/max and pace requests/minute. Overflow retains its exact numeric value and a warning. Amplification is a multiple (`1.8×`); temperature movement is signed score points.
 
-`components::detail_table(value, columns, width)` renders complete cell widths with numeric alignment when all columns fit, otherwise uses labelled records. `detail_records(value, width)` retains nested fields and renders null as N/A. Neither truncates numeric values. `ReportLayout::new(inner, selected_height)` places detail beside the plot at 120 useful cells, otherwise below it; short layouts retain authoritative details first.
+## DetailTable and Report preset
 
-```rust,ignore
-let lines = components::detail_table(&data, widget.detail_columns, width);
-```
+**DetailTable** renders stable cell-measured columns, aligns numbers, ellipsizes labels and does not wrap dashboard/expanded table rows. Stable-ID row selection survives refresh, filtering and sorting. Full prose and nested authoritative values remain accessible in expanded detail. Do not silently truncate numeric meaning; reduce optional columns or expose complete values through detail.
+
+The **Report** preset occupies approximately 90% of the viewport with independent scrolling and restores the previous Dashboard focus/scroll on Esc. Every chart has a table equivalent, switched with `v`; `s` cycles sort columns. Tables use existing dimension filters, and selected-row detail exposes full prose. Enter on an actionable detail row opens the authoritative owner. Detail lookup is lazy, bounded and cached by filters/revision. Missing historical/provenance facts remain unavailable.
+
+The general `components::detail_table` and `detail_records` helpers remain available for complete labelled-record detail; this prose fallback must not wrap plot/table rows in dashboard panels. Anchored See more appears only when rows are hidden, opens expanded detail and disappears at the bottom.
 
 ## ScrollPane
 
-`ScrollPane` owns a `usize` offset. `scroll(delta, extent, viewport)` clamps it; `reveal(start, height, viewport)` brings a whole card into view; `visible(lines, height)` slices before rendering, avoiding u16 Paragraph offsets. Grid and report keep independent scroll state.
+`components::ScrollPane` owns a `usize` offset. `scroll(delta, extent, viewport)` clamps it; `reveal(start, height, viewport)` brings focused content into view; `visible(lines, height)` slices before rendering, avoiding u16 Paragraph offsets. Dashboard, each panel and expanded detail keep independent state.
 
 ```rust,ignore
 pane.scroll(20, lines.len(), room);
 frame.render_widget(Paragraph::new(pane.visible(&lines, room).to_vec()), area);
 ```
 
+Tab/Shift+Tab uses reading order and reveals the next panel. PgUp/PgDn and wheel scroll focused content then page consistently; keyboard and mouse share geometry. Expanded detail restores its saved dashboard state on Esc.
+
 ## ActionBar and Overlay
 
-`components::action_rects(area, labels)` measures labels in terminal cells. Draw and register each returned rectangle. Compact Profile uses a current-app control with the six app choices accessible through its action and 0–5 shortcuts. Profile pickers push a layout scope; the top scope owns hit testing and focus.
+`components::action_rects(area, labels)` measures labels in terminal cells. Draw and register each returned rectangle. Compact Profile exposes Summary and five app pages through the section control and 0–5 shortcuts. Profile pickers push a layout scope; the top scope owns hit testing and focus.
 
 ```rust,ignore
 for (target, rect) in targets.iter().zip(action_rects(area, &labels)) {
@@ -71,7 +74,9 @@ let rows = components::measured_lines(vec![Line::raw(text)], width);
 
 ## Acceptance
 
-Check Profile at 160×50, 120×40, the 104/103 content boundary, 100×36, 80×24, 40×20 and 100×24. Cover zero, empty, missing history, loading, stale, error and small samples. Verify keyboard and mouse reachability, full-record scrolling and global shortcuts.
+Use [tui-verification.md](tui-verification.md) and `scripts/tui_review.py`. Name the component/preset, assert shared geometry/state behavior and inspect actual fixture PNGs. Capture starts pending; record reviewed images and action/metric results separately.
+
+Check Profile at 160×50, 120×40, 100×32, 80×24, 60×18 and below minimum. Cover all 20 IDs, zero, empty, missing history, loading, stale, error and small samples. Verify simultaneous panels, keyboard/mouse parity, full-record scrolling, state restoration, Unicode/no wrapping, units/scales/denominators and global shortcuts. Render actual terminal fixtures with `scripts/render_tui_cells.py`; compare Summary/Recon composition with approved references when available.
 
 ## MeasuredEditor and TranscriptBlock
 

@@ -8,88 +8,28 @@ Nothing here invents a number. A metric the installation never collected renders
 
 | Tab | Holds |
 | --- | --- |
-| **Overview** (default) | Filter strip, section navigator, 35 telemetry widgets |
+| **Overview** (default) | Filter strip, Summary and five app pages, 20 primary views |
 | **System** | Host, Paths, **Refresh hardware**, and the **Configs** export/import popup |
 
 Tab/Shift+Tab traverse controls; Enter activates the selected Overview/System tab, or `t` switches tabs. The System view provides Host, Paths and Refresh hardware; compact screens use registered Host/Paths selectors. Configs is reachable through `x` and the tab-row action. Contextual help includes analytics and report controls.
 
-## The 35 widgets
+## The 20 primary views
 
-Every widget is registered once in `WIDGETS` (`crates/argos-osint-bin/src/tui/profile.rs`); a test asserts the count, the absence of a duplicate id and the per-section totals, so a new widget cannot slip in unannounced. Inside a section the widgets render in presentation priority order — the most actionable first — and the section navigator moves between sections without duplicating widgets.
+The current primary inventory and merged detail mapping are in [profile-analytics-dashboard.md](profile-analytics-dashboard.md#primary-inventory). `WIDGETS` in `crates/argos-osint-bin/src/tui/profile.rs` registers exactly Intel 4 / Recon 5 / Atlas 3 / Models 4 / Tools 4. Summary reuses existing views; KPI cards and detail tables are not inventory entries.
 
-### Intel — 7 widgets
-
-| Id | Widget | Measures |
-| --- | --- | --- |
-| `intel.volume` | Ingestion volume | Distinct canonical articles first seen per bucket, split by primary tag with untagged counted separately |
-| `intel.confidence` | Initial vs current confidence | Paired initial claim confidence and current Brief rating across the five fixed 0–1 bands, with cohort mean, median and N |
-| `intel.origins` | Country / origin mix | Distinct article volume by collection/source origin with share, plus `Other` and `Unknown` |
-| `intel.enrichment` | Tag enrichment | Per tag: distinct articles, body / claim-extraction / report coverage, mean initial confidence and mean Brief rating with their Ns |
-| `intel.reports` | Report outcomes | Latest terminal revision per (article, mode): completed / partial / failed, current waiting / blocked, mean and p95 wall, mean active, N |
-| `intel.publishers` | Publishers | Top source domains by distinct articles with share and the top-3 concentration |
-| `intel.freshness` | Article freshness | Published-to-first-ingestion delay in fixed buckets, with missing and future timestamps reported separately |
-
-### Recon — 7 widgets
-
-| Id | Widget | Measures |
-| --- | --- | --- |
-| `recon.outcomes` | Run outcomes | Mutually exclusive terminal outcomes per bucket and mode: completed with evidence, completed zero evidence, partial, failed, cancelled |
-| `recon.stages` | Stage durations | Mean execution and mean wait per stage and mode, with N |
-| `recon.recall` | Memory recall | Completed recall queries, queries with candidate hits, queries with accepted hits, candidate-to-accepted retention, accepted memories per run, dominant rejection reason |
-| `recon.workload` | Workload per run | Runs, directives / calls / categories / accepted memories per run, median and p95 wall duration |
-| `recon.diversity` | Tool diversity | Eligible scopes, scopes with ≥2 tools attempted, with ≥2 successful, independent source groups per scope and top shortfall reason per intelligence category (`recon_coverage`) |
-| `recon.directives` | Directive resolution | Answered / partial / unresolved / blocked / unknown directive assessments per mode, with N |
-| `recon.unresolved` | Unresolved directives | The unresolved and blocked directives with reason, evidence count, last progress and recorded next action |
-
-### Atlas — 6 widgets
-
-| Id | Widget | Measures |
-| --- | --- | --- |
-| `atlas.cycles` | Cycle outcomes | Completed / partial / failed / cancelled cycles per completion bucket |
-| `atlas.hot_zones` | Hot zones | Origin table: articles, latest and mean temperature, latest tier, tier 1/2/3 shares, snapshot count |
-| `atlas.temperature` | Temperature shifts | Largest absolute temperature movement per origin between the latest and the preceding comparable snapshot, with warming / cooling label |
-| `atlas.cycle_time` | Cycle time | Mean and p95 completed-cycle wall duration per bucket, mean queue wait and N |
-| `atlas.discovery` | Discovery mix | Fetched candidate occurrences split into retained-new, retained-existing, duplicate-in-cycle, rejected and pending |
-| `atlas.backlog` | Backlog | Per stage: queued / running / waiting / blocked units from the latest transition per (stage, unit), oldest pending age and latest error category |
-
-### Models — 8 widgets
-
-| Id | Widget | Measures |
-| --- | --- | --- |
-| `models.capacity` | Provider capacity | Live sends in a rolling 60 s, effective RPM, active, queued and cooldown per quota scope. Live state: ignores the historical filters |
-| `models.by_role` | Requests by role | Wire requests per bucket stacked by role |
-| `models.latency` | Latency | p50 / p95 send-to-completion duration for finished attempts with N, plus p50 first-header and first-content timings |
-| `models.queue` | Queue delay | p50 / p95 enqueue-to-send delay with N |
-| `models.performance` | Provider performance | Hierarchical provider totals with expandable model rows: sends, completed attempts, attempt error %, 429 count, final operation failure %, mean and p95 duration |
-| `models.fallback` | Fallback triggers | Triggered versus recovered operations per role and route with trigger reason, recovery %, and median / p95 time to the terminal outcome |
-| `models.amplification` | Retry amplification | Sends per terminal operation per completion bucket, plus in-flight operations |
-| `models.failures` | Model failure causes | Failed wire attempts per bucket split by failure category, with the share of all finished attempts |
-
-`models.performance` and `models.fallback` currently render an empty state: their builders in `crates/argos-osint-core/src/profile_stats.rs` return no rows yet, because the schema-26 operation and attempt facts they group are not joined into those two shapes. The widgets are registered and asserted; the tables fill when that join lands. Live capacity and queue delay stay unavailable until the orchestration companion publishes (see [Provider orchestration companion](#provider-orchestration-companion)).
-
-### Tools — 7 widgets
-
-| Id | Widget | Measures |
-| --- | --- | --- |
-| `tools.usage` | Tool usage | Logical invocations per tool and category with the remote / local / cache split |
-| `tools.attribution` | Attribution | Category totals split by trigger: Recon prompt, Intel brief, Atlas cycle, manual, scheduled, repair |
-| `tools.outcomes` | Tool outcomes | Completed-nonempty, verified-zero, partial, failed and blocked invocations per bucket |
-| `tools.reliability` | Reliability | Per tool: invocations, wire requests, cache-hit %, verified-zero %, remote error %, mean and p95 duration, dominant trigger and mode |
-| `tools.search_health` | Search health | Google, Yandex and Mojeek: fetches, valid SERPs, verified-zero, challenge, parser mismatch, transport failure, usable results per fetch, cache hits, last success, parser version |
-| `tools.evidence` | Evidence contribution | Successful nonempty invocations, invocations yielding ≥1 accepted evidence item, acceptance %, distinct evidence items, citations by completed reports |
-| `tools.failure_causes` | Failure causes | Ranked terminal failure causes with count and share of finished invocations |
+The previous 35-widget presentation is superseded. Useful ingestion/confidence, recall/workload, discovery/cycle-time, role/fallback/amplification and tool usage/outcome measurements remain in merged details and the metric dictionary below. Historical confidence-distribution, collection-origin and hot-zone DTOs may remain available to their owners, but are not Profile primary panels.
 
 ## Analytics controls
 
-Overview begins at All apps, with one primary card per app. App views expose all 35 registered reports. The [component catalog](tui-components.md) defines the grid and report geometry; the [design contract](tui-design-spec.md) defines coverage and interaction requirements.
+Overview begins at Summary and displays simultaneous panels. App selection is independent of the telemetry app filter. The [dashboard contract](profile-analytics-dashboard.md#dashboard-preset) and [component catalog](tui-components.md) define geometry, merged details and coverage requirements.
 
-Tab/Shift+Tab traverse registered controls; Enter activates them. `t` switches Overview/System. `0` selects All apps; `1`–`5` selects Intel, Recon, Atlas, Models, Tools; `[`/`]` cycles app views. App selection is independent of the telemetry app dimension.
+Tab/Shift+Tab traverse registered controls and panels in reading order; Enter activates or expands, and `t` switches Overview/System. `0` selects Summary; `1`–`5` selects Intel, Recon, Atlas, Models, Tools; `[`/`]` cycles pages. Moving focus reveals the next panel without collapsing another one.
 
-Arrows or `j`/`k` select cards, Enter or `m` opens a full report, Esc restores the grid. Report Left/Right selects buckets; PageUp/PageDown and wheel scroll the complete detail dataset.
+Arrows select rows or buckets. Enter opens approximately 90%-viewport detail; detail-row Enter opens an authoritative owner when available. `v` switches chart/table in detail and `s` cycles sort columns. PageUp/PageDown and wheel scroll focused content then the dashboard; Esc restores prior focus and scroll.
 
-`p` selects 1h/24h/7d/30d. `f` opens a searchable picker for app, provider, role, mode, tool and category. Tab/Shift+Tab changes dimensions, arrows choose an observed value, Enter applies it; Esc closes. `c` clears every dimension while preserving period. `r` refreshes statistics in Overview and hardware in System. `x` opens Configs.
+`p` selects 1h/24h/7d/30d/custom, with date/timezone validation. Custom input is `from | to`, both RFC3339 timestamps with explicit timezones. `f` opens app/provider/role/mode/tool/category filters; the strip shows applied chips and unsupported scope. Expanded tables use these dimension filters and expose complete selected-row prose; unsupported historical identities/provenance stay unavailable. Tab/Shift+Tab changes picker dimensions, arrows choose an observed value, Enter applies; Esc closes. `c` clears dimensions while preserving period. `r` refreshes Overview statistics or System hardware; `x` opens Configs.
 
-Snapshots load on a background reader, at most once per second while visible. Refresh retains the last good snapshot and visibly labels stale data and errors; obsolete filter generations are discarded. Live capacity and job counts ignore historical filters. Historical controls remain fixed while report details scroll.
+Snapshots load on a background reader, at most once per second while visible. Refresh retains the last good snapshot and panel state, visibly labels stale data/errors, and discards obsolete filter generations. Live capacity, unresolved directives and backlog ignore historical filters and remain labeled. Detail reads are lazy, bounded and cached by filters/revision.
 
 ## Metric dictionary
 
@@ -117,24 +57,24 @@ Aggregation rules that hold for every row:
 | Workload per run | Per-run averages over runs in the window. Categories are categorical: they are counted and listed, never averaged as names |
 | Tool diversity | Rates over scopes with ≥2 eligible tools; scopes below that are marked ineligible rather than scored zero |
 | Directive resolution | Recorded terminal assessments among terminal runs. `unknown` is a category; an answer is never inferred from run completion |
-| Temperature shifts | Latest eligible snapshot versus the preceding comparable one under the same scoring version and eligible collection scope. New, missing or method-incomparable origins are labelled and shown separately, never given an invented zero baseline |
+| Temperature shifts | Signed score-point difference, not percentage change. Latest eligible snapshot versus the preceding comparable one under the same scoring version and eligible collection scope. New, missing or method-incomparable origins are labelled and shown separately, never given an invented zero baseline |
 | Tier shares | Shares across captured origin-cycle snapshots. Tier is ordinal, so the mean is descriptive only. Temperature is Argos's own score |
 | Discovery mix | One mutually exclusive disposition per candidate occurrence; pending and unknown are shown separately |
-| Pipeline backlog | The latest transition per (stage, unit) is that unit's current state, so the counts describe the end of the window. Each row carries the unit label its writer recorded, and units from different stages are never summed. The completed-in-period column is registered but not populated yet |
+| Pipeline backlog | Live latest transition per (stage, unit), independent of the historical period. Each row carries the unit label its writer recorded, and units from different stages are never summed. The completed-in-period column is registered but not populated yet |
 | Model sends / requests by role | Actual wire attempts. A logical operation may hold several, so sends are not jobs |
 | Model latency | Send-to-contract-completion duration of successful finished attempts. First header and first content are separate drill-down fields; queue delay stays in its own widget |
 | Queue delay | Measured enqueue-to-send delay only, with N |
 | Attempt error % | **Failed finished attempts / all finished attempts.** An unfinished send is never a failure |
 | Final operation failure % | Terminal operations counted once, attributed to the primary route cohort; the effective route is a separate field so a fallback does not double-count |
 | Fallback triggers and recovery | A **trigger is not a recovery**: they are separate columns, and recovery % = recovered / triggered |
-| Retry amplification | Sends / terminal operations per completion bucket, including every route of each operation even when a send predates the window; in-flight operations stay separate |
+| Retry amplification | Sends / terminal operations per completion bucket, including every route of each operation even when a send predates the window; in-flight operations stay separate. Display as a multiple (`1.8×`), never a percentage |
 | Failure categories | Each failed attempt is classified once. The percentage is of all finished attempts |
 | Tool usage | Logical invocations with the remote / local / cache split. **A cache hit is not a remote request** |
 | Tool reliability | Cache-hit % and verified-zero % are over logical invocations; the error % denominator is **remote invocations only**, excluding cache and local-only executions |
 | Named search health | Usable per fetch = valid SERPs / fetches. Engine identity is separate from the transport provider that fetched the SERP |
 | Evidence contribution | Acceptance % = invocations yielding ≥1 accepted evidence item / successful nonempty invocations. One evidence item may credit several tools, so the rows are nonadditive |
 | Tool failure causes | One terminal cause per invocation, ranked, with share of finished invocations. Attempt-level errors are drill-down, not a second count |
-| Provider capacity | Live sends in a rolling 60 s, effective pace, active, queued and cooldown. Always live: it does not pretend to honour a historical filter |
+| Provider capacity | Live sends in a rolling 60 s / effective limit, concurrency active/max, pace requests/minute, queued and cooldown. Unknown/disabled limits are N/A; overflow retains exact values with a warning. Overlapping scopes are never summed; historical filters do not apply |
 
 A **failed transport is not zero results**. `verified_zero` means the engine or provider explicitly reported zero; every other non-success is a distinct failure cause.
 

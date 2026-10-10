@@ -14,6 +14,7 @@ pub mod markdown;
 pub mod model_roles;
 pub mod profile;
 pub mod profile_charts;
+pub mod profile_components;
 pub mod profile_config;
 pub mod profile_layout;
 mod recon_parts;

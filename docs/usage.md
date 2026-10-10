@@ -70,21 +70,25 @@ Pipeline and quotas: [architecture.md](architecture.md#atlas).
 
 ### Profile
 
-Overview starts at All apps. Tab/Shift+Tab traverse controls; Enter activates, and `t` switches Overview/System.
+Overview starts at Summary, followed by Intel, Recon, Atlas, Models and Tools. Its simultaneous panels use exactly 20 primary views (4 / 5 / 3 / 4 / 4); Summary reuses existing views. Tab/Shift+Tab traverse controls and panels in reading order; Enter activates, and `t` switches Overview/System.
 
 | Keys | Action |
 | --- | --- |
-| `0`, `1`–`5`, `[` / `]` | All apps, app views, previous/next app |
-| Arrows / `j` / `k` | Select cards |
-| Enter / `m` | Open full report |
+| `0`, `1`–`5`, `[` / `]` | Summary, app views, previous/next page |
+| Arrows / `j` / `k` | Select rows/buckets or panels |
+| Enter / `m` | Expand detail; detail-row Enter opens its owning app/item when available |
 | Left/Right in report | Select original buckets or page duration points |
-| PageUp/PageDown / wheel | Scroll report details |
+| PageUp/PageDown / wheel | Scroll focused content, then the page |
+| `v` in report | Switch chart/table |
+| `s` in report | Cycle sort column |
 | `p`, `f`, `c` | Choose period, edit six dimensions, clear dimensions |
 | `r` | Refresh analytics in Overview, hardware in System |
 | `x` | Configs |
-| Esc | Restore grid or return Home |
+| Esc | Restore dashboard focus/scroll or return Home |
 
-Overview uses aligned summary cards and complete reports, following the [design contract](tui-design-spec.md) and [component catalog](tui-components.md). System provides scrollable Host and Paths. Short screens use metric lists and pane selectors. Typing inside pickers belongs to the search field; Tab changes filter dimension, arrows select a recorded value and Enter applies it.
+Overview uses four KPI cards and simultaneous chart/table panels, following the [dashboard contract](profile-analytics-dashboard.md), [design contract](tui-design-spec.md) and [component catalog](tui-components.md). At body width 120 or wider panels use two columns; narrower screens use one column and scroll. Expanded details occupy approximately 90% of the viewport and keep independent state. Period defaults to 24h; 1h/7d/30d/custom and applicable app/provider/role/mode/tool/category filters show their scope and coverage. Live metrics ignore period. System provides scrollable Host and Paths; below the practical 60×18 minimum navigation remains with a size notice. Typing inside pickers belongs to the search field; Tab changes filter dimension, arrows select a recorded value and Enter applies it.
+
+Custom period input is `from | to`: both timestamps use RFC3339 with explicit timezones, for example `2026-10-09T00:00:00-04:00 | 2026-10-10T00:00:00-04:00`. Expanded tables use the same dimension filters; selected-row detail shows complete prose, and unsupported historical facts display unavailable.
 
 
 **Configs** (`x`) — Export writes the portable schema-v1 document; Import merges one in. The file contains saved API keys, so treat it as a secret and never commit it.
@@ -94,7 +98,7 @@ Overview uses aligned summary cards and complete reports, following the [design 
 | Export | Type the destination (`~` expands), Enter checks it and exports. Enter again confirms an overwrite |
 | Import | Paste the document. Enter inserts a newline; Ctrl+Enter validates and, only when valid, imports |
 
-The redacted change summary lists what moves before you commit. Every surface here — widget ids, the filter strip, the metric dictionary, the portable configuration contract, validation and the commit — is documented in [profile-dashboard-and-search.md](profile-dashboard-and-search.md).
+The redacted change summary lists what moves before you commit. Primary IDs, filters and layouts are documented in [profile-analytics-dashboard.md](profile-analytics-dashboard.md); the metric dictionary, portable configuration contract, validation and commit remain in [profile-dashboard-and-search.md](profile-dashboard-and-search.md).
 
 ### Other apps
 

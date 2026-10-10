@@ -1,6 +1,6 @@
 //! Profile dashboard: the Overview and System tabs.
 //!
-//! Overview renders all 35 stable metrics as aligned cards and scrollable reports.
+//! Overview renders 20 primary analytics views as aligned cards and scrollable reports.
 //! System exposes Host and Paths; Configs retains its existing import/export flow.
 //! Rendering consumes immutable snapshots delivered by one background read at a
 //! time. Missing history, measured zero, empty windows and stale errors remain
@@ -21,13 +21,14 @@ use argos_osint_core::store::Store;
 use super::app::App;
 use super::components::{self, ScrollPane};
 use super::profile_charts as charts;
-use super::profile_layout::{AnalyticsLayout, ReportLayout};
+use super::profile_components::{self as panels, Kpi};
+use super::profile_layout::{DashboardPage, LayoutResult, ReportLayout};
 use super::theme;
 
 /// Which Profile tab is on screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SystemTab {
-    /// Activity: the 35 telemetry widgets.
+    /// Activity: the 20 primary analytics views.
     #[default]
     Overview,
     /// Host, Paths, Logs.
@@ -142,7 +143,7 @@ const fn renderer_kind(id: &str) -> RendererKind {
         return RendererKind::Table;
     }
     if same_id(id, "intel.reports") {
-        return RendererKind::Table;
+        return RendererKind::Ranked;
     }
     if same_id(id, "intel.publishers") {
         return RendererKind::Ranked;
@@ -471,12 +472,46 @@ const fn series_keys(id: &str) -> &'static [&'static str] {
     &[]
 }
 const fn applicable_filters(id: &str) -> &'static [&'static str] {
-    if same_id(id, "models.capacity") || same_id(id, "atlas.backlog") {
+    if same_id(id, "models.capacity")
+        || same_id(id, "atlas.backlog")
+        || same_id(id, "summary.attention")
+        || same_id(id, "recon.unresolved")
+    {
         return &[];
     }
-    &["app", "provider", "role", "mode", "tool", "category"]
+    if same_id(id, "intel.reports")
+        || same_id(id, "recon.outcomes")
+        || same_id(id, "recon.directives")
+        || same_id(id, "atlas.cycles")
+    {
+        return &["app", "mode"];
+    }
+    if same_id(id, "intel.enrichment")
+        || same_id(id, "intel.publishers")
+        || same_id(id, "intel.freshness")
+    {
+        return &["app", "category"];
+    }
+    if same_id(id, "recon.stages") {
+        return &["app", "mode", "category"];
+    }
+    if same_id(id, "recon.diversity") {
+        return &["category"];
+    }
+    if same_id(id, "atlas.temperature") {
+        return &["app"];
+    }
+    if same_id(id, "models.performance") {
+        return &["app", "provider", "role", "mode"];
+    }
+    if same_id(id, "models.latency") || same_id(id, "models.queue") {
+        return &["app", "provider", "role", "mode"];
+    }
+    if same_id(id, "tools.search_health") || same_id(id, "tools.evidence") {
+        return &["app", "provider", "mode", "tool"];
+    }
+    &["app", "provider", "mode", "tool", "category"]
 }
-
 const fn detail_columns(id: &str) -> &'static [&'static str] {
     if same_id(id, "intel.volume") {
         return &["bucket", "total", "by_tag", "untagged"];
@@ -663,17 +698,18 @@ const fn detail_columns(id: &str) -> &'static [&'static str] {
     }
     if same_id(id, "models.capacity") {
         return &[
-            "capacity",
-            "capacity_available",
-            "by_role",
-            "latency",
-            "queue_delay",
-            "performance",
-            "fallback",
-            "amplification",
-            "failures",
-            "attempts",
-            "note",
+            "provider",
+            "quota_group",
+            "scope",
+            "sends_60s",
+            "effective_rpm",
+            "pace_per_min",
+            "active",
+            "max_concurrency",
+            "queued",
+            "oldest_wait_ms",
+            "cooldown_ms",
+            "quota_source",
         ];
     }
     if same_id(id, "models.by_role") {
@@ -822,93 +858,126 @@ macro_rules! widget {
     };
 }
 
-/// Exactly the reviewed 35 widgets. A test asserts the count and the absence of
-/// a duplicate id, so a new widget cannot slip in unannounced.
+/// Primary inventory. Summary reuses these views; merged details are not entries.
 pub const WIDGETS: &[WidgetSpec] = &[
-    // ---- Intel (7) ----
-    widget!("intel.volume", Section::Intel, "Ingestion volume", 1),
-    widget!(
-        "intel.confidence",
-        Section::Intel,
-        "Initial vs current confidence",
-        2
-    ),
-    widget!("intel.origins", Section::Intel, "Country / origin mix", 3),
-    widget!("intel.enrichment", Section::Intel, "Tag enrichment", 4),
-    widget!("intel.reports", Section::Intel, "Report outcomes", 5),
-    widget!("intel.publishers", Section::Intel, "Publishers", 6),
-    widget!("intel.freshness", Section::Intel, "Article freshness", 7),
-    // ---- Recon (7) ----
-    widget!("recon.outcomes", Section::Recon, "Run outcomes", 1),
-    widget!("recon.stages", Section::Recon, "Stage durations", 2),
-    widget!("recon.recall", Section::Recon, "Memory recall", 3),
-    widget!("recon.workload", Section::Recon, "Workload per run", 4),
-    widget!("recon.diversity", Section::Recon, "Tool diversity", 5),
+    widget!("intel.enrichment", Section::Intel, "Enrichment", 1),
+    widget!("intel.reports", Section::Intel, "Report outcomes", 2),
+    widget!("intel.publishers", Section::Intel, "Publishers", 3),
+    widget!("intel.freshness", Section::Intel, "Article freshness", 4),
+    widget!("recon.outcomes", Section::Recon, "Recon outcomes", 1),
     widget!(
         "recon.directives",
         Section::Recon,
         "Directive resolution",
-        6
+        2
+    ),
+    widget!("recon.stages", Section::Recon, "Stage durations", 3),
+    widget!(
+        "recon.diversity",
+        Section::Recon,
+        "Corroboration diversity",
+        4
     ),
     widget!(
         "recon.unresolved",
         Section::Recon,
-        "Unresolved directives",
-        7
+        "Unresolved directives · Live",
+        5
     ),
-    // ---- Atlas (6) ----
-    widget!("atlas.cycles", Section::Atlas, "Cycle outcomes", 1),
-    widget!("atlas.hot_zones", Section::Atlas, "Hot zones", 2),
+    widget!("atlas.backlog", Section::Atlas, "Atlas backlog · Live", 1),
+    widget!("atlas.cycles", Section::Atlas, "Cycle outcomes", 2),
     widget!("atlas.temperature", Section::Atlas, "Temperature shifts", 3),
-    widget!("atlas.cycle_time", Section::Atlas, "Cycle time", 4),
-    widget!("atlas.discovery", Section::Atlas, "Discovery mix", 5),
-    widget!("atlas.backlog", Section::Atlas, "Backlog", 6),
-    // ---- Models (8) ----
-    widget!("models.capacity", Section::Models, "Provider capacity", 1),
-    widget!("models.by_role", Section::Models, "Requests by role", 2),
-    widget!("models.latency", Section::Models, "Latency", 3),
-    widget!("models.queue", Section::Models, "Queue delay", 4),
+    widget!(
+        "models.capacity",
+        Section::Models,
+        "Provider capacity · Live",
+        1
+    ),
     widget!(
         "models.performance",
         Section::Models,
-        "Provider performance",
-        5
-    ),
-    widget!("models.fallback", Section::Models, "Fallback triggers", 6),
-    widget!(
-        "models.amplification",
-        Section::Models,
-        "Retry amplification",
-        7
+        "Provider / model performance",
+        2
     ),
     widget!(
-        "models.failures",
+        "models.latency",
         Section::Models,
-        "Model failure causes",
-        8
+        "Successful model latency",
+        3
     ),
-    // ---- Tools (7) ----
-    widget!("tools.usage", Section::Tools, "Tool usage", 1),
-    widget!("tools.attribution", Section::Tools, "Attribution", 2),
-    widget!("tools.outcomes", Section::Tools, "Tool outcomes", 3),
-    widget!("tools.reliability", Section::Tools, "Reliability", 4),
-    widget!("tools.search_health", Section::Tools, "Search health", 5),
-    widget!("tools.evidence", Section::Tools, "Evidence contribution", 6),
-    widget!("tools.failure_causes", Section::Tools, "Failure causes", 7),
+    widget!("models.queue", Section::Models, "Enqueue-to-send delay", 4),
+    widget!("tools.search_health", Section::Tools, "Search health", 1),
+    widget!("tools.reliability", Section::Tools, "Tool reliability", 2),
+    widget!("tools.evidence", Section::Tools, "Evidence yield", 3),
+    widget!(
+        "tools.failure_causes",
+        Section::Tools,
+        "Terminal failure causes",
+        4
+    ),
 ];
-
-/// The reviewed inventory size. Changing it is a spec change, not a tweak.
-pub const WIDGET_COUNT: usize = 35;
+pub const WIDGET_COUNT: usize = 20;
+/// A Summary-only composition, deliberately outside the primary inventory.
+const ATTENTION: WidgetSpec = WidgetSpec {
+    detail_columns: &["app", "owner_id", "item_id", "reason", "age_ms", "action"],
+    applicable_filters: &[],
+    ..widget!(
+        "summary.attention",
+        Section::Recon,
+        "Needs attention · Live",
+        0
+    )
+};
 
 #[cfg(test)]
 mod registry_tests {
     use super::*;
 
+    #[test]
+    fn capacity_preserves_unknown_disabled_and_overflow_values() {
+        let mut models = profile_stats::ModelStats {
+            capacity_available: true,
+            ..Default::default()
+        };
+        models
+            .capacity
+            .push(argos_osint_core::provider_metrics::CapacityRow {
+                sends_60s: 125,
+                active: 7,
+                effective_rpm: Some(100),
+                max_concurrency: Some(4),
+                pace_per_min: Some(32.5),
+                ..Default::default()
+            });
+        let text = |models: &profile_stats::ModelStats| {
+            capacity_lines(models, 80, 4)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let overflow = text(&models);
+        assert!(overflow.contains("125/100 sends/60s !"));
+        assert!(overflow.contains("7/4 active !"));
+        assert!(overflow.contains("pace 32.5 req/min"));
+        models.capacity[0].effective_rpm = None;
+        models.capacity[0].max_concurrency = Some(0);
+        let unavailable = text(&models);
+        assert!(unavailable.contains("125/N/A sends/60s"));
+        assert!(unavailable.contains("7/N/A active"));
+        assert!(!unavailable.contains(" !"));
+    }
+
     /// The inventory is a table, so the count is asserted rather than estimated.
     #[test]
     fn exactly_the_reviewed_widgets_are_registered() {
         assert_eq!(WIDGETS.len(), WIDGET_COUNT);
-        assert_eq!(WIDGET_COUNT, 35);
+        assert_eq!(WIDGET_COUNT, 20);
     }
 
     #[test]
@@ -931,8 +1000,8 @@ mod registry_tests {
     #[test]
     fn every_section_registers_its_reviewed_widget_count() {
         let counts: Vec<usize> = Section::all().iter().map(|s| s.widgets().len()).collect();
-        // Intel 7, Recon 7, Atlas 6, Models 8, Tools 7.
-        assert_eq!(counts, vec![7, 7, 6, 8, 7]);
+        // Intel 4, Recon 5, Atlas 3, Models 4, Tools 4.
+        assert_eq!(counts, vec![4, 5, 3, 4, 4]);
         assert_eq!(counts.iter().sum::<usize>(), WIDGET_COUNT);
     }
 
@@ -958,6 +1027,21 @@ mod registry_tests {
             "system.paths",
             "profile.hardware",
             "system.storage",
+            "intel.volume",
+            "intel.confidence",
+            "intel.origins",
+            "recon.recall",
+            "recon.workload",
+            "atlas.hot_zones",
+            "atlas.cycle_time",
+            "atlas.discovery",
+            "models.by_role",
+            "models.fallback",
+            "models.amplification",
+            "models.failures",
+            "tools.usage",
+            "tools.attribution",
+            "tools.outcomes",
         ] {
             assert!(
                 !WIDGETS.iter().any(|w| w.id == stale),
@@ -968,6 +1052,8 @@ mod registry_tests {
 }
 
 /// Dashboard state. One struct on `App`, mirroring `JobsView` and `LogsView`.
+type DetailCacheKey = (&'static str, u16, usize, usize, bool);
+type DetailCache = std::cell::RefCell<HashMap<DetailCacheKey, Vec<Line<'static>>>>;
 #[derive(Clone, Debug)]
 pub struct ProfileView {
     pub tab: SystemTab,
@@ -975,6 +1061,18 @@ pub struct ProfileView {
     pub report: Option<&'static str>,
     pub grid_scroll: ScrollPane,
     pub report_scroll: ScrollPane,
+    pub panel_scroll: HashMap<&'static str, ScrollPane>,
+    pub table_view: bool,
+    pub sort_descending: bool,
+    pub sort_column: usize,
+    pub collapsed_providers: HashMap<String, bool>,
+    pub report_origin: Option<(usize, usize, Target)>,
+    pub report_offsets: HashMap<&'static str, usize>,
+    pub detail_cache: DetailCache,
+    pub selected_row_keys: HashMap<&'static str, String>,
+    pub selected_row: HashMap<&'static str, usize>,
+    pub custom_period: bool,
+    pub picker_error: Option<String>,
     pub system_scroll: [ScrollPane; 2],
     pub selected_bucket: HashMap<&'static str, usize>,
     pub period_popup: bool,
@@ -1006,6 +1104,18 @@ impl Default for ProfileView {
             report: None,
             grid_scroll: ScrollPane::default(),
             report_scroll: ScrollPane::default(),
+            panel_scroll: HashMap::new(),
+            table_view: false,
+            sort_descending: false,
+            sort_column: 0,
+            collapsed_providers: HashMap::new(),
+            report_origin: None,
+            report_offsets: HashMap::new(),
+            detail_cache: std::cell::RefCell::new(HashMap::new()),
+            selected_row_keys: HashMap::new(),
+            selected_row: HashMap::new(),
+            custom_period: false,
+            picker_error: None,
             system_scroll: [ScrollPane::default(), ScrollPane::default()],
             selected_bucket: HashMap::new(),
             period_popup: false,
@@ -1039,14 +1149,13 @@ impl ProfileView {
     pub fn focused_widgets(&self) -> Vec<&'static WidgetSpec> {
         if self.all_apps {
             [
-                "intel.volume",
                 "recon.outcomes",
-                "atlas.cycles",
-                "models.by_role",
-                "tools.outcomes",
+                "atlas.backlog",
+                "summary.attention",
+                "models.latency",
             ]
             .iter()
-            .filter_map(|id| WIDGETS.iter().find(|w| w.id == *id))
+            .filter_map(|id| view_spec(id))
             .collect()
         } else {
             self.section.widgets()
@@ -1061,8 +1170,19 @@ impl ProfileView {
     }
 
     pub fn accept_snapshot(&mut self, snapshot: ProfileSnapshot) {
+        self.detail_cache.borrow_mut().clear();
+        for (id, key) in &self.selected_row_keys {
+            if let Some(w) = view_spec(id) {
+                let rows = ordered_rows(self, w, &snapshot);
+                let index = rows
+                    .iter()
+                    .position(|r| row_identity(r) == *key)
+                    .unwrap_or(0);
+                self.selected_row.insert(id, index);
+            }
+        }
         for (id, index) in &mut self.selected_bucket {
-            if let Some(widget) = WIDGETS.iter().find(|widget| widget.id == *id) {
+            if let Some(widget) = view_spec(id) {
                 let stamps = |snapshot: &ProfileSnapshot| {
                     let buckets = count_buckets(widget, snapshot);
                     if buckets.is_empty() {
@@ -1093,16 +1213,19 @@ impl ProfileView {
     }
 
     pub fn invalidate(&mut self) {
+        self.detail_cache.borrow_mut().clear();
         self.generation = self.generation.wrapping_add(1);
         self.loaded_at = None;
     }
 
     pub fn picker_choices(&self) -> Vec<String> {
         if self.period_popup {
-            return profile_stats::Period::ALL
+            let mut choices: Vec<_> = profile_stats::Period::ALL
                 .iter()
                 .map(|p| p.label().to_owned())
                 .collect();
+            choices.push("Custom range (RFC3339 with timezone)".into());
+            return choices;
         }
         let mut choices = vec![String::new()];
         if let Some(dimension) = self.filter_popup {
@@ -1151,8 +1274,14 @@ impl ProfileView {
 
     pub fn next_section(&mut self) {
         let all = Section::all();
-        let next = (self.section_index() + 1) % all.len();
-        self.all_apps = false;
+        let next = if self.all_apps {
+            0
+        } else {
+            (self.section_index() + 1) % all.len()
+        };
+        let summary = !self.all_apps && self.section_index() == all.len() - 1;
+        self.all_apps = summary;
+        self.report = None;
         self.grid_scroll.offset = 0;
         self.section = all[next];
         self.focus = 0;
@@ -1160,8 +1289,14 @@ impl ProfileView {
 
     pub fn prev_section(&mut self) {
         let all = Section::all();
-        let prev = (self.section_index() + all.len() - 1) % all.len();
-        self.all_apps = false;
+        let prev = if self.all_apps {
+            all.len() - 1
+        } else {
+            (self.section_index() + all.len() - 1) % all.len()
+        };
+        let summary = !self.all_apps && self.section_index() == 0;
+        self.all_apps = summary;
+        self.report = None;
         self.grid_scroll.offset = 0;
         self.section = all[prev];
         self.focus = 0;
@@ -1215,22 +1350,52 @@ impl ProfileView {
 
 /// Draws the Profile module: the tab strip, then the active tab's body.
 pub fn draw_profile(frame: &mut Frame, app: &App, area: Rect) {
-    let layout = AnalyticsLayout::new(area);
+    let layout = dashboard_layout(app, area, app.profile.grid_scroll.offset);
     draw_tab_strip(frame, app, layout.tabs);
     match app.profile.tab {
         SystemTab::Overview => {
-            draw_filter_strip(frame, app, layout.controls);
             draw_section_navigator(frame, app, layout.apps);
-            draw_section_body(frame, app, layout.content);
+            draw_filter_strip(frame, app, layout.controls);
+            if !layout.too_small {
+                for (metric, rect) in kpis(app).iter().zip(&layout.kpis) {
+                    panels::kpi(frame, *rect, metric);
+                }
+            }
+            if layout.too_small {
+                let y = layout.controls.bottom();
+                frame.render_widget(
+                    Paragraph::new("Profile needs 60×18 · resize to view analytics")
+                        .style(theme::warn()),
+                    Rect::new(area.x, y, area.width, area.bottom().saturating_sub(y)),
+                );
+            } else {
+                draw_section_body(frame, app, layout.content);
+            }
+            if let Some(id) = app.profile.report {
+                if let Some(widget) = view_spec(id) {
+                    let popup = expanded_area(area);
+                    frame.render_widget(ratatui::widgets::Clear, popup);
+                    draw_report(frame, app, widget, popup);
+                }
+            }
         }
         SystemTab::System => {
             draw_system_tab(frame, app, strip(area, 1, area.height.saturating_sub(2)))
         }
     }
-    draw_status_strip(frame, app, layout.status);
     if app.profile.filter_popup.is_some() || app.profile.period_popup {
         draw_picker(frame, app, area);
     }
+}
+fn expanded_area(area: Rect) -> Rect {
+    let w = area.width * 9 / 10;
+    let h = area.height * 9 / 10;
+    Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    )
 }
 
 /// The System tab: Host and Paths, the panes this module always had. Logs stays
@@ -1244,22 +1409,9 @@ fn system_lines(app: &App, pane: usize, width: u16) -> Vec<Line<'static>> {
     };
     components::measured_lines(lines.into_iter().map(Line::raw).collect(), width)
 }
-fn draw_system_tab(frame: &mut Frame, app: &App, area: Rect) {
-    let (content, actions) = super::ui::system_areas(area);
-    super::ui::draw_button(
-        frame,
-        app,
-        super::app::ButtonId::RefreshHardware,
-        "Refresh hardware",
-        super::ui::system_button(actions),
-    );
-    let panes = if content.height < 27 {
-        super::ui::pane_tabs(
-            frame,
-            app,
-            Rect::new(content.x, content.y, content.width, 1),
-            &["Host", "Paths"],
-        );
+fn system_panes(app: &App, area: Rect) -> Vec<(usize, Rect)> {
+    let (content, _) = super::ui::system_areas(area);
+    if content.height < 27 {
         let selected = app.compact_pages[super::app::ModuleId::System.index()] % 2;
         vec![(
             selected,
@@ -1275,7 +1427,26 @@ fn draw_system_tab(frame: &mut Frame, app: &App, area: Rect) {
             .min(content.height as usize / 2) as u16;
         let areas = rows(content, &[host_h, 0]);
         vec![(0, areas[0]), (1, areas[1])]
-    };
+    }
+}
+fn draw_system_tab(frame: &mut Frame, app: &App, area: Rect) {
+    let (content, actions) = super::ui::system_areas(area);
+    super::ui::draw_button(
+        frame,
+        app,
+        super::app::ButtonId::RefreshHardware,
+        "Refresh hardware",
+        super::ui::system_button(actions),
+    );
+    if content.height < 27 {
+        super::ui::pane_tabs(
+            frame,
+            app,
+            Rect::new(content.x, content.y, content.width, 1),
+            &["Host", "Paths"],
+        );
+    }
+    let panes = system_panes(app, area);
     for (index, area) in panes {
         let block = theme::panel(if index == 0 { " host " } else { " paths " });
         let inner = block.inner(area);
@@ -1350,7 +1521,9 @@ fn draw_actions(frame: &mut Frame, app: &App, area: Rect, actions: &[(Target, St
         };
         frame.render_widget(
             Paragraph::new(label.as_str()).style(if app.focus == *target || active {
-                theme::selected()
+                ratatui::style::Style::default()
+                    .fg(theme::BG)
+                    .bg(theme::ACCENT)
             } else {
                 theme::dim()
             }),
@@ -1423,10 +1596,13 @@ fn draw_status_strip(frame: &mut Frame, app: &App, area: Rect) {
                     Span::styled(charts::count(jobs as u64), theme::text()),
                     Span::styled(" · queued ", theme::muted()),
                     Span::styled(queued, theme::text()),
-                    Span::styled(" · widgets ", theme::muted()),
+                    Span::styled(" · views ", theme::muted()),
                     Span::styled(charts::count(WIDGET_COUNT as u64), theme::text()),
                     Span::styled(" · updated ", theme::muted()),
-                    Span::styled(snapshot.status.last_updated.clone(), theme::dim()),
+                    Span::styled(
+                        format!("{} UTC", snapshot.captured_at.trim_end_matches('Z')),
+                        theme::dim(),
+                    ),
                 ])
             }
             None => Line::from(Span::styled(
@@ -1486,10 +1662,24 @@ fn draw_filter_strip(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(_, label)| components::text_width(label))
         .sum::<usize>() as u16;
     draw_actions(frame, app, area, &labels);
-    if !active.is_empty() {
+    let x = area.x.saturating_add(used).min(area.right());
+    if active.is_empty() {
+        draw_status_strip(frame, app, Rect::new(x, area.y, area.right() - x, 1));
+    } else {
         let x = area.x.saturating_add(used).min(area.right());
         frame.render_widget(
-            Paragraph::new(active.join(" · ")).style(theme::accent()),
+            Paragraph::new(format!(
+                "{}{}",
+                if let Some(error) = &app.profile.error {
+                    format!("Stale · {error} · ")
+                } else if app.profile.loading {
+                    "Refreshing · ".into()
+                } else {
+                    String::new()
+                },
+                active.join(" · ")
+            ))
+            .style(theme::accent()),
             Rect::new(x, area.y, area.right() - x, area.height),
         );
     }
@@ -1498,7 +1688,7 @@ fn draw_section_navigator(frame: &mut Frame, app: &App, area: Rect) {
     // On compact screens expose a measured current-app selector; activation cycles all six choices.
     if area.width < 66 {
         let label = if app.profile.all_apps {
-            "All apps"
+            "Summary"
         } else {
             app.profile.section.label()
         };
@@ -1509,7 +1699,7 @@ fn draw_section_navigator(frame: &mut Frame, app: &App, area: Rect) {
             &[(Target::ProfileApp(6), format!(" {label} [0–5, [, ]] "))],
         );
     } else {
-        let mut actions = vec![(Target::ProfileApp(0), " All apps ".into())];
+        let mut actions = vec![(Target::ProfileApp(0), " Summary ".into())];
         actions.extend(
             Section::all()
                 .iter()
@@ -1519,64 +1709,1318 @@ fn draw_section_navigator(frame: &mut Frame, app: &App, area: Rect) {
         draw_actions(frame, app, area, &actions);
     }
 }
-fn content_layout(app: &App) -> AnalyticsLayout {
-    AnalyticsLayout::new(super::ui::body_rect(app))
-}
-fn grid_offset(app: &App, layout: &AnalyticsLayout) -> usize {
-    let mut pane = app.profile.grid_scroll.clone();
-    pane.reveal(
+pub fn reveal_focus(app: &mut App) {
+    let layout = content_layout(app);
+    app.profile.grid_scroll.reveal(
         layout.focus_start(app.profile.focus),
-        if layout.compact {
-            1
-        } else {
-            layout.card_height
-        },
+        layout
+            .panel_height(app.profile.focus)
+            .min(layout.content.height as usize),
         layout.content.height as usize,
     );
-    pane.offset
+    app.profile
+        .grid_scroll
+        .scroll(0, layout.extent(), layout.content.height as usize);
 }
-fn draw_section_body(frame: &mut Frame, app: &App, area: Rect) {
-    let widgets = app.profile.focused_widgets();
-    if let Some(id) = app.profile.report {
-        if let Some(widget) = WIDGETS.iter().find(|w| w.id == id) {
-            draw_report(frame, app, widget, area);
-        }
-        return;
+fn row_identity(row: &serde_json::Value) -> String {
+    [
+        "app",
+        "owner_id",
+        "item_id",
+        "run_id",
+        "label",
+        "tool_id",
+        "engine",
+        "provider",
+        "model",
+        "role",
+        "scope",
+        "quota_group",
+        "stage",
+        "unit",
+        "mode",
+        "tag",
+        "domain",
+        "origin",
+        "bucket",
+        "cause",
+    ]
+    .iter()
+    .filter_map(|key| row.get(*key).map(|v| format!("{key}:{v}")))
+    .collect::<Vec<_>>()
+    .join("|")
+}
+fn compare_cells(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ordering {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        _ => a.to_string().cmp(&b.to_string()),
     }
-    let layout = content_layout(app);
-    let offset = grid_offset(app, &layout);
-    for (index, widget) in widgets.iter().enumerate() {
-        if let Some(rect) = layout.card(index, offset) {
-            app.layout
-                .borrow_mut()
-                .register(Target::ProfileCard(index), rect);
-            if layout.compact {
-                frame.render_widget(
-                    Paragraph::new(format!(
-                        "{} {} · {}",
-                        if index == app.profile.focus {
-                            "▸"
-                        } else {
-                            " "
-                        },
-                        widget.section.label(),
-                        widget.title
-                    ))
-                    .style(if index == app.profile.focus {
-                        theme::accent()
-                    } else {
-                        theme::text()
-                    }),
-                    rect,
-                );
-            } else {
-                draw_widget_panel(frame, app, widget, rect);
+}
+fn sorted_rows(app: &App, w: &WidgetSpec, s: &ProfileSnapshot) -> Vec<serde_json::Value> {
+    ordered_rows(&app.profile, w, s)
+}
+fn ordered_rows(
+    profile: &ProfileView,
+    w: &WidgetSpec,
+    s: &ProfileSnapshot,
+) -> Vec<serde_json::Value> {
+    let data = widget_data(w, s);
+    let mut rows = data.as_array().cloned().unwrap_or_default();
+    if let Some(key) = w.detail_columns.get(profile.sort_column) {
+        if profile.sort_column > 0 || profile.sort_descending {
+            rows.sort_by(|a, b| {
+                compare_cells(&a[*key], &b[*key])
+                    .then_with(|| row_identity(a).cmp(&row_identity(b)))
+            });
+            if profile.sort_descending {
+                rows.reverse();
             }
         }
     }
+    if w.id == "models.performance" {
+        rows.retain(|row| {
+            !row["is_model_row"].as_bool().unwrap_or(false)
+                || !profile
+                    .collapsed_providers
+                    .get(row["provider"].as_str().unwrap_or(""))
+                    .copied()
+                    .unwrap_or(false)
+        });
+        rows.sort_by(|a, b| {
+            a["provider"]
+                .to_string()
+                .cmp(&b["provider"].to_string())
+                .then_with(|| {
+                    a["is_model_row"]
+                        .as_bool()
+                        .unwrap_or(false)
+                        .cmp(&b["is_model_row"].as_bool().unwrap_or(false))
+                })
+        });
+    }
+    rows
 }
+fn remember_row(app: &mut App, id: &'static str, index: usize) {
+    app.profile.selected_row.insert(id, index);
+    if let (Some(w), Some(snapshot)) = (view_spec(id), app.profile.snapshot.as_ref()) {
+        if let Some(row) = sorted_rows(app, w, snapshot).get(index) {
+            app.profile.selected_row_keys.insert(id, row_identity(row));
+        }
+    }
+    app.profile.detail_cache.borrow_mut().clear();
+}
+fn select_row(app: &mut App, delta: isize) {
+    let id = app
+        .profile
+        .report
+        .or_else(|| app.profile.focused_widget().map(|w| w.id));
+    let Some(w) = id.and_then(view_spec) else {
+        return;
+    };
+    let Some(s) = app.profile.snapshot.as_ref() else {
+        return;
+    };
+    let rows = sorted_rows(app, w, s);
+    let n = rows.len();
+    let index = app.profile.selected_row.entry(w.id).or_default();
+    *index = index.saturating_add_signed(delta).min(n.saturating_sub(1));
+    if let Some(row) = rows.get(*index) {
+        app.profile
+            .selected_row_keys
+            .insert(w.id, row_identity(row));
+    }
+    let selected = *index;
+    let layout = content_layout(app);
+    if app.profile.report.is_none() {
+        app.profile.panel_scroll.entry(w.id).or_default().reveal(
+            selected + 1,
+            1,
+            layout.panel_height(app.profile.focus).saturating_sub(2),
+        );
+    }
+}
+fn open_selected_owner(app: &mut App) {
+    let Some(id) = app.profile.report else {
+        return;
+    };
+    let Some(s) = app.profile.snapshot.as_ref() else {
+        return;
+    };
+    let Some(w) = view_spec(id) else {
+        return;
+    };
+    let rows = sorted_rows(app, w, s);
+    let index = app.profile.selected_row.get(id).copied().unwrap_or(0);
+    let Some(row) = rows.get(index) else {
+        return;
+    };
+    if id == "recon.unresolved" {
+        if let Some(run) = row["run_id"].as_str() {
+            open_run_owner(app, run);
+        }
+        return;
+    }
+    if id != ATTENTION.id {
+        return;
+    }
+    let owner = row["owner_id"].as_str().unwrap_or("").to_owned();
+    match row["owner_kind"].as_str().unwrap_or("") {
+        "run" => open_run_owner(app, &owner),
+        "intel_job" => {
+            app.profile.report = None;
+            if let Err(error) = app.open_profile_intel_job(&owner) {
+                app.status = format!("Could not open report: {error}");
+            }
+        }
+        "atlas_run" => {
+            app.profile.report = None;
+            app.select(super::app::ModuleId::Atlas.index());
+            if let Some(index) = app.atlas_runs.iter().position(|run| run.id == owner) {
+                app.activate_target(Target::AtlasHistory(index));
+            } else {
+                app.status = "Atlas cycle is no longer retained".into();
+            }
+        }
+        "provider_scope" => {
+            let capacity = view_spec("models.capacity").unwrap();
+            let group = row["item_id"].as_str().unwrap_or("");
+            let index = sorted_rows(app, capacity, s).iter().position(|r| {
+                format!(
+                    "{} {}",
+                    r["provider"].as_str().unwrap_or(""),
+                    r["scope"].as_str().unwrap_or("")
+                ) == owner
+                    && r["quota_group"].as_str().unwrap_or("") == group
+            });
+            let Some(index) = index else {
+                app.status = "Capacity scope is no longer retained".into();
+                return;
+            };
+            remember_row(app, capacity.id, index);
+            app.profile.report = Some("models.capacity");
+            app.profile.report_scroll.offset = index.saturating_sub(2);
+            app.profile.table_view = true;
+            app.set_focus(Target::ProfileReport);
+        }
+        _ => app.status = "No retained owner for this attention item".into(),
+    }
+}
+fn open_run_owner(app: &mut App, run_id: &str) {
+    match app.store.get_run(run_id) {
+        Ok(Some(run)) => {
+            app.profile.report = None;
+            app.select(super::app::ModuleId::Recon.index());
+            if let Err(error) = app.open_thread(&run.thread_id) {
+                app.status = format!("Could not open investigation: {error}");
+            }
+        }
+        Ok(None) => app.status = "Investigation is no longer retained".into(),
+        Err(error) => app.status = format!("Could not load investigation: {error}"),
+    }
+}
+
+fn w_is_time(widget: &WidgetSpec) -> bool {
+    widget.renderer == RendererKind::Time
+}
+fn view_spec(id: &str) -> Option<&'static WidgetSpec> {
+    if id == ATTENTION.id {
+        Some(&ATTENTION)
+    } else {
+        WIDGETS.iter().find(|w| w.id == id)
+    }
+}
+fn content_layout(app: &App) -> LayoutResult {
+    dashboard_layout(
+        app,
+        super::ui::body_rect(app),
+        app.profile.grid_scroll.offset,
+    )
+}
+fn dashboard_layout(app: &App, area: Rect, offset: usize) -> LayoutResult {
+    let page = if app.profile.all_apps {
+        DashboardPage::Summary
+    } else {
+        match app.profile.section {
+            Section::Recon => DashboardPage::Recon,
+            Section::Atlas => DashboardPage::Atlas,
+            _ => DashboardPage::Other,
+        }
+    };
+    LayoutResult::new(area, page, app.profile.focused_widgets().len(), offset)
+}
+fn grid_offset(app: &App, layout: &LayoutResult) -> usize {
+    app.profile.grid_scroll.offset.min(
+        layout
+            .extent()
+            .saturating_sub(layout.content.height as usize),
+    )
+}
+fn draw_section_body(frame: &mut Frame, app: &App, area: Rect) {
+    let widgets = app.profile.focused_widgets();
+    let initial = content_layout(app);
+    let layout = dashboard_layout(app, super::ui::body_rect(app), grid_offset(app, &initial));
+    if layout.too_small {
+        frame.render_widget(
+            Paragraph::new("Profile needs 60×18 · resize to view analytics").style(theme::warn()),
+            area,
+        );
+        return;
+    }
+    for geometry in &layout.panels {
+        let widget = widgets[geometry.index];
+        app.layout
+            .borrow_mut()
+            .register(Target::ProfileCard(geometry.index), geometry.rect);
+        let width = geometry.rect.width.saturating_sub(4) as usize;
+        let height = geometry.height.saturating_sub(2);
+        let mut lines = dashboard_lines(app, widget, width, height);
+        let logical_rows = app
+            .profile
+            .snapshot
+            .as_ref()
+            .map(|s| sorted_rows(app, widget, s).len())
+            .unwrap_or(0);
+        let content_offset = app
+            .profile
+            .panel_scroll
+            .get(widget.id)
+            .map(|p| p.offset)
+            .unwrap_or(0)
+            .min(lines.len().saturating_sub(height));
+        if widget.renderer != RendererKind::Time {
+            let offset = app
+                .profile
+                .panel_scroll
+                .get(widget.id)
+                .map(|p| p.offset)
+                .unwrap_or(0)
+                .min(lines.len().saturating_sub(height));
+            let hidden = offset + height < lines.len();
+            lines = lines.into_iter().skip(offset).take(height).collect();
+            if hidden && height > 0 {
+                lines.truncate(height - 1);
+                lines.push(Line::styled("See more · Enter", theme::accent()));
+            }
+        }
+        if widget.renderer == RendererKind::Table || widget.id == ATTENTION.id {
+            let prefix = usize::from(
+                widget.applicable_filters.is_empty() || widget.id == "recon.unresolved",
+            ) + usize::from(
+                !widget.applicable_filters.is_empty()
+                    && ["app", "provider", "role", "mode", "tool", "category"]
+                        .iter()
+                        .any(|d| {
+                            !app.profile.filter_value(d).is_empty()
+                                && !widget.applicable_filters.contains(d)
+                        }),
+            );
+            for row in 0..logical_rows {
+                let line = prefix + 1 + row;
+                if line < content_offset {
+                    continue;
+                }
+                let virtual_y = 1 + line - content_offset;
+                if virtual_y >= geometry.source_offset
+                    && virtual_y < geometry.source_offset + geometry.rect.height as usize
+                    && virtual_y < geometry.height - 1
+                {
+                    app.layout.borrow_mut().register(
+                        Target::ProfilePanelRow(geometry.index, row),
+                        Rect::new(
+                            geometry.rect.x + 2,
+                            geometry.rect.y + (virtual_y - geometry.source_offset) as u16,
+                            width as u16,
+                            1,
+                        ),
+                    );
+                }
+            }
+        }
+        if w_is_time(widget) {
+            if let Some(snapshot) = &app.profile.snapshot {
+                let buckets = count_buckets(widget, snapshot);
+                let series = buckets.is_empty();
+                let count = if series {
+                    series_points(widget, snapshot).len()
+                } else {
+                    buckets.len()
+                };
+                let selected = app
+                    .profile
+                    .selected_bucket
+                    .get(widget.id)
+                    .copied()
+                    .unwrap_or(count.saturating_sub(1));
+                let first = lines
+                    .iter()
+                    .position(|line| line.to_string().contains('│'))
+                    .unwrap_or(0);
+                let rows = lines
+                    .iter()
+                    .skip(first)
+                    .take_while(|line| line.to_string().contains('│'))
+                    .count();
+                let source_top = geometry.source_offset;
+                let top = (first + 1).max(source_top);
+                let bottom = (first + 1 + rows).min(source_top + geometry.rect.height as usize);
+                if bottom > top {
+                    for (index, x, slot) in charts::plot_targets(count, width, selected, series) {
+                        app.layout.borrow_mut().register(
+                            Target::ProfilePanelBucket(geometry.index, index),
+                            Rect::new(
+                                geometry.rect.x + 2 + x as u16,
+                                geometry.rect.y + (top - source_top) as u16,
+                                slot as u16,
+                                (bottom - top) as u16,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        panels::panel(
+            frame,
+            geometry,
+            widget.title,
+            app.focus == Target::ProfileCard(geometry.index),
+            panels::clipped(lines, width),
+        );
+    }
+}
+fn rate_kpi(label: &'static str, numerator: u64, denominator: u64, note: &str) -> Kpi {
+    Kpi {
+        label,
+        value: if denominator == 0 {
+            "N/A".into()
+        } else {
+            format!("{:.1}%", numerator as f64 * 100.0 / denominator as f64)
+        },
+        coverage: format!("{numerator}/{denominator} · {note}"),
+    }
+}
+fn count_kpi(label: &'static str, value: Option<u64>, note: String) -> Kpi {
+    Kpi {
+        label,
+        value: value.map(charts::count).unwrap_or_else(|| "N/A".into()),
+        coverage: note,
+    }
+}
+fn kpis(app: &App) -> Vec<Kpi> {
+    let Some(s) = app.profile.snapshot.as_ref() else {
+        let labels = if app.profile.all_apps {
+            [
+                "Report completion",
+                "Answered directives",
+                "Atlas completion",
+                "Successful model p95",
+            ]
+        } else {
+            match app.profile.section {
+                Section::Intel => [
+                    "Distinct new articles",
+                    "Body availability",
+                    "Report completion",
+                    "Top-three publisher share",
+                ],
+                Section::Recon => [
+                    "Terminal runs",
+                    "Answered directives",
+                    "Unresolved · Live",
+                    "Corroboration coverage",
+                ],
+                Section::Atlas => [
+                    "Terminal cycles",
+                    "Completed share",
+                    "Blocked · Live",
+                    "Oldest pending · Live",
+                ],
+                Section::Models => [
+                    "Sends",
+                    "Final operation failures",
+                    "Queue p95",
+                    "Active / max · Live",
+                ],
+                Section::Tools => [
+                    "Logical calls",
+                    "Usable search fetches",
+                    "Remote errors",
+                    "Evidence yield",
+                ],
+            }
+        };
+        return labels
+            .into_iter()
+            .map(|label| Kpi {
+                label,
+                value: "N/A".into(),
+                coverage: "Loading statistics".into(),
+            })
+            .collect();
+    };
+    let report_complete = s.intel.reports.iter().map(|r| r.completed as u64).sum();
+    let report_n = s
+        .intel
+        .reports
+        .iter()
+        .map(|r| (r.completed + r.partial + r.failed) as u64)
+        .sum();
+    let answered = s.recon.directives.iter().map(|r| r.answered as u64).sum();
+    let directive_n = s.recon.directives.iter().map(|r| r.n as u64).sum();
+    let cycle_complete = s
+        .atlas
+        .cycle_outcomes
+        .iter()
+        .map(|r| r.completed as u64)
+        .sum();
+    let cycle_n = s
+        .atlas
+        .cycle_outcomes
+        .iter()
+        .map(|r| (r.completed + r.partial + r.failed + r.cancelled) as u64)
+        .sum();
+    let report = || {
+        rate_kpi(
+            "Report completion",
+            report_complete,
+            report_n,
+            "latest revisions",
+        )
+    };
+    let directives = || {
+        rate_kpi(
+            "Answered directives",
+            answered,
+            directive_n,
+            "assessments; unknown included",
+        )
+    };
+    let atlas = || {
+        rate_kpi(
+            "Atlas completion",
+            cycle_complete,
+            cycle_n,
+            "cancelled included",
+        )
+    };
+    let latency = || Kpi {
+        label: "Successful model p95",
+        value: charts::duration_ms(s.models.period_summary.successful_execution_p95_ms),
+        coverage: format!(
+            "N={} · successful executions",
+            s.models.period_summary.successful_execution_n
+        ),
+    };
+    if app.profile.all_apps {
+        return vec![report(), directives(), atlas(), latency()];
+    }
+    match app.profile.section {
+        Section::Intel => vec![
+            count_kpi(
+                "Distinct new articles",
+                s.intel.distinct_new_articles,
+                "Distinct cohort".into(),
+            ),
+            match (
+                s.intel.body_available_articles,
+                s.intel.body_eligible_articles,
+            ) {
+                (Some(a), Some(n)) => rate_kpi("Body availability", a, n, "distinct articles"),
+                _ => Kpi {
+                    label: "Body availability",
+                    value: "N/A".into(),
+                    coverage: "Distinct body coverage unavailable".into(),
+                },
+            },
+            report(),
+            Kpi {
+                label: "Top-three publisher share",
+                value: charts::percent(s.intel.publishers.first().map(|r| r.top3_concentration)),
+                coverage: format!(
+                    "N={} · publisher cohort",
+                    s.intel
+                        .publishers
+                        .iter()
+                        .map(|r| r.articles as u64)
+                        .sum::<u64>()
+                ),
+            },
+        ],
+        Section::Recon => {
+            let runs = s
+                .recon
+                .outcomes
+                .iter()
+                .map(|r| {
+                    (r.completed_with_evidence
+                        + r.completed_zero_evidence
+                        + r.partial
+                        + r.failed
+                        + r.cancelled) as u64
+                })
+                .sum();
+            let eligible = s
+                .recon
+                .diversity
+                .iter()
+                .filter(|r| r.eligible)
+                .map(|r| r.eligible_scopes as u64)
+                .sum();
+            let corroborated = s
+                .recon
+                .diversity
+                .iter()
+                .filter(|r| r.eligible)
+                .map(|r| r.scopes_with_two_successful as u64)
+                .sum();
+            vec![
+                count_kpi("Terminal runs", Some(runs), "Cancelled included".into()),
+                directives(),
+                count_kpi(
+                    "Unresolved · Live",
+                    Some(s.recon.unresolved_live_total),
+                    "Live · ignores period".into(),
+                ),
+                rate_kpi(
+                    "Corroboration coverage",
+                    corroborated,
+                    eligible,
+                    "eligible category scopes",
+                ),
+            ]
+        }
+        Section::Atlas => {
+            // Never add unlike backlog units. Each stage/unit is visible verbatim.
+            let blocked = s
+                .atlas
+                .backlog
+                .iter()
+                .filter(|r| r.blocked > 0)
+                .map(|r| format!("{} {} {}", r.blocked, r.unit, r.stage))
+                .collect::<Vec<_>>()
+                .join("; ");
+            vec![
+                count_kpi(
+                    "Terminal cycles",
+                    Some(cycle_n),
+                    "Cancelled included".into(),
+                ),
+                rate_kpi(
+                    "Completed share",
+                    cycle_complete,
+                    cycle_n,
+                    "cancelled included",
+                ),
+                Kpi {
+                    label: "Blocked · Live",
+                    value: if blocked.is_empty() {
+                        "0".into()
+                    } else {
+                        blocked
+                    },
+                    coverage: "By stage / unit · Live".into(),
+                },
+                Kpi {
+                    label: "Oldest pending · Live",
+                    value: charts::duration_ms(
+                        s.atlas
+                            .backlog
+                            .iter()
+                            .filter_map(|r| r.oldest_pending_ms)
+                            .max(),
+                    ),
+                    coverage: "Live · ignores period".into(),
+                },
+            ]
+        }
+        Section::Models => {
+            let rows: Vec<_> = s
+                .models
+                .capacity
+                .iter()
+                .filter(|r| {
+                    (s.filters.provider.is_empty() || s.filters.provider == r.provider)
+                        && (s.filters.role.is_empty() || s.filters.role == r.scope)
+                })
+                .collect();
+            let capacity = if rows.len() == 1 {
+                format!(
+                    "{} / {}",
+                    rows[0].active,
+                    rows[0]
+                        .max_concurrency
+                        .filter(|n| *n > 0)
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "N/A".into())
+                )
+            } else {
+                "N/A".into()
+            };
+            vec![
+                count_kpi(
+                    "Sends",
+                    Some(s.models.period_summary.sends),
+                    "Actual wire sends".into(),
+                ),
+                count_kpi(
+                    "Final operation failures",
+                    Some(s.models.period_summary.final_failures),
+                    format!(
+                        "N={} terminal · cancelled included",
+                        s.models.period_summary.terminal_operations
+                    ),
+                ),
+                Kpi {
+                    label: "Queue p95",
+                    value: charts::duration_ms(s.models.period_summary.queue_p95_ms),
+                    coverage: format!(
+                        "N={} · measured enqueue-to-send",
+                        s.models.period_summary.queue_n
+                    ),
+                },
+                Kpi {
+                    label: "Active / max · Live",
+                    value: capacity,
+                    coverage: if rows.len() == 1 {
+                        format!("{} / {} · Live", rows[0].provider, rows[0].scope)
+                    } else {
+                        "Select one quota scope · Live".into()
+                    },
+                },
+            ]
+        }
+        Section::Tools => {
+            let calls = s.tools.logical_calls;
+            let usable = s
+                .tools
+                .engine_health
+                .iter()
+                .map(|r| r.valid_serps + r.verified_zero)
+                .sum();
+            let fetches = s.tools.engine_health.iter().map(|r| r.fetches).sum();
+            // Remote error percentages cannot reconstruct exact eligible counts.
+            let errors = rate_kpi(
+                "Remote errors",
+                s.tools.remote_errors,
+                s.tools.eligible_remote_calls,
+                "eligible remote calls",
+            );
+            let evidence = s.tools.evidence.iter().map(|r| r.with_evidence).sum();
+            let eligible = s.tools.evidence.iter().map(|r| r.successful_nonempty).sum();
+            vec![
+                count_kpi("Logical calls", Some(calls), "Logical invocations".into()),
+                rate_kpi(
+                    "Usable search fetches",
+                    usable,
+                    fetches,
+                    "valid + verified zero",
+                ),
+                errors,
+                if s.tools
+                    .evidence
+                    .iter()
+                    .any(|r| r.successful_nonempty > 0 && r.acceptance_pct.is_none())
+                {
+                    Kpi {
+                        label: "Evidence yield",
+                        value: "N/A".into(),
+                        coverage: format!("Linked {evidence}/{eligible} · incomplete provenance"),
+                    }
+                } else {
+                    rate_kpi(
+                        "Evidence yield",
+                        evidence,
+                        eligible,
+                        "logical calls; identities nonadditive",
+                    )
+                },
+            ]
+        }
+    }
+}
+fn attention_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let Some(s) = &app.profile.snapshot else {
+        return vec![Line::raw("Loading statistics")];
+    };
+    if s.attention.is_empty() {
+        return vec![
+            Line::raw("No recorded blockers in available telemetry."),
+            Line::styled(format!("Coverage since {}", s.observed_since), theme::dim()),
+        ];
+    }
+    let selected = app
+        .profile
+        .selected_row
+        .get(ATTENTION.id)
+        .copied()
+        .unwrap_or(0);
+    let mut lines = vec![panels::table_row(
+        &[
+            "App / item".into(),
+            "Reason".into(),
+            "Age".into(),
+            "Action".into(),
+        ],
+        &[30, 35, 10, 25],
+        width,
+        false,
+    )];
+    for (i, row) in sorted_rows(app, &ATTENTION, s).into_iter().enumerate() {
+        let Ok(r) = serde_json::from_value::<profile_stats::AttentionRow>(row) else {
+            continue;
+        };
+        lines.push(panels::table_row(
+            &[
+                format!(
+                    "{} / {}",
+                    r.app,
+                    if r.item_id.is_empty() {
+                        &r.owner_id
+                    } else {
+                        &r.item_id
+                    }
+                ),
+                r.reason.clone(),
+                charts::duration_ms(r.age_ms),
+                r.action.clone(),
+            ],
+            &[30, 35, 10, 25],
+            width,
+            i == selected,
+        ));
+    }
+    lines
+}
+fn dashboard_lines(app: &App, w: &WidgetSpec, width: usize, height: usize) -> Vec<Line<'static>> {
+    let Some(s) = app.profile.snapshot.as_ref() else {
+        return vec![Line::raw(if app.profile.error.is_some() {
+            "Unavailable statistics"
+        } else {
+            "Loading statistics"
+        })];
+    };
+    let mut lines = Vec::new();
+    if w.applicable_filters.is_empty() {
+        lines.push(Line::styled(
+            "Live · ignores historical period / dimensions",
+            theme::dim(),
+        ));
+    }
+    if !w.applicable_filters.is_empty() {
+        let unused = ["app", "provider", "role", "mode", "tool", "category"]
+            .into_iter()
+            .filter(|d| {
+                !app.profile.filter_value(d).is_empty() && !w.applicable_filters.contains(d)
+            })
+            .collect::<Vec<_>>();
+        if !unused.is_empty() {
+            lines.push(Line::styled(
+                format!("Not applicable: {}", unused.join(", ")),
+                theme::muted(),
+            ));
+        }
+    }
+    let selected = app
+        .profile
+        .selected_bucket
+        .get(w.id)
+        .copied()
+        .unwrap_or(point_count(w, s).saturating_sub(1));
+    match w.id {
+        "summary.attention" => lines.extend(attention_lines(app, width)),
+        "recon.outcomes" | "atlas.cycles" => {
+            let buckets = count_buckets(w, s);
+            let n = buckets.iter().map(charts::TimeBucket::total).sum::<u64>();
+            lines.push(Line::styled(
+                format!("{} · N={n} · cancelled included", s.filters.period.label()),
+                theme::dim(),
+            ));
+            if let Some(error) = &app.profile.error {
+                lines.insert(0, Line::styled(format!("Stale · {error}"), theme::warn()));
+            }
+            if app.profile.loading {
+                lines.insert(
+                    0,
+                    Line::styled("Refreshing · previous snapshot", theme::warn()),
+                );
+            }
+            if let Some(bucket) = buckets.get(selected) {
+                lines.push(Line::styled(
+                    format!("Selected {} · N={}", bucket.start, bucket.total()),
+                    theme::text(),
+                ));
+            }
+            lines.extend(charts::time_plot(
+                &buckets,
+                width,
+                height.saturating_sub(lines.len() + 1),
+                selected,
+            ));
+            let keys: &[(&str, &str)] = if w.id == "recon.outcomes" {
+                &[
+                    ("completed_with_evidence", "evidence"),
+                    ("completed_zero_evidence", "zero"),
+                    ("partial", "partial"),
+                    ("failed", "failed"),
+                    ("cancelled", "cancelled"),
+                ]
+            } else {
+                &[
+                    ("completed", "completed"),
+                    ("partial", "partial"),
+                    ("failed", "failed"),
+                    ("cancelled", "cancelled"),
+                ]
+            };
+            lines.push(Line::from(
+                keys.iter()
+                    .map(|(key, label)| {
+                        Span::styled(format!("{label}  "), charts::series_style(key))
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        "models.latency" | "models.queue" => {
+            lines.push(Line::styled(
+                format!(
+                    "{} · seconds · measured N={}",
+                    s.filters.period.label(),
+                    series_points(w, s).iter().map(|p| p.n).sum::<u64>()
+                ),
+                theme::dim(),
+            ));
+            lines.extend(charts::series_plot(
+                &series_points(w, s),
+                width,
+                height.saturating_sub(lines.len()),
+                selected,
+            ));
+        }
+        "intel.reports" => {
+            let maximum = s
+                .intel
+                .reports
+                .iter()
+                .map(|r| (r.completed + r.partial + r.failed) as u64)
+                .max()
+                .unwrap_or(0);
+            lines.push(Line::styled(
+                format!("Latest revisions · reports · scale 0–{maximum}"),
+                theme::dim(),
+            ));
+            for r in &s.intel.reports {
+                let series = vec![
+                    ("completed".into(), r.completed as u64),
+                    ("partial".into(), r.partial as u64),
+                    ("failed".into(), r.failed as u64),
+                ];
+                let label = width.min(18);
+                let mut line = charts::stacked_bar(
+                    &r.mode,
+                    label,
+                    &series,
+                    width.saturating_sub(label + 10),
+                    maximum,
+                );
+                line.spans.push(Span::raw(format!(
+                    " N={}",
+                    r.completed + r.partial + r.failed
+                )));
+                lines.push(line);
+            }
+            lines.push(legend(&["completed", "partial", "failed"]));
+            lines.push(Line::styled(
+                format!(
+                    "Live waiting {} · blocked {}",
+                    s.intel
+                        .reports
+                        .iter()
+                        .map(|r| r.waiting as u64)
+                        .sum::<u64>(),
+                    s.intel
+                        .reports
+                        .iter()
+                        .map(|r| r.blocked as u64)
+                        .sum::<u64>()
+                ),
+                theme::dim(),
+            ));
+        }
+        "recon.directives" => {
+            lines.push(Line::styled(
+                "Assessment share · 0–100% · actual mode",
+                theme::dim(),
+            ));
+            for r in &s.recon.directives {
+                let series = vec![
+                    ("answered".into(), r.answered as u64),
+                    ("partial".into(), r.partial as u64),
+                    ("unresolved".into(), r.unresolved as u64),
+                    ("blocked".into(), r.blocked as u64),
+                    ("unknown".into(), r.unknown as u64),
+                ];
+                let label = width.min(16);
+                let mut line = charts::stacked_bar(
+                    &r.mode,
+                    label,
+                    &series,
+                    width.saturating_sub(label + 10),
+                    r.n as u64,
+                );
+                line.spans.push(Span::raw(format!(" N={}", r.n)));
+                lines.push(line);
+            }
+            lines.push(legend(&[
+                "answered",
+                "partial",
+                "unresolved",
+                "blocked",
+                "unknown",
+            ]));
+        }
+        "recon.stages" => {
+            let max = s
+                .recon
+                .stages
+                .iter()
+                .flat_map(|r| [r.mean_exec_ms, r.mean_wait_ms])
+                .flatten()
+                .max()
+                .unwrap_or(0);
+            lines.push(Line::styled(
+                format!("Mean seconds · shared scale 0–{:.1}s", max as f64 / 1000.0),
+                theme::dim(),
+            ));
+            for r in &s.recon.stages {
+                let label = format!("{} N={}", r.stage, r.n);
+                lines.extend(charts::paired_bars(
+                    &label,
+                    width.min(28),
+                    r.mean_exec_ms,
+                    r.mean_wait_ms,
+                    max,
+                    width.saturating_sub(39),
+                ));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("execution", theme::accent()),
+                Span::styled("  wait", theme::warn()),
+            ]));
+        }
+        "atlas.temperature" => {
+            let maximum = s
+                .atlas
+                .temperature_changes
+                .iter()
+                .filter(|r| r.comparable)
+                .filter_map(|r| r.delta)
+                .map(f64::abs)
+                .fold(0.0, f64::max);
+            lines.push(Line::styled(
+                format!("Signed score points · zero centre · ±{maximum:.1}"),
+                theme::dim(),
+            ));
+            for r in &s.atlas.temperature_changes {
+                let label_width = width.min(18);
+                let mut line = Line::raw(format!(
+                    "{:<label_width$} ",
+                    components::clip_text(&r.origin, label_width)
+                ));
+                line.spans.extend(
+                    charts::diverging_bar(
+                        if r.comparable { r.delta } else { None },
+                        maximum,
+                        width.saturating_sub(label_width + 12),
+                    )
+                    .spans,
+                );
+                line.spans.push(Span::raw(
+                    r.delta
+                        .filter(|_| r.comparable)
+                        .map(|v| format!(" {v:+.1} pt"))
+                        .unwrap_or_else(|| " N/A".into()),
+                ));
+                lines.push(line);
+            }
+        }
+        "intel.publishers" | "tools.failure_causes" => {
+            lines.extend(categorical_plot(w, s, width as u16, usize::MAX))
+        }
+        "intel.freshness" => {
+            let max = s
+                .intel
+                .freshness
+                .buckets
+                .iter()
+                .map(|(_, n)| *n)
+                .max()
+                .unwrap_or(0);
+            lines.push(Line::styled(
+                format!("Categorical delay bins · articles · 0–{max}"),
+                theme::dim(),
+            ));
+            for (label, n) in &s.intel.freshness.buckets {
+                let lw = width.min(16);
+                let mut line = Line::raw(format!("{:<lw$} ", components::clip_text(label, lw)));
+                line.spans.extend(
+                    charts::rank_bar(*n as u64, max as u64, width.saturating_sub(lw + 10)).spans,
+                );
+                line.spans.push(Span::raw(format!(" {n}")));
+                lines.push(line);
+            }
+            lines.push(Line::styled(
+                format!(
+                    "Missing {} · future {} · unequal bins",
+                    s.intel.freshness.missing, s.intel.freshness.future
+                ),
+                theme::dim(),
+            ));
+        }
+        "recon.diversity" => {
+            lines.push(panels::table_row(
+                &[
+                    "Category".into(),
+                    "Eligible".into(),
+                    "Corroborated".into(),
+                    "Shortfall".into(),
+                ],
+                &[24, 14, 20, 42],
+                width,
+                false,
+            ));
+            for r in &s.recon.diversity {
+                lines.push(panels::table_row(
+                    &[
+                        r.category.clone(),
+                        if r.eligible {
+                            r.eligible_scopes.to_string()
+                        } else {
+                            "N/A".into()
+                        },
+                        r.scopes_with_two_successful.to_string(),
+                        r.top_shortfall_reason.clone(),
+                    ],
+                    &[24, 14, 20, 42],
+                    width,
+                    false,
+                ));
+                let mut meter = charts::meter(
+                    if r.eligible && r.eligible_scopes > 0 {
+                        Some(r.scopes_with_two_successful as f64 / r.eligible_scopes as f64)
+                    } else {
+                        None
+                    },
+                    width.saturating_sub(10),
+                );
+                meter.spans.push(Span::raw(format!(
+                    " {}/{}",
+                    r.scopes_with_two_successful, r.eligible_scopes
+                )));
+                lines.push(meter);
+            }
+        }
+        "models.capacity" => lines.extend(capacity_lines(&s.models, width, usize::MAX)),
+        "tools.evidence" => {
+            lines.push(Line::styled(
+                "Yield per successful nonempty invocation · 0–100%",
+                theme::dim(),
+            ));
+            for r in &s.tools.evidence {
+                let lw = width.min(22);
+                let mut line =
+                    Line::raw(format!("{:<lw$} ", components::clip_text(&r.tool_id, lw)));
+                line.spans.extend(
+                    charts::meter(
+                        r.acceptance_pct.map(|p| p / 100.0),
+                        width.saturating_sub(lw + 14),
+                    )
+                    .spans,
+                );
+                line.spans.push(Span::raw(format!(
+                    " {}/{}",
+                    r.with_evidence, r.successful_nonempty
+                )));
+                lines.push(line);
+            }
+            lines.push(Line::styled(
+                "Identity credit may overlap; do not sum tool identities",
+                theme::dim(),
+            ));
+        }
+        _ => lines.extend(primary_table(app, w, s, width)),
+    }
+    if lines.is_empty() {
+        lines.push(Line::raw("Empty window · no recorded observations"));
+    }
+    lines
+}
+fn legend(keys: &[&str]) -> Line<'static> {
+    Line::from(
+        keys.iter()
+            .map(|key| Span::styled(format!("{key}  "), charts::series_style(key)))
+            .collect::<Vec<_>>(),
+    )
+}
+fn primary_table(
+    app: &App,
+    w: &WidgetSpec,
+    s: &ProfileSnapshot,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let (keys, headers, proportions): (&[&str], &[&str], &[usize]) = match w.id {
+        "intel.enrichment" => (
+            &["tag", "articles", "body_pct", "claims_pct", "report_pct"],
+            &["Tag", "Articles", "Body", "Claims", "Reports"],
+            &[28, 18, 18, 18, 18],
+        ),
+        "recon.unresolved" => (
+            &["run_id", "label", "reason", "evidence_count", "next_action"],
+            &["Run", "Directive", "Reason", "Evidence", "Next action"],
+            &[8, 30, 23, 14, 25],
+        ),
+        "atlas.backlog" => (
+            &["stage", "unit", "queued", "blocked", "oldest_pending_ms"],
+            &["Stage", "Unit", "Queued", "Blocked", "Oldest"],
+            &[30, 24, 14, 14, 18],
+        ),
+        "models.performance" => (
+            &[
+                "provider",
+                "model",
+                "role",
+                "sends",
+                "attempt_error_pct",
+                "final_operation_failure_pct",
+                "p95_exec_ms",
+            ],
+            &[
+                "Provider",
+                "Model",
+                "Role",
+                "Sends",
+                "Errors",
+                "Final fail",
+                "p95",
+            ],
+            &[15, 25, 15, 10, 10, 13, 12],
+        ),
+        "tools.reliability" => (
+            &[
+                "tool_id",
+                "invocations",
+                "wire_requests",
+                "cache_hit_pct",
+                "verified_zero_pct",
+                "error_pct",
+                "p95_ms",
+            ],
+            &["Tool", "Calls", "Wire", "Cache", "Zero", "Errors", "p95"],
+            &[30, 12, 12, 12, 12, 12, 10],
+        ),
+        "tools.search_health" => (
+            &[
+                "engine",
+                "fetches",
+                "valid_serps",
+                "verified_zero",
+                "challenge",
+                "parser_mismatch",
+                "transport_failure",
+            ],
+            &[
+                "Engine",
+                "Fetches",
+                "Valid",
+                "Zero",
+                "Challenge",
+                "Parser",
+                "Transport",
+            ],
+            &[24, 14, 12, 10, 14, 12, 14],
+        ),
+        _ => (w.detail_columns, w.detail_columns, &[]),
+    };
+    let weights = if proportions.is_empty() {
+        vec![1; keys.len()]
+    } else {
+        proportions.to_vec()
+    };
+    let rows = sorted_rows(app, w, s);
+    let mut lines = vec![panels::table_row(
+        &headers.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        &weights,
+        width,
+        false,
+    )];
+    let selected = app.profile.selected_row.get(w.id).copied().unwrap_or(0);
+    for (i, row) in rows.iter().enumerate() {
+        let mut cells = keys
+            .iter()
+            .map(|key| format_cell(key, &row[*key]))
+            .collect::<Vec<_>>();
+        if w.id == "models.performance" {
+            let is_model = row["is_model_row"].as_bool().unwrap_or(false);
+            let collapsed = app
+                .profile
+                .collapsed_providers
+                .get(row["provider"].as_str().unwrap_or(""))
+                .copied()
+                .unwrap_or(false);
+            cells[0] = format!(
+                "{} {}",
+                if is_model {
+                    "  "
+                } else if collapsed {
+                    "▸"
+                } else {
+                    "▾"
+                },
+                cells[0]
+            );
+        }
+        lines.push(panels::table_row(&cells, &weights, width, i == selected));
+    }
+    if rows.is_empty() {
+        lines.push(Line::raw("Empty window · no recorded rows"));
+    }
+    if w.id == "tools.search_health" {
+        for row in rows {
+            let usable = row["valid_serps"].as_u64().unwrap_or(0)
+                + row["verified_zero"].as_u64().unwrap_or(0);
+            let n = row["fetches"].as_u64().unwrap_or(0);
+            let mut meter = charts::meter(
+                if n > 0 {
+                    Some(usable as f64 / n as f64)
+                } else {
+                    None
+                },
+                width.saturating_sub(16),
+            );
+            meter.spans.push(Span::raw(format!(" {usable}/{n} usable")));
+            lines.push(meter);
+        }
+    }
+    lines
+}
+fn format_cell(key: &str, value: &serde_json::Value) -> String {
+    if key.ends_with("_ms") {
+        return charts::duration_ms(value.as_i64());
+    }
+    if key.ends_with("_pct") || key == "share" {
+        return charts::percent(value.as_f64());
+    }
+    if key == "ratio" {
+        return charts::ratio(value.as_f64());
+    }
+    match value {
+        serde_json::Value::Null => "N/A".into(),
+        serde_json::Value::String(s) => s.clone(),
+        _ => value.to_string(),
+    }
+}
+
 fn widget_data(widget: &WidgetSpec, snapshot: &ProfileSnapshot) -> serde_json::Value {
     match widget.id {
+        "summary.attention" => serde_json::to_value(&snapshot.attention).unwrap_or_default(),
         "intel.volume" => serde_json::to_value(&snapshot.intel.volume).unwrap_or_default(),
         "intel.confidence" => serde_json::to_value(&snapshot.intel.confidence).unwrap_or_default(),
         "intel.origins" => serde_json::to_value(&snapshot.intel.origins).unwrap_or_default(),
@@ -1752,12 +3196,7 @@ fn count_buckets(widget: &WidgetSpec, snapshot: &ProfileSnapshot) -> Vec<charts:
 fn series_points(widget: &WidgetSpec, snapshot: &ProfileSnapshot) -> Vec<charts::SeriesPoint> {
     let keys: &[&str] = match widget.id {
         "atlas.cycle_time" => &["mean_ms", "p95_ms", "mean_queue_ms"],
-        "models.latency" => &[
-            "p50_ms",
-            "p95_ms",
-            "p50_first_header_ms",
-            "p50_first_content_ms",
-        ],
+        "models.latency" => &["p50_ms", "p95_ms"],
         "models.queue" => &["p50_ms", "p95_ms"],
         "models.amplification" => &["ratio"],
         _ => return Vec::new(),
@@ -1810,163 +3249,10 @@ fn bucket_end(start: &str, seconds: i64) -> String {
         .map(|time| (time + chrono::Duration::seconds(seconds)).to_rfc3339())
         .unwrap_or_else(|_| start.to_owned())
 }
-fn analytics_lines(
-    app: &App,
-    widget: &WidgetSpec,
-    width: u16,
-    height: usize,
-    report: bool,
-) -> Vec<Line<'static>> {
-    let Some(snapshot) = &app.profile.snapshot else {
-        return vec![Line::raw(if app.profile.error.is_some() {
-            "Unavailable: snapshot read failed"
-        } else {
-            "Loading statistics"
-        })];
-    };
-    let buckets = if widget.renderer == RendererKind::Time {
-        count_buckets(widget, snapshot)
-    } else {
-        Vec::new()
-    };
-    let selected = app
-        .profile
-        .selected_bucket
-        .get(widget.id)
-        .copied()
-        .unwrap_or(buckets.len().saturating_sub(1))
-        .min(buckets.len().saturating_sub(1));
-    let mut lines = vec![Line::from(Span::styled(
-        format!(
-            "{} · {} buckets · {}",
-            snapshot.filters.period.label(),
-            snapshot.filters.period.bucket_label(),
-            widget.unit
-        ),
-        theme::dim(),
-    ))];
-    if report {
-        lines.extend(components::measured_lines(
-            vec![Line::raw(format!(
-                "Observed since {} · retained raw {} days / rollups {} days",
-                if snapshot.observed_since.is_empty() {
-                    "unavailable"
-                } else {
-                    &snapshot.observed_since
-                },
-                snapshot.retention.raw_days,
-                snapshot.retention.rollup_days
-            ))],
-            width,
-        ));
-    }
-    if !buckets.is_empty() {
-        let total: u64 = buckets.iter().map(charts::TimeBucket::total).sum();
-        let headline = if buckets.iter().all(|bucket| !bucket.available) {
-            "Unavailable history".into()
-        } else if total == 0 {
-            format!("Empty window · 0 {}", widget.unit)
-        } else {
-            format!("{} {}", charts::count(total), widget.title)
-        };
-        lines.push(Line::from(Span::styled(headline, theme::accent())));
-        // Exact selected values take precedence over decorative plot labels.
-        let bucket = &buckets[selected];
-        lines.extend(components::measured_lines(
-            vec![
-                Line::raw(format!(
-                    "Selected {} → {} · N={}{}",
-                    bucket.start,
-                    bucket.end,
-                    bucket.total(),
-                    if bucket.available {
-                        ""
-                    } else {
-                        " · unavailable history"
-                    }
-                )),
-                Line::from(
-                    bucket
-                        .series
-                        .iter()
-                        .map(|(key, value)| {
-                            Span::styled(
-                                format!("{key}={}  ", charts::count(*value)),
-                                charts::series_style(key),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-            ],
-            width,
-        ));
-        let available = height.saturating_sub(lines.len() + 2);
-        let plot = charts::time_plot(&buckets, width as usize, available.min(10), selected);
-        lines.extend(components::measured_lines(plot, width));
-        if widget.id == "intel.volume" {
-            lines.extend(components::measured_lines(
-                vec![Line::raw(
-                    "Distinct articles; tags overlap and are shown separately in the report",
-                )],
-                width,
-            ));
-        }
-    } else if !report && width < 70 {
-        lines.extend(components::detail_table(
-            &widget_data(widget, snapshot),
-            widget.detail_columns,
-            width,
-        ));
-    } else if !report {
-        lines.extend(components::measured_lines(
-            widget_lines(widget, snapshot, width as usize, 6),
-            width,
-        ));
-    }
-    if report {
-        lines.push(Line::raw(format!(
-            "Details · {}",
-            widget.detail_columns.join(" / ")
-        )));
-        lines.extend(components::detail_table(
-            &widget_data(widget, snapshot),
-            widget.detail_columns,
-            width,
-        ));
-    }
-    if widget.applicable_filters.is_empty() {
-        lines.insert(0, Line::raw("Live · historical filters do not apply"));
-    }
-    if lines.len() <= 2 {
-        lines.push(Line::raw("Empty window / unavailable history"));
-    }
-    lines
-}
-fn draw_widget_panel(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
-    let focused = app
-        .profile
-        .focused_widget()
-        .is_some_and(|w| w.id == widget.id);
-    let inner = components::analytics_card(
-        frame,
-        area,
-        &format!(" {} · {} ", widget.section.label(), widget.title),
-        focused,
-    );
-    let lines = analytics_lines(app, widget, inner.width, inner.height as usize, false);
-    frame.render_widget(
-        Paragraph::new(
-            lines
-                .into_iter()
-                .take(inner.height as usize)
-                .collect::<Vec<_>>(),
-        ),
-        inner,
-    );
-}
 fn report_layout(app: &App, widget: &WidgetSpec, inner: Rect) -> ReportLayout {
     let mut layout = ReportLayout::new(inner, selected_lines(app, widget, inner.width).len());
-    if widget.renderer == RendererKind::Table {
+    if widget.renderer == RendererKind::Table || app.profile.table_view || widget.id == ATTENTION.id
+    {
         layout.details.y = layout.plot.y.min(layout.details.y);
         layout.details.x = inner.x;
         layout.details.width = inner.width;
@@ -2006,8 +3292,11 @@ fn categorical_plot(
         .filter_map(|row| row[value].as_u64())
         .max()
         .unwrap_or(0);
-    let mut lines = Vec::new();
-    for row in rows.iter().take(height / 2) {
+    let mut lines = vec![Line::styled(
+        format!("{value} · shared scale 0–{peak}"),
+        theme::dim(),
+    )];
+    for row in rows.iter().take(height.saturating_sub(1) / 2) {
         let count = row[value].as_u64().unwrap_or(0);
         lines.push(Line::raw(format!(
             "{} · {value}={count}",
@@ -2021,11 +3310,179 @@ fn categorical_plot(
     lines
 }
 fn report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
+    let key = (
+        widget.id,
+        width,
+        app.profile
+            .selected_row
+            .get(widget.id)
+            .copied()
+            .unwrap_or(0),
+        app.profile.sort_column,
+        app.profile.sort_descending,
+    );
+    if let Some(lines) = app.profile.detail_cache.borrow().get(&key) {
+        return lines.clone();
+    }
+    let lines = build_report_detail_lines(app, widget, width);
+    let mut cache = app.profile.detail_cache.borrow_mut();
+    if cache.len() >= 8 {
+        cache.clear();
+    }
+    cache.insert(key, lines.clone());
+    lines
+}
+fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
     let Some(snapshot) = &app.profile.snapshot else {
         return vec![Line::raw("Loading statistics")];
     };
-    let mut lines =
-        components::detail_table(&widget_data(widget, snapshot), widget.detail_columns, width);
+    let rows = sorted_rows(app, widget, snapshot);
+    let keys = if widget.id == ATTENTION.id {
+        vec!["app", "owner_id", "item_id", "reason", "age_ms", "action"]
+    } else {
+        widget.detail_columns.to_vec()
+    };
+    let proportions = vec![1; keys.len()];
+    let mut lines = Vec::new();
+    if !rows.is_empty() {
+        lines.push(panels::table_row(
+            &keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+            &proportions,
+            width as usize,
+            false,
+        ));
+        let selected = app
+            .profile
+            .selected_row
+            .get(widget.id)
+            .copied()
+            .unwrap_or(0);
+        for (i, row) in rows.iter().enumerate() {
+            lines.push(panels::table_row(
+                &keys
+                    .iter()
+                    .map(|k| format_cell(k, &row[*k]))
+                    .collect::<Vec<_>>(),
+                &proportions,
+                width as usize,
+                i == selected,
+            ));
+        }
+        if let Some(row) = rows.get(selected) {
+            lines.push(Line::styled(
+                "Selected row · full values / prose",
+                theme::accent(),
+            ));
+            lines.extend(components::detail_records(row, width));
+        }
+    } else {
+        lines.extend(components::detail_records(
+            &widget_data(widget, snapshot),
+            width,
+        ));
+    }
+    let merged: Vec<(&str, serde_json::Value)> = match widget.id {
+        "intel.enrichment" => vec![
+            (
+                "Distinct ingestion",
+                serde_json::to_value(&snapshot.intel.volume).unwrap_or_default(),
+            ),
+            (
+                "Paired confidence coverage",
+                serde_json::json!({"initial":snapshot.intel.confidence.mean_initial,"current":snapshot.intel.confidence.mean_current,"paired_n":snapshot.intel.confidence.paired_n,"coverage":snapshot.intel.confidence.coverage_note}),
+            ),
+        ],
+        "recon.outcomes" => vec![
+            (
+                "Workload",
+                serde_json::to_value(&snapshot.recon.workload).unwrap_or_default(),
+            ),
+            (
+                "Recall / retention",
+                serde_json::to_value(&snapshot.recon.recall).unwrap_or_default(),
+            ),
+        ],
+        "atlas.cycles" => vec![(
+            "Cycle durations",
+            serde_json::to_value(&snapshot.atlas.cycle_times).unwrap_or_default(),
+        )],
+        "atlas.backlog" => vec![(
+            "Discovery dispositions",
+            serde_json::to_value(&snapshot.atlas.discovery).unwrap_or_default(),
+        )],
+        "models.performance" => vec![
+            (
+                "Fallback recovery",
+                serde_json::to_value(&snapshot.models.fallback).unwrap_or_default(),
+            ),
+            (
+                "Role breakdown",
+                serde_json::to_value(&snapshot.models.by_role).unwrap_or_default(),
+            ),
+            (
+                "Failure causes",
+                serde_json::to_value(&snapshot.models.failures).unwrap_or_default(),
+            ),
+            (
+                "Amplification (sends / terminal operation, ×)",
+                serde_json::to_value(&snapshot.models.amplification).unwrap_or_default(),
+            ),
+        ],
+        "tools.evidence" => vec![(
+            "Accepted / cited identities and provenance · retained raw coverage",
+            serde_json::to_value(&snapshot.tools.evidence_details).unwrap_or_default(),
+        )],
+        "tools.reliability" => vec![
+            (
+                "Usage",
+                serde_json::to_value(&snapshot.tools.top_tools).unwrap_or_default(),
+            ),
+            (
+                "Trigger attribution",
+                serde_json::to_value(&snapshot.tools.categories_by_trigger).unwrap_or_default(),
+            ),
+            (
+                "Outcomes",
+                serde_json::to_value(&snapshot.tools.outcomes).unwrap_or_default(),
+            ),
+        ],
+        _ => Vec::new(),
+    };
+    for (label, data) in merged {
+        lines.push(Line::styled(label.to_owned(), theme::accent()));
+        lines.extend(components::detail_table(&data, &[], width));
+    }
+    let retained_plot = match widget.id {
+        "atlas.cycles" => Some(widget!(
+            "atlas.cycle_time",
+            Section::Atlas,
+            "Cycle duration · seconds",
+            0
+        )),
+        "models.performance" => Some(widget!(
+            "models.amplification",
+            Section::Models,
+            "Amplification · sends / terminal operation (×)",
+            0
+        )),
+        _ => None,
+    };
+    if let Some(plot) = retained_plot {
+        let points = series_points(&plot, snapshot);
+        if !points.is_empty() {
+            lines.push(Line::styled(plot.title, theme::accent()));
+            lines.extend(charts::series_plot(
+                &points,
+                width as usize,
+                11,
+                points.len() - 1,
+            ));
+            lines.push(Line::styled(
+                "Exact bucket values in the retained table above",
+                theme::dim(),
+            ));
+        }
+    }
     if lines.is_empty() {
         lines.push(Line::raw("Empty window · no recorded rows"));
     }
@@ -2078,6 +3535,14 @@ fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'stati
         snapshot.filters.period.bucket_label(),
         widget.unit
     ))];
+    if let Some(error) = &app.profile.error {
+        lines.push(Line::styled(format!("Stale · {error}"), theme::warn()));
+    } else if app.profile.loading {
+        lines.push(Line::styled(
+            "Refreshing · showing previous snapshot",
+            theme::dim(),
+        ));
+    }
     if let Some(bucket) = buckets.get(selected) {
         lines.push(Line::raw(format!(
             "{} → {} · N={}{}",
@@ -2124,6 +3589,23 @@ fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'stati
         }
     }
     if buckets.is_empty() {
+        if widget.renderer != RendererKind::Time {
+            let rows = sorted_rows(app, widget, snapshot);
+            let index = app
+                .profile
+                .selected_row
+                .get(widget.id)
+                .copied()
+                .unwrap_or(0);
+            if let Some(row) = rows.get(index) {
+                lines.push(Line::raw(format!(
+                    "Selected row {} / {} · {}",
+                    index + 1,
+                    rows.len(),
+                    row_identity(row)
+                )));
+            }
+        }
         let points = series_points(widget, snapshot);
         let selected = app
             .profile
@@ -2147,6 +3629,11 @@ fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'stati
                     .series
                     .iter()
                     .map(|(key, value)| {
+                        let value = if key.starts_with("p95") && small_sample(point.n).is_some() {
+                            None
+                        } else {
+                            *value
+                        };
                         Span::styled(
                             format!(
                                 "{key}={}  ",
@@ -2164,9 +3651,20 @@ fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'stati
     components::measured_lines(lines, width)
 }
 fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
+    app.layout.borrow_mut().push_scope(area);
     let block = theme::panel(&format!(" {} · Esc grid · ←/→ bucket ", widget.title));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if widget.id == "models.performance" && area.width >= 45 {
+        let fold = Rect::new(area.right() - 21, area.y, 19, 1);
+        frame.render_widget(
+            Paragraph::new(" [g] fold provider ").style(theme::accent()),
+            fold,
+        );
+        app.layout
+            .borrow_mut()
+            .register(Target::ProfileAction(5), fold);
+    }
     let selected = selected_lines(app, widget, inner.width);
     let layout = report_layout(app, widget, inner);
     frame.render_widget(Paragraph::new(selected), layout.selected);
@@ -2182,7 +3680,22 @@ fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
             .get(widget.id)
             .copied()
             .unwrap_or(point_count(widget, snapshot).saturating_sub(1));
-        let lines = if widget.renderer != RendererKind::Time {
+        let lines = if matches!(
+            widget.id,
+            "intel.reports"
+                | "recon.stages"
+                | "recon.directives"
+                | "recon.diversity"
+                | "atlas.temperature"
+                | "tools.evidence"
+        ) {
+            dashboard_lines(
+                app,
+                widget,
+                layout.plot.width as usize,
+                layout.plot.height as usize,
+            )
+        } else if widget.renderer != RendererKind::Time {
             categorical_plot(
                 widget,
                 snapshot,
@@ -2205,34 +3718,21 @@ fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
             )
         };
         frame.render_widget(
-            Paragraph::new(components::measured_lines(lines, layout.plot.width)),
+            Paragraph::new(panels::clipped(lines, layout.plot.width as usize)),
             layout.plot,
         );
-        if !points.is_empty() && layout.plot.width >= 14 && layout.plot.height >= 5 {
-            let capacity = ((layout.plot.width as usize - 7) / 3).max(1);
-            let start = selected.min(points.len() - 1) / capacity * capacity;
-            for index in start..(start + capacity).min(points.len()) {
+        let series = buckets.is_empty();
+        let count = if series { points.len() } else { buckets.len() };
+        if layout.plot.width >= 14 && layout.plot.height >= 6 {
+            for (index, x, slot) in
+                charts::plot_targets(count, layout.plot.width as usize, selected, series)
+            {
                 app.layout.borrow_mut().register(
                     Target::ProfileBucket(index),
                     Rect::new(
-                        layout.plot.x + 7 + (index - start) as u16 * 3,
+                        layout.plot.x + x as u16,
                         layout.plot.y,
-                        2,
-                        layout.plot.height,
-                    ),
-                );
-            }
-        }
-        if !buckets.is_empty() && layout.plot.width >= 14 && layout.plot.height >= 4 {
-            let capacity = (usize::from(layout.plot.width) - 7) / 3;
-            let group = buckets.len().div_ceil(capacity.max(1)).max(1);
-            for (i, _) in buckets.chunks(group).enumerate() {
-                app.layout.borrow_mut().register(
-                    Target::ProfileBucket(i * group),
-                    Rect::new(
-                        layout.plot.x + 7 + i as u16 * 3,
-                        layout.plot.y,
-                        2,
+                        slot as u16,
                         layout.plot.height,
                     ),
                 );
@@ -2242,6 +3742,23 @@ fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
     let lines = report_detail_lines(app, widget, layout.details.width);
     let mut pane = app.profile.report_scroll.clone();
     pane.scroll(0, lines.len(), layout.details.height as usize);
+    if let Some(snapshot) = &app.profile.snapshot {
+        let rows = sorted_rows(app, widget, snapshot);
+        for i in 0..rows.len() {
+            let row = i + 1;
+            if row >= pane.offset && row < pane.offset + layout.details.height as usize {
+                app.layout.borrow_mut().register(
+                    Target::ProfileRow(i),
+                    Rect::new(
+                        layout.details.x,
+                        layout.details.y + (row - pane.offset) as u16,
+                        layout.details.width,
+                        1,
+                    ),
+                );
+            }
+        }
+    }
     frame.render_widget(
         Paragraph::new(
             pane.visible(&lines, layout.details.height as usize)
@@ -2278,6 +3795,20 @@ fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(format!("Search: {}", app.profile.filter_edit)),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
+    if app.profile.custom_period {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::raw("Enter from | to, both RFC3339 with explicit timezone"),
+                Line::raw(app.profile.filter_edit.clone()),
+                Line::styled(
+                    app.profile.picker_error.clone().unwrap_or_default(),
+                    theme::warn(),
+                ),
+            ]),
+            inner,
+        );
+        return;
+    }
     let choices = app.profile.picker_choices();
     let room = inner.height.saturating_sub(2) as usize;
     let start = app
@@ -2401,13 +3932,23 @@ pub fn activate(app: &mut App, target: Target) {
         }
         Target::ProfileCard(index) => {
             app.profile.focus = index;
+            app.profile.report_origin = Some((index, app.profile.grid_scroll.offset, app.focus));
             if let Some(widget) = app.profile.focused_widget() {
                 app.profile.report = Some(widget.id);
-                app.profile.report_scroll.offset = 0;
+                app.profile.table_view = false;
+                app.profile.report_scroll.offset = app
+                    .profile
+                    .report_offsets
+                    .get(widget.id)
+                    .copied()
+                    .unwrap_or(0);
+                app.set_focus(Target::ProfileReport);
             }
         }
         Target::ProfileAction(0) => {
             app.profile.period_popup = true;
+            app.profile.custom_period = false;
+            app.profile.picker_error = None;
             app.profile.picker_selection = 0;
         }
         Target::ProfileAction(1) => {
@@ -2426,12 +3967,56 @@ pub fn activate(app: &mut App, target: Target) {
             app.set_focus(Target::Field(super::app::FieldId::ProfileExportPath));
         }
         Target::ProfileAction(4) => app.profile.loaded_at = None,
+        Target::ProfileAction(5) => {
+            if let Some(snapshot) = app.profile.snapshot.as_ref() {
+                let w = view_spec("models.performance").unwrap();
+                let rows = sorted_rows(app, w, snapshot);
+                let selected = app.profile.selected_row.get(w.id).copied().unwrap_or(0);
+                if let Some(row) = rows.get(selected) {
+                    let provider = row["provider"].as_str().unwrap_or("").to_string();
+                    let collapsed = app
+                        .profile
+                        .collapsed_providers
+                        .entry(provider.clone())
+                        .or_default();
+                    *collapsed = !*collapsed;
+                    let rows = sorted_rows(app, w, snapshot);
+                    let index = rows
+                        .iter()
+                        .position(|r| {
+                            r["provider"].as_str().unwrap_or("") == provider
+                                && !r["is_model_row"].as_bool().unwrap_or(false)
+                        })
+                        .unwrap_or(0);
+                    remember_row(app, w.id, index);
+                }
+            }
+        }
+        Target::ProfilePanelRow(card, index) => {
+            app.profile.focus = card;
+            if let Some(w) = app.profile.focused_widget() {
+                remember_row(app, w.id, index);
+            }
+            app.set_focus(Target::ProfileCard(card));
+        }
+        Target::ProfilePanelBucket(card, index) => {
+            app.profile.focus = card;
+            if let Some(w) = app.profile.focused_widget() {
+                app.profile.selected_bucket.insert(w.id, index);
+            }
+            app.set_focus(Target::ProfileCard(card));
+        }
         Target::ProfileBucket(index) => {
             if let Some(id) = app.profile.report {
                 app.profile.selected_bucket.insert(id, index);
             }
         }
         Target::ProfileChoice(index) => {
+            if app.profile.period_popup && index == 4 {
+                app.profile.custom_period = true;
+                app.profile.filter_edit.clear();
+                return;
+            }
             if app.profile.period_popup {
                 app.profile.filters.period = profile_stats::Period::ALL[index.min(3)].clone();
                 app.profile.invalidate();
@@ -2442,7 +4027,17 @@ pub fn activate(app: &mut App, target: Target) {
             }
             app.profile.period_popup = false;
             app.profile.filter_popup = None;
-            app.set_focus(Target::ProfileAction(1));
+            app.set_focus(if app.profile.report.is_some() {
+                Target::ProfileReport
+            } else {
+                Target::ProfileAction(1)
+            });
+        }
+        Target::ProfileRow(index) => {
+            if let Some(id) = app.profile.report {
+                remember_row(app, id, index);
+                open_selected_owner(app);
+            }
         }
         _ => {}
     }
@@ -2454,21 +4049,29 @@ pub fn scroll(app: &mut App, delta: isize) {
             Target::ProfileSystem(index) => index,
             _ => app.compact_pages[super::app::ModuleId::System.index()] % 2,
         };
-        let lines = system_lines(app, index, layout.content.width.saturating_sub(2));
-        app.profile.system_scroll[index].scroll(
-            delta,
-            lines.len(),
-            layout.content.height.saturating_sub(3) as usize,
-        );
+        let body = super::ui::body_rect(app);
+        let area = strip(body, 1, body.height.saturating_sub(2));
+        if let Some((_, rect)) = system_panes(app, area)
+            .into_iter()
+            .find(|(i, _)| *i == index)
+        {
+            let lines = system_lines(app, index, rect.width.saturating_sub(2));
+            app.profile.system_scroll[index].scroll(
+                delta,
+                lines.len(),
+                rect.height.saturating_sub(2) as usize,
+            );
+        }
         return;
     }
     if let Some(id) = app.profile.report {
-        if let Some(widget) = WIDGETS.iter().find(|w| w.id == id) {
+        if let Some(widget) = view_spec(id) {
+            let popup = expanded_area(super::ui::body_rect(app));
             let inner = Rect::new(
-                layout.content.x + 1,
-                layout.content.y + 1,
-                layout.content.width.saturating_sub(2),
-                layout.content.height.saturating_sub(2),
+                popup.x + 1,
+                popup.y + 1,
+                popup.width.saturating_sub(2),
+                popup.height.saturating_sub(2),
             );
             let report = report_layout(app, widget, inner);
             let lines = report_detail_lines(app, widget, report.details.width);
@@ -2477,20 +4080,40 @@ pub fn scroll(app: &mut App, delta: isize) {
                 .scroll(delta, lines.len(), report.details.height as usize);
         }
     } else {
-        let offset = grid_offset(app, &layout);
-        app.profile.grid_scroll.offset = offset;
-        app.profile.grid_scroll.scroll(
-            delta,
-            layout.extent(app.profile.focused_widgets().len()),
-            layout.content.height as usize,
-        );
-        let stride = if layout.compact {
-            1
-        } else {
-            layout.card_height + 1
-        };
-        app.profile.focus = (app.profile.grid_scroll.offset.div_ceil(stride) * layout.columns)
-            .min(app.profile.focused_widgets().len().saturating_sub(1));
+        if let Some(w) = app.profile.focused_widget() {
+            let width = layout
+                .panels
+                .iter()
+                .find(|p| p.index == app.profile.focus)
+                .map(|p| p.rect.width.saturating_sub(4))
+                .unwrap_or(layout.content.width.saturating_sub(4));
+            let extent = dashboard_lines(
+                app,
+                w,
+                width as usize,
+                layout.panel_height(app.profile.focus).saturating_sub(2),
+            )
+            .len();
+            let viewport = layout.panel_height(app.profile.focus).saturating_sub(2);
+            let pane = app.profile.panel_scroll.entry(w.id).or_default();
+            let previous = pane.offset;
+            pane.scroll(delta, extent, viewport);
+            if pane.offset != previous {
+                return;
+            }
+        }
+        app.profile.grid_scroll.offset = grid_offset(app, &layout);
+        app.profile
+            .grid_scroll
+            .scroll(delta, layout.extent(), layout.content.height as usize);
+        let offset = app.profile.grid_scroll.offset;
+        let column = app.profile.focus % layout.columns;
+        app.profile.focus = (0..app.profile.focused_widgets().len())
+            .find(|i| layout.focus_start(*i) + layout.panel_height(*i) > offset)
+            .unwrap_or(0);
+        app.profile.focus =
+            (app.profile.focus + column).min(app.profile.focused_widgets().len().saturating_sub(1));
+        app.focus = Target::ProfileCard(app.profile.focus);
     }
 }
 pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
@@ -2501,11 +4124,56 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
     if app.profile.filter_popup.is_some() || app.profile.period_popup {
+        if app.profile.custom_period {
+            match key.code {
+                KeyCode::Esc => {
+                    app.profile.custom_period = false;
+                    app.profile.period_popup = false;
+                }
+                KeyCode::Char(ch) => {
+                    app.profile.filter_edit.push(ch);
+                }
+                KeyCode::Backspace => {
+                    app.profile.filter_edit.pop();
+                }
+                KeyCode::Enter => {
+                    let input = app.profile.filter_edit.clone();
+                    if let Some((from, to)) = input.split_once('|') {
+                        match (
+                            chrono::DateTime::parse_from_rfc3339(from.trim()),
+                            chrono::DateTime::parse_from_rfc3339(to.trim()),
+                        ) {
+                            (Ok(a), Ok(b)) if b > a => {
+                                app.profile.filters.period = profile_stats::Period::Custom {
+                                    from: a.to_rfc3339(),
+                                    to: b.to_rfc3339(),
+                                };
+                                app.profile.invalidate();
+                                app.profile.custom_period = false;
+                                app.profile.period_popup = false;
+                            }
+                            _ => {
+                                app.profile.picker_error =
+                                    Some("Valid timestamps and end after start required".into())
+                            }
+                        }
+                    } else {
+                        app.profile.picker_error = Some("Separate start and end with |".into());
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc => {
                 app.profile.filter_popup = None;
                 app.profile.period_popup = false;
-                app.set_focus(Target::ProfileAction(1));
+                app.set_focus(if app.profile.report.is_some() {
+                    Target::ProfileReport
+                } else {
+                    Target::ProfileAction(1)
+                });
             }
             KeyCode::Tab | KeyCode::BackTab if !app.profile.period_popup => {
                 let dimensions = ["app", "provider", "role", "mode", "tool", "category"];
@@ -2584,10 +4252,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char('[') => {
             app.profile.prev_section();
+            app.set_focus(Target::ProfileCard(0));
             true
         }
         KeyCode::Char(']') => {
             app.profile.next_section();
+            app.set_focus(Target::ProfileCard(0));
             true
         }
         KeyCode::Char('p') => {
@@ -2603,12 +4273,67 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             true
         }
         KeyCode::Esc if app.profile.report.is_some() => {
+            if let Some(id) = app.profile.report {
+                app.profile
+                    .report_offsets
+                    .insert(id, app.profile.report_scroll.offset);
+            }
             app.profile.report = None;
-            app.set_focus(Target::ProfileCard(app.profile.focus));
+            if let Some((index, offset, focus)) = app.profile.report_origin.take() {
+                app.profile.focus = index;
+                app.set_focus(focus);
+                app.profile.grid_scroll.offset = offset;
+            } else {
+                app.set_focus(Target::ProfileCard(app.profile.focus));
+            }
             true
         }
-        KeyCode::Left | KeyCode::Right if app.profile.report.is_some() => {
-            let id = app.profile.report.unwrap();
+        KeyCode::Char('s') if app.profile.report.is_some() => {
+            let columns = app
+                .profile
+                .report
+                .and_then(view_spec)
+                .map(|w| w.detail_columns.len())
+                .unwrap_or(1)
+                .max(1);
+            app.profile.sort_column = (app.profile.sort_column + 1) % columns;
+            app.profile.sort_descending = false;
+            if let Some(snapshot) = app.profile.snapshot.clone() {
+                app.profile.accept_snapshot(snapshot);
+            }
+            true
+        }
+        KeyCode::Char('g')
+            if app.profile.report == Some("models.performance")
+                || app
+                    .profile
+                    .focused_widget()
+                    .is_some_and(|w| w.id == "models.performance") =>
+        {
+            activate(app, Target::ProfileAction(5));
+            true
+        }
+        KeyCode::Enter if app.profile.report.is_some() => {
+            if app.focus == Target::ProfileAction(5) {
+                activate(app, Target::ProfileAction(5));
+            } else {
+                open_selected_owner(app);
+            }
+            true
+        }
+        KeyCode::Char('v') if app.profile.report.is_some() => {
+            app.profile.table_view = !app.profile.table_view;
+            true
+        }
+        KeyCode::Left | KeyCode::Right
+            if app.profile.report.is_some()
+                || app.profile.focused_widget().is_some_and(w_is_time) =>
+        {
+            let id = app
+                .profile
+                .report
+                .or_else(|| app.profile.focused_widget().map(|w| w.id))
+                .unwrap();
             let count = app
                 .profile
                 .snapshot
@@ -2644,20 +4369,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             true
         }
         KeyCode::Down | KeyCode::Char('j') => {
+            select_row(app, 1);
             if app.profile.report.is_some() {
                 scroll(app, 1);
-            } else {
-                app.profile.next_widget();
-                app.set_focus(Target::ProfileCard(app.profile.focus));
             }
             true
         }
         KeyCode::Up | KeyCode::Char('k') => {
+            select_row(app, -1);
             if app.profile.report.is_some() {
                 scroll(app, -1);
-            } else {
-                app.profile.prev_widget();
-                app.set_focus(Target::ProfileCard(app.profile.focus));
             }
             true
         }
@@ -2668,6 +4389,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.profile.next_widget();
             }
             app.set_focus(Target::ProfileCard(app.profile.focus));
+            true
+        }
+        KeyCode::Enter if app.profile.all_apps && app.focus == Target::ProfileCard(2) => {
+            app.profile.report = Some(ATTENTION.id);
+            open_selected_owner(app);
+            if app.profile.report == Some(ATTENTION.id) {
+                app.profile.report = None;
+            }
             true
         }
         KeyCode::Enter => match app.focus {
@@ -2780,8 +4509,14 @@ fn confidence_lines(
         Span::styled(
             format!(
                 "{}  {}",
-                charts::percent(distribution.mean_initial),
-                charts::percent(distribution.mean_current)
+                distribution
+                    .mean_initial
+                    .map(|v| format!("{v:.3} score"))
+                    .unwrap_or_else(|| "N/A".into()),
+                distribution
+                    .mean_current
+                    .map(|v| format!("{v:.3} score"))
+                    .unwrap_or_else(|| "N/A".into())
             ),
             theme::text(),
         ),
@@ -3322,9 +5057,25 @@ fn temperature_lines(
         out.push(table_row(
             &[
                 format!("{:<18}", row.origin),
-                format!("{:>9}", charts::percent(row.previous_temperature)),
-                format!("{:>8}", charts::percent(row.current_temperature)),
-                format!("{:>8}", charts::percent(row.delta)),
+                format!(
+                    "{:>9}",
+                    row.previous_temperature
+                        .map(|v| format!("{v:.1}"))
+                        .unwrap_or_else(|| "N/A".into())
+                ),
+                format!(
+                    "{:>8}",
+                    row.current_temperature
+                        .map(|v| format!("{v:.1}"))
+                        .unwrap_or_else(|| "N/A".into())
+                ),
+                format!(
+                    "{:>8}",
+                    row.delta
+                        .filter(|_| row.comparable)
+                        .map(|v| format!("{v:+.1} pt"))
+                        .unwrap_or_else(|| "N/A".into())
+                ),
                 format!("{:>9}", charts::count(row.articles as u64)),
                 format!("  {}", row.label),
             ],
@@ -3429,54 +5180,76 @@ fn capacity_lines(
     page: usize,
 ) -> Vec<Line<'static>> {
     if !models.capacity_available {
-        return empty_note("live provider capacity unavailable — the orchestration companion has not published a snapshot");
+        return empty_note("Live capacity unavailable · no companion snapshot");
     }
-    if models.capacity.is_empty() {
-        return empty_note("no capacity rows in this window");
-    }
-    let mut out = vec![Line::from(Span::styled(
-        "provider  group         scope     sends/60s  effective rpm  active  queued  cooldown"
-            .to_string(),
-        theme::dim(),
-    ))];
-    for row in models.capacity.iter().take(page) {
-        let rpm = match row.effective_rpm {
-            Some(value) => charts::count(value as u64),
-            None => charts::unavailable().to_string(),
-        };
-        out.push(table_row(
-            &[
-                format!("{:<9}", row.provider),
-                format!("{:<13}", row.quota_group),
-                format!("{:<9}", row.scope),
-                format!("{:>9}", charts::count(row.sends_60s as u64)),
-                format!("{:>14}", rpm),
-                format!("{:>7}", charts::count(row.active as u64)),
-                format!("{:>7}", charts::count(row.queued as u64)),
-                format!(
-                    "{:>9}",
-                    charts::duration_ms(row.cooldown_ms.map(|v| v as i64))
-                ),
-            ],
-            &row.quota_source,
-        ));
-    }
-    // The pace meter is the shared ratio renderer; an unknown pace is N/A.
-    for row in models.capacity.iter().take(page) {
-        let pace = row.pace_per_min.filter(|value| value.is_finite());
-        let mut spans = vec![Span::styled(format!("{:<10}", row.provider), theme::text())];
-        spans.extend(charts::meter(pace, width.saturating_sub(16)).spans);
-        spans.push(Span::styled(
-            format!("  {}", charts::percent(pace)),
+    let mut lines = Vec::new();
+    for r in models.capacity.iter().take(page) {
+        lines.push(Line::styled(
+            format!(
+                "{} / {} / {} · {}",
+                r.provider, r.quota_group, r.scope, r.quota_source
+            ),
             theme::dim(),
         ));
-        out.push(Line::from(spans));
+        let limit = r.effective_rpm.filter(|n| *n > 0);
+        let ratio = limit.map(|n| r.sends_60s as f64 / n as f64);
+        let mut meter = charts::meter(ratio, width.saturating_sub(25));
+        meter.spans.push(Span::styled(
+            format!(
+                " {}/{} sends/60s{}",
+                r.sends_60s,
+                limit.map(|n| n.to_string()).unwrap_or_else(|| "N/A".into()),
+                if ratio.is_some_and(|v| v > 1.0) {
+                    " !"
+                } else {
+                    ""
+                }
+            ),
+            if ratio.is_some_and(|v| v > 1.0) {
+                theme::warn()
+            } else {
+                theme::text()
+            },
+        ));
+        lines.push(meter);
+        let concurrency = r.max_concurrency.filter(|n| *n > 0);
+        let ratio = concurrency.map(|n| r.active as f64 / n as f64);
+        let mut meter = charts::meter(ratio, width.saturating_sub(25));
+        meter.spans.push(Span::styled(
+            format!(
+                " {}/{} active{}",
+                r.active,
+                concurrency
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "N/A".into()),
+                if ratio.is_some_and(|v| v > 1.0) {
+                    " !"
+                } else {
+                    ""
+                }
+            ),
+            if ratio.is_some_and(|v| v > 1.0) {
+                theme::warn()
+            } else {
+                theme::text()
+            },
+        ));
+        lines.push(meter);
+        lines.push(Line::raw(format!(
+            "pace {} req/min · queued {} · oldest {} · cooldown {}",
+            r.pace_per_min
+                .filter(|v| v.is_finite())
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "N/A".into()),
+            r.queued,
+            charts::duration_ms(r.oldest_wait_ms.map(|v| v as i64)),
+            charts::duration_ms(r.cooldown_ms.map(|v| v as i64))
+        )));
     }
-    out.push(Line::from(Span::styled(
-        "capacity ignores the historical filters: it is live state".to_string(),
-        theme::muted(),
-    )));
-    out
+    if lines.is_empty() {
+        lines.push(Line::raw("No live capacity rows"));
+    }
+    lines
 }
 
 fn role_request_lines(
@@ -3661,7 +5434,7 @@ fn amplification_lines(
                 format!("{:<11}", row.bucket),
                 format!("{:>6}", charts::count(row.sends)),
                 format!("{:>13}", charts::count(row.terminal_operations)),
-                format!("{:>10}", charts::percent(row.ratio)),
+                format!("{:>10}", charts::ratio(row.ratio)),
                 format!("{:>10}", charts::count(row.in_flight_operations)),
             ],
             "",

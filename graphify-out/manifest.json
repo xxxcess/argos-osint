@@ -1,8 +1,8 @@
 {
   ".opencode/opencode.json": {
-    "mtime": 1791466813.8800423,
-    "seen": 1791468236.5686872,
-    "ast_hash": "d51a8e93ba117a8588c5af5c6e9d2323",
+    "mtime": 1791596988.7876904,
+    "seen": 1791614287.9688609,
+    "ast_hash": "d540d883e81a3d7846d962f949009eb7",
     "semantic_hash": ""
   },
   "Cargo.toml": {
@@ -12,15 +12,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/Cargo.toml": {
-    "mtime": 1791417994.0092437,
-    "seen": 1791423918.620803,
-    "ast_hash": "4ba47160d6428eea843fc92f18eb34ff",
-    "semantic_hash": "4ba47160d6428eea843fc92f18eb34ff"
+    "mtime": 1791577981.645656,
+    "seen": 1791614287.970013,
+    "ast_hash": "38676192eab1f39a8fc9cfdca9fa5199",
+    "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/cli.rs": {
-    "mtime": 1791533894.4049182,
-    "seen": 1791534402.383966,
-    "ast_hash": "da671594443fdafe86691ca142dbf17a",
+    "mtime": 1791595301.9576833,
+    "seen": 1791614287.970016,
+    "ast_hash": "7e7abb1c66760e18c2723a4abd49cc45",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/main.rs": {
@@ -30,9 +30,9 @@
     "semantic_hash": "769b9d268d68d2b876cb64cebcc855f9"
   },
   "crates/argos-osint-bin/src/tui/app.rs": {
-    "mtime": 1791532764.1489275,
-    "seen": 1791533372.39144,
-    "ast_hash": "7a2a47e8d3d7997ef88433235eac6681",
+    "mtime": 1791617363.1795747,
+    "seen": 1791618305.993314,
+    "ast_hash": "4ec59e76b36af6115162aa67713322b5",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/atlas_actions.rs": {
@@ -84,9 +84,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/mod.rs": {
-    "mtime": 1791419976.138587,
-    "seen": 1791423918.621611,
-    "ast_hash": "2a6337c943318e606f0e6b90e5958fe3",
+    "mtime": 1791602751.257871,
+    "seen": 1791614287.975177,
+    "ast_hash": "2fe34ad8d6513cc4af9f76cf0dfa8871",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/summary_card.rs": {
@@ -96,9 +96,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/theme.rs": {
-    "mtime": 1791316804.7599635,
-    "seen": 1791317572.799367,
-    "ast_hash": "2ab886c434164917a13b3b8e20adda2d",
+    "mtime": 1791608606.715882,
+    "seen": 1791614287.976087,
+    "ast_hash": "696db0d6afa7c8a0192a5514e616ed22",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/tracked.rs": {
@@ -108,15 +108,15 @@
     "semantic_hash": "28c3293556d4f43b0d509e809b8629dd"
   },
   "crates/argos-osint-bin/src/tui/ui.rs": {
-    "mtime": 1791533894.304174,
-    "seen": 1791534402.386344,
-    "ast_hash": "66993c071e178dfb0accf45045392741",
+    "mtime": 1791615315.3538635,
+    "seen": 1791618305.99855,
+    "ast_hash": "52cdf448b7738c456e4d6890041f4dea",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/Cargo.toml": {
-    "mtime": 1791531284.6173952,
-    "seen": 1791533372.395612,
-    "ast_hash": "e24b859dde7b9d3a5ddc38f33057e415",
+    "mtime": 1791577981.6455812,
+    "seen": 1791614287.976274,
+    "ast_hash": "9846e0f1116fdefc3db3df22859f7e2f",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/build.rs": {
@@ -126,21 +126,21 @@
     "semantic_hash": "05933d01a415bc5a0ed38297d1fd4d50"
   },
   "crates/argos-osint-core/src/atlas.rs": {
-    "mtime": 1791467467.1467617,
-    "seen": 1791468236.571178,
-    "ast_hash": "fc53ac6cee9bc7a816eccd1656bc5f9c",
+    "mtime": 1791584752.7274325,
+    "seen": 1791614287.9764202,
+    "ast_hash": "af17044b71da631f6e157f209334b472",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/atlas_insights.rs": {
-    "mtime": 1791465889.976687,
-    "seen": 1791468236.57118,
-    "ast_hash": "bb12f4bdcdf9ad330aa0d421b746edde",
+    "mtime": 1791586677.6637323,
+    "seen": 1791614287.976425,
+    "ast_hash": "8e3488cc8104650c7c351a387470f8a0",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/atlas_memory.rs": {
-    "mtime": 1791466959.2457585,
-    "seen": 1791468236.571182,
-    "ast_hash": "fb6536b74343bb7e6b09085bc3690edc",
+    "mtime": 1791582703.4388673,
+    "seen": 1791614287.976429,
+    "ast_hash": "7fb529ccce8ffd249f2eb83ed656e8ce",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain.rs": {
@@ -216,10 +216,10 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brain.rs": {
-    "mtime": 1791301218.4329116,
-    "seen": 1791306546.1435661,
-    "ast_hash": "4a3fdce3df984731ce95969b70cbd7ca",
-    "semantic_hash": "4a3fdce3df984731ce95969b70cbd7ca"
+    "mtime": 1791579451.598621,
+    "seen": 1791614287.9796422,
+    "ast_hash": "0e28433858f637f3c4b7e3451cea3a13",
+    "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/briefing_view.rs": {
     "mtime": 1791477372.1149817,
@@ -228,10 +228,10 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/classify_mode.rs": {
-    "mtime": 1791165507.8040478,
-    "seen": 1791294627.631606,
-    "ast_hash": "2fabe2e7ff7cf11a7b63bce9b4bdac7e",
-    "semantic_hash": "2fabe2e7ff7cf11a7b63bce9b4bdac7e"
+    "mtime": 1791581213.7805707,
+    "seen": 1791614287.9799418,
+    "ast_hash": "7f13aebe5c6c63f6dbd3095aeed3b530",
+    "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/jobs.rs": {
     "mtime": 1791521109.9531558,
@@ -258,9 +258,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/persist.rs": {
-    "mtime": 1791520690.8653703,
-    "seen": 1791533372.4008698,
-    "ast_hash": "403187f216dac8fdc9662b98b0f61afd",
+    "mtime": 1791587180.1361928,
+    "seen": 1791614287.9810371,
+    "ast_hash": "1f055bedf64e5e7bae5c9bd2294e0a7e",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/replace_insights.rs": {
@@ -312,15 +312,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/lib.rs": {
-    "mtime": 1791464386.6119485,
-    "seen": 1791468236.575553,
-    "ast_hash": "edaf0b40446407e59caec90ce7770c90",
+    "mtime": 1791597876.4083695,
+    "seen": 1791614287.986132,
+    "ast_hash": "c8e0ad5f1093e3706a8f89406251b178",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/osint.rs": {
-    "mtime": 1791532765.605617,
-    "seen": 1791533372.407178,
-    "ast_hash": "215da04f8f2632fa031e7500f749792a",
+    "mtime": 1791587151.3462873,
+    "seen": 1791614287.986376,
+    "ast_hash": "59cab98cd1019c97d7ceefe31fe57794",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/osint/atlas_news.rs": {
@@ -336,9 +336,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/osint/providers.rs": {
-    "mtime": 1791532765.4435515,
-    "seen": 1791533372.408306,
-    "ast_hash": "d154cd44d3eb42420f78a061997df35f",
+    "mtime": 1791588791.6788974,
+    "seen": 1791614287.988992,
+    "ast_hash": "ab202333fe716dd1ea936840a5fdd209",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/osint/source_eval.rs": {
@@ -354,9 +354,9 @@
     "semantic_hash": "4b9728b4254c6682135cd8554e55b7e5"
   },
   "crates/argos-osint-core/src/paths.rs": {
-    "mtime": 1791452764.3655248,
-    "seen": 1791468236.5761652,
-    "ast_hash": "eede6f223e31a2eb5c7646f9644071a1",
+    "mtime": 1791592452.9774756,
+    "seen": 1791614287.98993,
+    "ast_hash": "2487d0d55fbc74989a4a2f46ff94399a",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/pipeline.rs": {
@@ -366,9 +366,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/provider.rs": {
-    "mtime": 1791530742.3546026,
-    "seen": 1791533372.411051,
-    "ast_hash": "72b1224cd178d3cec94d4c1ba99b769e",
+    "mtime": 1791608621.8223872,
+    "seen": 1791614287.990081,
+    "ast_hash": "66bb527a83b384c477db49d656e075ed",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/provider_attempt.rs": {
@@ -390,15 +390,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon.rs": {
-    "mtime": 1791532766.6174483,
-    "seen": 1791533372.41136,
-    "ast_hash": "61ca991b12061e8ead9f9bf6723fe885",
+    "mtime": 1791582317.615785,
+    "seen": 1791614287.991023,
+    "ast_hash": "2b00bb8e43bb6f4ad860c109f9166039",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon/brain_resources.rs": {
-    "mtime": 1791350448.1622221,
-    "seen": 1791350690.430232,
-    "ast_hash": "086273637e54fbeedd7e3a9723607b41",
+    "mtime": 1791582127.7298365,
+    "seen": 1791614287.991031,
+    "ast_hash": "0b0a87468e80a5cfdd9b90817b570182",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon/budget.rs": {
@@ -438,9 +438,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon/orchestrate.rs": {
-    "mtime": 1791532766.4254494,
-    "seen": 1791533372.4119942,
-    "ast_hash": "d73ca258463743cb90715aa1cf99561a",
+    "mtime": 1791582408.671102,
+    "seen": 1791614287.992574,
+    "ast_hash": "044aa2527b1580152d00d4f4b51cb6e6",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon/picker.rs": {
@@ -468,15 +468,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/secrets.rs": {
-    "mtime": 1790807997.24238,
-    "seen": 1791294627.6317282,
-    "ast_hash": "e3f24f0ba91b365e634a15d7928bc81e",
-    "semantic_hash": "e3f24f0ba91b365e634a15d7928bc81e"
+    "mtime": 1791592211.3060634,
+    "seen": 1791614287.9933639,
+    "ast_hash": "729aa740c78ab19311eda78383c1be7d",
+    "semantic_hash": ""
   },
   "crates/argos-osint-core/src/store.rs": {
-    "mtime": 1791519184.0067449,
-    "seen": 1791533372.412757,
-    "ast_hash": "00caab3f76da3587c9ea4160dd122eae",
+    "mtime": 1791600657.3872468,
+    "seen": 1791614287.9933681,
+    "ast_hash": "b068bc5254723a8c94c57f0a049d77db",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/store/graph_summaries.rs": {
@@ -486,9 +486,9 @@
     "semantic_hash": "d51ae6b9a800e50e619a6d861397071a"
   },
   "crates/argos-osint-core/src/store/publication.rs": {
-    "mtime": 1791403704.5442472,
-    "seen": 1791423918.62976,
-    "ast_hash": "5fda45988d44ce3f6b30b28ac111e2aa",
+    "mtime": 1791579451.6641839,
+    "seen": 1791614287.993527,
+    "ast_hash": "9266075fa9327d5b0c103bebb84c7c6d",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/subscription.rs": {
@@ -558,9 +558,9 @@
     "semantic_hash": ""
   },
   ".github/workflows/ci.yml": {
-    "mtime": 1791187892.557588,
-    "seen": 1791296004.9536262,
-    "ast_hash": "efe37a274f648ae66675a8523974d588",
+    "mtime": 1791577981.5318198,
+    "seen": 1791614287.9947698,
+    "ast_hash": "3fb6b0111b303ef5fa22320e0de3b860",
     "semantic_hash": ""
   },
   ".opencode/agents/ecc-planner.md": {
@@ -630,9 +630,9 @@
     "semantic_hash": ""
   },
   ".opencode/skills/ecc-verify/SKILL.md": {
-    "mtime": 1791301218.404178,
-    "seen": 1791306546.148156,
-    "ast_hash": "ac348f029a57d97173cc146fa93a1893",
+    "mtime": 1791580458.8934753,
+    "seen": 1791614287.996775,
+    "ast_hash": "69958b4f5ae8fdc158ea49dbcc9cf433",
     "semantic_hash": ""
   },
   ".planning/PROJECT.md": {
@@ -678,9 +678,9 @@
     "semantic_hash": ""
   },
   "AGENTS.md": {
-    "mtime": 1791533934.795968,
-    "seen": 1791534402.405074,
-    "ast_hash": "64813292a89fb6fdab1c96336b99e202",
+    "mtime": 1791580459.113852,
+    "seen": 1791614287.999019,
+    "ast_hash": "d2f39565880349d15ced375b62c5400f",
     "semantic_hash": ""
   },
   "README.md": {
@@ -690,9 +690,9 @@
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1791533953.8589172,
-    "seen": 1791534402.405252,
-    "ast_hash": "73134b6429cf474f7d85026211c2104c",
+    "mtime": 1791616043.079722,
+    "seen": 1791618306.079797,
+    "ast_hash": "9fc2f44c0fbcb2602e7dcd1b6be2323a",
     "semantic_hash": ""
   },
   "docs/atlas-memory-system-apps-checklist.md": {
@@ -702,9 +702,9 @@
     "semantic_hash": ""
   },
   "docs/opencode-v2.md": {
-    "mtime": 1791432975.0806816,
-    "seen": 1791468236.581123,
-    "ast_hash": "2aedec276c3557bfeffc398456c640f8",
+    "mtime": 1791580459.0311882,
+    "seen": 1791614288.0032299,
+    "ast_hash": "d1d70bd0aa5e668617f32b12182e5ee7",
     "semantic_hash": ""
   },
   "docs/providers.md": {
@@ -780,9 +780,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/investigation/evidence.rs": {
-    "mtime": 1791368758.2625263,
-    "seen": 1791371154.791036,
-    "ast_hash": "fb5b73bc5cc70211739b6f3c41cfc152",
+    "mtime": 1791587031.3479471,
+    "seen": 1791614287.984149,
+    "ast_hash": "eda1886d3bdacf2a3fa63969db9bc61d",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/investigation/gates.rs": {
@@ -846,9 +846,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/osint/results.rs": {
-    "mtime": 1791528190.7864492,
-    "seen": 1791533372.40831,
-    "ast_hash": "571930d38fbf81a0234c1e774f2c8bd5",
+    "mtime": 1791582801.623305,
+    "seen": 1791614287.989001,
+    "ast_hash": "fa09a03b224b720cdb539bd50f9dea60",
     "semantic_hash": ""
   },
   "docs/investigation-harness.md": {
@@ -912,9 +912,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/atlas_work.rs": {
-    "mtime": 1791465890.0093904,
-    "seen": 1791468236.571281,
-    "ast_hash": "0c14f0879b5b9f5e472765e61212535b",
+    "mtime": 1791582126.6892762,
+    "seen": 1791614287.976661,
+    "ast_hash": "a0d28012db2518c584943af9e89a758f",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_query.rs": {
@@ -972,9 +972,9 @@
     "semantic_hash": ""
   },
   "docs/README.md": {
-    "mtime": 1791433039.617053,
-    "seen": 1791468236.580988,
-    "ast_hash": "09068a0dd507cedb7740a8a1345af1ff",
+    "mtime": 1791616105.3291345,
+    "seen": 1791618306.079788,
+    "ast_hash": "bb3ca3c998a9ff3757435b01ad61482a",
     "semantic_hash": ""
   },
   "docs/concepts.md": {
@@ -984,9 +984,9 @@
     "semantic_hash": ""
   },
   "docs/conventions.md": {
-    "mtime": 1791433113.8641617,
-    "seen": 1791468236.581079,
-    "ast_hash": "9ec2d06d5a600598a6990ff621395e4f",
+    "mtime": 1791578020.1270747,
+    "seen": 1791614287.999636,
+    "ast_hash": "51b3114e708df67d04f098df9b8e410a",
     "semantic_hash": ""
   },
   "docs/diagrams.md": {
@@ -1092,9 +1092,9 @@
     "semantic_hash": ""
   },
   "docs/usage.md": {
-    "mtime": 1791533934.7554474,
-    "seen": 1791534402.4076421,
-    "ast_hash": "7fb01c5c4174ea26578dfd86f95016bb",
+    "mtime": 1791616376.9859562,
+    "seen": 1791618306.095053,
+    "ast_hash": "ad019b65b03dbc8e5ee21b6397809794",
     "semantic_hash": ""
   },
   "docs/diagrams/agent-graphify.svg": {
@@ -1230,9 +1230,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/osint/search_engines.rs": {
-    "mtime": 1791532765.4645104,
-    "seen": 1791533372.4083142,
-    "ast_hash": "8dbf9773242081c02622a5a5bcfd8020",
+    "mtime": 1791597340.4120219,
+    "seen": 1791614287.989009,
+    "ast_hash": "010b2ef0e8a4b3d808e05f3b7eae8e43",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/osint/whoxy.rs": {
@@ -1242,27 +1242,453 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon/diversity.rs": {
-    "mtime": 1791533274.2030303,
-    "seen": 1791533372.411575,
-    "ast_hash": "c4a3b086c502b8c93a110d2a4f982166",
+    "mtime": 1791588976.3237722,
+    "seen": 1791614287.99163,
+    "ast_hash": "8289f7c69c4e2a355fd478095cc7e366",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon/model_exec.rs": {
-    "mtime": 1791524802.5482137,
-    "seen": 1791533372.411989,
-    "ast_hash": "f12503005a840726cac61ab7afad81ce",
+    "mtime": 1791582128.2318306,
+    "seen": 1791614287.992567,
+    "ast_hash": "0f6d458caeee7410959520e7d67a4c67",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon/tool_runner.rs": {
-    "mtime": 1791532766.4696333,
-    "seen": 1791533372.412002,
-    "ast_hash": "94a197bcfb2dc1f073199e0835208f33",
+    "mtime": 1791587208.3534486,
+    "seen": 1791614287.99288,
+    "ast_hash": "e5fe6d5496c11dcdd3b41d79d549b1c2",
     "semantic_hash": ""
   },
-  ".planning/2026-10-08-recon-diversity-reliability-and-tools/delivery.md": {
-    "mtime": 1791533987.7703042,
-    "seen": 1791534402.403998,
-    "ast_hash": "9421fca0b719d447fffde92c577cd30d",
+  ".opencode/tests/tools-registry.test.mjs": {
+    "mtime": 1791577324.1737406,
+    "seen": 1791614287.969768,
+    "ast_hash": "c0265fa3acb4f119dc7191411d40a529",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-bin/src/tui/profile.rs": {
+    "mtime": 1791616479.821617,
+    "seen": 1791618305.996746,
+    "ast_hash": "2ab9e7806164b56d5cbd3dfc7d65b7da",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-bin/src/tui/profile_charts.rs": {
+    "mtime": 1791608234.4920402,
+    "seen": 1791614287.9754739,
+    "ast_hash": "ce0022fc930c7678737b76c3ccd71b12",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-bin/src/tui/profile_config.rs": {
+    "mtime": 1791617666.4466817,
+    "seen": 1791618305.997074,
+    "ast_hash": "5ef7c662cd70762e94de127caba66fd5",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/src/brain_lance_off.rs": {
+    "mtime": 1791578025.9642358,
+    "seen": 1791614287.977101,
+    "ast_hash": "c77eaef8924e5282f3d1e63a9f649a71",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/src/config_commit.rs": {
+    "mtime": 1791613439.5488405,
+    "seen": 1791614287.977376,
+    "ast_hash": "83f38f8386d0330726ffff604a796f62",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/src/config_transfer.rs": {
+    "mtime": 1791607008.2211921,
+    "seen": 1791614287.97738,
+    "ast_hash": "3527088372d15d2547009bf56297456c",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/src/config_transfer_tests.rs": {
+    "mtime": 1791599307.6953285,
+    "seen": 1791614287.977383,
+    "ast_hash": "4d9f5e4f3c65dee0f16b044d90692f3b",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/src/osint/search_engines/tests.rs": {
+    "mtime": 1791597390.7417245,
+    "seen": 1791614287.989016,
+    "ast_hash": "5f05807c615040ddabc99376df54a4af",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/src/profile_stats.rs": {
+    "mtime": 1791611575.1659904,
+    "seen": 1791614287.990077,
+    "ast_hash": "1d6d0ddc997fc1af6c29c1a34a15c7e7",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/src/provider_metrics.rs": {
+    "mtime": 1791581246.3645487,
+    "seen": 1791614287.990685,
+    "ast_hash": "ebea68d720e7f5fcf1071059c47f02a0",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/src/telemetry.rs": {
+    "mtime": 1791582801.7650077,
+    "seen": 1791614287.9941041,
+    "ast_hash": "13acba0e732586ad247794a6507cdbc5",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/api_http_404.expected.json": {
+    "mtime": 1791589496.1737366,
+    "seen": 1791614287.994111,
+    "ast_hash": "978f47b6277ddaaeaf8f4c4d004e6486",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/api_http_404.json": {
+    "mtime": 1791589496.1675394,
+    "seen": 1791614287.994116,
+    "ast_hash": "ef3c4466317fc995eed987d5a178a843",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/boundary_query_values.expected.json": {
+    "mtime": 1791589592.6382613,
+    "seen": 1791614287.99412,
+    "ast_hash": "eb78240c10e9718162232ac787d59ccd",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/boundary_query_values.json": {
+    "mtime": 1791589592.6293712,
+    "seen": 1791614287.9941251,
+    "ast_hash": "5826f4e6955b925a4052cb34d6541da5",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/envelope_success_false.expected.json": {
+    "mtime": 1791589496.1889927,
+    "seen": 1791614287.99413,
+    "ast_hash": "7ea390361d8c45f9d7f329eec2344909",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/envelope_success_false.json": {
+    "mtime": 1791589496.182143,
+    "seen": 1791614287.9941351,
+    "ast_hash": "b235188d57b6342dcd3622f509deebb4",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_cleaned_html_fallback.expected.json": {
+    "mtime": 1791582919.3273518,
+    "seen": 1791614287.99414,
+    "ast_hash": "3519cd4d1a01fbe790b9987c6bad6823",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_consent_noscript.expected.json": {
+    "mtime": 1791597355.0576189,
+    "seen": 1791614287.994143,
+    "ast_hash": "9860beae0d9d02c3045e1409da6daa11",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_consent_redirect.expected.json": {
+    "mtime": 1791589677.8966532,
+    "seen": 1791614287.994148,
+    "ast_hash": "7c75e338a08679d55c5f4368f449c0e6",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_duplicate_links.expected.json": {
+    "mtime": 1791589814.9015298,
+    "seen": 1791614287.994153,
+    "ast_hash": "a11019f46822803ea82fae18a055ea86",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_missing_metadata.expected.json": {
+    "mtime": 1791584719.43697,
+    "seen": 1791614287.994158,
+    "ast_hash": "97f6d3ba3ca548bb29fe2dcd9bd540ef",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_missing_metadata.json": {
+    "mtime": 1791584719.4369698,
+    "seen": 1791614287.9941618,
+    "ast_hash": "d8666f50b09685a25c30f676e040543e",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_rejected_links.expected.json": {
+    "mtime": 1791589865.6837194,
+    "seen": 1791614287.994165,
+    "ast_hash": "43d523dc80200b71040b0c9123ef8faf",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_sorry_challenge.expected.json": {
+    "mtime": 1791589702.44563,
+    "seen": 1791614287.994168,
+    "ast_hash": "172aa9ae0025381c813de3938071033a",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_403.expected.json": {
+    "mtime": 1791584720.6588707,
+    "seen": 1791614287.994171,
+    "ast_hash": "ddfad21434228109c7779c82912a17f4",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_403.json": {
+    "mtime": 1791584720.1946375,
+    "seen": 1791614287.994174,
+    "ast_hash": "31f324dc542c52931eb1fc3f142b087f",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_429.expected.json": {
+    "mtime": 1791584741.5037193,
+    "seen": 1791614287.994176,
+    "ast_hash": "419bd66ca4b3808d06ba14556d98011f",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_429.json": {
+    "mtime": 1791584741.5036955,
+    "seen": 1791614287.9941802,
+    "ast_hash": "67aeb8e943c706728c64bb0b9642409d",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_500.expected.json": {
+    "mtime": 1791584742.7027469,
+    "seen": 1791614287.9941819,
+    "ast_hash": "84cc1250906fb2adee9a72248ecf5b1c",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_500.json": {
+    "mtime": 1791584741.5037174,
+    "seen": 1791614287.994186,
+    "ast_hash": "ea42fd6924a893e1ba08cefdadb73e30",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_unrecognized_dom.expected.json": {
+    "mtime": 1791582919.9096577,
+    "seen": 1791614287.994189,
+    "ast_hash": "416503d99ced5fc6bccbea721b7360b0",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_valid_raw_html.expected.json": {
+    "mtime": 1791582702.8648221,
+    "seen": 1791614287.994192,
+    "ast_hash": "ad3ae00f50c2cc25ca163a0cde754af0",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_verified_zero.expected.json": {
+    "mtime": 1791589702.159851,
+    "seen": 1791614287.994195,
+    "ast_hash": "8ab3a8bd2beaf128f8568120cf724917",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_wrapper_links.expected.json": {
+    "mtime": 1791589968.9401538,
+    "seen": 1791614287.994198,
+    "ast_hash": "46b66b4cca5735d96754457f62281451",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_links_only.expected.json": {
+    "mtime": 1791589541.0698547,
+    "seen": 1791614287.9942012,
+    "ast_hash": "23d91264cd46b164ce685c91f271c490",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_links_only.json": {
+    "mtime": 1791589541.059711,
+    "seen": 1791614287.9942038,
+    "ast_hash": "1a2bf74048cb42097686925d4add701b",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_target_status_404.expected.json": {
+    "mtime": 1791589496.1606483,
+    "seen": 1791614287.994207,
+    "ast_hash": "63be96c09c1721ff53c8abeaf46cae04",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_target_status_404.json": {
+    "mtime": 1791589496.15462,
+    "seen": 1791614287.994209,
+    "ast_hash": "1a7094bade59822d4f3b66ad407bbe98",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_truncated_envelope.expected.json": {
+    "mtime": 1791589541.0451562,
+    "seen": 1791614287.9942122,
+    "ast_hash": "a55b1b9f72fa593b677f81e12af8c6f7",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_truncated_envelope.json": {
+    "mtime": 1791590147.0032783,
+    "seen": 1791614287.994216,
+    "ast_hash": "046c50c1dfdfd2691b9a4bcd1187bd4e",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_valid_hundred_results.expected.json": {
+    "mtime": 1791582837.5826921,
+    "seen": 1791614287.994219,
+    "ast_hash": "2495a0f5fb5cab5961ff05c055b13b41",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_valid_ten_results.expected.json": {
+    "mtime": 1791582836.7436333,
+    "seen": 1791614287.994221,
+    "ast_hash": "bce2be862e0e551eae37394f0ac588bb",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_verified_zero.expected.json": {
+    "mtime": 1791589702.2923248,
+    "seen": 1791614287.994224,
+    "ast_hash": "cc143b3759db22e1f0e387cc709f41a2",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/unicode_query.expected.json": {
+    "mtime": 1791589592.6151521,
+    "seen": 1791614287.994227,
+    "ast_hash": "b75fe45433c64b8267d2f1fb26bb5217",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/unicode_query.json": {
+    "mtime": 1791589592.6072187,
+    "seen": 1791614287.99423,
+    "ast_hash": "d90f32976e013159de014b5fa0938bc0",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/yandex_not_found_snippet.expected.json": {
+    "mtime": 1791589702.0893857,
+    "seen": 1791614287.9942331,
+    "ast_hash": "95f9eff52eb8d92e054b2c45241fce4a",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/yandex_valid_raw_html.expected.json": {
+    "mtime": 1791582768.2590635,
+    "seen": 1791614287.994236,
+    "ast_hash": "bfce9a8a374040df95e4e46831376348",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/yandex_verified_zero.expected.json": {
+    "mtime": 1791589702.2279603,
+    "seen": 1791614287.994238,
+    "ast_hash": "f5200c2548e9d00ca7d7086d49c19230",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/search_engines_fixtures.rs": {
+    "mtime": 1791597365.9797366,
+    "seen": 1791614287.994241,
+    "ast_hash": "2758016db44368e83da1d18b49abfcbb",
+    "semantic_hash": ""
+  },
+  "docs/schemas/profile-config-v1.schema.json": {
+    "mtime": 1791599913.2525752,
+    "seen": 1791614287.994244,
+    "ast_hash": "a40a4dc9444d0d95fcc098570308d86b",
+    "semantic_hash": ""
+  },
+  ".opencode/agents/ecc-edit.md": {
+    "mtime": 1791580458.8934677,
+    "seen": 1791614287.9947772,
+    "ast_hash": "0a6481c9acac4777d70433de7654f8f5",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/argos-implement/SKILL.md": {
+    "mtime": 1791580458.8934362,
+    "seen": 1791614287.996016,
+    "ast_hash": "c69cb16b76b3f945c9e7d1c0c827289d",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/argos-plan/SKILL.md": {
+    "mtime": 1791577315.224968,
+    "seen": 1791614287.99602,
+    "ast_hash": "b22cd845fb7817342028ce63d60483c3",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_cleaned_html_fallback.html": {
+    "mtime": 1791589449.6517239,
+    "seen": 1791614287.999139,
+    "ast_hash": "5e9b0704f0a18fddf640e33f9e09b8f1",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_consent_noscript.html": {
+    "mtime": 1791597355.0575473,
+    "seen": 1791614287.999142,
+    "ast_hash": "a4b1af508fef539c261d6f59012c633c",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_consent_redirect.html": {
+    "mtime": 1791589527.4530852,
+    "seen": 1791614287.999146,
+    "ast_hash": "fa27dc746a4d7c5c11ef314351ab2197",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_duplicate_links.html": {
+    "mtime": 1791589568.008211,
+    "seen": 1791614287.999149,
+    "ast_hash": "d4bd423d829f350d95dcb31cc56ea5d6",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_rejected_links.html": {
+    "mtime": 1791589567.9738202,
+    "seen": 1791614287.9991522,
+    "ast_hash": "91a9304367b07605114f675e6684f1dc",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_sorry_challenge.html": {
+    "mtime": 1791589527.5227315,
+    "seen": 1791614287.999155,
+    "ast_hash": "4f3a0d5128bed2e4b035afed1c19b979",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_unrecognized_dom.html": {
+    "mtime": 1791582919.8161185,
+    "seen": 1791614287.999168,
+    "ast_hash": "62263cf866ef8788a0ad10a4bd10ee36",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_valid_raw_html.html": {
+    "mtime": 1791582702.8648407,
+    "seen": 1791614287.9991732,
+    "ast_hash": "fb0abd24fbfcb039a406799e65520fda",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_verified_zero.html": {
+    "mtime": 1791589527.5355587,
+    "seen": 1791614287.999177,
+    "ast_hash": "317e7105645f784c7cabeb79918d94a2",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_wrapper_links.html": {
+    "mtime": 1791589956.6678529,
+    "seen": 1791614287.999182,
+    "ast_hash": "0f1fb1965d8ddc64985da9f8e64d2289",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_valid_hundred_results.html": {
+    "mtime": 1791582836.7436273,
+    "seen": 1791614287.999187,
+    "ast_hash": "80199ef4098d14ea2ce1c701f1fd20dc",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_valid_ten_results.html": {
+    "mtime": 1791582836.743693,
+    "seen": 1791614287.999192,
+    "ast_hash": "9cda9f51037b28af4976f9f4e59c7d80",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_verified_zero.html": {
+    "mtime": 1791589527.562692,
+    "seen": 1791614287.999197,
+    "ast_hash": "dcbe67131f4d7c1a47f832c3e014a48f",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/yandex_not_found_snippet.html": {
+    "mtime": 1791589592.5922153,
+    "seen": 1791614287.999202,
+    "ast_hash": "7df52738c033fd0c58cda4485c8a0f0c",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/yandex_valid_raw_html.html": {
+    "mtime": 1791582768.2590287,
+    "seen": 1791614287.999208,
+    "ast_hash": "b813c438b4c4b038cabc468da8ff43c3",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/fixtures/search_engines/yandex_verified_zero.html": {
+    "mtime": 1791589527.549723,
+    "seen": 1791614287.999212,
+    "ast_hash": "0d4e290d7e647975c49175d0b4a8e115",
+    "semantic_hash": ""
+  },
+  "docs/profile-dashboard-and-search.md": {
+    "mtime": 1791616353.1293058,
+    "seen": 1791618306.0943942,
+    "ast_hash": "dd6aa1ebfe513727c83b1e7b986bdb3c",
     "semantic_hash": ""
   }
 }

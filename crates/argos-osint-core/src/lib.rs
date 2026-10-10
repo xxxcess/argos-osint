@@ -20,8 +20,13 @@ pub mod atlas_memory;
 pub mod atlas_recall_tests;
 pub mod atlas_work;
 pub mod brain;
+#[cfg_attr(not(feature = "lancedb"), path = "brain_lance_off.rs")]
 pub mod brain_lance;
 pub mod brain_query;
+pub mod config_commit;
+pub mod config_transfer;
+#[cfg(test)]
+mod config_transfer_tests;
 pub mod embed;
 pub mod events;
 pub mod evidence;

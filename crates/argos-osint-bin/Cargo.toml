@@ -11,9 +11,13 @@ rust-version.workspace = true
 name = "argos"
 path = "src/main.rs"
 
+[features]
+default = ["lancedb"]
+lancedb = ["argos-osint-core/lancedb"]
+
 [dependencies]
 anyhow.workspace = true
-argos-osint-core = { path = "../argos-osint-core" }
+argos-osint-core = { path = "../argos-osint-core", default-features = false }
 chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
@@ -25,5 +29,5 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-argos-osint-core = { path = "../argos-osint-core", features = ["fixtures"] }
+argos-osint-core = { path = "../argos-osint-core", default-features = false, features = ["fixtures"] }
 tempfile.workspace = true

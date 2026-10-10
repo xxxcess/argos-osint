@@ -12,7 +12,7 @@ anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
-lancedb.workspace = true
+lancedb = { workspace = true, optional = true }
 regex.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
@@ -30,6 +30,9 @@ url.workspace = true
 scraper.workspace = true
 
 [features]
+default = ["lancedb"]
+# Local LanceDB vector index. CI builds with `--no-default-features` and skips this.
+lancedb = ["dep:lancedb"]
 # Test/screenshot fixtures used by the binary's tests. Never enabled in release builds.
 fixtures = []
 # Paused-time Tokio tests (`tokio::time::pause`).

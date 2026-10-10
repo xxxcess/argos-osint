@@ -36,14 +36,11 @@ jobs:
           command -v protoc || echo "no system protoc on PATH"
           cargo fetch --locked
           tools/protoc --version
+      # `--no-default-features` omits the lancedb feature so CI does not compile
+      # LanceDB, Arrow, or DataFusion. Local `cargo build` still includes them.
       - name: Build
-        run: cargo build --locked
-      - name: Test (offline; ARGOS_EMBED unset)
-        run: cargo test --workspace --locked
+        run: cargo build --locked --no-default-features
+      - name: Test (offline; no LanceDB; ARGOS_EMBED unset)
+        run: cargo test --workspace --locked --no-default-features
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: MiniLM + LanceDB integration (downloads the model)
-        env:
-          ARGOS_EMBED: "1"
-          ARGOS_HOME: ${{ runner.temp }}/argos-home
-        run: cargo test -p argos-osint-core --locked -- --ignored minilm
+        run: cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings

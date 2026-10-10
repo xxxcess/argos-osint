@@ -1575,13 +1575,16 @@ impl App {
         true
     }
 
-    /// One Profile snapshot when its 20-second automatic refresh is due.
+    fn profile_analytics_visible(&self) -> bool {
+        self.module == Some(ModuleId::System)
+            && self.profile.tab == super::profile::SystemTab::Overview
+            && self.overlay == Overlay::None
+    }
+
+    /// One visible Profile snapshot when its 20-second automatic refresh is due.
     /// The read is on the store's own connection, so it never blocks recording.
     pub(crate) fn reload_profile(&mut self) {
-        if !self.profile.due()
-            || self.profile.loading
-            || self.profile.tab != super::profile::SystemTab::Overview
-        {
+        if !self.profile_analytics_visible() || !self.profile.due() || self.profile.loading {
             return;
         }
         self.profile.loading = true;
@@ -4767,6 +4770,11 @@ impl App {
                 options,
             } => {
                 self.profile.loading = false;
+                // A read may finish after navigation. Retain the previous snapshot
+                // and its timestamp so returning to overdue analytics retries.
+                if !self.profile_analytics_visible() {
+                    return false;
+                }
                 if generation != self.profile.generation || filters != self.profile.filters {
                     return true;
                 }
@@ -14370,6 +14378,73 @@ mod tests {
             })
             .collect();
         snapshot
+    }
+
+    #[test]
+    fn profile_refresh_requests_and_publication_require_visible_analytics() {
+        let mut app = app();
+        app.profile.accept_snapshot(analytics_fixture());
+        let previous = app.profile.snapshot.clone();
+        let at = Instant::now() - Duration::from_secs(25);
+        app.profile.loaded_at = Some(at);
+        for (module, tab, overlay) in [
+            (
+                None,
+                super::super::profile::SystemTab::Overview,
+                Overlay::None,
+            ),
+            (
+                Some(ModuleId::Recon),
+                super::super::profile::SystemTab::Overview,
+                Overlay::None,
+            ),
+            (
+                Some(ModuleId::System),
+                super::super::profile::SystemTab::System,
+                Overlay::None,
+            ),
+            (
+                Some(ModuleId::System),
+                super::super::profile::SystemTab::Overview,
+                Overlay::Configs,
+            ),
+        ] {
+            app.module = module;
+            app.profile.tab = tab;
+            app.overlay = overlay;
+            app.reload_profile();
+            assert!(
+                !app.profile.loading,
+                "hidden analytics must not start a read"
+            );
+            app.profile.loading = true;
+            assert!(!app.on_work_event(WorkEvent::ProfileLoaded {
+                generation: app.profile.generation,
+                filters: app.profile.filters.clone(),
+                outcome: Ok(Box::default()),
+                options: Vec::new(),
+            }));
+            assert!(!app.profile.loading);
+            assert_eq!(app.profile.snapshot, previous);
+            assert_eq!(app.profile.loaded_at, Some(at));
+        }
+        app.module = Some(ModuleId::System);
+        app.profile.tab = super::super::profile::SystemTab::Overview;
+        app.overlay = Overlay::None;
+        assert!(app.profile_analytics_visible());
+        assert!(app.profile.due(), "overdue refresh resumes on return");
+        assert!(app.on_work_event(WorkEvent::ProfileLoaded {
+            generation: app.profile.generation,
+            filters: app.profile.filters.clone(),
+            outcome: Ok(Box::default()),
+            options: Vec::new(),
+        }));
+        assert_ne!(app.profile.snapshot, previous);
+        assert!(!app.profile.due());
+        app.profile.loaded_at = Some(Instant::now() - Duration::from_secs(19));
+        assert!(!app.profile.due());
+        app.profile.loaded_at = Some(Instant::now() - Duration::from_secs(21));
+        assert!(app.profile.due());
     }
 
     #[test]

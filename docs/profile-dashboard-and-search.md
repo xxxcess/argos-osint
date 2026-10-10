@@ -29,7 +29,7 @@ Arrows select rows or buckets. Enter opens approximately 90%-viewport detail; de
 
 `p` selects 1h/24h/7d/30d/custom, with date/timezone validation. Custom input is `from | to`, both RFC3339 timestamps with explicit timezones. `f` opens app/provider/role/mode/tool/category filters; the strip shows applied chips and unsupported scope. Expanded tables use these dimension filters and expose complete selected-row prose; unsupported historical identities/provenance stay unavailable. Tab/Shift+Tab changes picker dimensions, arrows choose an observed value, Enter applies; Esc closes. `c` clears dimensions while preserving period. `r` refreshes Overview statistics or System hardware; `x` opens Configs.
 
-Snapshots load on a background reader, at most once per second while visible. Refresh retains the last good snapshot and panel state, visibly labels stale data/errors, and discards obsolete filter generations. Live capacity, unresolved directives and backlog ignore historical filters and remain labeled. Detail reads are lazy, bounded and cached by filters/revision.
+Snapshots load on a background reader every 20 seconds while Profile Overview analytics is visible with no overlay; manual refresh and filter changes invalidate that timer. Other apps, Home, System and overlays suspend requests and snapshot publication. A read completing while hidden is discarded; returning to overdue analytics retries. Refresh retains the last good snapshot and panel state, visibly labels stale data/errors, and discards obsolete filter generations. Live capacity, unresolved directives and backlog ignore historical filters and remain labeled. Detail reads are lazy, bounded and cached by filters/revision.
 
 ## Metric dictionary
 

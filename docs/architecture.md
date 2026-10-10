@@ -402,14 +402,14 @@ Profile (internal id `System`) is read-only observability plus one configuration
 ### Snapshot path
 
 ```
-tick (1 Hz) → Store::profile_snapshot → profile_stats::snapshot(&store.conn, period, filters, now)
-            → ProfileSnapshot (immutable) → tui/profile.rs renders
+tick (1 Hz) → visible Overview + refresh due (20s / invalidated) → background reader
+            → Store::profile_snapshot → ProfileSnapshot (immutable) → tui/profile.rs renders
 ```
 
-- `App::reload_profile` asks `ProfileView::due()` first, so a snapshot is built at most once per second while Profile is on screen.
-- The read runs on the **store's own connection** (`Store::connection`), never a second writer and never a pooled checkout, so a dashboard refresh cannot block recording. A failed read keeps the last good snapshot and reports the error instead.
+- `App::reload_profile` requires visible Profile Overview analytics with no overlay and asks `ProfileView::due()` before starting a read. Automatic refresh is every 20 seconds; manual refresh, filters and fresh Profile entry invalidate freshness. Snapshot delivery applies the same visibility guard, discarding reads completed while hidden without replacing the previous snapshot or timestamp.
+- The background worker opens a separate read-only connection with `Store::open_profile_reader`, keeping snapshot reads off the UI thread and away from the recording connection. A failed visible read keeps the last good snapshot and reports the error instead.
 - `profile_stats::snapshot` performs no writes, no network calls and no model calls; it merges `telemetry_events` with `telemetry_hourly` / `telemetry_daily`, reads a rollup bucket only when the whole bucket predates the raw retention boundary, and returns `N/A` rather than `0` wherever the denominator is zero.
-- Rendering consumes the cached snapshot only. Only the focused section is laid out; the other sections collapse to one-line summaries.
+- Rendering consumes the cached snapshot only. The selected Summary/app page uses Dashboard geometry; expanded measurements use the Report preset.
 
 ### Module layout
 

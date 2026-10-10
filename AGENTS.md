@@ -228,3 +228,6 @@ Scratch = agent-only helpers Argos does not need to build or test (`*.py`, `*.sh
 - After `fmt` → `clippy` → `test`, delete that task’s scratch files.
 - Keep `scripts/` only for documented project utilities (`scripts/agent_cargo.py`, `scripts/render_tui_cells.py`, `scripts/tui_review.py`). Review artifacts live under the named plan; durable selected fixture PNGs may live under `docs/screenshots/`. Dependency environments and diagnostic logs stay task-owned scratch.
 - Incomplete work: leave scratch in `.agent-scratch/` and list it in the hand-off.
+
+
+TUI overhaul navigation/component contract: read `docs/tui-design-spec.md` and `docs/tui-components.md`, including Shared navigation and portable configuration. Preserve three Profile pages, independent TabBar focus/activation, nested dataset offsets, background image resources, exact-revision Verify/Save and usize transcript scroll. Include `dump_overhaul_screens` alongside Profile captures in the six-size acceptance matrix; generation does not complete visual review.

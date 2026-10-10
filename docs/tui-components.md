@@ -95,3 +95,18 @@ let frozen = TranscriptBlock { revision, width, content: rendered_lines };
 ## Application presets
 
 Home shrinks its logo and uses two launcher columns on short screens. Recon uses a transcript and 30% context column at 110 cells; compact screens expose Transcript/Investigation pages. Intel uses three columns at 132 cells, two at 100–131, and Extracted/Reader/Context pages on smaller or short screens. Its article reader is borderless. Atlas exposes compact Origins/Insights/Headlines pages. Brain supports Split/Graph/Related/Summary expansion. Tools and Models expose list/editor pages; the model role list registers its rows. System exposes Host/Paths pages on short screens.
+
+
+## Shared navigation and portable configuration
+
+TabBar uses three-row bordered buttons when space permits and one-row `[Label]` buttons in compact layouts. ACCENT/bold denotes activation; SELECT denotes keyboard focus independently. Enter/Space activates and Left/Right moves within a focused row. Nested active choices contain `●`; parent pages retain child state. Tab/Shift+Tab follows visual order, with popup scopes trapping focus. Editors retain typing and paste ownership.
+
+Profile has Overview / System / Configs. Overview retains Summary / Intel / Recon / Atlas / Models / Tools and all 20 metric IDs. System and Configs suspend analytics reads and publication. Configs preserves drafts during page navigation and discards credential buffers on explicit Esc. Export defaults to `~/argos-config.json`; a second Export confirms overwriting the same destination. Import uses a multiline editor, Verify, a redacted summary and Save and apply. Verification performs no writes; edits invalidate the exact verified revision. Commit uses the existing transactional snapshot and reloads settings for subsequent work.
+
+Report datasets are bounded DetailTable sections with sticky headers, 10 visible rows on tall screens and 3 on short screens. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
+
+Intel imagery uses the Ratatui image adapter with protocol detection once outside draw, a half-block fallback, contain fit, bounded background fetch/decode/encoding and article-ID + URL identity. Missing/invalid/failed images collapse. Image and Visit article site actions open the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
+
+Recon uses a SURFACE user band with ACCENT edge, quiet Markdown synthesis and expandable evidence activity. Failed activities keep a short reason visible. Transcript offsets are usize, Unicode padding uses terminal cells, completed Markdown keeps revision/width caches, and cached block/local-row anchors preserve history during updates. Jump to latest resumes follow; previous/next-turn commands select user-query boundaries.
+
+Acceptance and reproducible capture: [tui-verification.md](tui-verification.md), tests `dump_overhaul_screens` and `analytics_viewports_and_data_states`. Capture all six viewport sizes including 40×20 into a fresh plan directory and inspect actual PNGs. Live graphics/browser checks are recorded separately from TestBackend evidence.

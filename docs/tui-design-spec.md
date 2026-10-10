@@ -61,3 +61,18 @@ AGENTS.md and the supported existing OpenCode mechanisms (`argos-plan`, `argos-i
 Verify all 20 primary views, merged details, filters and System/Configs. Render terminal fixtures with `scripts/render_tui_cells.py` at 160×50, 120×40, 100×32, 80×24, 60×18 and too-small, empty, stale and loading states. Check geometry, no wrapping, Unicode, shared scales, denominators, missing/low-N samples, stable colors, owner actions, focus/scroll restoration and mouse parity. Compare actual Summary/Recon snapshots against approved references when available; concept images are not QA.
 
 Run repository fmt → clippy → test with ARGOS_EMBED unset. OpenCode build/clippy/test use `--locked --no-default-features` per [AGENTS.md](../AGENTS.md), and graphify is updated after code changes. Report actual results and unverified live behavior; acceptance instructions are not evidence that checks have run.
+
+
+## Shared navigation and portable configuration
+
+TabBar uses three-row bordered buttons when space permits and one-row `[Label]` buttons in compact layouts. ACCENT/bold denotes activation; SELECT denotes keyboard focus independently. Enter/Space activates and Left/Right moves within a focused row. Nested active choices contain `●`; parent pages retain child state. Tab/Shift+Tab follows visual order, with popup scopes trapping focus. Editors retain typing and paste ownership.
+
+Profile has Overview / System / Configs. Overview retains Summary / Intel / Recon / Atlas / Models / Tools and all 20 metric IDs. System and Configs suspend analytics reads and publication. Configs preserves drafts during page navigation and discards credential buffers on explicit Esc. Export defaults to `~/argos-config.json`; a second Export confirms overwriting the same destination. Import uses a multiline editor, Verify, a redacted summary and Save and apply. Verification performs no writes; edits invalidate the exact verified revision. Commit uses the existing transactional snapshot and reloads settings for subsequent work.
+
+Report datasets are bounded DetailTable sections with sticky headers, 10 visible rows on tall screens and 3 on short screens. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
+
+Intel imagery uses the Ratatui image adapter with protocol detection once outside draw, a half-block fallback, contain fit, bounded background fetch/decode/encoding and article-ID + URL identity. Missing/invalid/failed images collapse. Image and Visit article site actions open the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
+
+Recon uses a SURFACE user band with ACCENT edge, quiet Markdown synthesis and expandable evidence activity. Failed activities keep a short reason visible. Transcript offsets are usize, Unicode padding uses terminal cells, completed Markdown keeps revision/width caches, and cached block/local-row anchors preserve history during updates. Jump to latest resumes follow; previous/next-turn commands select user-query boundaries.
+
+Acceptance and reproducible capture: [tui-verification.md](tui-verification.md), tests `dump_overhaul_screens` and `analytics_viewports_and_data_states`. Capture all six viewport sizes including 40×20 into a fresh plan directory and inspect actual PNGs. Live graphics/browser checks are recorded separately from TestBackend evidence.

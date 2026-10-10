@@ -41,3 +41,6 @@ For TUI edits, read the supplied design contract and catalog entries, reuse shar
 For Profile edits, read `docs/profile-analytics-dashboard.md`. Preserve 20 primary views (Intel 4 / Recon 5 / Atlas 3 / Models 4 / Tools 4), Summary reuse and metric/history contracts. Reuse AnalyticsCard, TimePlot, DetailTable, Meter and ScrollPane through `profile_components`, with the Dashboard/Report presets and pure `profile_layout::LayoutResult` geometry. Keep theme RGB/tokens, System and Configs. Report changes against the supplied viewport/state acceptance checks; the parent runs validation. Do not change OpenCode model defaults/permissions or add config keys.
 
 TUI process and artifact retention: `docs/tui-verification.md` / `argos-tui-verify`. The parent owns capture and image/action/metric verification; editors remain formatting-only.
+
+
+TUI overhaul navigation/component contract: read `docs/tui-design-spec.md` and `docs/tui-components.md`, including Shared navigation and portable configuration. Preserve three Profile pages, independent TabBar focus/activation, nested dataset offsets, background image resources, exact-revision Verify/Save and usize transcript scroll. Include `dump_overhaul_screens` alongside Profile captures in the six-size acceptance matrix; generation does not complete visual review.

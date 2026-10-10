@@ -93,10 +93,10 @@ Custom period input is `from | to`: both timestamps use RFC3339 with explicit ti
 
 **Configs** (`x`) — Export writes the portable schema-v1 document; Import merges one in. The file contains saved API keys, so treat it as a secret and never commit it.
 
-| Tab | Keys |
+| Section | Keys |
 | --- | --- |
-| Export | Type the destination (`~` expands), Enter checks it and exports. Enter again confirms an overwrite |
-| Import | Paste the document. Enter inserts a newline; Ctrl+Enter validates and, only when valid, imports |
+| Export | Type the destination (`~` expands), focus Export and activate it. Activate Export again to confirm overwrite of the same destination |
+| Import | Paste the document; Enter inserts a newline. Focus Verify to validate, then Save and apply to commit. Any edit requires verification again |
 
 The redacted change summary lists what moves before you commit. Primary IDs, filters and layouts are documented in [profile-analytics-dashboard.md](profile-analytics-dashboard.md); the metric dictionary, portable configuration contract, validation and commit remain in [profile-dashboard-and-search.md](profile-dashboard-and-search.md).
 
@@ -173,3 +173,6 @@ State: `~/.argos` (`ARGOS_HOME` overrides).
 [![Persistence stack](diagrams/persistence.svg)](diagrams/persistence.html)
 
 Persistence: [architecture.md](architecture.md#persistence).
+
+
+Profile opens Overview; its upper buttons select Overview, System or Configs. `x` and the Configs palette command select the Configs page. Export precedes the multiline Import editor: Verify shows a redacted change summary, then Save and apply commits that exact revision. Enter in JSON inserts a newline. Tools has category groups and compact Catalog / Documentation / Test pages; search reveals matches without changing saved expansion. Intel's Visit article site action opens the article URL. Ctrl+K lists recent commands and current-app shortcuts above universal actions. Recon exposes Jump to latest and previous/next-turn commands through the palette.

@@ -1,6 +1,6 @@
 # Profile analytics dashboard
 
-Profile keeps the internal `ModuleId::System`, **Overview / System** tabs, and portable **Configs** import/export. Overview starts on **Summary**, followed by Intel, Recon, Atlas, Models and Tools. Its simultaneous dashboard panels replace the earlier focused-only accordion and 35-primary-widget presentation. Telemetry, cohorts, retained DTOs/history, retention, privacy and provider scheduler contracts remain authoritative in [profile-dashboard-and-search.md](profile-dashboard-and-search.md).
+Profile keeps the internal `ModuleId::System` and exactly three upper tabs: **Overview / System / Configs**. Configs contains portable export and import. Overview starts on **Summary**, followed by Intel, Recon, Atlas, Models and Tools. Its simultaneous dashboard panels replace the earlier focused-only accordion and 35-primary-widget presentation. Telemetry, cohorts, retained DTOs/history, retention, privacy and provider scheduler contracts remain authoritative in [profile-dashboard-and-search.md](profile-dashboard-and-search.md).
 
 ## Primary inventory
 
@@ -40,11 +40,11 @@ At **160×50**, zero-based terminal rows are:
 | Rows | Content |
 | --- | --- |
 | 0 | Existing `[Home] Profile` shell header |
-| 1–2 | Overview / System tabs |
-| 3–4 | Summary / Intel / Recon / Atlas / Models / Tools |
-| 5 | Period, applied filters, Refresh, update time/timezone, stale/coverage |
-| 6–11 | Four bordered KPI cards, with labels, values and denominators/N |
-| 12–48 | Scrollable analytic body, 37 rows |
+| 1–3 | Overview / System / Configs tabs |
+| 4–6 | Summary / Intel / Recon / Atlas / Models / Tools |
+| 7 | Period, applied filters, Refresh, update time/timezone, stale/coverage |
+| 8–13 | Four bordered KPI cards, with labels, values and denominators/N |
+| 14–48 | Scrollable analytic body, 35 rows |
 | 49 | Contextual keyboard hints |
 
 The body uses two columns at **120 cells or wider**, a **one-cell gutter**, and aligned edges. At width 160 the columns are 79 and 80 cells. Four KPI cards use near-equal widths with one-cell gutters. Below 120 the body becomes one column in reading order; at 80–119 KPIs are two across, and below 80 they use compact two-column values. Keep chart heights at least 11 and table heights at least 9; reduce chrome/KPI height and scroll the body instead of squeezing panels. The practical minimum is 60×18; smaller screens retain navigation and show a size notice. Focus never collapses another panel.
@@ -93,3 +93,6 @@ Render real terminal fixtures through `scripts/render_tui_cells.py` at **160×50
 Run fmt → clippy → test with `ARGOS_EMBED` unset. OpenCode build/clippy/test commands use `--locked --no-default-features` as specified in [AGENTS.md](../AGENTS.md). Report actual check results, screenshot paths, justified migrations and unverified live behavior; this document specifies acceptance and is not a test result.
 
 Recorded results and retained screenshot examples are in [the implementation session](tui-verification-session-2026-10-10.md). Reproduce the full matrix with [the capture workflow](tui-verification.md); captures belong to a fresh current-plan run, not a fixed historical directory. Artifact generation itself does not establish a reviewed result.
+
+
+Navigation update: the upper TabBar has Overview / System / Configs, with three-row buttons on tall viewports and compact one-row buttons otherwise. The existing lower Overview inventory and metric contract remain authoritative. This adds two chrome rows on tall screens; fixed analytic panel heights are retained and the page scrolls to reveal overflow. Report supporting datasets use fixed-height sections with independent table offsets; Configs is a page containing Export above Import with separate Verify and Save and apply buttons.

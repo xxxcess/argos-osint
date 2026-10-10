@@ -20,3 +20,6 @@ Follow the guide's dependency setup. The default fixture covers Profile; use `--
 Open emitted PNGs with the host's image viewer and compare the viewport/state contract and available approved references. Record image names, observations, fixes, test results and limitations in the review ledger. If the host cannot view images, report visual verification as pending; readable cells are useful but do not complete screenshot review.
 
 Re-capture after output changes. Focused tests suffice for a subsequent interaction-only change when buffers are unchanged and the full gate passed; record that sequence. Run `graphify update .` after code edits, retain prescribed graph files and remove task-owned scratch after checks. Deliver actual evidence links and distinguish live-provider/default-LanceDB/MiniLM checks from offline checks. Do not infer permissions or change models.
+
+
+TUI overhaul navigation/component contract: read `docs/tui-design-spec.md` and `docs/tui-components.md`, including Shared navigation and portable configuration. Preserve three Profile pages, independent TabBar focus/activation, nested dataset offsets, background image resources, exact-revision Verify/Save and usize transcript scroll. Include `dump_overhaul_screens` alongside Profile captures in the six-size acceptance matrix; generation does not complete visual review.

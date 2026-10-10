@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
 use crate::provider_metrics::{self, CapacityRow};
-use crate::telemetry::{self, EventKind, ToolOutcome, Trigger};
+use crate::telemetry::{self, EventKind, Trigger};
 
 /// Percentiles below this many observations are suppressed instead of shown as
 /// a confident p95. The row keeps p50, the mean and `n`, and the UI labels it.
@@ -196,6 +196,37 @@ pub struct StatFilters {
     pub mode: String,
     pub tool: String,
     pub category: String,
+}
+
+/// Filter dimensions emitted by each source. Unsupported filters stay visible
+/// in `ProfileSnapshot::filters` but never erase an unrelated metric cohort.
+pub const fn applicable_filter_dimensions(kind: EventKind) -> &'static [&'static str] {
+    match kind {
+        EventKind::IntelArticle => &["app", "category"],
+        EventKind::IntelBriefRating => &["app", "mode", "category"],
+        EventKind::IntelReport => &["app", "mode"],
+        EventKind::ReconRun | EventKind::RecallQuery | EventKind::DirectiveAssessed => {
+            &["app", "mode"]
+        }
+        EventKind::ReconStage => &["app", "mode", "category"],
+        EventKind::AtlasCycle => &["app", "mode"],
+        EventKind::AtlasOriginSnapshot | EventKind::AtlasStage => &["app"],
+        EventKind::AtlasCandidate => &["app", "provider", "category"],
+        EventKind::ModelAttempt => &["app", "provider", "role", "mode"],
+        EventKind::ModelOperation => &["app", "provider", "role"],
+        EventKind::ToolInvocation | EventKind::ToolWireRequest => {
+            &["app", "provider", "mode", "tool", "category"]
+        }
+        EventKind::ToolEngineQuery | EventKind::EvidenceItem => {
+            &["app", "provider", "mode", "tool"]
+        }
+    }
+}
+
+/// Durable coverage records carry category and update time. Their scope label
+/// alone does not establish an app or a historical report mode.
+pub const fn diversity_filter_dimensions() -> &'static [&'static str] {
+    &["category"]
 }
 
 impl StatFilters {
@@ -336,6 +367,21 @@ pub struct ProfileSnapshot {
     pub atlas: AtlasStats,
     pub models: ModelStats,
     pub tools: ToolStats,
+    #[serde(default)]
+    pub attention: Vec<AttentionRow>,
+}
+
+/// Bounded live attention records containing IDs and labels, never error prose,
+/// article bodies, prompts or outputs. Owner IDs are authoritative references.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AttentionRow {
+    pub app: String,
+    pub owner_kind: String,
+    pub owner_id: String,
+    pub item_id: String,
+    pub reason: String,
+    pub age_ms: Option<i64>,
+    pub action: String,
 }
 
 /// Retention boundaries the dashboard displays.
@@ -380,6 +426,7 @@ pub fn snapshot(
     let atlas = reader.atlas();
     let models = reader.models();
     let tools = reader.tools();
+    let attention = reader.attention(&recon, &models);
     let carries_data = sections_carry_data(&intel, &recon, &atlas, &models, &tools);
     let status = global_status(conn, period, now, carries_data);
     Ok(ProfileSnapshot {
@@ -393,6 +440,7 @@ pub fn snapshot(
         atlas,
         models,
         tools,
+        attention,
     })
 }
 
@@ -414,6 +462,14 @@ pub fn filter_options(conn: &Connection) -> Vec<(String, Vec<String>)> {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct IntelStats {
+    /// Distinct canonical identities; unavailable for rollup-only history.
+    #[serde(default)]
+    pub distinct_new_articles: Option<u64>,
+    /// Current body availability in the same distinct ingestion cohort.
+    #[serde(default)]
+    pub body_available_articles: Option<u64>,
+    #[serde(default)]
+    pub body_eligible_articles: Option<u64>,
     pub volume: Vec<VolumeBucket>,
     pub confidence: ConfidenceDistribution,
     pub origins: Vec<OriginCount>,
@@ -516,6 +572,9 @@ pub struct FreshnessHistogram {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReconStats {
+    /// Uncapped latest unresolved/blocked assessments. The rows are bounded.
+    #[serde(default)]
+    pub unresolved_live_total: u64,
     pub outcomes: Vec<ReconOutcomeBucket>,
     pub stages: Vec<StageDurationRow>,
     pub recall: Vec<RecallRow>,
@@ -694,6 +753,8 @@ pub struct BacklogRow {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelStats {
+    #[serde(default)]
+    pub period_summary: ModelPeriodSummary,
     /// Live capacity from the orchestration companion. Ignores every filter.
     pub capacity: Vec<CapacityRow>,
     pub capacity_available: bool,
@@ -709,6 +770,18 @@ pub struct ModelStats {
     /// Coverage labels: sends versus operations, error-rate denominators, and
     /// live capacity that deliberately ignores historical filters.
     pub note: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelPeriodSummary {
+    pub sends: u64,
+    /// Includes cancelled operations; final failures exclude cancellations.
+    pub terminal_operations: u64,
+    pub final_failures: u64,
+    pub successful_execution_p95_ms: Option<i64>,
+    pub successful_execution_n: u64,
+    pub queue_p95_ms: Option<i64>,
+    pub queue_n: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -787,6 +860,7 @@ pub struct AmplificationBucket {
     pub bucket: String,
     pub sends: u64,
     pub terminal_operations: u64,
+    /// Raw sends per terminal operation (1.0 = one send), never a percentage.
     pub ratio: Option<f64>,
     pub in_flight_operations: u64,
 }
@@ -803,12 +877,20 @@ pub struct FailureBucket {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolStats {
+    #[serde(default)]
+    pub logical_calls: u64,
+    #[serde(default)]
+    pub remote_errors: u64,
+    #[serde(default)]
+    pub eligible_remote_calls: u64,
     pub top_tools: Vec<ToolCount>,
     pub categories_by_trigger: Vec<CategoryTrigger>,
     pub outcomes: Vec<ToolOutcomeBucket>,
     pub reliability: Vec<ReliabilityRow>,
     pub engine_health: Vec<EngineHealthRow>,
     pub evidence: Vec<EvidenceRow>,
+    #[serde(default)]
+    pub evidence_details: Vec<EvidenceIdentity>,
     pub failure_causes: Vec<FailureCauseRow>,
     /// Coverage labels: remote-only error denominators, cancelled handling, and
     /// engine identity separate from the transport provider.
@@ -886,6 +968,17 @@ pub struct EvidenceRow {
     pub nonadditive: bool,
 }
 
+/// Measured evidence provenance only; bodies and prompts never travel here.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceIdentity {
+    pub tool_id: String,
+    pub call_id: String,
+    pub run_id: String,
+    pub article_id: String,
+    pub canonical_ref: String,
+    pub cited: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FailureCauseRow {
     pub cause: String,
@@ -920,6 +1013,8 @@ struct Dims {
 #[derive(Clone, Debug, Default)]
 struct Cell {
     events: u64,
+    raw_events: u64,
+    raw_total_ms: i64,
     total_ms: i64,
     max_ms: i64,
     samples: Vec<i64>,
@@ -929,8 +1024,10 @@ struct Cell {
 impl Cell {
     fn add_raw(&mut self, count: i64, metric_ms: Option<i64>) {
         self.events += count.max(0) as u64;
+        self.raw_events += count.max(0) as u64;
         if let Some(ms) = metric_ms.filter(|value| *value >= 0) {
             self.total_ms += ms;
+            self.raw_total_ms += ms;
             self.max_ms = self.max_ms.max(ms);
             self.samples.push(ms);
         }
@@ -950,6 +1047,8 @@ impl Cell {
 
     fn absorb(&mut self, other: &Cell) {
         self.events += other.events;
+        self.raw_events += other.raw_events;
+        self.raw_total_ms += other.raw_total_ms;
         self.total_ms += other.total_ms;
         self.max_ms = self.max_ms.max(other.max_ms);
         self.samples.extend(other.samples.iter().copied());
@@ -964,6 +1063,16 @@ impl Cell {
     /// Duration observations: raw samples plus everything the rollup bins hold.
     fn duration_n(&self) -> u64 {
         self.samples.len() as u64 + self.rollup_bins.iter().sum::<i64>().max(0) as u64
+    }
+
+    fn rollup_only(&self) -> Cell {
+        Cell {
+            events: self.events.saturating_sub(self.raw_events),
+            total_ms: self.total_ms - self.raw_total_ms,
+            max_ms: self.max_ms,
+            rollup_bins: self.rollup_bins.clone(),
+            ..Cell::default()
+        }
     }
 
     fn has_rollup(&self) -> bool {
@@ -1185,7 +1294,7 @@ fn bucket_floor(value: DateTime<Utc>, secs: i64) -> DateTime<Utc> {
 fn parse_bucket(value: &str) -> Option<DateTime<Utc>> {
     let value = value.trim();
     if value.len() >= 13 {
-        chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H")
+        chrono::NaiveDateTime::parse_from_str(&format!("{value}:00:00"), "%Y-%m-%dT%H:%M:%S")
             .ok()
             .map(|naive| Utc.from_utc_datetime(&naive))
     } else {
@@ -1317,6 +1426,136 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    fn attention(&self, recon: &ReconStats, models: &ModelStats) -> Vec<AttentionRow> {
+        let age = |stamp: &str| {
+            parse_timestamp(stamp).map(|at| (self.win.now - at).num_milliseconds().max(0))
+        };
+        let mut rows = Vec::new();
+        for directive in recon.unresolved.iter().take(32) {
+            rows.push(AttentionRow {
+                app: "Recon".into(),
+                owner_kind: "run".into(),
+                owner_id: directive.run_id.clone(),
+                item_id: directive.label.clone(),
+                reason: directive.reason.clone(),
+                age_ms: age(&directive.last_progress),
+                action: directive.next_action.clone(),
+            });
+        }
+        if has_table(self.conn, "intel_report_jobs") {
+            if let Ok(mut stmt)=self.conn.prepare("SELECT id,article_id,state,stage,updated_at FROM intel_report_jobs WHERE state IN ('blocked','waiting') ORDER BY updated_at,id LIMIT 32") {
+                if let Ok(jobs)=stmt.query_map([],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?))) {
+                    for job in jobs.flatten() {
+                        rows.push(AttentionRow {app:"Intel".into(),owner_kind:"intel_job".into(),owner_id:job.0,item_id:job.1,reason:bounded_label(&format!("{} {}",job.2,job.3)),age_ms:age(&job.4),action:"Open report".into()});
+                    }
+                }
+            }
+        }
+        if has_table(self.conn, "intel_report_tasks") {
+            if let Ok(mut stmt)=self.conn.prepare("SELECT t.id,t.job_id,j.article_id,t.lease_until FROM intel_report_tasks t JOIN intel_report_jobs j ON j.id=t.job_id WHERE t.status='running' AND t.lease_until != '' AND t.lease_until < ?1 ORDER BY t.lease_until,t.id LIMIT 16") {
+                if let Ok(tasks)=stmt.query_map([self.win.now.to_rfc3339()],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?))) {
+                    for task in tasks.flatten() { rows.push(AttentionRow {app:"Intel".into(),owner_kind:"intel_job".into(),owner_id:task.1,item_id:task.2,reason:format!("expired task lease {}",bounded_label(&task.0)),age_ms:age(&task.3),action:"Open report".into()}); }
+                }
+            }
+        }
+        let stages = self.live_load(EventKind::AtlasStage);
+        let mut latest = BTreeMap::new();
+        for (row, at) in stages.timed() {
+            let unit = if row.call_id.is_empty() {
+                row.label("unit_id")
+            } else {
+                row.call_id.clone()
+            };
+            if !unit.is_empty() {
+                let stage = if row.dims.tool.is_empty() {
+                    row.label("stage")
+                } else {
+                    row.dims.tool.clone()
+                };
+                latest.insert((stage, unit), (row, at));
+            }
+        }
+        for ((stage, unit), (row, at)) in latest
+            .into_iter()
+            .filter(|(_, (row, _))| row.dims.outcome == "blocked")
+            .take(32)
+        {
+            if row.run_id.is_empty() {
+                continue;
+            }
+            rows.push(AttentionRow {
+                app: "Atlas".into(),
+                owner_kind: "atlas_run".into(),
+                owner_id: row.run_id.clone(),
+                item_id: unit,
+                reason: bounded_label(&format!("{} {}", stage, row.dims.reason)),
+                age_ms: Some((self.win.now - at).num_milliseconds().max(0)),
+                action: "Open cycle".into(),
+            });
+        }
+        let engine_events = self.live_load(EventKind::ToolEngineQuery);
+        let mut latest = BTreeMap::new();
+        for (row, at) in engine_events.timed() {
+            latest.insert(row.dims.engine.clone(), (row, at));
+        }
+        for (engine, (row, at)) in latest {
+            if row.run_id.is_empty()
+                || !matches!(
+                    row.dims.outcome.as_str(),
+                    "challenge" | "parser_mismatch" | "transport_failure" | "failed"
+                )
+            {
+                continue;
+            }
+            rows.push(AttentionRow {
+                app: "Tools".into(),
+                owner_kind: "run".into(),
+                owner_id: row.run_id.clone(),
+                item_id: engine,
+                reason: bounded_label(&row.dims.outcome),
+                age_ms: Some((self.win.now - at).num_milliseconds().max(0)),
+                action: "Open investigation".into(),
+            });
+        }
+        for capacity in models
+            .capacity
+            .iter()
+            .filter(|row| row.cooldown_ms.is_some_and(|value| value > 0))
+            .take(16)
+        {
+            rows.push(AttentionRow {
+                app: "Models".into(),
+                owner_kind: "provider_scope".into(),
+                owner_id: bounded_label(&format!("{} {}", capacity.provider, capacity.scope)),
+                item_id: bounded_label(&capacity.quota_group),
+                reason: format!("cooldown {}ms", capacity.cooldown_ms.unwrap_or_default()),
+                age_ms: None,
+                action: "Inspect capacity".into(),
+            });
+        }
+        rows.sort_by(|a, b| {
+            b.age_ms
+                .cmp(&a.age_ms)
+                .then(a.app.cmp(&b.app))
+                .then(a.owner_id.cmp(&b.owner_id))
+                .then(a.item_id.cmp(&b.item_id))
+        });
+        rows.truncate(64);
+        rows
+    }
+
+    /// Current states ignore the historical period and all historical filters.
+    fn live_load(&self, kind: EventKind) -> Loaded {
+        let mut reader = Self::new(
+            self.conn,
+            &Period::H24,
+            &StatFilters::default(),
+            self.win.now,
+        );
+        reader.win.start = DateTime::from_timestamp(0, 0).unwrap_or(self.win.now);
+        reader.win.end = self.win.now;
+        reader.load(kind).unwrap_or_default()
+    }
     fn new(
         conn: &'a Connection,
         period: &Period,
@@ -1341,7 +1580,7 @@ impl<'a> Reader<'a> {
         self.win.buckets.iter().map(|b| b.label.clone()).collect()
     }
 
-    fn matches_filters(&self, dims: &Dims) -> bool {
+    fn matches_filters(&self, kind: EventKind, dims: &Dims) -> bool {
         for (column, want) in [
             ("app", self.filters.app.as_str()),
             ("provider", self.filters.provider.as_str()),
@@ -1351,7 +1590,7 @@ impl<'a> Reader<'a> {
             ("category", self.filters.category.as_str()),
         ] {
             let want = want.trim();
-            if want.is_empty() {
+            if want.is_empty() || !applicable_filter_dimensions(kind).contains(&column) {
                 continue;
             }
             let have = match column {
@@ -1391,7 +1630,8 @@ impl<'a> Reader<'a> {
             ("category", self.filters.category.as_str()),
         ] {
             let want = want.trim();
-            if want.is_empty() {
+            let dimension = if column == "tool_id" { "tool" } else { column };
+            if want.is_empty() || !applicable_filter_dimensions(kind).contains(&dimension) {
                 continue;
             }
             let index = args.len() + 1;
@@ -1497,7 +1737,7 @@ impl<'a> Reader<'a> {
                         continue;
                     }
                     let dims = dims_from_key(&dim_key);
-                    if !self.matches_filters(&dims) {
+                    if !self.matches_filters(kind, &dims) {
                         continue;
                     }
                     let bins: Vec<i64> = serde_json::from_str(&bins_json).unwrap_or_default();
@@ -1534,11 +1774,7 @@ impl Reader<'_> {
         let mut seen: Vec<ArticleFact> = Vec::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
         for (row, at) in articles.timed() {
-            let id = if row.article_id.is_empty() {
-                row.dims.category.clone()
-            } else {
-                row.article_id.clone()
-            };
+            let id = row.article_id.clone();
             if id.is_empty() || !seen_ids.insert(id.clone()) {
                 continue;
             }
@@ -1586,6 +1822,21 @@ impl Reader<'_> {
             }
         }
 
+        let identities_available = !observed_since(self.conn).is_empty()
+            && articles
+                .cells
+                .values()
+                .all(|cell| cell.events == cell.raw_events)
+            && articles.rows.iter().all(|row| !row.article_id.is_empty());
+        let distinct_new_articles = identities_available.then_some(seen.len() as u64);
+        let body_eligible_articles = identities_available
+            .then_some(seen.len() as u64)
+            .filter(|_| has_table(self.conn, "article_bodies"));
+        let body_available_articles = body_eligible_articles.map(|_| {
+            seen.iter()
+                .filter(|article| self.article_has_body(&article.domain, &article.id))
+                .count() as u64
+        });
         let volume = self.intel_volume(&seen, &articles);
         let confidence = paired_confidence(&seen, &ratings);
         let origins = origin_counts(&seen);
@@ -1593,22 +1844,28 @@ impl Reader<'_> {
         let freshness = self.intel_freshness(&seen);
 
         let mut by_tag: BTreeMap<String, Vec<&ArticleFact>> = BTreeMap::new();
-        for fact in &seen {
-            let key = if fact.tag.is_empty() {
+        let identities: HashMap<_, _> = seen.iter().map(|fact| (fact.id.as_str(), fact)).collect();
+        let mut memberships = HashSet::new();
+        for row in &articles.rows {
+            let Some(fact) = identities.get(row.article_id.as_str()) else {
+                continue;
+            };
+            let tag = normalize_tag(&row.dims.category, &row.label("tag"));
+            let key = if tag.is_empty() {
                 "untagged".to_string()
             } else {
-                fact.tag.clone()
+                tag
             };
-            by_tag.entry(key).or_default().push(fact);
+            if memberships.insert((key.clone(), fact.id.clone())) {
+                by_tag.entry(key).or_default().push(fact);
+            }
         }
         let mut enrichment: Vec<EnrichmentRow> = by_tag
             .into_iter()
             .map(|(tag, rows)| {
                 let bodies = rows
                     .iter()
-                    .filter(|row| {
-                        !row.domain.is_empty() && self.article_has_body(&row.domain, &row.id)
-                    })
+                    .filter(|row| self.article_has_body(&row.domain, &row.id))
                     .count() as u64;
                 let claims = rows.iter().filter(|row| row.claims > 0).count() as u64;
                 let with_report = rows
@@ -1640,6 +1897,9 @@ impl Reader<'_> {
 
         let report_rows = self.intel_reports(&reports);
         IntelStats {
+            distinct_new_articles,
+            body_available_articles,
+            body_eligible_articles,
             volume,
             confidence,
             origins,
@@ -1668,9 +1928,11 @@ impl Reader<'_> {
         }
         // Rollup history covers buckets the raw table no longer holds. Rollup
         // buckets never overlap a retained raw row, so the counts add directly.
-        for (label, by_tag) in loaded.trend_grouped(|dims| normalize_tag(&dims.category, "")) {
-            let entry = per_tag.entry(label).or_default();
-            for (tag, count) in by_tag {
+        for ((label, dims), cell) in &loaded.trend {
+            let count = cell.events.saturating_sub(cell.raw_events);
+            if count > 0 {
+                let entry = per_tag.entry(label.clone()).or_default();
+                let tag = normalize_tag(&dims.category, "");
                 let key = if tag.is_empty() {
                     "untagged".to_string()
                 } else {
@@ -1804,7 +2066,7 @@ impl Reader<'_> {
     fn article_has_body(&self, _domain: &str, article_id: &str) -> bool {
         self.conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM article_bodies WHERE article_id = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM article_bodies WHERE article_id = ?1 AND quality != 'unavailable' AND length(trim(body_markdown)) > 0)",
                 rusqlite::params![article_id],
                 |row| row.get::<_, bool>(0),
             )
@@ -2019,14 +2281,18 @@ impl Reader<'_> {
         let directives = self.load(EventKind::DirectiveAssessed).unwrap_or_default();
 
         let run_facts = self.recon_run_facts(&runs);
+        let mut unresolved = self.recon_unresolved(&self.live_load(EventKind::DirectiveAssessed));
+        let unresolved_live_total = unresolved.len() as u64;
+        unresolved.truncate(200);
         ReconStats {
+            unresolved_live_total,
             outcomes: self.recon_outcomes(&run_facts),
             stages: self.recon_stages(&stages),
             recall: self.recon_recall(&recalls),
             workload: self.recon_workload(&run_facts),
             diversity: self.recon_diversity(),
             directives: self.recon_directives(&directives),
-            unresolved: self.recon_unresolved(&directives),
+            unresolved,
             note: "Terminal run assessments come from recorded transitions, not from a \
                    successful tool call. Directive categories are categorical and never \
                    averaged into a score."
@@ -2200,12 +2466,17 @@ impl Reader<'_> {
                 let (scope, generation, category, payload, updated_at) = row;
                 let key = format!("{scope}\u{1f}{category}");
                 let stamp = parse_timestamp(&updated_at);
+                if !stamp.is_some_and(|at| self.win.contains(at))
+                    || (!self.filters.category.is_empty() && self.filters.category != category)
+                {
+                    continue;
+                }
                 // One authoritative row per (scope, category): the newest
                 // generation wins, then the newest update.
                 let stale = match (latest.get(&key), stamp) {
                     (Some(current), Some(at)) => {
-                        at < current.updated_at
-                            || (at == current.updated_at && generation < current.generation)
+                        generation < current.generation
+                            || (generation == current.generation && at < current.updated_at)
                     }
                     _ => false,
                 };
@@ -2218,8 +2489,18 @@ impl Reader<'_> {
                 // `CoverageRecord` payload: eligible candidates, attempted and
                 // successful tools, independent source groups and the reason a
                 // category fell short of the two-tool target.
-                let eligible_candidates = json_array_len(&record, "candidates")
-                    .saturating_sub(json_at(&record, "candidates", "ineligible"));
+                let eligible_candidates = record
+                    .get("candidates")
+                    .and_then(Json::as_array)
+                    .map(|candidates| {
+                        candidates
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.get("eligible").and_then(Json::as_bool) == Some(true)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
                 latest.insert(
                     key,
                     CoverageFact {
@@ -2295,13 +2576,29 @@ impl Reader<'_> {
 
     /// Recon widget 7: unresolved and blocked directives with their reason.
     fn recon_unresolved(&self, loaded: &Loaded) -> Vec<UnresolvedDirective> {
-        let mut rows: Vec<UnresolvedDirective> = loaded
-            .timed()
+        let mut latest = BTreeMap::new();
+        for (row, at) in loaded.timed() {
+            if row.run_id.is_empty() {
+                continue;
+            }
+            let identity = if row.canonical_ref.is_empty() {
+                row.label("label")
+            } else {
+                row.canonical_ref.clone()
+            };
+            latest.insert((row.run_id.clone(), identity), (row, at));
+        }
+        let mut rows: Vec<UnresolvedDirective> = latest
+            .into_values()
             .filter(|(row, _)| matches!(row.dims.outcome.as_str(), "unresolved" | "blocked"))
             .map(|(row, at)| UnresolvedDirective {
                 run_id: row.run_id.clone(),
                 mode: recon_mode(&row.dims.mode),
-                label: row.label("label"),
+                label: if row.label("label").is_empty() {
+                    bounded_label(row.canonical_ref.rsplit(':').next().unwrap_or(""))
+                } else {
+                    row.label("label")
+                },
                 reason: if row.dims.reason.is_empty() {
                     row.label("reason")
                 } else {
@@ -2317,7 +2614,6 @@ impl Reader<'_> {
                 .cmp(&a.last_progress)
                 .then(a.run_id.cmp(&b.run_id))
         });
-        rows.truncate(200);
         rows
     }
 
@@ -2508,7 +2804,7 @@ impl Reader<'_> {
             .load(EventKind::AtlasOriginSnapshot)
             .unwrap_or_default();
         let candidates = self.load(EventKind::AtlasCandidate).unwrap_or_default();
-        let stages = self.load(EventKind::AtlasStage).unwrap_or_default();
+        let live_cycles = self.live_load(EventKind::AtlasCycle);
         let articles = self.atlas_article_facts();
 
         AtlasStats {
@@ -2517,9 +2813,9 @@ impl Reader<'_> {
             cycle_outcomes: self.atlas_cycle_outcomes(&cycles),
             origins: atlas_origin_rows(&snapshots, &articles),
             discovery: self.atlas_discovery(&candidates),
-            backlog: self.atlas_backlog(&stages),
-            waiting_now: self.atlas_current_state(&cycles, "waiting"),
-            blocked_now: self.atlas_current_state(&cycles, "blocked"),
+            backlog: self.atlas_backlog(&self.live_load(EventKind::AtlasStage)),
+            waiting_now: self.atlas_current_state(&live_cycles, "waiting"),
+            blocked_now: self.atlas_current_state(&live_cycles, "blocked"),
             note: "Temperature is Argos's own score and tier is ordinal, so tiers are a \
                    distribution plus a descriptive mean rather than an interval scale. \
                    Waiting and blocked are current counts, never fabricated completions."
@@ -2667,30 +2963,19 @@ impl Reader<'_> {
 
     /// Current, unfiltered waiting/blocked cycles: a live count, not history.
     fn atlas_current_state(&self, loaded: &Loaded, want: &str) -> u32 {
-        loaded.cells.iter().fold(0u32, |total, (dims, cell)| {
-            if dims.outcome == want {
-                total + cell.events as u32
-            } else {
-                total
+        let mut latest = BTreeMap::new();
+        for (row, _) in loaded.timed() {
+            if !row.run_id.is_empty() {
+                latest.insert(row.run_id.clone(), row.dims.outcome.as_str());
             }
-        })
+        }
+        latest.values().filter(|state| **state == want).count() as u32
     }
 
     /// Atlas widget 5: one mutually exclusive disposition per candidate.
     fn atlas_discovery(&self, loaded: &Loaded) -> Vec<DiscoveryBucket> {
         let mut per_bucket: BTreeMap<String, DiscoveryBucket> = BTreeMap::new();
-        for (row, at) in loaded.timed() {
-            let entry = per_bucket.entry(self.win.label_at(at)).or_default();
-            entry.fetched += 1;
-            match row.dims.outcome.as_str() {
-                "retained_new" | "new" => entry.retained_new += 1,
-                "retained_existing" | "existing" => entry.retained_existing += 1,
-                "duplicate_in_cycle" | "duplicate" | "dup" => entry.duplicate_in_cycle += 1,
-                "rejected" | "reject" => entry.rejected += 1,
-                _ => entry.pending += 1,
-            }
-        }
-        // Rollup-only buckets still count as candidate occurrences.
+        // Merged trend cells include both raw and rollup candidate occurrences.
         for (label, by_disposition) in loaded.trend_grouped(|dims| dims.outcome.to_string()) {
             let entry = per_bucket.entry(label).or_default();
             for (disposition, count) in by_disposition {
@@ -2729,6 +3014,9 @@ impl Reader<'_> {
             } else {
                 row.call_id.clone()
             };
+            if unit_id.is_empty() {
+                continue;
+            }
             let key = (stage, unit_id);
             match units.get(&key) {
                 Some(current) if current.at >= at => {}
@@ -2753,13 +3041,15 @@ impl Reader<'_> {
                 }
             }
         }
-        let mut rows: BTreeMap<String, BacklogRow> = BTreeMap::new();
+        let mut rows: BTreeMap<(String, String), BacklogRow> = BTreeMap::new();
         for ((stage, unit_id), unit) in units {
-            let entry = rows.entry(stage.clone()).or_insert_with(|| BacklogRow {
-                stage: stage.clone(),
-                unit: unit.unit.clone(),
-                ..BacklogRow::default()
-            });
+            let entry = rows
+                .entry((stage.clone(), unit.unit.clone()))
+                .or_insert_with(|| BacklogRow {
+                    stage: stage.clone(),
+                    unit: unit.unit.clone(),
+                    ..BacklogRow::default()
+                });
             match unit.state.as_str() {
                 "queued" => entry.queued += 1,
                 "running" => entry.running += 1,
@@ -2919,31 +3209,54 @@ impl Reader<'_> {
 
         // Wire requests per tool, counted separately from logical calls.
         let mut wire_by_tool: BTreeMap<String, u64> = BTreeMap::new();
-        for (row, _) in wires.timed() {
-            if row.dims.tool.is_empty() {
-                continue;
+        for (dims, cell) in &wires.cells {
+            if !dims.tool.is_empty() {
+                *wire_by_tool.entry(dims.tool.clone()).or_default() += cell.events;
             }
-            *wire_by_tool.entry(row.dims.tool.clone()).or_default() += 1;
         }
+        // Legacy invocation payloads are only a fallback when no separate wire
+        // cohort exists; the same request must never be counted by both sources.
+        let mut legacy_wire_by_tool = BTreeMap::new();
         for (row, _) in invocations.timed() {
             let remote = row.count("wire_requests").max(row.count("remote_requests"));
             if remote > 0 && !row.dims.tool.is_empty() {
-                *wire_by_tool.entry(row.dims.tool.clone()).or_default() += remote;
+                *legacy_wire_by_tool
+                    .entry(row.dims.tool.clone())
+                    .or_default() += remote;
             }
         }
+        for (tool, count) in legacy_wire_by_tool {
+            wire_by_tool.entry(tool).or_insert(count);
+        }
         ToolStats {
+            logical_calls: invocations.total(|_| true),
+            remote_errors: invocations.total(|dims| {
+                dims.mode != "cache"
+                    && dims.mode != "local"
+                    && matches!(
+                        dims.outcome.as_str(),
+                        "failed" | "blocked" | "parser_mismatch"
+                    )
+            }),
+            eligible_remote_calls: invocations
+                .total(|dims| dims.mode != "cache" && dims.mode != "local"),
             top_tools: tool_counts(&invocations),
             categories_by_trigger: category_triggers(&invocations),
             outcomes: self.tool_outcomes(&invocations),
             reliability: tool_reliability(&invocations, &wire_by_tool),
             engine_health: engine_health(&engines, &invocations),
             evidence: self.tool_evidence(&evidence, &invocations),
+            evidence_details: evidence_details(&evidence),
             failure_causes: tool_failure_causes(&invocations),
             note: "Logical invocations, wire requests and cache hits are counted \
                    separately. Remote error-rate denominators exclude cache and \
                    local-only executions, so a cache hit is never a remote \
                    failure. Engine identity stays separate from the transport \
-                   provider that fetched the page."
+                   provider that fetched the page. Evidence acceptance requires known \
+                   logical-call provenance; historical rollups retain counts but erase \
+                   evidence identity links, so affected rates are unavailable. Tool \
+                   counts and duration histograms include retained rollups; parser \
+                   versions and exact last-success timestamps cover raw observations only."
                 .to_string(),
         }
     }
@@ -2984,7 +3297,35 @@ impl Reader<'_> {
 
     /// Tools widget 6: evidence contribution joined through provenance.
     fn tool_evidence(&self, loaded: &Loaded, invocations: &Loaded) -> Vec<EvidenceRow> {
-        let mut per_tool: BTreeMap<(String, String), EvidenceAccumulator> = BTreeMap::new();
+        let mut per_tool: BTreeMap<String, EvidenceAccumulator> = BTreeMap::new();
+        for (dims, cell) in &invocations.cells {
+            if dims.tool.is_empty() || !successful_nonempty(&dims.outcome) {
+                continue;
+            }
+            let entry = per_tool.entry(dims.tool.clone()).or_default();
+            entry.tool_id = dims.tool.clone();
+            entry.category = dims.category.clone();
+            entry.successful += cell.events;
+            entry.incomplete |= cell.rollup_only().events > 0;
+        }
+        for (row, _) in invocations.timed() {
+            if row.dims.tool.is_empty() || !successful_nonempty(&row.dims.outcome) {
+                continue;
+            }
+            let entry = per_tool.entry(row.dims.tool.clone()).or_default();
+            if row.call_id.is_empty() {
+                entry.incomplete = true;
+            } else {
+                entry.eligible_calls.insert(row.call_id.clone());
+            }
+        }
+        for (dims, cell) in &loaded.cells {
+            if !dims.tool.is_empty() && cell.rollup_only().events > 0 {
+                let entry = per_tool.entry(dims.tool.clone()).or_default();
+                entry.tool_id = dims.tool.clone();
+                entry.incomplete = true;
+            }
+        }
         for (row, _) in loaded.timed() {
             let tool = if row.dims.tool.is_empty() {
                 row.label("tool_id")
@@ -2994,46 +3335,41 @@ impl Reader<'_> {
             if tool.is_empty() {
                 continue;
             }
-            let entry = per_tool
-                .entry((tool.clone(), row.dims.category.clone()))
-                .or_insert_with(|| EvidenceAccumulator {
-                    tool_id: tool,
-                    category: row.dims.category.clone(),
-                    ..EvidenceAccumulator::default()
-                });
-            entry.invocations += 1;
-            entry.fingerprints.insert(fingerprint(row));
-            if row.flag("cited") {
-                entry.citations += 1;
+            let entry = per_tool.entry(tool.clone()).or_default();
+            entry.tool_id = tool;
+            if entry.category.is_empty() {
+                entry.category = row.dims.category.clone();
             }
-        }
-        // Successful nonempty invocations give the acceptance denominator.
-        let mut successful: BTreeMap<String, u64> = BTreeMap::new();
-        for (row, _) in invocations.timed() {
-            if !reached_source(&row.dims.outcome) {
-                continue;
-            }
-            if !row.dims.tool.is_empty() {
-                *successful.entry(row.dims.tool.clone()).or_default() += 1;
-            }
-        }
-        let mut rows: Vec<EvidenceRow> = per_tool
-            .into_values()
-            .map(|entry| {
-                let denominator = successful.get(&entry.tool_id).copied().unwrap_or(0);
-                EvidenceRow {
-                    tool_id: entry.tool_id.clone(),
-                    category: entry.category,
-                    successful_nonempty: denominator,
-                    with_evidence: entry.invocations,
-                    acceptance_pct: sum_ratio(entry.invocations, denominator),
-                    distinct_evidence: entry.fingerprints.len() as u64,
-                    cited_by_completed_reports: entry.citations,
-                    coverage_n: entry.invocations,
-                    // One evidence item can carry several tools, so the rows
-                    // credit each tool but must not be summed.
-                    nonadditive: true,
+            let identity = fingerprint(row);
+            if identity.is_empty() {
+                entry.incomplete = true;
+            } else {
+                entry.fingerprints.insert(identity.clone());
+                if evidence_cited(row) {
+                    entry.cited.insert(identity);
                 }
+            }
+            let call = evidence_call(row);
+            if call.is_empty() || !entry.eligible_calls.contains(&call) {
+                entry.incomplete = true;
+            } else {
+                entry.accepted_calls.insert(call);
+            }
+        }
+        let mut rows: Vec<_> = per_tool
+            .into_values()
+            .map(|entry| EvidenceRow {
+                tool_id: entry.tool_id,
+                category: entry.category,
+                successful_nonempty: entry.successful,
+                with_evidence: entry.accepted_calls.len() as u64,
+                acceptance_pct: (!entry.incomplete)
+                    .then(|| sum_ratio(entry.accepted_calls.len() as u64, entry.successful))
+                    .flatten(),
+                distinct_evidence: entry.fingerprints.len() as u64,
+                cited_by_completed_reports: entry.cited.len() as u64,
+                coverage_n: entry.eligible_calls.len() as u64,
+                nonadditive: true,
             })
             .collect();
         rows.sort_by(|a, b| {
@@ -3046,24 +3382,59 @@ impl Reader<'_> {
 }
 
 fn fingerprint(row: &EventRow) -> String {
-    // Prefer the explicit evidence identity, then the call provenance, so the
-    // same item reported twice is counted once.
-    for key in ["fingerprint", "evidence_id", "canonical_ref"] {
+    // canonical_ref is the owning report revision, not an evidence identity.
+    for key in ["item_id", "fingerprint", "evidence_id"] {
         let value = row.label(key);
         if !value.is_empty() {
             return value;
         }
     }
-    if !row.call_id.is_empty() {
-        return row.call_id.clone();
-    }
-    row.article_id.clone()
+    String::new()
 }
 
-fn reached_source(outcome: &str) -> bool {
-    ToolOutcome::from_str(outcome)
-        .map(|v| v.reached_source())
-        .unwrap_or(false)
+fn evidence_call(row: &EventRow) -> String {
+    // The emitter uses the item id as the event call when provenance is absent.
+    // An explicitly empty payload call must therefore remain unknown.
+    if row.payload.get("call_id").is_some() {
+        row.label("call_id")
+    } else {
+        row.call_id.clone()
+    }
+}
+
+fn evidence_cited(row: &EventRow) -> bool {
+    row.flag("cited") || (!row.canonical_ref.is_empty() && row.count("citations") > 0)
+}
+
+fn evidence_details(loaded: &Loaded) -> Vec<EvidenceIdentity> {
+    let mut details = BTreeMap::new();
+    for (row, _) in loaded.timed() {
+        let tool = if row.dims.tool.is_empty() {
+            row.label("tool_id")
+        } else {
+            row.dims.tool.clone()
+        };
+        let identity = fingerprint(row);
+        if tool.is_empty() || identity.is_empty() {
+            continue;
+        }
+        let entry = details
+            .entry((tool.clone(), identity, row.canonical_ref.clone()))
+            .or_insert_with(|| EvidenceIdentity {
+                tool_id: tool,
+                call_id: evidence_call(row),
+                run_id: row.run_id.clone(),
+                article_id: row.article_id.clone(),
+                canonical_ref: row.canonical_ref.clone(),
+                cited: false,
+            });
+        entry.cited |= evidence_cited(row);
+    }
+    details.into_values().take(128).collect()
+}
+
+fn successful_nonempty(outcome: &str) -> bool {
+    matches!(outcome, "completed_nonempty" | "nonempty" | "ok")
 }
 
 /// Tools widget 1: top logical invocations with the remote/local/cache split.
@@ -3090,6 +3461,25 @@ fn tool_counts(loaded: &Loaded) -> Vec<ToolCount> {
             "cache" => entry.cache += 1,
             "local" => entry.local += 1,
             _ => entry.remote += 1,
+        }
+    }
+    for (dims, cell) in &loaded.cells {
+        let count = cell.rollup_only().events;
+        if count == 0 || dims.tool.is_empty() {
+            continue;
+        }
+        let entry = per_tool
+            .entry(dims.tool.clone())
+            .or_insert_with(|| ToolAccumulator {
+                tool_id: dims.tool.clone(),
+                category: dims.category.clone(),
+                ..Default::default()
+            });
+        entry.invocations += count;
+        match dims.mode.as_str() {
+            "cache" => entry.cache += count,
+            "local" => entry.local += count,
+            _ => entry.remote += count,
         }
     }
     let mut rows: Vec<ToolCount> = per_tool
@@ -3191,8 +3581,40 @@ fn tool_reliability(loaded: &Loaded, wire_by_tool: &BTreeMap<String, u64>) -> Ve
             entry.verified_zero += 1;
         }
         if let Some(duration) = row.metric_ms.filter(|value| *value >= 0) {
-            entry.durations.push(duration);
+            entry.duration.add_raw(1, Some(duration));
         }
+    }
+    for (dims, cell) in &loaded.cells {
+        let rolled = cell.rollup_only();
+        let count = rolled.events;
+        if count == 0 || dims.tool.is_empty() {
+            continue;
+        }
+        let entry = per_tool
+            .entry(dims.tool.clone())
+            .or_insert_with(|| ReliabilityAccumulator {
+                tool_id: dims.tool.clone(),
+                category: dims.category.clone(),
+                ..Default::default()
+            });
+        entry.invocations += count;
+        *entry.triggers.entry(dims.trigger.clone()).or_default() += count;
+        *entry.modes.entry(dims.mode.clone()).or_default() += count;
+        if dims.mode != "cache" && dims.mode != "local" {
+            entry.remote += count;
+            if matches!(
+                dims.outcome.as_str(),
+                "failed" | "blocked" | "parser_mismatch"
+            ) {
+                entry.remote_errors += count;
+            }
+        } else if dims.mode == "cache" {
+            entry.cache += count;
+        }
+        if dims.outcome == "verified_zero" {
+            entry.verified_zero += count;
+        }
+        entry.duration.absorb(&rolled);
     }
     let mut rows: Vec<ReliabilityRow> = per_tool
         .into_iter()
@@ -3207,8 +3629,8 @@ fn tool_reliability(loaded: &Loaded, wire_by_tool: &BTreeMap<String, u64>) -> Ve
                 verified_zero_pct: sum_ratio(entry.verified_zero, entry.invocations),
                 // Denominator is remote executions only.
                 error_pct: sum_ratio(entry.remote_errors, entry.remote),
-                mean_ms: mean(&entry.durations).map(|value| value as i64),
-                p95_ms: small_sample_p95(&entry.durations),
+                mean_ms: entry.duration.mean_ms(),
+                p95_ms: entry.duration.p95_ms(),
                 dominant_trigger: dominant_label(&entry.triggers),
                 dominant_mode: dominant_label(&entry.modes),
             }
@@ -3260,6 +3682,27 @@ fn engine_health(engines: &Loaded, invocations: &Loaded) -> Vec<EngineHealthRow>
             entry.parser_version = version;
         }
     }
+    for (dims, cell) in &engines.cells {
+        let count = cell.rollup_only().events;
+        if count == 0 || dims.engine.is_empty() {
+            continue;
+        }
+        let entry = per_engine
+            .entry(dims.engine.clone())
+            .or_insert_with(|| EngineAccumulator {
+                engine: dims.engine.clone(),
+                ..Default::default()
+            });
+        entry.fetches += count;
+        match dims.outcome.as_str() {
+            "valid" | "ok" => entry.valid += count,
+            "verified_zero" | "zero" => entry.verified_zero += count,
+            "challenge" | "consent" => entry.challenge += count,
+            "parser_mismatch" => entry.parser_mismatch += count,
+            "transport_failure" | "timeout" => entry.transport_failure += count,
+            _ => entry.other += count,
+        }
+    }
     // Cache hits stay separate from fetches so they never inflate health.
     let mut cache_by_engine: BTreeMap<String, u64> = BTreeMap::new();
     for (row, _) in invocations.timed() {
@@ -3273,6 +3716,11 @@ fn engine_health(engines: &Loaded, invocations: &Loaded) -> Vec<EngineHealthRow>
         };
         if !engine.is_empty() {
             *cache_by_engine.entry(engine).or_default() += 1;
+        }
+    }
+    for (dims, cell) in &invocations.cells {
+        if dims.mode == "cache" && !dims.engine.is_empty() {
+            *cache_by_engine.entry(dims.engine.clone()).or_default() += cell.rollup_only().events;
         }
     }
     let mut rows: Vec<EngineHealthRow> = Vec::new();
@@ -3290,13 +3738,18 @@ fn engine_health(engines: &Loaded, invocations: &Loaded) -> Vec<EngineHealthRow>
                 challenge: entry.challenge,
                 parser_mismatch: entry.parser_mismatch,
                 transport_failure: entry.transport_failure,
-                usable_per_fetch: sum_ratio(entry.valid, entry.fetches),
+                usable_per_fetch: sum_ratio(entry.valid + entry.verified_zero, entry.fetches),
                 cache_hits: cache,
-                last_success: entry.last_success.to_rfc3339(),
+                last_success: if entry.last_success == DateTime::<Utc>::default() {
+                    String::new()
+                } else {
+                    entry.last_success.to_rfc3339()
+                },
                 parser_version: entry.parser_version,
             },
             None => EngineHealthRow {
                 engine: engine.to_string(),
+                cache_hits: cache,
                 ..EngineHealthRow::default()
             },
         });
@@ -3306,16 +3759,20 @@ fn engine_health(engines: &Loaded, invocations: &Loaded) -> Vec<EngineHealthRow>
             continue;
         }
         rows.push(EngineHealthRow {
-            engine,
+            engine: engine.clone(),
             fetches: entry.fetches,
             valid_serps: entry.valid,
             verified_zero: entry.verified_zero,
             challenge: entry.challenge,
             parser_mismatch: entry.parser_mismatch,
             transport_failure: entry.transport_failure,
-            usable_per_fetch: sum_ratio(entry.valid, entry.fetches),
-            cache_hits: 0,
-            last_success: entry.last_success.to_rfc3339(),
+            usable_per_fetch: sum_ratio(entry.valid + entry.verified_zero, entry.fetches),
+            cache_hits: cache_by_engine.get(&engine).copied().unwrap_or(0),
+            last_success: if entry.last_success == DateTime::<Utc>::default() {
+                String::new()
+            } else {
+                entry.last_success.to_rfc3339()
+            },
             parser_version: entry.parser_version,
         });
     }
@@ -3399,7 +3856,7 @@ struct ReliabilityAccumulator {
     verified_zero: u64,
     triggers: BTreeMap<String, u64>,
     modes: BTreeMap<String, u64>,
-    durations: Vec<i64>,
+    duration: Cell,
 }
 
 #[derive(Default)]
@@ -3420,9 +3877,12 @@ struct EngineAccumulator {
 struct EvidenceAccumulator {
     tool_id: String,
     category: String,
-    invocations: u64,
+    successful: u64,
+    eligible_calls: HashSet<String>,
+    accepted_calls: HashSet<String>,
     fingerprints: HashSet<String>,
-    citations: u64,
+    cited: HashSet<String>,
+    incomplete: bool,
 }
 
 // ---------- Models ----------
@@ -3432,15 +3892,51 @@ impl Reader<'_> {
         let capacity = provider_metrics::capacity_snapshot(self.conn);
         let operations = self.load(EventKind::ModelOperation).unwrap_or_default();
         let attempts = self.load(EventKind::ModelAttempt).unwrap_or_default();
-        let facts = model_facts(self.conn, &operations, &attempts);
+        let facts = model_facts(self, &operations, &attempts);
+        let successful = model_duration_cell(
+            &facts,
+            &attempts,
+            |attempt| attempt.sent && attempt.succeeded,
+            true,
+        );
+        let queues: Vec<_> = facts
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.sent)
+            .filter_map(|attempt| attempt.queue_ms)
+            .collect();
+        let period_summary = ModelPeriodSummary {
+            sends: facts.attempts.iter().filter(|attempt| attempt.sent).count() as u64
+                + attempts
+                    .cells
+                    .iter()
+                    .filter(|(dims, _)| !model_blocked(&dims.outcome))
+                    .map(|(_, cell)| cell.events.saturating_sub(cell.raw_events))
+                    .sum::<u64>(),
+            terminal_operations: facts
+                .operations
+                .iter()
+                .filter(|operation| operation.terminal_bucket.is_some())
+                .count() as u64,
+            final_failures: facts
+                .operations
+                .iter()
+                .filter(|operation| operation.terminal_bucket.is_some() && operation.failed)
+                .count() as u64,
+            successful_execution_p95_ms: successful.p95_ms(),
+            successful_execution_n: successful.duration_n(),
+            queue_p95_ms: small_sample_p95(&queues),
+            queue_n: queues.len() as u64,
+        };
 
         ModelStats {
+            period_summary,
             capacity: capacity.capacity.clone(),
             capacity_available: capacity.available,
-            by_role: self.model_by_role(&facts.attempts),
-            latency: self.model_latency(&facts.attempts),
+            by_role: self.model_by_role(&facts.attempts, &attempts),
+            latency: self.model_latency(&facts.attempts, &attempts),
             queue_delay: self.model_queue_delay(&facts.attempts),
-            performance: model_performance(&facts),
+            performance: model_performance(&facts, &attempts),
             fallback: model_fallback(&facts),
             amplification: self.model_amplification(&facts),
             failures: self.model_failures(&facts.attempts),
@@ -3451,13 +3947,15 @@ impl Reader<'_> {
                    cohort. Fallback triggers and recoveries are different \
                    counts, amplification includes every route of each terminal \
                    operation, and live capacity deliberately ignores historical \
-                   filters."
+                   filters. Queue percentiles cover measured raw samples only; \
+                   queue, response timing and exact HTTP statuses were not retained \
+                   in historical rollups. HTTP 429 counts cover measured raw attempts."
                 .to_string(),
         }
     }
 
     /// Models widget 2: sends per bucket stacked by role.
-    fn model_by_role(&self, attempts: &[AttemptFact]) -> Vec<RoleRequestBucket> {
+    fn model_by_role(&self, attempts: &[AttemptFact], loaded: &Loaded) -> Vec<RoleRequestBucket> {
         let mut per_bucket: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
         for attempt in attempts {
             if !attempt.sent {
@@ -3468,6 +3966,15 @@ impl Reader<'_> {
                 .or_default()
                 .entry(attempt.role.clone())
                 .or_default() += 1;
+        }
+        for ((bucket, dims), cell) in &loaded.trend {
+            if !model_blocked(&dims.outcome) {
+                *per_bucket
+                    .entry(bucket.clone())
+                    .or_default()
+                    .entry(dims.role.clone())
+                    .or_default() += cell.events.saturating_sub(cell.raw_events);
+            }
         }
         self.win.skeleton(|bucket| {
             let roles = per_bucket.remove(&bucket.label).unwrap_or_default();
@@ -3483,7 +3990,7 @@ impl Reader<'_> {
     }
 
     /// Models widget 3: successful send-to-contract-completion latency.
-    fn model_latency(&self, attempts: &[AttemptFact]) -> Vec<LatencyBucket> {
+    fn model_latency(&self, attempts: &[AttemptFact], loaded: &Loaded) -> Vec<LatencyBucket> {
         let mut per_bucket: BTreeMap<String, (Vec<i64>, Vec<i64>, Vec<i64>)> = BTreeMap::new();
         for attempt in attempts {
             if !attempt.sent || !attempt.succeeded {
@@ -3502,11 +4009,20 @@ impl Reader<'_> {
         }
         self.win.skeleton(|bucket| {
             let (exec, headers, contents) = per_bucket.remove(&bucket.label).unwrap_or_default();
+            let mut merged = Cell::default();
+            for value in exec {
+                merged.add_raw(1, Some(value));
+            }
+            for ((label, dims), cell) in &loaded.trend {
+                if label == &bucket.label && model_succeeded(&dims.outcome) {
+                    merged.absorb(&cell.rollup_only());
+                }
+            }
             LatencyBucket {
                 bucket: bucket.label.clone(),
-                p50_ms: quantile_owned(&exec, 0.5),
-                p95_ms: small_sample_p95(&exec),
-                n: exec.len() as u64,
+                p50_ms: merged.p50_ms(),
+                p95_ms: merged.p95_ms(),
+                n: merged.duration_n(),
                 p50_first_header_ms: quantile_owned(&headers, 0.5),
                 p50_first_content_ms: quantile_owned(&contents, 0.5),
             }
@@ -3602,7 +4118,8 @@ impl Reader<'_> {
 
 impl AmplificationBucket {
     fn with_ratio(mut self) -> Self {
-        self.ratio = sum_ratio(self.sends, self.terminal_operations);
+        self.ratio = (self.terminal_operations > 0)
+            .then(|| self.sends as f64 / self.terminal_operations as f64);
         self
     }
 }
@@ -3632,7 +4149,11 @@ fn classify_model_failure(category: &str) -> &'static str {
 
 /// One wire attempt from the authoritative durable row plus its telemetry
 /// counterpart, merged so neither double counts.
+#[derive(Clone)]
 struct AttemptFact {
+    id: String,
+    at: Option<DateTime<Utc>>,
+    dims: Dims,
     bucket: String,
     provider: String,
     model: String,
@@ -3662,6 +4183,7 @@ struct OperationFact {
     sends: u64,
     failed: bool,
     recovered: bool,
+    fallback_triggered: bool,
     trigger_reason: String,
     operation_id: String,
     created_at: Option<DateTime<Utc>>,
@@ -3676,16 +4198,24 @@ struct ModelFacts {
 
 /// Reads the durable schema-26 operation/attempt rows and merges the canonical
 /// telemetry events, keeping exactly one count per fact.
-fn model_facts(conn: &Connection, _operations: &Loaded, attempts: &Loaded) -> ModelFacts {
+fn model_facts(reader: &Reader<'_>, operations: &Loaded, attempts: &Loaded) -> ModelFacts {
+    let conn = reader.conn;
     let mut facts = ModelFacts::default();
     let mut known_operations: HashSet<String> = HashSet::new();
     let mut known_attempts: HashSet<String> = HashSet::new();
+    let supplemental: HashMap<_, _> = attempts
+        .rows
+        .iter()
+        .filter(|row| !row.canonical_ref.is_empty())
+        .map(|row| (row.canonical_ref.as_str(), row))
+        .collect();
+    let mut all_attempts = Vec::new();
 
     if has_table(conn, "recon_model_operations") {
         if let Ok(mut stmt) = conn
-            .prepare("SELECT id, role, status, created_at, updated_at FROM recon_model_operations")
+            .prepare("SELECT id, role, status, created_at, updated_at FROM recon_model_operations WHERE created_at <= ?1")
         {
-            if let Ok(rows) = stmt.query_map([], |row| {
+            if let Ok(rows) = stmt.query_map([reader.win.end.to_rfc3339()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -3697,7 +4227,7 @@ fn model_facts(conn: &Connection, _operations: &Loaded, attempts: &Loaded) -> Mo
                 for row in rows.flatten() {
                     known_operations.insert(row.0.clone());
                     facts.operations.push(OperationFact {
-                        terminal_bucket: None,
+                        terminal_bucket: model_terminal(&row.2).then(|| parse_timestamp(&row.4)).flatten().filter(|at| reader.win.contains(*at)),
                         role: row.1,
                         primary_provider: String::new(),
                         primary_model: String::new(),
@@ -3705,23 +4235,36 @@ fn model_facts(conn: &Connection, _operations: &Loaded, attempts: &Loaded) -> Mo
                         effective_model: String::new(),
                         sends: 0,
                         failed: matches!(row.2.as_str(), "failed" | "error"),
-                        recovered: matches!(row.2.as_str(), "succeeded" | "completed" | "ok"),
+                        recovered: model_succeeded(&row.2),
+                        fallback_triggered: false,
                         trigger_reason: String::new(),
                         operation_id: row.0,
                         created_at: parse_timestamp(&row.3),
                     });
-                    facts.summary.operations += 1;
                 }
             }
         }
     }
     if has_table(conn, "recon_model_attempts") {
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, operation_id, provider, model, route_index, dispatched, outcome, \
-                    failure_category, http_status, elapsed_ms, queue_ms, ttfb_ms \
-             FROM recon_model_attempts",
-        ) {
-            if let Ok(rows) = stmt.query_map([], |row| {
+        let columns: HashSet<String> = conn
+            .prepare("PRAGMA table_info(recon_model_attempts)")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(1))
+                    .ok()
+                    .map(|rows| rows.flatten().collect())
+            })
+            .unwrap_or_default();
+        let optional = |column: &str| {
+            if columns.contains(column) {
+                format!("a.{column}")
+            } else {
+                "NULL".into()
+            }
+        };
+        let sql = format!("SELECT a.id, a.operation_id, a.provider, a.model, a.route_index, a.dispatched, a.outcome, a.failure_category, a.http_status, {}, {}, {}, a.started_at, a.finished_at, {}, {}, {}, o.role, a.transport FROM recon_model_attempts a JOIN recon_model_operations o ON o.id = a.operation_id WHERE a.started_at <= ?1 ORDER BY a.started_at, a.id", optional("elapsed_ms"), optional("queue_ms"), optional("ttfb_ms"), optional("sent_at"), optional("queued_at"), optional("first_response_at"));
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(rows) = stmt.query_map([reader.win.end.to_rfc3339()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -3732,31 +4275,479 @@ fn model_facts(conn: &Connection, _operations: &Loaded, attempts: &Loaded) -> Mo
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, Option<u32>>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, i64>(11)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, Option<String>>(14)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(15)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(16)?.unwrap_or_default(),
+                    row.get::<_, String>(17)?,
+                    row.get::<_, String>(18)?,
                 ))
             }) {
                 for row in rows.flatten() {
                     known_attempts.insert(row.0.clone());
+                    let extra = supplemental.get(row.0.as_str()).copied();
+                    let finished = !row.13.is_empty() && model_finished(&row.6);
+                    let succeeded = finished && model_succeeded(&row.6);
+                    let mut dims = extra
+                        .map(|extra| extra.dims.clone())
+                        .unwrap_or_else(|| Dims {
+                            app: "recon".into(),
+                            provider: row.2.clone(),
+                            model: row.3.clone(),
+                            role: row.17.clone(),
+                            mode: row.18.clone(),
+                            outcome: row.6.clone(),
+                            reason: row.7.clone(),
+                            ..Dims::default()
+                        });
+                    dims.provider = row.2.clone();
+                    dims.model = row.3.clone();
+                    dims.role = row.17.clone();
+                    dims.outcome = row.6.clone();
+                    let at = parse_timestamp(if row.14.is_empty() { &row.12 } else { &row.14 });
+                    all_attempts.push(AttemptFact {
+                        id: row.0,
+                        at,
+                        dims,
+                        bucket: at.map(|at| reader.win.label_at(at)).unwrap_or_default(),
+                        provider: row.2,
+                        model: row.3,
+                        role: row.17,
+                        sent: row.5,
+                        finished,
+                        succeeded,
+                        failed: finished && !succeeded && !model_cancelled(&row.6),
+                        exec_ms: row
+                            .9
+                            .filter(|value| *value >= 0 && finished && !row.14.is_empty())
+                            .or_else(|| {
+                                extra
+                                    .and_then(|extra| extra.metric_ms)
+                                    .filter(|value| *value >= 0 && finished)
+                            }),
+                        queue_ms: row
+                            .10
+                            .filter(|value| *value >= 0 && !row.14.is_empty() && !row.15.is_empty())
+                            .or_else(|| {
+                                extra
+                                    .and_then(|extra| extra.int("queue_ms"))
+                                    .filter(|value| *value >= 0)
+                            }),
+                        first_header_ms: row
+                            .11
+                            .filter(|value| *value >= 0 && (!row.16.is_empty() || *value > 0))
+                            .or_else(|| {
+                                extra
+                                    .and_then(|extra| extra.int("ttfb_ms"))
+                                    .filter(|value| *value > 0)
+                            }),
+                        first_content_ms: extra
+                            .and_then(|extra| extra.int("first_content_ms"))
+                            .filter(|value| *value >= 0),
+                        http_status: row.8,
+                        failure_category: row.7,
+                        operation_id: row.1,
+                        route_index: row.4,
+                    });
                 }
             }
         }
     }
-    // `attempts` publishes sends from the same window; the durable rows are
-    // already counted above, so only their ids are collected here.
-    let _ = attempts;
+    for (row, at) in attempts.timed() {
+        if !row.canonical_ref.is_empty() && known_attempts.contains(&row.canonical_ref) {
+            continue;
+        }
+        let sent = !row.flag("blocked_before_send") && !model_blocked(&row.dims.outcome);
+        let finished = model_finished(&row.dims.outcome);
+        let succeeded = model_succeeded(&row.dims.outcome);
+        all_attempts.push(AttemptFact {
+            id: row.canonical_ref.clone(),
+            at: Some(at),
+            dims: row.dims.clone(),
+            bucket: reader.win.label_at(at),
+            provider: row.dims.provider.clone(),
+            model: row.dims.model.clone(),
+            role: row.dims.role.clone(),
+            sent,
+            finished,
+            succeeded,
+            failed: finished && !succeeded && !model_cancelled(&row.dims.outcome),
+            exec_ms: row
+                .int("elapsed_ms")
+                .or(row.metric_ms)
+                .filter(|value| *value >= 0 && finished),
+            queue_ms: row.int("queue_ms").filter(|value| *value >= 0),
+            first_header_ms: row.int("ttfb_ms").filter(|value| *value >= 0),
+            first_content_ms: row.int("first_content_ms").filter(|value| *value >= 0),
+            http_status: row.int("http_status").map(|value| value as u32),
+            failure_category: if row.dims.reason.is_empty() {
+                row.label("failure_category")
+            } else {
+                row.dims.reason.clone()
+            },
+            operation_id: row.label("operation_id"),
+            route_index: row.count("route_index") as u32,
+        });
+    }
+    for (row, at) in operations.timed() {
+        if !row.canonical_ref.is_empty() && known_operations.contains(&row.canonical_ref) {
+            continue;
+        }
+        if !model_terminal(&row.dims.outcome) && !row.flag("terminal") {
+            continue;
+        }
+        facts.operations.push(OperationFact {
+            terminal_bucket: Some(at),
+            role: row.dims.role.clone(),
+            primary_provider: row.label("primary_provider"),
+            primary_model: row.label("primary_model"),
+            effective_provider: row.label("effective_provider"),
+            effective_model: row.label("effective_model"),
+            sends: row.count("wire_attempts").max(row.count("attempts")),
+            failed: matches!(row.dims.outcome.as_str(), "failed" | "error"),
+            recovered: row.flag("recovered") || model_succeeded(&row.dims.outcome),
+            fallback_triggered: row.flag("recovered") || row.count("effective_route") > 0,
+            trigger_reason: row.dims.reason.clone(),
+            operation_id: row.canonical_ref.clone(),
+            created_at: None,
+        });
+    }
+    all_attempts.sort_by(|a, b| a.at.cmp(&b.at).then(a.id.cmp(&b.id)));
+    for operation in &mut facts.operations {
+        let routes: Vec<_> = all_attempts
+            .iter()
+            .filter(|attempt| {
+                !operation.operation_id.is_empty() && attempt.operation_id == operation.operation_id
+            })
+            .collect();
+        if let Some(primary) = routes.iter().min_by(|a, b| {
+            a.route_index
+                .cmp(&b.route_index)
+                .then(a.at.cmp(&b.at))
+                .then(a.id.cmp(&b.id))
+        }) {
+            operation.primary_provider = primary.provider.clone();
+            operation.primary_model = primary.model.clone();
+        }
+        if let Some(effective) = routes.iter().rev().find(|attempt| attempt.succeeded) {
+            operation.effective_provider = effective.provider.clone();
+            operation.effective_model = effective.model.clone();
+        }
+        if !routes.is_empty() {
+            operation.sends = routes.iter().filter(|attempt| attempt.sent).count() as u64;
+        }
+        operation.fallback_triggered |= routes
+            .iter()
+            .any(|attempt| attempt.route_index > 0 && attempt.sent);
+        operation.trigger_reason = routes
+            .iter()
+            .find(|attempt| attempt.failed && attempt.route_index == 0)
+            .map(|attempt| attempt.failure_category.clone())
+            .unwrap_or_else(|| operation.trigger_reason.clone());
+    }
+    facts.operations.retain(|operation| {
+        let mut dimensions = all_attempts
+            .iter()
+            .find(|attempt| {
+                !operation.operation_id.is_empty()
+                    && attempt.operation_id == operation.operation_id
+                    && attempt.route_index == 0
+            })
+            .map(|attempt| attempt.dims.clone())
+            .unwrap_or_else(|| Dims {
+                app: "recon".into(),
+                ..Dims::default()
+            });
+        dimensions.role = operation.role.clone();
+        dimensions.provider = operation.primary_provider.clone();
+        dimensions.model = operation.primary_model.clone();
+        reader.matches_filters(EventKind::ModelOperation, &dimensions)
+            && (reader.filters.mode.is_empty()
+                || all_attempts.iter().any(|attempt| {
+                    attempt.operation_id == operation.operation_id
+                        && attempt.sent
+                        && reader.matches_filters(EventKind::ModelAttempt, &attempt.dims)
+                }))
+            && (operation.terminal_bucket.is_some()
+                || operation
+                    .created_at
+                    .is_some_and(|at| reader.win.contains(at)))
+    });
+    facts.attempts = all_attempts
+        .into_iter()
+        .filter(|attempt| {
+            reader.matches_filters(EventKind::ModelAttempt, &attempt.dims)
+                && attempt
+                    .at
+                    .is_some_and(|at| reader.win.contains(at) && at >= reader.win.raw_cutoff)
+        })
+        .collect();
+    facts.summary.operations = facts.operations.len() as u64;
+    facts.summary.terminal_operations_with_send = facts
+        .operations
+        .iter()
+        .filter(|operation| operation.terminal_bucket.is_some() && operation.sends > 0)
+        .count() as u64;
+    facts.summary.finished_attempts = facts
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.sent && attempt.finished)
+        .count() as u64;
+    facts.summary.failed_attempts = facts
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.sent && attempt.failed)
+        .count() as u64;
+    facts.summary.blocked_before_send = facts
+        .attempts
+        .iter()
+        .filter(|attempt| !attempt.sent)
+        .count() as u64;
+    facts.summary.missing_queue_timing = facts
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.sent && attempt.queue_ms.is_none())
+        .count() as u64;
+    facts.summary.missing_first_response = facts
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.sent && attempt.first_header_ms.is_none())
+        .count() as u64;
     facts
 }
 
+fn model_succeeded(outcome: &str) -> bool {
+    matches!(
+        outcome,
+        "ok" | "final" | "succeeded" | "completed" | "success"
+    )
+}
+fn model_cancelled(outcome: &str) -> bool {
+    matches!(outcome, "cancelled" | "canceled")
+}
+fn model_blocked(outcome: &str) -> bool {
+    matches!(outcome, "blocked" | "blocked_before_send" | "skipped")
+}
+fn model_finished(outcome: &str) -> bool {
+    !matches!(outcome, "" | "running" | "queued" | "pending" | "admitted")
+        && !model_blocked(outcome)
+}
+fn model_terminal(outcome: &str) -> bool {
+    model_succeeded(outcome) || model_cancelled(outcome) || matches!(outcome, "failed" | "error")
+}
+
+fn model_duration_cell(
+    facts: &ModelFacts,
+    loaded: &Loaded,
+    predicate: impl Fn(&AttemptFact) -> bool,
+    successful_rollups: bool,
+) -> Cell {
+    let mut cell = Cell::default();
+    for attempt in &facts.attempts {
+        if predicate(attempt) {
+            cell.add_raw(1, attempt.exec_ms);
+        }
+    }
+    for (dims, rolled) in &loaded.cells {
+        if successful_rollups && model_succeeded(&dims.outcome) {
+            cell.absorb(&rolled.rollup_only());
+        }
+    }
+    cell
+}
+
 /// Models widget 5: hierarchical provider totals with expandable model rows.
-fn model_performance(_facts: &ModelFacts) -> Vec<ProviderModelRow> {
-    Vec::new()
+fn model_performance(facts: &ModelFacts, loaded: &Loaded) -> Vec<ProviderModelRow> {
+    #[derive(Default)]
+    struct Accumulator {
+        sends: u64,
+        finished: u64,
+        errors: u64,
+        http_429: u64,
+        terminal: u64,
+        failed: u64,
+        duration: Cell,
+    }
+    impl Accumulator {
+        fn absorb(&mut self, other: &Self) {
+            self.sends += other.sends;
+            self.finished += other.finished;
+            self.errors += other.errors;
+            self.http_429 += other.http_429;
+            self.terminal += other.terminal;
+            self.failed += other.failed;
+            self.duration.absorb(&other.duration);
+        }
+        fn row(
+            &self,
+            provider: String,
+            role: String,
+            model: String,
+            is_model_row: bool,
+        ) -> ProviderModelRow {
+            ProviderModelRow {
+                provider,
+                role,
+                model,
+                is_model_row,
+                sends: self.sends,
+                completed_attempts: self.finished,
+                attempt_error_pct: sum_ratio(self.errors, self.finished),
+                http_429: self.http_429,
+                final_operation_failure_pct: sum_ratio(self.failed, self.terminal),
+                mean_exec_ms: self.duration.mean_ms(),
+                p95_exec_ms: self.duration.p95_ms(),
+                n: self.duration.duration_n(),
+            }
+        }
+    }
+    let mut cohorts: BTreeMap<(String, String, String), Accumulator> = BTreeMap::new();
+    for attempt in &facts.attempts {
+        let entry = cohorts
+            .entry((
+                attempt.provider.clone(),
+                attempt.role.clone(),
+                attempt.model.clone(),
+            ))
+            .or_default();
+        if attempt.sent {
+            entry.sends += 1;
+            entry.finished += u64::from(attempt.finished);
+            entry.errors += u64::from(attempt.failed);
+            entry.http_429 += u64::from(attempt.http_status == Some(429));
+            if attempt.succeeded {
+                entry.duration.add_raw(1, attempt.exec_ms);
+            }
+        }
+    }
+    for (dims, cell) in &loaded.cells {
+        let rolled = cell.rollup_only();
+        if rolled.events == 0 || model_blocked(&dims.outcome) {
+            continue;
+        }
+        let entry = cohorts
+            .entry((dims.provider.clone(), dims.role.clone(), dims.model.clone()))
+            .or_default();
+        entry.sends += rolled.events;
+        if model_finished(&dims.outcome) {
+            entry.finished += rolled.events;
+            if !model_succeeded(&dims.outcome) && !model_cancelled(&dims.outcome) {
+                entry.errors += rolled.events;
+            }
+        }
+        // Historical failure categories do not retain the exact HTTP status.
+        if model_succeeded(&dims.outcome) {
+            entry.duration.absorb(&rolled);
+        }
+    }
+    for operation in &facts.operations {
+        if operation.terminal_bucket.is_none() {
+            continue;
+        }
+        let entry = cohorts
+            .entry((
+                operation.primary_provider.clone(),
+                operation.role.clone(),
+                operation.primary_model.clone(),
+            ))
+            .or_default();
+        entry.terminal += 1;
+        entry.failed += u64::from(operation.failed);
+    }
+    let mut providers: BTreeMap<(String, String), Accumulator> = BTreeMap::new();
+    for ((provider, role, _), entry) in &cohorts {
+        providers
+            .entry((provider.clone(), role.clone()))
+            .or_default()
+            .absorb(entry);
+    }
+    let mut rows = Vec::new();
+    for ((provider, role), entry) in providers {
+        rows.push(entry.row(provider.clone(), role.clone(), String::new(), false));
+        for ((p, r, model), entry) in &cohorts {
+            if p == &provider && r == &role {
+                rows.push(entry.row(provider.clone(), role.clone(), model.clone(), true));
+            }
+        }
+    }
+    rows
 }
 
 /// Models widget 6: fallback triggers versus successful recoveries.
-fn model_fallback(_facts: &ModelFacts) -> Vec<FallbackRow> {
-    Vec::new()
+fn model_fallback(facts: &ModelFacts) -> Vec<FallbackRow> {
+    let mut groups: BTreeMap<
+        (String, String, String, String, String, String),
+        Vec<&OperationFact>,
+    > = BTreeMap::new();
+    for operation in &facts.operations {
+        if operation.terminal_bucket.is_some() && operation.fallback_triggered {
+            groups
+                .entry((
+                    operation.role.clone(),
+                    operation.primary_provider.clone(),
+                    operation.primary_model.clone(),
+                    operation.effective_provider.clone(),
+                    operation.effective_model.clone(),
+                    operation.trigger_reason.clone(),
+                ))
+                .or_default()
+                .push(operation);
+        }
+    }
+    groups
+        .into_iter()
+        .map(
+            |(
+                (
+                    role,
+                    primary_provider,
+                    primary_model,
+                    effective_provider,
+                    effective_model,
+                    trigger_reason,
+                ),
+                operations,
+            )| {
+                let recovered_operations = operations
+                    .iter()
+                    .filter(|operation| operation.recovered)
+                    .count() as u64;
+                let durations: Vec<_> = operations
+                    .iter()
+                    .filter(|operation| operation.recovered)
+                    .filter_map(|operation| {
+                        Some(
+                            (operation.terminal_bucket? - operation.created_at?)
+                                .num_milliseconds()
+                                .max(0),
+                        )
+                    })
+                    .collect();
+                FallbackRow {
+                    role,
+                    primary_provider,
+                    primary_model,
+                    effective_provider,
+                    effective_model,
+                    trigger_reason,
+                    triggered_operations: operations.len() as u64,
+                    recovered_operations,
+                    recovery_pct: sum_ratio(recovered_operations, operations.len() as u64),
+                    median_ttoutcome_ms: quantile_owned(&durations, 0.5),
+                    p95_ttoutcome_ms: small_sample_p95(&durations),
+                    recovered_n: durations.len() as u64,
+                    failed_n: operations
+                        .iter()
+                        .filter(|operation| operation.failed)
+                        .count() as u64,
+                }
+            },
+        )
+        .collect()
 }
 
 fn median_i64(samples: &[i64]) -> Option<i64> {
@@ -3769,6 +4760,14 @@ fn median_i64(samples: &[i64]) -> Option<i64> {
 }
 
 // ---------- snapshot helpers ----------
+
+fn bounded_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(128)
+        .collect()
+}
 
 /// The telemetry columns that say when something was last recorded. A rollup
 /// bucket only marks the start of a period, so raw events win ties.
@@ -4050,6 +5049,621 @@ mod snapshot_tests {
     use super::*;
     use crate::store::Store;
     use crate::telemetry::{EventKind, TelemetryEvent};
+
+    #[test]
+    fn retained_bucket_parser_defaults_hour_boundaries_to_zero_minutes() {
+        assert_eq!(
+            parse_bucket("2026-07-01T13"),
+            parse_timestamp("2026-07-01T13:00:00Z")
+        );
+        assert_eq!(
+            parse_bucket("2026-07-01"),
+            parse_timestamp("2026-07-01T00:00:00Z")
+        );
+        assert_eq!(parse_bucket("2026-07-01T99"), None);
+    }
+
+    #[test]
+    fn amplification_is_a_raw_multiplier_with_an_eligible_denominator() {
+        for (sends, terminal, expected) in [
+            (1, 1, Some(1.0)),
+            (4, 2, Some(2.0)),
+            (0, 0, None),
+            (2, 0, None),
+        ] {
+            let row = AmplificationBucket {
+                sends,
+                terminal_operations: terminal,
+                ..Default::default()
+            }
+            .with_ratio();
+            assert_eq!(row.ratio, expected);
+        }
+    }
+
+    #[test]
+    fn durable_model_rows_and_supplemental_telemetry_count_once() {
+        let store = store();
+        let now = Utc::now();
+        let started = (now - ChronoDuration::minutes(5)).to_rfc3339();
+        let finished = (now - ChronoDuration::minutes(1)).to_rfc3339();
+        store.connection().execute("INSERT INTO recon_model_operations (id,role,status,created_at,updated_at) VALUES ('op-main','recon','final',?1,?2)",rusqlite::params![started,finished]).unwrap();
+        for index in 0..24 {
+            let id = format!("attempt-{index}");
+            store.connection().execute("INSERT INTO recon_model_attempts (id,operation_id,route_index,attempt,provider,account,model,transport,dispatched,outcome,started_at,finished_at,sent_at,queued_at,first_response_at,elapsed_ms,queue_ms,ttfb_ms) VALUES (?1,'op-main',0,?2,'openrouter','','fixture','chat',1,'ok',?3,?4,?3,?3,?3,1000,200,100)",rusqlite::params![id,index,started,finished]).unwrap();
+            record(
+                &store,
+                TelemetryEvent::new(EventKind::ModelAttempt)
+                    .canonical(&id)
+                    .at(finished.clone())
+                    .app("recon")
+                    .provider("openrouter")
+                    .model("fixture")
+                    .role("recon")
+                    .mode("chat")
+                    .outcome("ok")
+                    .duration_ms(Some(1000))
+                    .payload(serde_json::json!({"operation_id":"op-main","queue_ms":200})),
+            );
+        }
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::ModelOperation)
+                .canonical("op-main")
+                .at(finished)
+                .app("recon")
+                .role("recon")
+                .outcome("final"),
+        );
+        let snap = snapshot_at(&store, &Period::H1, now);
+        let summary = &snap.models.period_summary;
+        assert_eq!(summary.sends, 24);
+        assert_eq!(summary.terminal_operations, 1);
+        assert_eq!(summary.final_failures, 0);
+        assert_eq!(summary.successful_execution_n, 24);
+        assert_eq!(summary.successful_execution_p95_ms, Some(1000));
+        assert_eq!(summary.queue_n, 24);
+        assert_eq!(summary.queue_p95_ms, Some(200));
+        assert_eq!(
+            snap.models
+                .amplification
+                .iter()
+                .find(|row| row.terminal_operations > 0)
+                .unwrap()
+                .ratio,
+            Some(24.0)
+        );
+        let parent = snap
+            .models
+            .performance
+            .iter()
+            .find(|row| !row.is_model_row)
+            .unwrap();
+        assert_eq!(parent.sends, 24);
+        assert_eq!(parent.attempt_error_pct, Some(0.0));
+        let filtered = snapshot(
+            store.connection(),
+            &Period::H1,
+            &StatFilters {
+                provider: "google".into(),
+                ..Default::default()
+            },
+            now,
+        )
+        .unwrap();
+        assert_eq!(filtered.models.period_summary.sends, 0);
+        assert_eq!(filtered.models.period_summary.terminal_operations, 0);
+    }
+
+    #[test]
+    fn successful_execution_p95_merges_samples_and_bins_instead_of_percentiles() {
+        let now = Utc::now();
+        let mut loaded = Loaded::default();
+        let mut rolled = Cell::default();
+        let mut bins = vec![0; telemetry::DURATION_BINS_MS.len() + 1];
+        bins[telemetry::bin_index(1000)] = 99;
+        rolled.add_rollup(99, 99_000, 1000, &bins);
+        loaded.cells.insert(
+            Dims {
+                outcome: "ok".into(),
+                ..Default::default()
+            },
+            rolled,
+        );
+        let attempt = AttemptFact {
+            id: "tail".into(),
+            at: Some(now),
+            dims: Dims::default(),
+            bucket: String::new(),
+            provider: String::new(),
+            model: String::new(),
+            role: String::new(),
+            sent: true,
+            finished: true,
+            succeeded: true,
+            failed: false,
+            exec_ms: Some(100_000),
+            queue_ms: None,
+            first_header_ms: None,
+            first_content_ms: None,
+            http_status: None,
+            failure_category: String::new(),
+            operation_id: String::new(),
+            route_index: 0,
+        };
+        let facts = ModelFacts {
+            attempts: vec![attempt],
+            ..Default::default()
+        };
+        let cell = model_duration_cell(
+            &facts,
+            &loaded,
+            |attempt| attempt.sent && attempt.succeeded,
+            true,
+        );
+        bins[telemetry::bin_index(100_000)] += 1;
+        assert_eq!(cell.duration_n(), 100);
+        assert_eq!(cell.p95_ms(), quantile_from_bins(&bins, 0.95));
+        assert_ne!(cell.p95_ms(), Some((1000 + 100_000) / 2));
+    }
+
+    #[test]
+    fn distinct_article_body_cohort_deduplicates_tags_and_excludes_empty_cache_rows() {
+        let store = store();
+        let now = Utc::now();
+        for (article, tag) in [
+            ("article-1", "tag-a"),
+            ("article-1", "tag-b"),
+            ("article-2", "tag-a"),
+        ] {
+            record(
+                &store,
+                TelemetryEvent::new(EventKind::IntelArticle)
+                    .at(now.to_rfc3339())
+                    .article(article)
+                    .category(tag)
+                    .app("intel"),
+            );
+        }
+        store.connection().execute("INSERT INTO article_bodies (id,article_id,original_url,body_markdown,quality,created_at,updated_at) VALUES ('body-1','article-1','https://example.test/1','Fixture body','partial',?1,?1),('body-2','article-2','https://example.test/2','','unavailable',?1,?1)",[now.to_rfc3339()]).unwrap();
+        let snap = snapshot_at(&store, &Period::H1, now);
+        assert_eq!(snap.intel.distinct_new_articles, Some(2));
+        assert_eq!(snap.intel.body_eligible_articles, Some(2));
+        assert_eq!(snap.intel.body_available_articles, Some(1));
+        assert_eq!(
+            snap.intel
+                .enrichment
+                .iter()
+                .map(|row| row.articles as u64)
+                .sum::<u64>(),
+            3
+        );
+        assert_eq!(
+            snap.intel
+                .volume
+                .iter()
+                .map(|bucket| bucket.total as u64)
+                .sum::<u64>(),
+            2
+        );
+    }
+
+    #[test]
+    fn rollup_only_articles_do_not_invent_distinct_identity_or_body_coverage() {
+        let store = store();
+        let now = Utc::now();
+        let at = now - ChronoDuration::days(100);
+        let bucket = at.format("%Y-%m-%dT%H").to_string();
+        let dims = ["intel", "", "", "tag-a", "", "", "", "", "", "", ""].join("\u{1f}");
+        store.connection().execute("INSERT INTO telemetry_hourly (bucket,event_type,dim_key,events) VALUES (?1,'intel_article',?2,7)",rusqlite::params![bucket,dims]).unwrap();
+        let period = Period::Custom {
+            from: (at - ChronoDuration::hours(2)).to_rfc3339(),
+            to: (at + ChronoDuration::hours(2)).to_rfc3339(),
+        };
+        let snap = snapshot_at(&store, &period, now);
+        assert_eq!(snap.intel.distinct_new_articles, None);
+        assert_eq!(snap.intel.body_available_articles, None);
+        assert_eq!(snap.intel.body_eligible_articles, None);
+        assert_eq!(
+            snap.intel
+                .volume
+                .iter()
+                .map(|bucket| bucket.total as u64)
+                .sum::<u64>(),
+            7
+        );
+    }
+
+    #[test]
+    fn live_backlog_and_bounded_attention_keep_owner_ids_outside_period() {
+        let store = store();
+        let now = Utc::now();
+        let earlier = now - ChronoDuration::days(3);
+        for index in 0..70 {
+            record(&store,TelemetryEvent::new(EventKind::AtlasStage).at(earlier.to_rfc3339()).run(format!("atlas-run-{index}")).outcome("blocked").payload(serde_json::json!({"stage":"verify","unit":"packet","unit_id":format!("packet-{index}"),"terminal_reason":"missing_provenance"})));
+        }
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::AtlasStage)
+                .at(now.to_rfc3339())
+                .run("atlas-run-0")
+                .outcome("completed")
+                .payload(
+                    serde_json::json!({"stage":"verify","unit":"packet","unit_id":"packet-0"}),
+                ),
+        );
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::AtlasStage)
+                .at(earlier.to_rfc3339())
+                .run("atlas-memory-run")
+                .outcome("queued")
+                .payload(
+                    serde_json::json!({"stage":"verify","unit":"memory","unit_id":"memory-1"}),
+                ),
+        );
+        let snap = snapshot_at(&store, &Period::H1, now);
+        let packets = snap
+            .atlas
+            .backlog
+            .iter()
+            .find(|row| row.unit == "packet")
+            .unwrap();
+        let memories = snap
+            .atlas
+            .backlog
+            .iter()
+            .find(|row| row.unit == "memory")
+            .unwrap();
+        assert_eq!(packets.blocked, 69);
+        assert_eq!(memories.queued, 1);
+        assert_eq!(packets.oldest_pending_ms, Some(3 * 86_400_000));
+        assert!(snap.attention.len() <= 64);
+        assert!(!snap.attention.is_empty());
+        assert!(snap
+            .attention
+            .iter()
+            .all(|row| row.owner_kind == "atlas_run" && row.owner_id.starts_with("atlas-run-")));
+        assert!(!snap
+            .attention
+            .iter()
+            .any(|row| row.owner_id == "atlas-run-0"));
+        let filtered = snapshot(
+            store.connection(),
+            &Period::H1,
+            &StatFilters {
+                app: "recon".into(),
+                ..Default::default()
+            },
+            now,
+        )
+        .unwrap();
+        assert_eq!(filtered.atlas.backlog, snap.atlas.backlog);
+    }
+
+    #[test]
+    fn live_unresolved_uses_canonical_directives_and_latest_assessment() {
+        let store = store();
+        let now = Utc::now();
+        let old = now - ChronoDuration::days(2);
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::DirectiveAssessed)
+                .at(old.to_rfc3339())
+                .canonical("run-1:d1")
+                .run("run-1")
+                .outcome("blocked"),
+        );
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::DirectiveAssessed)
+                .at(old.to_rfc3339())
+                .canonical("run-1:d2")
+                .run("run-1")
+                .outcome("unresolved"),
+        );
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::DirectiveAssessed)
+                .at(now.to_rfc3339())
+                .canonical("run-1:d1")
+                .run("run-1")
+                .outcome("answered"),
+        );
+        let snap = snapshot_at(&store, &Period::H1, now);
+        assert_eq!(snap.recon.unresolved.len(), 1);
+        assert_eq!(snap.recon.unresolved[0].label, "d2");
+        assert_eq!(snap.recon.unresolved[0].run_id, "run-1");
+    }
+
+    #[test]
+    fn unrelated_model_filters_do_not_erase_intel_or_tool_cohorts() {
+        let store = store();
+        let now = Utc::now();
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::IntelArticle)
+                .at(now.to_rfc3339())
+                .article("article-1")
+                .app("atlas")
+                .category("politics"),
+        );
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::ToolInvocation)
+                .at(now.to_rfc3339())
+                .app("recon")
+                .tool("fixture")
+                .provider("public")
+                .mode("remote")
+                .outcome("completed_nonempty"),
+        );
+        let filters = StatFilters {
+            provider: "google".into(),
+            role: "synthesis".into(),
+            ..Default::default()
+        };
+        let snap = snapshot(store.connection(), &Period::H1, &filters, now).unwrap();
+        assert_eq!(snap.filters, filters);
+        assert_eq!(snap.intel.distinct_new_articles, Some(1));
+        assert_eq!(snap.tools.logical_calls, 0); // provider is supported here
+        let role_only = StatFilters {
+            role: "synthesis".into(),
+            ..Default::default()
+        };
+        let snap = snapshot(store.connection(), &Period::H1, &role_only, now).unwrap();
+        assert_eq!(snap.tools.logical_calls, 1); // role is not emitted by tools
+        assert!(!applicable_filter_dimensions(EventKind::IntelArticle).contains(&"provider"));
+        assert!(!applicable_filter_dimensions(EventKind::ToolInvocation).contains(&"role"));
+    }
+
+    #[test]
+    fn rollup_tool_totals_and_uncapped_live_directive_total_are_exact() {
+        let store = store();
+        let now = Utc::now();
+        let earlier = now - ChronoDuration::days(100);
+        let dims = [
+            "recon",
+            "",
+            "fixture",
+            "web",
+            "public",
+            "",
+            "",
+            "remote",
+            "",
+            "completed_nonempty",
+            "",
+        ]
+        .join("\u{1f}");
+        store.connection().execute("INSERT INTO telemetry_hourly (bucket,event_type,dim_key,events) VALUES (?1,'tool_invocation',?2,17)",rusqlite::params![earlier.format("%Y-%m-%dT%H").to_string(),dims]).unwrap();
+        let period = Period::Custom {
+            from: (earlier - ChronoDuration::hours(2)).to_rfc3339(),
+            to: (earlier + ChronoDuration::hours(2)).to_rfc3339(),
+        };
+        let snap = snapshot_at(&store, &period, now);
+        assert_eq!(snap.tools.logical_calls, 17);
+        for index in 0..205 {
+            record(
+                &store,
+                TelemetryEvent::new(EventKind::DirectiveAssessed)
+                    .at((now - ChronoDuration::days(2)).to_rfc3339())
+                    .run(format!("run-{index}"))
+                    .canonical(format!("run-{index}:d1"))
+                    .outcome("unresolved"),
+            );
+        }
+        let snap = snapshot_at(&store, &Period::H1, now);
+        assert_eq!(snap.recon.unresolved_live_total, 205);
+        assert_eq!(snap.recon.unresolved.len(), 200);
+    }
+
+    #[test]
+    fn evidence_acceptance_counts_logical_calls_and_keeps_zero_contributors() {
+        let store = store();
+        let now = Utc::now();
+        for (tool, call) in [
+            ("tool-a", "call-a1"),
+            ("tool-a", "call-a2"),
+            ("tool-b", "call-b1"),
+        ] {
+            record(
+                &store,
+                TelemetryEvent::new(EventKind::ToolInvocation)
+                    .at(now.to_rfc3339())
+                    .tool(tool)
+                    .call(call)
+                    .outcome("completed_nonempty"),
+            );
+        }
+        for (index, identity) in ["item-1", "item-2", "item-1"].iter().enumerate() {
+            record(
+                &store,
+                TelemetryEvent::new(EventKind::EvidenceItem)
+                    .with_id(format!("contribution-{index}"))
+                    .at(now.to_rfc3339())
+                    .tool("tool-a")
+                    .call("call-a1")
+                    .canonical("report:1")
+                    .article("article-1")
+                    .payload(serde_json::json!({"item_id": identity, "call_id": "call-a1", "citations": 2})),
+            );
+        }
+        let snap = snapshot_at(&store, &Period::H1, now);
+        let a = snap
+            .tools
+            .evidence
+            .iter()
+            .find(|row| row.tool_id == "tool-a")
+            .unwrap();
+        assert_eq!(a.successful_nonempty, 2);
+        assert_eq!(a.with_evidence, 1);
+        assert_eq!(a.acceptance_pct, Some(50.0));
+        assert_eq!(a.distinct_evidence, 2);
+        assert_eq!(a.cited_by_completed_reports, 2);
+        let b = snap
+            .tools
+            .evidence
+            .iter()
+            .find(|row| row.tool_id == "tool-b")
+            .unwrap();
+        assert_eq!(b.successful_nonempty, 1);
+        assert_eq!(b.acceptance_pct, Some(0.0));
+        assert_eq!(snap.tools.evidence_details.len(), 2);
+        assert!(snap
+            .tools
+            .evidence_details
+            .iter()
+            .all(|row| row.call_id == "call-a1" && row.cited));
+    }
+
+    #[test]
+    fn evidence_missing_provenance_and_rollups_do_not_invent_acceptance() {
+        let store = store();
+        let now = Utc::now();
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::ToolInvocation)
+                .at(now.to_rfc3339())
+                .tool("tool-a")
+                .call("call-a")
+                .outcome("completed_nonempty"),
+        );
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::EvidenceItem)
+                .at(now.to_rfc3339())
+                .tool("tool-a")
+                .call("item-1")
+                .canonical("report:1")
+                .payload(serde_json::json!({"item_id": "item-1", "call_id": ""})),
+        );
+        let snap = snapshot_at(&store, &Period::H1, now);
+        assert_eq!(snap.tools.evidence[0].acceptance_pct, None);
+        assert_eq!(snap.tools.evidence[0].with_evidence, 0);
+        assert_eq!(snap.tools.evidence_details[0].call_id, "");
+        let earlier = now - ChronoDuration::days(100);
+        let dims = [
+            "recon",
+            "",
+            "tool-b",
+            "web",
+            "public",
+            "",
+            "",
+            "remote",
+            "",
+            "completed_nonempty",
+            "",
+        ]
+        .join("\u{1f}");
+        store.connection().execute("INSERT INTO telemetry_hourly (bucket,event_type,dim_key,events) VALUES (?1,'tool_invocation',?2,17)",rusqlite::params![earlier.format("%Y-%m-%dT%H").to_string(),dims]).unwrap();
+        let period = Period::Custom {
+            from: (earlier - ChronoDuration::hours(2)).to_rfc3339(),
+            to: (earlier + ChronoDuration::hours(2)).to_rfc3339(),
+        };
+        let snap = snapshot_at(&store, &period, now);
+        assert_eq!(snap.tools.evidence[0].successful_nonempty, 17);
+        assert_eq!(snap.tools.evidence[0].acceptance_pct, None);
+        assert_eq!(snap.tools.evidence[0].coverage_n, 0);
+    }
+
+    #[test]
+    fn atlas_raw_candidate_occurrences_are_not_added_twice() {
+        let store = store();
+        let now = Utc::now();
+        record(
+            &store,
+            TelemetryEvent::new(EventKind::AtlasCandidate)
+                .at(now.to_rfc3339())
+                .app("atlas")
+                .outcome("retained_new"),
+        );
+        let snap = snapshot_at(&store, &Period::H1, now);
+        assert_eq!(
+            snap.atlas
+                .discovery
+                .iter()
+                .map(|row| row.fetched)
+                .sum::<u32>(),
+            1
+        );
+        assert_eq!(
+            snap.atlas
+                .discovery
+                .iter()
+                .map(|row| row.retained_new)
+                .sum::<u32>(),
+            1
+        );
+    }
+
+    #[test]
+    fn tool_rollup_counts_rates_and_histograms_match_retained_cohorts() {
+        let mut invocations = Loaded::default();
+        let mut remote = Cell::default();
+        let mut bins = vec![0; telemetry::DURATION_BINS_MS.len() + 1];
+        bins[telemetry::bin_index(1000)] = 20;
+        remote.add_rollup(20, 20_000, 1000, &bins);
+        invocations.cells.insert(
+            Dims {
+                tool: "tool-a".into(),
+                category: "web".into(),
+                engine: "google".into(),
+                mode: "remote".into(),
+                outcome: "failed".into(),
+                ..Default::default()
+            },
+            remote,
+        );
+        let mut cache = Cell::default();
+        cache.add_rollup(5, 0, 0, &[]);
+        invocations.cells.insert(
+            Dims {
+                tool: "tool-a".into(),
+                engine: "google".into(),
+                mode: "cache".into(),
+                outcome: "verified_zero".into(),
+                ..Default::default()
+            },
+            cache,
+        );
+        let counts = tool_counts(&invocations);
+        assert_eq!(counts[0].invocations, 25);
+        assert_eq!((counts[0].remote, counts[0].cache), (20, 5));
+        let reliability = tool_reliability(&invocations, &BTreeMap::from([("tool-a".into(), 40)]));
+        assert_eq!(reliability[0].invocations, 25);
+        assert_eq!(reliability[0].wire_requests, 40);
+        assert_eq!(reliability[0].cache_hit_pct, Some(20.0));
+        assert_eq!(reliability[0].verified_zero_pct, Some(20.0));
+        assert_eq!(reliability[0].error_pct, Some(100.0));
+        assert_eq!(reliability[0].mean_ms, Some(1000));
+        assert_eq!(reliability[0].p95_ms, Some(1000));
+        let mut engines = Loaded::default();
+        for (outcome, count) in [("valid", 7), ("verified_zero", 3), ("challenge", 2)] {
+            let mut cell = Cell::default();
+            cell.add_rollup(count, 0, 0, &[]);
+            engines.cells.insert(
+                Dims {
+                    engine: "google".into(),
+                    outcome: outcome.into(),
+                    ..Default::default()
+                },
+                cell,
+            );
+        }
+        let health = engine_health(&engines, &invocations);
+        let google = health.iter().find(|row| row.engine == "google").unwrap();
+        assert_eq!(google.fetches, 12);
+        assert_eq!(
+            (google.valid_serps, google.verified_zero, google.challenge),
+            (7, 3, 2)
+        );
+        assert_eq!(google.usable_per_fetch, sum_ratio(10, 12));
+        assert_eq!(google.cache_hits, 5);
+        assert!(google.last_success.is_empty());
+        assert!(google.parser_version.is_empty());
+    }
 
     fn store() -> Store {
         Store::memory().unwrap()

@@ -1,5 +1,10 @@
 //! Provider secrets. `auth.json` is owner-only on Unix (0600),
 //! same convention Grok uses for `~/.grok/auth.json`.
+//!
+//! Writes route through the configuration commit store (see
+//! [`crate::config_commit`]): a unique sibling temporary file is created 0600 at
+//! creation, written, flushed, fsynced and atomically renamed into place. This is
+//! never a write-then-chmod helper.
 
 use std::fs;
 use std::path::Path;
@@ -95,7 +100,10 @@ impl AuthFile {
         Self::load_from(&auth_path())
     }
 
-    fn load_from(path: &Path) -> Result<Self> {
+    /// Public staged loader. Reads an auth document from `path`, migrating the
+    /// legacy `research` / `gmail` slots away; the migration rewrite itself goes
+    /// through the commit store's secure primitive.
+    pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -111,34 +119,40 @@ impl AuthFile {
         Ok(auth)
     }
 
+    /// Commits ONLY the `auth` slot, serialised behind the app-wide configuration
+    /// write lock. It never writes `config.toml` or `quota.json`; a caller that
+    /// needs all three files to move together uses the combined transfer entry
+    /// point on `SettingsFile`.
     pub fn save(&self) -> Result<()> {
         ensure_home()?;
-        self.save_to(&auth_path())
+        let lock = crate::config_commit::ConfigLock::acquire()?;
+        lock.commit_files(&[crate::config_commit::CommitFile::new(
+            "auth",
+            auth_path(),
+            serde_json::to_string_pretty(self)?,
+        )])?;
+        Ok(())
     }
 
+    /// The secure single-file write used for non-canonical/test paths. It goes
+    /// through the commit store's secure primitive (unique sibling temp file
+    /// created 0600, written, flushed, fsynced, atomically renamed) and bypasses
+    /// the cross-file lock by design.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         write_private(path, &serde_json::to_string_pretty(self)?)
     }
 }
 
+/// Writes `path` atomically with owner-only permissions.
+///
+/// This routes through the commit store's secure primitive: a unique sibling
+/// temporary file is created 0600 at creation, written, flushed, fsynced and
+/// atomically renamed into place. It is NOT a write-then-chmod helper.
 pub fn write_private(path: &Path, body: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, body)?;
-    owner_only(&tmp);
-    fs::rename(&tmp, path)?;
-    owner_only(path);
-    Ok(())
-}
-
-fn owner_only(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
+    crate::config_commit::write_secure(path, body)
 }
 
 pub fn mask(secret: &str) -> String {
@@ -240,5 +254,68 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    /// The secure primitive creates the destination owner-only and leaves no
+    /// staged sibling behind, so a reader never sees a partial file.
+    #[test]
+    fn saving_through_the_lock_keeps_the_file_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut auth = AuthFile::default();
+        let mut secret = crate::provider::account_secret(&auth, "openrouter");
+        secret.api_key = Some("router-secret".into());
+        auth.set_account(secret);
+        auth.save_to(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            serde_json::to_string_pretty(&auth).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_no_staged_files(dir.path());
+    }
+
+    /// One slot, one file: a single-slot commit never publishes the other
+    /// configuration files, and every commit advances the generation.
+    #[test]
+    fn auth_save_commits_only_the_auth_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = crate::config_commit::current_generation();
+        let lock = crate::config_commit::ConfigLock::acquire_at(dir.path()).unwrap();
+        assert!(lock.generation() >= before);
+        let generation = lock
+            .commit_files(&[crate::config_commit::CommitFile::new(
+                "auth",
+                dir.path().join("auth.json"),
+                serde_json::to_string_pretty(&AuthFile::default()).unwrap(),
+            )])
+            .unwrap();
+        assert!(generation > before, "commit must bump the generation");
+        let after = crate::config_commit::current_generation();
+        assert!(
+            after >= before,
+            "generation must advance monotonically: {before} -> {after}"
+        );
+        assert!(dir.path().join("auth.json").exists());
+        assert!(!dir.path().join("config.toml").exists());
+        assert!(!dir.path().join("quota.json").exists());
+        assert_no_staged_files(dir.path());
+    }
+
+    /// Asserts the directory holds no `*.tmp` or `*.staged` leftovers.
+    fn assert_no_staged_files(dir: &std::path::Path) {
+        let leftovers: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp") || name.ends_with(".staged"))
+            .collect();
+        assert!(leftovers.is_empty(), "staged leftovers: {leftovers:?}");
     }
 }

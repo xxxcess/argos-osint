@@ -1947,6 +1947,42 @@ impl SettingsFile {
         }
     }
 
+    /// Sets the saved key for a keyed tool provider. Unknown ids are ignored.
+    /// An empty value clears the saved key.
+    pub fn set_saved_key(&mut self, provider: &str, value: &str) {
+        let value = value.trim();
+        match provider.trim() {
+            "firecrawl" => self.firecrawl_api_key = value.into(),
+            "hunter" => self.hunter_api_key = value.into(),
+            "sociavault" => self.sociavault_api_key = value.into(),
+            "newsapi" => self.newsapi_api_key = value.into(),
+            "courtlistener" => self.courtlistener_api_token = value.into(),
+            "gnews" => self.gnews_api_key = value.into(),
+            "newsdata" => self.newsdata_api_key = value.into(),
+            "currents" => self.currents_api_key = value.into(),
+            "whoxy" => self.whoxy_api_key = value.into(),
+            _ => {}
+        }
+    }
+
+    /// Sets the saved second key for a keyed tool provider. Unknown ids are ignored.
+    /// An empty value clears the saved second key.
+    pub fn set_saved_fallback_key(&mut self, provider: &str, value: &str) {
+        let value = value.trim();
+        match provider.trim() {
+            "firecrawl" => self.firecrawl_api_key_fallback = value.into(),
+            "hunter" => self.hunter_api_key_fallback = value.into(),
+            "sociavault" => self.sociavault_api_key_fallback = value.into(),
+            "newsapi" => self.newsapi_api_key_fallback = value.into(),
+            "courtlistener" => self.courtlistener_api_token_fallback = value.into(),
+            "gnews" => self.gnews_api_key_fallback = value.into(),
+            "newsdata" => self.newsdata_api_key_fallback = value.into(),
+            "currents" => self.currents_api_key_fallback = value.into(),
+            "whoxy" => self.whoxy_api_key_fallback = value.into(),
+            _ => {}
+        }
+    }
+
     /// The key a provider's tools use: a non-empty setting, else its environment variable.
     pub fn provider_key(&self, provider: &str) -> String {
         self.provider_key_with(provider, |name| std::env::var(name).ok())
@@ -2000,7 +2036,10 @@ impl SettingsFile {
         Self::load_from(&path)
     }
 
-    fn load_from(path: &std::path::Path) -> Result<Self> {
+    /// Public staged loader. Reads a settings document from `path`, running the
+    /// migration ladder over it and rewriting the file (through the commit
+    /// store's secure primitive) only when something actually migrated.
+    pub fn load_from(path: &std::path::Path) -> Result<Self> {
         let seeded = || {
             let mut settings = Self::default();
             settings.defaults.seed_tool_picker();
@@ -2103,13 +2142,37 @@ impl SettingsFile {
         Ok(settings)
     }
 
+    /// Commits ONLY the `settings` slot, serialised behind the app-wide
+    /// configuration write lock. It never writes `auth.json` or `quota.json`; a
+    /// caller that needs all three files to move together uses
+    /// [`Self::save_configuration_with`].
     pub fn save(&self) -> Result<()> {
         crate::paths::ensure_home()?;
-        self.save_to(&crate::paths::config_path())
+        let lock = crate::config_commit::ConfigLock::acquire()?;
+        lock.commit_files(&[crate::config_commit::CommitFile::new(
+            "settings",
+            crate::paths::config_path(),
+            toml::to_string_pretty(self)?,
+        )])?;
+        Ok(())
     }
 
+    /// The secure single-file write used for non-canonical/test paths. It goes
+    /// through the commit store's secure primitive (unique sibling temp file
+    /// created 0600, written, flushed, fsynced, atomically renamed) and bypasses
+    /// the cross-file lock by design.
     pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
         crate::secrets::write_private(path, &toml::to_string_pretty(self)?)
+    }
+
+    /// Writes settings, auth and quota settings as one all-or-nothing configuration revision.
+    /// Any failure restores the previous pair and leaves the in-memory state unpublished.
+    pub fn save_configuration_with(
+        &self,
+        auth: &crate::secrets::AuthFile,
+        quotas: &crate::config_transfer::QuotaSettingsFile,
+    ) -> Result<u64> {
+        crate::config_transfer::commit_profile_config(self, auth, quotas)
     }
 }
 
@@ -2206,6 +2269,71 @@ mod tests {
         let before = std::fs::read_to_string(&path).unwrap();
         SettingsFile::load_from(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// Every keyed tool provider's saved key round trips through
+    /// [`SettingsFile::set_saved_key`], and its second account through
+    /// [`SettingsFile::set_saved_fallback_key`]. Values are trimmed, unknown ids
+    /// are ignored, and a blank value clears the field.
+    #[test]
+    fn set_saved_key_round_trips_every_keyed_tool_provider() {
+        let providers: Vec<&str> = KEY_ENV.iter().map(|(provider, _)| *provider).collect();
+        assert_eq!(providers.len(), 9);
+        for (index, &provider) in providers.iter().enumerate() {
+            let mut settings = SettingsFile::default();
+            let primary = format!("primary-key-{index}");
+            let fallback = format!("fallback-key-{index}");
+            settings.set_saved_key(provider, &format!("  {primary}  "));
+            settings.set_saved_fallback_key(provider, &fallback);
+            assert_eq!(settings.saved_key(provider), primary, "{provider}");
+            assert_eq!(
+                settings.saved_fallback_key(provider),
+                fallback,
+                "{provider}"
+            );
+            // The other eight providers keep neither key.
+            for &other in &providers {
+                if other == provider {
+                    continue;
+                }
+                assert!(
+                    settings.saved_key(other).is_empty(),
+                    "{other} primary key should stay unset after setting {provider}"
+                );
+                assert!(
+                    settings.saved_fallback_key(other).is_empty(),
+                    "{other} fallback key should stay unset after setting {provider}"
+                );
+            }
+        }
+        // Clearing is a whitespace-only value, and it survives a settings round trip.
+        let mut settings = SettingsFile::default();
+        let first = providers[0];
+        settings.set_saved_key(first, "keep-primary");
+        settings.set_saved_fallback_key(first, "keep-fallback");
+        settings.set_saved_key(first, "  ");
+        settings.set_saved_fallback_key(first, "   ");
+        assert_eq!(settings.saved_key(first), "");
+        assert_eq!(settings.saved_fallback_key(first), "");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        settings.save_to(&path).unwrap();
+        let loaded = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(loaded.saved_key(first), "");
+        assert_eq!(loaded.saved_fallback_key(first), "");
+        // An unknown id is ignored, so it never touches another provider's field.
+        settings.set_saved_key(first, "kept");
+        settings.set_saved_key("not-a-provider", "leak");
+        settings.set_saved_fallback_key("not-a-provider", "leak");
+        assert_eq!(settings.saved_key(first), "kept");
+        assert_eq!(settings.saved_fallback_key(first), "");
+        settings.save_to(&path).unwrap();
+        let reopened = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(reopened.saved_key(first), "kept");
+        assert_eq!(reopened.saved_fallback_key(first), "");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("kept"));
+        assert!(!after.contains("leak"));
     }
 
     #[test]
@@ -2790,5 +2918,157 @@ mod tests {
         .await
         .unwrap();
         assert!(response.answers["next_tool"].choice.is_some());
+    }
+
+    /// The non-canonical single-file write is still the secure primitive: the
+    /// destination is owner-only and no `*.tmp` / `*.staged` sibling survives.
+    #[test]
+    fn settings_save_to_is_a_secure_single_file_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let settings = SettingsFile {
+            newsapi_api_key: "saved-news".into(),
+            ..Default::default()
+        };
+        settings.save_to(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let keeps_the_key = saved.contains("newsapi_api_key = \"saved-news\"");
+        assert!(keeps_the_key, "{saved}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp") || name.ends_with(".staged"))
+            .collect();
+        assert!(leftovers.is_empty(), "staged leftovers: {leftovers:?}");
+    }
+
+    /// The staged loader is public: an import document loads through it by path,
+    /// and the keys it never mentions stay untouched.
+    #[test]
+    fn load_from_is_public_and_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let imported = "
+newsapi_api_key = 'imported-news'
+
+[defaults.recon]
+provider = 'openrouter'
+model = 'imported-recon'
+";
+        std::fs::write(&path, imported).unwrap();
+        let loaded = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(loaded.newsapi_api_key, "imported-news");
+        assert_eq!(loaded.defaults.recon.model, "imported-recon");
+        assert_eq!(loaded.defaults.recon.provider, "openrouter");
+        // The import document carries neither local preference: both are untouched.
+        let expected = ReconLimits::default();
+        assert_eq!(loaded.recon_limits.max_rounds, expected.max_rounds);
+        assert_eq!(loaded.recon_limits.max_calls, expected.max_calls);
+        assert_eq!(loaded.recon_limits.turn_seconds, expected.turn_seconds);
+        assert_eq!(
+            loaded.recon_limits.max_turn_seconds,
+            expected.max_turn_seconds
+        );
+        assert_eq!(
+            loaded.recon_limits.firecrawl_credits,
+            default_firecrawl_credits()
+        );
+        assert_eq!(loaded.osint_user_agent, "");
+    }
+
+    /// Every role, including the optional decision fallback, survives a settings
+    /// round trip with its ordered fallbacks intact.
+    #[test]
+    fn role_defaults_round_trip_through_settings() {
+        const ROLES: &[&str] = &[
+            "recon",
+            "synthesis",
+            "tool_picker",
+            "classifier",
+            "summarization",
+            "evidence_curator",
+            "entity_resolver",
+            "claim_assessor",
+            "investigation_controller",
+            "decision_model",
+        ];
+        let mut settings = SettingsFile::default();
+        for role in ROLES {
+            let mut assignment = ModelAssignment {
+                provider: "openrouter".into(),
+                model: format!("{role}-model"),
+                account: "primary".into(),
+                fallbacks: Vec::new(),
+            };
+            assignment
+                .add_fallback(ModelRoute {
+                    provider: "openrouter".into(),
+                    model: format!("{role}-first-fallback"),
+                    account: String::new(),
+                })
+                .unwrap();
+            assignment
+                .add_fallback(ModelRoute {
+                    provider: "nvidia".into(),
+                    model: format!("{role}-second-fallback"),
+                    account: String::new(),
+                })
+                .unwrap();
+            *settings.defaults.role_mut(role).unwrap() = assignment;
+        }
+        // The decision fallback mirrors a route the decision model already lists,
+        // so the migration ladder leaves the stored document unchanged.
+        settings.defaults.decision_model.fallbacks.push(ModelRoute {
+            provider: "nvidia".into(),
+            model: "decision-mirror".into(),
+            account: String::new(),
+        });
+        settings.defaults.decision_fallback = Some(ModelAssignment {
+            provider: "nvidia".into(),
+            model: "decision-mirror".into(),
+            account: String::new(),
+            fallbacks: Vec::new(),
+        });
+        let before = toml::to_string_pretty(&settings.defaults).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        settings.save_to(&path).unwrap();
+        let loaded = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(
+            toml::to_string_pretty(&loaded.defaults).unwrap(),
+            before,
+            "role defaults must round trip verbatim"
+        );
+        for role in ROLES {
+            let written = settings.defaults.role(role).unwrap();
+            let reloaded = loaded.defaults.role(role).unwrap();
+            assert_eq!(reloaded.provider, written.provider, "{role} provider");
+            assert_eq!(reloaded.model, written.model, "{role} model");
+            let labels = |assignment: &ModelAssignment| -> Vec<String> {
+                assignment
+                    .fallbacks
+                    .iter()
+                    .map(|route| route.label())
+                    .collect()
+            };
+            assert_eq!(labels(reloaded), labels(written), "{role} fallbacks");
+            assert_eq!(
+                reloaded.fallbacks.len(),
+                written.fallbacks.len(),
+                "{role} fallback count"
+            );
+        }
+        let fallback = loaded.defaults.decision_fallback.as_ref().unwrap();
+        assert_eq!(fallback.provider, "nvidia");
+        assert_eq!(fallback.model, "decision-mirror");
     }
 }

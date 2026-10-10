@@ -44,6 +44,26 @@ pub fn config_path() -> PathBuf {
     home_dir().join("config.toml")
 }
 
+/// App-wide configuration write lock, beside `config.toml`.
+///
+/// [`crate::config_commit::ConfigLock`] locks the directory that holds the
+/// configuration files; this is the fixed path an operator inspects by hand.
+pub fn config_lock_path() -> PathBuf {
+    home_dir().join(".argos-config.lock")
+}
+
+/// Recoverable commit journal for the app-wide configuration lock. It records
+/// paths and state only, never a file body and never key material.
+pub fn config_journal_path() -> PathBuf {
+    home_dir().join(".argos-config-journal.json")
+}
+
+/// Provider quota settings, the third configuration file that moves with
+/// `config.toml` and `auth.json` under one lock.
+pub fn quota_path() -> PathBuf {
+    home_dir().join("quota.json")
+}
+
 pub fn hardware_cache_path() -> PathBuf {
     home_dir().join("hardware.json")
 }

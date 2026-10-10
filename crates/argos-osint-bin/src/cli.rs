@@ -353,6 +353,8 @@ pub async fn dispatch() -> Result<()> {
 
 fn open_store() -> Result<Store> {
     paths::ensure_home()?;
+    // Finish any configuration commit a previous process left half applied.
+    let _ = argos_osint_core::config_commit::recover_at_startup();
     Store::open(&paths::db_path())
 }
 

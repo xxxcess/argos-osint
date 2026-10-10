@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://argos-osint/schemas/profile-config-v1.schema.json",
+  "title": "Argos portable profile configuration",
+  "description": "Portable Argos configuration (schema version 1). Exported from and imported by the Profile > System > Configs actions. Contains saved API keys: treat the file as a secret and never commit it. Import merges by stable provider, tool, role and quota-group ID, replaces values explicitly supplied, and preserves unrelated settings, recon limits and local state. Ephemeral counters, cooldowns, queues, databases and host paths are never exported. Companion relationship: this document owns which settings are portable; provider rate-limit policy values are shared with the orchestration companion and re-validated on import.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "providers",
+    "tool_credentials",
+    "model_roles",
+    "rate_limits"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Portable configuration schema version. Argos rejects any other value."
+    },
+    "exported_at": {
+      "type": "string",
+      "description": "Informational RFC3339 export timestamp. Never required and never used to merge."
+    },
+    "providers": {
+      "type": "array",
+      "description": "Every configured model account, including local keyless routes.",
+      "items": { "$ref": "#/$defs/provider" }
+    },
+    "tool_credentials": {
+      "type": "array",
+      "description": "Primary and fallback credentials for each keyed OSINT tool provider. Keyless tools (Holehe) are never listed.",
+      "items": { "$ref": "#/$defs/toolCredential" }
+    },
+    "model_roles": { "$ref": "#/$defs/roles" },
+    "rate_limits": {
+      "type": "array",
+      "description": "Quota group settings shared with the provider orchestration companion.",
+      "items": { "$ref": "#/$defs/quotaSetting" }
+    }
+  },
+  "$defs": {
+    "credential": {
+      "description": "Tagged credential reference. `inline` carries a saved key, `env` names an environment variable that must resolve at runtime, `none` marks a keyless route.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "api_key"],
+          "properties": {
+            "source": { "const": "inline" },
+            "api_key": {
+              "type": "string",
+              "minLength": 1,
+              "description": "A saved API key. A blank string is rejected: it is not a masked placeholder."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "name"],
+          "properties": {
+            "source": { "const": "env" },
+            "name": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "description": "Environment variable name. Import validation reports an unresolved name instead of importing an empty key."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source"],
+          "properties": { "source": { "const": "none" } }
+        }
+      ]
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "base_url", "default_model", "credential"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable provider id, lower case."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["openrouter", "google", "nvidia", "grok", "openai", "local", "subscription"],
+          "minLength": 1,
+          "description": "Provider kind. `subscription` marks an OAuth route that requires reauthorization on the importing machine; it never carries key material."
+        },
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Endpoint base URL. https unless the kind is a documented local route."
+        },
+        "default_model": { "type": "string" },
+        "credential": { "$ref": "#/$defs/credential" },
+        "quota_group_id": {
+          "type": "string",
+          "default": "",
+          "description": "Must reference an entry in rate_limits when non-empty."
+        }
+      }
+    },
+    "toolCredential": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "description": "Only the provider id is required. A primary or fallback slot the document omits is not a supplied value, so it preserves the local account; an explicit null removes it.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Keyed tool provider id: firecrawl, hunter, sociavault, newsapi, courtlistener, gnews, newsdata, currents, whoxy."
+        },
+        "primary": {
+          "oneOf": [{ "$ref": "#/$defs/credential" }, { "type": "null" }]
+        },
+        "fallback": {
+          "oneOf": [{ "$ref": "#/$defs/credential" }, { "type": "null" }],
+          "description": "Explicit null means no fallback account is configured."
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "model"],
+      "properties": {
+        "provider_id": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 }
+      }
+    },
+    "roleAssignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary"],
+      "properties": {
+        "primary": {
+          "oneOf": [{ "$ref": "#/$defs/route" }, { "type": "null" }],
+          "description": "Null preserves documented inheritance (Tool picker for decision roles, Recon for evidence curator and investigation controller, Classifier for entity resolver, Synthesis for summarization and claim assessment)."
+        },
+        "fallbacks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/route" },
+          "description": "Ordered fallback routes. Order is priority; duplicates are rejected."
+        }
+      }
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recon",
+        "synthesis",
+        "tool_picker",
+        "classifier",
+        "summarization",
+        "evidence_curator",
+        "entity_resolver",
+        "claim_assessor",
+        "investigation_controller",
+        "decision_model"
+      ],
+      "properties": {
+        "recon": { "$ref": "#/$defs/roleAssignment" },
+        "synthesis": { "$ref": "#/$defs/roleAssignment" },
+        "tool_picker": { "$ref": "#/$defs/roleAssignment" },
+        "classifier": { "$ref": "#/$defs/roleAssignment" },
+        "summarization": { "$ref": "#/$defs/roleAssignment" },
+        "evidence_curator": { "$ref": "#/$defs/roleAssignment" },
+        "entity_resolver": { "$ref": "#/$defs/roleAssignment" },
+        "claim_assessor": { "$ref": "#/$defs/roleAssignment" },
+        "investigation_controller": { "$ref": "#/$defs/roleAssignment" },
+        "decision_model": { "$ref": "#/$defs/roleAssignment" },
+        "decision_fallback": {
+          "oneOf": [{ "$ref": "#/$defs/roleAssignment" }, { "type": "null" }],
+          "description": "Optional compatible fallback for decision roles; null means none configured."
+        }
+      }
+    },
+    "quotaSetting": {
+      "description": "Import merges quota settings by (quota_group_id, scope). Groups absent from the document are preserved untouched.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quota_group_id"],
+      "properties": {
+        "quota_group_id": { "type": "string", "minLength": 1 },
+        "scope": {
+          "type": "string",
+          "default": "*",
+          "description": "* for the whole account, otherwise a model id."
+        },
+        "verified_rpm": { "type": "integer", "minimum": 0 },
+        "verified_tpm": { "type": "integer", "minimum": 0 },
+        "verified_rpd": { "type": "integer", "minimum": 0 },
+        "local_rpm": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Argos's own override; wins over verified_rpm. An explicit 0 disables the quota."
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "default": 1
+        },
+        "source": {
+          "type": "string",
+          "enum": ["provider_docs", "probe", "desk_assumption", "unset"],
+          "default": "unset"
+        },
+        "verified_at": { "type": "string", "description": "RFC3339 timestamp." }
+      }
+    }
+  }
+}

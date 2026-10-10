@@ -37,3 +37,7 @@ Read each named file before changing it. Apply only the requested change. Then f
 Return the files changed and any decision a sibling unit must follow. Use the model inherited from the parent session.
 
 For TUI edits, read the supplied design contract and catalog entries, reuse shared components and presets, preserve theme and metric semantics, and report any component API/catalog changes. Drawing, focus and pointer targets share geometry.
+
+For Profile edits, read `docs/profile-analytics-dashboard.md`. Preserve 20 primary views (Intel 4 / Recon 5 / Atlas 3 / Models 4 / Tools 4), Summary reuse and metric/history contracts. Reuse AnalyticsCard, TimePlot, DetailTable, Meter and ScrollPane through `profile_components`, with the Dashboard/Report presets and pure `profile_layout::LayoutResult` geometry. Keep theme RGB/tokens, System and Configs. Report changes against the supplied viewport/state acceptance checks; the parent runs validation. Do not change OpenCode model defaults/permissions or add config keys.
+
+TUI process and artifact retention: `docs/tui-verification.md` / `argos-tui-verify`. The parent owns capture and image/action/metric verification; editors remain formatting-only.

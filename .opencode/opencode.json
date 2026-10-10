@@ -15,81 +15,266 @@
       }
     }
   },
-  "agent": {
+  "agents": {
     "plan": {
       "model": "opencode/step-5-preview-free#max",
-      "options": {
-        "reasoningEffort": "max",
-        "thinkingBudget": -1
-      },
       "permissions": [
-        { "action": "browser", "resource": "*", "effect": "deny" },
-        { "action": "gsd_*", "resource": "*", "effect": "deny" },
-        { "action": "read", "resource": "*", "effect": "allow" },
-        { "action": "edit", "resource": "*", "effect": "allow" },
-        { "action": "shell", "resource": "*", "effect": "allow" },
-        { "action": "execute", "resource": "*", "effect": "allow" },
-        { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "build", "effect": "allow" },
-        { "action": "subagent", "resource": "general", "effect": "allow" },
-        { "action": "subagent", "resource": "explore", "effect": "allow" },
-        { "action": "subagent", "resource": "ecc-planner", "effect": "allow" },
-        { "action": "subagent", "resource": "ecc-reviewer", "effect": "allow" },
-        { "action": "subagent", "resource": "ecc-edit", "effect": "allow" },
-        { "action": "skill", "resource": "*", "effect": "deny" },
-        { "action": "skill", "resource": "graphify", "effect": "allow" },
-        { "action": "skill", "resource": "argos-plan", "effect": "allow" },
-        { "action": "skill", "resource": "argos-implement", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-plan", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-review", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-verify", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-checkpoint", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-learn", "effect": "allow" }
-      ]
+        {
+          "action": "browser",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "gsd_*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "execute",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "explore",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "ecc-planner",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "ecc-reviewer",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "skill",
+          "resource": "graphify",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "argos-plan",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "argos-implement",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-plan",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-review",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-verify",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-checkpoint",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-learn",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "argos-tui-verify",
+          "effect": "allow"
+        }
+      ],
+      "request": {
+        "body": {
+          "reasoningEffort": "max",
+          "thinkingBudget": -1
+        }
+      }
     },
     "build": {
       "mode": "all",
       "model": "opencode/mimo-v2.6-flash-free#max",
-      "options": {
-        "reasoningEffort": "max",
-        "thinkingBudget": -1
-      },
       "permissions": [
-        { "action": "browser", "resource": "*", "effect": "deny" },
-        { "action": "gsd_*", "resource": "*", "effect": "deny" },
-        { "action": "read", "resource": "*", "effect": "allow" },
-        { "action": "edit", "resource": "*", "effect": "allow" },
-        { "action": "shell", "resource": "*", "effect": "allow" },
-        { "action": "execute", "resource": "*", "effect": "allow" },
-        { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "explore", "effect": "allow" },
-        { "action": "subagent", "resource": "ecc-planner", "effect": "allow" },
-        { "action": "subagent", "resource": "ecc-reviewer", "effect": "allow" },
-        { "action": "subagent", "resource": "ecc-edit", "effect": "allow" },
-        { "action": "skill", "resource": "*", "effect": "deny" },
-        { "action": "skill", "resource": "graphify", "effect": "allow" },
-        { "action": "skill", "resource": "argos-plan", "effect": "allow" },
-        { "action": "skill", "resource": "argos-implement", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-plan", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-review", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-verify", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-checkpoint", "effect": "allow" },
-        { "action": "skill", "resource": "ecc-learn", "effect": "allow" }
-      ]
+        {
+          "action": "browser",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "gsd_*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "execute",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "explore",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "ecc-planner",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "ecc-reviewer",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "ecc-edit",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "skill",
+          "resource": "graphify",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "argos-plan",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "argos-implement",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-plan",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-review",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-verify",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-checkpoint",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "ecc-learn",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "argos-tui-verify",
+          "effect": "allow"
+        }
+      ],
+      "request": {
+        "body": {
+          "reasoningEffort": "max",
+          "thinkingBudget": -1
+        }
+      }
     },
     "general": {
       "mode": "subagent",
       "model": "opencode/mimo-v2.6-flash-free#max",
-      "options": {
-        "reasoningEffort": "max",
-        "thinkingBudget": -1
-      },
       "permissions": [
-        { "action": "read", "resource": "*", "effect": "allow" },
-        { "action": "edit", "resource": "*", "effect": "allow" },
-        { "action": "shell", "resource": "*", "effect": "allow" },
-        { "action": "execute", "resource": "*", "effect": "allow" }
-      ]
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "execute",
+          "resource": "*",
+          "effect": "allow"
+        }
+      ],
+      "request": {
+        "body": {
+          "reasoningEffort": "max",
+          "thinkingBudget": -1
+        }
+      }
     }
   }
 }

@@ -13,3 +13,7 @@ Write the plan to disk and keep the chat to the current step.
 6. Code for the current phase is implemented on the `build` agent with the `argos-implement` skill.
 
 UI phases read `docs/tui-design-spec.md` and relevant `docs/tui-components.md` entries. Identify chosen components, layout preset, affected screens, and viewport/interaction/data acceptance checks before editing.
+
+Profile phases also read `docs/profile-analytics-dashboard.md`. Plan exactly 20 primary views (Intel 4 / Recon 5 / Atlas 3 / Models 4 / Tools 4), Summary reuse, simultaneous Dashboard and expanded Report presets, shared `profile_components` and pure `profile_layout::LayoutResult` geometry. Preserve theme tokens/RGB, metric/history contracts, System/Configs and provider scheduler ownership. Include 160×50, 120×40, 100×32, 80×24, 60×18 and too-small/empty/stale acceptance. Existing skills/agent prompts carry this guidance; no OpenCode config key, model default or permission change is required.
+
+TUI process and artifact retention: `docs/tui-verification.md` / `argos-tui-verify`. The parent owns capture and image/action/metric verification; editors remain formatting-only.

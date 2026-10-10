@@ -108,9 +108,9 @@
     "semantic_hash": "28c3293556d4f43b0d509e809b8629dd"
   },
   "crates/argos-osint-bin/src/tui/ui.rs": {
-    "mtime": 1791671075.4595785,
-    "seen": 1791671278.763349,
-    "ast_hash": "1b79dc6eab62920589ff72ec75c7a845",
+    "mtime": 1791675856.7244415,
+    "seen": 1791676101.6651351,
+    "ast_hash": "b84a29026a1fa356f87dc037093cdc8b",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/Cargo.toml": {
@@ -1068,9 +1068,9 @@
     "semantic_hash": ""
   },
   "docs/usage.md": {
-    "mtime": 1791671156.3629096,
-    "seen": 1791671278.844994,
-    "ast_hash": "108ab033855f1957bddcb85f71341cb0",
+    "mtime": 1791676084.4428399,
+    "seen": 1791676101.717304,
+    "ast_hash": "beb3d0dd31deccbd0fbd3866a47a0a24",
     "semantic_hash": ""
   },
   "docs/diagrams/agent-graphify.svg": {
@@ -1680,9 +1680,9 @@
     "semantic_hash": ""
   },
   "docs/tui-components.md": {
-    "mtime": 1791670173.2624943,
-    "seen": 1791671278.8444428,
-    "ast_hash": "3a45c59d0aa854ebf5d139e0d24e8421",
+    "mtime": 1791675887.428756,
+    "seen": 1791676101.716647,
+    "ast_hash": "20e087ad1bcd828cbca215f8d82c3c17",
     "semantic_hash": ""
   },
   "docs/tui-design-spec.md": {
@@ -1806,9 +1806,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/article_image.rs": {
-    "mtime": 1791670703.32371,
-    "seen": 1791671278.759296,
-    "ast_hash": "19bde478d058eb02b5f22db2e697b146",
+    "mtime": 1791676036.2468486,
+    "seen": 1791676101.660196,
+    "ast_hash": "3cafd6ad3a12470c9ef8f7d0b76a95dd",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/tool_catalog.rs": {
@@ -1818,14 +1818,14 @@
     "semantic_hash": ""
   },
   "docs/tui-overhaul-verification-2026-10-10.md": {
-    "mtime": 1791671916.7548788,
-    "seen": 1791671949.8166962,
-    "ast_hash": "9c96f4a5741bcbc1193624626d394723",
+    "mtime": 1791672286.0496933,
+    "seen": 1791676101.71678,
+    "ast_hash": "6b33429338fe70e0ac224ac76e171f50",
     "semantic_hash": ""
   },
   "docs/screenshots/tui-overhaul-2026-10-10/run-02-provenance.json": {
-    "mtime": 1791671627.0369031,
-    "seen": 1791671949.8006122,
+    "mtime": 1791672285.982807,
+    "seen": 1791676101.701632,
     "ast_hash": "c3d4e6b1b28e3c82b282fdf39cd0b591",
     "semantic_hash": ""
   },
@@ -1881,6 +1881,42 @@
     "mtime": 1791671439.2217383,
     "seen": 1791671949.823379,
     "ast_hash": "4e2359c0b13effb5a46248d9a57b8b99",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/tui-overhaul-2026-10-10/run-05-provenance.json": {
+    "mtime": 1791672285.9867148,
+    "seen": 1791676101.701637,
+    "ast_hash": "31224d3c8c88ead65ae4b6d078bdafc5",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/tui-overhaul-2026-10-10/README.md": {
+    "mtime": 1791671938.8532605,
+    "seen": 1791676101.716643,
+    "ast_hash": "243b1bbc5b161b59462838f1c54beaa1",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/tui-overhaul-2026-10-10/profile-report-120x40.png": {
+    "mtime": 1791672261.1742492,
+    "seen": 1791676101.7235699,
+    "ast_hash": "bd8ef56b48b03dc4f5ada1f582663673",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/tui-overhaul-2026-10-10/profile-small-sample-60x18.png": {
+    "mtime": 1791672262.4433594,
+    "seen": 1791676101.723575,
+    "ast_hash": "22d7ef3611a582a6b6b0f9890b069c76",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/tui-overhaul-2026-10-10/profile-summary-160x50.png": {
+    "mtime": 1791672263.4755151,
+    "seen": 1791676101.723579,
+    "ast_hash": "6fea6ce4c9e1d29547bf750b2dc1d70c",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/tui-overhaul-2026-10-10/profile-summary-40x20.png": {
+    "mtime": 1791672263.5093012,
+    "seen": 1791676101.723582,
+    "ast_hash": "df614b0a82b3cbe5dca4c04e81336998",
     "semantic_hash": ""
   }
 }

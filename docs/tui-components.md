@@ -94,6 +94,13 @@ let frozen = TranscriptBlock { revision, width, content: rendered_lines };
 
 ## Application presets
 
+Intel article imagery preserves decoded source pixels within the bounded decoder limits.
+Background encoding performs one Lanczos contain resize at the terminal's pixel dimensions;
+the encoded image is centered horizontally and vertically inside its registered area.
+Bulletin preview text is vertically centered when shorter than its viewport and scrolls
+normally when overflowing. Native graphics preserve photographic detail; half-block
+fallback is inherently limited to two color samples per terminal cell.
+
 Home shrinks its logo and uses two launcher columns on short screens. Recon uses a transcript and 30% context column at 110 cells; compact screens expose Transcript/Investigation pages. Intel uses three columns at 132 cells, two at 100–131, and Extracted/Reader/Context pages on smaller or short screens. Its article reader is borderless. Atlas exposes compact Origins/Insights/Headlines pages. Brain supports Split/Graph/Related/Summary expansion. Tools and Models expose list/editor pages; the model role list registers its rows. System exposes Host/Paths pages on short screens.
 
 

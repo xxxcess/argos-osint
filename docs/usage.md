@@ -176,3 +176,18 @@ Persistence: [architecture.md](architecture.md#persistence).
 
 
 Profile opens Overview; its upper buttons select Overview, System or Configs. `x` and the Configs palette command select the Configs page. Export precedes the multiline Import editor: Verify shows a redacted change summary, then Save and apply commits that exact revision. Enter in JSON inserts a newline. Tools has category groups and compact Catalog / Documentation / Test pages; search reveals matches without changing saved expansion. Intel's Visit article site action opens the article URL. Ctrl+K lists recent commands and current-app shortcuts above universal actions. Recon exposes Jump to latest and previous/next-turn commands through the palette.
+## Intel article image quality
+
+Argos queries terminal graphics capabilities at startup. Direct-session fallback
+detection selects Kitty graphics for Kitty/Ghostty and inline iTerm images for
+iTerm2/VS Code. In VS Code enable `terminal.integrated.enableImages` (see
+[terminal image support](https://code.visualstudio.com/docs/terminal/advanced#_image-support)).
+Multiplexed sessions rely on capability queries rather than outer-terminal names.
+When pixel-size queries are unavailable, native rendering uses the adapter's
+default cell aspect ratio. Apple Terminal and unknown terminals retain the
+portable half-block fallback, whose resolution is limited to terminal cells.
+For photographic detail use a terminal that supports native image graphics.
+
+Images retain their source resolution during decoding and use a single high-quality
+contain resize for display. Bulletin imagery and short article previews are
+vertically centered; briefing imagery is horizontally centered in the reader column.

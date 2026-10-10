@@ -7051,6 +7051,16 @@ fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
     let start = app
         .intel_preview_scroll
         .min(lines.len().saturating_sub(story_inner.height as usize));
+    // Center short previews; overflowing previews retain their full scroll area.
+    let spare = story_inner
+        .height
+        .saturating_sub(lines.len().min(u16::MAX as usize) as u16);
+    let text_area = Rect::new(
+        story_inner.x,
+        story_inner.y + spare / 2,
+        story_inner.width,
+        story_inner.height - spare / 2,
+    );
     frame.render_widget(
         Paragraph::new(
             lines
@@ -7059,7 +7069,7 @@ fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
                 .take(story_inner.height as usize)
                 .collect::<Vec<_>>(),
         ),
-        story_inner,
+        text_area,
     );
     app.layout
         .borrow_mut()

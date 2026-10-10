@@ -1,7 +1,11 @@
 //! Bounded background article imagery. Draw only consumes encoded protocols.
 use image::{DynamicImage, ImageReader, Limits};
 use ratatui::layout::{Rect, Size};
-use ratatui_image::{picker::Picker, protocol::Protocol, Image, Resize};
+use ratatui_image::{
+    picker::{Picker, ProtocolType},
+    protocol::Protocol,
+    Image, Resize,
+};
 use std::{
     collections::HashMap,
     io::Cursor,
@@ -51,6 +55,13 @@ impl ArticleImages {
     /// Called once in the terminal event loop, after alternate-screen entry.
     pub fn detect(&mut self) {
         self.picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+        let protocol = terminal_protocol(
+            self.picker.protocol_type(),
+            &std::env::var("TERM_PROGRAM").unwrap_or_default(),
+            &std::env::var("TERM").unwrap_or_default(),
+            std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some(),
+        );
+        self.picker.set_protocol_type(protocol);
     }
 
     #[cfg(test)]
@@ -176,7 +187,10 @@ impl ArticleImages {
         if let Some((key, size, protocol)) = &self.encoded {
             if key.0 == id && key.1 == url && size.width <= area.width && size.height <= area.height
             {
-                frame.render_widget(Image::new(protocol), area);
+                frame.render_widget(
+                    Image::new(protocol),
+                    centered_image_rect(area, protocol.size()),
+                );
                 return;
             }
         }
@@ -187,12 +201,48 @@ impl ArticleImages {
     }
 }
 
+/// Queries win. Direct-session hints also work when pixel/font queries are
+/// unavailable; the picker's default cell aspect ratio is then used for sizing.
+/// Never trust outer-terminal hints through a multiplexer.
+fn terminal_protocol(
+    detected: ProtocolType,
+    program: &str,
+    term: &str,
+    multiplexed: bool,
+) -> ProtocolType {
+    if detected != ProtocolType::Halfblocks || multiplexed {
+        return detected;
+    }
+    match program.to_ascii_lowercase().as_str() {
+        "ghostty" | "kitty" => ProtocolType::Kitty,
+        "iterm.app" | "iterm2" | "vscode" => ProtocolType::Iterm2,
+        "apple_terminal" => ProtocolType::Halfblocks,
+        _ if matches!(term, "xterm-kitty" | "xterm-ghostty") => ProtocolType::Kitty,
+        _ => detected,
+    }
+}
+
 fn encode(picker: &Picker, image: &DynamicImage, size: Size) -> Option<Protocol> {
-    let font = picker.font_size();
-    let width = (u32::from(size.width) * u32::from(font.width)).clamp(1, 2048);
-    let height = (u32::from(size.height) * u32::from(font.height)).clamp(1, 2048);
-    let contained = image.resize(width, height, image::imageops::FilterType::Triangle);
-    picker.new_protocol(contained, size, Resize::Fit(None)).ok()
+    // Keep the decoded source intact and perform one high-quality contain resize
+    // for the terminal's actual pixel dimensions, including HiDPI cell sizes.
+    picker
+        .new_protocol(
+            image.clone(),
+            size,
+            Resize::Scale(Some(image::imageops::FilterType::Lanczos3)),
+        )
+        .ok()
+}
+
+fn centered_image_rect(area: Rect, size: Size) -> Rect {
+    let width = size.width.min(area.width);
+    let height = size.height.min(area.height);
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
 }
 
 fn valid_url(value: &str) -> bool {
@@ -230,15 +280,84 @@ fn decode(data: Vec<u8>) -> Option<DynamicImage> {
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    reader
-        .decode()
-        .ok()
-        .map(|image| image.thumbnail(2048, 2048))
+    reader.decode().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_detection_preserves_queries_and_covers_direct_session_hints() {
+        for (program, term, expected) in [
+            ("ghostty", "xterm-256color", ProtocolType::Kitty),
+            ("kitty", "xterm-kitty", ProtocolType::Kitty),
+            ("iTerm.app", "xterm-256color", ProtocolType::Iterm2),
+            ("vscode", "xterm-256color", ProtocolType::Iterm2),
+            ("Apple_Terminal", "xterm-256color", ProtocolType::Halfblocks),
+            ("", "xterm-kitty", ProtocolType::Kitty),
+            ("unknown", "xterm-256color", ProtocolType::Halfblocks),
+        ] {
+            assert_eq!(
+                terminal_protocol(ProtocolType::Halfblocks, program, term, false),
+                expected
+            );
+            assert_eq!(
+                terminal_protocol(ProtocolType::Sixel, program, term, false),
+                ProtocolType::Sixel
+            );
+            assert_eq!(
+                terminal_protocol(ProtocolType::Halfblocks, program, term, true),
+                ProtocolType::Halfblocks
+            );
+        }
+    }
+    #[test]
+    fn native_encoders_keep_the_selected_graphics_protocol() {
+        let image = DynamicImage::new_rgb8(64, 32);
+        for kind in [
+            ProtocolType::Kitty,
+            ProtocolType::Iterm2,
+            ProtocolType::Sixel,
+        ] {
+            let mut picker = Picker::halfblocks();
+            picker.set_protocol_type(kind);
+            let protocol = encode(&picker, &image, Size::new(8, 4)).unwrap();
+            assert!(matches!(
+                (kind, protocol),
+                (ProtocolType::Kitty, Protocol::Kitty(_))
+                    | (ProtocolType::Iterm2, Protocol::ITerm2(_))
+                    | (ProtocolType::Sixel, Protocol::Sixel(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn decode_preserves_source_resolution_and_pixels() {
+        let source = DynamicImage::ImageRgb8(image::RgbImage::from_fn(2500, 2, |x, _| {
+            image::Rgb([(x % 256) as u8, 50, 200])
+        }));
+        let mut bytes = Cursor::new(Vec::new());
+        source
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let decoded = decode(bytes.into_inner()).unwrap();
+        assert_eq!(decoded.to_rgb8(), source.to_rgb8());
+    }
+
+    #[test]
+    fn image_is_centered_in_both_axes_without_stretching() {
+        assert_eq!(
+            centered_image_rect(Rect::new(20, 5, 80, 20), Size::new(40, 10)),
+            Rect::new(40, 10, 40, 10)
+        );
+        let protocol = encode(
+            &Picker::halfblocks(),
+            &DynamicImage::new_rgb8(640, 320),
+            Size::new(80, 10),
+        )
+        .unwrap();
+        assert_eq!(protocol.size(), Size::new(40, 10));
+    }
     #[test]
     fn absent_invalid_failed_images_collapse() {
         let mut images = ArticleImages::default();

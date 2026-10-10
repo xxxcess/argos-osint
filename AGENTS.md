@@ -1,6 +1,8 @@
 # Argos OSINT — Agent Instructions
 
-For changes under crates/argos-osint-bin/src/tui/, read docs/tui-design-spec.md and the relevant docs/tui-components.md entries. Name the components and layout preset before editing. Extend shared components when required. Preserve theme tokens, widget IDs, and metric semantics. Drawing, focus, and mouse targets must share geometry. Verify relevant viewport snapshots and interaction/data states. Child prompts carry chosen components, preset, owned files, read-only references, and acceptance checks.
+For changes under crates/argos-osint-bin/src/tui/, read [docs/tui-design-spec.md](docs/tui-design-spec.md) and the relevant [docs/tui-components.md](docs/tui-components.md) entries. Profile changes also read [docs/profile-analytics-dashboard.md](docs/profile-analytics-dashboard.md): exactly 20 primary views (Intel 4 / Recon 5 / Atlas 3 / Models 4 / Tools 4), with Summary reusing views. Name components (AnalyticsCard, TimePlot, DetailTable, Meter, ScrollPane) and the Dashboard/Report preset before editing. Extend shared profile_components when required; profile_layout::LayoutResult owns pure geometry shared by drawing, focus and mouse targets. Preserve theme RGB/tokens, primary IDs, metric semantics/history, System and Configs. Verify 160×50, 120×40, 100×32, 80×24, 60×18 and too-small/empty/stale viewport snapshots plus interaction/data states. Child prompts carry chosen components, preset, owned files, read-only references, and acceptance checks.
+
+All agents follow [docs/tui-verification.md](docs/tui-verification.md) for TUI work. Load the repo [argos-tui-verify skill](.opencode/skills/argos-tui-verify/SKILL.md) (OpenCode: skill id `argos-tui-verify` or `/tui-verify`; other hosts may read it directly). Use `scripts/tui_review.py` for fresh actual TestBackend captures; inspect PNGs with an image-capable viewer and record visual, interaction and metric results separately. Generation is not visual review. Report unavailable references/image capability/live checks. [Session evidence and screenshots](docs/tui-verification-session-2026-10-10.md) explain the standard.
 
 ## Project Structure
 Rust workspace with two crates:
@@ -119,6 +121,7 @@ Steps: `cargo fetch` → `cargo build --locked --no-default-features` → `cargo
 - `docs/concepts.md` — glossary (module ids, roles, bindings, schema)
 - `docs/conventions.md` — TUI, schema, tests, scratch, planning, diagrams
 - `docs/providers.md` — provider setup, model roles, OSINT provider details
+- `docs/profile-analytics-dashboard.md` — 20-view Profile inventory, simultaneous Dashboard/Report presets, shared geometry, metric units and viewport acceptance
 - `docs/diagrams.md` — editorial diagram language (diagram-design)
 - `crates/argos-osint-core/src/osint/providers.rs` — primary provider adapters
 - `crates/argos-osint-core/src/recon/investigation/tool_io.rs` — tool input/binding table (source of truth for binder/picker)
@@ -168,7 +171,7 @@ V2 ignores `experimental.primary_tools`. `.opencode/opencode.json` is the primar
 | `question` | header, prompt, choices |
 | `subagent` | `agent`, `description`, `prompt`. Optional `background` and `sessionID` |
 
-Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`.
+Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`, `argos-tui-verify`.
 
 `build` may launch `explore`, `ecc-planner`, `ecc-reviewer`, and `ecc-edit`. `plan` may launch the first three. Repo questions start with shell `graphify query "<question>"`. Load `graphify` only when that command is unclear. Multi-step work loads `argos-plan` and leaves the plan on disk. GSD phase commands stay explicit (`/gsd-...`); their tools are not on `build` or `plan`.
 
@@ -217,5 +220,5 @@ Scratch = agent-only helpers Argos does not need to build or test (`*.py`, `*.sh
 - Never `git add` scratch files. `git rm` if one is already tracked.
 - Prefer editor edits. No line-number rewrites (`sed -i 'N,Mc'`) without re-reading the file.
 - After `fmt` → `clippy` → `test`, delete that task’s scratch files.
-- Keep `scripts/` only for documented project utilities (`scripts/render_tui_cells.py`).
+- Keep `scripts/` only for documented project utilities (`scripts/render_tui_cells.py`, `scripts/tui_review.py`). Review artifacts live under the named plan; durable selected fixture PNGs may live under `docs/screenshots/`. Dependency environments and diagnostic logs stay task-owned scratch.
 - Incomplete work: leave scratch in `.agent-scratch/` and list it in the hand-off.

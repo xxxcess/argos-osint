@@ -12,7 +12,8 @@ Deep investigation: [architecture.md](architecture.md). Keys and roles: [provide
 | [usage.md](usage.md) | TUI navigation, CLI, state directory |
 | [architecture.md](architecture.md) | Recon turn, binder, picker, persistence, Atlas, news/legal |
 | [providers.md](providers.md) | Model accounts (Defaults, OpenRouter, Google, Nvidia) and OSINT keys |
-| [profile-dashboard-and-search.md](profile-dashboard-and-search.md) | Profile dashboard widgets, metric dictionary, portable configuration, named search engines |
+| [profile-analytics-dashboard.md](profile-analytics-dashboard.md) | Profile's 20 primary views, simultaneous dashboard, shared layout/components and viewport acceptance |
+| [profile-dashboard-and-search.md](profile-dashboard-and-search.md) | Profile metric dictionary/history, portable configuration and named search engines |
 | [concepts.md](concepts.md) | Glossary: apps vs IDs, roles, bindings, Intel jobs, schema |
 | [conventions.md](conventions.md) | TUI, schema, tests, agent scratch, planning files |
 | [diagrams.md](diagrams.md) | Editorial diagram language and figures |
@@ -46,6 +47,8 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | --- | --- |
 | [../AGENTS.md](../AGENTS.md) | Commands, graphify, planning-with-files, scratch rules |
 | [opencode-v2.md](opencode-v2.md) | Primary tool list, graph-first plugins, and ECC commands |
+| [tui-verification.md](tui-verification.md) | Agent standard: shared geometry, capture tooling, screenshot/action/metric verification |
+| [tui-verification-session-2026-10-10.md](tui-verification-session-2026-10-10.md) | Profile process, actual screenshot evidence, defects and results |
 | [ui-interaction-audit.md](ui-interaction-audit.md) | TUI surfaces, fields, focus, overflow |
 | [investigation-harness.md](investigation-harness.md) | Unified investigation task graph |
 | [jev-decision-gates.md](jev-decision-gates.md) | Tool-picker decisions transport |

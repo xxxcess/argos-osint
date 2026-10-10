@@ -4,9 +4,11 @@ Rules that keep Argos and agent work aligned. Product behavior lives in [archite
 
 ## Checks
 
-Order matches CI: `cargo fmt --all --check` → `cargo clippy --workspace --all-targets --no-default-features -- -D warnings` → `cargo test --workspace --no-default-features` (offline, `ARGOS_EMBED` unset, no LanceDB). Local default builds include the `lancedb` feature. MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
+Order matches CI: `cargo fmt --all --check` → `cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings` → `cargo test --workspace --locked --no-default-features` (offline, `ARGOS_EMBED` unset, no LanceDB). Local default builds include the `lancedb` feature. MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
 
 ## TUI
+
+All agents follow [tui-verification.md](tui-verification.md) and the repo [argos-tui-verify skill](../.opencode/skills/argos-tui-verify/SKILL.md). Use `scripts/tui_review.py` for fresh fixture galleries. Inspect PNGs, action tests and metric tests separately; capture is not visual approval. [Session evidence](tui-verification-session-2026-10-10.md) records the defects behind this convention. Keep the viewport/state matrix proportional to affected presets; Profile uses 160×50, 120×40, 100×32, 100×24, 80×24, 60×18 and 40×20. Artifacts are fixture cells/PNG/manifest/review ledger under a named plan; avoid live secrets.
 
 - Layout, hit-test, and Tab order share rectangles. `LayoutRegistry` fills during `draw`. Focus order uses registered targets from the active layout scope. Figure: [tui-shell.html](diagrams/tui-shell.html).
 - Internal IDs stay `Osint` / `Providers` / `System` even when the labels are Tools / Models / Profile.

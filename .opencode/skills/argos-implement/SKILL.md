@@ -23,8 +23,8 @@ Do not set `model`. Do not poll. Do not edit those files in the parent while a c
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
-cargo test --workspace --locked --no-default-features
+python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+python3 scripts/agent_cargo.py test --workspace --locked --no-default-features
 ```
 
 4. On failure, map each error to the unit that owns the file. Launch `ecc-edit` again the same way. Pass `sessionID` to continue the editor that already owns those files, and put the failing command plus the relevant output in `prompt`.

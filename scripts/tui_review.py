@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +10,8 @@ import tempfile
 from datetime import datetime, timezone
 
 sys.dont_write_bytecode = True
+from agent_cargo import TARGET_DIR, cargo_command, cargo_env
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -58,8 +59,8 @@ def capture(args):
     cells, screenshots = output / "cells", output / "screenshots"
     cells.mkdir()
     screenshots.mkdir()
-    command = ["cargo", "test", "-p", "argos-osint-bin", "--locked",
-               "--no-default-features", args.test]
+    command = cargo_command(["test", "-p", "argos-osint-bin", "--locked",
+                             "--no-default-features", args.test])
     if args.ignored:
         command.extend(["--", "--ignored"])
     manifest = {"created_utc": datetime.now(timezone.utc).isoformat(),
@@ -68,7 +69,7 @@ def capture(args):
                 "tracked_diff_sha256": hashlib.sha256(subprocess.check_output(
                     ["git", "diff", "HEAD", "--binary"], cwd=ROOT)).hexdigest(),
                 "git_status": git("status", "--short"), "command": command,
-                "ARGOS_EMBED": "unset", "font": FONT,
+                "ARGOS_EMBED": "unset", "CARGO_TARGET_DIR": str(TARGET_DIR), "font": FONT,
                 "pillow_version": PIL.__version__, "python_version": sys.version,
                 "renderer_sha256": digest(ROOT / "scripts/render_tui_cells.py"),
                 "visual_review": "pending", "interaction_review": "not certified by capture",
@@ -87,7 +88,7 @@ def capture(args):
                                      dir=scratch, delete=False) as log:
         log_path = Path(log.name)
         with tempfile.TemporaryDirectory(prefix="argos-tui-review-") as home:
-            env = os.environ.copy()
+            env = cargo_env()
             env.pop("ARGOS_EMBED", None)
             env.update(ARGOS_HOME=home, ARGOS_SCREEN_DIR=str(cells))
             process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,

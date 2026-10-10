@@ -59,5 +59,5 @@ test("ecc-edit formats its files and cannot run the test suite", () => {
   assert.ok(shellDeny > -1 && fmtAllow > shellDeny);
   const skill = readFileSync(join(root, "skills/argos-implement/SKILL.md"), "utf8");
   assert.match(skill, /"agent": "ecc-edit"/);
-  assert.match(skill, /cargo test --workspace/);
+  assert.match(skill, /agent_cargo\.py test --workspace/);
 });

@@ -9,7 +9,7 @@ Before editing, name components, layout preset, owned files, immutable data sour
 
 Use deterministic fixtures with overflow, missing/low-N values and stale/empty/loading states. Assert geometry, state restoration, stable identities, filters and keyboard/mouse parity. A PNG cannot certify an action or metric cohort.
 
-The parent runs fmt → strict Clippy → offline tests with locked dependencies and no default features. Editors follow their host's formatting-only rules. Then capture real terminal output into a **fresh** run directory:
+The parent runs fmt → strict Clippy → offline tests with locked dependencies and no default features. Use `python3 scripts/agent_cargo.py` for Clippy/tests so agent artifacts stay in `target/agents` and user runs retain `target/debug`. Capture applies this isolation automatically. Editors follow their host's formatting-only rules. Then capture real terminal output into a **fresh** run directory:
 
 ```sh
 .agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<PLAN_ID>/tui/run-01

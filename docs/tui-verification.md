@@ -46,9 +46,11 @@ The parent runs these in order with `ARGOS_EMBED` unset:
 
 ```sh
 env -u ARGOS_EMBED cargo fmt --all --check
-env -u ARGOS_EMBED cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
-env -u ARGOS_EMBED ARGOS_HOME=/private/tmp/argos-tui-check cargo test --workspace --locked --no-default-features
+env -u ARGOS_EMBED python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+env -u ARGOS_EMBED ARGOS_HOME=/private/tmp/argos-tui-check python3 scripts/agent_cargo.py test --workspace --locked --no-default-features
 ```
+
+The wrapper and fixture capture reserve `target/agents` for agent artifacts; the user’s normal `cargo run` continues using `target/debug`. Capture manifests record `CARGO_TARGET_DIR` and the explicit Cargo target argument. Do not override the target directory or delete a lock file. See [agent Cargo isolation](../AGENTS.md#agent-cargo-isolation).
 
 Use a task-specific temporary state path (Linux may use `/tmp`) rather than `~/.argos`. OpenCode shell calls use `timeout: 600000`. `env -u` expresses the unset requirement on macOS/Linux; do not substitute `ARGOS_EMBED=0` when reporting the offline gate. If the sandbox blocks local mock sockets, request host-required escalation and rerun affected checks. A permission failure does not prove a code regression. Ignored MiniLM, default-feature LanceDB and live-provider checks are separate results.
 

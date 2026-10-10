@@ -24,12 +24,14 @@ Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`
 Every agent compiles and tests without LanceDB. `build`, `plan`, `explore`, `ecc-edit`, `ecc-planner`, and `ecc-reviewer` use:
 
 ```sh
-cargo build --locked --no-default-features
-cargo test --workspace --locked --no-default-features
-cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+python3 scripts/agent_cargo.py build --locked --no-default-features
+python3 scripts/agent_cargo.py test --workspace --locked --no-default-features
+python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings
 ```
 
 Leave `ARGOS_EMBED` unset. Do not pass `--features lancedb`. `ecc-edit` only formats its Rust files with `cargo fmt -- <paths>`. The parent runs fmt check, clippy, and test.
+
+All compilation and test commands use the wrapper, which reserves `target/agents` for agents and leaves the user’s default `target/debug` free. `cargo fmt` needs no artifact lock. Screenshot capture follows this policy automatically. See [agent Cargo isolation](../AGENTS.md#agent-cargo-isolation).
 
 ## Phase edits
 
@@ -37,7 +39,7 @@ On `build`, load `argos-implement`. Split the in-progress phase into disjoint fi
 
 `ecc-edit` changes only those files, then runs `cargo fmt -- <paths>` for the Rust files it changed. It cannot run the test suite.
 
-When the children finish, the parent runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings`, and `cargo test --workspace --locked --no-default-features`, with shell `timeout` `600000` and `ARGOS_EMBED` unset. Failures go back to `ecc-edit`, using `sessionID` to continue the editor that owns the file. The parent re-runs the failed command, then the full trio, then `graphify update .`. `plan` does not launch `ecc-edit`.
+When the children finish, the parent runs `cargo fmt --all --check`, `python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings`, and `python3 scripts/agent_cargo.py test --workspace --locked --no-default-features`, with shell `timeout` `600000` and `ARGOS_EMBED` unset. Failures go back to `ecc-edit`, using `sessionID` to continue the editor that owns the file. The parent re-runs the failed command, then the full trio, then `graphify update .`. `plan` does not launch `ecc-edit`.
 
 ## Graph first
 

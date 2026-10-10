@@ -141,14 +141,20 @@ Plan agent: wait for approval, then prefer a `build` subagent with the approved 
 - Prefer `graphify-out/wiki/index.md` when present. `GRAPH_REPORT.md` only for architecture review or when query/path/explain are thin.
 - After code edits: `graphify update .`. Track `graph.json`, `manifest.json`, `GRAPH_REPORT.md` only.
 
+## Agent Cargo isolation
+
+Every agent host runs compilation, checks, tests and previews through `python3 scripts/agent_cargo.py <command> <args>`. The wrapper fixes artifacts to `target/agents`, overriding inherited `CARGO_TARGET_DIR` and rejecting `--target-dir` overrides. Reserve the default `target/debug` for the user's `cargo run -p argos-osint-bin`. Keep `.cargo/config.toml` free of a global agent target directory. `cargo fmt` can run directly; it does not lock build artifacts. Screenshot capture uses the same isolation automatically and records the path in its manifest.
+
+Serialize agent Cargo jobs sharing this cache. Keep the cache for subsequent checks; its first build recompiles dependencies. Never delete a Cargo lock file or terminate an unrelated Cargo process to bypass contention. If a user still sees an artifact lock, identify its owner with `lsof -nP target/debug/.cargo-lock`; route agent work through the wrapper. Cargo registry/package-cache locks are separate from artifact locks.
+
 ## OpenCode builds
 
 Every OpenCode agent (`build`, `plan`, `explore`, `ecc-edit`, `ecc-planner`, and `ecc-reviewer`) compiles and tests without LanceDB. Pass `--locked --no-default-features` on every `cargo build`, `cargo test`, and `cargo clippy`. Leave `ARGOS_EMBED` unset. Do not add `--features lancedb`.
 
 ```sh
-cargo build --locked --no-default-features
-cargo test --workspace --locked --no-default-features
-cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+python3 scripts/agent_cargo.py build --locked --no-default-features
+python3 scripts/agent_cargo.py test --workspace --locked --no-default-features
+python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings
 ```
 
 Order stays `fmt` check, then clippy, then test. `ecc-edit` only runs `cargo fmt -- <paths>` for the Rust files it changed. The parent agent runs the three commands above, with shell `timeout` `600000`.
@@ -193,7 +199,7 @@ On `build`, load `argos-implement` and send the current phase's code edits to `e
 
 3. Stop until those children finish. Do not edit their files in the parent while they run, and do not poll them.
 4. `ecc-edit` formats the Rust files it changed with `cargo fmt -- <paths>` and does not run tests.
-5. The parent then runs the **OpenCode builds** commands, with shell `timeout` `600000`: `cargo fmt --all --check`, then `cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings`, then `cargo test --workspace --locked --no-default-features`.
+5. The parent then runs the **OpenCode builds** commands, with shell `timeout` `600000`: `cargo fmt --all --check`, then `python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings`, then `python3 scripts/agent_cargo.py test --workspace --locked --no-default-features`.
 6. On failure, map each error to its unit. Launch `ecc-edit` again the same way. Pass `sessionID` to continue the editor that already owns those files, and include the failing command and the relevant output in `prompt`.
 7. Re-run the failed command, then the full trio. After it passes, run `graphify update .`.
 
@@ -220,5 +226,5 @@ Scratch = agent-only helpers Argos does not need to build or test (`*.py`, `*.sh
 - Never `git add` scratch files. `git rm` if one is already tracked.
 - Prefer editor edits. No line-number rewrites (`sed -i 'N,Mc'`) without re-reading the file.
 - After `fmt` → `clippy` → `test`, delete that task’s scratch files.
-- Keep `scripts/` only for documented project utilities (`scripts/render_tui_cells.py`, `scripts/tui_review.py`). Review artifacts live under the named plan; durable selected fixture PNGs may live under `docs/screenshots/`. Dependency environments and diagnostic logs stay task-owned scratch.
+- Keep `scripts/` only for documented project utilities (`scripts/agent_cargo.py`, `scripts/render_tui_cells.py`, `scripts/tui_review.py`). Review artifacts live under the named plan; durable selected fixture PNGs may live under `docs/screenshots/`. Dependency environments and diagnostic logs stay task-owned scratch.
 - Incomplete work: leave scratch in `.agent-scratch/` and list it in the hand-off.

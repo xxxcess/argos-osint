@@ -60,4 +60,28 @@ Query `graphify-out/graph.json` before broad exploration. Expand query tokens fr
 
 New figures follow [diagrams.md](diagrams.md): self-contained HTML + SVG, no Mermaid, no shadows, accent on at most two nodes. Link each figure from this index and the matching Markdown doc.
 
+## Architecture and concepts
+
+When code introduces or significantly changes component ownership/boundaries,
+execution or data flow, persistence/state transitions, public contracts or domain
+concepts, update the relevant maintained docs and diagrams in the same change.
+For example, a new pipeline stage affects its flow description and figure; a new
+durable job state affects lifecycle docs and the state diagram; a changed role or
+binding model affects architecture, concepts and the matching model/data-flow figure.
+
+During planning, identify affected paths using [README.md](README.md) and the
+[diagram catalog](diagrams.md), and assign doc/figure ownership alongside code.
+Update `architecture.md`, `concepts.md`, `usage.md`, provider or component contracts
+only where affected. Update existing figures that become inaccurate; add a focused
+figure when a new structure, flow or state model needs visual explanation. Internal
+edits that preserve these contracts do not require new diagrams.
+
+Keep each figure's HTML/inline SVG and sibling SVG consistent. Update catalog,
+documentation index and prose links when adding, replacing or retiring figures.
+Before completion, compare documentation claims and figure labels/arrows with final
+code, including failure/retry paths, and check links. The parent handles docs outside
+an editor's assigned file set. Reviewers flag stale concepts or diagrams as incomplete
+work. Report updated docs/figures and actual validation, or a concrete reason no
+figure is affected; do not treat a graphify refresh as a maintained diagram update.
+
 TUI changes follow [the design contract](tui-design-spec.md) and [component catalog](tui-components.md). Name the components/preset before editing; preserve metric semantics, widget IDs and palette. Profile uses registered geometry and independent grid/report scrolling.

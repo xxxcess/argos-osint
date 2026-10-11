@@ -45,3 +45,5 @@ TUI overhaul navigation/component contract: read `docs/tui-design-spec.md` and `
 Read `docs/versioning.md` for compatibility assessment. Report user/API/config/data breaking impact to the parent. Do not stage, commit, bump versions or publish releases; the parent owns authorized commit tasks.
 
 Follow `docs/planning-artifacts.md`: worker ledgers and raw diagnostics stay local. Report durable decisions/check results to the parent for curation; do not stage planning files or delete another task's evidence.
+
+For new or significant architectural/conceptual shifts, follow `docs/conventions.md#architecture-and-concepts`. Update assigned relevant doc/diagram paths alongside code, preserving HTML/SVG consistency and `docs/diagrams.md` conventions. Report affected docs/figures outside your file scope to the parent; do not silently leave stale contracts.

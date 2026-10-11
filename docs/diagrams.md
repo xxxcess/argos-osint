@@ -35,4 +35,11 @@ Each `<svg>` has `role="img"` and unique `<title>` / `<desc>` ids (`<slug>-title
 
 ## Agent rule
 
+New or significant architectural/conceptual changes follow
+[the documentation policy](conventions.md#architecture-and-concepts): update affected
+figures in the same change as code and prose. Check final ownership, flow, states,
+labels and failure/retry paths against the implementation. Keep HTML/inline SVG and
+sibling SVG consistent; update catalog/index/prose links for added, replaced or
+retired figures. A graphify refresh does not replace these maintained figures.
+
 Follow this file and [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design). Put new figures in `docs/diagrams/` as HTML plus a sibling SVG, then link them from [README.md](README.md) and the matching prose doc. Do not drop Mermaid fences into `docs/`.

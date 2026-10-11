@@ -224,6 +224,8 @@ Use **planning-with-files** (`~/.agents/skills/planning-with-files/SKILL.md`) fo
 
 ## diagrams
 
+New or significant architectural/conceptual changes must update the relevant maintained docs and diagrams in the same change. Follow [docs/conventions.md#architecture-and-concepts](docs/conventions.md#architecture-and-concepts). Assess component ownership/boundaries, execution/data flow, persistence/state, public contracts and domain terminology during planning. Name affected doc/figure paths and assign ownership; the parent completes documentation outside an editor's file scope. Update existing figures that become inaccurate; add a focused figure when a new structure/flow/state model needs one. Keep HTML and sibling SVG consistent and update catalog/index/prose links. Before completion, check claims and labels/arrows against the final code, including failure/retry paths, and report actual doc/diagram updates or a concrete reason no figure is affected. Internal edits that preserve those contracts do not require new diagrams.
+
 Figures in `docs/diagrams/` follow [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design): HTML + inline SVG, orthogonal connectors, no shadows, no Mermaid, accent on at most two nodes. Conventions: `docs/diagrams.md`. Link new figures from `docs/README.md` and the matching prose doc.
 
 ## Temporary agent scripts

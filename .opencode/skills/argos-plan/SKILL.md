@@ -5,6 +5,8 @@ description: Keep multi-step Argos work in .planning/ so the chat stays short. U
 
 Write the plan to disk and keep the chat to the current step.
 
+For new or significant architectural/conceptual shifts, follow `docs/conventions.md#architecture-and-concepts`. Identify affected maintained docs and diagrams, assign their paths/owners alongside code, and include code-to-doc/figure consistency in acceptance. Preserve scope for changes that leave contracts intact.
+
 Follow `docs/planning-artifacts.md`: named task working memory stays local.
 Curated shared `design.md`, `decisions.md`, `acceptance.md`
 or `handoff.md` are eligible Git deliverables only when useful to collaborators.

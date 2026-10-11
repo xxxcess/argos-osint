@@ -11,3 +11,5 @@ TUI process and artifact retention: `docs/tui-verification.md` / `argos-tui-veri
 For commit/release reviews, use `docs/versioning.md` to check Conventional Commit classification, breaking/migration notes, scoped staging and synchronized release versions.
 
 Review planning changes against `docs/planning-artifacts.md`: retain relevant shared state and curated durable deliverables; flag session logs/raw evidence, stale shared acceptance and links to ignored artifacts.
+
+For architectural/conceptual shifts, follow `docs/conventions.md#architecture-and-concepts`: flag missing or stale relevant docs/diagrams, inconsistent HTML/SVG pairs, broken links and claims/labels/arrows that disagree with final code or failure/retry paths.

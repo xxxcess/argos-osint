@@ -37,7 +37,7 @@ All compilation and test commands use the wrapper, which reserves `target/agents
 
 On `build`, load `argos-implement`. Split the in-progress phase into disjoint file sets and call `subagent` once per set. Use `ecc-edit`. Set `background` to true and send every call in the same turn when there are two or more sets. The prompt carries the phase, the file list, and the change. Do not set `model`, and do not poll.
 
-`ecc-edit` changes only those files, then runs `cargo fmt -- <paths>` for the Rust files it changed. It cannot run the test suite.
+`ecc-edit` changes only those files, then runs `cargo fmt -- <paths>` for the Rust files it changed. Its instructions leave builds and tests to the parent. `ecc-edit`, `ecc-planner`, and `ecc-reviewer` allow shell commands without approval, as does the built-in `explore` agent. Planner and reviewer instructions remain read-only; shell access is not a filesystem sandbox.
 
 When the children finish, the parent runs `cargo fmt --all --check`, `python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings`, and `python3 scripts/agent_cargo.py test --workspace --locked --no-default-features`, with shell `timeout` `600000` and `ARGOS_EMBED` unset. Failures go back to `ecc-edit`, using `sessionID` to continue the editor that owns the file. The parent re-runs the failed command, then the full trio, then `graphify update .`. `plan` does not launch `ecc-edit`.
 

@@ -50,13 +50,20 @@ test("TUI command loads the registered screenshot skill and verify keeps offline
   assert.match(verify, /ARGOS_EMBED.*unset/);
 });
 
-test("ecc-edit formats its files and cannot run the test suite", () => {
+test("build subagents allow shell commands without approval", () => {
+  for (const id of ["ecc-edit", "ecc-planner", "ecc-reviewer"]) {
+    const text = readFileSync(join(root, "agents", `${id}.md`), "utf8");
+    const frontmatter = text.split("---")[1];
+    assert.match(frontmatter, /action: shell\s+resource: "\*"\s+effect: allow/, id);
+    assert.doesNotMatch(frontmatter, /action: shell\s+resource: [^\n]+\s+effect: (deny|ask)/, id);
+  }
+});
+
+test("ecc-edit leaves builds and tests to the parent", () => {
   const text = readFileSync(join(root, "agents/ecc-edit.md"), "utf8");
   assert.match(text, /mode: subagent/);
   assert.match(text, /cargo fmt -- <paths>/);
-  const shellDeny = text.indexOf('resource: "*"\n    effect: deny');
-  const fmtAllow = text.indexOf('resource: "cargo fmt *"\n    effect: allow');
-  assert.ok(shellDeny > -1 && fmtAllow > shellDeny);
+  assert.match(text, /Do not run `cargo test`, `cargo clippy`, or `cargo fmt --all`/);
   const skill = readFileSync(join(root, "skills/argos-implement/SKILL.md"), "utf8");
   assert.match(skill, /"agent": "ecc-edit"/);
   assert.match(skill, /agent_cargo\.py test --workspace/);

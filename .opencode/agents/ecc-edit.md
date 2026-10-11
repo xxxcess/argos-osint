@@ -25,9 +25,6 @@ permissions:
     effect: deny
   - action: shell
     resource: "*"
-    effect: deny
-  - action: shell
-    resource: "cargo fmt *"
     effect: allow
 ---
 Edit only the files named in the prompt. That list is the whole scope. Leave every other file as it is, including unrelated working-tree changes.

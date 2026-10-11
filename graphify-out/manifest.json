@@ -1068,9 +1068,9 @@
     "semantic_hash": ""
   },
   "docs/usage.md": {
-    "mtime": 1791676084.4428399,
-    "seen": 1791676101.717304,
-    "ast_hash": "beb3d0dd31deccbd0fbd3866a47a0a24",
+    "mtime": 1791677437.1815956,
+    "seen": 1791677503.185963,
+    "ast_hash": "98a754a0510934334c7b7caffb82001d",
     "semantic_hash": ""
   },
   "docs/diagrams/agent-graphify.svg": {
@@ -1806,9 +1806,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/article_image.rs": {
-    "mtime": 1791676036.2468486,
-    "seen": 1791676101.660196,
-    "ast_hash": "3cafd6ad3a12470c9ef8f7d0b76a95dd",
+    "mtime": 1791677658.5687892,
+    "seen": 1791677753.7256162,
+    "ast_hash": "05bcba36a78009a13dc6942c5c0b92f0",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/tool_catalog.rs": {
@@ -1917,6 +1917,90 @@
     "mtime": 1791672263.5093012,
     "seen": 1791676101.723582,
     "ast_hash": "df614b0a82b3cbe5dca4c04e81336998",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/manifest.json": {
+    "mtime": 1791676471.663478,
+    "seen": 1791677503.163062,
+    "ast_hash": "c88b4a93102a09ae5bc27f61b387ec99",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/README.md": {
+    "mtime": 1791677742.300849,
+    "seen": 1791677753.82008,
+    "ast_hash": "f02b4ca2066bb6f1eace27966a54ca5b",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-brief-image-100x32.png": {
+    "mtime": 1791676421.2105355,
+    "seen": 1791677503.1911712,
+    "ast_hash": "bac7951461b772e56fe7364a71b18401",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-brief-image-120x40.png": {
+    "mtime": 1791676421.3625867,
+    "seen": 1791677503.191177,
+    "ast_hash": "a139bad6e83b624f9dfb3dea5220b367",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-brief-image-160x50.png": {
+    "mtime": 1791676421.6106856,
+    "seen": 1791677503.1911821,
+    "ast_hash": "e26f0d96afa58b4078196da4692656cc",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-brief-image-40x20.png": {
+    "mtime": 1791676421.6955369,
+    "seen": 1791677503.191187,
+    "ast_hash": "0c3944e04dee4bca2b82be90f4ca57cd",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-brief-image-60x18.png": {
+    "mtime": 1791676421.755186,
+    "seen": 1791677503.191193,
+    "ast_hash": "7555669994161db989bf042534d66f23",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-brief-image-80x24.png": {
+    "mtime": 1791676421.8476932,
+    "seen": 1791677503.1911979,
+    "ast_hash": "eb7df36dad81c16adfd0072ada0bfa9f",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-image-100x32.png": {
+    "mtime": 1791676421.95137,
+    "seen": 1791677503.191204,
+    "ast_hash": "51fc3ee06013044c78c6fb9e1816cf17",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-image-120x40.png": {
+    "mtime": 1791676422.1214728,
+    "seen": 1791677503.191208,
+    "ast_hash": "92d20a645fbfb9d176cd4dbfdd7d3538",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-image-160x50.png": {
+    "mtime": 1791676422.3601594,
+    "seen": 1791677503.1912131,
+    "ast_hash": "37021e9f4122a6978e9beafe2d34007d",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-image-40x20.png": {
+    "mtime": 1791676422.418748,
+    "seen": 1791677503.191218,
+    "ast_hash": "d4a8ba2085b766cb45ac125a64dc38e2",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-image-60x18.png": {
+    "mtime": 1791676422.5361376,
+    "seen": 1791677503.191222,
+    "ast_hash": "c03ae068eb30840f7a16f6072ba62ffe",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-image-quality-2026-10-10/intel-image-80x24.png": {
+    "mtime": 1791676422.6727936,
+    "seen": 1791677503.191227,
+    "ast_hash": "d427cfdea3cc9bfc7c83efc74bb6f5c8",
     "semantic_hash": ""
   }
 }

@@ -180,7 +180,9 @@ Profile opens Overview; its upper buttons select Overview, System or Configs. `x
 
 Argos queries terminal graphics capabilities at startup. Direct-session fallback
 detection selects Kitty graphics for Kitty/Ghostty and inline iTerm images for
-iTerm2/VS Code. In VS Code enable `terminal.integrated.enableImages` (see
+iTerm2/VS Code. Direct iTerm2 sessions prefer its native inline-image protocol
+even when Kitty support is advertised, because the adapter's Kitty renderer
+requires Unicode image placements. In VS Code enable `terminal.integrated.enableImages` (see
 [terminal image support](https://code.visualstudio.com/docs/terminal/advanced#_image-support)).
 Multiplexed sessions rely on capability queries rather than outer-terminal names.
 When pixel-size queries are unavailable, native rendering uses the adapter's

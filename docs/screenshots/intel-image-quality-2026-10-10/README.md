@@ -26,3 +26,28 @@ Limits: synthetic fallback images verify composition, not live native graphics o
 | intel-image-80x24 | [View](intel-image-80x24.png) |
 
 Provenance: [manifest.json](manifest.json). Original full capture contained 162 fixtures; only the twelve affected Intel captures are retained here.
+
+## iTerm2 protocol follow-up
+
+The subsequent iTerm2 missing-image fix changes direct-session protocol selection,
+not layout or the half-block TestBackend buffers shown above. Direct iTerm2 now
+uses OSC 1337 inline images even when a query advertises Kitty graphics. The
+adapter's Kitty implementation uses Unicode image placements; generic Kitty
+support alone does not establish compatibility with that extension. Multiplexed
+sessions retain capability-query selection.
+
+`iterm_inline_image_reaches_crossterm_output_on_first_draw_and_redraw` passes:
+the actual Crossterm backend writes the inline PNG sequence on both initial draw
+and a draw at a new position after clearing, with no Kitty placeholder glyph.
+The byte sink deliberately clears the backend directly because fixed-viewport
+Terminal clearing otherwise queries a physical TTY size. This verifies emitted
+terminal commands, not live iTerm2 display. The user-supplied blank-image screenshot
+is the live failure reference; successful live display still requires a restart
+and confirmation in iTerm2. Existing twelve reviewed PNGs remain the layout
+evidence; no new screenshots were generated for this protocol-only follow-up.
+
+Final follow-up gate: fmt → strict workspace Clippy → workspace tests, locked
+dependencies/no default features with ARGOS_EMBED unset. 183 CLI/TUI + 709 core
++ 3 integration passed, 8 ignored. The initially failing byte-sink clear test
+was corrected without changing the production patch; the focused regression
+and the complete final suite both pass. Compilation used `target/agents`.

@@ -201,7 +201,9 @@ impl ArticleImages {
     }
 }
 
-/// Queries win. Direct-session hints also work when pixel/font queries are
+/// Direct iTerm2 uses its reference inline-image protocol. Its Kitty support
+/// does not guarantee compatibility with this adapter's Unicode placements.
+/// Other queries win. Direct-session hints also work when pixel/font queries are
 /// unavailable; the picker's default cell aspect ratio is then used for sizing.
 /// Never trust outer-terminal hints through a multiplexer.
 fn terminal_protocol(
@@ -210,6 +212,14 @@ fn terminal_protocol(
     term: &str,
     multiplexed: bool,
 ) -> ProtocolType {
+    if !multiplexed
+        && matches!(
+            program.to_ascii_lowercase().as_str(),
+            "iterm.app" | "iterm2"
+        )
+    {
+        return ProtocolType::Iterm2;
+    }
     if detected != ProtocolType::Halfblocks || multiplexed {
         return detected;
     }
@@ -301,15 +311,80 @@ mod tests {
                 terminal_protocol(ProtocolType::Halfblocks, program, term, false),
                 expected
             );
+            let queried = if matches!(program, "iTerm.app" | "iterm2") {
+                ProtocolType::Iterm2
+            } else {
+                ProtocolType::Sixel
+            };
             assert_eq!(
                 terminal_protocol(ProtocolType::Sixel, program, term, false),
-                ProtocolType::Sixel
+                queried
             );
             assert_eq!(
                 terminal_protocol(ProtocolType::Halfblocks, program, term, true),
                 ProtocolType::Halfblocks
             );
         }
+    }
+    #[test]
+    fn iterm_inline_image_reaches_crossterm_output_on_first_draw_and_redraw() {
+        use ratatui::{
+            backend::{Backend, CrosstermBackend},
+            Terminal, TerminalOptions, Viewport,
+        };
+        assert_eq!(
+            terminal_protocol(ProtocolType::Kitty, "iTerm.app", "xterm-256color", false),
+            ProtocolType::Iterm2
+        );
+        assert_eq!(
+            terminal_protocol(ProtocolType::Kitty, "iTerm.app", "screen", true),
+            ProtocolType::Kitty
+        );
+        let mut images = ArticleImages::default();
+        images.picker.set_protocol_type(ProtocolType::Iterm2);
+        let size = Size::new(40, 12);
+        let protocol = encode(&images.picker, &DynamicImage::new_rgb8(640, 320), size).unwrap();
+        images.encoded = Some((
+            ("a".into(), "https://example.com/a.png".into()),
+            size,
+            protocol,
+        ));
+        let area = Rect::new(0, 0, 80, 24);
+        let mut output = Vec::<u8>::new();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(&mut output),
+            TerminalOptions {
+                viewport: Viewport::Fixed(area),
+            },
+        )
+        .unwrap();
+        terminal
+            .draw(|frame| {
+                images.draw(
+                    frame,
+                    Rect::new(5, 2, 40, 12),
+                    "a",
+                    "https://example.com/a.png",
+                )
+            })
+            .unwrap();
+        // Clear the backend directly: Terminal's fixed-viewport region clear
+        // queries a physical terminal size, unavailable to this byte sink.
+        terminal.backend_mut().clear().unwrap();
+        terminal
+            .draw(|frame| {
+                images.draw(
+                    frame,
+                    Rect::new(10, 4, 40, 12),
+                    "a",
+                    "https://example.com/a.png",
+                )
+            })
+            .unwrap();
+        drop(terminal);
+        let bytes = String::from_utf8_lossy(&output);
+        assert_eq!(bytes.matches("\x1b]1337;File=inline=1;").count(), 2);
+        assert!(!bytes.contains('\u{10eeee}'));
     }
     #[test]
     fn native_encoders_keep_the_selected_graphics_protocol() {

@@ -27,6 +27,12 @@ Limits: synthetic fallback images verify composition, not live native graphics o
 
 Provenance: [manifest.json](manifest.json). Original full capture contained 162 fixtures; only the twelve affected Intel captures are retained here.
 
+The `intel-brief-image-*` PNGs above show the earlier stacked arrangement (image strip above
+the brief article section). That brief-reader layout is superseded by
+[intel-brief-image-column-2026-10-11](../intel-brief-image-column-2026-10-11/README.md), which
+places the image inside the brief article section beside the content. The `intel-image-*`
+bulletin captures remain current.
+
 ## iTerm2 protocol follow-up
 
 The subsequent iTerm2 missing-image fix changes direct-session protocol selection,

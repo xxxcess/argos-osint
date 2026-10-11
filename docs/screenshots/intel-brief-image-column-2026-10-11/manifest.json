@@ -1,0 +1,1390 @@
+{
+ "created_utc": "2026-10-11T10:00:35.029206+00:00",
+ "capture_status": "complete",
+ "git_head": "50713c4574384007144d3ae6a250dc59344c7fad",
+ "tracked_diff_sha256": "ab57b1d44200867da99be7e7b5899219f1fa5002db31dfebeaa79e95725fcffe",
+ "git_status": "M crates/argos-osint-bin/src/tui/app.rs\n M crates/argos-osint-bin/src/tui/ui.rs\n M docs/tui-components.md\n M docs/tui-design-spec.md\n M graphify-out/GRAPH_REPORT.md\n M graphify-out/graph.json\n M graphify-out/manifest.json",
+ "command": [
+  "cargo",
+  "test",
+  "--target-dir",
+  "/Users/successndalama/Desktop/xxxcess/repos/argos-osint/target/agents",
+  "-p",
+  "argos-osint-bin",
+  "--locked",
+  "--no-default-features",
+  "dump_overhaul_screens"
+ ],
+ "ARGOS_EMBED": "unset",
+ "CARGO_TARGET_DIR": "/Users/successndalama/Desktop/xxxcess/repos/argos-osint/target/agents",
+ "font": "/System/Library/Fonts/Supplemental/Courier New.ttf",
+ "pillow_version": "12.3.0",
+ "python_version": "3.10.10 (main, Mar 21 2023, 13:41:39) [Clang 14.0.6 ]",
+ "renderer_sha256": "cbbf79cc1c51eae6a0b601f0bbd312df66f8c1cda3d924001c0869eebedd2953",
+ "visual_review": "reviewed 2026-10-11: intel-brief-image-{160x50,120x40,100x32,80x24,60x18,40x20}.png \u2014 image is the left column inside the brief article section, beside the content, no overlap; 40x20 collapses to full-width prose. Pass.",
+ "interaction_review": "not certified by capture; layout/state tests intel_brief_image_column_sits_beside_brief_content_and_centers_vertically, _adapts_and_collapses_by_viewport, _text_keeps_full_width_without_image, _renders_beside_content_in_buffer pass in the offline gate",
+ "reference_comparison": "unavailable: no approved reference images for the Intel brief reader",
+ "live_providers": "not exercised (offline gate); live graphics protocols not covered by TestBackend",
+ "source_sha256": {
+  "crates/argos-osint-bin/Cargo.toml": "7a1f52787ad16697ff0e18315be00a4b02091f7a1254f2c2a4101c136dcd638a",
+  "crates/argos-osint-bin/src/cli.rs": "15cbca9138f33a58349f1d84166a0102c86decaa79d3532e63e4d32eb973a9a8",
+  "crates/argos-osint-bin/src/main.rs": "6651ce78b4d91dbbb7e6d37cffb7eba0efcf2af42f20e2b06e10923ca6d50d08",
+  "crates/argos-osint-bin/src/tui/app.rs": "637e0ad32845a3b75ed81b93d8233ea66a3e9cfb2b69472771553e701be766ba",
+  "crates/argos-osint-bin/src/tui/article_image.rs": "9c5c0cb3a7e63d8f9b0a76e3c3ec924defe024ed6b5218bb5dba8fee15478405",
+  "crates/argos-osint-bin/src/tui/atlas_actions.rs": "ff3f58665216d9b1be8a8c6b00e77b5cce5b0577bc653fcf53a5f6c354d19301",
+  "crates/argos-osint-bin/src/tui/atlas_table.rs": "caec87473c94801de4117097de5a70808c67ce7d2aaa8c92b39a2fb98b2dbe96",
+  "crates/argos-osint-bin/src/tui/brain_detail.rs": "05d5565b5a214564d68e245c53da333ff9a98bf922470a1e4fd1884b3923b45e",
+  "crates/argos-osint-bin/src/tui/commands.rs": "16363627748e9f1d5f0f9d4ff8367abfa212ef2fdb0acca585b2baa2694fdc40",
+  "crates/argos-osint-bin/src/tui/components.rs": "cf51c8906d3e40c71664c845f2160850d852c842eba586c78e85d2c339b1c5e8",
+  "crates/argos-osint-bin/src/tui/graph.rs": "bf4202cdaf6d2a0fda290ef8882bb020793ee54de65bad8d3de7fe07d127d704",
+  "crates/argos-osint-bin/src/tui/investigation_trace.rs": "2655c1b45bde9b1424b739a6a80bbdf3ca86a9ad84315a6be2ce8137c47b0123",
+  "crates/argos-osint-bin/src/tui/jobs.rs": "aa153807c21dbff878ad6b14055f0b3a0096d5e1483c660f79325cba7b04368b",
+  "crates/argos-osint-bin/src/tui/land.rs": "031e3d594b1be42ca28482676a1a94928c86c98976b5a80651808e505f810391",
+  "crates/argos-osint-bin/src/tui/logs.rs": "29f5800c41fee3773061b19cd1520acaefef31e0cd14386dddf3d61367470214",
+  "crates/argos-osint-bin/src/tui/map.rs": "d83a19c697fa40be52538cd8328e0f68e5f558c0c3bc4ff3c4d39e0c9d6f4213",
+  "crates/argos-osint-bin/src/tui/markdown.rs": "ce181fcbaf18c2ebc677828054cd55673471882fef1a5666faf16b88b09751c5",
+  "crates/argos-osint-bin/src/tui/mod.rs": "2a273661f860407c04adb16776bd1e592fa2616e142f47fc249d5db87f026325",
+  "crates/argos-osint-bin/src/tui/model_roles.rs": "e8361058ec759b822a6a3d8d256539c9a5a81c004c609119ccba99d5e45ac406",
+  "crates/argos-osint-bin/src/tui/profile.rs": "cf11cd64e2c9caf018131944c6dc0f74fceb2e152550105f61c410cbda50373f",
+  "crates/argos-osint-bin/src/tui/profile_charts.rs": "2a9795dead4b46c8cd080a9e20d0f60a1425ab5892add7f0ee09d576824579ff",
+  "crates/argos-osint-bin/src/tui/profile_components.rs": "beb0f2519120689408a0673c05ae81308f3eb3141aa5ec21ee14f116fcb40e41",
+  "crates/argos-osint-bin/src/tui/profile_config.rs": "1644a5f63818666cb8b068ff83452859cc64ea45eca49ce817a22b0ebea36943",
+  "crates/argos-osint-bin/src/tui/profile_layout.rs": "301b31f985f2041773d9340f4e362977472e69fcd65df89852c32fa0274bd57b",
+  "crates/argos-osint-bin/src/tui/recon_parts.rs": "674d5f66e29fd1651c2fa1e1e9858aa2df1bf256c2857449cc95d38609430ff5",
+  "crates/argos-osint-bin/src/tui/summary_card.rs": "339ca58c938235877cf755089a4b8725d89c2e9bc338be11ba3a20b269d73074",
+  "crates/argos-osint-bin/src/tui/theme.rs": "4fef402c3c0dd6ad1163f6b117146f785c1d8bf43f34200543ef3993fdd4f20f",
+  "crates/argos-osint-bin/src/tui/tool_catalog.rs": "161e444501e4e13e6398c40dd3f483c16c741e254d9d164ffda8f1058ac4edf7",
+  "crates/argos-osint-bin/src/tui/tracked.rs": "3bc978595c00eb14169314b8824c92504b8736ba1f9e3c4a7166b0801adfcd41",
+  "crates/argos-osint-bin/src/tui/ui.rs": "3fe4971b479a9054b6a0ba0ec4669a5900d2179b7479c3b632a386f9621c8ade",
+  "crates/argos-osint-core/Cargo.toml": "862254278fbf9c4b6ba9d2a83ee66bb1286b48e61effa42cdb72e563ce1a80be",
+  "crates/argos-osint-core/build.rs": "54294785893f4c8c97b2cd1b3b365e712282671e84aeb8d64243bee1293aa0a1",
+  "crates/argos-osint-core/src/atlas.rs": "141358f59658219a43bfb4f923f73051bcc1314da3a115a0f16d966e9029d14d",
+  "crates/argos-osint-core/src/atlas_insights.rs": "193407c2840a11931046b5a8da384cbae30f4f0174b49897b600018baa32ee13",
+  "crates/argos-osint-core/src/atlas_memory.rs": "309a4572c53bc4c076cf83118e9f5a4aa7bba422949cd35da20ba6b17a7269c7",
+  "crates/argos-osint-core/src/atlas_recall_tests.rs": "5d2ef0bd0f3ee724f673b5bed4b164346ee85a8f0fadc78314ede0cf379fff7f",
+  "crates/argos-osint-core/src/atlas_work.rs": "878c9ad8689075b1bbe051eee4d73695b6817ed28597ff7f7fb50c94223e6cbb",
+  "crates/argos-osint-core/src/brain.rs": "4baf374c08000420a79579a2af8b0a9df9ffcc909277ec94bc37afc8c80b0843",
+  "crates/argos-osint-core/src/brain_lance.rs": "9d97b00f1ca352dbe9d288e5a2dc51154a00eae7d77f6ff44ca226e852f36741",
+  "crates/argos-osint-core/src/brain_lance_off.rs": "fd894df1369a3226cac985fd9fd095804007625102075700c75f1991ae21108a",
+  "crates/argos-osint-core/src/brain_query.rs": "16ba6e659d70932567d9c4859eb9fb717a3036f9e37ba156f4b56c406896d463",
+  "crates/argos-osint-core/src/config_commit.rs": "ab2a7f3b53651ee035db97666723b3e7a4efb4eb2715cd577c94b506f57775e6",
+  "crates/argos-osint-core/src/config_transfer.rs": "65bf620a467a8b25bf786771871e2817bacb7a63a8db6107d1e283ea8371b07a",
+  "crates/argos-osint-core/src/config_transfer_tests.rs": "759398ffb416c71beacd2e44cb6115a916f50a67fe4b41fce538d2ab96dc054d",
+  "crates/argos-osint-core/src/embed.rs": "b1359dfb834a887cfb6c65e0a6073fa743d72ed3cbdc210a4e47947f16bc5dfc",
+  "crates/argos-osint-core/src/events.rs": "6c7e63aab2850d8a7fc34dc363c0366c7845d1d9a8c7585b703e15bacf1dac26",
+  "crates/argos-osint-core/src/evidence.rs": "6d46c50dc1884230839624738d04750a9fb3c0ea2ba6e31b122431769e83dd96",
+  "crates/argos-osint-core/src/explore.rs": "1a7ea8edacaa4d0171c6c3629f7d918c315b9cd27929a79ca6df862ecb1366ac",
+  "crates/argos-osint-core/src/graph_explanation/tests.rs": "afd09ac3ffdee8f13ccaeecff43fca737d2e8f1923b1125dc8d51fc1436c8d21",
+  "crates/argos-osint-core/src/graph_explanation.rs": "41ae1c4d379e74c3ca7a68b62c29ffd2d18c5daaabb1dcf669735c95899cf4de",
+  "crates/argos-osint-core/src/grok_oauth.rs": "7dfe0c4c7d86d7c95820e6cb5c2a2ceac8869b9a0a7239de410a4368d07f2ff0",
+  "crates/argos-osint-core/src/hardware.rs": "e26e5069fba1ed8a52e3495afffce0277e9d514b1ca1d199c0d8c19217d69d1a",
+  "crates/argos-osint-core/src/intel_recon/actor_review.rs": "89df70aad546b064604f01091c5a90a32151f7b87f3baa857528c0a3cf825655",
+  "crates/argos-osint-core/src/intel_recon/body.rs": "6d781bfdda0525a24d4805acce18c384c9409f9d837929e261408ae6118ffe24",
+  "crates/argos-osint-core/src/intel_recon/body_filter.rs": "5a7f90526edb4450cc2b41db82969a65e5477e320b4020e37ee906074a491344",
+  "crates/argos-osint-core/src/intel_recon/brain.rs": "4417af81aa82300efc09d492d33497a42277771742823491b29444c07a010f0c",
+  "crates/argos-osint-core/src/intel_recon/briefing_view.rs": "f889ac2d233abee15f0f84899bbfd907864d863f31d2721f89d9e717444a9d47",
+  "crates/argos-osint-core/src/intel_recon/classify_mode.rs": "816e739d9a6a09519338bc70b7f27349c6a7740345bc986caf193b03dbe04585",
+  "crates/argos-osint-core/src/intel_recon/jobs.rs": "7c06e5a0047b328a53d2bbead82a0e1be3e7fe1b1c5e8144b90bffe5f945eb08",
+  "crates/argos-osint-core/src/intel_recon/ledger.rs": "93e11a1b78bc933801c500d59758e8176f49e9c6acaa401ed9934b033b33793a",
+  "crates/argos-osint-core/src/intel_recon/mod.rs": "2e9b06c64ac67d1c3fc4024cd9ae0c6a74605c104a131b85cf1d1e797c04bf98",
+  "crates/argos-osint-core/src/intel_recon/modes.rs": "8c8da0a0d96aa32c28881bf179b0c329364c72400f4609ff69c6486a99c8e648",
+  "crates/argos-osint-core/src/intel_recon/persist.rs": "9488ef8c1738eff5378b57af1fb203c5894fd79ebf3ac3d8527b265275f52d7d",
+  "crates/argos-osint-core/src/intel_recon/replace_insights.rs": "3159653df0a009becc8d55ccfe5ca77e5cadfe4926ef162658cb5e1e8132f6ff",
+  "crates/argos-osint-core/src/intel_recon/synthesize.rs": "a7ec05d77a6aa9570582cd89a5318b08f46a0f819e821f872595b7faf0d2aeac",
+  "crates/argos-osint-core/src/intel_recon/tests_acceptance.rs": "71208e0d75e02c4ff6988f344486344084bd5414f278763193b5fa7faf99cd7a",
+  "crates/argos-osint-core/src/intel_recon/validate.rs": "5f69a8593a2f468ec27670c6647a5d843a67a8b23e2f570384a6ebe2d3ad18c8",
+  "crates/argos-osint-core/src/intel_recon/worker.rs": "443c4e26c239eaec797062db77b5d07d99222b1edcbef9a7a67d38039298529c",
+  "crates/argos-osint-core/src/investigation/contracts.rs": "bd5a0672c5a23d48911c076f6afcf4eddd49041450bdcbd00fffbc25dab9312f",
+  "crates/argos-osint-core/src/investigation/decisions/adapters.rs": "4e5127417f8c162157fd8496254c93462f4cce3ec43b9959a4fe1af0301a65d3",
+  "crates/argos-osint-core/src/investigation/decisions/contracts.rs": "944a03488f2697fa644ed281b1e925b2a1ce132d3924273357ec520603251b56",
+  "crates/argos-osint-core/src/investigation/decisions/mod.rs": "25cbda7bbe6078aecff20f95ec8f50178942c6399b2fbef5a8e8e567c4282eea",
+  "crates/argos-osint-core/src/investigation/decisions/policy.rs": "a6e42cdd29f69561357a4918521e47b5171a8550992888aed0751f789990e857",
+  "crates/argos-osint-core/src/investigation/decisions/state.rs": "bb05a81b356da7179993c2b169b3c86685563a04099522924a4c4c83ef10a4de",
+  "crates/argos-osint-core/src/investigation/decisions/templates.rs": "a39043de276ba420563299c50863dc92bad88b9ad98f9855dcd574635afc5031",
+  "crates/argos-osint-core/src/investigation/decisions/tests.rs": "1034b6f225a22a5824dfcf3544422ba56f08c70d88bd064b081c803cbfe7a8c2",
+  "crates/argos-osint-core/src/investigation/engine.rs": "fb4c780995ad9b677150bf5628cff0d8e259a5f5fdcae13c19ee77bf4c5d2f85",
+  "crates/argos-osint-core/src/investigation/evidence.rs": "0098a1fcae0469f7f5dd2bcb8b11839df0d325cb1de2aade8c8f685bb546e2d2",
+  "crates/argos-osint-core/src/investigation/gates.rs": "01842cd0fdcd40954f78a34998a1b3fcde030d519e72a889ef178f9b281c96e9",
+  "crates/argos-osint-core/src/investigation/mod.rs": "c629d9842d0d2874f5615f0f2a8d2e08484cca2ced954d3cb0eeb94f68d562d9",
+  "crates/argos-osint-core/src/investigation/patterns.rs": "a68be403ac922ed430ca596f8f2cf6f14d382cd88ca93bc92bb6324a84431117",
+  "crates/argos-osint-core/src/investigation/persist.rs": "aa6d19ddfd333766c11f38232b4ce2cfcd1fb62f0bce2897c63a24454078df71",
+  "crates/argos-osint-core/src/investigation/policy.rs": "fb2f58db118c482a79bcb7056638d23998cd20f8991a5efcae82a9644d5f2c3e",
+  "crates/argos-osint-core/src/investigation/recovery.rs": "f85ccf550a0970ad30bbb47b6f6c690ee97c2d44e56a614cb2ce81ee96e60c3d",
+  "crates/argos-osint-core/src/investigation/roles.rs": "1ad24c86a8d52eaaaa795027411ca6741fb74ad90862e583bfa7dc1db5ee985d",
+  "crates/argos-osint-core/src/investigation/tests_acceptance.rs": "68ee1062e366e33051b731fca7995758c13882f331527df17bceeb8193cd9265",
+  "crates/argos-osint-core/src/investigation/trace.rs": "6dd21216b1fa87fdeacd1fb42b0f789c121787212866c444f001d41b148f3adb",
+  "crates/argos-osint-core/src/iso3166.rs": "e1ff1c860db29a80ac45564758cc9d31907630dc6c305f2cc6a00585f355ca5d",
+  "crates/argos-osint-core/src/job_registry.rs": "632b582303793d72a91a0cadb47482aeca0b3fabb729f13b58df2bf7a9c43bee",
+  "crates/argos-osint-core/src/jobs_view.rs": "90967c90d9ca3c05af55ce9872838be34c02bc75acdc0a8732e7eafb13853970",
+  "crates/argos-osint-core/src/lib.rs": "4e94efd8ed68e49e39530d5e2b8f5c8107647751478f700735984084d0a56068",
+  "crates/argos-osint-core/src/memory_metadata.rs": "c25119eb1dce183101ee43de75853d97d9a33f7a4136111ea6d52bd7d6c56f3f",
+  "crates/argos-osint-core/src/osint/atlas_news.rs": "b865327bc67f5c8dbb53f5058a414a3c8b67c3e4c806455e197e5554a7b56f28",
+  "crates/argos-osint-core/src/osint/contracts.rs": "c0d917f8ac83e9eb58cfbef09c3df9278127d3c70361b9e8b8f42d47f9cf57f4",
+  "crates/argos-osint-core/src/osint/dataset.rs": "118182912486ad97e1c2651f8119233f6dda1d116b1d5c9437bef3cb950323a9",
+  "crates/argos-osint-core/src/osint/dork_generator.rs": "f5567db20ba56df66439711c2b68661273c71cd85776c4a08e64029cbbee4b27",
+  "crates/argos-osint-core/src/osint/dork_seed.json": "bfab9d9b78ae03882855f25750aad389f2851eb0373f960c3e5c053e2e101722",
+  "crates/argos-osint-core/src/osint/holehe/catalog.rs": "d04564824fc9c84f319a915d0ee7c2473ac825aa6fc05f17f545cce9e985f0d2",
+  "crates/argos-osint-core/src/osint/holehe/mod.rs": "8483e2497ecf1bfc0e4b4c971d8d0251d6a6a76aa9936c91d21872e54e4c2af8",
+  "crates/argos-osint-core/src/osint/holehe/pinterest.rs": "3dfdc5c13e70903882ac175e6a75af19cb3b07d7dd52b11711b91011a6fc378a",
+  "crates/argos-osint-core/src/osint/holehe/spotify.rs": "2a25330c28db21053366939b945815a9e90c6ed81f0483ee73be15bf79809b04",
+  "crates/argos-osint-core/src/osint/holehe/twitter.rs": "00cbfb6271437bfb409332e0647209364246a93595ec5ca95c3758935892e2cc",
+  "crates/argos-osint-core/src/osint/news_legal.rs": "248ef00d7dbf3213436a86c2770718e6365f726a7f0e5e30cbe6883e105c56d9",
+  "crates/argos-osint-core/src/osint/providers.rs": "4bdc4cf20036988fa89090581ffd3584b3e69b6e673cda68b48f591e3654f5b7",
+  "crates/argos-osint-core/src/osint/results.rs": "7dfeb0317455248608a06e54dc89e63e7f8e4b5009b5b706fa3516dddf9b576d",
+  "crates/argos-osint-core/src/osint/search_engines/tests.rs": "3aaa8566c2c5b653d0dc3341434d2fa9172d090130fbbec356c8ca4dae513be5",
+  "crates/argos-osint-core/src/osint/search_engines.rs": "177c31fb3c9b7c56d9ed40d03a5daf048c85c1824d03a9b16c10a06915410aae",
+  "crates/argos-osint-core/src/osint/source_eval.rs": "62cac222bff59602447f38626c787d3ce275d42e7e5fdb0b0a14358319d1aab0",
+  "crates/argos-osint-core/src/osint/whatsmyname.rs": "2a9b5328cd2c9f38943869e9e71c6f8b9235a3ebe2e4be2ba381eab2326fdb65",
+  "crates/argos-osint-core/src/osint/whoxy.rs": "dd86094f85256bc999f274934b9c5c07167476af1599e92b33f67bb51c43f692",
+  "crates/argos-osint-core/src/osint/wikipedia_rsp.rs": "d6dbb6c1173b7a67247256844716546a93948d38196c3362cff822691a545ef9",
+  "crates/argos-osint-core/src/osint.rs": "c46cb9dd553057e1c6387b5992a4a008bb256936c99a746c95cb113574564bfc",
+  "crates/argos-osint-core/src/paths.rs": "340c63341a09ded852f27a43d028dbc3d09453b7ba0c547f24172b96a9a8a42a",
+  "crates/argos-osint-core/src/pipeline.rs": "9572282e0fabf664ed962d449477c2eae265cf07c8bd1f1aae4bb7b58c082491",
+  "crates/argos-osint-core/src/profile_stats.rs": "e21978a00a0f81e0b84c53639a657b06ad6c391a3cb7254399fe79cdc64ae3e6",
+  "crates/argos-osint-core/src/provider.rs": "f82acae0ac5e4c06fb44cafc5c71cd33fbe5a81f68d00835c6df0bc744b392dd",
+  "crates/argos-osint-core/src/provider_attempt.rs": "a522c9c760f382da2e4332b1672989a48aed3a73c113f317b0c94b97f963e5da",
+  "crates/argos-osint-core/src/provider_chain.rs": "caa12998cb68a9c02e98ab93f82ec3a44b0357d8fd4dc24796b962c57e155bc4",
+  "crates/argos-osint-core/src/provider_diag.rs": "8644b4961e25285baf296bfa2909635d6d30a3e03b4e40c3c68b13d5b9236370",
+  "crates/argos-osint-core/src/provider_metrics.rs": "be368923e393e62a44edbab66dd5716f2622dad40410b0d17a48e92368badf6d",
+  "crates/argos-osint-core/src/provider_request.rs": "21ad45b55a1dba152193347c0ab06702c6e5fcfbe2c1b80a08c2b0e9ca3a75fa",
+  "crates/argos-osint-core/src/recon/brain_resources.rs": "64c3c632658791d989385e836d75635703633bf068eec7e8edd926cc98c5afb6",
+  "crates/argos-osint-core/src/recon/budget.rs": "6c53f248a927e7c4fe721b121afa930d94a451c1e3b46ca403871875916ee48e",
+  "crates/argos-osint-core/src/recon/clocks.rs": "2b2d907a6f005a6f43e13add20c70199b2f58999a098e88b9cdd1d877ccb0d56",
+  "crates/argos-osint-core/src/recon/diversity.rs": "56d3a31b59fe7d41e4c6c60da36987113b9478e609be9855d1ec9cc5b0fd024b",
+  "crates/argos-osint-core/src/recon/graph.rs": "5a8d92666d4ed8a760a4755072f01dee9410a6e960b40c5554b180e7e46497f7",
+  "crates/argos-osint-core/src/recon/investigation/directives.rs": "cd552093980ea39b14ac6c89482d78a5ec317937e47e9bee2c69b90b87150cd1",
+  "crates/argos-osint-core/src/recon/investigation/tool_io.rs": "aa3458534eaf1dd188e6369f125cf075b25b9779e9d5508137c9c4f03931cfe6",
+  "crates/argos-osint-core/src/recon/investigation.rs": "0a8cefea2914c2800d9a830354708324712283301a3b713bc66f72a641763667",
+  "crates/argos-osint-core/src/recon/model_exec.rs": "459e7ae2d9a174821d60af3dadd970470f4dcab833a52fd9f0eb49de2ac09a57",
+  "crates/argos-osint-core/src/recon/orchestrate.rs": "50ad50c7d01875460b92479f49800ac292d55142c0e3a0d0907d0662a2c04e8f",
+  "crates/argos-osint-core/src/recon/picker.rs": "c016f97d79a53c87c78d147f2e2565eaa46f4ab5fcd56f8c419fa097e6cf7e0e",
+  "crates/argos-osint-core/src/recon/tool_runner.rs": "bfd07682602e47de78c380afc02cb40cc85625dc2856f554a8588b88ee95243c",
+  "crates/argos-osint-core/src/recon.rs": "809880b7cb89249bea87410f066aa2dee901d85ba22845a79a304cb95e2e96ab",
+  "crates/argos-osint-core/src/related_memories.rs": "3b267f84691848fe6309fe9d3982578bc88b49f2f67c6ebacfe4d97ea915d2da",
+  "crates/argos-osint-core/src/reliability_faults.rs": "1e1130b7299151790bf0cf57803822b12a5f27dfe087f2d442f6a1a51bbffcce",
+  "crates/argos-osint-core/src/scheduler.rs": "1228117364005907c194d468c038dfe4582dd3df79c26207d3d3a664994efd29",
+  "crates/argos-osint-core/src/secrets.rs": "8743f45ca6f8d5dc90bfad2d03eff7772c4366e6cc52bed545b42f5227546af3",
+  "crates/argos-osint-core/src/store/graph_summaries.rs": "207bdab7bb3228a29a066c4191cea3b5648cce27c2162d200a3771c7a8605a02",
+  "crates/argos-osint-core/src/store/publication.rs": "7fe0bb2a4e120e8702796a30bdf74ae107414796052561a6ec6b2a11c204f4ca",
+  "crates/argos-osint-core/src/store.rs": "ba9a093dd73d400a8866bd5e8c695ff67f73dcbba0c444e4d7368ddf895b2ce9",
+  "crates/argos-osint-core/src/subscription.rs": "9eee20a1b69ac4468d3e1533a8fcd28a2af21f7e03dc6415b7a003ae618554dc",
+  "crates/argos-osint-core/src/summarization/exec.rs": "393f59df03340784ac8e0d6d710360acce6d17934eabbddecbffffd7285ac895",
+  "crates/argos-osint-core/src/summarization.rs": "79f7f0184a4bf431ade79bcc42e0eecee093d709514a89e646a56f28d296a4fd",
+  "crates/argos-osint-core/src/tasks.rs": "21062996eda942325e0d96ce44e9e8f7b586a4bcad34871e0f2296173d23a6b3",
+  "crates/argos-osint-core/src/telemetry.rs": "0348703555ebdb2fa22c7e2698e8d92c0925b0bfbaa7bc31089f0888773ae76f",
+  "crates/argos-osint-core/tests/fixtures/search_engines/api_http_404.expected.json": "f8126c9eaf6c5bcfaaf4566c44849c06cb8785818fec5bfe0485cd274ae49479",
+  "crates/argos-osint-core/tests/fixtures/search_engines/api_http_404.json": "6a8791ed96651bdec6c0dd2f5ad7b4b9ae4bc65c3e9f3db564674a09fdfb353b",
+  "crates/argos-osint-core/tests/fixtures/search_engines/boundary_query_values.expected.json": "853376397cad62ab95a5502c557705675b6d2d8169634e514ccdb68a8829774d",
+  "crates/argos-osint-core/tests/fixtures/search_engines/boundary_query_values.json": "d0dc4ab245f6444a66f5a910950234fc6b9e897ec54fd598dfd6c1ba98eccc7b",
+  "crates/argos-osint-core/tests/fixtures/search_engines/envelope_success_false.expected.json": "77e7815cd82ca0a577096f5734d34d772a873e0c8765a395879240fc55a3ef6c",
+  "crates/argos-osint-core/tests/fixtures/search_engines/envelope_success_false.json": "82699e9136e9d989a83506fdb986ee1fcdb8208d0f94f2042e554c25b13261b3",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_cleaned_html_fallback.expected.json": "cb1d233680a58b4658f1a9e48b58d993df89e9c06fd67715c37ce9aee3849efb",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_consent_noscript.expected.json": "04c7f7bc9f77a0c670db42c6352b454b44390cf47728d6812fff406ae72835f0",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_consent_redirect.expected.json": "9486c0c6429e3c08ba7cc0fdf9820d418c0aa2946fa0473c4e18c4c7bd099510",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_duplicate_links.expected.json": "e8d117715822f3fd365a0ee90e3af35fb34f831e254c10cf18812fe28d24ea32",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_missing_metadata.expected.json": "59cbdf96664c5032325e0b8a1336051cd5a31c2c5ff6e7e909afddafa5ead532",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_missing_metadata.json": "ec28037768af63a1908ca4108c98b62888f3ea85c89d84bb48bc00106615d327",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_rejected_links.expected.json": "54668e181afb625e9d0ee9e376a2d1786ad1f6be94955e1e6958fbe7e8b48a06",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_sorry_challenge.expected.json": "b76665cde5fe377a4b4fae282d25b1d1eedfdedef1e278c611189a3dbace3d31",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_403.expected.json": "580f326d713e7d6a78d817d7f9ac6330305046ca19b3851dcc3c9e3ca59eee8b",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_403.json": "426870b40a247f27ceace74423e9987a8f947801415de5dc2e66d1fc5932909f",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_429.expected.json": "8ba809c7e19c27860d73d7f5836720098729b054fc8ffcd573a3710d2e3c0d60",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_429.json": "0db1578716e3f740b34c5768439c0d7b64c49d5c1a1d339c9a6f956b4d19c79d",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_500.expected.json": "c12b0d4461d32359b4e9862f7a3f4b3509750d44270c3dc3a16832c14c287ee2",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_target_status_500.json": "76f267c5081bc75839bafedbc06c60ba4e89fcd3758552d7067b5d57dd9e11f9",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_unrecognized_dom.expected.json": "a4acf276a9ca64ba261c6a16c00da29994e99e60ec4da271ff888323eb11c7d2",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_valid_raw_html.expected.json": "4bafc839ea13a87b63efee263172d7496df1ad385a4466ddeae92229401825e1",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_verified_zero.expected.json": "9bdc1f1f68e30754f02274557dc8439995768f6a9cf7142159afe65aaeed0bab",
+  "crates/argos-osint-core/tests/fixtures/search_engines/google_wrapper_links.expected.json": "665500234db0ae7e2839c70c79664285d154f3120331ae5aa5c7d170ae893751",
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_links_only.expected.json": "166856871dc6b78766c4b47530bc8aa03616d7b332dfea98446ec96163a8f094",
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_links_only.json": "50dd447157d36e4163fb4c54887b3ec46c93af9affe1ce25c6b949c3244bf488",
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_target_status_404.expected.json": "800c42a1f3804a6b830ab2602f949ca9247cef5e0f41d35ae440042e27b01696",
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_target_status_404.json": "8582fc7ac4c7a5050ebc8f6caf4f8675352e528792a2ffedafd8684ba5a2a746",
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_truncated_envelope.expected.json": "9076eceffe409c6d42f22e17e0b1f840efa9ebb1a9f5153af19c06883898b143",
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_truncated_envelope.json": "b8d0d0c4e2374df496fb5bbff8ed86b272b5b25269b7e877be05dc325019ddaa",
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_valid_hundred_results.expected.json": "7c9744d445144e6f3e318222702be3ce4c54b2d944bda6997ecba30ec640fec9",
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_valid_ten_results.expected.json": "28499af4204d4532783ab4e9a87bf16700382e2c5d33cc1d8cb32d8cd8aeaf1e",
+  "crates/argos-osint-core/tests/fixtures/search_engines/mojeek_verified_zero.expected.json": "2514ca820422a48e64ac8f013d1b8f07b9f8cd383a5e036c3f7f003309a52b25",
+  "crates/argos-osint-core/tests/fixtures/search_engines/unicode_query.expected.json": "936788e43182fb29536dfeda27b3687a19432894a94dd523f72bbaa86c24d3ff",
+  "crates/argos-osint-core/tests/fixtures/search_engines/unicode_query.json": "d4bedfd41b1eb2ed10053ce9028e51cc0d3ccf811eddc6c8e1fcbcf57009d097",
+  "crates/argos-osint-core/tests/fixtures/search_engines/yandex_not_found_snippet.expected.json": "786e79b99a73999a19165a9ef821491fcc48958fbcc5e73701fd4cdcf9d0c398",
+  "crates/argos-osint-core/tests/fixtures/search_engines/yandex_valid_raw_html.expected.json": "69b8f187b75e9ee956deda9942ed8499a026b3ea200c73e2b2292fb77233b794",
+  "crates/argos-osint-core/tests/fixtures/search_engines/yandex_verified_zero.expected.json": "2fb4af8bb71c7d987d4a423ce30f8e7061894dc7caac88c5ae1cc068511feffa",
+  "crates/argos-osint-core/tests/search_engines_fixtures.rs": "46d024bf08036b324962e75f5b5396e572d379f46953bee5f0dc24f7137ec136",
+  "scripts/agent_cargo.py": "d122732a9b31fda99be0a567fbcb057c69a006477006758067c9229f6b4c7827",
+  "scripts/render_tui_cells.py": "cbbf79cc1c51eae6a0b601f0bbd312df66f8c1cda3d924001c0869eebedd2953",
+  "scripts/tui_review.py": "8a3511bcdb275306d3a5c18c72943501195792c38de6655b73b8012fed0a7362",
+  ".opencode/agents/ecc-edit.md": "8de9949e650f6e9caefa85f3116a2bd522e8b8505f9cd15d21b978068d348704",
+  ".opencode/agents/ecc-planner.md": "6950c7e2208b9eb44c159250cee9aa57801a6d87d835a13f6911b5a78a10d3ab",
+  ".opencode/agents/ecc-reviewer.md": "e45ef76b6bf8e3aebbcecd6180771b0dc8239f5e6cfdf228e1b2c7c687936fbd",
+  ".opencode/commands/ecc-checkpoint.md": "ceb4b440b9dacdf4694a68a88decbb20d6851b9d0bf79001f0699cbf2840dfaa",
+  ".opencode/commands/ecc-learn.md": "b1c903ce5b678cf7a1324455f551c81cf263ab901d31b8295a281720d7bded4d",
+  ".opencode/commands/ecc-plan.md": "eba05b7feaada152d13977ecd4e4e07a2faeb406bf6e72f46317f27fab1adab0",
+  ".opencode/commands/ecc-review.md": "b788b4ed69addb8d42d25a3b551088441fe461e40a7796c3482b4f5feb437ada",
+  ".opencode/commands/ecc-verify.md": "66abe7b19ec12014079b53dc15d679de6fe5f9df9d5b8018e322a7a43a545aa8",
+  ".opencode/commands/tui-verify.md": "8b13f8fae62217f864a49d1fbf04143dc5610f2a16c5242e8490a10e50325239",
+  ".opencode/opencode.json": "d3b4a203bdad385372f9333980226cb2317cce5aedbfd27df164a026fe217233",
+  ".opencode/package.json": "609158e6c5fbc237939fa3ddf7faab80ab690bdc0c8d584414a885130103c4e8",
+  ".opencode/skills/argos-implement/SKILL.md": "9b8a3c0745136737e3824d3dc6662632ebdf8ac647788df74e88ec7a9a170546",
+  ".opencode/skills/argos-plan/SKILL.md": "390a3dd4e56a762688f8f7e9dbdcfc27b26678652ceaad1b344c1346627ecc68",
+  ".opencode/skills/argos-tui-verify/SKILL.md": "aa72d31bd618a564e5f7a0922c31be8a80ff0309e51dcb156eb330681bff6881",
+  ".opencode/skills/ecc-checkpoint/SKILL.md": "b626b5fc3e41f4110399b0f7b1886bdda5721b5cbe770580107b41c30b6bef22",
+  ".opencode/skills/ecc-learn/SKILL.md": "c7c620fe4b70e564b766d6dd3a70e79b4070ffba927b19ca74e07799b9ba7bdb",
+  ".opencode/skills/ecc-plan/SKILL.md": "bcb9d7eb872dc914966c22ec030b5fed62304b74312c8c33877a6187985f4dec",
+  ".opencode/skills/ecc-review/SKILL.md": "812344b5bcdc6bb2ecf999b250d665f260a85ee1b6652e0c8fbf0307c3456a47",
+  ".opencode/skills/ecc-verify/SKILL.md": "632cbe488202ba9da6ab456769cf32d645d497677162d410ae2cd766679f0b4c",
+  ".opencode/skills/graphify/SKILL.md": "aed405243260a7de8887aa1b8b1f85ea13203d9958888fc0324daff8a60d3a59",
+  ".opencode/skills/graphify/references/add-watch.md": "1e77351815547334c7e030f018dba513b303d397bf73d11fac47df03ace3b3f4",
+  ".opencode/skills/graphify/references/exports.md": "ee47fae477f106d8aed38798c58493b5a7f060a0d9d2581ce6132302827bc14b",
+  ".opencode/skills/graphify/references/extraction-spec.md": "f72a6d2dfa67446f06f27a8f0053af1adc8d53b02e393c8472045f6740c6183e",
+  ".opencode/skills/graphify/references/github-and-merge.md": "e5ebd90c7686f50363ff7a535556bc2f596d4c47ec1e6c8b95e11e36a0dfea2b",
+  ".opencode/skills/graphify/references/hooks.md": "b9a4e9f66813c6fc720589f1071d1a03c95756ab7101447e14e57291fe7844e5",
+  ".opencode/skills/graphify/references/query.md": "e563ddcb1e155aa230f107e5ef9380bc1249c5cd8241128de7ed8a7bd9c20cf5",
+  ".opencode/skills/graphify/references/transcribe.md": "676a1e39aa6d43cdfcc416ec56616e36f7bad74066a82bd33a9485515b9a865c",
+  ".opencode/skills/graphify/references/update.md": "661f559b3ff4f3db7ba47bc2ba1c7e19f1c1d66a36f647e49221eecb174f2228",
+  ".opencode/tests/agent-cargo.test.mjs": "27a26d10d0e6b900c983e9d72529bfde0a23cfe32d10d8a732c3f31b1543e95a",
+  ".opencode/tests/graphify.test.mjs": "3d900d41d73dd4d1f40d60b0f35dcdda46ccfe38c318cc1c88630b320adbdb18",
+  ".opencode/tests/gsd-v2.test.mjs": "a0440532388c4a361506d0256318f5fe778745e16032b8b754f48c6ad44d24a2",
+  ".opencode/tests/tools-registry.test.mjs": "0f1b6b66063938fe25760388fc1212ccdb678f397b98eec44766f468af07fc04",
+  ".opencode/tests/tui-review.test.mjs": "06eb050e7db9f036b419d437959698fc4f3e48c55fbda5ce7cefd3e202175529"
+ },
+ "test_exit_code": 0,
+ "fixtures": [
+  {
+   "name": "app-0-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "7cac58a34a529bcbcdcf04bacb3261456fd89b4be42568030607ae2d3e394d63",
+   "png_sha256": "b7baa1ed34479e5d7394d0d432dc8f8a4321a94f812e72a8832551b25edf07b0"
+  },
+  {
+   "name": "app-0-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "0d0273cef332a2a25a22ae781211a6ce04d52f9b1cc35ae4569d75b54dd5fb77",
+   "png_sha256": "4050f8da2059a4cb011dd90f36df2d73c271155356a7a02f4c103d4c78602087"
+  },
+  {
+   "name": "app-0-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "f41ca904a6c76ca7feaaffa448bbb802f14adf10cbcf844c6c7bf217720fe640",
+   "png_sha256": "f02786e8f66f6b897faf6c1f031984ebf2e7a659f170103f7a9b15f0018a9497"
+  },
+  {
+   "name": "app-0-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "6cd8c9ddb6ce8f510c0671f245f170bbd02de7c2fed31b0f1b9f631994cef16b",
+   "png_sha256": "bc9bc7b2812a62228b7b5c71d0547b4505fcc2c20a1414ce480d834c6eeac5ba"
+  },
+  {
+   "name": "app-0-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "508b3ac37aeee321f00371da57495127f9a42d20800e98f5c9631f8b6ab2a67c",
+   "png_sha256": "99ca913964fa59f0bdd46e14970fc001c2a7b2e3d99a1122f176cbc1d5ac9f89"
+  },
+  {
+   "name": "app-0-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "d8725d71b96a67dff847de7421133b135c650730bb2a4e1591841d9aa23e73f7",
+   "png_sha256": "c6aec9a39187ca4dd73d5dd8f8f2297652ec2e5ff48e532d152e4f9baddd50a9"
+  },
+  {
+   "name": "app-1-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "3ac3043baae731627043d924adec2b85a12f26d1be34b28d6bd66bbbb41f8218",
+   "png_sha256": "5a96232323423b432fd8cb78878f431a765c6e4bc911d8bac755b5afbca4b172"
+  },
+  {
+   "name": "app-1-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "5002f6a5ecf2e6a315d14e8958be4e4b158abb6729219a715417de56cbc2f924",
+   "png_sha256": "3ad608478df18d0c1d7713eab685a32c39f52fec377560edd9809f9f537ea695"
+  },
+  {
+   "name": "app-1-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "563490fe1476eeea1281c67afb3ac492f90914936c8a36c7782495962e3a0cd0",
+   "png_sha256": "4bc4e0ba014819bf4cf363aa5effd46acd34d76961dce85b3f0868b1bfcb9e3d"
+  },
+  {
+   "name": "app-1-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "9207d9bb47f6fafdf8f2a032af539e825372ba509232afc6bc56799ed463335b",
+   "png_sha256": "39401bdd453f91ddef8686f341fffd68b94407eca5336058f20042a232454b7a"
+  },
+  {
+   "name": "app-1-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "6b9cc927c05e296d8573e189b2fe98192c3dab86e3714ffaae28de0ec5a3a359",
+   "png_sha256": "9d3979612772cc2d5a2ca115c6fb1173981fe6d04099899b1cb9f03027152645"
+  },
+  {
+   "name": "app-1-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "53bec1d5880f6c315f480cdb3bd2ecbd5f64f0e8a612996069a02fb8405deacb",
+   "png_sha256": "c6bda5cafe13a5d34cac15c871f6fc9cd939a62e09ed0daef111a7e6d4e38a29"
+  },
+  {
+   "name": "app-2-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "69d25be4ab72d7df16c70f400fed0ae0f0d4ced7a32937fb15293979ba398828",
+   "png_sha256": "ab0a071225b42931656ca8605cca728b84515f3f0ea1248864beeca369fea2a6"
+  },
+  {
+   "name": "app-2-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "85ca60b29cdc5d76185b2598149196ef74c2881e938f74b4f913fbd7ab2bc4a7",
+   "png_sha256": "d01d095f6f77b90fbed69bec2bc7ca3bed66255f0015786ee3b6d27847d4b9c1"
+  },
+  {
+   "name": "app-2-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "aeef74d440c7f359c65e92a0befc38a002d96077cba30d0ee0fa0c24bf00095b",
+   "png_sha256": "ad47f461e4d761b1a43cb03adb5584d9ae8d13a4218459feecb25abb3cb8ee59"
+  },
+  {
+   "name": "app-2-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "9b8314881f35bb5cf40ea106573f6cb87725dc206ee14bd8482664858ed5f214",
+   "png_sha256": "6ada3565264f561e7a6c6ef7c6ecfd9b7051ca1d4a8484474911c5347228efc4"
+  },
+  {
+   "name": "app-2-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "2ac05dd2ac1ad709ecadd2e077101fdba643d2c193a01e45ebe915ec88489c38",
+   "png_sha256": "ac4bc0678b59b7e9ef5074668956613d7d18f4125eaee5fb47fd1684d352a7f4"
+  },
+  {
+   "name": "app-2-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "700f5491ceea7941de4efeb00086486e253c8890b09f30b9b67b790574498969",
+   "png_sha256": "3d8f8f204e50482391e062785649df7bd8d9f743df4348becb85d2ff010e67fd"
+  },
+  {
+   "name": "app-3-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "83805da1cf5a76d0d5e8f699ef7f259827612e869236a63aae478e70ee7edde3",
+   "png_sha256": "5a9d5ed73ea110468f325a5f4679f17d068161b7a469502da146f1bb69ee088c"
+  },
+  {
+   "name": "app-3-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "0bb154beea1f1579d643bb45ab851390ed194b2dc97a0336e049ba6ba0fb770d",
+   "png_sha256": "69476169bd5cbbeb54e47bdab65435f5d7fbaa097671ca3daee75a3ab6939592"
+  },
+  {
+   "name": "app-3-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "8f4cf61c54490c1a0945fe8dd4730fea83fd193149f01860b22c338624b09376",
+   "png_sha256": "699417911e9727682378f2ba4bc42fec215cd74d86c1ab9b2f0f27355cd9fd85"
+  },
+  {
+   "name": "app-3-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "55a17535984aeb14b607640c1a053b04da277c75122ecbdf83d6d2e424db9278",
+   "png_sha256": "29bb4d282f0f2eac8e04943d0238d4ef554d5222eed0baaca33e44958d570718"
+  },
+  {
+   "name": "app-3-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "abb03fa596e07cc31826019a2380c8cf7a29c1b699b87a5f21bf1435cfcf9032",
+   "png_sha256": "f529a8c9e3170ea2acc77631f15ad1570019be224421238a06542c134d098150"
+  },
+  {
+   "name": "app-3-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "108b499d8da32faa6aec0944ed583999bf0bc5a2628b6a9bd83d4c356a4b5b0a",
+   "png_sha256": "3bfbcd2f5233757d6c7ad21644be135e250013fc11b1e4eecbe92c4b37062555"
+  },
+  {
+   "name": "app-4-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "ae93434a1d99dc075b50387ec485d4f8c5d71dded0c01b5c6b1057b01c296ea2",
+   "png_sha256": "8068f58511204abf1c7e38a2a1b59f42a218d8cdb49da7bea95cd203626929fd"
+  },
+  {
+   "name": "app-4-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "922e347f7020b6584c0be1c6f73c422d383b609ccd9926c26606aa62f36fd9f0",
+   "png_sha256": "84ab685e47ac906a9709314b1d582542b7232798716a757bc4b4f1877a35ecc2"
+  },
+  {
+   "name": "app-4-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "a46747caee51a18df8ccf44a69a63c192008667e5ce06fcd30d1870b31249293",
+   "png_sha256": "9b87c3c2860b15b2108ca195590caf561567dfa4379071f832cce70a341b2391"
+  },
+  {
+   "name": "app-4-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "779ef6e85f63f20f264cf221807b87023fa973b9e64c9ec8e477cfc2741137ca",
+   "png_sha256": "f847dd076b42ca4a661815e78065d784e0d558203e1855a4f515829b363a2fd5"
+  },
+  {
+   "name": "app-4-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "2beb65c9ebaa8f6fb47a64d0441f6fdc983f2fa1d4cd0c6c4e26b8584eff48f9",
+   "png_sha256": "af0918906325146de237efab504a2c14f7ff2b7ee856f612aeec60300ce108e2"
+  },
+  {
+   "name": "app-4-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "8b008d813b13c421665df0298ec19b2b002856eae55c3d18aeb566c76ac165ab",
+   "png_sha256": "1ea12ee878e8cd477d0dbec59a6fcc8bc4b584ee3b408c283135bce4e69e7982"
+  },
+  {
+   "name": "app-5-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "b7ba0ef3c06fa11b5ae240157c62533937540d1a2dc8a6c44d3b64eeaf073ff4",
+   "png_sha256": "0b02ecd5b9da0293fdc51109fb1d81ba19ef33df635975890a56ef835ce9adc9"
+  },
+  {
+   "name": "app-5-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "8c1d072c4dc1a9ed220d33c99b0b5908771281ae659a0c7870220f0d733294e5",
+   "png_sha256": "faea3e35bcc48910ed6c0c66a4231c578ef47fd4ad2be926e4d9e84c6cbfdeb2"
+  },
+  {
+   "name": "app-5-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "2427167de1e6f69bb6a9b2ad664beeed7e85aaf722775c8bf2ac569ea1b5917c",
+   "png_sha256": "215a093704d536d437f051e6c206ca25af975e5cf4abbe9d59dea52e9f98bc0e"
+  },
+  {
+   "name": "app-5-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "de7711f933177a7a54fb35bb7634bf8a3981544b4fe813ed93a758ef1a43bd33",
+   "png_sha256": "b4ab8b52621bd6c83caae1e93020ce151f9bb65ce50f5db08f1456fed5fa2257"
+  },
+  {
+   "name": "app-5-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "11f205e657bd44975258de361b628c379a4ee0f401e4550bdb7e3783864e49d2",
+   "png_sha256": "a35b376a667ff7b15c7003e346c36f2522c5acdd2f430ebcb0a5f45365002291"
+  },
+  {
+   "name": "app-5-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "8605af969f0cca7979b8d3faa6ef6ac8e58ab2333b5782f9383c07287fd3aeb5",
+   "png_sha256": "955720bcd7cc21e04355894ef12e0949d34b367788ab09f6307b4d122bb19a95"
+  },
+  {
+   "name": "app-6-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "0a1dfc72ec9ca36d3f5db7c4b17cf3ed956c994e5d8686a10a12c67e92005a3b",
+   "png_sha256": "98d3356a5e057cdcc4272d64ad6489f6b1876842e2bd4d0c23750a0e8e760fb6"
+  },
+  {
+   "name": "app-6-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "2fa10c6dd36429f95533e9e451d52ecec63a782d16ffd44a3283eefa0c4385ff",
+   "png_sha256": "c56827591e3359f7a7001cd48f46d73554d8fee5256b499d1463531bd9dcbf1f"
+  },
+  {
+   "name": "app-6-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "98e0f0184b529bd87cec0767f0f8819e8a0c9e028eefc0fec477f573e0252286",
+   "png_sha256": "e7715c63f83e240466e4ae10173f981e9b563ec29d45d047606c04dc01f11e0f"
+  },
+  {
+   "name": "app-6-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "8ceba7f409396e81cd64e614e56b3a05a17d9817c75594bc3b1113e4c11686ad",
+   "png_sha256": "46a35fe35bc1bbed485deb4e9546a96101d50c629ab5c419c5ed62383346f5a0"
+  },
+  {
+   "name": "app-6-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "4ac4c9c755c4bb247c92b0d4781c0fb9d7b1895948735d73b8d7b440856a495b",
+   "png_sha256": "720dc4a382f819c5df48e8fc9334d150e2732e98b5505fbbef17a423f9e42e41"
+  },
+  {
+   "name": "app-6-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "3c761041519221a241339b3cdc700f8632a9f8b3bc8734be1caa89a4d3ecd140",
+   "png_sha256": "dd854bc6b3608eb501e38107ee96c1a509fc4cc3e47f40de5be72c7f5c38b02d"
+  },
+  {
+   "name": "app-7-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "00da4c4ee3290d5fa7cbf9dc0f0e641ce69cab9bcc239831afa7b06505942813",
+   "png_sha256": "3bef883cda17cf6a2b44965a984fdf06cbe651f31d88eafad7844a24b0b95079"
+  },
+  {
+   "name": "app-7-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "5118ec54f5f731fd1c1020039c6df49e4cc2ea26b67e63f93c437f2531380052",
+   "png_sha256": "ed201f75fb1c1eff24b7e78b59a2524b4780e98c37f81e5506010d26d5540eac"
+  },
+  {
+   "name": "app-7-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "421c5528e5da1d5fd0823413b2553fb21ff298ffce53de1de1b4c3741c9dacfb",
+   "png_sha256": "0fc83102dbb4b95902bfd707ba5d1827fafc0890fd8199a40ba3f390ab62a024"
+  },
+  {
+   "name": "app-7-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "0752edf1a7ba57ccc0f64ebfa7111c9fc23970a9322deff49b30b44c060c3843",
+   "png_sha256": "f15695d5b00fe2be88e6345bc27a523e611ef155ed2cb9d4ca5165b26b96c476"
+  },
+  {
+   "name": "app-7-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "67ebfce2057e08e79a340673ca1e3ac9697457a211c8c292f0f7603d19cdb9ba",
+   "png_sha256": "b9ff42edd7702d3eec6e4b7ab0b9d7bf836eccb291113b278a5f71872ccee326"
+  },
+  {
+   "name": "app-7-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "41391fa5b087616b268fad2d3827d37e19b311d9bc9aa19662cc134c73f3eea4",
+   "png_sha256": "d351324697a41d5504bd3165f736eb4c64b4b459ac3bee49de25d120a5f1db1b"
+  },
+  {
+   "name": "app-8-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "674973b542967f08aea6e3577d62ba48cf079d2b99917c5c1ac8ac56b4c79e37",
+   "png_sha256": "edaee40da9a380b0a7bca9a0ad1bbc4693835a27694e8d88c691dbfb3a09ffef"
+  },
+  {
+   "name": "app-8-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "b442d1901f578fcdf92abc07413194e02e083dcb915886bf4d16f136936ed27b",
+   "png_sha256": "aac792b591bd02717504d22390093802a100ddb0d42fa3416db7234dd06ee340"
+  },
+  {
+   "name": "app-8-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "0233d9d36865f0b6dc8754082facd4da3a15607e7b9402fb0101a8f85b0d44c7",
+   "png_sha256": "44c6d95c19de10b1b0910056182faeb4de9a2cd6a7fcfeefe396c80dcb0469fc"
+  },
+  {
+   "name": "app-8-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "f2ee8e8073dee0109648b71eb069de6722aebdd9aeb163b1b8481455e4540534",
+   "png_sha256": "b59e00266df0dedb8f19c5029163ef287f26d929bc34c34c942c9dbcd797d4f7"
+  },
+  {
+   "name": "app-8-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "c4130269d30b826654cb75db9cc1cecc5d2fd7a8cfd98d931b5395fad3970220",
+   "png_sha256": "c8f41155226b652b4f189db6906fac27aa06c984d10577ae3601ddfc240504e6"
+  },
+  {
+   "name": "app-8-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "ef6aec9f47d35c3c8d4ec85f8549d373520994a19a549d732e169741aad97f33",
+   "png_sha256": "59204fd7d3147e6722e3d200f06df4c29493143de5064a1af4f2077d4ab89d5d"
+  },
+  {
+   "name": "configs-draft-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "587f30b55f2ec1b0c104c64bd37e659a1c98a031829c6c1355a8f92c21097515",
+   "png_sha256": "7ee101b8cf1584b17f2b9623b954e279df79ab13bc2c952d777f8b5ded59f5ca"
+  },
+  {
+   "name": "configs-draft-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "67c1b9d739091f245a553b86a116cceb9f624d4b1c9c5c2745516c0ee75626c8",
+   "png_sha256": "bc1046f6ec905b64165f43295ab7b8fa8d78af683bce1faaa62386db8314f3f6"
+  },
+  {
+   "name": "configs-draft-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "e27df82b8e102fd0889ae871a3789b550dea9a34366408ab2ff835426171ceaf",
+   "png_sha256": "e15c9f13d98ba07eac35a0adf53a7139c72cc68e9668b14f868328126d4a1983"
+  },
+  {
+   "name": "configs-draft-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "1c300fe51fc61858faf30294055cffd6a52ec46e08b435c39d65912071d49da4",
+   "png_sha256": "3c6a2075c27e4ce6c967b6438b6ed246d198df058ad382c84b7da2f64511ee6a"
+  },
+  {
+   "name": "configs-draft-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "b8373c92be2ad92ea057b190ac74ebd4a7c19ea3b67112e7203c3499d8ea1ccf",
+   "png_sha256": "dc5b6d6b8172d7ae00735fb36b561edde2f79ccb03b76948954b27add3ab0044"
+  },
+  {
+   "name": "configs-draft-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "04ce70a33df17b9ae8d2023a8e7bdfc510523d716b66e740682e1b2c5f7d6e00",
+   "png_sha256": "cad6856e6e123a28cde5a8a5b52777eba8956fb3c4fd0ce1aadd43d78674c843"
+  },
+  {
+   "name": "configs-error-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "fe33026cf3412aefc41aa9f409af39b186e6c2c50f787e0546d053448da8ecc0",
+   "png_sha256": "ca6c427658b5b16c6aee169125c963d3f75e174dbd16abb62a47f140ff83de92"
+  },
+  {
+   "name": "configs-error-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "d5e1572db84f178bb7171df77d8b4d2f4d0762277fdfc3bcad900fc8d46174a0",
+   "png_sha256": "fddaba9190251d224d34f1e285a38d8954d7f698f37d063d649ecd2a519a1abd"
+  },
+  {
+   "name": "configs-error-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "39e168fc20a7e3f8de7e2b451d8a0b4a3061e214e9ddfb174ed42911f9e3a506",
+   "png_sha256": "c9fe04c387a9abaea8d270d1dc4af545671b97ab9354d6362494e9235b828dfe"
+  },
+  {
+   "name": "configs-error-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "aa85436dca981723c51cfba929ce49d0074a302a2008524c3cfeff836e608081",
+   "png_sha256": "04d386baa8f0189e6a0264e1b28232331ba9ed14b6561d1ccdbff6ccb149e02e"
+  },
+  {
+   "name": "configs-error-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "f5c50ef856b4f35ffd4e3a06d08b6297b2bb35740a37be388eca8ff5237f036a",
+   "png_sha256": "abb2469f5f4d3640da36a361ad95f967eb6b367b2385242b1f851efc541a7574"
+  },
+  {
+   "name": "configs-error-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "f9f82e1daea2248c929afebec2ef4f15457801e7281a8e68bf113cd6892f02df",
+   "png_sha256": "ce07d8b6b0882137f17fd1fac485550d2554ad202c0830372a5534d365f55f2b"
+  },
+  {
+   "name": "help-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "d8e27633b5973166db146b78d6133cb0b347f7d855647ab70baec7535c964c6b",
+   "png_sha256": "bc31ccffa218680e22c88e4e05f667646d68749071afbffe5317c5f2b5f0de14"
+  },
+  {
+   "name": "help-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "75ff81250095da335859245d4b4994c4953c546ccc881941f0e3534a95e18903",
+   "png_sha256": "cf7e1e65cec6ee0e00bb7eab7d81242bf96a22000ea7ab3816b86e3e0faa39d1"
+  },
+  {
+   "name": "help-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "a235c9c21a669e2683ae185767c1e72715dd025fdea144e6445753b4170ef53b",
+   "png_sha256": "dc1fac28994e3b1ebf6833746c7d69cfc9679d23aaea087e31812d52f3c46655"
+  },
+  {
+   "name": "help-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "f17420ead5801df444fb204fd3d0d8ef0bc2ffea7ca99aa422381ffee600618a",
+   "png_sha256": "33cb213a14aef280b3d685e418da3568594b0c22007fc017f182b8f3ab9f94e8"
+  },
+  {
+   "name": "help-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "e180912bdfd54682d44fbb554776d39244762fab16f5df02489c29320f2ebdc9",
+   "png_sha256": "40f43bec71ac77344ec6f43487e5fb7e493f87da4986e4579f0b7494cb91a0bd"
+  },
+  {
+   "name": "help-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "b3d1f8cb6e63d2954195be2261708101b0d624f5e837ae987867bc6664fe8de6",
+   "png_sha256": "aa79f5fc52c6996bc35670c8bbf61d75e776efa994632386f83b952ed6fcff3a"
+  },
+  {
+   "name": "home-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "9e9a51c75cb628bb285b43f718ce84d77210d616bae873d3162b8390c7657d15",
+   "png_sha256": "022c6b5c68f6ae261a46d30ccaab711d1f2c9eb8aca5cb901bb68e10b84c49cd"
+  },
+  {
+   "name": "home-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "96eadaa61a452c87f2d25d7c27903e34aa5b7ecc1afbcf47460e47e9011795d9",
+   "png_sha256": "c70e171b63c2be7fe1ec101a9c68a0d5b4c963ba9dbe15bb632653bc51b944b4"
+  },
+  {
+   "name": "home-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "8a9702e1a886f54198fbff260e7b6b32769e4d56ebb716ceff0f20ee0cf1b7ae",
+   "png_sha256": "cc73e960427eeab510fe72437a8ac885e3859978938b36a6c28975e36b34fb14"
+  },
+  {
+   "name": "home-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "21b556cf73dbd575244b6608f26143c2f937565fd0faab828d845c38d8b3c84f",
+   "png_sha256": "eb63faedebfa3e59fdc839aad15bff595d4e8022c1066064eee3a297f6ccf78c"
+  },
+  {
+   "name": "home-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "99eb1ebbe014001bbc218e51cd972f3df6881a4605da17e3ed106a5167cb7f0f",
+   "png_sha256": "8213ad16865e16592deb3ddc4e77f20b3e9027398af3e89af4e3e304e3d035ff"
+  },
+  {
+   "name": "home-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "516d382f8728e534c8db3b56c9e0c7969c5f90d36595660844f978beb305543c",
+   "png_sha256": "bc9323c344be07b2784d3b4315cc91befd3410d4957c37936fc8a944825517a7"
+  },
+  {
+   "name": "intel-brief-image-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "3540b3744480665d2062b3ea2037f5ebe8a706d7621875ea5dbb559ea412f5d8",
+   "png_sha256": "6881910245ebcc60636b03a217dddd7a10bcd7e3ca6bcdd8ce81e62a58ef2c75"
+  },
+  {
+   "name": "intel-brief-image-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "942b07eb1befbfcdc2969094b4f09d21c34d0e433f8b45c58feb5e1ee1077f68",
+   "png_sha256": "ac1cab691ce010765363ed02d36c6f6234a84044e396df7ca3e02ae6ce91c93e"
+  },
+  {
+   "name": "intel-brief-image-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "827ea954cae1bb8567a129cb4ce9bc2b53b414daf74c6888697b4f33aa69398d",
+   "png_sha256": "06735525756e49cb88281065a3c7f210afbabf17e2afccbb5291c5e94cfef147"
+  },
+  {
+   "name": "intel-brief-image-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "49940d442cc36cb60a3a1a8aeac0cdf8bdeb6e847a2b157e250c49ed53bfe9b7",
+   "png_sha256": "e3c8385b4899de26d1a3f242698c56e21e05433a302710ded1cb48428ccb1041"
+  },
+  {
+   "name": "intel-brief-image-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "66d30dee6425f2742015c67f06042ee5708b3b582364693438e186d7670f28de",
+   "png_sha256": "d703d16245a632f7c3e90c7f06b4e80e5f4e7e570834cfba229716211d5b4533"
+  },
+  {
+   "name": "intel-brief-image-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "5b7fe06410572e955c1ff788256a41ab1972afdc51102c0f247ad0e0b38e7abf",
+   "png_sha256": "9925be5d2ccc86ea72ca6b11a90a8f59cf4bca8c1281b88db4012d9e963f54dc"
+  },
+  {
+   "name": "intel-image-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "d27e0b39b53b04cc531c090ad31ecdaae6be32a208c6058bad7bf7b70c9c0e3e",
+   "png_sha256": "80592c5991e436f0516503d96f9dbbd67e8e70c8994920c45bb3ad378ffc5bc5"
+  },
+  {
+   "name": "intel-image-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "97589143826c9d69de6d1fbdcf10711e7668ec7d90a38dba69951434eda786b6",
+   "png_sha256": "c4eab2143149b04b6d532ccc449c43a24871d215235c38424dc92a7097cba3ab"
+  },
+  {
+   "name": "intel-image-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "fe1d6c14d43cb2d7d6581187e52d8b8148fdb10e5d3dd83e6a3c7c4a8a2fae94",
+   "png_sha256": "b0826421d6eeb5a67e64bf281a6355267f3dd021d8f586bbce0611ad632ce686"
+  },
+  {
+   "name": "intel-image-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "e1cfee6bf8bc7d38955260f5ae4b1ec2ba182816362467d37fdd0303e7dfb69e",
+   "png_sha256": "89a233d4e7ed58e8da79129fc4b787d05984d543960b5192baa56378dc5306aa"
+  },
+  {
+   "name": "intel-image-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "5f7bec862f8bc91d62a68565daa54ec1bc72046a4e66fdaa8460aae289ac03f3",
+   "png_sha256": "597044c37332521164f6e1333d73a555893c69292b31be4c41012d622386a058"
+  },
+  {
+   "name": "intel-image-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "6b51ffbb1cf28baf914c4dd808c0b0082b7018bef99e84de5fc64abaa48d3018",
+   "png_sha256": "0aea139c39d43a6e06f915a9a96f1b3e002d90086023b8aeab134f7d9d68097a"
+  },
+  {
+   "name": "overlay-choice-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "3c292defcc698458714ff091daa6ae846ccfe08156f28f61a2b27933f2d7d138",
+   "png_sha256": "efd78a1273122db1bcd08390da51281c4f13a1a2c431368f834d240665a893ed"
+  },
+  {
+   "name": "overlay-choice-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "555ef59f20b334272c7adf4243054ba5b2e85d41cc66b503624f6f7963b6fcfa",
+   "png_sha256": "593cb381056ad766c04079f9b149ce8b0bb8ef310482cb85d5b98a0f93c13fbb"
+  },
+  {
+   "name": "overlay-choice-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "04a2085a30aa6cc2050d95ceb815f7b1d82fa4383250ecf4ca6a4c9a29ffd378",
+   "png_sha256": "73f11c502364a8a15469153658ac1c8e79acc26774608e86fe55d2bcbe599640"
+  },
+  {
+   "name": "overlay-choice-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "de8ee23436c71fc3950fd34169b7bc3770de05c4bf80bf57d7c766b934259291",
+   "png_sha256": "90e6d020358b7f4577e3188681fa08a5403d1c07d09b9a86db67537b1dbe413a"
+  },
+  {
+   "name": "overlay-choice-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "73a1c709181690a86e1a6d31e9d55cf71b8000f9e1e71ff0d36ac15e51ea4652",
+   "png_sha256": "dbd439f41cd7b119007607c1537e77baf745d1abcbaf3485c2e94676852d354d"
+  },
+  {
+   "name": "overlay-choice-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "7d3c0761d242f9f3c1a5a347904f8b7306e8a1187a89c813ddf16f7f59010832",
+   "png_sha256": "88c077d9f665257d8ee7670f9fb1a7b8c377d18da79600b870835d694a0f4a00"
+  },
+  {
+   "name": "overlay-fallback-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "c48484ed47026620a715122bb3d291a93fb08f5c823b008843feea0bce370778",
+   "png_sha256": "b3f5cad13c3d4c9de181be10f68f779ef4b0bfc599d0fd3d2720f0f72fccc5b3"
+  },
+  {
+   "name": "overlay-fallback-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "e25445db9f247d64885985dd95546a3f07995f4c3897f2d01509dae53fc079c4",
+   "png_sha256": "eadc8e638e8075ef145add9f67c1f6221cfb1ada33d11ff4da429ec03a14618f"
+  },
+  {
+   "name": "overlay-fallback-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "7c59cfe2113226f6b914530201809986df89e69aab92f2228d9966a03dfd6210",
+   "png_sha256": "da7fe236cfd8c244150a1ed71d5ad7315036ab5261a24c43c2994c20497743ba"
+  },
+  {
+   "name": "overlay-fallback-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "eeada94be8a58ea8ced3ea7733aac44f62262f17df2630881a77af932c2ea9b0",
+   "png_sha256": "1997cd980393a751406499ff5ed36009339e5aaee071e8257ed20014bb72d9bf"
+  },
+  {
+   "name": "overlay-fallback-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "d40c45950326a8d9fb60349af06c43f08ec5263416d8800c30f7fe4ada7bfa22",
+   "png_sha256": "434b74686613d780ecfe058c8a3268d6df145855f6bf27f4604068c4795cda32"
+  },
+  {
+   "name": "overlay-fallback-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "889e2f418d07f36b548822f2b282b976719689d2b00d7ee304e2fa486efad81f",
+   "png_sha256": "2f3b58c566532a387d0fca2002a442b888517b7014b05b805085d7dd88caed68"
+  },
+  {
+   "name": "overlay-intel-recon-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "f341eb83989bbcc732d7b55aa7096af84af1e572b3c87276d50d176162e133ad",
+   "png_sha256": "b18bcd2697d7107c350d8be030cf7dbd4646169df2e7c29f6e4d838e5aa79813"
+  },
+  {
+   "name": "overlay-intel-recon-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "fb0ffd9241de9750226be8c5b4c2b93e67a19f0ea8e28e0f3690bf6d9766af9b",
+   "png_sha256": "2b5c940a94952abf642875f3c7e837b32b5b27b90610208e12c39de008ab8f54"
+  },
+  {
+   "name": "overlay-intel-recon-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "a39f6b2748c7927ba639618c68e4587165a2bee9de79ff39aedcba4722306236",
+   "png_sha256": "bd6d9a65ded1942e36c2389392b98ff8d4387eec856f5239ae327dc4eb717c20"
+  },
+  {
+   "name": "overlay-intel-recon-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "1d31961c6f34955d0bca696e7499092f698eb893264d66ca29c4f3ed309ccaf6",
+   "png_sha256": "03b8a0b162a9f3a6ee63109445b0e03411bc218899725167a56d63600a42185e"
+  },
+  {
+   "name": "overlay-intel-recon-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "46f6a1677e695eb85ad55d189a5535be5eb54ab2a03f905bd8a657ee4fb89d58",
+   "png_sha256": "6e9edfca08c9d06be95d9268b6da66467d796980a6b614858a95d8f6e8c5b13f"
+  },
+  {
+   "name": "overlay-intel-recon-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "471ebe26d8c049cc943deff6e51206b6dc4a2d61cf2c9867658a2c0a86a33074",
+   "png_sha256": "f00c4de0bf3a40c8eb56ad5d1e0ef246c610634465e811e9c2d8542984ed5280"
+  },
+  {
+   "name": "overlay-memories-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "844d6c08270924dffe25c21adb174f5e50c22b3d6e5b86ae10aff0ce2ab1f746",
+   "png_sha256": "534a84bf95ca9d3dbd73cf454a679eda9de685442f7679373842f54d0979e379"
+  },
+  {
+   "name": "overlay-memories-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "4888370f24a467ca983fb1299b95453b5e1fe9f388f715112230b5a64fb75db0",
+   "png_sha256": "108b4c21a9ecd440628713715ffb17fafadedfba91b61ab6e9893a5659a2d537"
+  },
+  {
+   "name": "overlay-memories-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "81bad2d19592611b5208a03b38b14fa3fcc2ab877b1b827e4b32624e3d82aff7",
+   "png_sha256": "71ee670c39637a26e27e0c0cc59febd44f9b3a27ece2fa1273097e4e49e7c7d3"
+  },
+  {
+   "name": "overlay-memories-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "d12cd8325e50b347c9b3451bfd926e5a2d28f3234513cb24a9885293717be51d",
+   "png_sha256": "86c845855a41f3a02ac6ecd3f39d9757e060cb737637bb7554d05c429a960d1b"
+  },
+  {
+   "name": "overlay-memories-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "9bf182725bbd71027053408ae25c6ab5119c800821b33564512339cccba52c01",
+   "png_sha256": "930366addb9a487233d4a31f706f827afbe9868bc358672300e56e3ce0033250"
+  },
+  {
+   "name": "overlay-memories-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "3c7a7061f8f19d2aa8036bd7d0158f3327583117c51e1878726a7f837a77723c",
+   "png_sha256": "8af95a02074e8bd5a86943295ca58d2dbfeb8d487a5ea3c123cf9b03228cdd68"
+  },
+  {
+   "name": "overlay-resume-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "401869acbdf24a5afc3edd12f94c5d2077ba1602e258641c86d6d94306de515d",
+   "png_sha256": "2e45c2d4bcc3dd4e0fc497c40c031a1265f36797b8bca8486cd40ece57cbb498"
+  },
+  {
+   "name": "overlay-resume-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "6bb61bf72a5dd7c7abb8fa7b000f58ee720f1ca38456f2456cd4279d8165b16b",
+   "png_sha256": "389dd44fe062c45e977cccb321ef68af507ca7eb75c2c5c731f9dedc50c31bf3"
+  },
+  {
+   "name": "overlay-resume-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "e442603b4e82c986166d1bea4533100041937f81931c1ef7f908aaa57ee988f5",
+   "png_sha256": "41b1f212eccd2b6250e59f0a59f33e15bb8fc501dc95fc4bb73c6a5d8f8a44a5"
+  },
+  {
+   "name": "overlay-resume-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "c3f8a99b712f15ace7beba5d17b24607c78a331b35c4ac10aaeb6a5c63e30b16",
+   "png_sha256": "1f300a5a99337962634ed9e72781443d3d8321886c57032b33da4ccd8334cebd"
+  },
+  {
+   "name": "overlay-resume-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "c12b37f0b0343a1f01c15a742a980854ef65d5b42e726cb3868d5d7708b7eb5b",
+   "png_sha256": "eaf9917fc50da621e34bdb351ab3e646d663ec4a49a5667d4639e7f05515ed5a"
+  },
+  {
+   "name": "overlay-resume-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "9863b02c6e09f62dd63d5f0dac00955aafa0b582c5e3c00486bdfe68254e9592",
+   "png_sha256": "3760e8aa72bbea5ca9dc8e77468488b99a052b8bd523ac398c24c5df11a5c124"
+  },
+  {
+   "name": "palette-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "197fdd93622c04b74f1a85d7440ee226337ac5861935c63f1794269246d682f5",
+   "png_sha256": "0711727700e77c9a8177284a576cfa30ae2b2f1440df71cc8fdf8f8a5eeb0669"
+  },
+  {
+   "name": "palette-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "5013f370791dbc445477b8735a0a3bdf6cd51f9c397819cb8e4919730a70e22a",
+   "png_sha256": "757a8c8ff1ff70821f01c470b13db81a9b54cb08746b9044a658c636d4efc3b4"
+  },
+  {
+   "name": "palette-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "a4dfbd2510b912baa3e1268640d04e32bae176dc4f02141dba5f53c153b21f00",
+   "png_sha256": "175aab17de1403e0c4bafe921d3b42504a87c0a8029ce640a0704b2491809303"
+  },
+  {
+   "name": "palette-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "ca1afca90c79d42df1eb0df5e77720e580cfd56cd6bb465919c595807f4a6dba",
+   "png_sha256": "b4f05f63ca321f1397464bd7839997b5170bc5110cf752f77f0202fbb627eb37"
+  },
+  {
+   "name": "palette-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "1641eeef520ed308a5f7a390e6911a4c1d434501ac932f96d9651d67a506afb3",
+   "png_sha256": "c83cf21ddff1307a8cf4f76c35ca55dc9aad4f72efa6b1aba90b950f7e0c757e"
+  },
+  {
+   "name": "palette-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "ec9650646a454abb391d24a21732394ffac916c090b9ac59462bfd0f9efff544",
+   "png_sha256": "c6379364f1a0adac15087307486dabcdf942f5742e93752d6e2a272b59b2865d"
+  },
+  {
+   "name": "recon-history-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "cd29c9c2742e87ed0faeb44d4b9187f829c23b76b8b098434e72cf28ecad3fae",
+   "png_sha256": "75dbce5b116c1db08ce4809a026dce5485a23163106bf2dcc3efb8f2db8ada8b"
+  },
+  {
+   "name": "recon-history-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "c26bff95ea8d738874e6a73fb9ae682eaedf3692fc024dc355d0a0708d9a67cf",
+   "png_sha256": "198d8fc7e946b1db1088f3f48225a17cc7048f910797a58e6d47e7e44a3e2cee"
+  },
+  {
+   "name": "recon-history-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "c7313f061abd0f3866b987e3903f8668fc122c63c0b7cfa8634906cc5a87db80",
+   "png_sha256": "da39bb875aa0c0b175f217fdbed14a61368da6739b10aeccc46657d9572dcede"
+  },
+  {
+   "name": "recon-history-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "05f6ee27635d941955f4386a1a92b0c90491d3cd46419c349ba01be2cf24db0c",
+   "png_sha256": "fe5b46edde53c7a5b27c6b078a72eb3f504079b50ea0f5ea6b231eccf6ce1b93"
+  },
+  {
+   "name": "recon-history-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "5c17de7e7397135ebabb12f573f4873c5ebd9a5c00689ec29a6d1de7a00dba94",
+   "png_sha256": "040adc8a612dfae0cb80e006e1e06b98b1be83aa5ad044f3295a67fe64a6807c"
+  },
+  {
+   "name": "recon-history-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "2b8365b72bbb0ef8febf275a12c20fa4471d50d8ca2bd461e5da5c87a786bfac",
+   "png_sha256": "03b1a21dae7400ed72c16ca0972bc7ac775204ddebda5c6a46c7c728a29c609b"
+  },
+  {
+   "name": "recon-transcript-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "65fc17a13e6a237392974c699158f3512b9fbc5640670a3ee5c270eb550233df",
+   "png_sha256": "faec38be54fb41ee7c353bdbed9c1e7c4ff79d40a0c0cd93dc78a57bf6a29240"
+  },
+  {
+   "name": "recon-transcript-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "739fb4cb9f42d2a630694cf20fd2cc289d49725780aa41d6f15489d351e3fd10",
+   "png_sha256": "7aefbae699b389c683085dd82640ee2a4a9cfa97adbee1bac88c333df9974330"
+  },
+  {
+   "name": "recon-transcript-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "7cbcc2ed86a9660c252f05f5a8dd61d075dea6425429abb8fe44d86bddc3e0c2",
+   "png_sha256": "64216a3dcec7801022079b3501b436c8e020585283cc701b74280232045e676c"
+  },
+  {
+   "name": "recon-transcript-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "e13be31b1221212b6d41052d4ef9204ca1e9ba39cb5c896961ec6f770c281c67",
+   "png_sha256": "99f7535c9935a89bef5d602e5be5f99b2631de13cf4871eb2c953bbbb7f1e9d7"
+  },
+  {
+   "name": "recon-transcript-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "135cd26f1883d662fd47bd2953684a4a04f9dc1ad3b933c3cec195e0603f7164",
+   "png_sha256": "f05d11bcc7385d491ee9ecdfd74014996aefb4f6f6629589c28773a4aa62d192"
+  },
+  {
+   "name": "recon-transcript-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "8b157614d214fe45898741f2f6bdd4b76bc258036c35b76ce8d6a5bd217065ed",
+   "png_sha256": "b102fc888797e4fcac819ffe0c3e1646fee3c181a39752d2fc4c6c5b3bed60fd"
+  },
+  {
+   "name": "record-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "b68933e219a1e2a391730090bc06dbd796110b654e81dbc944380cd8d0212ac4",
+   "png_sha256": "da49f58985850fc6676945fd3254da506e56ba28970fb1289f79bd5be5bc70cc"
+  },
+  {
+   "name": "record-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "276e950415978b0db651fe589f4adde5f989040f348ccfe73b06a0eb43c21739",
+   "png_sha256": "e2df218dd15cfede3272599400199ab899b76c3f961c4abfa319747f9099152e"
+  },
+  {
+   "name": "record-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "a846d8278cd47a527df5dfea2b97595f645c2f5a045a39b909092922fa4f59cf",
+   "png_sha256": "4fe855b49c8b502a4159d23dd7b7d4abb8d41368485198c59ce1d6473164f374"
+  },
+  {
+   "name": "record-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "9a926394a9f187f9974d91eab06d1bddeaa0fb2d8b1b7108fe89afe49c1a98a4",
+   "png_sha256": "506e429d845a1ead88b1bcf98d8b04b269c2f20b4a93077691d9cbf9997d8533"
+  },
+  {
+   "name": "record-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "48b0a246eaa1ecd0f71152cf8450da7cc0abee421a482dbc1265c6b543e5ceb9",
+   "png_sha256": "d73ba72d2b2bb78e9a7c1a9e544dfa82e548bd8bb46eca84dbe9a14033709739"
+  },
+  {
+   "name": "record-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "a1f94d90ed65ff5105cd176b194a0787370ff1816b13a2bff4714a657621feaf",
+   "png_sha256": "3638d365c91a93425e608a122a8d06773d5f632c88122e62e08858ff2fa2fa0c"
+  },
+  {
+   "name": "tools-page-0-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "0a1dfc72ec9ca36d3f5db7c4b17cf3ed956c994e5d8686a10a12c67e92005a3b",
+   "png_sha256": "98d3356a5e057cdcc4272d64ad6489f6b1876842e2bd4d0c23750a0e8e760fb6"
+  },
+  {
+   "name": "tools-page-0-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "2fa10c6dd36429f95533e9e451d52ecec63a782d16ffd44a3283eefa0c4385ff",
+   "png_sha256": "c56827591e3359f7a7001cd48f46d73554d8fee5256b499d1463531bd9dcbf1f"
+  },
+  {
+   "name": "tools-page-0-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "98e0f0184b529bd87cec0767f0f8819e8a0c9e028eefc0fec477f573e0252286",
+   "png_sha256": "e7715c63f83e240466e4ae10173f981e9b563ec29d45d047606c04dc01f11e0f"
+  },
+  {
+   "name": "tools-page-0-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "8ceba7f409396e81cd64e614e56b3a05a17d9817c75594bc3b1113e4c11686ad",
+   "png_sha256": "46a35fe35bc1bbed485deb4e9546a96101d50c629ab5c419c5ed62383346f5a0"
+  },
+  {
+   "name": "tools-page-0-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "4ac4c9c755c4bb247c92b0d4781c0fb9d7b1895948735d73b8d7b440856a495b",
+   "png_sha256": "720dc4a382f819c5df48e8fc9334d150e2732e98b5505fbbef17a423f9e42e41"
+  },
+  {
+   "name": "tools-page-0-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "3c761041519221a241339b3cdc700f8632a9f8b3bc8734be1caa89a4d3ecd140",
+   "png_sha256": "dd854bc6b3608eb501e38107ee96c1a509fc4cc3e47f40de5be72c7f5c38b02d"
+  },
+  {
+   "name": "tools-page-1-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "0a1dfc72ec9ca36d3f5db7c4b17cf3ed956c994e5d8686a10a12c67e92005a3b",
+   "png_sha256": "98d3356a5e057cdcc4272d64ad6489f6b1876842e2bd4d0c23750a0e8e760fb6"
+  },
+  {
+   "name": "tools-page-1-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "2fa10c6dd36429f95533e9e451d52ecec63a782d16ffd44a3283eefa0c4385ff",
+   "png_sha256": "c56827591e3359f7a7001cd48f46d73554d8fee5256b499d1463531bd9dcbf1f"
+  },
+  {
+   "name": "tools-page-1-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "98e0f0184b529bd87cec0767f0f8819e8a0c9e028eefc0fec477f573e0252286",
+   "png_sha256": "e7715c63f83e240466e4ae10173f981e9b563ec29d45d047606c04dc01f11e0f"
+  },
+  {
+   "name": "tools-page-1-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "ae17332debecea5db1eb16ad7758c0f062b3c300a2b0ff55419f3f4993d4cf4f",
+   "png_sha256": "f319314feb66c70a03f378e34d690bade2f53e1ddec33bfb27a71267ae4bca45"
+  },
+  {
+   "name": "tools-page-1-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "9235136d06c56cb3a9edb7168909f2b4e5e22506561072f036b5630ebe8fdfdb",
+   "png_sha256": "3240373e61982c7890cb394473cd42b237daed56e5062ee7b82ff5917645ee02"
+  },
+  {
+   "name": "tools-page-1-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "193dab84b7c598de10bb984de37fb7f7a32e3f5d074ad797c44bc610ad8e1686",
+   "png_sha256": "1feeada90bf0f1c9aadfd7921e3410a90002f85b2e30e06ab900f42bbd5d93dc"
+  },
+  {
+   "name": "tools-page-2-100x32",
+   "width": 100,
+   "height": 32,
+   "cells_sha256": "0a1dfc72ec9ca36d3f5db7c4b17cf3ed956c994e5d8686a10a12c67e92005a3b",
+   "png_sha256": "98d3356a5e057cdcc4272d64ad6489f6b1876842e2bd4d0c23750a0e8e760fb6"
+  },
+  {
+   "name": "tools-page-2-120x40",
+   "width": 120,
+   "height": 40,
+   "cells_sha256": "2fa10c6dd36429f95533e9e451d52ecec63a782d16ffd44a3283eefa0c4385ff",
+   "png_sha256": "c56827591e3359f7a7001cd48f46d73554d8fee5256b499d1463531bd9dcbf1f"
+  },
+  {
+   "name": "tools-page-2-160x50",
+   "width": 160,
+   "height": 50,
+   "cells_sha256": "98e0f0184b529bd87cec0767f0f8819e8a0c9e028eefc0fec477f573e0252286",
+   "png_sha256": "e7715c63f83e240466e4ae10173f981e9b563ec29d45d047606c04dc01f11e0f"
+  },
+  {
+   "name": "tools-page-2-40x20",
+   "width": 40,
+   "height": 20,
+   "cells_sha256": "8c336b66035004779bbf0414ca6acfaceef1065ce8a44f25f93f75b0f5d80efe",
+   "png_sha256": "4b1cc5eab516f36795a763ff48599fa80d62287d9f3e4e7ae6392b120538a379"
+  },
+  {
+   "name": "tools-page-2-60x18",
+   "width": 60,
+   "height": 18,
+   "cells_sha256": "9ac27834a4b2014e437e036bd186805e6c0ca60512184d31e0357492a62f11b7",
+   "png_sha256": "089b1b30ee94e0b7ada2ed29e4d05eb22dfb7723bdcc1aa7f739a75128fe9c35"
+  },
+  {
+   "name": "tools-page-2-80x24",
+   "width": 80,
+   "height": 24,
+   "cells_sha256": "06a7c02550a71560fd874be0688bccfd15a8da253fed2dd109c015868e99077f",
+   "png_sha256": "7bec332aa7ab9425210f0e26b0cc7d4b2c3c52155427f496c795452deebb10a4"
+  }
+ ],
+ "artifact_count": 162,
+ "review_ledger": "README.md"
+}

@@ -97,6 +97,11 @@ let frozen = TranscriptBlock { revision, width, content: rendered_lines };
 Intel article imagery preserves decoded source pixels within the bounded decoder limits.
 Background encoding performs one Lanczos contain resize at the terminal's pixel dimensions;
 the encoded image is centered horizontally and vertically inside its registered area.
+In the brief focus reader the encoded image occupies the left column inside the brief
+article section, beside the brief content; image and content are vertically centered
+within the section. The column is sized adaptively from the reader width (14–40 columns,
+keeping at least 24 columns of brief text) and height (5–12 rows), and collapses when
+the reader is too narrow.
 Bulletin preview text is vertically centered when shorter than its viewport and scrolls
 normally when overflowing. Native graphics preserve photographic detail; half-block
 fallback is inherently limited to two color samples per terminal cell.

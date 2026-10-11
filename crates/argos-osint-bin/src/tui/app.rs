@@ -14011,6 +14011,180 @@ mod tests {
         app.intel_links_reviewing.clear();
     }
 
+    fn intel_brief_image_article(id: &str, image_url: &str) -> AtlasArticleRow {
+        AtlasArticleRow {
+            run_id: "r1".into(),
+            id: id.into(),
+            title: "Brief focus article with an image column".into(),
+            description: "First sentence of the deterministic preview stays readable beside the image column. Second sentence keeps the prose wide enough to wrap across several rows. Third sentence makes the section taller than the image so the image stays vertically centered. Fourth sentence leaves the reader readable at every supported viewport size.".into(),
+            url: "https://example.com/article".into(),
+            country: "us".into(),
+            source_name: "Test Source".into(),
+            source_domain: "example.com".into(),
+            author: String::new(),
+            image_url: image_url.into(),
+            published_at: "2026-10-08T12:00:00Z".into(),
+            provider: "newsapi".into(),
+            temperature: 0.8,
+            category: "stability".into(),
+            seen_at: String::new(),
+        }
+    }
+
+    /// Select Intel, install one brief-article fixture and return the center
+    /// reader geometry for the requested viewport.
+    fn intel_brief_image_geometry(
+        app: &mut App,
+        article: AtlasArticleRow,
+        width: u16,
+        height: u16,
+        reader_page: usize,
+    ) -> crate::tui::ui::IntelCenterGeometry {
+        app.select(ModuleId::Intel.index());
+        app.intel_page = IntelPage::Briefing;
+        app.intel_articles = vec![article];
+        app.intel_sel = 0;
+        app.compact_pages[ModuleId::Intel.index()] = reader_page;
+        app.screen = Rect::new(0, 0, width, height);
+        crate::tui::ui::intel_center_geometry_for(app)
+            .unwrap_or_else(|| panic!("brief layout missing at {width}x{height}"))
+    }
+
+    #[test]
+    fn intel_brief_image_column_sits_beside_brief_content_and_centers_vertically() {
+        let mut app = app();
+        let geo = intel_brief_image_geometry(
+            &mut app,
+            intel_brief_image_article("art-1", "https://example.com/image.png"),
+            160,
+            50,
+            0,
+        );
+        let (image_x, image_y, image_w, image_h) = geo.image;
+        let (brief_x, brief_y, brief_w, brief_h) = geo.brief;
+        let (text_x, text_y, text_w, text_h) = geo.brief_text;
+        let inner_w = brief_w.saturating_sub(2) as usize;
+        let columns = image_w as usize + 1 + text_w as usize;
+        let image_bottom = image_y + image_h as i32;
+        let section_bottom = brief_y + brief_h as i32 - 1;
+        // The image column stays inside the brief article section.
+        assert!(image_x > brief_x, "{geo:?}");
+        assert!(image_x + image_w <= brief_x + brief_w - 1, "{geo:?}");
+        assert!(image_y > brief_y, "{geo:?}");
+        assert!(image_bottom <= section_bottom, "{geo:?}");
+        // The image column is strictly left of the brief prose.
+        assert!(image_x + image_w <= text_x, "{geo:?}");
+        // Image, gutter and prose fill the section inner width.
+        assert_eq!(columns, inner_w, "{geo:?}");
+        assert!(text_w >= 24, "{geo:?}");
+        // Image and prose are vertically centered inside the section.
+        let section_mid = brief_y + brief_h as i32 / 2;
+        let image_mid = image_y + image_h as i32 / 2;
+        let text_mid = text_y + text_h as i32 / 2;
+        assert!((image_mid - section_mid).abs() <= 1, "{geo:?}");
+        assert!((text_mid - section_mid).abs() <= 1, "{geo:?}");
+        assert!((14..=40).contains(&image_w), "{geo:?}");
+        assert!((5..=12).contains(&image_h), "{geo:?}");
+    }
+
+    #[test]
+    fn intel_brief_image_column_adapts_and_collapses_by_viewport() {
+        let mut app = app();
+        for (width, height) in [(160u16, 50u16), (120, 40), (100, 32), (80, 24), (60, 18)] {
+            let geo = intel_brief_image_geometry(
+                &mut app,
+                intel_brief_image_article("art-1", "https://example.com/image.png"),
+                width,
+                height,
+                1,
+            );
+            assert!(geo.image.2 > 0, "{width}x{height}: {geo:?}");
+            assert!((5..=12).contains(&geo.image.3), "{width}x{height}: {geo:?}");
+            assert!(geo.brief_text.2 >= 24, "{width}x{height}: {geo:?}");
+            match width {
+                160 => assert!(geo.image.2 >= 20, "{width}x{height}: {geo:?}"),
+                100 => assert!(
+                    (21..=23).contains(&geo.image.2),
+                    "{width}x{height}: {geo:?}"
+                ),
+                80 | 60 => assert_eq!(geo.image.3, 5, "{width}x{height}: {geo:?}"),
+                _ => {}
+            }
+        }
+        // The image column collapses at 40x20; the prose keeps the inner width.
+        let geo = intel_brief_image_geometry(
+            &mut app,
+            intel_brief_image_article("art-1", "https://example.com/image.png"),
+            40,
+            20,
+            1,
+        );
+        assert_eq!(geo.image.2, 0, "{geo:?}");
+        assert_eq!(geo.image.3, 0, "{geo:?}");
+        assert_eq!(geo.brief_text.0, geo.brief.0 + 1, "{geo:?}");
+        assert_eq!(geo.brief_text.2, geo.brief.2 - 2, "{geo:?}");
+    }
+
+    #[test]
+    fn intel_brief_text_keeps_full_width_without_image() {
+        let mut app = app();
+        for (label, image_url) in [("absent", ""), ("invalid", "file:///etc/passwd")] {
+            let geo = intel_brief_image_geometry(
+                &mut app,
+                intel_brief_image_article("art-1", image_url),
+                160,
+                50,
+                0,
+            );
+            assert_eq!(geo.image.2, 0, "{label}: {geo:?}");
+            assert_eq!(geo.image.3, 0, "{label}: {geo:?}");
+            assert_eq!(geo.brief_text.0, geo.brief.0 + 1, "{label}: {geo:?}");
+            assert_eq!(geo.brief_text.2, geo.brief.2 - 2, "{label}: {geo:?}");
+        }
+    }
+
+    #[test]
+    fn intel_brief_image_column_renders_beside_content_in_buffer() {
+        let mut app = app();
+        let geo = intel_brief_image_geometry(
+            &mut app,
+            intel_brief_image_article("art-1", "https://example.com/image.png"),
+            160,
+            50,
+            0,
+        );
+        let image_area = crate::tui::ui::article_image_area(&app);
+        if image_area.width > 0 && image_area.height > 0 {
+            app.article_images
+                .fixture("art-1", "https://example.com/image.png", image_area);
+        }
+        let buffer = render(&mut app, 160, 50);
+        let painted = buffer_text(&buffer);
+        assert!(painted.contains(" brief article "), "{painted}");
+        let (image_x, image_y, image_w, image_h) = geo.image;
+        let (text_x, text_y, text_w, text_h) = geo.brief_text;
+        let rows = buffer.area.height as i32;
+        let cols = buffer.area.width;
+        let mut image_blocks = 0;
+        for row in image_y..(image_y + image_h as i32).min(rows) {
+            for col in image_x..(image_x + image_w).min(cols) {
+                if matches!(buffer[(col, row as u16)].symbol(), "▀" | "▄") {
+                    image_blocks += 1;
+                }
+            }
+        }
+        assert!(image_blocks > 0, "no image glyphs in {image_area:?}");
+        let mut text_blocks = 0;
+        for row in text_y..(text_y + text_h as i32).min(rows) {
+            for col in text_x..(text_x + text_w).min(cols) {
+                if matches!(buffer[(col, row as u16)].symbol(), "▀" | "▄") {
+                    text_blocks += 1;
+                }
+            }
+        }
+        assert_eq!(text_blocks, 0, "image glyphs inside {image_area:?}");
+    }
+
     #[test]
     fn filter_fields_display_item_counts_in_placeholders() {
         let mut app = app();

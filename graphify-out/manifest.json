@@ -30,9 +30,9 @@
     "semantic_hash": "769b9d268d68d2b876cb64cebcc855f9"
   },
   "crates/argos-osint-bin/src/tui/app.rs": {
-    "mtime": 1791701709.0444565,
-    "seen": 1791702096.246401,
-    "ast_hash": "f27448608e2d01af3d54d6704436972a",
+    "mtime": 1791712203.7162519,
+    "seen": 1791713486.099778,
+    "ast_hash": "32ea31b1f96e59e2176dc12198e48d1d",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/atlas_actions.rs": {
@@ -108,9 +108,9 @@
     "semantic_hash": "28c3293556d4f43b0d509e809b8629dd"
   },
   "crates/argos-osint-bin/src/tui/ui.rs": {
-    "mtime": 1791686520.3348515,
-    "seen": 1791687297.516814,
-    "ast_hash": "648a0821e953ec08a5fa6f642cc0b48c",
+    "mtime": 1791711527.4053645,
+    "seen": 1791713486.1041331,
+    "ast_hash": "f6f613459a8a17fe857ebb547c8b0c3b",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/Cargo.toml": {
@@ -564,15 +564,15 @@
     "semantic_hash": ""
   },
   ".opencode/agents/ecc-planner.md": {
-    "mtime": 1791670173.2706368,
-    "seen": 1791671278.8222752,
-    "ast_hash": "776719988ee8e78cf1ae34263d8fbde4",
+    "mtime": 1791713593.3061023,
+    "seen": 1791713812.0892859,
+    "ast_hash": "71152b705238d192e1cad1745edafc98",
     "semantic_hash": ""
   },
   ".opencode/agents/ecc-reviewer.md": {
-    "mtime": 1791670173.271088,
-    "seen": 1791671278.822279,
-    "ast_hash": "9e2ab03f63906458618b07c79081ab14",
+    "mtime": 1791713593.3053591,
+    "seen": 1791713812.089293,
+    "ast_hash": "8ab3b620da27bd00f870d0ff4791b5c3",
     "semantic_hash": ""
   },
   ".opencode/commands/ecc-checkpoint.md": {
@@ -678,9 +678,9 @@
     "semantic_hash": ""
   },
   "AGENTS.md": {
-    "mtime": 1791670173.2671459,
-    "seen": 1791671278.8260741,
-    "ast_hash": "ccd4a4b9e5ed3af96d82ce412a30168c",
+    "mtime": 1791713593.3074985,
+    "seen": 1791713812.093636,
+    "ast_hash": "b95ade5d2cd513a1e1fca24e9694a95d",
     "semantic_hash": ""
   },
   "README.md": {
@@ -702,9 +702,9 @@
     "semantic_hash": ""
   },
   "docs/opencode-v2.md": {
-    "mtime": 1791641134.1309714,
-    "seen": 1791651636.670601,
-    "ast_hash": "05a2eebf87224aa822d33317c3842b58",
+    "mtime": 1791713593.3196228,
+    "seen": 1791713812.10406,
+    "ast_hash": "6a5a7610321f6c14b27056a08611482e",
     "semantic_hash": ""
   },
   "docs/providers.md": {
@@ -1236,9 +1236,9 @@
     "semantic_hash": ""
   },
   ".opencode/tests/tools-registry.test.mjs": {
-    "mtime": 1791641134.1330023,
-    "seen": 1791651636.6261692,
-    "ast_hash": "8fe0128f2ab9e1d8b525e3ba555a6816",
+    "mtime": 1791710558.7154493,
+    "seen": 1791710703.9075022,
+    "ast_hash": "3a46458b8ec845b888eb6f922631f35d",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/profile.rs": {
@@ -1548,21 +1548,21 @@
     "semantic_hash": ""
   },
   ".opencode/agents/ecc-edit.md": {
-    "mtime": 1791670173.2701612,
-    "seen": 1791671278.822269,
-    "ast_hash": "78162164e1b4da14c196cc83f183615e",
+    "mtime": 1791713593.3068922,
+    "seen": 1791713812.08928,
+    "ast_hash": "c3c6fb47559baea16f3481597bedf0c1",
     "semantic_hash": ""
   },
   ".opencode/skills/argos-implement/SKILL.md": {
-    "mtime": 1791670173.2690728,
-    "seen": 1791671278.823622,
-    "ast_hash": "f15fba8987b285b6fbf5a221dc232a5b",
+    "mtime": 1791713593.3009434,
+    "seen": 1791713812.0909739,
+    "ast_hash": "29fd8652c637ed7e0efdb55c56ad1bd5",
     "semantic_hash": ""
   },
   ".opencode/skills/argos-plan/SKILL.md": {
-    "mtime": 1791670173.268364,
-    "seen": 1791671278.823628,
-    "ast_hash": "7147021e0f5efdb237e768cf238aa6ee",
+    "mtime": 1791713593.2978525,
+    "seen": 1791713812.09098,
+    "ast_hash": "6d77a0a0c0bf30e4c888a213e92b5385",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/tests/fixtures/search_engines/google_cleaned_html_fallback.html": {
@@ -1680,15 +1680,15 @@
     "semantic_hash": ""
   },
   "docs/tui-components.md": {
-    "mtime": 1791675887.428756,
-    "seen": 1791676101.716647,
-    "ast_hash": "20e087ad1bcd828cbca215f8d82c3c17",
+    "mtime": 1791713593.31689,
+    "seen": 1791713812.10512,
+    "ast_hash": "68e5ed264c6e22761e5cb0fc01943ace",
     "semantic_hash": ""
   },
   "docs/tui-design-spec.md": {
-    "mtime": 1791670173.2605808,
-    "seen": 1791671278.844448,
-    "ast_hash": "0b8a74c10d92a8c000e171e2fe7e18fa",
+    "mtime": 1791713593.311647,
+    "seen": 1791713812.105129,
+    "ast_hash": "2a882cd4194f2c8e47f9c6b32dbd49cc",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/profile_components.rs": {
@@ -1698,9 +1698,9 @@
     "semantic_hash": ""
   },
   "docs/profile-analytics-dashboard.md": {
-    "mtime": 1791671156.4564614,
-    "seen": 1791671278.844074,
-    "ast_hash": "01dc645bfd1c6e3d364b1d6b5231b93a",
+    "mtime": 1791713593.3218231,
+    "seen": 1791713812.104077,
+    "ast_hash": "6e085e7d00e85e04777499acec8493e5",
     "semantic_hash": ""
   },
   ".opencode/tests/tui-review.test.mjs": {
@@ -1710,9 +1710,9 @@
     "semantic_hash": ""
   },
   "scripts/tui_review.py": {
-    "mtime": 1791641133.828882,
-    "seen": 1791651636.660903,
-    "ast_hash": "a5a283b3cf5578c5029e8729b4ea5c03",
+    "mtime": 1791713644.579007,
+    "seen": 1791713812.088817,
+    "ast_hash": "42cb826cc644c0c8e0f7495cb85fef99",
     "semantic_hash": ""
   },
   ".opencode/commands/tui-verify.md": {
@@ -1722,9 +1722,9 @@
     "semantic_hash": ""
   },
   ".opencode/skills/argos-tui-verify/SKILL.md": {
-    "mtime": 1791670173.2697332,
-    "seen": 1791671278.823633,
-    "ast_hash": "5cdcdcc8d0a415de681d720c7440a22c",
+    "mtime": 1791713716.3616471,
+    "seen": 1791713812.090986,
+    "ast_hash": "3c1a18cd3ece19211aa1c2b2857b3ba9",
     "semantic_hash": ""
   },
   "docs/tui-verification-session-2026-10-10.md": {
@@ -1734,9 +1734,9 @@
     "semantic_hash": ""
   },
   "docs/tui-verification.md": {
-    "mtime": 1791641342.5211267,
-    "seen": 1791651636.671337,
-    "ast_hash": "ad95c50d20cce1793ab7dfd5e29815a5",
+    "mtime": 1791713716.3628387,
+    "seen": 1791713812.105422,
+    "ast_hash": "20463df79aed3f34422070823d0a9f0b",
     "semantic_hash": ""
   },
   "docs/screenshots/profile-analytics-2026-10-10/profile-atlas-160x50.png": {
@@ -1818,9 +1818,9 @@
     "semantic_hash": ""
   },
   "docs/tui-overhaul-verification-2026-10-10.md": {
-    "mtime": 1791672286.0496933,
-    "seen": 1791676101.71678,
-    "ast_hash": "6b33429338fe70e0ac224ac76e171f50",
+    "mtime": 1791713661.663447,
+    "seen": 1791713812.1051369,
+    "ast_hash": "c7c52a290aff42caf6320727c94ba28f",
     "semantic_hash": ""
   },
   "docs/screenshots/tui-overhaul-2026-10-10/run-02-provenance.json": {
@@ -1926,9 +1926,9 @@
     "semantic_hash": ""
   },
   "docs/screenshots/intel-image-quality-2026-10-10/README.md": {
-    "mtime": 1791678002.51493,
-    "seen": 1791687297.5394828,
-    "ast_hash": "45fbcd1bc214beb2e01f6235fe6d532a",
+    "mtime": 1791713794.5891035,
+    "seen": 1791713812.104747,
+    "ast_hash": "4de91b52c33847cd3ec5d2e62801e07f",
     "semantic_hash": ""
   },
   "docs/screenshots/intel-image-quality-2026-10-10/intel-brief-image-100x32.png": {
@@ -2001,6 +2001,48 @@
     "mtime": 1791676422.6727936,
     "seen": 1791677503.191227,
     "ast_hash": "d427cfdea3cc9bfc7c83efc74bb6f5c8",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-brief-image-column-2026-10-11/manifest.json": {
+    "mtime": 1791713762.4026296,
+    "seen": 1791713812.087641,
+    "ast_hash": "61138788dadbb7f9e7b98f2a320f009f",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-brief-image-column-2026-10-11/intel-brief-image-100x32.png": {
+    "mtime": 1791713762.3225183,
+    "seen": 1791713812.110719,
+    "ast_hash": "c4bf9b4c8de306c1f1e8f2be013fd82a",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-brief-image-column-2026-10-11/intel-brief-image-120x40.png": {
+    "mtime": 1791713762.3082879,
+    "seen": 1791713812.1107259,
+    "ast_hash": "b941c47ba27b4d91f4a7ac1b0ba10130",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-brief-image-column-2026-10-11/intel-brief-image-160x50.png": {
+    "mtime": 1791713762.2969103,
+    "seen": 1791713812.110733,
+    "ast_hash": "16084ad471dda4f8479ec2af03f9370a",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-brief-image-column-2026-10-11/intel-brief-image-40x20.png": {
+    "mtime": 1791713762.383724,
+    "seen": 1791713812.1107368,
+    "ast_hash": "9963902ed585e53bfdb89943dc25b028",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-brief-image-column-2026-10-11/intel-brief-image-60x18.png": {
+    "mtime": 1791713762.3564522,
+    "seen": 1791713812.110742,
+    "ast_hash": "d272d9dcbaba0d5e73c258c1d2862490",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-brief-image-column-2026-10-11/intel-brief-image-80x24.png": {
+    "mtime": 1791713762.3321793,
+    "seen": 1791713812.1107461,
+    "ast_hash": "b429d0791c5c987c43f0442f4675b249",
     "semantic_hash": ""
   }
 }

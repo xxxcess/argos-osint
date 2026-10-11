@@ -3315,6 +3315,29 @@ pub fn tool_room_for(app: &App) -> usize {
     tool_room(app)
 }
 
+/// Test-only reader geometry for the Intel brief focus view.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub struct IntelCenterGeometry {
+    pub image: (u16, i32, u16, u16),
+    pub brief: (u16, i32, u16, u16),
+    pub brief_text: (u16, i32, u16, u16),
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub fn intel_center_geometry_for(app: &App) -> Option<IntelCenterGeometry> {
+    let body = chrome(app.screen, app).body;
+    let (_left, center, _right) = intel_briefing_areas(app, body);
+    let layout = intel_center_layout(app, center)?;
+    let rect = |area: AbsRect| (area.x, area.y, area.width, area.height);
+    Some(IntelCenterGeometry {
+        image: rect(layout.image),
+        brief: rect(layout.brief),
+        brief_text: rect(layout.brief_text),
+    })
+}
+
 pub fn atlas_run_card(app: &App) -> bool {
     matches!(&app.overlay, Overlay::Block { title, .. } if title.starts_with("Run "))
 }
@@ -7423,17 +7446,11 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     // Side panes stay fixed; only the center stack scrolls.
     frame.render_widget(Block::default().style(theme::text()), center);
     if let Some(layout) = intel_center_layout(app, center) {
+        // The brief pane owns the background: paint it before the image column.
+        draw_intel_brief_article(frame, center, &layout);
         if let Some((rect, _)) = intersect_abs(center, layout.image) {
             draw_article_image(frame, app, rect);
         }
-        draw_clipped_md_pane(
-            frame,
-            center,
-            layout.brief,
-            " brief article ",
-            &layout.brief_lines,
-            0,
-        );
         draw_clipped_button(
             frame,
             app,
@@ -7515,6 +7532,27 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     draw_intel_jobs_pane(frame, app, right_rows[3]);
 }
 
+/// Brief article section: the image occupies a left column beside the brief
+/// prose, both vertically centered inside the bordered pane.
+fn draw_intel_brief_article(frame: &mut Frame, viewport: Rect, layout: &IntelCenterLayout) {
+    let Some((vis, _top_clip)) = intersect_abs(viewport, layout.brief) else {
+        return;
+    };
+    frame.render_widget(Block::default().style(theme::text()), vis);
+    stroke_clipped_box(frame, viewport, layout.brief, " brief article ");
+    let Some((text_vis, skipped)) = intersect_abs(viewport, layout.brief_text) else {
+        return;
+    };
+    let visible: Vec<Line> = layout
+        .brief_lines
+        .iter()
+        .skip(skipped as usize)
+        .take(text_vis.height as usize)
+        .cloned()
+        .collect();
+    frame.render_widget(Paragraph::new(visible), text_vis);
+}
+
 #[derive(Clone, Copy)]
 struct AbsRect {
     x: u16,
@@ -7541,6 +7579,7 @@ fn intel_reader_actions(area: AbsRect) -> (AbsRect, AbsRect) {
 struct IntelCenterLayout {
     image: AbsRect,
     brief: AbsRect,
+    brief_text: AbsRect,
     reload: AbsRect,
     full: AbsRect,
     reports_btn: AbsRect,
@@ -7614,19 +7653,46 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     let min_section = term_pct_height(app, 0.15, 5);
     let full_h = term_pct_height(app, 0.50, 8);
 
-    let mut brief_lines = intel_brief_preview_lines(article, inner_w);
+    // The article image lives in a left column inside the brief article section;
+    // the prose keeps the remaining columns and both are vertically centered.
+    let gap: u16 = 1;
+    let mut image_w: u16 = 0;
+    let mut image_h: u16 = 0;
+    if app.article_images.visible(&article.id, &article.image_url) {
+        // ~35% of the reader inner width, bounded, but never squeeze the brief prose
+        image_w = ((inner_w as u16).saturating_mul(35) / 100).clamp(14, 40);
+        let text_room = (inner_w as u16).saturating_sub(24 + gap);
+        if image_w > text_room {
+            image_w = text_room;
+        }
+        if image_w >= 14 {
+            // ~20% of the reader height, bounded; never taller than the box is wide
+            // in pixel terms (terminal cells are ~1:2 pixels, so rows <= cols / 2)
+            image_h = (viewport.height.saturating_mul(20) / 100)
+                .clamp(5, 12)
+                .min((image_w / 2).max(3));
+        } else {
+            // Too narrow: collapse, text keeps the full width.
+            image_w = 0;
+        }
+    }
+    let image_columns = if image_w > 0 { image_w + gap } else { 0 };
+    let text_w = (inner_w as u16).saturating_sub(image_columns).max(1) as usize;
+
+    let mut brief_lines = intel_brief_preview_lines(article, text_w);
     if app
         .status
         .starts_with(&format!("Could not open {}:", article.url))
     {
         brief_lines.splice(
             0..0,
-            wrap_text(&app.status, inner_w)
+            wrap_text(&app.status, text_w)
                 .into_iter()
                 .map(|text| Line::styled(text, theme::accent())),
         );
     }
     let brief_h = (brief_lines.len() as u16)
+        .max(image_h)
         .saturating_add(2)
         .max(min_section);
 
@@ -7647,13 +7713,7 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
         ACTION_H
     };
 
-    let image_h = if app.article_images.visible(&article.id, &article.image_url) {
-        viewport.height.clamp(6, 10)
-    } else {
-        0
-    };
     let total = brief_h
-        .saturating_add(image_h)
         .saturating_add(ACTION_H)
         .saturating_add(full_h)
         .saturating_add(recon_h)
@@ -7663,9 +7723,24 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     let scroll = app.scrolls.intel_brief.min(stack_scroll_max) as i32;
 
     let mut y = i32::from(viewport.y) - scroll;
-    let image = abs_rect(viewport.x, y, viewport.width, image_h);
-    y += i32::from(image_h);
     let brief = abs_rect(viewport.x, y, viewport.width, brief_h);
+    // Image and prose sit inside the brief section, vertically centered.
+    let brief_inner_h = brief_h.saturating_sub(2);
+    let image_top = brief_inner_h.saturating_sub(image_h) / 2;
+    let text_top =
+        brief_inner_h.saturating_sub(brief_lines.len().min(brief_inner_h as usize) as u16) / 2;
+    let image = abs_rect(
+        viewport.x + 1,
+        brief.y + 1 + i32::from(image_top),
+        image_w,
+        image_h,
+    );
+    let brief_text = abs_rect(
+        viewport.x + 1 + image_columns,
+        brief.y + 1 + i32::from(text_top),
+        text_w as u16,
+        brief_lines.len() as u16,
+    );
     y += i32::from(brief_h);
     let reload = abs_rect(viewport.x, y, viewport.width, ACTION_H);
     y += i32::from(ACTION_H);
@@ -7680,6 +7755,7 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     Some(IntelCenterLayout {
         image,
         brief,
+        brief_text,
         reload,
         full,
         reports_btn,

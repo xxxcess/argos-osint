@@ -94,10 +94,10 @@ All agents follow [tui-verification.md](tui-verification.md); the [session recor
 Install Pillow in task scratch using `uv venv .agent-scratch/tui-review-env` then `uv pip install --python .agent-scratch/tui-review-env/bin/python Pillow`. After the parent gate, capture with a real selected plan name:
 
 ```sh
-.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<PLAN_ID>/tui/run-01
+.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<PLAN_ID>/tui/run-01 --test dump_overhaul_screens --include 'tools-page-*' --size 160x50 --size 80x24 --reason "Tools page change"
 ```
 
-The default captures Profile's 60 cases; `--test` selects another emitting fixture and `--ignored` is only for ignored fixture tests. The guide covers manifest/review/cleanup. If OpenCode cannot view images, hand off PNG links and leave visual review pending; do not invent an image tool or claim generation is review.
+Choose the affected app/pages explicitly with `--test` and `--include`, select affected thresholds with `--size`, and record `--reason`. There is no implicit Profile capture. `--all` is reserved for intentional full sweeps; `--ignored` is only for ignored fixture tests. Selection precedes PNG rendering; fixture assertions still run. The guide covers manifest/review/cleanup. If OpenCode cannot view images, hand off PNG links and leave visual review pending; do not invent an image tool or claim generation is review.
 
 The installed V2 format uses top-level `agents` and per-agent `request.body` for reasoning settings. The legacy `agent`/`options` form was observed putting permission rules inside provider request options rather than enforcing the documented tool policy. This repo uses supported fields and preserves model IDs/reasoning settings. Plan denies source edits, Code Mode and edit/build subagents; build keeps scoped editing. Both primary agents allow the named skills, including `argos-tui-verify`. Arbitrary shell access is not a security sandbox; read-only planning remains an agent responsibility.
 

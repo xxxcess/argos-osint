@@ -16,7 +16,21 @@ For delegated work, assign disjoint file sets. Child prompts carry components/pr
 
 Use `ratatui::backend::TestBackend` with deterministic snapshots, timestamps and fake providers. Render the application including its real shell, theme and registry. Examples in `crates/argos-osint-bin/src/tui/app.rs`: `analytics_fixture`, `analytics_viewports_and_data_states`, `dump_cells` and adjacent interaction tests. Draw before clicking so the registry is current; verify resize refreshes geometry.
 
-Choose a matrix proportional to the changed surface. Profile's matrix is:
+Choose screenshot scope from the change and its consumers before capturing. Record the affected Argos app, pages/presets, states, fixture test, include patterns, viewport sizes and why other surfaces are excluded. File names alone do not establish scope: an edit in `ui.rs` or `app.rs` may be local, while a shared helper may affect several apps.
+
+| Change | Required visual coverage |
+| --- | --- |
+| Local label/style/content | Changed page/state at a normal viewport and the smallest or wrapping threshold affected |
+| App-specific layout, scrolling or compact page | Changed app's pages/states at affected wide, breakpoint and compact sizes; include below-minimum if its fallback changes |
+| Shared component | Each distinct affected consumer/preset at relevant thresholds; expand to all consumers if behavior differs or impact is uncertain |
+| Shared Profile geometry or registry | Affected Dashboard/Report pages across the full Profile size matrix; registry/inventory changes cover all 20 IDs and Summary reuse |
+| Shared shell, theme, global navigation, full overhaul or uncertain global impact | Both `dump_overhaul_screens` and `analytics_viewports_and_data_states`, all emitted pages/sizes/states |
+| Interaction/data-only with unchanged buffers | Focused action/metric tests; no new PNGs required when reviewed evidence still matches output |
+| Docs/tooling-only | Validate the workflow/tool; no application-wide screenshot sweep |
+
+Include directly affected overlays, empty/loading/stale/error and overflow states. Do not capture unrelated apps merely because a fixture emits them. Keep the full offline test gate for Rust changes; screenshot scope does not narrow test assertions. Broaden coverage when shared consumers or responsive behavior cannot be bounded.
+
+Profile's available size matrix is:
 
 | Case | Cells | Purpose |
 | --- | --- | --- |
@@ -27,7 +41,7 @@ Choose a matrix proportional to the changed surface. Profile's matrix is:
 | Minimum | 60×18 | Compact KPIs and reachable controls |
 | Below minimum | 40×20 | Navigation and explicit too-small notice |
 
-The Profile fixture emits eight page/report cases at seven sizes plus four state cases: 60 dumps. Do not require all 60 for unrelated small edits; test affected thresholds/states. This matrix does not cover Configs or all other modules. Add their focused cases when affected.
+The Profile fixture emits eight page/report cases at seven sizes plus four state cases: 60 dumps. `dump_overhaul_screens` emits 162 dumps for the shell, app pages and overlays. These are fixture inventories, not mandatory PNG counts for every change. Select only affected cases before rendering. Profile's `intel`/`recon`/`tools` names refer to analytics views, not those standalone apps. Configs/System use separate cases. Add a focused exporter when the inventory lacks the changed state.
 
 Include empty, loading, stale/error-with-retained-data, overflow, long Unicode labels/numbers, missing durations, low-N percentiles, unknown/over-limit capacity and signed/fractional series. Keep fixture times inside the chosen period.
 
@@ -63,7 +77,10 @@ Python 3.10+ and Pillow are needed for PNGs. Install dependencies in task-owned 
 ```sh
 uv venv .agent-scratch/tui-review-env
 uv pip install --python .agent-scratch/tui-review-env/bin/python Pillow
-.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<PLAN_ID>/tui/run-01
+.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture \
+  --output .planning/<PLAN_ID>/tui/run-01 --test dump_overhaul_screens \
+  --include 'tools-page-*' --size 160x50 --size 80x24 \
+  --reason "Tools compact page change; wide and compact layouts"
 ```
 
 Substitute the selected plan name for `<PLAN_ID>`. Dependency downloads may require host approval. DejaVu Sans Mono on Linux or Courier New on macOS is required; missing fonts are reported. No system Python mutation or Cargo dependency is needed.
@@ -73,11 +90,33 @@ The capture tool runs the selected binary test with locked dependencies, no defa
 For another module, extend a deterministic test to emit the same cell format into `ARGOS_SCREEN_DIR`, then select it:
 
 ```sh
-.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<PLAN_ID>/tui/run-02 --test dump_phase5b_screens --ignored
+.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture \
+  --output .planning/<PLAN_ID>/tui/run-02 --test dump_phase5b_screens --ignored \
+  --include 'brain-claim-detail*' --reason "Brain claim detail; normal and narrow states"
 python3 scripts/tui_review.py validate .planning/<PLAN_ID>/tui/run-02/cells
 ```
 
-Only explicitly ignored fixture tests need `--ignored`. A filter matching zero tests or a test without dumps fails capture. Cell validation uses the standard library. The low-level renderer still supports existing dumps:
+Only explicitly ignored fixture tests need `--ignored`. A filter matching zero tests or a test without dumps fails capture. Cell validation uses the standard library.
+
+`--test` and either `--include` or `--all` are required; there is no default app. Include patterns match fixture filename stems (without `.json`), use shell quotes, and combine by union. Repeat `--size WIDTHxHEIGHT` to restrict that union by actual cell dimensions; omit it to retain all emitted sizes for the selected pages. Each include pattern and requested size must match a selected dump or capture fails. Inspect the gallery to ensure required page/size combinations exist; selectors do not infer the change's acceptance criteria.
+
+| Surface | Test | Example include patterns |
+| --- | --- | --- |
+| Tools | `dump_overhaul_screens` | `tools-page-*` |
+| Intel article imagery | `dump_overhaul_screens` | `intel-image-*`, `intel-brief-image-*` |
+| Recon transcript/history | `dump_overhaul_screens` | `recon-transcript-*`, `recon-history-*` |
+| Profile Configs | `dump_overhaul_screens` | `configs-draft-*`, `configs-error-*` |
+| Shared overlays | `dump_overhaul_screens` | `palette-*`, `help-*`, `record-*`, `overlay-*` |
+| Profile analytics | `analytics_viewports_and_data_states` | `profile-recon-*`, `profile-report-*`, `profile-small-sample-*` |
+| Profile data states/System | `analytics_viewports_and_data_states` | `profile-empty-*`, `profile-stale-*`, `profile-loading-*`, `profile-system-*` |
+
+For generic app entry views (`app-<index>-*`), resolve the index from `ModuleId` rather than guessing. The selected screenshots retain the real application shell. Filters never crop the terminal buffer.
+
+For an intentional global sweep, run each fixture suite separately with `--all --reason "Shared shell change; all consumers"` and no include/size restriction. A full sweep is also available on request.
+
+The Rust fixture still executes and emits its cases, preserving assertions. The tool stages those dumps temporarily, retains/validates/renders only selected ones, and discards unselected temporary cells without generating PNGs. The manifest records selectors, rationale, emitted count and skipped names; the gallery states selected versus emitted counts. This saves PNG generation, storage and visual review, not fixture execution time. For expensive fixture execution, add a dedicated focused exporter rather than weakening existing tests.
+
+The low-level renderer supports existing dumps:
 
 ```sh
 .agent-scratch/tui-review-env/bin/python scripts/render_tui_cells.py <cells-dir> <screenshots-dir>
@@ -102,7 +141,7 @@ Record findings in the run's `README.md` and planning progress:
 | Fix | Root cause, owner/file, regression and fresh run |
 | Limits | Missing references, viewing capability, live/feature checks |
 
-Update manifest review fields only after review, with a ledger link. Re-capture to a new run after output, fixture, geometry or renderer changes; label earlier evidence superseded. Do not overwrite reviewed baselines. Screenshots do not replace action or metric tests.
+Update manifest review fields only after review, with a ledger link. Re-capture affected cases to a new run after output, fixture, geometry or renderer changes; preserve the recorded scope unless the fix expands its impact. Unaffected screenshots need no regeneration. Prior visual review may carry forward only when regenerated selected cell and PNG hashes match reviewed evidence and the viewport/state contract and renderer are unchanged; link the earlier ledger and record the comparison. Never describe carried evidence as a new image inspection. Label earlier evidence superseded only for changed cases. Do not overwrite reviewed baselines. Screenshots do not replace action or metric tests.
 
 ## Finish and retain evidence
 

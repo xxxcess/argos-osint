@@ -9,8 +9,8 @@ Run formatting, strict Clippy and the offline workspace suite in that order, as 
 Create a task-owned Python environment with Pillow, then capture into fresh plan directories:
 
 ```sh
-.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<plan>/tui/non-profile --test dump_overhaul_screens
-.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<plan>/tui/profile --test analytics_viewports_and_data_states
+.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<plan>/tui/non-profile --test dump_overhaul_screens --all --reason "Reproduce full overhaul"
+.agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<plan>/tui/profile --test analytics_viewports_and_data_states --all --reason "Reproduce full Profile overhaul"
 ```
 
 Non-Profile fixtures cover Home, all nine apps, three compact Tools pages, Configs draft/error, palette, help, full-record, memories, choice, Intel mode, fallback and resume overlays, transcript/history and article half-block imagery at 160×50, 120×40, 100×32, 80×24, 60×18 and 40×20. Profile covers all primary IDs, Dashboard/Report pages, seven viewports and empty/loading/stale/System states. Capture manifests record source fingerprints and rendered-cell hashes; capture itself does not certify visual or interaction correctness.

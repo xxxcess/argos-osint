@@ -76,7 +76,7 @@ let rows = components::measured_lines(vec![Line::raw(text)], width);
 
 Use [tui-verification.md](tui-verification.md) and `scripts/tui_review.py`. Name the component/preset, assert shared geometry/state behavior and inspect actual fixture PNGs. Capture starts pending; record reviewed images and action/metric results separately.
 
-Check Profile at 160×50, 120×40, 100×32, 80×24, 60×18 and below minimum. Cover all 20 IDs, zero, empty, missing history, loading, stale, error and small samples. Verify simultaneous panels, keyboard/mouse parity, full-record scrolling, state restoration, Unicode/no wrapping, units/scales/denominators and global shortcuts. Render actual terminal fixtures with `scripts/render_tui_cells.py`; compare Summary/Recon composition with approved references when available.
+For shared Profile geometry/registry changes, check Profile at 160×50, 120×40, 100×32, 80×24, 60×18 and below minimum, covering all 20 IDs. For local changes, select affected views, thresholds and zero/empty/missing/loading/stale/error/small-sample states per the verification guide. Verify simultaneous panels, keyboard/mouse parity, full-record scrolling, state restoration, Unicode/no wrapping, units/scales/denominators and global shortcuts. Render actual terminal fixtures with `scripts/render_tui_cells.py`; compare Summary/Recon composition with approved references when available.
 
 ## MeasuredEditor and TranscriptBlock
 
@@ -116,4 +116,4 @@ Intel imagery uses the Ratatui image adapter with protocol detection once outsid
 
 Recon uses a SURFACE user band with ACCENT edge, quiet Markdown synthesis and expandable evidence activity. Failed activities keep a short reason visible. Transcript offsets are usize, Unicode padding uses terminal cells, completed Markdown keeps revision/width caches, and cached block/local-row anchors preserve history during updates. Jump to latest resumes follow; previous/next-turn commands select user-query boundaries.
 
-Acceptance and reproducible capture: [tui-verification.md](tui-verification.md), tests `dump_overhaul_screens` and `analytics_viewports_and_data_states`. Capture all six viewport sizes including 40×20 into a fresh plan directory and inspect actual PNGs. Live graphics/browser checks are recorded separately from TestBackend evidence.
+Acceptance and reproducible capture: [tui-verification.md](tui-verification.md), tests `dump_overhaul_screens` and `analytics_viewports_and_data_states`. Scope capture to affected apps/pages and states using the verification guide; shared layout changes cover affected consumers at all six viewport sizes including 40×20. Full shell/theme/navigation changes use both suites. Capture into a fresh plan directory and inspect the selected actual PNGs. Live graphics/browser checks are recorded separately from TestBackend evidence.

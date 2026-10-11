@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Capture real TUI fixtures into a fresh, traceable review directory."""
 import argparse
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -46,6 +47,41 @@ def git(*args):
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
 
 
+def viewport(value):
+    try:
+        width, height = (int(part) for part in value.split("x"))
+        if width > 0 and height > 0:
+            return width, height
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("viewport must be positive WIDTHxHEIGHT, e.g. 80x24")
+
+
+def select_dumps(cells, patterns, sizes):
+    """Select before rendering; reject omissions caused by misspelled selectors."""
+    paths = sorted(cells.glob("*.json"))
+    selected = []
+    matched_patterns, matched_sizes = set(), set()
+    for path in paths:
+        matches = {pattern for pattern in patterns if fnmatch.fnmatchcase(path.stem, pattern)}
+        if patterns and not matches:
+            continue
+        data = json.loads(path.read_text())
+        size = data["width"], data["height"]
+        if sizes and size not in sizes:
+            continue
+        selected.append(path)
+        matched_patterns.update(matches)
+        matched_sizes.add(size)
+    if not selected:
+        raise ValueError("No selected cell dumps; check --test, --include and --size")
+    missing_patterns = set(patterns) - matched_patterns
+    missing_sizes = set(sizes) - matched_sizes
+    if missing_patterns or missing_sizes:
+        raise ValueError(f"Unmatched selectors: patterns={sorted(missing_patterns)}, sizes={sorted(missing_sizes)}")
+    return selected, [path.stem for path in paths if path not in selected]
+
+
 def capture(args):
     # Preflight before running Cargo or creating an artifact directory.
     import PIL  # noqa: F401
@@ -74,6 +110,9 @@ def capture(args):
                 "renderer_sha256": digest(ROOT / "scripts/render_tui_cells.py"),
                 "visual_review": "pending", "interaction_review": "not certified by capture",
                 "reference_comparison": "pending", "live_providers": "not exercised"}
+    manifest["selection"] = {"test": args.test, "include": args.include or [],
+                             "sizes": [f"{w}x{h}" for w, h in args.size],
+                             "all": args.all, "reason": args.reason}
     # Include new, untracked implementation files that a git diff alone omits.
     manifest["source_sha256"] = {
         str(path.relative_to(ROOT)): digest(path)
@@ -87,16 +126,29 @@ def capture(args):
     with tempfile.NamedTemporaryFile(mode="w", prefix="tui-review-", suffix=".log",
                                      dir=scratch, delete=False) as log:
         log_path = Path(log.name)
-        with tempfile.TemporaryDirectory(prefix="argos-tui-review-") as home:
+        with tempfile.TemporaryDirectory(prefix="argos-tui-review-") as home, \
+                tempfile.TemporaryDirectory(prefix="tui-cells-", dir=scratch) as raw:
             env = cargo_env()
             env.pop("ARGOS_EMBED", None)
-            env.update(ARGOS_HOME=home, ARGOS_SCREEN_DIR=str(cells))
+            env.update(ARGOS_HOME=home, ARGOS_SCREEN_DIR=raw)
             process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, text=True)
             for line in process.stdout:
                 print(line, end="", flush=True)
                 log.write(line)
             manifest["test_exit_code"] = process.wait()
+            (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+            if manifest["test_exit_code"] == 0:
+                try:
+                    selected, skipped = select_dumps(Path(raw), args.include or [], args.size)
+                except (ValueError, KeyError, TypeError, OSError) as error:
+                    manifest["selection_error"] = str(error)
+                    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+                    raise ValueError(f"{error}; incomplete artifacts: {output}; log: {log_path}") from error
+                manifest["emitted_count"] = len(selected) + len(skipped)
+                manifest["skipped_fixtures"] = skipped
+                for path in selected:
+                    path.replace(cells / path.name)
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     if manifest["test_exit_code"]:
         raise ValueError(f"Cargo failed; incomplete artifacts: {output}; log: {log_path}")
@@ -112,6 +164,8 @@ def capture(args):
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         lines = ["# TUI fixture review", "", "Actual TestBackend cells from deterministic fixtures. Review is pending.",
                  "", "See `manifest.json` for command, revision, environment and artifact hashes.", "",
+                 f"Scope: {args.reason}", "",
+                 f"Selected {len(records)} of {manifest['emitted_count']} emitted dumps; only selected fixtures were rendered.", "",
                  "| Fixture | Cells | Screenshot |", "| --- | --- | --- |"]
         for record in records:
             name = record["name"]
@@ -131,12 +185,22 @@ def main():
     sub = parser.add_subparsers(dest="action", required=True)
     run = sub.add_parser("capture", help="run offline fixtures, validate and render a fresh gallery")
     run.add_argument("--output", type=Path, required=True)
-    run.add_argument("--test", default="analytics_viewports_and_data_states",
+    run.add_argument("--test", required=True,
                      help="Cargo test filter; test must emit ARGOS_SCREEN_DIR dumps")
+    scope = run.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--include", action="append", help="fixture stem glob (quote it); repeat to include pages/states")
+    scope.add_argument("--all", action="store_true", help="intentionally select every emitted fixture")
+    run.add_argument("--size", action="append", type=viewport, default=[],
+                     help="select a viewport; repeat for thresholds (default: all emitted sizes)")
+    run.add_argument("--reason", required=True, help="affected surface/consumers and rationale for coverage")
     run.add_argument("--ignored", action="store_true", help="run an explicitly ignored fixture test")
     check = sub.add_parser("validate", help="validate existing cell dumps without Pillow/Cargo")
     check.add_argument("cells", type=Path)
     args = parser.parse_args()
+    if args.action == "capture" and args.all and args.size:
+        parser.error("--all is a full sweep; use --include '*' with --size for a scoped sweep")
+    if args.action == "capture" and not args.reason.strip():
+        parser.error("--reason must explain the selected coverage")
     try:
         if args.action == "capture":
             capture(args)

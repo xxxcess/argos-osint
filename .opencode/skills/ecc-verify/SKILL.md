@@ -9,3 +9,5 @@ Profile verification follows `docs/profile-analytics-dashboard.md`: all 20 uniqu
 TUI process and artifact retention: `docs/tui-verification.md` / `argos-tui-verify`. The parent owns capture and image/action/metric verification; editors remain formatting-only.
 
 For commit/release/configuration changes, run `node scripts/release_check.mjs versions` and the relevant offline Node tests (`node --test .opencode/tests/*.test.mjs`). Validate prepared messages with `node scripts/release_check.mjs message --file <path>`. These checks complement the Rust/TUI gates; see `docs/versioning.md`.
+
+Follow `docs/planning-artifacts.md` when recording acceptance: curate actual results, revision, reproducible commands and limitations; keep raw logs/captures local. Git ignore policy is exercised by `.opencode/tests/planning-artifacts.test.mjs`.

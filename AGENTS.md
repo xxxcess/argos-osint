@@ -136,7 +136,7 @@ Steps: `cargo fetch` → `cargo build --locked --no-default-features` → `cargo
 
 ## graphify
 
-Tracked graph: `graphify-out/`. Skill: `.opencode/skills/graphify/SKILL.md`. OpenCode V2 plugins: `.opencode/plugins/`. GSD for phases; `/ecc-plan`, `/ecc-review`, `/ecc-verify`, `/ecc-checkpoint`, `/ecc-learn` for focused steps.
+Tracked graph: `graphify-out/`. Skill: `.opencode/skills/graphify/SKILL.md`. OpenCode V2 plugin: `.opencode/plugins/graphify.js`. `argos-plan` owns multi-step task planning; `/ecc-plan`, `/ecc-review`, `/ecc-verify`, `/ecc-checkpoint`, `/ecc-learn` handle focused steps. No milestone framework or onboarding ceremony is required.
 
 Plan agent: wait for approval, then prefer a `build` subagent with the approved plan. Keep scope. Preserve unrelated working-tree changes.
 
@@ -187,7 +187,7 @@ V2 ignores `experimental.primary_tools`. `.opencode/opencode.json` is the primar
 
 Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`, `argos-tui-verify`, `argos-commit`.
 
-`build` may launch `explore`, `ecc-planner`, `ecc-reviewer`, and `ecc-edit`. `plan` may launch the first three. Repo questions start with shell `graphify query "<question>"`. Load `graphify` only when that command is unclear. Multi-step work loads `argos-plan` and leaves the plan on disk. GSD phase commands stay explicit (`/gsd-...`); their tools are not on `build` or `plan`.
+`build` may launch `explore`, `ecc-planner`, `ecc-reviewer`, and `ecc-edit`. `plan` may launch the first three. Repo questions start with shell `graphify query "<question>"`. Load `graphify` only when that command is unclear. Multi-step work loads `argos-plan` and leaves the plan on disk. Keep simple tasks lightweight; use named task phases only when useful.
 
 ## OpenCode phase edits
 
@@ -219,7 +219,8 @@ Use **planning-with-files** (`~/.agents/skills/planning-with-files/SKILL.md`) fo
 2. Files: `task_plan.md` (phases, Next Step, decisions, errors), `findings.md` (research; untrusted web text here only), `progress.md` (session log).
 3. One orchestrator owns `task_plan.md`. Workers append their own ledger.
 4. Root `task_plan.md` / `findings.md` / `progress.md` are gitignored leftovers.
-5. Graphify first, then write the plan from the subgraph. Do not paste the plan back into the chat. Implementation of the current phase on the `build` agent follows **OpenCode phase edits**.
+5. Follow [docs/planning-artifacts.md](docs/planning-artifacts.md) before staging planning changes. Commit curated durable designs, decisions, acceptance or cross-contributor handoffs when needed. Named task working memory, raw research/evidence and `.planning/.active_plan` stay local. Four eligible task deliverables are `design.md`, `decisions.md`, `acceptance.md`, `handoff.md`; exceptions are not a requirement to create or commit them. Stage exact paths, never the whole `.planning/` tree or force-add ignored session files. Promote useful results into maintained docs; preserve active/unresolved local evidence. Maintained project requirements and architecture belong in `docs/` rather than duplicate onboarding files.
+6. Graphify first, then write the plan from the subgraph. Do not paste the plan back into the chat. Implementation of the current phase on the `build` agent follows **OpenCode phase edits**.
 
 ## diagrams
 

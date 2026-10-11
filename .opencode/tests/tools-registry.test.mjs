@@ -23,7 +23,6 @@ test("primary agents keep a short skill list and split edit subagents", () => {
   for (const agent of ["build", "plan"]) {
     assert.equal(effect(agent, "execute", "*"), "deny");
     assert.equal(effect(agent, "browser", "*"), "deny");
-    assert.equal(effect(agent, "gsd_*", "*"), "deny");
     assert.equal(effect(agent, "subagent", "*"), "deny");
     assert.equal(effect(agent, "skill", "*"), "deny");
     for (const id of skills) assert.equal(effect(agent, "skill", id), "allow", id);

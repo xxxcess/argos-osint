@@ -10,7 +10,7 @@ function session(id) {
 }
 
 export function isGraphQuery(command) {
-  return /(?:^|[;&|\n]|\bthen\s+)\s*(?:graphify\s+query|(?:node\s+)?\S*gsd-tools\.cjs\s+graphify\s+query)\s+\S/.test(command);
+  return /(?:^|[;&|\n]|\bthen\s+)\s*graphify\s+query\s+\S/.test(command);
 }
 
 export function isBroadSearch(tool, input = {}) {

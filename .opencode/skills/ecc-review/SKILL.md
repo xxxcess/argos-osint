@@ -9,3 +9,5 @@ description: Review Argos changes for concrete regressions.
 TUI process and artifact retention: `docs/tui-verification.md` / `argos-tui-verify`. The parent owns capture and image/action/metric verification; editors remain formatting-only.
 
 For commit/release reviews, use `docs/versioning.md` to check Conventional Commit classification, breaking/migration notes, scoped staging and synchronized release versions.
+
+Review planning changes against `docs/planning-artifacts.md`: retain relevant shared state and curated durable deliverables; flag session logs/raw evidence, stale shared acceptance and links to ignored artifacts.

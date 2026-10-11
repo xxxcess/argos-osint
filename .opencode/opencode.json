@@ -25,11 +25,6 @@
           "effect": "deny"
         },
         {
-          "action": "gsd_*",
-          "resource": "*",
-          "effect": "deny"
-        },
-        {
           "action": "read",
           "resource": "*",
           "effect": "allow"
@@ -138,11 +133,6 @@
       "permissions": [
         {
           "action": "browser",
-          "resource": "*",
-          "effect": "deny"
-        },
-        {
-          "action": "gsd_*",
           "resource": "*",
           "effect": "deny"
         },

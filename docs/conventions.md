@@ -43,9 +43,14 @@ Scratch scripts and logs go only under `.agent-scratch/` (gitignored). Never wri
 
 Multi-step work uses **planning-with-files**: `task_plan.md`, `findings.md`, `progress.md` under `.planning/<YYYY-MM-DD-slug>/`.
 
-- Root copies of those names are gitignored leftovers
+- Those working-memory filenames are gitignored at every depth
 - One orchestrator owns `task_plan.md`
 - Untrusted web text goes in `findings.md` only
+
+Use [planning-artifacts.md](planning-artifacts.md) to select what belongs in Git.
+Maintained shared docs and curated durable task deliverables can be committed;
+named task logs, raw evidence and active-plan pointers stay local. Stage exact
+paths and promote useful conclusions before cleaning up completed task files.
 
 ## Graphify
 

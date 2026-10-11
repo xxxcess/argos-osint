@@ -5,6 +5,8 @@ description: On the build agent, edit the current plan phase through parallel ec
 
 Run this on the `build` agent. `plan` does not launch `ecc-edit`.
 
+Follow `docs/planning-artifacts.md` at task-phase completion: update the named plan, promote lasting decisions and acceptance results, and leave task logs/generated evidence local. The parent selects exact deliverables for authorized commits.
+
 1. Read the in-progress phase in `.planning/<id>/task_plan.md`. Split its files into disjoint sets. One set is one unit. A file that several units need belongs to one unit only.
 2. Call `subagent` once per unit. Two or more units go in the same turn with `background` true. One unit stays in the foreground.
 

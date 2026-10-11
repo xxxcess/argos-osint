@@ -78,6 +78,11 @@ committing. Do not use `git add .` for a dirty shared workspace. Stage only the
 relevant portions of mixed files; leave unrelated generated graphs/evidence out.
 An editor reports compatibility impact to its parent; the parent owns commits.
 
+Classify planning artifacts using [planning-artifacts.md](planning-artifacts.md).
+Include relevant maintained shared docs and curated durable deliverables; keep session
+working memory, generated evidence and host selectors local. Do not force-add
+ignored files or stage the whole `.planning/` directory.
+
 Use a task-owned scratch message file with actual newlines, then run:
 
 ```sh

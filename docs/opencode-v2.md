@@ -1,10 +1,10 @@
 # OpenCode V2 workflow
 
-GSD still owns phases and milestones in `.planning/`. Project plugins under `.opencode/plugins/` add graph-first navigation, a GSD hook bridge, and a short session handoff.
+`argos-plan` keeps multi-step task state in named `.planning/` directories. The project graphify plugin adds graph-first navigation and a short session handoff. ECC commands handle planning, review, verification and commit tasks without a separate milestone framework.
 
 ## Primary tools
 
-OpenCode V2 ignores `experimental.primary_tools`. `build` and `plan` in `.opencode/opencode.json` deny Code Mode (`execute`), the browser catalog, GSD MCP tools, GSD subagents, and every skill except the list below. Call the provider schema for these tools. Do not invent `tools.<namespace>[...]()` calls.
+OpenCode V2 ignores `experimental.primary_tools`. `build` and `plan` in `.opencode/opencode.json` deny Code Mode (`execute`), the browser catalog, unlisted subagents, and every skill except the list below. Call the provider schema for these tools. Do not invent `tools.<namespace>[...]()` calls.
 
 | Tool | Use |
 | --- | --- |
@@ -17,7 +17,7 @@ OpenCode V2 ignores `experimental.primary_tools`. `build` and `plan` in `.openco
 
 Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`, `argos-tui-verify`, `argos-commit`.
 
-`argos-plan` writes `.planning/<YYYY-MM-DD-slug>/` and keeps that text out of the chat. Load `graphify` only when the shell command above is unclear. `/gsd-...` still runs GSD with its own tools.
+`argos-plan` writes `.planning/<YYYY-MM-DD-slug>/` and keeps that text out of the chat. Load `graphify` only when the shell command above is unclear. Keep simple tasks lightweight; task phases are useful for multi-step work and do not require project onboarding.
 
 ## Builds
 
@@ -54,7 +54,7 @@ Tracked graph: `graphify-out/graph.json`.
 | `graphify path "<A>" "<B>"` | Relationship |
 | `graphify update .` | After code edits (AST only) |
 
-Track only `graph.json`, `manifest.json`, `GRAPH_REPORT.md`. GSD reads the same graph via `.planning/config.json`.
+Track only `graph.json`, `manifest.json`, `GRAPH_REPORT.md`. The graphify plugin reads this graph directly; no planning configuration mirror is required.
 
 Skip graphify only if the graph is the thing being fixed, or the user says so.
 
@@ -69,17 +69,17 @@ Skip graphify only if the graph is the thing being fixed, or the user says so.
 | `/ecc-learn` | Reusable practice (needs approval) |
 | `/tui-verify` | Actual fixture capture, screenshot review, action/metric evidence |
 
-Planner and reviewer inherit the active model and cannot edit files. Automatic handoff: ≤500 characters each for latest request and outcome, plus up to 12 paths. Loads once in a later session for the same project. Does not replace GSD artifacts.
+Planner and reviewer inherit the active model and cannot edit files. Automatic handoff: ≤500 characters each for latest request and outcome, plus up to 12 paths. Loads once in a later session for the same project. Named task plans hold the detailed working state; durable decisions/results follow the planning retention policy.
 
 ## Verify setup
 
 With OpenCode V2 in this project:
 
-- `/api/plugin` — `argos.graphify`, `argos.gsd-v2`
-- `/api/command` — five `ecc-*` commands and `tui-verify`
+- `/api/plugin` — `argos.graphify`
+- `/api/command` — six `ecc-*` commands and `tui-verify`
 - `/api/skill` — matching skills
 
-Incompatible global GSD V1 was moved from `~/.config/opencode/plugins/gsd-core.js` to `~/.config/opencode/gsd-core.v1.js`. A later GSD update may restore it; move it out of `plugins/` again if startup errors return.
+No GSD plugin, MCP server, command catalog or agent installation is required. Avoid installing a second planning framework for this workflow.
 
 ```sh
 node --test .opencode/tests/*.test.mjs
@@ -107,6 +107,30 @@ Catalog loading is asynchronous in the installed runtime: an immediate standalon
 
 ## Commit and release tasks
 
+Planning retention follows [planning-artifacts.md](planning-artifacts.md).
+`argos-plan` records local working memory; `argos-commit` selects shared plans and
+curated durable deliverables for exact staging. Agent instructions and skills
+carry this policy; automatic session handoffs remain in plugin storage.
+No new model, permission or unsupported config key is needed.
+
 The registered `argos-commit` skill and `/ecc-commit` command follow [versioning.md](versioning.md). `plan` prepares messages and release-impact assessments without staging; `build` completes authorized commits with exact staging, message/version checks and the appropriate implementation gate. Child editors report compatibility impact and leave commits to the parent. Models and other permission defaults are unchanged.
 
 `node scripts/release_check.mjs versions` checks the workspace, both local lockfile versions and release mirrors. `message --file <path>` validates a prepared Conventional Commit and reports impact. Release Please owns synchronized bumps, changelog entries and reviewed `vX.Y.Z` releases. PR titles and breaking-change footers survive squash merging; do not invent `Release-As` or bump versions per code commit. GitHub token/merge/required-check setup is documented in the guide.
+
+## Workflow simplification
+
+The 2026-10-11 audit removed the GSD integration. The repository had no active
+GSD phase directories, while roadmap/state still described the October 6
+onboarding and duplicated maintained product docs. Primary agents already used
+`argos-plan`/ECC and denied GSD tools. The bridge nevertheless launched synchronous
+external hooks on ordinary tools, including up to five pre-write hooks plus a
+post-tool monitor, each with a 25-second timeout. This is structural overhead;
+no wall-clock benchmark or complete session-usage audit was performed.
+
+The global OpenCode install also registered an enabled MCP server, 72 command
+files and 64 agent files. With explicit user authorization it was disabled using
+a backup outside OpenCode's discovery directories. The repo bridge/test, stale
+onboarding scaffolding and active workflow references were removed. Historical
+screenshot provenance remains unchanged. No Rust/TUI behavior changed; existing
+graph navigation, named task plans, ECC checks, scoped screenshot verification,
+commit policy and bounded session handoff remain the supported workflow.

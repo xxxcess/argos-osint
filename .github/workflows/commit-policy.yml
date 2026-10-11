@@ -28,4 +28,4 @@ jobs:
       - name: Check workspace, lockfile and release manifest
         run: node scripts/release_check.mjs versions
       - name: Test agent tooling and release policy
-        run: node --test .opencode/tests/release-policy.test.mjs .opencode/tests/tools-registry.test.mjs
+        run: node --test .opencode/tests/release-policy.test.mjs .opencode/tests/tools-registry.test.mjs .opencode/tests/planning-artifacts.test.mjs

@@ -12,4 +12,11 @@ findings.md
 progress.md
 .agent-scratch/
 .planning/**/tui/
+# Host selection and ad hoc task working memory are local. See docs/planning-artifacts.md.
+/.planning/.active_plan
+/.planning/[0-9][0-9][0-9][0-9]-*/**
+!/.planning/[0-9][0-9][0-9][0-9]-*/design.md
+!/.planning/[0-9][0-9][0-9][0-9]-*/decisions.md
+!/.planning/[0-9][0-9][0-9][0-9]-*/acceptance.md
+!/.planning/[0-9][0-9][0-9][0-9]-*/handoff.md
 /scripts/__pycache__/

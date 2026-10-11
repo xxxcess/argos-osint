@@ -33,7 +33,7 @@ test("graph guard is per session and accepts only successful queries", async () 
   hooks.tool["execute.after"]({ sessionID: "one", tool: "bash", input: { command: 'graphify query "brain"' }, status: "completed", result: { content: "Graph: 10 nodes" } });
   assert.doesNotThrow(() => broad("one"));
   assert.throws(() => broad("two"), /graphify query/);
-  hooks.tool["execute.after"]({ sessionID: "two", tool: "bash", input: { command: 'node gsd-tools.cjs graphify query "brain"' }, status: "completed", result: { content: "Graph: 10 nodes" } });
+  hooks.tool["execute.after"]({ sessionID: "two", tool: "shell", input: { command: 'graphify query "brain"' }, status: "completed", result: { content: "Graph: 10 nodes" } });
   assert.doesNotThrow(() => broad("two"));
   assert.doesNotThrow(() => hooks.tool["execute.before"]({ sessionID: "three", tool: "bash", input: { command: "rg brain crates/argos-osint-core" } }));
   hooks.session.prompt({ sessionID: "four", prompt: { text: "Skip graphify for this task" } });
@@ -54,7 +54,7 @@ test("missing graph permits search, invalid query does not unlock, and classifie
   assert.equal(isBroadSearch("bash", { command: 'rg "Profile" assets/screenshots/' }), false);
   assert.equal(isBroadSearch("bash", { command: 'rg "binding" | grep Hunter' }), true);
   assert.equal(isBroadSearch("bash", { command: 'cd /repo && rg "binding" .' }), true);
-  assert.equal(isGraphQuery('node gsd-tools.cjs graphify query "x"'), true);
+  assert.equal(isGraphQuery('graphify query "x"'), true);
   assert.equal(isGraphQuery('echo graphify query "x"'), false);
   mkdirSync(join(root, "graphify-out"));
   writeFileSync(join(root, "graphify-out", "graph.json"), "{bad json");

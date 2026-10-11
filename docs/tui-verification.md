@@ -147,4 +147,9 @@ Update manifest review fields only after review, with a ledger link. Re-capture 
 
 Run `graphify update .` after code edits; inspect warnings. Prescribed tracked graph artifacts are `graph.json`, `manifest.json`, `GRAPH_REPORT.md`. Run `git diff --check`; update catalog/docs and plan results. Remove only task-owned scratch after checks; retain unresolved diagnostic logs.
 
-Keep cells, PNGs, manifest and review ledger under the named plan while work/review is active. Generated `tui/` runs are gitignored. At completion, consolidate reproducible steps, useful defects, exact results and limitations into maintained docs; retain a small referenced fixture selection in `docs/screenshots/<session>/` when it demonstrates a distinct contract. Remove superseded/duplicate/negative-check runs and completed task plans once their useful findings are preserved. Do not remove active plans, unresolved evidence, or unrelated project/GSD context. Update any pointers before deleting artifacts. Avoid secrets, live state and dependency environments. Link durable evidence and regeneration commands in the final handoff.
+Select tracked planning deliverables with [planning-artifacts.md](planning-artifacts.md).
+Curated acceptance/decision records may belong in Git; raw capture runs and session
+working memory stay local. Durable records reference maintained evidence or
+regeneration commands rather than ignored run paths.
+
+Keep cells, PNGs, manifest and review ledger under the named plan while work/review is active. Generated `tui/` runs are gitignored. At completion, consolidate reproducible steps, useful defects, exact results and limitations into maintained docs; retain a small referenced fixture selection in `docs/screenshots/<session>/` when it demonstrates a distinct contract. Remove superseded/duplicate/negative-check runs and completed task plans once their useful findings are preserved. Do not remove active plans, unresolved evidence, or unrelated project context. Update any pointers before deleting artifacts. Avoid secrets, live state and dependency environments. Link durable evidence and regeneration commands in the final handoff.

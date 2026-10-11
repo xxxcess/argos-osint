@@ -47,6 +47,7 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | --- | --- |
 | [../AGENTS.md](../AGENTS.md) | Commands, graphify, planning-with-files, scratch rules |
 | [versioning.md](versioning.md) | SemVer, Conventional Commits, agent commit tasks and release PR automation |
+| [planning-artifacts.md](planning-artifacts.md) | Shared planning deliverables, local session evidence and selective Git retention |
 | [opencode-v2.md](opencode-v2.md) | Primary tool list, graph-first plugins, and ECC commands |
 | [tui-verification.md](tui-verification.md) | Agent standard: shared geometry, capture tooling, screenshot/action/metric verification |
 | [tui-verification-session-2026-10-10.md](tui-verification-session-2026-10-10.md) | Profile process, actual screenshot evidence, defects and results |

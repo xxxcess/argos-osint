@@ -842,7 +842,7 @@ impl Store {
         Ok(self.conn.query_row("SELECT id,thread_id,turn_id,state,stage,recon_model,synthesis_model,max_rounds,max_calls,turn_seconds,plan_json,error,created_at,updated_at,tool_picker_model FROM recon_runs WHERE id=?1",[rid],|r|Ok(Run{id:r.get(0)?,thread_id:r.get(1)?,turn_id:r.get(2)?,state:r.get(3)?,stage:r.get(4)?,recon_model:r.get(5)?,synthesis_model:r.get(6)?,tool_picker_model:r.get(14)?,max_rounds:r.get(7)?,max_calls:r.get(8)?,turn_seconds:r.get(9)?,plan_json:r.get(10)?,error:r.get(11)?,created_at:r.get(12)?,updated_at:r.get(13)?})).optional()?)
     }
     pub fn latest_resumable_run(&self, tid: &str) -> Result<Option<Run>> {
-        let id:Option<String>=self.conn.query_row("SELECT id FROM recon_runs WHERE thread_id=?1 AND state IN ('interrupted','failed') ORDER BY updated_at DESC LIMIT 1",[tid],|r|r.get(0)).optional()?;
+        let id:Option<String>=self.conn.query_row("SELECT id FROM (SELECT id,state FROM recon_runs WHERE thread_id=?1 ORDER BY updated_at DESC LIMIT 1) WHERE state IN ('interrupted','failed')",[tid],|r|r.get(0)).optional()?;
         id.map(|id| self.get_run(&id))
             .transpose()
             .map(Option::flatten)
@@ -4600,6 +4600,37 @@ fn citation_ids(answer: &str) -> Vec<String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_failed_or_interrupted_latest_run_is_resumable() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("argos.db")).unwrap();
+        let t = s.new_thread("Resume").unwrap();
+        let set = |id: &str, state: &str, at: &str| {
+            s.conn
+                .execute(
+                    "UPDATE recon_runs SET state=?1, updated_at=?2 WHERE id=?3",
+                    params![state, at, id],
+                )
+                .unwrap();
+        };
+        let failed = s.new_run(&t.id, "turn-1", "r", "s").unwrap();
+        set(&failed.id, "failed", "2026-01-01T00:00:01Z");
+        assert_eq!(
+            s.latest_resumable_run(&t.id).unwrap().map(|r| r.id),
+            Some(failed.id.clone())
+        );
+        // A later completed run supersedes the older failure: no Resume.
+        let done = s.new_run(&t.id, "turn-2", "r", "s").unwrap();
+        set(&done.id, "completed", "2026-01-01T00:00:02Z");
+        assert!(s.latest_resumable_run(&t.id).unwrap().is_none());
+        let interrupted = s.new_run(&t.id, "turn-3", "r", "s").unwrap();
+        set(&interrupted.id, "interrupted", "2026-01-01T00:00:03Z");
+        assert_eq!(
+            s.latest_resumable_run(&t.id).unwrap().map(|r| r.id),
+            Some(interrupted.id)
+        );
+    }
+
     #[test]
     fn investigation_jobs_finish_truthfully_and_link_their_run() {
         let dir = tempfile::tempdir().unwrap();

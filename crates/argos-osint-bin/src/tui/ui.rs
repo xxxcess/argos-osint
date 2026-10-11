@@ -3560,7 +3560,9 @@ fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             if app.can_resume_recon() {
                 buttons.push(ButtonId::ResumeRun);
             }
-            buttons.push(ButtonId::CancelRun);
+            if app.can_stop_recon() {
+                buttons.push(ButtonId::CancelRun);
+            }
             let areas = button_areas(run_actions, buttons.len());
             for (i, id) in buttons.into_iter().enumerate() {
                 if contains(areas[i], x, y) {
@@ -5753,13 +5755,15 @@ pub(crate) fn recon_context_buttons(area: Rect, app: &App) -> Vec<(ButtonId, Rec
     if app.can_resume_recon() {
         defs.push((ButtonId::ResumeRun, "Resume"));
     }
-    defs.push((ButtonId::CancelRun, "Cancel"));
+    if app.can_stop_recon() {
+        defs.push((ButtonId::CancelRun, "Stop"));
+    }
     defs.push((
         ButtonId::ToggleInvestigation,
         if app.recon_context_enabled {
-            "Hide investigation"
+            "Hide details"
         } else {
-            "Show investigation"
+            "More details"
         },
     ));
 
@@ -5824,12 +5828,14 @@ fn draw_recon_chat(frame: &mut Frame, app: &App, area: Rect) {
         if app.can_resume_recon() {
             buttons.push((ButtonId::ResumeRun, "Resume"));
         }
-        buttons.push((ButtonId::CancelRun, "Cancel"));
+        if app.can_stop_recon() {
+            buttons.push((ButtonId::CancelRun, "Stop"));
+        }
         // On narrow terminals the investigation panel is hidden; offer an explicit toggle.
         let toggle_label = if app.recon_context_enabled {
-            "Hide investigation"
+            "Hide details"
         } else {
-            "Show investigation"
+            "More details"
         };
         buttons.push((ButtonId::ToggleInvestigation, toggle_label));
         let count = buttons.len();
@@ -7219,7 +7225,7 @@ fn intel_hero_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 Style::default().fg(super::map::heat_color(article.temperature)),
             ),
             Span::styled(
-                fit(&article.title, width.saturating_sub(2)),
+                article.title.clone(),
                 theme::text().add_modifier(Modifier::BOLD),
             ),
         ]),

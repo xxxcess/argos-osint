@@ -3315,6 +3315,12 @@ impl App {
         self.send_recon_query(&tid, &question)
     }
 
+    pub fn can_stop_recon(&self) -> bool {
+        self.selected_thread
+            .as_ref()
+            .is_some_and(|tid| self.running.contains_key(tid))
+    }
+
     pub fn can_resume_recon(&self) -> bool {
         let Some(tid) = &self.selected_thread else {
             return false;
@@ -10449,7 +10455,6 @@ mod tests {
         app.recon_chat = true;
         terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
         for target in [
-            Target::Button(ButtonId::CancelRun),
             Target::Button(ButtonId::RetryInsights),
             Target::Button(ButtonId::Send),
         ] {
@@ -10460,6 +10465,7 @@ mod tests {
                 "chat is missing {target:?}"
             );
         }
+        assert!(!hit(&app, Target::Button(ButtonId::CancelRun)));
         assert!(!hit(&app, Target::Button(ButtonId::ResumeRun)));
         let t = app.store.new_thread("Test Thread").unwrap();
         app.selected_thread = Some(t.id.clone());
@@ -15286,7 +15292,7 @@ mod tests {
             app.overlay = Overlay::None;
             app.select(ModuleId::Intel.index());
             app.intel_articles.push(AtlasArticleRow {
-                run_id: "fixture".into(), id: "fixture-article".into(), title: "Article imagery and browser actions".into(), description: "Deterministic article preview. Image opens the article URL. Secondary stories remain reachable.".into(),
+                run_id: "fixture".into(), id: "fixture-article".into(), title: "Article imagery and browser actions keep a long headline fully visible by wrapping across several preview rows instead of truncating it".into(), description: "Deterministic article preview. Image opens the article URL. Secondary stories remain reachable.".into(),
                 url: "https://example.com/article".into(), country: "US".into(), source_name: "Fixture".into(), source_domain: "example.com".into(), published_at: "2026-10-10T12:00:00Z".into(), provider: "fixture".into(), temperature: 0.5,
                 category: "world".into(), seen_at: "2026-10-10T12:00:00Z".into(), author: "Fixture author".into(), image_url: "https://example.com/image.png".into(),
             });

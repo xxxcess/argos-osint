@@ -6,7 +6,7 @@ Home launches four applications — **Intel**, **Atlas**, **Brain**, **Recon** �
 
 Only Recon has a chat. Everything else is fields, lists, and buttons. Observations are retrieved data with a timestamp. They are not proof of identity or ownership.
 
-[Docs](docs/README.md) · [Usage](docs/usage.md) · [Figures](docs/diagrams.md)
+[Docs](docs/README.md) · [Usage](docs/usage.md) · [Figures](docs/diagrams.md) · [Releases](docs/versioning.md) · [Changelog](CHANGELOG.md)
 
 [![Argos workspace](docs/diagrams/workspace.svg)](docs/diagrams/workspace.html)
 

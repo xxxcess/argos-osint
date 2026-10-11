@@ -118,6 +118,11 @@
           "action": "skill",
           "resource": "argos-tui-verify",
           "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "argos-commit",
+          "effect": "allow"
         }
       ],
       "request": {
@@ -234,6 +239,11 @@
         {
           "action": "skill",
           "resource": "argos-tui-verify",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "argos-commit",
           "effect": "allow"
         }
       ],

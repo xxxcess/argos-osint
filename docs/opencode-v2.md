@@ -15,7 +15,7 @@ OpenCode V2 ignores `experimental.primary_tools`. `build` and `plan` in `.openco
 | `webfetch`, `websearch`, `question` | One URL, one query, or one user choice |
 | `subagent` | `agent`, `description`, `prompt`. `build` may launch `explore`, `ecc-planner`, `ecc-reviewer`, and `ecc-edit`. `plan` may launch the first three |
 
-Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`, `argos-tui-verify`.
+Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`, `argos-tui-verify`, `argos-commit`.
 
 `argos-plan` writes `.planning/<YYYY-MM-DD-slug>/` and keeps that text out of the chat. Load `graphify` only when the shell command above is unclear. `/gsd-...` still runs GSD with its own tools.
 
@@ -104,3 +104,9 @@ The installed V2 format uses top-level `agents` and per-agent `request.body` for
 After config changes run `node --test .opencode/tests/*.test.mjs`, `opencode debug config` and `opencode debug agents`. Inspect resolved **permissions**, not fields inside `request.body`. Confirm the skill/command through `/api/skill` and `/api/command` using the installed provider API. Diagnostics may require local log access; no live model call is needed. Avoid copying unrelated global setup into artifacts.
 
 Catalog loading is asynchronous in the installed runtime: an immediate standalone request returned an empty list before initialization. Use a running local server and recheck after startup; do not treat the first empty response as successful discovery. The CLI also truncates large catalog/debug output, sometimes producing incomplete JSON. Filter or decode the bounded entries needed for the check instead of archiving entire global catalogs. This session confirmed the new skill ID/path, command and effective primary-agent permissions on the initialized server.
+
+## Commit and release tasks
+
+The registered `argos-commit` skill and `/ecc-commit` command follow [versioning.md](versioning.md). `plan` prepares messages and release-impact assessments without staging; `build` completes authorized commits with exact staging, message/version checks and the appropriate implementation gate. Child editors report compatibility impact and leave commits to the parent. Models and other permission defaults are unchanged.
+
+`node scripts/release_check.mjs versions` checks the workspace, both local lockfile versions and release mirrors. `message --file <path>` validates a prepared Conventional Commit and reports impact. Release Please owns synchronized bumps, changelog entries and reviewed `vX.Y.Z` releases. PR titles and breaking-change footers survive squash merging; do not invent `Release-As` or bump versions per code commit. GitHub token/merge/required-check setup is documented in the guide.

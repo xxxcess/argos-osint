@@ -1,8 +1,8 @@
 {
   ".opencode/opencode.json": {
-    "mtime": 1791638021.6160338,
-    "seen": 1791638732.840966,
-    "ast_hash": "83b16f2eb2deba0d7aac1178dac8e941",
+    "mtime": 1791717015.7977662,
+    "seen": 1791717491.8463511,
+    "ast_hash": "7601b642cb01d65eb229b743cea8d4e8",
     "semantic_hash": ""
   },
   "Cargo.toml": {
@@ -564,15 +564,15 @@
     "semantic_hash": ""
   },
   ".opencode/agents/ecc-planner.md": {
-    "mtime": 1791713593.3061023,
-    "seen": 1791713812.0892859,
-    "ast_hash": "71152b705238d192e1cad1745edafc98",
+    "mtime": 1791717015.8020642,
+    "seen": 1791717491.8765361,
+    "ast_hash": "b1ddc558498c5736cbc6ef9c98cf1ece",
     "semantic_hash": ""
   },
   ".opencode/agents/ecc-reviewer.md": {
-    "mtime": 1791713593.3053591,
-    "seen": 1791713812.089293,
-    "ast_hash": "8ab3b620da27bd00f870d0ff4791b5c3",
+    "mtime": 1791717015.8028462,
+    "seen": 1791717491.876539,
+    "ast_hash": "472c2e44e6087d85bf6b3e7822bbf9d7",
     "semantic_hash": ""
   },
   ".opencode/commands/ecc-checkpoint.md": {
@@ -606,9 +606,9 @@
     "semantic_hash": ""
   },
   ".opencode/skills/ecc-checkpoint/SKILL.md": {
-    "mtime": 1791301218.4028242,
-    "seen": 1791306546.148148,
-    "ast_hash": "ad8ce82cbc4596ba50367ca49bf72483",
+    "mtime": 1791717015.808826,
+    "seen": 1791717491.877415,
+    "ast_hash": "748d893e427e77e2d96ad50ba4fb8126",
     "semantic_hash": ""
   },
   ".opencode/skills/ecc-learn/SKILL.md": {
@@ -624,15 +624,15 @@
     "semantic_hash": ""
   },
   ".opencode/skills/ecc-review/SKILL.md": {
-    "mtime": 1791639186.5884702,
-    "seen": 1791639271.385412,
-    "ast_hash": "d7ec582cad6565998829f656c3599c4c",
+    "mtime": 1791717015.806383,
+    "seen": 1791717491.877803,
+    "ast_hash": "c7e38ba98b7d3c378c24700b91bc2456",
     "semantic_hash": ""
   },
   ".opencode/skills/ecc-verify/SKILL.md": {
-    "mtime": 1791641134.1291256,
-    "seen": 1791651636.662742,
-    "ast_hash": "15db0a9a25eb71b36e24ae7ad9cd0386",
+    "mtime": 1791717015.8073294,
+    "seen": 1791717491.8778071,
+    "ast_hash": "7416601f76f1af24ba33d140c0eceaa9",
     "semantic_hash": ""
   },
   ".planning/PROJECT.md": {
@@ -678,15 +678,15 @@
     "semantic_hash": ""
   },
   "AGENTS.md": {
-    "mtime": 1791713593.3074985,
-    "seen": 1791713812.093636,
-    "ast_hash": "b95ade5d2cd513a1e1fca24e9694a95d",
+    "mtime": 1791717015.8004928,
+    "seen": 1791717491.879364,
+    "ast_hash": "0f60372edbdb938f6b22de7600ada41c",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1791433113.9238803,
-    "seen": 1791468236.580986,
-    "ast_hash": "54178a66b346895e8ae5cbfebb2f18ce",
+    "mtime": 1791717015.8145895,
+    "seen": 1791717491.879377,
+    "ast_hash": "9d93cae013f29d86e84ff8bb8006bd19",
     "semantic_hash": ""
   },
   "docs/architecture.md": {
@@ -702,9 +702,9 @@
     "semantic_hash": ""
   },
   "docs/opencode-v2.md": {
-    "mtime": 1791713593.3196228,
-    "seen": 1791713812.10406,
-    "ast_hash": "6a5a7610321f6c14b27056a08611482e",
+    "mtime": 1791717365.4546359,
+    "seen": 1791717491.887365,
+    "ast_hash": "117345dd0b36755b2e5815f819725a13",
     "semantic_hash": ""
   },
   "docs/providers.md": {
@@ -948,9 +948,9 @@
     "semantic_hash": ""
   },
   "docs/README.md": {
-    "mtime": 1791671184.1594086,
-    "seen": 1791671278.834677,
-    "ast_hash": "841b83cf4d9d5f1945f75625cb34bc4c",
+    "mtime": 1791717015.8132277,
+    "seen": 1791717491.8833852,
+    "ast_hash": "7659a18e7b1df2ad279fb18fd9b82cdc",
     "semantic_hash": ""
   },
   "docs/concepts.md": {
@@ -960,9 +960,9 @@
     "semantic_hash": ""
   },
   "docs/conventions.md": {
-    "mtime": 1791641134.1307435,
-    "seen": 1791651636.666461,
-    "ast_hash": "26ab4e2a0ef97e192e224e1ff88bec1a",
+    "mtime": 1791717015.8101373,
+    "seen": 1791717491.883947,
+    "ast_hash": "93f71102f4a89474f185048ff275d085",
     "semantic_hash": ""
   },
   "docs/diagrams.md": {
@@ -1236,9 +1236,9 @@
     "semantic_hash": ""
   },
   ".opencode/tests/tools-registry.test.mjs": {
-    "mtime": 1791710558.7154493,
-    "seen": 1791710703.9075022,
-    "ast_hash": "3a46458b8ec845b888eb6f922631f35d",
+    "mtime": 1791717015.799058,
+    "seen": 1791717491.847332,
+    "ast_hash": "3db3b4d53517e6d3f6b02b9519787da0",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/profile.rs": {
@@ -1548,21 +1548,21 @@
     "semantic_hash": ""
   },
   ".opencode/agents/ecc-edit.md": {
-    "mtime": 1791713593.3068922,
-    "seen": 1791713812.08928,
-    "ast_hash": "c3c6fb47559baea16f3481597bedf0c1",
+    "mtime": 1791717015.801501,
+    "seen": 1791717491.876531,
+    "ast_hash": "98e26826677b662b6dd57d87f2737445",
     "semantic_hash": ""
   },
   ".opencode/skills/argos-implement/SKILL.md": {
-    "mtime": 1791713593.3009434,
-    "seen": 1791713812.0909739,
-    "ast_hash": "29fd8652c637ed7e0efdb55c56ad1bd5",
+    "mtime": 1791717015.8048036,
+    "seen": 1791717491.877271,
+    "ast_hash": "e64735ec3647c8aa4bab5acdb647ea19",
     "semantic_hash": ""
   },
   ".opencode/skills/argos-plan/SKILL.md": {
-    "mtime": 1791713593.2978525,
-    "seen": 1791713812.09098,
-    "ast_hash": "6d77a0a0c0bf30e4c888a213e92b5385",
+    "mtime": 1791717015.8037195,
+    "seen": 1791717491.877274,
+    "ast_hash": "17754a9d8ba79bc9ca04cbbe147f2bcd",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/tests/fixtures/search_engines/google_cleaned_html_fallback.html": {
@@ -2043,6 +2043,90 @@
     "mtime": 1791713762.3321793,
     "seen": 1791713812.1107461,
     "ast_hash": "b429d0791c5c987c43f0442f4675b249",
+    "semantic_hash": ""
+  },
+  ".opencode/tests/release-policy.test.mjs": {
+    "mtime": 1791717141.0323927,
+    "seen": 1791717491.847323,
+    "ast_hash": "c0c70a362d7633bd685950a996735a20",
+    "semantic_hash": ""
+  },
+  ".planning/2026-10-11-semantic-versioning/release-simulation.json": {
+    "mtime": 1791717286.0785153,
+    "seen": 1791717491.847471,
+    "ast_hash": "971852b8ad25bd45481ecd8fee3ae6bb",
+    "semantic_hash": ""
+  },
+  ".release-please-manifest.json": {
+    "mtime": 1791716736.1433523,
+    "seen": 1791717491.8475761,
+    "ast_hash": "1c8b63ed2357e372ebb38dcc1cc38e4b",
+    "semantic_hash": ""
+  },
+  "release-please-config.json": {
+    "mtime": 1791717285.3815374,
+    "seen": 1791717491.875794,
+    "ast_hash": "1a1df2ebce74e8c4a3727bd08b36fd95",
+    "semantic_hash": ""
+  },
+  "scripts/release_check.mjs": {
+    "mtime": 1791717285.381973,
+    "seen": 1791717491.876034,
+    "ast_hash": "1c863c640fec2739c66c8e4684d618f2",
+    "semantic_hash": ""
+  },
+  ".github/pull_request_template.md": {
+    "mtime": 1791716889.373592,
+    "seen": 1791717491.876391,
+    "ast_hash": "15df3e7be0fc4a29bcd52199b1824095",
+    "semantic_hash": ""
+  },
+  ".github/workflows/commit-policy.yml": {
+    "mtime": 1791717469.4525964,
+    "seen": 1791717491.876523,
+    "ast_hash": "b6546012f2c2283f15609529faac465b",
+    "semantic_hash": ""
+  },
+  ".github/workflows/release-please.yml": {
+    "mtime": 1791717062.3444173,
+    "seen": 1791717491.876527,
+    "ast_hash": "9c73e893b07b9fff01e589a1827d31da",
+    "semantic_hash": ""
+  },
+  ".opencode/commands/ecc-commit.md": {
+    "mtime": 1791716889.5174184,
+    "seen": 1791717491.876683,
+    "ast_hash": "4c7048576b46611cac7312ed414324d3",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/argos-commit/SKILL.md": {
+    "mtime": 1791716889.4273784,
+    "seen": 1791717491.877267,
+    "ast_hash": "c1993a8c3920035b1e21320134a460e3",
+    "semantic_hash": ""
+  },
+  "CHANGELOG.md": {
+    "mtime": 1791716736.1439784,
+    "seen": 1791717491.879371,
+    "ast_hash": "fcc3f8e443da219c7565e100cd549baa",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/intel-brief-image-column-2026-10-11/README.md": {
+    "mtime": 1791713783.4127727,
+    "seen": 1791717491.887737,
+    "ast_hash": "b36b617fbc521ada65a34275d61b7520",
+    "semantic_hash": ""
+  },
+  "docs/versioning.md": {
+    "mtime": 1791717469.7844543,
+    "seen": 1791717491.8896,
+    "ast_hash": "4e796054f60061598f0fcd0098022133",
+    "semantic_hash": ""
+  },
+  "version.txt": {
+    "mtime": 1791716736.1436758,
+    "seen": 1791717491.8896031,
+    "ast_hash": "1347633cdf7cdcb2168d61093630d5ae",
     "semantic_hash": ""
   }
 }

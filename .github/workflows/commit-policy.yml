@@ -1,0 +1,31 @@
+name: Commit policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Conventional commits and shared version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      # Event fields are read as JSON data, never interpolated into shell code.
+      - name: Check PR title/body or new main commits
+        run: node scripts/release_check.mjs event
+      - name: Check workspace, lockfile and release manifest
+        run: node scripts/release_check.mjs versions
+      - name: Test agent tooling and release policy
+        run: node --test .opencode/tests/release-policy.test.mjs .opencode/tests/tools-registry.test.mjs

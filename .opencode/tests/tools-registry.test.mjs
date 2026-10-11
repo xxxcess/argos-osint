@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const config = JSON.parse(readFileSync(join(root, "opencode.json"), "utf8"));
-const skills = ["graphify", "argos-plan", "argos-implement", "ecc-plan", "ecc-review", "ecc-verify", "ecc-checkpoint", "ecc-learn", "argos-tui-verify"];
+const skills = ["graphify", "argos-plan", "argos-implement", "ecc-plan", "ecc-review", "ecc-verify", "ecc-checkpoint", "ecc-learn", "argos-tui-verify", "argos-commit"];
 
 function rules(agent) {
   return config.agents[agent].permissions;

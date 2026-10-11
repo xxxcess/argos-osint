@@ -19,3 +19,5 @@ TUI process and artifact retention: `docs/tui-verification.md` / `argos-tui-veri
 
 
 TUI overhaul navigation/component contract: read `docs/tui-design-spec.md` and `docs/tui-components.md`, including Shared navigation and portable configuration. Preserve three Profile pages, independent TabBar focus/activation, nested dataset offsets, background image resources, exact-revision Verify/Save and usize transcript scroll. Scope captures to affected Argos apps, pages, states and viewport thresholds using `docs/tui-verification.md`. Select `--test` and `--include` explicitly; use `--size` for affected thresholds and record `--reason`. Shared components require representative affected consumers; shared shell/theme/global navigation or a full overhaul requires both fixture suites with `--all`. Unrelated apps need no PNGs. Generation does not complete visual review.
+
+Read `docs/versioning.md` for commit/release tasks. Include the expected Conventional Commit type, release impact and compatibility/migration risks in plans. Prepare messages only; do not stage, commit or change release versions.

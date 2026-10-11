@@ -8,6 +8,10 @@ Order matches CI: `cargo fmt --all --check` → `python3 scripts/agent_cargo.py 
 
 Agent compilation uses `scripts/agent_cargo.py` and `target/agents`; user runs keep `target/debug`. Screenshot capture uses the same isolated cache. See [agent Cargo isolation](../AGENTS.md#agent-cargo-isolation) for ownership and lock diagnosis.
 
+## Commits and versions
+
+Follow [versioning.md](versioning.md): one inherited workspace SemVer, Conventional Commit messages/PR titles, explicit breaking/migration footers and reviewed Release Please version bumps. Use `node scripts/release_check.mjs` for offline message/version checks. Stage task-owned paths/hunks; preserve unrelated and pre-staged work. Application versions and database schema counters are independent.
+
 ## TUI
 
 All agents follow [tui-verification.md](tui-verification.md) and the repo [argos-tui-verify skill](../.opencode/skills/argos-tui-verify/SKILL.md). Use `scripts/tui_review.py` for fresh fixture galleries. Inspect PNGs, action tests and metric tests separately; capture is not visual approval. [Session evidence](tui-verification-session-2026-10-10.md) records the defects behind this convention. Keep the viewport/state matrix proportional to affected presets; Profile uses 160×50, 120×40, 100×32, 100×24, 80×24, 60×18 and 40×20. Artifacts are fixture cells/PNG/manifest/review ledger under a named plan; avoid live secrets.

@@ -30,6 +30,14 @@ ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm
 
 **Command order matters:** `fmt -> clippy -> test` (matches CI). OpenCode agents do not use the build, clippy, or test lines above. They use **OpenCode builds**.
 
+## Versioning and commit tasks
+
+Follow [docs/versioning.md](docs/versioning.md) for all commit, PR and release tasks. One SemVer version in `workspace.package.version` covers both crates. Use Conventional Commits: `feat` → minor, `fix`/`perf` → patch; maintenance types do not release by themselves. Breaking changes require `!` and a `BREAKING CHANGE:` footer describing impact and migration: minor during 0.x, major from 1.0.0. Assess CLI/output, core API, config/data compatibility and documented workflows.
+
+Release Please owns synchronized workspace/lockfile/`version.txt`/manifest/changelog bumps through reviewed release PRs and `vX.Y.Z` tags. Do not bump versions on ordinary code commits or invent `Release-As`. Preserve unrelated/pre-staged changes; stage exact task paths/hunks and inspect the full staged diff. Use a scratch message file with `git commit --file`; first run `node scripts/release_check.mjs message --file <path>`, `node scripts/release_check.mjs versions`, `git diff --cached --check` and relevant implementation checks. Report the SHA and actual validation. Existing authorization governs commit/push/merge/release actions.
+
+OpenCode: load `argos-commit` or `/ecc-commit` for commit tasks. `plan` prepares a message/release-impact assessment only; the parent `build` agent owns authorized staging/commits. Editors report compatibility impact and do not commit. PR titles use the same convention; preserve the breaking footer in the squash body. GitHub merge/token/required-check setup is documented in the versioning guide.
+
 ## Toolchain & Build Quirks
 - Rust **1.94.0** pinned in `rust-toolchain.toml` (workspace `rust-version = "1.91"` minimum)
 - **Vendored protoc**: `.cargo/config.toml` sets `PROTOC = "tools/protoc"` — a shim that finds the `protoc-bin-vendored` binary downloaded by Cargo. No system `protobuf` install needed.
@@ -177,7 +185,7 @@ V2 ignores `experimental.primary_tools`. `.opencode/opencode.json` is the primar
 | `question` | header, prompt, choices |
 | `subagent` | `agent`, `description`, `prompt`. Optional `background` and `sessionID` |
 
-Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`, `argos-tui-verify`.
+Skill ids: `graphify`, `argos-plan`, `argos-implement`, `ecc-plan`, `ecc-review`, `ecc-verify`, `ecc-checkpoint`, `ecc-learn`, `argos-tui-verify`, `argos-commit`.
 
 `build` may launch `explore`, `ecc-planner`, `ecc-reviewer`, and `ecc-edit`. `plan` may launch the first three. Repo questions start with shell `graphify query "<question>"`. Load `graphify` only when that command is unclear. Multi-step work loads `argos-plan` and leaves the plan on disk. GSD phase commands stay explicit (`/gsd-...`); their tools are not on `build` or `plan`.
 
@@ -226,7 +234,7 @@ Scratch = agent-only helpers Argos does not need to build or test (`*.py`, `*.sh
 - Never `git add` scratch files. `git rm` if one is already tracked.
 - Prefer editor edits. No line-number rewrites (`sed -i 'N,Mc'`) without re-reading the file.
 - After `fmt` → `clippy` → `test`, delete that task’s scratch files.
-- Keep `scripts/` only for documented project utilities (`scripts/agent_cargo.py`, `scripts/render_tui_cells.py`, `scripts/tui_review.py`). Review artifacts live under the named plan; durable selected fixture PNGs may live under `docs/screenshots/`. Dependency environments and diagnostic logs stay task-owned scratch.
+- Keep `scripts/` only for documented project utilities (`scripts/agent_cargo.py`, `scripts/render_tui_cells.py`, `scripts/tui_review.py`, `scripts/release_check.mjs`). Review artifacts live under the named plan; durable selected fixture PNGs may live under `docs/screenshots/`. Dependency environments and diagnostic logs stay task-owned scratch.
 - Incomplete work: leave scratch in `.agent-scratch/` and list it in the hand-off.
 
 

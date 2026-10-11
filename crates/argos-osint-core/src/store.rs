@@ -39,8 +39,9 @@ pub struct GraphSummary {
 /// Schema version this build writes. 26 adds model operations/attempts,
 /// coverage ledger, and intel task lease epoch. 27 adds the telemetry and
 /// activity-history tables plus additive timing columns on the model attempt
-/// and tool call records; every schema-26 fact is preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 27;
+/// and tool call records. 28 adds immutable NLP artifacts/references/features and
+/// complete summary-result envelopes; existing facts are preserved unchanged.
+pub const SCHEMA_VERSION: i64 = 28;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -722,6 +723,10 @@ impl Store {
                 }
 
                 self.conn.pragma_update(None, "user_version", 27)?;
+            }
+            if version < 28 {
+                crate::nlp::cache::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 28)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
@@ -1505,6 +1510,7 @@ impl Store {
                     })?;
             if exists > 0 {
                 self.tombstone_memory(id, "user_delete")?;
+                crate::nlp::cache::remove_owner(&self.conn, "memory", id)?;
             }
             self.conn.execute("DELETE FROM insight_sources WHERE fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
             self.conn.execute("DELETE FROM insight_relations WHERE left_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1) OR right_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
@@ -1736,6 +1742,8 @@ impl Store {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<bool> {
             self.delete_cycle_memories(id)?;
+            self.conn.execute("DELETE FROM nlp_source_refs WHERE owner_kind='article' AND owner_id IN(SELECT article_id FROM atlas_articles WHERE run_id=?1)",[id])?;
+            crate::nlp::cache::remove_owner(&self.conn, "atlas_run", id)?;
             self.conn
                 .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
             Ok(self
@@ -1951,6 +1959,7 @@ impl Store {
     }
 
     pub fn atlas_delete_article(&self, run_id: &str, article_id: &str) -> Result<()> {
+        crate::nlp::cache::remove_owner(&self.conn, "article", article_id)?;
         self.conn.execute(
             "DELETE FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
             params![run_id, article_id],
@@ -2256,7 +2265,10 @@ impl Store {
             };
             for id in &ids {
                 self.delete_cycle_memories(id)?;
+                crate::nlp::cache::remove_owner(&self.conn, "atlas_run", id)?;
                 if protected.is_empty() {
+                    self.conn.execute("DELETE FROM nlp_source_refs WHERE owner_kind='article' AND owner_id IN(SELECT article_id FROM atlas_articles WHERE run_id=?1)",[id])?;
+                    crate::nlp::cache::gc(&self.conn)?;
                     self.conn
                         .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
                 } else {
@@ -2271,6 +2283,7 @@ impl Store {
                         if protected.contains(&article_id) {
                             continue;
                         }
+                        crate::nlp::cache::remove_owner(&self.conn, "article", &article_id)?;
                         self.conn.execute(
                             "DELETE FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
                             params![id, article_id],
@@ -2409,6 +2422,9 @@ impl Store {
                 omitted: Vec::new(),
                 notes: "queued_for_flush".into(),
             },
+            source_hashes: Vec::new(),
+            provider: "local".into(),
+            preprocessing: serde_json::Value::Null,
             fallback: true,
         };
         let _ = crate::summarization::publish_deterministic_and_enqueue(
@@ -2750,7 +2766,7 @@ mod tests {
         #[test]
         fn schema_27_adds_telemetry_and_keeps_schema_26_columns() {
             let store = Store::memory().unwrap();
-            assert_eq!(version(&store.conn), 27);
+            assert_eq!(version(&store.conn), SCHEMA_VERSION);
             for name in [
                 "telemetry_events",
                 "telemetry_hourly",

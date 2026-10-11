@@ -1219,6 +1219,7 @@ pub fn job_observations(value: &Value, partial: bool) -> (Value, bool) {
                 "url": page.pointer("/metadata/sourceURL").or_else(|| page.pointer("/metadata/url")).and_then(Value::as_str).unwrap_or(""),
                 "title": clip_text(page.pointer("/metadata/title").and_then(Value::as_str).unwrap_or("")),
                 "markdown": clipped,
+                "nlp_source": crate::nlp::capture_page(page.pointer("/metadata/sourceURL").and_then(Value::as_str).unwrap_or(""),markdown),
             })
         })
         .collect();

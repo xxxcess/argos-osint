@@ -128,6 +128,6 @@ Recon limits: `news_calls_per_turn` 2, `legal_calls_per_turn` 3. Spec defaults s
 ## Verification and testing
 
 - Unit tests for every failure category and stage
-- Executor primary budget is 4 requests; admission wait consumes no attempt
+- Summary executor budget is 2 total requests, including transport fallback; admission wait consumes no attempt
 - Cache invalidation when inputs change
 - Graph explanation provider integration

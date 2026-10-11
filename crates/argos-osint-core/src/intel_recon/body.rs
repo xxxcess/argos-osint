@@ -210,6 +210,8 @@ pub async fn fetch_article_body(
 
     let executor = osint::Executor::new()?;
     let mut best_partial = String::new();
+    let mut best_length = 0;
+    let mut best_attempt = String::new();
     let mut best_tool = String::new();
     let mut best_resolved = url.clone();
     let mut attempted = Vec::new();
@@ -280,6 +282,22 @@ pub async fn fetch_article_body(
         let store = Store::open(db_path)?;
         match outcome {
             Ok(fetched) => {
+                // Persist acquisition before cleanup, linked to this exact retrieval attempt.
+                let mut source = crate::nlp::Source::derived(
+                    body_id,
+                    &generation.to_string(),
+                    &fetched.markdown,
+                );
+                source.attempt_id = attempt_id.clone();
+                source.raw_hash = Some(crate::nlp::cache::hash(&fetched.markdown));
+                crate::nlp::cache::register(
+                    &store.conn,
+                    "article",
+                    &article_id,
+                    &source,
+                    Some(&fetched.markdown),
+                    "acquisition-v1",
+                )?;
                 let validation = validate_article_body(&fetched.markdown, title, &url);
                 let reason = validation.rationale.clone();
                 store.finish_retrieval_attempt(
@@ -311,9 +329,11 @@ pub async fn fetch_article_body(
                             title,
                             &brief,
                             &url,
-                            &validation.cleaned_markdown,
+                            &fetched.markdown,
                             &fetched.resolved_url,
                             route,
+                            &attempt_id,
+                            &cancel,
                             force_refresh,
                             generation,
                             &article_id,
@@ -325,8 +345,10 @@ pub async fn fetch_article_body(
                         return Ok(());
                     }
                     BodyQuality::Partial | BodyQuality::Uncertain => {
-                        if validation.cleaned_markdown.len() > best_partial.len() {
-                            best_partial = validation.cleaned_markdown;
+                        if validation.cleaned_markdown.len() > best_length {
+                            best_length = validation.cleaned_markdown.len();
+                            best_attempt = attempt_id.clone();
+                            best_partial = fetched.markdown;
                             best_tool = route.into();
                             best_resolved = fetched.resolved_url;
                         }
@@ -359,6 +381,8 @@ pub async fn fetch_article_body(
             &best_partial,
             &best_resolved,
             &best_tool,
+            &best_attempt,
+            &cancel,
             force_refresh,
             generation,
             &article_id,
@@ -397,6 +421,8 @@ async fn commit_refined_body(
     scraped_markdown: &str,
     resolved_url: &str,
     tool: &str,
+    attempt_id: &str,
+    cancel: &Arc<AtomicBool>,
     force_refresh: bool,
     generation: i64,
     article_id: &str,
@@ -427,10 +453,48 @@ async fn commit_refined_body(
             generation,
         });
     }
+    // Index the immutable validated baseline even when no semantic model is available.
+    let baseline = validate_article_body(scraped_markdown, title, url);
+    let mut source =
+        crate::nlp::Source::derived(body_id, &generation.to_string(), &baseline.cleaned_markdown);
+    source.attempt_id = attempt_id.into();
+    source.raw_hash = Some(crate::nlp::cache::hash(scraped_markdown));
+    let context = source.context();
+    let cached = {
+        let store = Store::open(db_path)?;
+        crate::nlp::cache::register(
+            &store.conn,
+            "article",
+            article_id,
+            &source,
+            Some(scraped_markdown),
+            "validated-baseline-v1",
+        )?;
+        crate::nlp::cache::get(&store.conn, &source, &context)
+            .ok()
+            .flatten()
+    };
+    if crate::nlp::configured_mode() != crate::nlp::Mode::Off && cached.is_none() {
+        let annotation = crate::nlp::Service::shared()
+            .annotate(source.clone(), context.clone(), cancel.clone())
+            .await;
+        if annotation.status == crate::nlp::Status::Complete {
+            let store = Store::open(db_path)?;
+            crate::nlp::cache::put(&store.conn, &source, &context, &annotation)?;
+        }
+    }
     let refined =
         refine_retrieved_article_body(synthesis, classifier, title, brief, url, scraped_markdown)
             .await;
     let store = Store::open(db_path)?;
+    anyhow::ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+    let current = store
+        .article_body_by_id(body_id)?
+        .ok_or_else(|| anyhow!("body removed during refinement"))?;
+    anyhow::ensure!(
+        current.body_version == generation,
+        "body revision changed during refinement"
+    );
     store.commit_article_body(
         body_id,
         &refined.markdown,
@@ -440,6 +504,18 @@ async fn commit_refined_body(
         resolved_url,
         tool,
         force_refresh,
+    )?;
+    let mut derived =
+        crate::nlp::Source::derived(body_id, &generation.to_string(), &refined.markdown);
+    derived.attempt_id = attempt_id.into();
+    derived.raw_hash = Some(crate::nlp::cache::hash(scraped_markdown));
+    crate::nlp::cache::register(
+        &store.conn,
+        "article",
+        article_id,
+        &derived,
+        Some(scraped_markdown),
+        "body-refinement-v1",
     )?;
     // Emit Ready first so the cleaned body can paint while insights re-extract.
     on_event(BodyFetchEvent::Ready {

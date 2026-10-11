@@ -32,8 +32,8 @@ mod tests {
             })
             .await;
         assert!(out.value.is_none());
-        assert_eq!(hits.load(Ordering::SeqCst), 4);
-        assert_eq!(out.attempts_used, 4);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(out.attempts_used, 2);
         assert_eq!(out.last_category, ErrorCategory::Timeout);
     }
 
@@ -100,7 +100,7 @@ mod tests {
             sources: vec![SummarySource {
                 id: "ans-1".into(),
                 revision: "rev-1".into(),
-                hash: "h1".into(),
+                hash: crate::nlp::cache::hash("hello"),
                 text: "hello".into(),
                 meta: serde_json::json!({}),
             }],
@@ -110,6 +110,8 @@ mod tests {
             model: "m".into(),
             provider: "p".into(),
             prompt_version: SummarizationMode::FollowUpContext.prompt_version().into(),
+            preprocessing: serde_json::Value::Null,
+            deterministic: None,
         };
         let result = deterministic_follow_up("prior summary text for cache", 400);
         cache_put(&conn, &req, &result).unwrap();

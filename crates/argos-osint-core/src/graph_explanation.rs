@@ -289,7 +289,7 @@ pub async fn explain(
             "provider": key.provider,
             "model": key.model,
             "prompt_version": key.prompt_version,
-            "max_requests": crate::summarization::MAX_REQUESTS,
+            "max_requests": crate::summarization::GRAPH_MAX_REQUESTS,
         }),
     ) {
         logging.push(format!("event write failed: {err:#}"));
@@ -373,7 +373,7 @@ pub async fn explain(
                     job.phase(
                         &format!("attempt {number} · {}", transport.as_str()),
                         Some(number as i64 - 1),
-                        Some(i64::from(crate::summarization::MAX_REQUESTS)),
+                        Some(i64::from(crate::summarization::GRAPH_MAX_REQUESTS)),
                     );
                     child = job
                         .child(
@@ -551,7 +551,7 @@ pub fn record_detail_lines(rec: &ExplanationRecord) -> Vec<String> {
         lines.push(format!(
             "Requests: {} of {} · admission wait {} ms (not counted)",
             attempts.len(),
-            crate::summarization::MAX_REQUESTS,
+            crate::summarization::GRAPH_MAX_REQUESTS,
             wait
         ));
         lines.extend(attempts.iter().map(AttemptLog::line));

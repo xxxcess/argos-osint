@@ -40,6 +40,7 @@ pub mod iso3166;
 pub mod job_registry;
 pub mod jobs_view;
 pub mod memory_metadata;
+pub mod nlp;
 pub mod osint;
 pub mod paths;
 pub mod pipeline;

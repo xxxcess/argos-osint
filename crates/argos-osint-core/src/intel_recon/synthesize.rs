@@ -182,6 +182,7 @@ async fn model_refine_body(
     } else {
         brief.trim().to_string()
     };
+    let select_mode = crate::nlp::configured_mode() == crate::nlp::Mode::Select;
     let truncated: String = retrieved_markdown
         .chars()
         .take(BODY_REFINE_INPUT_CHARS)
@@ -212,10 +213,56 @@ Source URL:\n{url}\n\n\
 Retrieved page markdown:\n{truncated}\n\n\
 Extract and join ONLY the text strictly pertaining to the actual article title and description above, and ignore everything else. Return the cleaned article markdown only."
     );
+    let (system, user, reviewed) = if select_mode {
+        let source = crate::nlp::Source::derived(url, "body-cleanup", retrieved_markdown);
+        let prepared = crate::nlp::prepare(
+            source,
+            "article-cleanup",
+            &format!("{title} {brief}"),
+            36 * 1024,
+            BODY_REFINE_INPUT_CHARS,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
+        let mut blocks = super::body_filter::chunk_article_body(retrieved_markdown);
+        if let Some(manifest) = prepared.selection {
+            blocks.retain(|b| {
+                let start = crate::nlp::spans::scalar_to_byte(retrieved_markdown, b.start)
+                    .unwrap_or(usize::MAX);
+                let end = crate::nlp::spans::scalar_to_byte(retrieved_markdown, b.end)
+                    .unwrap_or(usize::MAX);
+                manifest
+                    .ranges
+                    .iter()
+                    .any(|r| start >= r.start_byte && end <= r.end_byte)
+            });
+        } else {
+            // Review a bounded set; unreviewed blocks stay verbatim.
+            let mut bytes = 0;
+            blocks.retain(|b| {
+                bytes += serde_json::to_vec(&b.text).map_or(usize::MAX, |v| v.len()) + 64;
+                bytes <= 36 * 1024
+            });
+        }
+        let block_json: Vec<_> = blocks
+            .iter()
+            .map(|b| json!({"id":b.id,"text":b.text}))
+            .collect();
+        (
+            super::body_filter::BLOCK_SYSTEM.to_string(),
+            format!(
+                "Title: {title}\nBrief: {brief}\nURL: {url}\nBlocks: {}",
+                serde_json::to_string(&block_json)?
+            ),
+            blocks,
+        )
+    } else {
+        (system.to_string(), user, Vec::new())
+    };
     let messages = [
         ChatMessage {
             role: "system".into(),
-            content: system.into(),
+            content: system,
             tool_call_id: None,
             tool_calls: Vec::new(),
         },
@@ -226,6 +273,12 @@ Extract and join ONLY the text strictly pertaining to the actual article title a
             tool_calls: Vec::new(),
         },
     ];
+    if crate::nlp::configured_mode() == crate::nlp::Mode::Select {
+        anyhow::ensure!(
+            crate::nlp::message_bytes(&messages, &serde_json::Value::Null) <= 48 * 1024,
+            "BudgetExceeded: section/cleanup message exceeds byte budget"
+        );
+    }
     let mut settings = crate::provider::SettingsFile::default();
     settings.defaults.synthesis = crate::provider::ModelAssignment {
         provider: secret.kind.clone(),
@@ -249,6 +302,13 @@ Extract and join ONLY the text strictly pertaining to the actual article title a
         false,
     )
     .await?;
+    if select_mode {
+        let ranges = super::body_filter::parse_block_decisions(&done_content, &reviewed)?;
+        return Ok(super::body_filter::remove_char_ranges_verbatim(
+            retrieved_markdown,
+            &ranges,
+        ));
+    }
     let extracted = strip_code_fence(done_content.trim());
     anyhow::ensure!(!extracted.is_empty(), "empty refined body");
     Ok(extracted)
@@ -303,42 +363,55 @@ async fn model_synthesize(
         .upstream_summaries
         .iter()
         .map(|(k, v)| {
-            let digest = crate::summarization::deterministic_report_context(k, v, 600);
+            let mut digest = crate::summarization::deterministic_report_context(k, v, 600);
             if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
                 let req = crate::summarization::flush_request(
                     crate::summarization::SummarizationMode::ReportContext,
                     k,
                     k,
-                    &digest.content,
+                    v,
                     &input.section_key,
                     600,
                 );
-                let _ = crate::summarization::publish_deterministic_and_enqueue(
+                if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
                     &store.conn,
                     &req,
                     digest.clone(),
-                );
+                ) {
+                    digest = published;
+                }
             }
             format!("### {k}\n{}", digest.content)
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let body_digest =
-        crate::summarization::deterministic_report_context("body", &input.body_excerpt, 3000);
+    let prepared = crate::nlp::prepare(
+        crate::nlp::Source::derived("body", &input.section_key, &input.body_excerpt),
+        "intel-section",
+        &format!("{} {}", input.section_title, input.objective),
+        2500,
+        2500,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .await;
+    let mut body_digest =
+        crate::summarization::deterministic_report_context("body", &prepared.text, 3000);
     if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
         let req = crate::summarization::flush_request(
             crate::summarization::SummarizationMode::ReportContext,
             "body",
             &input.section_key,
-            &body_digest.content,
+            &input.body_excerpt,
             &input.section_key,
             3000,
         );
-        let _ = crate::summarization::publish_deterministic_and_enqueue(
+        if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
             &store.conn,
             &req,
             body_digest.clone(),
-        );
+        ) {
+            body_digest = published;
+        }
     }
     let body_for_model = body_digest.content;
 
@@ -393,6 +466,12 @@ Return JSON: {{\"markdown\":string,\"summary\":string,\"confidence\":number,\
             tool_calls: Vec::new(),
         },
     ];
+    if crate::nlp::configured_mode() == crate::nlp::Mode::Select {
+        anyhow::ensure!(
+            crate::nlp::message_bytes(&messages, &serde_json::Value::Null) <= 48 * 1024,
+            "BudgetExceeded: section/cleanup message exceeds byte budget"
+        );
+    }
     let mut settings = crate::provider::SettingsFile::default();
     settings.defaults.synthesis = crate::provider::ModelAssignment {
         provider: secret.kind.clone(),
@@ -647,15 +726,18 @@ pub fn save_section(
         &output.markdown,
         480,
     );
-    judgment.summary = digest.content.clone();
-    store.enqueue_summary_flush_best_effort(
+    let req = crate::summarization::flush_request(
         crate::summarization::SummarizationMode::SectionDigest,
         &format!("section-{}-{}", section.job_id, section.section_key),
         &assessment_version.to_string(),
-        &digest.content,
+        &output.markdown,
         &section.section_key,
         480,
     );
+    let published =
+        crate::summarization::publish_deterministic_and_enqueue(&store.conn, &req, digest.clone())
+            .unwrap_or(digest);
+    judgment.summary = published.content;
     let judgment = serde_json::to_string(&judgment).unwrap_or_else(|_| "{}".into());
     let evidence_ids = json!(output.judgment.cited_evidence_ids).to_string();
     let status = if output.is_draft { "draft" } else { "complete" };

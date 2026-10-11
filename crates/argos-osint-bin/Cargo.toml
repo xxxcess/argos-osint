@@ -12,7 +12,8 @@ name = "argos"
 path = "src/main.rs"
 
 [features]
-default = ["lancedb"]
+default = ["lancedb", "nlp"]
+nlp = ["argos-osint-core/nlp"]
 lancedb = ["argos-osint-core/lancedb"]
 
 [dependencies]

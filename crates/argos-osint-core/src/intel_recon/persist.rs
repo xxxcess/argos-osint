@@ -323,6 +323,17 @@ impl Store {
                 ],
             )?;
         }
+        if let Some(body) = self.article_body_by_id(id)? {
+            let source = crate::nlp::Source::derived(id, &body.body_version.to_string(), markdown);
+            crate::nlp::cache::register(
+                &self.conn,
+                "article",
+                &body.article_id,
+                &source,
+                None,
+                "historical-body-v1",
+            )?;
+        }
         Ok(())
     }
 

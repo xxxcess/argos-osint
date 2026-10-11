@@ -1,0 +1,8 @@
+[
+  {"id":"clean","text":"Alice Smith said Acme announced a project in Geneva. She cautioned that the plan remains uncertain.","language":"en","focus":"Acme","material":["Alice Smith said","remains uncertain"]},
+  {"id":"no-entities","text":"The device failed during testing. However, the result was disputed and may be revised.","language":"en","focus":"testing","material":["failed during testing","may be revised"]},
+  {"id":"money-dispute","text":"Alice Smith estimated $1.2 billion, not $2 billion. The estimate is uncertain.","language":"en","focus":"estimate","material":["$1.2 billion, not $2 billion","uncertain"]},
+  {"id":"multilingual","text":"北京项目仍有争议。Corrección: la cifra no fue confirmada. 😀","language":"zh","focus":"项目","material":["北京项目仍有争议","no fue confirmada"]},
+  {"id":"code","text":"const url = 'https://example.test/a';\n\nThe build failed. The report denied an external attack.\n\nreturn false;","language":"en","focus":"attack","material":["denied an external attack","return false"]},
+  {"id":"structured-extract","text":"{\"source_url\":\"https://example.test/a\",\"ioc\":\"192.0.2.42\",\"status\":\"unconfirmed\"}","language":"en","focus":"unconfirmed","safe_fallback":true,"material":["https://example.test/a","192.0.2.42","unconfirmed"]}
+]

@@ -8,6 +8,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 
 | Aspect | Type | HTML | SVG |
 | --- | --- | --- | --- |
+| Local NLP | Data flow | [nlp-preprocessing.html](diagrams/nlp-preprocessing.html) | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
 | Workspace | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
 | TUI shell | Nested | [tui-shell.html](diagrams/tui-shell.html) | [tui-shell.svg](diagrams/tui-shell.svg) |
 | Recon turn | Process | [recon-turn.html](diagrams/recon-turn.html) | [recon-turn.svg](diagrams/recon-turn.svg) |

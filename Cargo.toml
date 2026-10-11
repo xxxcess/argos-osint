@@ -28,6 +28,7 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm_0
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 regex = "1"
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 rpassword = "7"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -43,3 +44,7 @@ toml = "0.8"
 tract-onnx = "0.23"
 url = "2"
 scraper = "0.27"
+
+# The embedded JS engine must meet local interrupt deadlines in debug builds too.
+[profile.dev.package.rquickjs-sys]
+opt-level = 3

@@ -193,3 +193,5 @@ For photographic detail use a terminal that supports native image graphics.
 Images retain their source resolution during decoding and use a single high-quality
 contain resize for display. Bulletin imagery and short article previews are
 vertically centered; briefing imagery is horizontally centered in the reader column.
+
+Local NLP is configured in `config.toml` with `[nlp] mode = "off"`, `"annotate"` (default), or `"select"`. It is not part of portable Profile configuration. See [nlp-preprocessing.md](nlp-preprocessing.md) for evidence and fallback behavior.

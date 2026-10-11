@@ -34,7 +34,7 @@ Each turn stores a user message and a run with snapshots of Recon, Tool picker, 
 - Up to five claim-ranked links become picker options `brain_scrape:0`…. Picking one is a pre-bound `firecrawl_scrape`.
 - While those options remain and no search URL exists, bare `firecrawl_scrape` is withheld.
 - Binder prefers `brain:` URLs over later search hits (first in batch scrape lists).
-- Large scrape/extract evidence is compacted by Synthesis (`compacting evidence`) before the final answer.
+- Large scrape/extract evidence is compacted by Summarization (`compacting evidence`) before the final answer. Local preprocessing can select verbatim page windows before that operation; see [nlp-preprocessing.md](nlp-preprocessing.md).
 
 ### Directives
 
@@ -524,3 +524,7 @@ Synthesis: news lines get publish date and source; court lines get court, filing
 | Information Credibility | 1–6 | Atlas peer support: title peers + fact→1, fact or body peers→2, mid inference→3, low confidence→4, unreliable or conflict→5, no baseline with F→6. |
 
 Scaled confidence: `clamp(base × reliability_factor × credibility_factor, 0, 1)`. Intel shows HIGH/MEAN plus REL (letter) and CRD (digit). Index caches 30 days in process memory and `app_state.wikipedia_rsp_index`.
+
+## Local preprocessing
+
+The process-shared NLP worker, immutable source references and migration 28 caches are described in [nlp-preprocessing.md](nlp-preprocessing.md). Annotate is the default; select retains verbatim windows and explicit partial coverage before existing model operations. [Evidence flow](diagrams/nlp-preprocessing.html).

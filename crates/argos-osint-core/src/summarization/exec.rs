@@ -21,8 +21,10 @@ use crate::secrets::ProviderSecret;
 use crate::tasks::{self, AdmissionGuard};
 
 /// Outbound requests one summary execution may send on the primary route.
-/// Shared chain policy: initial + 3 retries. Fallbacks add 3 each.
-pub const MAX_REQUESTS: u32 = crate::provider_chain::PRIMARY_ATTEMPTS;
+/// Summary-specific policy: two total requests, including transport fallback.
+pub const MAX_REQUESTS: u32 = 2;
+/// Existing independent GraphExplanation gate.
+pub const GRAPH_MAX_REQUESTS: u32 = crate::provider_chain::PRIMARY_ATTEMPTS;
 
 /// Execution limits.
 #[derive(Clone, Debug)]
@@ -165,7 +167,12 @@ pub async fn complete_summary_report(
         );
         return out;
     }
-    let cap = MAX_REQUESTS;
+    // GraphExplanation retains its existing independent request gate.
+    let cap = if mode == SummarizationMode::GraphExplanation {
+        crate::provider_chain::PRIMARY_ATTEMPTS
+    } else {
+        MAX_REQUESTS
+    };
     let mut transport = opts.first_transport;
     let mut number = 0u32;
     while number < cap {
@@ -320,7 +327,7 @@ mod tests {
         o.first_transport = first;
         let out = complete_summary_report(
             &secret,
-            SummarizationMode::GraphExplanation,
+            SummarizationMode::PageEvidence,
             &msgs(),
             &[],
             &o,
@@ -331,15 +338,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn primary_budget_is_four_requests_including_transport_fallback() {
-        // Persistent 503: primary budget is 4 requests.
+    async fn summary_budget_is_two_requests_including_transport_fallback() {
+        // Persistent 503: summary budget is 2 requests.
         let (out, hits) = exec(
             vec![Reply::Json(503, "{}".into())],
             "x-503",
             Transport::NonStream,
         )
         .await;
-        assert_eq!((out.requests(), hits), (4, 4));
+        assert_eq!((out.requests(), hits), (2, 2));
         assert!(out.content.is_none());
         assert_eq!(out.failure.unwrap().category, Category::Server);
 
@@ -358,7 +365,7 @@ mod tests {
             .unwrap()
             .starts_with("transport_fallback"));
 
-        // Unsupported non-stream then broken stream: primary budget of 4, partial never returned.
+        // Unsupported non-stream then broken stream: summary budget of 2, partial never returned.
         let (out, hits) = exec(
             vec![
                 Reply::Json(
@@ -371,7 +378,7 @@ mod tests {
             Transport::NonStream,
         )
         .await;
-        assert_eq!((out.requests(), hits), (4, 4));
+        assert_eq!((out.requests(), hits), (2, 2));
         assert!(out.content.is_none());
         let f = out.failure.unwrap();
         assert!(
@@ -402,7 +409,7 @@ mod tests {
             Transport::NonStream,
         )
         .await;
-        assert_eq!(hits, 4);
+        assert_eq!(hits, 2);
         let f = out.failure.unwrap();
         assert_eq!(f.category, Category::InvalidModel);
         assert!(f.guidance().unwrap().contains("Models"));
@@ -415,7 +422,7 @@ mod tests {
         .await;
         assert_eq!(
             (hits, out.failure.unwrap().category),
-            (4, Category::TokenLimit)
+            (2, Category::TokenLimit)
         );
     }
 
@@ -434,7 +441,7 @@ mod tests {
         });
         let out = complete_summary_report(
             &secret,
-            SummarizationMode::GraphExplanation,
+            SummarizationMode::PageEvidence,
             &msgs(),
             &[],
             &opts(&secret, account),

@@ -188,8 +188,8 @@ mod retry_tests {
             Err(ErrorCategory::RateLimit) as Result<(), ErrorCategory>
         })
         .await;
-        assert_eq!(out.attempts_used, 4);
-        assert_eq!(hits.load(Ordering::SeqCst), 4);
+        assert_eq!(out.attempts_used, 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
         assert!(out.value.is_none());
     }
 

@@ -19,7 +19,7 @@ use super::ledger::coverage_complete;
 use super::modes::ReportMode;
 use crate::secrets::AuthFile;
 
-use super::synthesize::{save_section, synthesize_section, SectionJudgment, SectionSynthInput};
+use super::synthesize::{save_section, synthesize_section, SectionSynthInput};
 
 #[derive(Clone)]
 pub struct JobRuntime {
@@ -566,7 +566,7 @@ async fn run_synthesize(
         let body = store.article_body_for_article(&job.article_id)?;
         let body_excerpt = body
             .as_ref()
-            .map(|b| b.body_markdown.chars().take(2500).collect::<String>())
+            .map(|b| b.body_markdown.clone())
             .unwrap_or_default();
         let settings: ReportScope = serde_json::from_str(&job.settings_json).unwrap_or_default();
         let upstream = if section_key == "bluf" {
@@ -574,12 +574,7 @@ async fn run_synthesize(
                 .intel_report_sections(&job.id)?
                 .into_iter()
                 .filter(|s| s.section_key != "bluf" && s.status == "complete")
-                .map(|s| {
-                    let summary = serde_json::from_str::<SectionJudgment>(&s.judgment_json)
-                        .map(|j| j.summary)
-                        .unwrap_or_else(|_| s.markdown.chars().take(400).collect());
-                    (s.title, summary)
-                })
+                .map(|s| (s.title, s.markdown))
                 .collect()
         } else {
             Vec::new()

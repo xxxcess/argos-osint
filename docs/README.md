@@ -14,6 +14,7 @@ Deep investigation: [architecture.md](architecture.md). Keys and roles: [provide
 | [providers.md](providers.md) | Model accounts (Defaults, OpenRouter, Google, Nvidia) and OSINT keys |
 | [profile-analytics-dashboard.md](profile-analytics-dashboard.md) | Profile's 20 primary views, simultaneous dashboard, shared layout/components and viewport acceptance |
 | [profile-dashboard-and-search.md](profile-dashboard-and-search.md) | Profile metric dictionary/history, portable configuration and named search engines |
+| [nlp-preprocessing.md](nlp-preprocessing.md) | Local NLP, immutable evidence, selection, cache and verification |
 | [concepts.md](concepts.md) | Glossary: apps vs IDs, roles, bindings, Intel jobs, schema |
 | [conventions.md](conventions.md) | TUI, schema, tests, agent scratch, planning files |
 | [diagrams.md](diagrams.md) | Editorial diagram language and figures |
@@ -24,6 +25,7 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 
 | Figure | Type | File |
 | --- | --- | --- |
+| Local NLP | Data flow | [diagrams/nlp-preprocessing.html](diagrams/nlp-preprocessing.html) |
 | Workspace | Architecture | [diagrams/workspace.html](diagrams/workspace.html) |
 | TUI shell | Nested | [diagrams/tui-shell.html](diagrams/tui-shell.html) |
 | Recon turn | Process | [diagrams/recon-turn.html](diagrams/recon-turn.html) |

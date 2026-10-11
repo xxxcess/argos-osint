@@ -44,3 +44,8 @@ jobs:
         run: cargo test --workspace --locked --no-default-features
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+
+      - name: Clippy (NLP enabled; no LanceDB)
+        run: cargo clippy --workspace --all-targets --locked --no-default-features --features nlp -- -D warnings
+      - name: Test (NLP enabled; offline; no embeddings)
+        run: cargo test --workspace --locked --no-default-features --features nlp

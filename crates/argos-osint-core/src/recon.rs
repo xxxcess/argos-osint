@@ -1437,6 +1437,7 @@ impl Store {
         if found == 0 {
             return Ok(false);
         }
+        crate::nlp::cache::remove_owner(&tx, "thread", tid)?;
         tx.execute("UPDATE recon_runs SET state='deleted',stage='deleted' WHERE thread_id=?1 AND state='running'",[tid])?;
         tx.execute("UPDATE osint_calls SET status='cancelled' WHERE thread_id=?1 AND status IN ('queued','running')",[tid])?;
         if insights {
@@ -2488,7 +2489,7 @@ fn packet_observation(value: &Value) -> Value {
                     .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
-                let digest = crate::summarization::deterministic_tool_observation(
+                let mut digest = crate::summarization::deterministic_tool_observation(
                     tool_id, call_id, status, value, 4000,
                 );
                 // Best-effort flush enqueue when the process DB is reachable.
@@ -2497,22 +2498,24 @@ fn packet_observation(value: &Value) -> Value {
                         crate::summarization::SummarizationMode::ToolObservation,
                         call_id,
                         call_id,
-                        &digest.content,
+                        &value.to_string(),
                         tool_id,
                         4000,
                     );
-                    let _ = crate::summarization::publish_deterministic_and_enqueue(
+                    if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
                         &store.conn,
                         &req,
                         digest.clone(),
-                    );
+                    ) {
+                        digest = published;
+                    }
                 }
                 json!({
                     "tool_observation_digest": digest.content,
                     "tool_meta": digest.coverage.notes,
                     "truncated_for_model": digest.coverage.partial,
                     "summarization_mode": "tool_observation",
-                    "fallback": true,
+                    "fallback": digest.fallback,
                 })
             }
         }
@@ -2580,6 +2583,7 @@ fn page_summary_observation(value: &Value, summary: &str) -> Value {
             "pages": pages,
             "summary": summary,
             "compacted": true,
+            "nlp_manifest":value.get("nlp_manifest"),
         });
     }
     json!({
@@ -2589,6 +2593,7 @@ fn page_summary_observation(value: &Value, summary: &str) -> Value {
         "org_name": value.get("org_name").and_then(Value::as_str).unwrap_or(""),
         "domain": value.get("domain").and_then(Value::as_str).unwrap_or(""),
         "summary": summary,
+        "nlp_manifest":value.get("nlp_manifest"),
         "compacted": true,
     })
 }
@@ -2664,7 +2669,12 @@ async fn compact_page_evidence(
     db_path: Option<&Path>,
 ) -> Result<Vec<(String, ToolResult)>> {
     let mut out = Vec::with_capacity(results.len());
-    for (id, result) in results {
+    for (id, original) in results {
+        let result = prepare_page_result(
+            settings, question, directives, id, original, cancel, run_id, db_path,
+        )
+        .await;
+        let result = &result;
         if !page_needs_compact(&result.observations) {
             out.push((id.clone(), result.clone()));
             continue;
@@ -3544,9 +3554,10 @@ impl Service {
             return Ok(None);
         }
         let _ = (max_calls, opening);
-        let synthesis_results = if results
-            .iter()
-            .any(|(_, result)| page_needs_compact(&result.observations))
+        let synthesis_results = if self.settings.nlp.mode != crate::nlp::Mode::Off
+            || results
+                .iter()
+                .any(|(_, result)| page_needs_compact(&result.observations))
         {
             progress(TurnEvent::Stage("compacting evidence".into()));
             Store::open(&self.db_path)?.set_run(
@@ -3573,8 +3584,50 @@ impl Service {
         };
         progress(TurnEvent::Stage("synthesizing".into()));
         Store::open(&self.db_path)?.set_run(&run.id, "running", "synthesizing", None, None)?;
-        let (synthesis_prompt, synthesis_user) =
-            synthesis_request(question, plan, &synthesis_results, prior, recalled)?;
+        let prior_view = crate::nlp::prepare_mode(
+            crate::nlp::Source::derived(&run.thread_id, "prior", prior),
+            "synthesis-prior",
+            question,
+            8000,
+            orchestrate::PRIOR_SYNTHESIS_CHARS,
+            cancel.clone(),
+            self.settings.nlp.mode,
+        )
+        .await;
+        let mut recall_views = recalled.to_vec();
+        for item in &mut recall_views {
+            let source = crate::nlp::Source::derived(&item.memory_id, &item.updated_at, &item.text);
+            let prepared = crate::nlp::prepare_mode(
+                source.clone(),
+                "brain-context",
+                question,
+                200,
+                200,
+                cancel.clone(),
+                self.settings.nlp.mode,
+            )
+            .await;
+            if self.settings.nlp.mode != crate::nlp::Mode::Off {
+                if let Ok(store) = Store::open(&self.db_path) {
+                    let _ = crate::nlp::cache::register(
+                        &store.conn,
+                        "memory",
+                        &item.memory_id,
+                        &source,
+                        None,
+                        "historical-brain-v1",
+                    );
+                }
+            }
+            item.text = prepared.text;
+        }
+        let (synthesis_prompt, synthesis_user) = synthesis_request(
+            question,
+            plan,
+            &synthesis_results,
+            &prior_view.text,
+            &recall_views,
+        )?;
         {
             let mut clock_guard = clock.lock().unwrap();
             clock_guard.set_evidence(synthesis_user.chars().count());
@@ -3597,6 +3650,12 @@ impl Service {
             chat("user", synthesis_user.clone()),
         ];
 
+        if self.settings.nlp.mode == crate::nlp::Mode::Select {
+            ensure!(
+                crate::nlp::message_bytes(&synthesis_messages, &Value::Null) <= 48 * 1024,
+                "BudgetExceeded: mandatory synthesis evidence exceeds serialized byte budget"
+            );
+        }
         let (prev_gen, _): (u32, String) = Store::open(&self.db_path)?
             .conn
             .query_row(
@@ -3756,7 +3815,7 @@ impl Service {
         }
         let answer_msg = self.store_answer(run, recalled, &answer, results, &[])?;
         let cited_ids = citation_ids(&answer);
-        let cited_results: Vec<_> = results
+        let cited_results: Vec<_> = synthesis_results
             .iter()
             .filter(|(id, _)| cited_ids.contains(id))
             .cloned()
@@ -3916,13 +3975,23 @@ impl Service {
     ) -> Result<()> {
         let packet:Vec<_>=evidence.iter().filter(|(_,r)|r.status=="completed").map(|(id,r)|json!({"id":id,"tool":r.tool_id,"source_url":r.source_url,"observations":packet_observation(&r.observations)})).collect();
         let prompt="Extract at most 5 concise atomic investigation claims supported by the evidence. Return JSON object {\"claims\":[{\"entity\":string,\"namespace\":string,\"predicate\":string,\"object\":string,\"topic\":string,\"claim\":string,\"classification\":\"fact\"|\"inference\",\"confidence\":number,\"evidence_ids\":[string]}]}. Do not extract generic advice, prompt text, or unsupported identity links. The entity is investigated, not the user. evidence_ids must be ids from Evidence. When the answer does not cite gathered evidence, infer which Evidence items support each claim, put those ids in evidence_ids, and set classification to inference.";
+        let answer_view = crate::nlp::prepare_mode(
+            crate::nlp::Source::derived(&answer.id, &answer.id, &answer.content),
+            "claim-mining",
+            question,
+            12000,
+            12000,
+            Arc::new(AtomicBool::new(false)),
+            self.settings.nlp.mode,
+        )
+        .await;
         let messages = [
             chat("system", prompt.into()),
             chat(
                 "user",
                 format!(
                     "Question: {question}\nAnswer: {}\nEvidence: {}",
-                    answer.content,
+                    answer_view.text,
                     serde_json::to_string(&packet)?
                 ),
             ),
@@ -4598,6 +4667,121 @@ fn citation_ids(answer: &str) -> Vec<String> {
     }
     ids
 }
+/// Prepare immutable page artifacts once, before compaction and synthesis retries.
+async fn prepare_page_result(
+    settings: &SettingsFile,
+    question: &str,
+    directives: &str,
+    id: &str,
+    result: &ToolResult,
+    cancel: &Arc<AtomicBool>,
+    run_id: &str,
+    db_path: Option<&Path>,
+) -> ToolResult {
+    if settings.nlp.mode == crate::nlp::Mode::Off
+        || result
+            .observations
+            .get("evidence_form")
+            .and_then(Value::as_str)
+            != Some("page")
+    {
+        return result.clone();
+    }
+    let raw = serde_json::from_str::<Value>(&result.raw).unwrap_or(Value::Null);
+    let data = raw.get("data").unwrap_or(&raw);
+    let mut out = result.clone();
+    let mut manifests = Vec::new();
+    let count = out
+        .observations
+        .get("pages")
+        .and_then(Value::as_array)
+        .map_or(1, Vec::len)
+        .max(1);
+    let owner = db_path
+        .and_then(|p| Store::open(p).ok())
+        .and_then(|s| {
+            s.conn
+                .query_row(
+                    "SELECT thread_id FROM recon_runs WHERE id=?1",
+                    [run_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+        })
+        .unwrap_or_else(|| run_id.to_owned());
+    let mut pages = if let Some(pages) = out.observations.get("pages").and_then(Value::as_array) {
+        pages.clone()
+    } else {
+        vec![out.observations.clone()]
+    };
+    for (index, page) in pages.iter_mut().enumerate() {
+        let acquired = if let Some(array) = data.as_array() {
+            array.get(index).unwrap_or(&Value::Null)
+        } else {
+            data
+        };
+        let full = acquired
+            .get("markdown")
+            .or_else(|| acquired.get("content"))
+            .and_then(Value::as_str)
+            .or_else(|| page.get("markdown").and_then(Value::as_str))
+            .unwrap_or("");
+        let mut source =
+            crate::nlp::Source::derived(&format!("{id}:{index}"), &result.retrieved_at, full);
+        source.attempt_id = id.into();
+        source.retrieved_at = result.retrieved_at.clone();
+        let raw_available = acquired
+            .get("markdown")
+            .or_else(|| acquired.get("content"))
+            .and_then(Value::as_str)
+            .is_some();
+        if raw_available {
+            source.raw_hash = Some(source.prose_hash.clone());
+        }
+        if let Some(path) = db_path {
+            if let Ok(store) = Store::open(path) {
+                let _ = crate::nlp::cache::register(
+                    &store.conn,
+                    "thread",
+                    &owner,
+                    &source,
+                    raw_available.then_some(full),
+                    "page-acquisition-v1",
+                );
+            }
+        }
+        let prepared = crate::nlp::prepare_mode(
+            source.clone(),
+            "recon-page",
+            &format!("{question} {directives}"),
+            (32 * 1024 / count).min(16000),
+            16000,
+            cancel.clone(),
+            settings.nlp.mode,
+        )
+        .await;
+        if settings.nlp.mode == crate::nlp::Mode::Select {
+            page["markdown"] = json!(prepared.text);
+        }
+        if let Some(path) = db_path {
+            if let Ok(store) = Store::open(path) {
+                let coverage =
+                    serde_json::to_string(&prepared.selection).unwrap_or_else(|_| "null".into());
+                let _=store.conn.execute("UPDATE nlp_source_refs SET metadata_json=json_set(metadata_json,'$.coverage',json(?4)) WHERE owner_kind='thread' AND owner_id=?1 AND source_id=?2 AND prose_hash=?3",params![owner,source.source_id,source.prose_hash,coverage]);
+            }
+        }
+        let manifest=prepared.selection.as_ref().map(|s|json!({"ranges":s.ranges,"selection_key":s.selection_key,"partial":!s.omitted_sentence_ids.is_empty(),"selected_count":s.selected_sentence_ids.len(),"omitted_count":s.omitted_sentence_ids.len()})).unwrap_or(Value::Null);
+        manifests.push(json!({"source_id":source.source_id,"artifact_hash":source.prose_hash,"selection":manifest,"diagnostic":prepared.diagnostic}));
+    }
+    if out.observations.get("pages").is_some() {
+        out.observations["pages"] = json!(pages);
+    } else {
+        out.observations = pages.remove(0);
+    }
+    out.observations["nlp_manifest"] = json!(manifests);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

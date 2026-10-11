@@ -14,7 +14,7 @@ use crate::tasks::OperationKind;
 mod exec;
 pub use exec::{
     admission_account, complete_summary_report, AttemptEvent, AttemptLog, ExecOptions,
-    SummaryExecution, MAX_REQUESTS,
+    SummaryExecution, GRAPH_MAX_REQUESTS, MAX_REQUESTS,
 };
 
 /// Nine production modes. Each maps to a real call site.
@@ -76,7 +76,7 @@ impl SummarizationMode {
 
     /// Prompt version string included in cache keys.
     pub fn prompt_version(self) -> &'static str {
-        "summarization.v1"
+        "summarization.v2"
     }
 }
 
@@ -102,23 +102,21 @@ pub struct SummaryRequest {
     pub model: String,
     pub provider: String,
     pub prompt_version: String,
+    #[serde(default)]
+    pub preprocessing: serde_json::Value,
+    #[serde(default)]
+    pub deterministic: Option<Box<SummaryResult>>,
 }
 
 impl SummaryRequest {
     pub fn cache_key(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(self.mode.as_str().as_bytes());
-        hasher.update(self.focus.as_bytes());
-        hasher.update(self.budget_chars.to_string().as_bytes());
-        hasher.update(self.model.as_bytes());
-        hasher.update(self.prompt_version.as_bytes());
-        for source in &self.sources {
-            hasher.update(source.id.as_bytes());
-            hasher.update(source.revision.as_bytes());
-            hasher.update(source.hash.as_bytes());
-        }
-        format!("{:x}", hasher.finalize())
+        crate::nlp::cache::key(&serde_json::json!({
+            "mode":self.mode,"focus":self.focus,"budget":self.budget_chars,
+            "provider":self.provider,"model":self.model,"prompt":self.prompt_version,
+            "required_fields":self.required_fields,"preprocessing":self.preprocessing,
+            "sources":self.sources.iter().map(|s|serde_json::json!({"id":s.id,"revision":s.revision,
+                "hash":sha_hex(&s.text),"declared_hash":s.hash,"meta":s.meta})).collect::<Vec<_>>()
+        }))
     }
 }
 
@@ -131,6 +129,12 @@ pub struct SummaryResult {
     pub prompt_version: String,
     pub coverage: CoverageMeta,
     pub fallback: bool,
+    #[serde(default)]
+    pub source_hashes: Vec<String>,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub preprocessing: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -218,6 +222,24 @@ pub fn validate_result(
             }
         }
     }
+    if !known_ids.is_empty() {
+        let citations = regex::Regex::new(r"\[([^\[\]]+)\]").unwrap();
+        for group in citations.captures_iter(text) {
+            for id in group[1].split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+                let id = id.trim_matches('.');
+                if [
+                    "call-", "brain:", "iev-", "art-", "article:", "source-", "src-", "memory-",
+                    "section-",
+                ]
+                .iter()
+                .any(|p| id.starts_with(p))
+                    && !known_ids.iter().any(|known| known == id)
+                {
+                    return Err(format!("unknown evidence id {id}"));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -248,41 +270,30 @@ pub fn fallback_excerpt(text: &str, budget: usize) -> String {
 }
 
 /// Look up a cached derived summary by the request cache key fields.
-pub fn cache_get(
+fn cache_get_exact(
     conn: &Connection,
     req: &SummaryRequest,
 ) -> Result<Option<SummaryResult>, anyhow::Error> {
-    let focus_hash = sha_hex(&req.focus);
-    let row: Option<(String, String, String, i64, String)> = conn
+    if req.sources.iter().any(|s| sha_hex(&s.text) != s.hash) {
+        return Ok(None);
+    }
+    let stored: Option<String> = conn
         .query_row(
-            "SELECT content, source_refs_json, coverage_json, fallback, model
-             FROM argos_derived_summaries
-             WHERE mode=?1 AND source_id=?2 AND source_revision=?3 AND focus_hash=?4
-               AND budget=?5 AND model=?6 AND prompt_version=?7
-             LIMIT 1",
-            params![
-                req.mode.as_str(),
-                req.sources.first().map(|s| s.id.as_str()).unwrap_or(""),
-                req.sources
-                    .first()
-                    .map(|s| s.revision.as_str())
-                    .unwrap_or(""),
-                focus_hash,
-                req.budget_chars as i64,
-                req.model,
-                req.prompt_version,
-            ],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            "SELECT result_json FROM argos_derived_summaries WHERE id=?1",
+            [format!("sum-{}", req.cache_key())],
+            |r| r.get(0),
         )
         .optional()?;
+    if let Some(json) = stored {
+        if let Ok(result) = serde_json::from_str::<SummaryResult>(&json) {
+            return Ok(Some(result));
+        }
+    }
+    let row: Option<(String, String, String, i64, String)> = conn.query_row(
+        "SELECT content, source_refs_json, coverage_json, fallback, model FROM argos_derived_summaries WHERE id=?1",
+        [format!("sum-{}",req.cache_key())],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional()?;
     let Some((content, refs_json, cov_json, fallback, model)) = row else {
         return Ok(None);
     };
@@ -299,8 +310,30 @@ pub fn cache_get(
         model,
         prompt_version: req.prompt_version.clone(),
         coverage,
+        source_hashes: req.sources.iter().map(|s| s.hash.clone()).collect(),
+        provider: req.provider.clone(),
+        preprocessing: req.preprocessing.clone(),
         fallback: fallback != 0,
     }))
+}
+
+/// Prefer an exact compatible model result, then its separately keyed local fallback.
+pub fn cache_get(conn: &Connection, req: &SummaryRequest) -> anyhow::Result<Option<SummaryResult>> {
+    if let Some(result) = cache_get_exact(conn, req)? {
+        return Ok(Some(result));
+    }
+    let mut local = req.clone();
+    local.provider = "local".into();
+    local.model = "deterministic".into();
+    Ok(cache_get_exact(conn, &local)?.filter(|r| r.fallback))
+}
+
+pub fn resolved_summary_route() -> (String, String) {
+    let auth = crate::secrets::AuthFile::load().unwrap_or_default();
+    let settings = crate::provider::SettingsFile::load().unwrap_or_default();
+    crate::provider::role_secret(&auth, &settings, "summarization")
+        .map(|s| (s.kind, s.model))
+        .unwrap_or_else(|_| ("local".into(), "deterministic".into()))
 }
 
 /// Persist a derived summary for later cache hits.
@@ -309,6 +342,10 @@ pub fn cache_put(
     req: &SummaryRequest,
     result: &SummaryResult,
 ) -> Result<(), anyhow::Error> {
+    anyhow::ensure!(
+        req.sources.iter().all(|s| sha_hex(&s.text) == s.hash),
+        "summary source hash mismatch"
+    );
     let now = chrono::Utc::now().to_rfc3339();
     let id = format!("sum-{}", req.cache_key());
     let focus_hash = sha_hex(&req.focus);
@@ -330,7 +367,8 @@ pub fn cache_put(
             source_refs_json=excluded.source_refs_json,
             coverage_json=excluded.coverage_json,
             fallback=excluded.fallback,
-            updated_at=excluded.updated_at",
+            updated_at=excluded.updated_at
+         WHERE argos_derived_summaries.fallback=1 OR excluded.fallback=0",
         params![
             id,
             req.mode.as_str(),
@@ -347,6 +385,14 @@ pub fn cache_put(
             serde_json::to_string(&result.coverage)?,
             if result.fallback { 1 } else { 0 },
             now,
+        ],
+    )?;
+    conn.execute(
+        "UPDATE argos_derived_summaries SET result_json=?2 WHERE id=?1 AND (fallback=1 OR ?3=0)",
+        params![
+            id,
+            serde_json::to_string(result)?,
+            i64::from(result.fallback)
         ],
     )?;
     Ok(())
@@ -406,21 +452,52 @@ pub fn try_live_summary_upgrade(
     let Some(req) = load_flush_request(conn, cache_key)? else {
         anyhow::bail!("flush request missing for {cache_key}");
     };
-    let cached = cache_get(conn, &req)?.unwrap_or_else(|| SummaryResult {
-        content: String::new(),
-        source_refs: Vec::new(),
-        source_hash: String::new(),
-        model: "deterministic".into(),
-        prompt_version: req.prompt_version.clone(),
-        coverage: CoverageMeta::default(),
-        fallback: true,
-    });
+    let cached = cache_get(conn, &req)?
+        .or_else(|| req.deterministic.as_deref().cloned())
+        .unwrap_or_else(|| SummaryResult {
+            content: if req.prompt_version.ends_with(".v1") {
+                fallback_excerpt(
+                    &req.sources
+                        .iter()
+                        .map(|s| s.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                    req.budget_chars,
+                )
+            } else {
+                String::new()
+            },
+            source_refs: req.sources.iter().map(|s| s.id.clone()).collect(),
+            source_hash: req
+                .sources
+                .first()
+                .map(|s| s.hash.clone())
+                .unwrap_or_default(),
+            model: "deterministic".into(),
+            prompt_version: req.prompt_version.clone(),
+            coverage: CoverageMeta::default(),
+            source_hashes: Vec::new(),
+            provider: "local".into(),
+            preprocessing: serde_json::Value::Null,
+            fallback: true,
+        });
     if !cached.fallback {
         return Ok((cached, "already_upgraded"));
     }
     let Some(secret) = secret else {
         return Ok((cached, "cached_deterministic_no_secret"));
     };
+    if req.prompt_version.ends_with(".v1") {
+        // Legacy requests contain a derived source. Their v1 identity stays isolated.
+        let mut legacy = req.clone();
+        legacy.model = secret.model.clone();
+        legacy.provider = secret.kind.clone();
+        legacy.preprocessing = serde_json::json!({"legacy_derived_source":true});
+        let upgraded =
+            crate::brain_lance::block_on(complete_summary(secret, &legacy, cached.clone()));
+        cache_put(conn, &legacy, &upgraded)?;
+        return Ok((upgraded, "legacy_derived_source"));
+    }
     let upgraded = crate::brain_lance::block_on(complete_summary(secret, &req, cached.clone()));
     cache_put(conn, &req, &upgraded)?;
     let outcome = if upgraded.fallback {
@@ -452,6 +529,9 @@ pub fn deterministic_follow_up(raw: &str, budget: usize) -> SummaryResult {
             omitted: Vec::new(),
             notes: "deterministic_follow_up".into(),
         },
+        source_hashes: Vec::new(),
+        provider: "local".into(),
+        preprocessing: serde_json::Value::Null,
         fallback: true,
     }
 }
@@ -491,6 +571,9 @@ pub fn deterministic_tool_observation(
             omitted: Vec::new(),
             notes: meta.to_string(),
         },
+        source_hashes: Vec::new(),
+        provider: "local".into(),
+        preprocessing: serde_json::Value::Null,
         fallback: true,
     }
 }
@@ -514,6 +597,9 @@ pub fn deterministic_atlas_brief(lines: &[String]) -> SummaryResult {
         model: "deterministic".into(),
         prompt_version: SummarizationMode::AtlasBrief.prompt_version().into(),
         coverage: CoverageMeta::default(),
+        source_hashes: Vec::new(),
+        provider: "local".into(),
+        preprocessing: serde_json::Value::Null,
         fallback: true,
     }
 }
@@ -543,6 +629,9 @@ pub fn deterministic_article_description(
             omitted: Vec::new(),
             notes: "article_description".into(),
         },
+        source_hashes: Vec::new(),
+        provider: "local".into(),
+        preprocessing: serde_json::Value::Null,
         fallback: true,
     }
 }
@@ -561,6 +650,9 @@ pub fn deterministic_report_context(label: &str, text: &str, budget: usize) -> S
             omitted: Vec::new(),
             notes: "report_context".into(),
         },
+        source_hashes: Vec::new(),
+        provider: "local".into(),
+        preprocessing: serde_json::Value::Null,
         fallback: true,
     }
 }
@@ -583,6 +675,9 @@ pub fn deterministic_section_digest(
             omitted: Vec::new(),
             notes: "section_digest".into(),
         },
+        source_hashes: Vec::new(),
+        provider: "local".into(),
+        preprocessing: serde_json::Value::Null,
         fallback: true,
     }
 }
@@ -642,9 +737,28 @@ pub fn publish_deterministic_and_enqueue(
     req: &SummaryRequest,
     deterministic: SummaryResult,
 ) -> anyhow::Result<SummaryResult> {
-    cache_put(conn, req, &deterministic)?;
-    let _ = persist_flush_request(conn, req);
-    let _ = enqueue_summary_flush(conn, req)?;
+    let mut req = req.clone();
+    // Factory-created requests already carry the route snapshot. Legacy/direct
+    // local envelopes resolve once here, before durable identity is calculated.
+    if req.provider.is_empty() {
+        let (provider, model) = resolved_summary_route();
+        req.provider = provider;
+        req.model = model;
+    }
+    if let Some(hit) = cache_get(conn, &req)? {
+        if !hit.fallback {
+            return Ok(hit);
+        }
+    }
+    let mut deterministic = deterministic;
+    deterministic.source_hashes = req.sources.iter().map(|s| s.hash.clone()).collect();
+    req.deterministic = Some(Box::new(deterministic.clone()));
+    let mut det_req = req.clone();
+    det_req.provider = "local".into();
+    det_req.model = "deterministic".into();
+    cache_put(conn, &det_req, &deterministic)?;
+    persist_flush_request(conn, &req)?;
+    let _ = enqueue_summary_flush(conn, &req)?;
     Ok(deterministic)
 }
 
@@ -657,6 +771,7 @@ pub fn flush_request(
     focus: &str,
     budget_chars: usize,
 ) -> SummaryRequest {
+    let (provider, model) = resolved_summary_route();
     SummaryRequest {
         mode,
         sources: vec![SummarySource {
@@ -669,9 +784,11 @@ pub fn flush_request(
         focus: focus.into(),
         budget_chars,
         required_fields: Vec::new(),
-        model: "deterministic".into(),
-        provider: "local".into(),
+        model,
+        provider,
         prompt_version: mode.prompt_version().into(),
+        preprocessing: serde_json::json!({"feature_key":crate::nlp::cache::feature_key(&crate::nlp::Source::derived(source_id,revision,text),&crate::nlp::ParseContext::default()),"selection_policy":"passage-v1","mode":crate::nlp::configured_mode()}),
+        deterministic: None,
     }
 }
 
@@ -682,18 +799,54 @@ pub async fn complete_summary(
     req: &SummaryRequest,
     fallback: SummaryResult,
 ) -> SummaryResult {
+    if req.sources.iter().any(|s| sha_hex(&s.text) != s.hash) {
+        return fallback;
+    }
+    // Snapshot route changes invalidate queued requests, rather than executing on a new route.
+    if req.model != "deterministic" && (req.model != secret.model || req.provider != secret.kind) {
+        return fallback;
+    }
+    let mode = req
+        .preprocessing
+        .get("mode")
+        .and_then(|v| serde_json::from_value::<crate::nlp::Mode>(v.clone()).ok())
+        .unwrap_or_else(crate::nlp::configured_mode);
     let account = format!("{}:{}", req.provider, secret.kind);
     let system = system_prompt(req.mode);
-    let user = {
-        let mut parts = vec![format!("Focus: {}", req.focus)];
-        for source in &req.sources {
-            parts.push(format!(
-                "Source {}@{}:\n{}",
-                source.id, source.revision, source.text
-            ));
+    let mut parts = vec![format!(
+        "Focus: {}\nOutput target (characters, soft): {}\nRequired fields: {}",
+        req.focus,
+        req.budget_chars,
+        req.required_fields.join(", ")
+    )];
+    let mut manifests = Vec::new();
+    let mut omitted = Vec::new();
+    let overhead = serde_json::to_vec(&parts).map_or(0, |v| v.len()) + system.len() + 1024;
+    let each_budget = (48 * 1024usize).saturating_sub(overhead) / req.sources.len().max(1);
+    for source in &req.sources {
+        let s = crate::nlp::Source::derived(&source.id, &source.revision, &source.text);
+        let prepared = crate::nlp::prepare_mode(
+            s,
+            "summary",
+            &req.focus,
+            each_budget,
+            each_budget / 4,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mode,
+        )
+        .await;
+        if let Some(selection) = &prepared.selection {
+            omitted.extend(selection.omitted_sentence_ids.clone());
+        } else if prepared.text != source.text {
+            omitted.push(source.id.clone());
         }
-        parts.join("\n\n")
-    };
+        manifests.push(serde_json::json!({"source_id":source.id,"hash":source.hash,"selection":prepared.selection,"diagnostic":prepared.diagnostic}));
+        parts.push(format!(
+            "Source {}@{} metadata {}:\n{}",
+            source.id, source.revision, source.meta, prepared.text
+        ));
+    }
+    let user = parts.join("\n\n");
     let messages = [
         ChatMessage {
             role: "system".into(),
@@ -708,12 +861,15 @@ pub async fn complete_summary(
             tool_calls: Vec::new(),
         },
     ];
+    if crate::nlp::message_bytes(&messages, &serde_json::Value::Null) > 48 * 1024 {
+        return fallback;
+    }
     let known: Vec<String> = req.sources.iter().map(|s| s.id.clone()).collect();
     let mut opts = ExecOptions::for_secret(secret);
     opts.admission_account = account;
     let exec = complete_summary_report(secret, req.mode, &messages, &known, &opts, |_| {}).await;
     match exec.content {
-        Some(text) => SummaryResult {
+        Some(text) if req.required_fields.iter().all(|f| text.contains(f)) => SummaryResult {
             content: text,
             source_refs: known,
             source_hash: req
@@ -723,10 +879,17 @@ pub async fn complete_summary(
                 .unwrap_or_default(),
             model: secret.model.clone(),
             prompt_version: req.prompt_version.clone(),
-            coverage: CoverageMeta::default(),
+            coverage: CoverageMeta {
+                partial: !omitted.is_empty(),
+                omitted,
+                notes: "bounded source view".into(),
+            },
+            source_hashes: req.sources.iter().map(|s| s.hash.clone()).collect(),
+            provider: secret.kind.clone(),
+            preprocessing: serde_json::json!(manifests),
             fallback: false,
         },
-        None => fallback,
+        _ => fallback,
     }
 }
 
@@ -767,7 +930,7 @@ mod tests {
             sources: vec![SummarySource {
                 id: "m1".into(),
                 revision: "1".into(),
-                hash: "h1".into(),
+                hash: sha_hex("x"),
                 text: "x".into(),
                 meta: serde_json::json!({}),
             }],
@@ -776,7 +939,9 @@ mod tests {
             required_fields: vec![],
             model: "m".into(),
             provider: "p".into(),
-            prompt_version: "summarization.v1".into(),
+            prompt_version: "summarization.v2".into(),
+            preprocessing: serde_json::Value::Null,
+            deterministic: None,
         };
         let a = req.cache_key();
         req.focus = "path-b".into();
@@ -857,7 +1022,7 @@ mod service_tests {
             sources: vec![SummarySource {
                 id: "ans-1".into(),
                 revision: "1".into(),
-                hash: "h".into(),
+                hash: sha_hex("hello"),
                 text: "hello".into(),
                 meta: serde_json::json!({}),
             }],
@@ -866,7 +1031,9 @@ mod service_tests {
             required_fields: vec![],
             model: "m".into(),
             provider: "p".into(),
-            prompt_version: "summarization.v1".into(),
+            prompt_version: "summarization.v2".into(),
+            preprocessing: serde_json::Value::Null,
+            deterministic: None,
         };
         assert!(cache_get(&conn, &req).unwrap().is_none());
         let result = deterministic_follow_up("hello world from prior answer", 400);
@@ -905,5 +1072,127 @@ mod service_tests {
                 .content
                 .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn all_source_hashes_routes_fields_and_upgrade_guard() {
+        let store = crate::store::Store::memory().unwrap();
+        let conn = &store.conn;
+        let mut req = flush_request(
+            SummarizationMode::ReportContext,
+            "one",
+            "1",
+            "original full text",
+            "focus",
+            400,
+        );
+        req.sources.push(SummarySource {
+            id: "two".into(),
+            revision: "1".into(),
+            hash: sha_hex("second text"),
+            text: "second text".into(),
+            meta: serde_json::json!({"title":"two"}),
+        });
+        let mut result = deterministic_report_context("fixture", "original full text", 400);
+        cache_put(conn, &req, &result).unwrap();
+        assert!(cache_get(conn, &req).unwrap().is_some());
+        let base = req.cache_key();
+        let mut changed = req.clone();
+        changed.sources[1].text = "changed second text".into();
+        changed.sources[1].hash = sha_hex(&changed.sources[1].text);
+        assert!(cache_get(conn, &changed).unwrap().is_none());
+        changed = req.clone();
+        changed.provider = "other".into();
+        assert_ne!(base, changed.cache_key());
+        changed = req.clone();
+        changed.required_fields.push("evidence".into());
+        assert_ne!(base, changed.cache_key());
+        changed = req.clone();
+        changed.sources[1].meta = serde_json::json!({"title":"changed"});
+        assert_ne!(base, changed.cache_key());
+        changed = req.clone();
+        changed.sources[1].hash = "false".into();
+        assert!(cache_put(conn, &changed, &result).is_err());
+        result.fallback = false;
+        result.content = "upgraded result preserves full qualification".into();
+        result.source_hashes = req.sources.iter().map(|s| s.hash.clone()).collect();
+        cache_put(conn, &req, &result).unwrap();
+        let det = deterministic_report_context("fixture", "short", 400);
+        cache_put(conn, &req, &det).unwrap();
+        assert_eq!(
+            cache_get(conn, &req).unwrap().unwrap().content,
+            result.content
+        );
+        let published = publish_deterministic_and_enqueue(conn, &req, det).unwrap();
+        assert_eq!(published.content, result.content);
+        let mut old = serde_json::to_value(&req).unwrap();
+        old.as_object_mut().unwrap().remove("preprocessing");
+        old.as_object_mut().unwrap().remove("deterministic");
+        old["prompt_version"] = serde_json::json!("summarization.v1");
+        let legacy: SummaryRequest = serde_json::from_value(old).unwrap();
+        assert_ne!(req.cache_key(), legacy.cache_key());
+    }
+}
+
+#[cfg(all(test, feature = "nlp"))]
+mod preparation_tests {
+    use super::*;
+    use crate::provider_attempt::mock;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modes_preserve_request_count_and_tail_evidence() {
+        let text=format!("Alice Smith attributed the Acme project announcement.\n\n{}Correction: Alice Smith denied the $1.2 billion estimate, not $2 billion.\n\nThe estimate remains uncertain.","Background details about unrelated page material.\n\n".repeat(1050));
+        assert!(text.len() > 48000);
+        let mut wire_sizes = Vec::new();
+        for mode in [
+            crate::nlp::Mode::Off,
+            crate::nlp::Mode::Annotate,
+            crate::nlp::Mode::Select,
+        ] {
+            let server = mock::serve(vec![mock::ok_json(
+                "[source-one] Alice Smith denied the estimate; the report remains uncertain.",
+                "stop",
+            )])
+            .await;
+            let secret = ProviderSecret {
+                kind: "local".into(),
+                model: "mock-model".into(),
+                base_url: server.base_url.clone(),
+                api_key: Some("fixture-only".into()),
+                stt_model: None,
+                device: None,
+            };
+            let mut req = flush_request(
+                SummarizationMode::PageEvidence,
+                "source-one",
+                "1",
+                &text,
+                "Acme",
+                400,
+            );
+            req.provider = secret.kind.clone();
+            req.model = secret.model.clone();
+            req.required_fields = vec!["source-one".into()];
+            req.preprocessing["mode"] = serde_json::json!(mode);
+            let fallback = deterministic_follow_up(&text, 400);
+            let result = complete_summary(&secret, &req, fallback).await;
+            assert!(!result.fallback, "{mode:?}: {:?}", result.coverage);
+            assert_eq!(server.hits(), 1, "{mode:?}");
+            let requests = server.requests.lock().unwrap();
+            let body = requests[0].split("\r\n\r\n").nth(1).unwrap();
+            wire_sizes.push(body.len());
+            if mode == crate::nlp::Mode::Select {
+                assert!(body.contains("denied the $1.2 billion"));
+                assert!(body.contains("attributed"));
+                assert!(result.coverage.partial);
+            }
+            assert_eq!(result.source_hashes, vec![sha_hex(&text)]);
+        }
+        assert_eq!(wire_sizes[0], wire_sizes[1]);
+        assert!(wire_sizes[2] < wire_sizes[0], "{wire_sizes:?}");
+        eprintln!("summary gold source_bytes={} off_wire_bytes={} annotate_wire_bytes={} select_wire_bytes={} requests_per_mode=1",text.len(),wire_sizes[0],wire_sizes[1],wire_sizes[2]);
     }
 }

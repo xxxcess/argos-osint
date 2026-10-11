@@ -14,8 +14,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Default total provider attempts for Summarization tasks (first try counts).
-/// Shared chain: primary is initial + 3 retries.
-pub const SUMMARIZATION_ATTEMPTS: u32 = crate::provider_chain::PRIMARY_ATTEMPTS;
+/// Summary-specific cap, including the first request.
+pub const SUMMARIZATION_ATTEMPTS: u32 = 2;
 /// Default total provider attempts for other retry-eligible LLM operations.
 pub const DEFAULT_LLM_ATTEMPTS: u32 = crate::provider_chain::PRIMARY_ATTEMPTS;
 /// Shared concurrent LLM requests per provider/account across all roles.
@@ -424,9 +424,10 @@ pub fn migrate_tables(conn: &Connection) -> Result<()> {
             coverage_json TEXT NOT NULL DEFAULT '{}',
             fallback INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}'
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS argos_derived_summaries_key
+        CREATE INDEX IF NOT EXISTS argos_derived_summaries_key
             ON argos_derived_summaries(mode, source_id, source_revision, focus_hash, budget, model, prompt_version);
         ",
     )?;
@@ -1842,8 +1843,8 @@ mod tests {
     }
 
     #[test]
-    fn summarization_gets_four_attempts_other_llm_four() {
-        assert_eq!(OperationKind::Summarization.attempt_cap(), 4);
+    fn summarization_gets_two_attempts_other_llm_four() {
+        assert_eq!(OperationKind::Summarization.attempt_cap(), 2);
         assert_eq!(OperationKind::OtherLlm.attempt_cap(), 4);
         assert!(can_retry(
             OperationKind::Summarization,

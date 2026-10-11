@@ -457,6 +457,9 @@ mod tests {
             model: "deterministic".into(),
             prompt_version: req.prompt_version.clone(),
             coverage: Default::default(),
+            source_hashes: Vec::new(),
+            provider: "local".into(),
+            preprocessing: serde_json::Value::Null,
             fallback: true,
         };
         crate::summarization::cache_put(&conn, &req, &det).unwrap();

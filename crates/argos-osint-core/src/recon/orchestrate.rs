@@ -1978,6 +1978,12 @@ async fn extract_bindings(
     observations: &Value,
 ) -> Result<Vec<super::Binding>> {
     let step = plan.calls[index].clone();
+    let expanded = if crate::nlp::configured_mode() == crate::nlp::Mode::Select {
+        crate::nlp::expanded_observations(observations)
+    } else {
+        observations.clone()
+    };
+    let observations = &expanded;
     let mut accepted =
         investigation::rule_bindings(env.question, call_id, &step.tool_id, observations);
     let mut staged = plan.bindings.clone();
@@ -2594,11 +2600,25 @@ async fn model_bindings(
     if env.recon_secret.model.trim().is_empty() {
         return Ok(Vec::new());
     }
+    let mut focused = observations.clone();
+    if let Some(markdown) = observations.get("markdown").and_then(Value::as_str) {
+        let prepared = crate::nlp::prepare(
+            crate::nlp::Source::derived(call_id, call_id, markdown),
+            "bindings",
+            env.question,
+            12000,
+            16000,
+            env.cancel.clone(),
+        )
+        .await;
+        focused["markdown"] = serde_json::json!(prepared.text);
+        focused["nlp_selection"] = serde_json::json!(prepared.selection);
+    }
     let user = format!(
         "Question: {}\nSubject: {}\nTool: {tool_id}\nEvidence id: {call_id}\nObservation: {}\nReturn JSON {{\"bindings\":[{{\"kind\":string,\"value\":string,\"evidence_id\":string,\"platform\":string}}]}}. kind is one of {}. For each account of the subject return kind handle with the bare handle (no @) and platform (twitter, truthsocial, instagram, facebook, youtube, tiktok, threads, linkedin, twitch, github, keybase).",
         env.question,
         super::question_subject(env.question),
-        super::packet_observation(observations),
+        super::packet_observation(&focused),
         investigation::BINDING_KINDS.join(", ")
     );
     let value = model_json(
@@ -2677,7 +2697,7 @@ pub(crate) struct DirectivePrompt<'a> {
 }
 
 /// Compacted previous synthesis passed into a follow-up, in characters.
-const PRIOR_SYNTHESIS_CHARS: usize = 1_200;
+pub(crate) const PRIOR_SYNTHESIS_CHARS: usize = 1_200;
 
 pub(crate) struct Derived {
     pub directives: Vec<super::Directive>,
@@ -2820,6 +2840,8 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
     };
     // Prefer a cached FollowUpContext summary when present.
     let req = crate::summarization::SummaryRequest {
+        preprocessing: serde_json::Value::Null,
+        deterministic: None,
         mode: crate::summarization::SummarizationMode::FollowUpContext,
         sources: vec![crate::summarization::SummarySource {
             id: latest.id.clone(),
@@ -2840,10 +2862,15 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
     if let Ok(Some(hit)) = crate::summarization::cache_get(&store.conn, &req) {
         return Ok(hit.content);
     }
-    let content = compact_prior_synthesis(&latest.content);
+    let content = if crate::nlp::configured_mode() == crate::nlp::Mode::Select {
+        latest.content.clone()
+    } else {
+        compact_prior_synthesis(&latest.content)
+    };
     let det = crate::summarization::deterministic_follow_up(&content, PRIOR_SYNTHESIS_CHARS);
-    let _ = crate::summarization::publish_deterministic_and_enqueue(&store.conn, &req, det);
-    Ok(content)
+    let published =
+        crate::summarization::publish_deterministic_and_enqueue(&store.conn, &req, det)?;
+    Ok(published.content)
 }
 
 /// Drops citations, the evidence trailer, and repeated article lines, then keeps the
@@ -2945,7 +2972,25 @@ pub(crate) async fn derive_directives(
             "No Recon model is configured, so fixed directives were used.".into(),
         ));
     }
-    let user = directive_user(&prompt)?;
+    let prepared = crate::nlp::prepare(
+        crate::nlp::Source::derived("prior", "directive", prompt.prior),
+        "directives",
+        prompt.question,
+        8000,
+        PRIOR_SYNTHESIS_CHARS,
+        cancel.clone(),
+    )
+    .await;
+    let bounded = DirectivePrompt {
+        question: prompt.question,
+        titles: prompt.titles,
+        recalled: prompt.recalled,
+        brain_resources: prompt.brain_resources,
+        thread: prompt.thread,
+        prior: &prepared.text,
+        report_mode: prompt.report_mode,
+    };
+    let user = directive_user(&bounded)?;
     let first = match model_json(secret, gate, DIRECTIVE_SYSTEM, &user, cancel).await {
         Ok(value) => value,
         Err(err) if cancelled(&err) || super::deadline_hit(&err) => return Err(err),

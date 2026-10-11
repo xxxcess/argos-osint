@@ -1113,12 +1113,54 @@ pub async fn extract_for_article_body(
             &[],
         ));
     }
-    let span_article = article_with_body_spans(article, body_markdown);
+    let mut source = crate::nlp::Source::derived(
+        &article.id,
+        &crate::nlp::cache::hash(body_markdown),
+        body_markdown,
+    );
+    source.published_at = Some(article.published_at.clone());
+    let prepared = crate::nlp::prepare(
+        source.clone(),
+        "body-claims",
+        &format!("{} {}", article.title, article.description),
+        BODY_SPAN_CHARS,
+        BODY_SPAN_CHARS,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .await;
+    let transmitted = &prepared.text;
+    let mut transmitted_article = article.clone();
+    transmitted_article.description = clip_chars(&article.description, DESCRIPTION_CHARS);
+    let span_article = article_with_body_spans(&transmitted_article, transmitted);
     let packet = [span_article];
-    let user = packet_json_with_body(article, body_markdown)?;
+    let mut user_value: Value =
+        serde_json::from_str(&packet_json_with_body(article, transmitted)?)?;
+    user_value[0]["artifact_hash"] = serde_json::json!(source.prose_hash);
+    user_value[0]["selection"] = prepared.selection.as_ref().map(|s|serde_json::json!({"ranges":s.ranges,"partial":!s.omitted_sentence_ids.is_empty(),"policy":s.policy_version})).unwrap_or(Value::Null);
+    crate::nlp::record_view("article", &article.id, &source, &prepared);
+    let user = serde_json::to_string(&user_value)?;
     let raw = ask_claims(synthesis, &[], &body_lead_prompt(BODY_CLAIM_LIMIT), &user)
         .await?
         .raw;
+    // Validate against only the exact windows sent for this article artifact.
+    let raw: Vec<_> = raw
+        .into_iter()
+        .filter(|claim| {
+            if spans_article(&transmitted_article, &claim.entity, &claim.object) {
+                return true;
+            }
+            if let Some(selection) = &prepared.selection {
+                selection.ranges.iter().any(|r| {
+                    r.slice(&source.prose).is_some_and(|text| {
+                        contains_span(text, &claim.entity) && contains_span(text, &claim.object)
+                    })
+                })
+            } else {
+                contains_span(transmitted, &claim.entity)
+                    && contains_span(transmitted, &claim.object)
+            }
+        })
+        .collect();
     let (mut lead, lead_dropped) = accept_claims(&packet, &raw, AcceptMode::Lead);
     if lead.is_empty() {
         return Ok(finish_insights(1, lead_dropped, &packet, lead, &[], &[]));
@@ -1835,7 +1877,7 @@ fn packet_json(articles: &[AtlasArticleRow]) -> Result<String> {
             let description = if article.description.chars().count() <= DESCRIPTION_CHARS {
                 article.description.clone()
             } else {
-                let det = crate::summarization::deterministic_article_description(
+                let mut det = crate::summarization::deterministic_article_description(
                     &article.title,
                     &article.description,
                     DESCRIPTION_CHARS,
@@ -1845,15 +1887,17 @@ fn packet_json(articles: &[AtlasArticleRow]) -> Result<String> {
                         crate::summarization::SummarizationMode::ArticleDescription,
                         &article.id,
                         &article.published_at,
-                        &det.content,
+                        &format!("{}. {}", article.title, article.description),
                         "atlas",
                         DESCRIPTION_CHARS,
                     );
-                    let _ = crate::summarization::publish_deterministic_and_enqueue(
+                    if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
                         &store.conn,
                         &req,
                         det.clone(),
-                    );
+                    ) {
+                        det = published;
+                    }
                 }
                 det.content
             };

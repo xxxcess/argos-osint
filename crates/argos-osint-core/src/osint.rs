@@ -1397,6 +1397,7 @@ fn parse_observations_with(
                 "title": clip_text(title),
                 "url": page_url,
                 "markdown": clipped,
+                "nlp_source": crate::nlp::capture_page(page_url,markdown),
                 "evidence_form": "page",
             }),
             markdown.chars().count() > clipped.chars().count(),

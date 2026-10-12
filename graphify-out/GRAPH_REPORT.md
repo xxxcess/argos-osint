@@ -1,7 +1,7 @@
 # Graph Report - argos-osint  (2026-10-11)
 
 ## Corpus Check
-- 277 files · ~631,295 words
+- 277 files · ~631,523 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 5 file(s) not represented in the graph (top: (none) 3, .toml 2)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `4173e44a`
+- Built from commit: `e0bfe14d`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 

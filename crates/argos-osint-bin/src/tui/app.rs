@@ -14002,6 +14002,10 @@ mod tests {
         assert!(painted.contains("links"), "{painted}");
         assert!(!painted.contains("related context"), "{painted}");
         assert!(painted.contains("Acme Corp"), "{painted}");
+        assert!(
+            painted.contains(" █████╗   ██╗"),
+            "legacy A1 badge: {painted}"
+        );
 
         // Scroll left column
         let max = super::super::ui::intel_extracted_scroll_max(&app);
@@ -14100,6 +14104,10 @@ mod tests {
                 assert!(!text.contains("Brief rating value"));
                 assert!(!text.contains("CONFIRMED"));
                 if width >= 80 {
+                    assert!(
+                        text.contains(" █████╗   ██████╗"),
+                        "v2 A6 badge missing at {width}x{height}: {text}"
+                    );
                     assert!(text.contains("claims"));
                     assert!(text.find("confidence").unwrap() < text.find("claims").unwrap());
                     let left = app

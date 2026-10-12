@@ -53,6 +53,8 @@ Atlas headline board: tabs, day filter, search, hero story.
 
 Intel Focus Brief shows Confidence above Claims in the left column and keeps Assessment in the context column. The provisional evidence score updates after committed claim assessments: full coverage and independent corroboration raise it, while counterevidence lowers it. Source reliability remains separate. Pending/previous scores stay labeled while refresh runs; empty assessed claim sets show N/A. Scroll the left column to reach all sections at compact sizes.
 
+Confidence retains the original large ASCII Admiralty grade and color gradient beside the score, stacking them at narrow widths. Legacy grades remain intact; new evidence scores use information grade 6 (cannot be judged), since the evidence rubric does not assign an Admiralty truth rating.
+
 Details: [concepts.md](concepts.md) · [architecture.md](architecture.md#intel-reports).
 
 [![Intel report job](diagrams/intel-report.svg)](diagrams/intel-report.html)

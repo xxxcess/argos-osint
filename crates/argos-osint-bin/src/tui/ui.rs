@@ -8431,6 +8431,7 @@ fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             ),
             theme::dim(),
         );
+        add("Information 6 · CANNOT BE JUDGED".into(), theme::dim());
         add("Evidence score · not a probability".into(), theme::dim());
     } else {
         let (_, mean) = intel_confidence_scores(app);
@@ -8449,15 +8450,65 @@ fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             theme::text(),
         );
         add(eval.footnote, theme::dim());
-        let color = grade_score_color((eval.reliability_meter + eval.credibility_meter) * 0.5);
-        for row in grade_ascii_lines(&format!(
-            "{}{}",
-            eval.reliability_letter, eval.credibility_digit
-        )) {
-            lines.push(Line::from(Span::styled(row, Style::default().fg(color))));
-        }
     }
-    lines
+    // Keep the original ANSI Shadow Admiralty badge beside the score. The
+    // evidence rubric does not assign an information-credibility grade: v2
+    // assertions must not inherit a legacy CONFIRMED digit.
+    let digit = if new_policy {
+        "6"
+    } else {
+        &eval.credibility_digit
+    };
+    let credibility_meter = if new_policy {
+        0.0
+    } else {
+        eval.credibility_meter
+    };
+    let art = grade_ascii_lines(&format!("{}{digit}", eval.reliability_letter));
+    let art_width = art.iter().map(|row| row.chars().count()).max().unwrap_or(0);
+    let style = Style::default()
+        .fg(grade_score_color(
+            (eval.reliability_meter + credibility_meter) * 0.5,
+        ))
+        .add_modifier(Modifier::BOLD);
+    if width >= art_width + 16 {
+        let mut details = Vec::new();
+        for line in lines {
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let row_style = line
+                .spans
+                .first()
+                .map(|span| span.style)
+                .unwrap_or_default();
+            details.extend(
+                wrap_text(&text, width - art_width - 2)
+                    .into_iter()
+                    .map(|row| Line::from(Span::styled(row, row_style))),
+            );
+        }
+        (0..art.len().max(details.len()))
+            .map(|i| {
+                let badge = art.get(i).cloned().unwrap_or_else(|| " ".repeat(art_width));
+                let padding = art_width.saturating_sub(badge.chars().count()) + 2;
+                let mut spans = vec![Span::styled(badge, style), Span::raw(" ".repeat(padding))];
+                if let Some(detail) = details.get(i) {
+                    spans.extend(detail.spans.clone());
+                }
+                Line::from(spans)
+            })
+            .collect()
+    } else {
+        let mut badge: Vec<_> = art
+            .into_iter()
+            .map(|row| Line::from(Span::styled(row, style)))
+            .collect();
+        badge.extend(lines);
+        badge
+    }
 }
 
 /// Bright green (best) → bright red (worst) by combined Admiralty meter.

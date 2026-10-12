@@ -19,8 +19,9 @@ const QUEUE_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    Off,
     #[default]
+    Auto,
+    Off,
     Annotate,
     Select,
 }
@@ -369,8 +370,88 @@ pub fn configured_mode() -> Mode {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Prepared {
     pub text: String,
+    pub entity_packet: Vec<EntityCandidate>,
     pub selection: Option<Selection>,
+    pub coverage: PreparationCoverage,
+    pub effective_action: EffectiveAction,
     pub diagnostic: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EntityCandidate {
+    pub id: String,
+    pub type_hint: String,
+    pub comparison_key: String,
+    pub original_forms: Vec<String>,
+    pub mention_refs: Vec<Span>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoverageRequirement {
+    Optional,
+    Complete,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreparePolicy {
+    pub purpose: String,
+    pub coverage_requirement: CoverageRequirement,
+    pub need_entities: bool,
+    /// Budget for serialized prose, after reserving mandatory request fields.
+    pub byte_budget: usize,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectiveAction {
+    Verbatim,
+    Selected,
+    LegacyFallback,
+    RequiresWindows,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreparationCoverage {
+    pub prose_hash: String,
+    pub retained_ranges: Vec<Span>,
+    pub complete: bool,
+}
+
+fn entity_candidates(source: &Source, annotation: &Annotation) -> Vec<EntityCandidate> {
+    if annotation.status != Status::Complete || !annotation.validate(source) {
+        return Vec::new();
+    }
+    let mut candidates: Vec<EntityCandidate> = Vec::new();
+    for mention in &annotation.mentions {
+        let Some(form) = mention.span.slice(&source.prose) else {
+            continue;
+        };
+        let key = form
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(candidate) = candidates
+            .iter_mut()
+            .find(|c| c.comparison_key == key && c.type_hint == mention.kind)
+        {
+            if !candidate.original_forms.iter().any(|s| s == form) {
+                candidate.original_forms.push(form.into());
+            }
+            candidate.mention_refs.push(mention.span);
+        } else {
+            candidates.push(EntityCandidate {
+                id: format!(
+                    "{}:{}:entity:{}",
+                    source.source_id,
+                    source.prose_hash,
+                    candidates.len()
+                ),
+                type_hint: mention.kind.clone(),
+                comparison_key: key,
+                original_forms: vec![form.into()],
+                mention_refs: vec![mention.span],
+            });
+        }
+    }
+    candidates
 }
 /// Prepare before legacy cuts; incomplete work always returns the caller's bounded fallback.
 pub async fn prepare(
@@ -401,9 +482,61 @@ pub async fn prepare_mode(
     cancel: Arc<AtomicBool>,
     mode: Mode,
 ) -> Prepared {
+    let policy = PreparePolicy {
+        purpose: purpose.into(),
+        coverage_requirement: CoverageRequirement::Optional,
+        need_entities: true,
+        byte_budget: budget,
+    };
+    prepare_with_policy(source, &policy, focus, fallback_chars, cancel, mode).await
+}
+
+pub async fn prepare_with_policy(
+    source: Source,
+    policy: &PreparePolicy,
+    focus: &str,
+    fallback_chars: usize,
+    cancel: Arc<AtomicBool>,
+    mode: Mode,
+) -> Prepared {
+    let serialized_bytes = serde_json::to_vec(&source.prose).map_or(usize::MAX, |s| s.len());
+    let whole = policy.coverage_requirement == CoverageRequirement::Complete
+        || (mode == Mode::Auto && serialized_bytes <= policy.byte_budget);
     let fallback = || Prepared {
-        text: source.prose.chars().take(fallback_chars).collect(),
+        text: if whole {
+            source.prose.clone()
+        } else {
+            source.prose.chars().take(fallback_chars).collect()
+        },
+        entity_packet: Vec::new(),
         selection: None,
+        coverage: PreparationCoverage {
+            prose_hash: source.prose_hash.clone(),
+            retained_ranges: if source.prose.is_empty() {
+                vec![]
+            } else {
+                vec![Span {
+                    start_byte: 0,
+                    end_byte: if whole {
+                        source.prose.len()
+                    } else {
+                        source
+                            .prose
+                            .char_indices()
+                            .nth(fallback_chars)
+                            .map_or(source.prose.len(), |(i, _)| i)
+                    },
+                }]
+            },
+            complete: whole || source.prose.chars().count() <= fallback_chars,
+        },
+        effective_action: if whole && serialized_bytes > policy.byte_budget {
+            EffectiveAction::RequiresWindows
+        } else if whole {
+            EffectiveAction::Verbatim
+        } else {
+            EffectiveAction::LegacyFallback
+        },
         diagnostic: None,
     };
     if mode == Mode::Off {
@@ -438,18 +571,47 @@ pub async fn prepare_mode(
             let _ = cache::put(&store.conn, &source, &context, &a);
         }
     }
-    if mode != Mode::Select {
-        return fallback();
+    let candidates = entity_candidates(&source, &a);
+    if (mode == Mode::Auto && whole)
+        || mode == Mode::Annotate
+        || policy.coverage_requirement == CoverageRequirement::Complete
+    {
+        let mut out = fallback();
+        if policy.need_entities {
+            out.entity_packet = candidates;
+        }
+        if policy.need_entities && out.entity_packet.is_empty() {
+            out.diagnostic =
+                Some("NLP yielded no entities; native/model discovery required".into());
+        }
+        if a.status != Status::Complete {
+            out.diagnostic = Some(format!(
+                "NLP {:?}; native/model discovery required",
+                a.status
+            ));
+        }
+        return out;
     }
     if cancel.load(Ordering::Acquire) {
         let mut out = fallback();
         out.diagnostic = Some("NLP Cancelled".into());
         return out;
     }
-    match select(&a, &source, purpose, focus, budget) {
+    match select(&a, &source, &policy.purpose, focus, policy.byte_budget) {
         Ok(selection) => match selection.text(&source) {
             Ok(text) => Prepared {
                 text,
+                entity_packet: if policy.need_entities {
+                    candidates
+                } else {
+                    Vec::new()
+                },
+                coverage: PreparationCoverage {
+                    prose_hash: source.prose_hash.clone(),
+                    retained_ranges: selection.ranges.clone(),
+                    complete: selection.omitted_sentence_ids.is_empty(),
+                },
+                effective_action: EffectiveAction::Selected,
                 selection: Some(selection),
                 diagnostic: None,
             },
@@ -503,10 +665,8 @@ pub fn record_view(owner_kind: &str, owner_id: &str, source: &Source, prepared: 
 /// Acquisition reference placed in bounded observations; the exact body stays in artifacts.
 pub fn capture_page(url: &str, text: &str) -> serde_json::Value {
     let hash = cache::hash(text);
-    if configured_mode() != Mode::Off {
-        if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-            let _ = cache::artifact(&store.conn, text);
-        }
+    if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
+        let _ = cache::artifact(&store.conn, text);
     }
     serde_json::json!({"source_id":url,"artifact_hash":hash,"byte_len":text.len()})
 }

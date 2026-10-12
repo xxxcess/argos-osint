@@ -1,6 +1,6 @@
 <svg role="img" aria-labelledby="intel-title intel-desc" viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
         <title id="intel-title">Intel report job</title>
-        <desc id="intel-desc">An Atlas article becomes a report job. Collection writes unique attempts. Summary shows only the selected revision BLUF. Tool counts never overwrite from a stale snapshot.</desc>
+        <desc id="intel-desc">An Atlas article becomes a report job. Async inventory, collection and assessment delegate to generation-fenced insight refresh before sections. Collection writes unique attempts. Summary shows only the selected revision BLUF. Tool counts never overwrite from a stale snapshot.</desc>
         <defs>
           <marker id="i-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#4f5d75" />
@@ -26,8 +26,8 @@
           <text x="404" y="76">Collect</text>
           <text x="404" y="96" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">atomic attempts</text>
           <rect x="500" y="40" width="128" height="80" rx="6" fill="#fff" stroke="#2d3142" />
-          <text x="564" y="76">Sections</text>
-          <text x="564" y="96" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">bluf first</text>
+          <text x="564" y="76">Refresh + prose</text>
+          <text x="564" y="96" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">sections → BLUF</text>
           <rect x="660" y="40" width="116" height="80" rx="6" fill="#fff" stroke="#2d3142" />
           <text x="718" y="76">Summary</text>
           <text x="718" y="96" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">UI card</text>
@@ -35,5 +35,5 @@
         <rect x="280" y="176" width="248" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" />
         <text x="404" y="204" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="12" font-weight="600" fill="#2d3142">intel_report_attempts</text>
         <text x="404" y="224" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">N calls used · B budget · unique attempt id</text>
-        <text x="400" y="272" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Stage updates never write tool_calls_done. Busy on this article hides Summary.</text>
+        <text x="400" y="272" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Acquire → inventory → collect → assess → refresh → sections / BLUF → finalize.</text>
       </svg>

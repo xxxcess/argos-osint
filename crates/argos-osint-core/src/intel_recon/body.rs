@@ -10,8 +10,8 @@ use crate::osint::{self, ProviderKeys};
 use crate::secrets::ProviderSecret;
 use crate::store::{AtlasArticleRow, Store};
 
-use super::replace_insights::replace_article_insights_from_body;
-use super::synthesize::refine_retrieved_article_body;
+use super::replace_insights::replace_article_insights_with_runtime;
+use super::synthesize::refine_retrieved_article_body_with_runtime;
 use super::validate::{validate_article_body, BodyQuality};
 
 /// Default cooldown after a terminal retrieval failure.
@@ -186,7 +186,38 @@ pub async fn fetch_article_body(
     user_agent: Option<String>,
     force_refresh: bool,
     cancel: Arc<AtomicBool>,
+    on_event: impl FnMut(BodyFetchEvent) + Send,
+) -> Result<()> {
+    fetch_article_body_with_runtime(
+        db_path,
+        body_id,
+        title,
+        brief,
+        keys,
+        synthesis,
+        classifier,
+        user_agent,
+        force_refresh,
+        cancel,
+        on_event,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn fetch_article_body_with_runtime(
+    db_path: &std::path::Path,
+    body_id: &str,
+    title: &str,
+    brief: &str,
+    keys: ProviderKeys,
+    synthesis: Option<ProviderSecret>,
+    classifier: Option<ProviderSecret>,
+    user_agent: Option<String>,
+    force_refresh: bool,
+    cancel: Arc<AtomicBool>,
     mut on_event: impl FnMut(BodyFetchEvent) + Send,
+    runtime: Option<&super::worker::JobRuntime>,
 ) -> Result<()> {
     let (generation, article_id, url, source_domain) = {
         let store = Store::open(db_path)?;
@@ -194,7 +225,7 @@ pub async fn fetch_article_body(
             .article_body_by_id(body_id)?
             .ok_or_else(|| anyhow!("article body {body_id} missing"))?;
         (
-            body.body_version,
+            body.body_version + i64::from(force_refresh),
             body.article_id,
             body.original_url,
             body.source_domain,
@@ -299,6 +330,7 @@ pub async fn fetch_article_body(
                     "acquisition-v1",
                 )?;
                 let validation = validate_article_body(&fetched.markdown, title, &url);
+                store.app_state_set(&format!("article-acquisition:{attempt_id}"),&json!({"complete_story":validation.quality==BodyQuality::Complete && !fetched.known_truncation,"known_truncation":fetched.known_truncation,"artifact_hash":source.prose_hash}).to_string())?;
                 let reason = validation.rationale.clone();
                 store.finish_retrieval_attempt(
                     &attempt_id,
@@ -340,6 +372,7 @@ pub async fn fetch_article_body(
                             synthesis.as_ref(),
                             classifier.as_ref(),
                             &mut on_event,
+                            runtime,
                         )
                         .await?;
                         return Ok(());
@@ -389,6 +422,7 @@ pub async fn fetch_article_body(
             synthesis.as_ref(),
             classifier.as_ref(),
             &mut on_event,
+            runtime,
         )
         .await?;
         return Ok(());
@@ -429,6 +463,7 @@ async fn commit_refined_body(
     synthesis: Option<&ProviderSecret>,
     classifier: Option<&ProviderSecret>,
     on_event: &mut (impl FnMut(BodyFetchEvent) + Send),
+    runtime: Option<&super::worker::JobRuntime>,
 ) -> Result<()> {
     if synthesis.is_some() {
         on_event(BodyFetchEvent::Progress {
@@ -474,7 +509,12 @@ async fn commit_refined_body(
             .ok()
             .flatten()
     };
-    if crate::nlp::configured_mode() != crate::nlp::Mode::Off && cached.is_none() {
+    if runtime
+        .map(|r| r.settings.nlp.mode)
+        .unwrap_or_else(crate::nlp::configured_mode)
+        != crate::nlp::Mode::Off
+        && cached.is_none()
+    {
         let annotation = crate::nlp::Service::shared()
             .annotate(source.clone(), context.clone(), cancel.clone())
             .await;
@@ -483,16 +523,23 @@ async fn commit_refined_body(
             crate::nlp::cache::put(&store.conn, &source, &context, &annotation)?;
         }
     }
-    let refined =
-        refine_retrieved_article_body(synthesis, classifier, title, brief, url, scraped_markdown)
-            .await;
+    let refined = refine_retrieved_article_body_with_runtime(
+        synthesis,
+        classifier,
+        title,
+        brief,
+        url,
+        scraped_markdown,
+        runtime,
+    )
+    .await;
     let store = Store::open(db_path)?;
     anyhow::ensure!(!cancel.load(Ordering::Acquire), "cancelled");
     let current = store
         .article_body_by_id(body_id)?
         .ok_or_else(|| anyhow!("body removed during refinement"))?;
     anyhow::ensure!(
-        current.body_version == generation,
+        current.body_version == generation - i64::from(force_refresh),
         "body revision changed during refinement"
     );
     store.commit_article_body(
@@ -549,12 +596,14 @@ async fn commit_refined_body(
                     message: "Re-extracting insights from full article…".into(),
                     generation,
                 });
-                match replace_article_insights_from_body(
+                match replace_article_insights_with_runtime(
                     db_path,
                     &article,
                     &refined.markdown,
                     synthesis,
                     classifier,
+                    cancel,
+                    runtime,
                 )
                 .await
                 {
@@ -584,6 +633,7 @@ async fn commit_refined_body(
 struct FetchedBody {
     markdown: String,
     resolved_url: String,
+    known_truncation: bool,
 }
 
 async fn scrape_via_firecrawl(
@@ -607,6 +657,11 @@ async fn scrape_via_firecrawl(
         return Err(anyhow!(err));
     }
     let markdown = full_markdown_from_result(&result)?;
+    let raw: Value = serde_json::from_str(&result.raw).unwrap_or(Value::Null);
+    let data = raw.get("data").unwrap_or(&raw);
+    let known_truncation = data.get("truncated").and_then(Value::as_bool) == Some(true)
+        || data.get("status").and_then(Value::as_str) == Some("partial")
+        || (result.truncated && data.get("markdown").and_then(Value::as_str).is_none());
     let resolved = result
         .observations
         .get("url")
@@ -616,6 +671,7 @@ async fn scrape_via_firecrawl(
     Ok(FetchedBody {
         markdown,
         resolved_url: resolved,
+        known_truncation,
     })
 }
 
@@ -809,6 +865,7 @@ async fn direct_http_extract(url: &str, user_agent: Option<&str>) -> Result<Fetc
     Ok(FetchedBody {
         markdown,
         resolved_url: final_url,
+        known_truncation: false,
     })
 }
 

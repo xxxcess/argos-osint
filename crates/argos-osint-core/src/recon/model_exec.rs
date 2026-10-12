@@ -763,7 +763,14 @@ where
     V: Fn(&str) -> Result<(), String> + Send + Sync,
 {
     let _ = ensure_operation(db_path, scope, "");
-    let (routes, secrets) = resolve_role_routes(auth, settings, scope.role);
+    let (mut routes, secrets) = resolve_role_routes(auth, settings, scope.role);
+    // Free-chat extraction cannot dispatch a Decisions-only model. Keep route
+    // indices and declared fallback order so audit and secrets remain aligned.
+    for (route, secret) in routes.iter_mut().zip(&secrets) {
+        if provider::is_decisions_model(&secret.model) {
+            route.skip_reason = Some("Decisions-only route does not support free chat".into());
+        }
+    }
 
     let mut attempt_counter = 0u32;
     let mut last_route_idx = 0usize;

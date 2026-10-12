@@ -4,8 +4,8 @@ pub(crate) mod budget;
 pub mod clocks;
 mod graph;
 pub use graph::{
-    force_links, graph_brief, recon_path, ForceLink, GraphEdge, GraphEdgeKind, GraphNode,
-    GraphNodeKind, MemoryGraph, PathBand, ReconPath,
+    build_claim_graph, force_links, graph_brief, recon_path, ForceLink, GraphEdge, GraphEdgeKind,
+    GraphNode, GraphNodeKind, MemoryGraph, PathBand, ReconPath,
 };
 pub mod diversity;
 pub(crate) mod investigation;
@@ -316,6 +316,8 @@ pub struct InsightSource {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InsightView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<crate::brain_query::InsightMetadata>,
     pub memory_id: String,
     pub entity: String,
     pub predicate: String,
@@ -325,6 +327,30 @@ pub struct InsightView {
     pub confidence: f64,
     pub sources: Vec<InsightSource>,
     pub related: Vec<String>,
+}
+impl InsightView {
+    pub fn presentation(&self) -> String {
+        if let Some(metadata) = &self.metadata {
+            format!(
+                "{} · {} → {} · {} · {} · {}",
+                self.entity,
+                self.predicate,
+                self.object_value,
+                metadata.insight_kind,
+                metadata.lifecycle,
+                metadata.assessment.relation
+            )
+        } else {
+            format!(
+                "{} · {} → {} · legacy/{} · unassessed · {:.0}%",
+                self.entity,
+                self.predicate,
+                self.object_value,
+                self.classification,
+                self.confidence * 100.0
+            )
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecallInsight {
@@ -1438,6 +1464,8 @@ impl Store {
             return Ok(false);
         }
         crate::nlp::cache::remove_owner(&tx, "thread", tid)?;
+        tx.execute("UPDATE insight_owner_state SET desired_generation=desired_generation+1,lifecycle='previous',last_error='origin investigation deleted' WHERE owner_kind='recon' AND owner_id IN (SELECT id FROM recon_runs WHERE thread_id=?1)",[tid])?;
+        tx.execute("UPDATE insight_derivation_links SET status='origin_deleted' WHERE snapshot_id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='recon' AND last_error='origin investigation deleted')",[])?;
         tx.execute("UPDATE recon_runs SET state='deleted',stage='deleted' WHERE thread_id=?1 AND state='running'",[tid])?;
         tx.execute("UPDATE osint_calls SET status='cancelled' WHERE thread_id=?1 AND status IN ('queued','running')",[tid])?;
         if insights {
@@ -1506,12 +1534,13 @@ impl Store {
             "UPDATE osint_calls SET thread_id=NULL,turn_id=NULL,run_id=NULL WHERE thread_id=?1",
             [tid],
         )?;
-        tx.execute("DELETE FROM osint_calls WHERE origin='recon' AND thread_id IS NULL AND run_id IS NULL AND id NOT IN (SELECT call_id FROM insight_sources)",[])?;
+        tx.execute("DELETE FROM osint_calls WHERE origin='recon' AND thread_id IS NULL AND run_id IS NULL AND id NOT IN (SELECT call_id FROM insight_sources) AND NOT EXISTS (SELECT 1 FROM insight_derivation_evidence e WHERE e.source_id='call:'||osint_calls.id OR e.source_id LIKE 'call:'||osint_calls.id||'#page%')",[])?;
         tx.execute("DELETE FROM recon_threads WHERE id=?1", [tid])?;
         tx.execute(
             "DELETE FROM app_state WHERE key='last_thread' AND value=?1",
             [tid],
         )?;
+        crate::investigation::insight_persist::reconcile_deleted_memories(&tx)?;
         tx.commit()?;
         let _ = self.index_now(&queued);
         Ok(true)
@@ -1540,7 +1569,7 @@ impl Store {
         Ok(rows)
     }
     pub fn insight_for_memory(&self, mid: &str) -> Result<Option<InsightView>> {
-        let base:Option<(String,String,String,String,String,f64,String)>=self.conn.query_row("SELECT entity_id,predicate,object_value,topic,classification,confidence,fingerprint FROM insight_claims WHERE memory_id=?1",[mid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
+        let base:Option<(String,String,String,String,String,f64,String)>=self.conn.query_row("SELECT COALESCE(e.label,c.entity_id),c.predicate,c.object_value,c.topic,c.classification,c.confidence,c.fingerprint FROM insight_claims c LEFT JOIN recon_entities e ON e.id=c.entity_id WHERE c.memory_id=?1",[mid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
         let Some((entity, predicate, object_value, topic, classification, confidence, fingerprint)) =
             base
         else {
@@ -1565,6 +1594,7 @@ impl Store {
             .query_map([&fingerprint], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(Some(InsightView {
+            metadata: crate::brain_query::insight_metadata(&self.conn, mid)?,
             memory_id: mid.into(),
             entity,
             predicate,
@@ -1577,7 +1607,7 @@ impl Store {
         }))
     }
     pub fn search_insights(&self, entity: &str, topic: &str) -> Result<Vec<InsightView>> {
-        let mut stmt=self.conn.prepare("SELECT memory_id FROM insight_claims WHERE entity_id LIKE ?1 AND topic LIKE ?2 ORDER BY updated_at DESC")?;
+        let mut stmt=self.conn.prepare("SELECT c.memory_id FROM insight_claims c LEFT JOIN recon_entities e ON e.id=c.entity_id WHERE (c.entity_id LIKE ?1 OR e.label LIKE ?1) AND c.topic LIKE ?2 ORDER BY c.updated_at DESC")?;
         let ids = stmt
             .query_map(params![format!("%{entity}%"), format!("%{topic}%")], |r| {
                 r.get::<_, String>(0)
@@ -2513,7 +2543,9 @@ fn packet_observation(value: &Value) -> Value {
                 json!({
                     "tool_observation_digest": digest.content,
                     "tool_meta": digest.coverage.notes,
-                    "truncated_for_model": digest.coverage.partial,
+                    // Coverage describes what the summary operation analyzed,
+                    // not whether this derived packet contains the original.
+                    "truncated_for_model": true,
                     "summarization_mode": "tool_observation",
                     "fallback": digest.fallback,
                 })
@@ -2675,7 +2707,11 @@ async fn compact_page_evidence(
         )
         .await;
         let result = &result;
-        if !page_needs_compact(&result.observations) {
+        if !page_needs_compact(&result.observations)
+            || (settings.nlp.mode == crate::nlp::Mode::Auto
+                && serde_json::to_vec(&result.observations)
+                    .is_ok_and(|v| v.len() <= crate::investigation::insights::WINDOW_BYTES))
+        {
             out.push((id.clone(), result.clone()));
             continue;
         }
@@ -2928,6 +2964,25 @@ impl Service {
     pub async fn retry_insights(&self, answer_id: &str) -> Result<()> {
         let store = Store::open(&self.db_path)?;
         let run_id:String=store.conn.query_row("SELECT run_id FROM extraction_jobs WHERE answer_id=?1 AND state IN ('queued','failed')",[answer_id],|r|r.get(0)).optional()?.ok_or_else(||anyhow!("retryable insight job not found"))?;
+        let contract: String = store.conn.query_row(
+            "SELECT contract_version FROM extraction_jobs WHERE answer_id=?1",
+            [answer_id],
+            |r| r.get(0),
+        )?;
+        if contract == crate::investigation::insights::CONTRACT {
+            // New-policy insights were staged from originals before the answer.
+            // Retry the durable refresh, never mine the saved answer.
+            drop(store);
+            crate::investigation::insight_persist::recover_refreshes(
+                &self.db_path,
+                &self.auth,
+                &self.settings,
+                &Arc::new(AtomicBool::new(false)),
+            )
+            .await?;
+            return Ok(());
+        }
+        ensure!(contract == "legacy-v1", "unknown extraction contract");
         let run = store
             .get_run(&run_id)?
             .ok_or_else(|| anyhow!("source run unavailable"))?;
@@ -3554,6 +3609,82 @@ impl Service {
             return Ok(None);
         }
         let _ = (max_calls, opening);
+        progress(TurnEvent::Stage("assessing source claims".into()));
+        let mut insight_input = {
+            let store = Store::open(&self.db_path)?;
+            let evidence =
+                crate::investigation::insights::evidence_from_tools(&store.conn, results)?;
+            let generation = crate::investigation::insight_persist::desired_generation(
+                &store.conn,
+                "recon",
+                &run.id,
+            )?;
+            let generation = if generation == 0 {
+                crate::investigation::insight_persist::advance_generation(
+                    &store.conn,
+                    "recon",
+                    &run.id,
+                    &now(),
+                )?
+            } else {
+                generation
+            };
+            crate::investigation::insights::PipelineInput {
+                snapshot: crate::investigation::insights::snapshot(
+                    "recon", &run.id, generation, &evidence,
+                ),
+                evidence,
+                objective: question.into(),
+                surface: "recon".into(),
+                required_tasks_complete: plan.calls.iter().all(|call| {
+                    results
+                        .iter()
+                        .any(|(_, r)| r.tool_id == call.tool_id && r.status == "completed")
+                }),
+                save_insights: store
+                    .get_thread(&run.thread_id)?
+                    .is_some_and(|t| t.recall_insights),
+                recall_enabled: store
+                    .get_thread(&run.thread_id)?
+                    .is_some_and(|t| t.recall_insights),
+            }
+        };
+        let refresh_task = {
+            let store = Store::open(&self.db_path)?;
+            crate::investigation::insight_persist::enqueue_refresh(
+                &store.conn,
+                &mut insight_input,
+                &self.settings,
+                &now(),
+            )?
+        };
+        let assessed = crate::investigation::insight_persist::run_refresh_slice(
+            &self.db_path,
+            &refresh_task,
+            &self.auth,
+            &self.settings,
+            cancel,
+        )
+        .await;
+        let assessed = match assessed {
+            Ok(Some(output)) => Some(output),
+            Ok(None) => crate::investigation::insight_persist::active_output(
+                &Store::open(&self.db_path)?.conn,
+                "recon",
+                &run.id,
+            )?,
+            Err(error) => {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(error);
+                }
+                let mut withheld = crate::investigation::insights::PipelineOutput::default();
+                withheld
+                    .readiness
+                    .gaps
+                    .push(format!("Claim assessment blocked: {error}"));
+                Some(withheld)
+            }
+        };
         let synthesis_results = if self.settings.nlp.mode != crate::nlp::Mode::Off
             || results
                 .iter()
@@ -3621,13 +3752,26 @@ impl Service {
             }
             item.text = prepared.text;
         }
-        let (synthesis_prompt, synthesis_user) = synthesis_request(
+        let (mut synthesis_prompt, mut synthesis_user) = synthesis_request(
             question,
             plan,
             &synthesis_results,
             &prior_view.text,
             &recall_views,
         )?;
+        if let Some(assessed) = &assessed {
+            synthesis_user.push_str(&format!(
+                "\nAssessed source claims, approved inferences, and coverage gaps:\n{}",
+                serde_json::to_string(assessed)?
+            ));
+            if !assessed.readiness.publication_eligible {
+                synthesis_prompt.push_str("\nEvidence readiness withholds investigative inferences. Return only factual observations, attributed source claims, direct factual answers and explicit coverage gaps. Do not derive analytical conclusions or infer identities from mentions. Brain recall and previous answers are leads, not independent corroboration.");
+            } else {
+                synthesis_prompt.push_str("\nGround analytical prose in the assessed premise IDs and approved inferences. Preserve limitations, speaker, uncertainty, allegation/denial and time. Do not mine this answer as independent evidence.");
+            }
+        } else {
+            synthesis_prompt.push_str("\nNo current assessment result: return observations, attributed claims and coverage gaps only; withhold analytical inferences.");
+        }
         {
             let mut clock_guard = clock.lock().unwrap();
             clock_guard.set_evidence(synthesis_user.chars().count());
@@ -3650,12 +3794,10 @@ impl Service {
             chat("user", synthesis_user.clone()),
         ];
 
-        if self.settings.nlp.mode == crate::nlp::Mode::Select {
-            ensure!(
-                crate::nlp::message_bytes(&synthesis_messages, &Value::Null) <= 48 * 1024,
-                "BudgetExceeded: mandatory synthesis evidence exceeds serialized byte budget"
-            );
-        }
+        ensure!(
+            crate::nlp::message_bytes(&synthesis_messages, &Value::Null) <= 48 * 1024,
+            "BudgetExceeded: mandatory synthesis evidence exceeds serialized byte budget"
+        );
         let (prev_gen, _): (u32, String) = Store::open(&self.db_path)?
             .conn
             .query_row(
@@ -3828,8 +3970,8 @@ impl Service {
             return Ok(None);
         }
         progress(TurnEvent::Stage("saving insights".into()));
-        self.save_insights(run, question, synthesis_secret, &answer_msg, &cited_results)
-            .await?;
+        Store::open(&self.db_path)?.conn.execute("UPDATE extraction_jobs SET state='completed',contract_version='insights-v1',updated_at=?1 WHERE answer_id=?2",params![now(),answer_msg.id])?;
+        let _ = cited_results; // Shared pre-answer refresh already owns derivations.
         Ok(None)
     }
 
@@ -3876,7 +4018,7 @@ impl Service {
         recalled: &[RecallInsight],
         results: &[(String, ToolResult)],
         watched: &str,
-        synthesis_secret: &crate::secrets::ProviderSecret,
+        _synthesis_secret: &crate::secrets::ProviderSecret,
         progress: &mut (impl FnMut(TurnEvent) + Send),
     ) -> Result<Option<String>> {
         let gathered: Vec<(String, ToolResult)> = results
@@ -3900,40 +4042,14 @@ impl Service {
             None,
         )?;
         let stored = cut_short_answer(watched, results, UNCITED);
-        let gathered_ids: Vec<String> = gathered.iter().map(|(id, _)| id.clone()).collect();
-        let answer_msg = self.store_answer(run, recalled, &stored, results, &gathered_ids)?;
+        let answer_msg = self.store_answer(run, recalled, &stored, results, &[])?;
         progress(TurnEvent::Stage("saving insights".into()));
-        self.save_insights(run, question, synthesis_secret, &answer_msg, &gathered)
-            .await?;
+        let _ = question;
+        Store::open(&self.db_path)?.conn.execute(
+            "UPDATE extraction_jobs SET state='completed',contract_version='insights-v1',updated_at=?1 WHERE answer_id=?2",
+            params![now(), answer_msg.id],
+        )?;
         Ok(None)
-    }
-
-    async fn save_insights(
-        &self,
-        run: &Run,
-        question: &str,
-        synthesis_secret: &crate::secrets::ProviderSecret,
-        answer_msg: &Message,
-        evidence: &[(String, ToolResult)],
-    ) -> Result<()> {
-        let recall = Store::open(&self.db_path)?
-            .get_thread(&run.thread_id)?
-            .is_some_and(|thread| thread.recall_insights);
-        if !recall {
-            Store::open(&self.db_path)?.conn.execute(
-                "UPDATE extraction_jobs SET state='skipped',updated_at=?1 WHERE answer_id=?2",
-                params![now(), answer_msg.id],
-            )?;
-            return Ok(());
-        }
-        Store::open(&self.db_path)?.set_run(&run.id, "running", "saving insights", None, None)?;
-        if let Err(e) = self
-            .extract_insights(synthesis_secret, question, answer_msg, evidence)
-            .await
-        {
-            Store::open(&self.db_path)?.conn.execute("UPDATE extraction_jobs SET state='failed',error=?1,updated_at=?2 WHERE answer_id=?3",params![e.to_string(),now(),answer_msg.id])?;
-        }
-        Ok(())
     }
 
     fn store_answer(
@@ -3942,7 +4058,7 @@ impl Service {
         recalled: &[RecallInsight],
         answer: &str,
         results: &[(String, ToolResult)],
-        inferred_evidence: &[String],
+        _inferred_evidence: &[String],
     ) -> Result<Message> {
         let mut store = Store::open(&self.db_path)?;
         ensure!(
@@ -3952,18 +4068,15 @@ impl Service {
             "run no longer active"
         );
         let known: HashSet<&str> = results.iter().map(|(id, _)| id.as_str()).collect();
-        let mut cited_ids: Vec<String> = citation_ids(answer)
+        let cited_ids: Vec<String> = citation_ids(answer)
             .into_iter()
             .filter(|id| known.contains(id.as_str()))
             .collect();
-        for id in inferred_evidence {
-            if known.contains(id.as_str()) && !cited_ids.contains(id) {
-                cited_ids.push(id.clone());
-            }
-        }
         let memory_ids: Vec<String> = recalled.iter().map(|item| item.memory_id.clone()).collect();
         let answer_msg =
             store.add_answer(&run.thread_id, &run.id, answer, &cited_ids, &memory_ids)?;
+        store.conn.execute("UPDATE extraction_jobs SET contract_version='insights-v1',state='completed',updated_at=?1 WHERE answer_id=?2",params![now(),answer_msg.id])?;
+        store.conn.execute("UPDATE insight_sources SET answer_id=?1 WHERE run_id=?2 AND answer_id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='recon' AND owner_id=?2)",params![answer_msg.id,run.id])?;
         Ok(answer_msg)
     }
     async fn extract_insights(
@@ -4760,7 +4873,12 @@ async fn prepare_page_result(
             settings.nlp.mode,
         )
         .await;
-        if settings.nlp.mode == crate::nlp::Mode::Select {
+        if matches!(
+            prepared.effective_action,
+            crate::nlp::EffectiveAction::Verbatim
+                | crate::nlp::EffectiveAction::Selected
+                | crate::nlp::EffectiveAction::RequiresWindows
+        ) {
             page["markdown"] = json!(prepared.text);
         }
         if let Some(path) = db_path {

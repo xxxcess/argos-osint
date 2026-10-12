@@ -1,6 +1,6 @@
       <svg role="img" aria-labelledby="investigation-harness-title investigation-harness-desc" viewBox="0 0 880 240" xmlns="http://www.w3.org/2000/svg">
         <title id="investigation-harness-title">Investigation harness</title>
-        <desc id="investigation-harness-desc">Recon chat, Home composer, and Intel briefing share admission gates, the picker, the executor, evidence curation, and synthesis. Surfaces keep their own UI and stored ids.</desc>
+        <desc id="investigation-harness-desc">Recon chat, Home composer, and Intel briefing share admission gates, the picker, the executor, source claims, evidence readiness, and synthesis. Surfaces keep their own UI and stored ids.</desc>
 
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
@@ -28,11 +28,11 @@
         <text x="542.0" y="76" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">Executor</text>
         <text x="542.0" y="94" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">OSINT</text>
         <rect x="632" y="48" width="124" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-        <text x="694.0" y="76" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">Curation</text>
-        <text x="694.0" y="94" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">stance</text>
+        <text x="694.0" y="76" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">Claims</text>
+        <text x="694.0" y="94" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">readiness</text>
         <rect x="784" y="48" width="72" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-        <text x="820.0" y="76" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">Answer</text>
-        <text x="820.0" y="94" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">stream</text>
-        <text x="440" y="200" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Permission and presentation stay on the surface; the task graph is shared.</text>
+        <text x="820.0" y="76" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">Publish</text>
+        <text x="820.0" y="94" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">fenced</text>
+        <text x="440" y="200" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Claim Assessor → readiness → Synthesis → assessed links → atomic snapshot.</text>
 
       </svg>

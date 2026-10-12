@@ -6392,14 +6392,7 @@ pub(crate) fn memory_list_note(app: &App) -> (String, ratatui::style::Style) {
 }
 
 pub(crate) fn memory_anchors_text(insight: &argos_osint_core::recon::InsightView) -> String {
-    let mut lines = vec![format!(
-        "{} · {} → {} · {} · {:.0}%",
-        insight.entity,
-        insight.predicate,
-        insight.object_value,
-        insight.classification,
-        insight.confidence * 100.0
-    )];
+    let mut lines = vec![insight.presentation()];
     let topic = insight.topic.trim();
     if !topic.is_empty() {
         lines.push(format!("topic: {topic}"));
@@ -7338,6 +7331,14 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Block::default().style(theme::text()), left);
     if let Some(layout) = intel_extracted_layout(app, left) {
         let detail = intel_insights_progress_detail(app);
+        draw_clipped_md_pane(
+            frame,
+            left,
+            layout.confidence,
+            " confidence ",
+            &layout.confidence_lines,
+            0,
+        );
         // 1. claims
         if layout.claims_loading {
             draw_clipped_intel_loading(
@@ -7421,26 +7422,6 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             draw_clipped_md_pane(frame, left, layout.links, " links ", &layout.links_lines, 0);
         }
-        // 5. related context
-        if layout.context_loading {
-            draw_clipped_intel_loading(
-                frame,
-                left,
-                layout.context,
-                " related context ",
-                "Extracting context",
-                detail.as_deref(),
-            );
-        } else {
-            draw_clipped_md_pane(
-                frame,
-                left,
-                layout.context,
-                " related context ",
-                &layout.context_lines,
-                0,
-            );
-        }
     }
 
     // Side panes stay fixed; only the center stack scrolls.
@@ -7514,12 +7495,12 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
         draw_intel_section_loading(
             frame,
             right_rows[0],
-            " confidence ",
-            "Updating confidence",
+            " assessment ",
+            "Updating assessment",
             app,
         );
     } else {
-        draw_intel_confidence(frame, app, right_rows[0]);
+        draw_intel_assessment(frame, app, right_rows[0]);
     }
     draw_intel_tags(frame, article, right_rows[1]);
     super::map::draw_country_mini_map(
@@ -7994,20 +7975,6 @@ fn extracted_links_markdown(items: &[String]) -> String {
         .join("\n")
 }
 
-fn extracted_context_markdown(items: &[intel_recon::ExtractedLine]) -> String {
-    if items.is_empty() {
-        return "_none_".to_string();
-    }
-    items
-        .iter()
-        .map(|item| match item.confidence {
-            Some(score) => format!("- {} ({score:.2})", item.text),
-            None => format!("- {}", item.text),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn parse_extracted_md(text: &str, width: usize) -> Vec<Line<'static>> {
     super::markdown::markdown_lines(text, width.max(1))
         .into_iter()
@@ -8016,21 +7983,20 @@ fn parse_extracted_md(text: &str, width: usize) -> Vec<Line<'static>> {
 }
 
 struct IntelExtractedLayout {
+    confidence: AbsRect,
     claims: AbsRect,
     inferences: AbsRect,
     actors: AbsRect,
     links: AbsRect,
-    context: AbsRect,
     claims_lines: Vec<Line<'static>>,
+    confidence_lines: Vec<Line<'static>>,
     inferences_lines: Vec<Line<'static>>,
     actors_lines: Vec<Line<'static>>,
     links_lines: Vec<Line<'static>>,
-    context_lines: Vec<Line<'static>>,
     claims_loading: bool,
     inferences_loading: bool,
     actors_loading: bool,
     links_loading: bool,
-    context_loading: bool,
     stack_scroll_max: u16,
 }
 
@@ -8040,6 +8006,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         return None;
     }
     let inner_w = viewport.width.saturating_sub(2).max(1) as usize;
+    let confidence_lines = intel_confidence_lines(app, inner_w);
     let buckets = intel_recon::bucket_extracted_with_explanations(
         &app.intel_claims,
         &app.intel_relations,
@@ -8047,23 +8014,39 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     );
 
     let claims_md = extracted_claims_markdown(&buckets.facts);
-    let inferences_md = extracted_inferences_markdown(&buckets.inferences);
+    let inferences_md = if buckets.inferences.is_empty() {
+        format!(
+            "_{} · inferences withheld until evidence is ready_",
+            app.intel_insight_lifecycle.replace('_', " ")
+        )
+    } else {
+        extracted_inferences_markdown(&buckets.inferences)
+    };
     let actors_md = extracted_actors_markdown(&buckets.actors);
-    let links_md = extracted_links_markdown(&buckets.links);
-    let context_md = extracted_context_markdown(&buckets.context);
+    let mut links_md = extracted_links_markdown(&buckets.links);
+    if !buckets.links.is_empty()
+        && app
+            .intel_claims
+            .iter()
+            .any(|claim| claim.fingerprint.starts_with("v2:"))
+        && app.intel_insight_lifecycle != "active"
+    {
+        links_md = format!(
+            "_{} · retained assessed links_\n\n{links_md}",
+            app.intel_insight_lifecycle.replace('_', " ")
+        );
+    }
 
     let claims_lines = parse_extracted_md(&claims_md, inner_w);
     let inferences_lines = parse_extracted_md(&inferences_md, inner_w);
     let actors_lines = parse_extracted_md(&actors_md, inner_w);
     let links_lines = parse_extracted_md(&links_md, inner_w);
-    let context_lines = parse_extracted_md(&context_md, inner_w);
 
     let insights_loading = intel_insights_loading(app);
-    let claims_loading = insights_loading;
-    let inferences_loading = insights_loading;
+    let claims_loading = insights_loading && buckets.facts.is_empty();
+    let inferences_loading = insights_loading && buckets.inferences.is_empty();
     let actors_loading = insights_loading || app.intel_actors_reviewing.contains(&article.id);
     let links_loading = insights_loading || app.intel_links_reviewing.contains(&article.id);
-    let context_loading = insights_loading;
 
     let section_h = |lines_count: usize, loading: bool| -> u16 {
         let natural = (lines_count as u16).saturating_add(2);
@@ -8078,17 +8061,19 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let inferences_h = section_h(inferences_lines.len(), inferences_loading);
     let actors_h = section_h(actors_lines.len(), actors_loading);
     let links_h = section_h(links_lines.len(), links_loading);
-    let context_h = section_h(context_lines.len(), context_loading);
 
-    let total = claims_h
+    let confidence_h = section_h(confidence_lines.len(), false);
+    let total = confidence_h
+        .saturating_add(claims_h)
         .saturating_add(inferences_h)
         .saturating_add(actors_h)
-        .saturating_add(links_h)
-        .saturating_add(context_h);
+        .saturating_add(links_h);
     let stack_scroll_max = total.saturating_sub(viewport.height);
     let scroll = app.scrolls.intel_extracted.min(stack_scroll_max) as i32;
 
     let mut y = i32::from(viewport.y) - scroll;
+    let confidence = abs_rect(viewport.x, y, viewport.width, confidence_h);
+    y += i32::from(confidence_h);
     let claims = abs_rect(viewport.x, y, viewport.width, claims_h);
     y += i32::from(claims_h);
     let inferences = abs_rect(viewport.x, y, viewport.width, inferences_h);
@@ -8096,25 +8081,22 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let actors = abs_rect(viewport.x, y, viewport.width, actors_h);
     y += i32::from(actors_h);
     let links = abs_rect(viewport.x, y, viewport.width, links_h);
-    y += i32::from(links_h);
-    let context = abs_rect(viewport.x, y, viewport.width, context_h);
 
     Some(IntelExtractedLayout {
+        confidence,
+        confidence_lines,
         claims,
         inferences,
         actors,
         links,
-        context,
         claims_lines,
         inferences_lines,
         actors_lines,
         links_lines,
-        context_lines,
         claims_loading,
         inferences_loading,
         actors_loading,
         links_loading,
-        context_loading,
         stack_scroll_max,
     })
 }
@@ -8360,85 +8342,122 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-fn draw_intel_confidence(frame: &mut Frame, app: &App, area: Rect) {
-    let block = pane(" confidence ");
+fn draw_intel_assessment(frame: &mut Frame, app: &App, area: Rect) {
+    let block = pane(" assessment ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let eval = intel_source_evaluation(app);
-    let (_high, mean) = intel_confidence_scores(app);
-    let grade = format!("{}{}", eval.reliability_letter, eval.credibility_digit);
-    let score = (eval.reliability_meter + eval.credibility_meter) * 0.5;
-    let color = grade_score_color(score);
-    let art = grade_ascii_lines(&grade);
-    let art_w = art
-        .iter()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0) as u16;
-    let cols = split_horizontal(
+    let lifecycle = app.intel_insight_lifecycle.replace('_', " ");
+    let text = format!("{lifecycle}\nClaims describe what the source reports. Source faithfulness and corroboration are assessed separately.\nInference rationale is stored with the assertions and links.");
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(theme::text())
+            .wrap(Wrap { trim: true }),
         inner,
-        [
-            Constraint::Length(art_w.saturating_add(1).max(12)),
-            Constraint::Min(12),
-        ],
     );
-    let art_lines: Vec<Line> = art
-        .into_iter()
-        .map(|row| {
-            Line::from(Span::styled(
-                row,
-                Style::default()
-                    .fg(color)
-                    .bg(theme::BG)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(art_lines), cols[0]);
+}
 
-    let text_w = cols[1].width.max(1) as usize;
-    let mut explain = Vec::new();
-    explain.push(Line::from(Span::styled(
-        fit(
-            &format!(
-                "Letter {} — {}",
+fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let eval = intel_source_evaluation(app);
+    let new_policy = app.intel_insight_lifecycle != "legacy/unassessed"
+        || app.intel_claims.is_empty()
+        || app
+            .intel_claims
+            .iter()
+            .any(|c| c.fingerprint.starts_with("v2:"));
+    let mut lines = Vec::new();
+    let mut add = |text: String, style: Style| {
+        for row in wrap_text(&text, width.max(1)) {
+            lines.push(Line::from(Span::styled(row, style)));
+        }
+    };
+    if new_policy {
+        let estimate = app.intel_evidence_confidence.as_ref();
+        let initial = app
+            .intel_articles
+            .get(app.intel_sel)
+            .filter(|a| !a.title.trim().is_empty() || !a.description.trim().is_empty())
+            .map(|_| 20);
+        let score = estimate.map(|e| e.score).unwrap_or(initial);
+        let status = if app.intel_insight_lifecycle == "pending" {
+            "previous · refresh pending".to_owned()
+        } else if app.intel_insight_lifecycle == "previous" {
+            "previous".to_owned()
+        } else if score.is_none() {
+            "unavailable".to_owned()
+        } else if estimate.is_none_or(|e| e.provisional) {
+            "provisional".to_owned()
+        } else {
+            "assessed".to_owned()
+        };
+        add(
+            format!(
+                "{} · {status}",
+                score
+                    .map(|s| format!("{s}/100"))
+                    .unwrap_or_else(|| "N/A · no claims".into())
+            ),
+            theme::accent().add_modifier(Modifier::BOLD),
+        );
+        if let Some(e) = estimate {
+            add(
+                format!("Claims {} · faithful {}", e.claims, e.faithful),
+                theme::text(),
+            );
+            add(
+                format!("Corroborated {} · disputed {}", e.corroborated, e.disputed),
+                theme::text(),
+            );
+            add(
+                format!(
+                    "Coverage: {}",
+                    if e.complete_coverage {
+                        "complete"
+                    } else {
+                        "partial / unknown"
+                    }
+                ),
+                theme::dim(),
+            );
+        } else {
+            add(
+                "Initial source evidence; assessment pending".into(),
+                theme::dim(),
+            );
+        }
+        add(
+            format!(
+                "Source {} · {}",
                 eval.reliability_letter, eval.reliability_label
             ),
-            text_w,
-        ),
-        theme::text(),
-    )));
-    explain.push(Line::from(Span::styled(
-        fit(
-            &format!(
-                "Digit {} — {}",
-                eval.credibility_digit, eval.credibility_label
-            ),
-            text_w,
-        ),
-        theme::text(),
-    )));
-    explain.push(Line::from(""));
-    explain.push(Line::from(Span::styled(
-        fit(&format!("Brief rating value: {mean:.2}"), text_w),
-        theme::accent().add_modifier(Modifier::BOLD),
-    )));
-    for chunk in wrap_text(
-        "Average confidence across every claim made in the article.",
-        text_w,
-    ) {
-        explain.push(Line::from(Span::styled(chunk, theme::dim())));
-    }
-    if !eval.footnote.is_empty() {
-        explain.push(Line::from(Span::styled(
-            fit(&eval.footnote, text_w),
             theme::dim(),
-        )));
+        );
+        add("Evidence score · not a probability".into(), theme::dim());
+    } else {
+        let (_, mean) = intel_confidence_scores(app);
+        add(
+            format!("Legacy confidence: {:.0}/100", mean * 100.0),
+            theme::accent().add_modifier(Modifier::BOLD),
+        );
+        add(
+            format!(
+                "{}{} · {} · {}",
+                eval.reliability_letter,
+                eval.credibility_digit,
+                eval.reliability_label,
+                eval.credibility_label
+            ),
+            theme::text(),
+        );
+        add(eval.footnote, theme::dim());
+        let color = grade_score_color((eval.reliability_meter + eval.credibility_meter) * 0.5);
+        for row in grade_ascii_lines(&format!(
+            "{}{}",
+            eval.reliability_letter, eval.credibility_digit
+        )) {
+            lines.push(Line::from(Span::styled(row, Style::default().fg(color))));
+        }
     }
-    frame.render_widget(Paragraph::new(explain), cols[1]);
+    lines
 }
 
 /// Bright green (best) → bright red (worst) by combined Admiralty meter.
@@ -10893,6 +10912,7 @@ mod tests {
     #[test]
     fn atlas_source_anchors_are_not_labeled_deleted_origin() {
         let insight = recon::InsightView {
+            metadata: None,
             memory_id: "m1".into(),
             entity: "delhi police".into(),
             predicate: "received".into(),

@@ -1815,6 +1815,9 @@ fn http() -> Result<reqwest::Client> {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SettingsFile {
+    /// Total investigative recall candidates, clamped to 10–20; absent means 20.
+    #[serde(default)]
+    pub insight_recall_limit: Option<usize>,
     #[serde(default)]
     pub nlp: crate::nlp::Settings,
     /// User preference; `None` preserves the default visible Recon context pane.

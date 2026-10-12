@@ -7,9 +7,10 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
-use crate::atlas_insights;
 use crate::secrets::ProviderSecret;
-use crate::store::{AtlasArticleRow, AtlasInsightClaim, Store};
+#[cfg(test)]
+use crate::store::AtlasInsightClaim;
+use crate::store::{AtlasArticleRow, Store};
 
 /// Outcome of a staged insight replacement.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,54 +30,118 @@ pub async fn replace_article_insights_from_body(
     synthesis: &ProviderSecret,
     classifier: Option<&ProviderSecret>,
 ) -> Result<ReplaceOutcome> {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    replace_article_insights_from_body_with_cancel(
+        db_path,
+        article,
+        body_markdown,
+        synthesis,
+        classifier,
+        &cancel,
+    )
+    .await
+}
+
+pub(crate) async fn replace_article_insights_from_body_with_cancel(
+    db_path: &Path,
+    article: &AtlasArticleRow,
+    body_markdown: &str,
+    synthesis: &ProviderSecret,
+    classifier: Option<&ProviderSecret>,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<ReplaceOutcome> {
+    replace_article_insights_with_runtime(
+        db_path,
+        article,
+        body_markdown,
+        synthesis,
+        classifier,
+        cancel,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn replace_article_insights_with_runtime(
+    db_path: &Path,
+    article: &AtlasArticleRow,
+    body_markdown: &str,
+    synthesis: &ProviderSecret,
+    classifier: Option<&ProviderSecret>,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    runtime: Option<&super::worker::JobRuntime>,
+) -> Result<ReplaceOutcome> {
+    anyhow::ensure!(
+        !cancel.load(std::sync::atomic::Ordering::Acquire),
+        "cancelled"
+    );
     if body_markdown.trim().is_empty() {
         return Err(anyhow!("empty article body"));
     }
 
-    let (peers, prior_count, protected) = {
-        let store = Store::open(db_path)?;
+    use rusqlite::params;
+    let store = Store::open(db_path)?;
+    let protected = store.article_insight_user_edit_count(&article.run_id, &article.id)?;
+    let active_recon:bool=store.conn.query_row("SELECT EXISTS(SELECT 1 FROM intel_report_jobs WHERE article_id=?1 AND state IN ('queued','running','pending','paused'))",[&article.id],|r|r.get(0))?;
+    if active_recon {
+        store.conn.execute("UPDATE insight_owner_state SET lifecycle='pending',updated_at=?2 WHERE owner_kind='article' AND owner_id=?1",params![article.id,chrono::Utc::now().to_rfc3339()])?;
         let prior = store
             .atlas_claims_for_article(&article.run_id, &article.id)?
             .len();
-        let protected = store.article_insight_user_edit_count(&article.run_id, &article.id)?;
-        let peers = store
-            .atlas_list_articles(&article.run_id)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|peer| peer.id != article.id)
-            .collect::<Vec<_>>();
-        (peers, prior, protected)
-    };
-
-    // Stage: network/model work with the prior insights still live.
-    let settled = atlas_insights::extract_for_article_body(
-        synthesis,
-        classifier,
-        article,
-        body_markdown,
-        &peers,
-    )
-    .await
-    .map_err(|err| {
-        anyhow!("insight extraction failed; prior insights retained ({prior_count} claims): {err}")
-    })?;
-
-    validate_staged_claims(&settled.claims, &article.id)?;
-
-    let store = Store::open(db_path)?;
-    let outcome = store.commit_article_insight_replacement(
-        &article.run_id,
+        return Ok(ReplaceOutcome {
+            claims: prior,
+            zero_claim_success: false,
+            preserved_user_edits: protected,
+        });
+    }
+    let generation = crate::investigation::insight_persist::advance_generation(
+        &store.conn,
+        "article",
         &article.id,
-        &settled.claims,
-        &settled.relations,
+        &chrono::Utc::now().to_rfc3339(),
     )?;
+    let mut settings = runtime
+        .map(|r| r.settings.clone())
+        .unwrap_or_else(|| crate::provider::SettingsFile::load().unwrap_or_default());
+    let mut auth = runtime
+        .map(|r| r.auth.clone())
+        .unwrap_or_else(|| crate::secrets::AuthFile::load().unwrap_or_default());
+    auth.set_account(synthesis.clone());
+    if runtime.is_none() && settings.defaults.resolve_role("claim_assessor").1.is_some() {
+        settings.defaults.synthesis = crate::provider::ModelAssignment {
+            provider: synthesis.kind.clone(),
+            model: synthesis.model.clone(),
+            ..Default::default()
+        };
+    }
+    let _ = classifier;
+    let mut input = crate::investigation::insight_persist::article_input(
+        &store,
+        article,
+        generation,
+        &article.title,
+        false,
+    )?;
+    let task = crate::investigation::insight_persist::enqueue_refresh(
+        &store.conn,
+        &mut input,
+        &settings,
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    drop(store);
+    let output = crate::investigation::insight_persist::run_refresh_slice(
+        db_path, &task, &auth, &settings, cancel,
+    )
+    .await?
+    .ok_or_else(|| anyhow!("insight refresh is already owned by another worker"))?;
     Ok(ReplaceOutcome {
-        claims: outcome.claims,
-        zero_claim_success: outcome.claims == 0,
-        preserved_user_edits: protected.max(outcome.preserved_user_edits),
+        claims: output.claims.len() + output.inferences.len(),
+        zero_claim_success: output.claims.is_empty() && output.inferences.is_empty(),
+        preserved_user_edits: protected,
     })
 }
 
+#[cfg(test)]
 fn validate_staged_claims(claims: &[AtlasInsightClaim], article_id: &str) -> Result<()> {
     for claim in claims {
         anyhow::ensure!(

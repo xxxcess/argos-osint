@@ -71,7 +71,7 @@ Defaults live under **Models → Defaults**. Empty derived roles inherit. Explic
 
 ## Persistence
 
-SQLite (current schema version 24; harness tables from v20+):
+SQLite (current schema version 29; harness tables from v20+):
 
 | Table | Contents |
 | --- | --- |
@@ -81,3 +81,11 @@ SQLite (current schema version 24; harness tables from v20+):
 | `investigation_claim_assessments` | `verified`, `refuted`, `inconclusive`, `insufficient_evidence` |
 | `investigation_events` | Gate/tool/transition trace, secrets redacted |
 | `investigation_stream_parts` | Durable streams for resume |
+
+## Shared claims and derivations
+
+`investigation::insights` owns candidate packets, qualified source claims, evidence readiness, Synthesis inferences and assessed typed links. Preparation remains separate from assessment. A source allegation, denial or speculation remains an attributed claim. Kind, fidelity, evidence relation and lifecycle are independent. Mentions are candidates, never support.
+
+Recon stages insights from retained tools before the analytical answer. Its new `insights-v1` extraction receipt prevents answer mining and citation retrofit; legacy queued jobs retain `legacy-v1` dispatch. Article reports delegate to one durable `insight_refresh` task after asynchronous inventory, collection and assessment. Section and BLUF prose consume its readiness result; insufficient evidence produces observations and gaps.
+
+See [NLP coverage](nlp-preprocessing.md) and the [shared harness](diagrams/investigation-harness.html). Schema 29 stores generation, lease-fenced activation, immutable original evidence and stage receipts alongside canonical Brain records.

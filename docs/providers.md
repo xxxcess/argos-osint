@@ -131,3 +131,7 @@ Recon limits: `news_calls_per_turn` 2, `legal_calls_per_turn` 3. Spec defaults s
 - Summary executor budget is 2 total requests, including transport fallback; admission wait consumes no attempt
 - Cache invalidation when inputs change
 - Graph explanation provider integration
+
+## Investigative assessment routes
+
+Claim Assessor (`claim_assessor`) inherits the Synthesis assignment when unset. An explicit assignment and its ordered fallbacks take precedence. Extraction and inference use `model_exec::execute_chat`, which skips Decisions-only models without changing route order. Fidelity, corroboration and identity contracts use `DecisionService::evaluate_shared` through the same admission, cancellation and fallback executor; native Jev decisions and chat adapters compile and parse the same finite contract. Cached stage receipts record the actual successful route. Changing captured route contracts invalidates refresh reuse.

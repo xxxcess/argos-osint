@@ -46,10 +46,12 @@ Turn flow, bindings, and citations: [architecture.md](architecture.md).
 
 Atlas headline board: tabs, day filter, search, hero story.
 
-- Enter → Briefing Focus (claims, tags, links, mini-map, Summary)
+- Enter → Briefing Focus (confidence, claims, assessment, tags, links, mini-map, Summary)
 - View full report → 70%-width card
 - Mode button → Verify / Explain / Assess Outlook / Full Assessment (Jobs-backed)
 - Busy work on this article hides Summary and the launch control
+
+Intel Focus Brief shows Confidence above Claims in the left column and keeps Assessment in the context column. The provisional evidence score updates after committed claim assessments: full coverage and independent corroboration raise it, while counterevidence lowers it. Source reliability remains separate. Pending/previous scores stay labeled while refresh runs; empty assessed claim sets show N/A. Scroll the left column to reach all sections at compact sizes.
 
 Details: [concepts.md](concepts.md) · [architecture.md](architecture.md#intel-reports).
 
@@ -194,4 +196,4 @@ Images retain their source resolution during decoding and use a single high-qual
 contain resize for display. Bulletin imagery and short article previews are
 vertically centered; briefing imagery is horizontally centered in the reader column.
 
-Local NLP is configured in `config.toml` with `[nlp] mode = "off"`, `"annotate"` (default), or `"select"`. It is not part of portable Profile configuration. See [nlp-preprocessing.md](nlp-preprocessing.md) for evidence and fallback behavior.
+Local NLP is configured in `config.toml` with `[nlp] mode = "auto"` (default), `"off"`, `"annotate"`, or `"select"`. It is not part of portable Profile configuration. See [nlp-preprocessing.md](nlp-preprocessing.md) for evidence and fallback behavior.

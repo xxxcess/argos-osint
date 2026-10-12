@@ -1,6 +1,6 @@
 <svg role="img" aria-labelledby="recon-title recon-desc" viewBox="0 0 880 280" xmlns="http://www.w3.org/2000/svg">
         <title id="recon-title">One Recon turn</title>
-        <desc id="recon-desc">Brain recall, directives, tool picker, binder, sequential executor, then streaming synthesis that may extract Brain claims.</desc>
+        <desc id="recon-desc">Brain recall, directives, tool picker, binder, sequential executor, then source claim assessment and readiness before streaming analytical synthesis.</desc>
         <defs>
           <marker id="r-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#4f5d75" />
@@ -33,9 +33,9 @@
           <text x="620" y="84">Executor</text>
           <text x="620" y="104" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">sequential OSINT</text>
           <rect x="700" y="48" width="156" height="80" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2" />
-          <text x="778" y="84">Synthesis</text>
-          <text x="778" y="104" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">stream + citations</text>
+          <text x="778" y="84">Assess → reason</text>
+          <text x="778" y="104" font-family="Geist Mono,ui-monospace,monospace" font-size="9" font-weight="400" fill="#7a8399">claims / gate / synthesis</text>
         </g>
-        <text x="440" y="196" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#4f5d75">CITED CLAIMS → BRAIN</text>
-        <text x="440" y="244" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Primary tools first (Firecrawl, SociaVault, Hunter). Gap-fillers never feed Hunter.</text>
+        <text x="440" y="196" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#4f5d75">ORIGINAL EVIDENCE → CLAIMS → READINESS → INFERENCES → ATOMIC BRAIN</text>
+        <text x="440" y="244" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Two substantive roots; snippets and copies cannot authorize inference. No new answer mining.</text>
       </svg>

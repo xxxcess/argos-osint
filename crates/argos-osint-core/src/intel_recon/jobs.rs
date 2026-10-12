@@ -142,7 +142,17 @@ pub fn create_report_job(
         "enable at least one report section before starting Recon"
     );
     let revision = store.next_job_revision(&article.id, mode.as_str())?;
+    // Insight generations are article-owned; report mode/revision generations
+    // cannot independently publish competing article baselines.
+    let insight_generation = crate::investigation::insight_persist::advance_generation(
+        &store.conn,
+        "article",
+        &article.id,
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+
     let budget = serde_json::json!({
+        "insight_generation": insight_generation,
         "max_collection_concurrent": 2,
         "max_synthesis_concurrent": 1,
         "tool_calls_allowance": 24,
@@ -203,6 +213,13 @@ pub fn create_report_job(
         &serde_json::json!([collect]).to_string(),
         "pending",
     )?;
+    let refresh = store.insert_report_task(
+        &job.id,
+        "refresh_insights",
+        "",
+        &serde_json::json!([assess]).to_string(),
+        "pending",
+    )?;
 
     let include_bluf = plan.iter().any(|section| section.key == "bluf");
     let mut section_task_ids = Vec::new();
@@ -214,7 +231,7 @@ pub fn create_report_job(
             &job.id,
             "synthesize",
             section.key,
-            &serde_json::json!([assess]).to_string(),
+            &serde_json::json!([refresh]).to_string(),
             "pending",
         )?;
         section_task_ids.push(tid);
@@ -222,7 +239,7 @@ pub fn create_report_job(
     let mut finalize_deps = section_task_ids.clone();
     if include_bluf {
         let bluf_deps = if section_task_ids.is_empty() {
-            serde_json::json!([assess])
+            serde_json::json!([refresh])
         } else {
             serde_json::json!(section_task_ids.clone())
         };
@@ -324,6 +341,7 @@ pub fn cancel_job(store: &Store, job_id: &str) -> Result<()> {
         &job.warning,
         "cancelled by user",
     )?;
+    store.conn.execute("UPDATE insight_owner_state SET lifecycle='pending',last_error='cancelled; evidence dirty',updated_at=?2 WHERE owner_kind='article' AND owner_id=?1",rusqlite::params![job.article_id,chrono::Utc::now().to_rfc3339()])?;
     // Pending tasks will not be claimed once job is cancelled.
     Ok(())
 }

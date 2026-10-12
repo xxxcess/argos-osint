@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use rusqlite::OptionalExtension;
+
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
@@ -12,14 +14,13 @@ use crate::provider::SettingsFile;
 use crate::secrets::ProviderSecret;
 use crate::store::Store;
 
-use super::body::{enqueue_article_body, fetch_article_body};
-use super::brain::{upsert_recon_insights, ReconInsightUpdate};
+use super::body::{enqueue_article_body, fetch_article_body_with_runtime};
 use super::jobs::{IntelReportEvent, ReportScope};
 use super::ledger::coverage_complete;
 use super::modes::ReportMode;
 use crate::secrets::AuthFile;
 
-use super::synthesize::{save_section, synthesize_section, SectionSynthInput};
+use super::synthesize::{save_section, synthesize_section_with_runtime, SectionSynthInput};
 
 #[derive(Clone)]
 pub struct JobRuntime {
@@ -88,17 +89,22 @@ pub async fn run_job_slice(
 
         let owner = format!("worker-{}-{}", std::process::id(), crate::recon::id("inst"));
         let task = store.claim_report_task(&job.id, &owner, 120)?;
-        if task.is_none() {
-            let tasks = store.intel_report_tasks(&job.id)?;
-            let pending = tasks
+        (job, task)
+    };
+    let Some(task) = task else {
+        let terminal = {
+            let store = Store::open(&runtime.db_path)?;
+            !store
+                .intel_report_tasks(&job.id)?
                 .iter()
-                .any(|t| matches!(t.status.as_str(), "pending" | "running" | "interrupted"));
-            if !pending {
-                finalize_job_state(&store, &job.id, on_event)?;
-            }
-            return Ok(false);
+                .any(|t| matches!(t.status.as_str(), "pending" | "running" | "interrupted"))
+        };
+        if terminal {
+            terminal_refresh(&runtime, &job, on_event).await?;
+            let store = Store::open(&runtime.db_path)?;
+            finalize_job_state(&store, &job.id, on_event)?;
         }
-        (job, task.unwrap())
+        return Ok(false);
     };
 
     on_event(IntelReportEvent::Stage {
@@ -129,17 +135,13 @@ pub async fn run_job_slice(
 
     let result = match task.task_type.as_str() {
         "acquire_body" => run_acquire_body(&runtime, &job.article_id).await,
-        "inventory" => {
-            let store = Store::open(&runtime.db_path)?;
-            run_inventory(&store, &job.investigation_id)
-        }
+        "inventory" => run_inventory(&runtime, &job).await,
         "collect" => run_collect(&runtime, &job, &task.id).await,
-        "assess" => {
-            let store = Store::open(&runtime.db_path)?;
-            run_assess(&runtime, &store, &job, on_event)
-        }
+        "assess" => run_assess(&runtime, &job).await,
+        "refresh_insights" => run_refresh(&runtime, &job, on_event).await,
         "synthesize" => run_synthesize(&runtime, &job, &task.section_key, on_event).await,
         "finalize" => {
+            terminal_refresh(&runtime, &job, on_event).await?;
             let store = Store::open(&runtime.db_path)?;
             run_finalize(&store, &job, on_event)
         }
@@ -227,7 +229,7 @@ async fn run_acquire_body(runtime: &JobRuntime, article_id: &str) -> Result<Stri
             ..
         } => {
             let ua = runtime.settings.osint_user_agent.clone();
-            fetch_article_body(
+            fetch_article_body_with_runtime(
                 &runtime.db_path,
                 &body_id,
                 &article.title,
@@ -239,6 +241,7 @@ async fn run_acquire_body(runtime: &JobRuntime, article_id: &str) -> Result<Stri
                 force_refresh,
                 runtime.cancel.clone(),
                 |_| {},
+                Some(runtime),
             )
             .await?;
             Ok(body_id)
@@ -246,8 +249,70 @@ async fn run_acquire_body(runtime: &JobRuntime, article_id: &str) -> Result<Stri
     }
 }
 
-fn run_inventory(store: &Store, investigation_id: &str) -> Result<String> {
-    let elements = store.intel_elements(investigation_id)?;
+async fn run_inventory(
+    runtime: &JobRuntime,
+    job: &super::persist::IntelReportJobRow,
+) -> Result<String> {
+    let mut input = {
+        let store = Store::open(&runtime.db_path)?;
+        let article = store
+            .atlas_article(&runtime.run_id, &job.article_id)?
+            .ok_or_else(|| anyhow!("article missing"))?;
+        let generation = crate::investigation::insight_persist::desired_generation(
+            &store.conn,
+            "article",
+            &job.article_id,
+        )?;
+        crate::investigation::insight_persist::article_input(
+            &store,
+            &article,
+            generation,
+            &runtime.article_title,
+            false,
+        )?
+    };
+    input.surface = "atlas".into(); // Inventory stages claims while article Recon is active.
+    input.snapshot.key = crate::investigation::insights::input_key(&input, &runtime.settings);
+    let output = crate::investigation::insights::run_pipeline(
+        &mut input,
+        &runtime.auth,
+        &runtime.settings,
+        &runtime.cancel,
+        &runtime.db_path,
+    )
+    .await;
+    let store = Store::open(&runtime.db_path)?;
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            if runtime.cancel.load(Ordering::Acquire) {
+                return Err(error);
+            }
+            let mut withheld = crate::investigation::insights::PipelineOutput::default();
+            withheld
+                .readiness
+                .gaps
+                .push(format!("Source inventory blocked: {error}"));
+            store.update_shared_assessment(
+                &job.investigation_id,
+                &serde_json::to_string(&withheld)?,
+            )?;
+            return Ok("source_inventory_blocked; retained leads require assessment".into());
+        }
+    };
+    for claim in &output.claims {
+        let fingerprint = crate::investigation::insights::claim_fingerprint(claim);
+        store.upsert_element(
+            &job.investigation_id,
+            &format!("claim:{fingerprint}"),
+            &fingerprint,
+            "claim",
+            &claim.text,
+            "claim_assessor",
+            "pending",
+        )?;
+    }
+    let elements = store.intel_elements(&job.investigation_id)?;
     Ok(format!("elements:{}", elements.len()))
 }
 
@@ -415,36 +480,61 @@ fn claim_relevant_evidence<'a>(
         .collect()
 }
 
-fn run_assess(
+async fn run_assess(
     runtime: &JobRuntime,
-    store: &Store,
     job: &super::persist::IntelReportJobRow,
-    on_event: &mut impl FnMut(IntelReportEvent),
 ) -> Result<String> {
-    let elements = store.intel_elements(&job.investigation_id)?;
-    let evidence = store.intel_evidence_list(&job.investigation_id)?;
-    let mut updates = Vec::new();
-
-    for el in &elements {
-        let matching = claim_relevant_evidence(&el.id, &el.original_text, &evidence);
-        let stance = if matching.is_empty() {
-            "unresolved"
-        } else if matching.iter().any(|e| e.stance == "contradict") {
-            "disputed"
-        } else if matching.iter().any(|e| e.stance == "support") {
-            "supported"
-        } else {
-            "unresolved"
+    use crate::investigation::decisions::{
+        templates::template_claim_relation, DecisionPolicy, DecisionService, DecisionState,
+    };
+    let (evidence, elements) = {
+        let store = Store::open(&runtime.db_path)?;
+        (
+            store.intel_evidence_list(&job.investigation_id)?,
+            store.intel_elements(&job.investigation_id)?,
+        )
+    };
+    for element in &elements {
+        let matching = claim_relevant_evidence(&element.id, &element.original_text, &evidence);
+        let mut state = DecisionState::new().with_candidate(json!({"claim":element.original_text}));
+        for item in &matching {
+            state = state.with_evidence_passage(
+                &item.id,
+                &item.source_url,
+                &item.source_domain,
+                &item.excerpt,
+                Some("Lexical overlap is a candidate, not support. Assess independently.".into()),
+            );
+        }
+        let id = format!("{}:{}:assess:{}", job.id, job.generation, element.id);
+        let scope = crate::recon::model_exec::OperationScope::new(&id, "claim_assessor")
+            .with_generation(job.generation as u32);
+        let result = DecisionService::new()
+            .evaluate_shared(
+                &runtime.auth,
+                &runtime.settings,
+                &scope,
+                &template_claim_relation(),
+                &state,
+                &DecisionPolicy::default(),
+                &runtime.cancel,
+                Some(&runtime.db_path),
+            )
+            .await;
+        let (stance,rationale)=match result {
+            Ok((result,outcomes)) if outcomes.get("claim_relation").is_some_and(|o|o.is_approved()) => match result.answers.get("claim_relation").map(|a|a.label.as_str()) {
+                Some("supports") => ("supported","Semantic assessment of retained evidence supports the qualified assertion."),
+                Some("contradicts") => ("disputed","Semantic assessment identifies counterevidence to the qualified assertion."),
+                Some("mentions_only") => ("mention","Evidence mentions the subject without establishing the assertion."),
+                _ => ("unresolved","Semantic assessment supplies no conclusive corroboration."),
+            },
+            _ => ("unresolved","Semantic assessment unavailable or uncertain; assertion remains a claim."),
         };
-        let rationale = match stance {
-            "supported" => "Corroborating evidence present in retained sources for this claim.",
-            "disputed" => "Contrary evidence present; not treated as confirmed.",
-            _ => "No independent corroboration located for this specific claim; unresolved.",
-        };
-        let matching_ids: Vec<&str> = matching.iter().map(|e| e.id.as_str()).collect();
+        let ids: Vec<_> = matching.iter().map(|e| &e.id).collect();
+        let store = Store::open(&runtime.db_path)?;
         store.update_element_assessment(
-            &el.id,
-            if stance == "unresolved" {
+            &element.id,
+            if stance == "unresolved" || stance == "mention" {
                 "unresolved"
             } else {
                 "assessed"
@@ -452,80 +542,175 @@ fn run_assess(
             stance,
             rationale,
             "",
-            &json!(matching_ids).to_string(),
+            &json!(ids).to_string(),
         )?;
-
-        let (entity, predicate, object) = split_claim_triple(&el.original_text, &el.fingerprint);
-        updates.push(ReconInsightUpdate {
-            entity,
-            namespace: "news".into(),
-            predicate,
-            object,
-            topic: el.element_type.clone(),
-            claim: el.original_text.clone(),
-            classification: if stance == "supported" {
-                "fact".into()
-            } else {
-                "inference".into()
-            },
-            confidence: match stance {
-                "supported" => 0.72,
-                "disputed" => 0.45,
-                _ => 0.35,
-            },
-            article_id: job.article_id.clone(),
-            source_url: runtime.article_url.clone(),
-            published_at: runtime.article_published.clone(),
-            reliability: String::new(),
-            info_credibility: 0,
-            admiralty: String::new(),
-            rsp_status: String::new(),
-            element_id: Some(el.id.clone()),
-            investigation_id: Some(job.investigation_id.clone()),
-            stance: stance.into(),
-            rationale: rationale.into(),
-        });
     }
-
-    let n = upsert_recon_insights(store, &runtime.run_id, &updates, &[])?;
-    on_event(IntelReportEvent::InsightsUpdated {
-        article_id: job.article_id.clone(),
-        job_id: job.id.clone(),
-        generation: job.generation,
-    });
-
-    let shared = json!({
-        "elements_assessed": elements.len(),
-        "evidence": evidence.len(),
-        "as_of": chrono::Utc::now().to_rfc3339(),
-    });
-    store.update_shared_assessment(&job.investigation_id, &shared.to_string())?;
-    Ok(format!("assessed:{n}"))
+    let store = Store::open(&runtime.db_path)?;
+    store.update_shared_assessment(&job.investigation_id,&json!({"elements_assessed":elements.len(),"evidence":evidence.len(),"readiness":"refresh_pending"}).to_string())?;
+    Ok(format!("assessed:{}", elements.len()))
 }
 
-fn split_claim_triple(text: &str, fingerprint: &str) -> (String, String, String) {
-    if let Ok(parts) = serde_json::from_str::<(String, String, String, String)>(fingerprint) {
-        return (parts.1, parts.2, parts.3);
-    }
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.len() >= 3 {
-        (
-            words[0].trim_matches(|c: char| !c.is_alphanumeric()).into(),
-            words[1].trim_matches(|c: char| !c.is_alphanumeric()).into(),
-            words[2..]
-                .join(" ")
-                .trim_matches(|c: char| c == '.' || c == ',')
-                .chars()
-                .take(80)
-                .collect(),
-        )
+async fn terminal_refresh(
+    runtime: &JobRuntime,
+    job: &super::persist::IntelReportJobRow,
+    on_event: &mut impl FnMut(IntelReportEvent),
+) -> Result<()> {
+    let changed = {
+        let store = Store::open(&runtime.db_path)?;
+        let article = store
+            .atlas_article(&runtime.run_id, &job.article_id)?
+            .ok_or_else(|| anyhow!("article missing"))?;
+        let generation = crate::investigation::insight_persist::desired_generation(
+            &store.conn,
+            "article",
+            &job.article_id,
+        )?;
+        let current = crate::investigation::insight_persist::article_input(
+            &store,
+            &article,
+            generation,
+            &runtime.article_title,
+            true,
+        )?;
+        let old:Option<String>=store.conn.query_row("SELECT s.inputs_json FROM insight_owner_state h JOIN insight_snapshots s ON s.id=h.active_snapshot_id WHERE h.owner_kind='article' AND h.owner_id=?1",[&job.article_id],|r|r.get(0)).optional()?;
+        match old {
+            Some(old) => {
+                let previous: crate::investigation::insights::EvidenceSnapshot =
+                    serde_json::from_str(&old)?;
+                current
+                    .snapshot
+                    .source_refs
+                    .iter()
+                    .any(|source| !previous.source_refs.contains(source))
+            }
+            None => !current.evidence.is_empty(),
+        }
+    };
+    if changed && !runtime.cancel.load(Ordering::Acquire) {
+        run_refresh(runtime, job, on_event).await?;
     } else {
-        (
-            text.chars().take(40).collect(),
-            "states".into(),
-            "claim".into(),
-        )
+        let store = Store::open(&runtime.db_path)?;
+        let failed = store
+            .intel_report_tasks(&job.id)?
+            .iter()
+            .any(|t| t.status == "failed");
+        if failed {
+            let generation = serde_json::from_str::<serde_json::Value>(&job.budget_json)?
+                .get("insight_generation")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            crate::investigation::insight_persist::record_terminal_failure(
+                &store.conn,
+                "article",
+                &job.article_id,
+                generation,
+                "investigation finished with unchanged evidence and failed tasks",
+                &chrono::Utc::now().to_rfc3339(),
+            )?;
+        }
     }
+    Ok(())
+}
+
+async fn run_refresh(
+    runtime: &JobRuntime,
+    job: &super::persist::IntelReportJobRow,
+    on_event: &mut impl FnMut(IntelReportEvent),
+) -> Result<String> {
+    let task = {
+        let store = Store::open(&runtime.db_path)?;
+        let article = store
+            .atlas_article(&runtime.run_id, &job.article_id)?
+            .ok_or_else(|| anyhow!("article missing"))?;
+        let generation = crate::investigation::insight_persist::desired_generation(
+            &store.conn,
+            "article",
+            &job.article_id,
+        )?;
+        let captured = serde_json::from_str::<serde_json::Value>(&job.budget_json)?
+            .get("insight_generation")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(generation as u64) as u32;
+        if captured != generation {
+            return Ok("superseded insight generation".into());
+        }
+        let mut input = crate::investigation::insight_persist::article_input(
+            &store,
+            &article,
+            generation,
+            &runtime.article_title,
+            true,
+        )?;
+        let collections_complete = store
+            .intel_report_tasks(&job.id)?
+            .iter()
+            .filter(|t| t.task_type == "collect")
+            .all(|t| t.status == "completed");
+        input.required_tasks_complete = collections_complete
+            && store
+                .intel_elements(&job.investigation_id)?
+                .iter()
+                .all(|e| {
+                    matches!(
+                        e.status.as_str(),
+                        "assessed" | "unresolved" | "superseded" | "excluded"
+                    )
+                });
+        crate::investigation::insight_persist::enqueue_refresh(
+            &store.conn,
+            &mut input,
+            &runtime.settings,
+            &chrono::Utc::now().to_rfc3339(),
+        )?
+    };
+    let result = crate::investigation::insight_persist::run_refresh_slice(
+        &runtime.db_path,
+        &task,
+        &runtime.auth,
+        &runtime.settings,
+        &runtime.cancel,
+    )
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            if runtime.cancel.load(Ordering::Acquire) {
+                return Err(error);
+            }
+            let store = Store::open(&runtime.db_path)?;
+            let mut withheld = crate::investigation::insights::PipelineOutput::default();
+            withheld
+                .readiness
+                .gaps
+                .push(format!("Insight refresh blocked: {error}"));
+            store.update_shared_assessment(
+                &job.investigation_id,
+                &serde_json::to_string(&withheld)?,
+            )?;
+            return Ok("insights_blocked; prior snapshot retained".into());
+        }
+    };
+    if result.is_some() {
+        on_event(IntelReportEvent::InsightsUpdated {
+            article_id: job.article_id.clone(),
+            job_id: job.id.clone(),
+            generation: job.generation,
+        });
+    }
+    let store = Store::open(&runtime.db_path)?;
+    let output = crate::investigation::insight_persist::active_output(
+        &store.conn,
+        "article",
+        &job.article_id,
+    )?
+    .unwrap_or_default();
+    store.update_shared_assessment(&job.investigation_id, &serde_json::to_string(&output)?)?;
+    Ok(if output.readiness.publication_eligible {
+        "insights_updated"
+    } else {
+        "insufficient_evidence"
+    }
+    .into())
 }
 
 async fn run_synthesize(
@@ -615,7 +800,8 @@ The writing targets are recommendations—soft limits that should expand when ne
     };
 
     let (input, section, assessment_version) = input;
-    let output = synthesize_section(runtime.synthesis_secret.as_ref(), &input).await?;
+    let operation_id = format!("{}:{}:section:{}", job.id, job.generation, section_key);
+    let output = synthesize_section_with_runtime(runtime, &input, &operation_id).await?;
     {
         let store = Store::open(&runtime.db_path)?;
         save_section(&store, &section, &output, assessment_version)?;

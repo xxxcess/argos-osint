@@ -194,6 +194,6 @@ pub fn remove_owner(conn: &Connection, kind: &str, id: &str) -> anyhow::Result<(
 }
 pub fn gc(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch("DELETE FROM nlp_features WHERE prose_hash NOT IN(SELECT prose_hash FROM nlp_source_refs);
-    DELETE FROM nlp_artifacts WHERE hash NOT IN(SELECT prose_hash FROM nlp_source_refs UNION SELECT raw_hash FROM nlp_source_refs WHERE raw_hash IS NOT NULL);")?;
+    DELETE FROM nlp_artifacts WHERE hash NOT IN(SELECT prose_hash FROM nlp_source_refs UNION SELECT raw_hash FROM nlp_source_refs WHERE raw_hash IS NOT NULL UNION SELECT json_extract(evidence_json,'$.artifact_hash') FROM insight_derivation_evidence UNION SELECT json_extract(value,'$.artifact_hash') FROM insight_snapshots,json_each(insight_snapshots.inputs_json,'$.source_refs'));")?;
     Ok(())
 }

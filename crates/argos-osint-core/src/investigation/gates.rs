@@ -153,6 +153,19 @@ use super::decisions::{
 use crate::secrets::ProviderSecret;
 use serde_json::json;
 
+/// A usable classification may be a negative label. Approval requires the
+/// label expected by the caller as well as its calibrated threshold outcome.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticGateResult {
+    pub label: String,
+    pub outcome: EnforcementOutcome,
+}
+impl SemanticGateResult {
+    pub fn approves(&self, expected: &str) -> bool {
+        self.label == expected && self.outcome.is_approved()
+    }
+}
+
 /// Evaluate semantic claim relation (supports, contradicts, mentions_only) using DecisionService.
 pub async fn evaluate_claim_relation_gate(
     secret: &ProviderSecret,
@@ -160,13 +173,13 @@ pub async fn evaluate_claim_relation_gate(
     passage: &str,
     service: &DecisionService,
     policy: &DecisionPolicy,
-) -> anyhow::Result<EnforcementOutcome> {
+) -> anyhow::Result<SemanticGateResult> {
     let contract = template_claim_relation();
     let state = DecisionState::new()
-        .with_custom("claim", json!(claim))
-        .with_custom("passage", json!(passage));
+        .with_candidate(json!({"claim":claim}))
+        .with_evidence_passage("supplied", "", "", passage, None);
 
-    let (_res, outcomes) = service.evaluate(secret, &contract, &state, policy).await?;
+    let (res, outcomes) = service.evaluate(secret, &contract, &state, policy).await?;
     let outcome =
         outcomes
             .get("claim_relation")
@@ -174,7 +187,14 @@ pub async fn evaluate_claim_relation_gate(
             .unwrap_or(EnforcementOutcome::Unavailable {
                 reason: "missing question outcome".into(),
             });
-    Ok(outcome)
+    Ok(SemanticGateResult {
+        label: res
+            .answers
+            .get("claim_relation")
+            .map(|a| a.label.clone())
+            .unwrap_or_default(),
+        outcome,
+    })
 }
 
 /// Evaluate semantic evidence relevance to an entity and directive using DecisionService.
@@ -185,14 +205,17 @@ pub async fn evaluate_evidence_relevance_gate(
     passage: &str,
     service: &DecisionService,
     policy: &DecisionPolicy,
-) -> anyhow::Result<EnforcementOutcome> {
+) -> anyhow::Result<SemanticGateResult> {
     let contract = template_evidence_relevance();
     let state = DecisionState::new()
-        .with_custom("subject", json!(subject_entity))
-        .with_custom("candidate", json!(directive))
-        .with_custom("evidence", json!(passage));
+        .with_subject(
+            [("target".into(), subject_entity.into())],
+            Vec::<String>::new(),
+        )
+        .with_candidate(json!({"directive":directive}))
+        .with_evidence_passage("supplied", "", "", passage, None);
 
-    let (_res, outcomes) = service.evaluate(secret, &contract, &state, policy).await?;
+    let (res, outcomes) = service.evaluate(secret, &contract, &state, policy).await?;
     let outcome =
         outcomes
             .get("evidence_relevance")
@@ -200,7 +223,14 @@ pub async fn evaluate_evidence_relevance_gate(
             .unwrap_or(EnforcementOutcome::Unavailable {
                 reason: "missing question outcome".into(),
             });
-    Ok(outcome)
+    Ok(SemanticGateResult {
+        label: res
+            .answers
+            .get("evidence_relevance")
+            .map(|a| a.label.clone())
+            .unwrap_or_default(),
+        outcome,
+    })
 }
 
 /// Evaluate semantic entity binding between subject and candidate identifier using DecisionService.
@@ -211,14 +241,17 @@ pub async fn evaluate_entity_binding_gate(
     evidence_text: &str,
     service: &DecisionService,
     policy: &DecisionPolicy,
-) -> anyhow::Result<EnforcementOutcome> {
+) -> anyhow::Result<SemanticGateResult> {
     let contract = template_entity_binding();
     let state = DecisionState::new()
-        .with_custom("subject", json!(target_entity))
-        .with_custom("candidate", json!(candidate_identifier))
-        .with_custom("evidence", json!(evidence_text));
+        .with_subject(
+            [("target".into(), target_entity.into())],
+            Vec::<String>::new(),
+        )
+        .with_candidate(json!({"identifier":candidate_identifier}))
+        .with_evidence_passage("supplied", "", "", evidence_text, None);
 
-    let (_res, outcomes) = service.evaluate(secret, &contract, &state, policy).await?;
+    let (res, outcomes) = service.evaluate(secret, &contract, &state, policy).await?;
     let outcome =
         outcomes
             .get("entity_binding")
@@ -226,7 +259,14 @@ pub async fn evaluate_entity_binding_gate(
             .unwrap_or(EnforcementOutcome::Unavailable {
                 reason: "missing question outcome".into(),
             });
-    Ok(outcome)
+    Ok(SemanticGateResult {
+        label: res
+            .answers
+            .get("entity_binding")
+            .map(|a| a.label.clone())
+            .unwrap_or_default(),
+        outcome,
+    })
 }
 
 /// Evaluate semantic publication fidelity against retained evidence using DecisionService.
@@ -236,20 +276,27 @@ pub async fn evaluate_publication_fidelity_gate(
     evidence_summary: &str,
     service: &DecisionService,
     policy: &DecisionPolicy,
-) -> anyhow::Result<EnforcementOutcome> {
+) -> anyhow::Result<SemanticGateResult> {
     let contract = template_publication();
     let state = DecisionState::new()
-        .with_custom("candidate", json!(conclusion))
-        .with_custom("evidence", json!(evidence_summary));
+        .with_candidate(json!({"conclusion":conclusion}))
+        .with_evidence_passage("supplied", "", "", evidence_summary, None);
 
-    let (_res, outcomes) = service.evaluate(secret, &contract, &state, policy).await?;
+    let (res, outcomes) = service.evaluate(secret, &contract, &state, policy).await?;
     let outcome = outcomes
         .get("publication")
         .cloned()
         .unwrap_or(EnforcementOutcome::Unavailable {
             reason: "missing question outcome".into(),
         });
-    Ok(outcome)
+    Ok(SemanticGateResult {
+        label: res
+            .answers
+            .get("publication")
+            .map(|a| a.label.clone())
+            .unwrap_or_default(),
+        outcome,
+    })
 }
 
 #[cfg(test)]

@@ -784,10 +784,6 @@ enum WorkEvent {
     IntelActorsReviewed {
         article_id: String,
     },
-    IntelLinksExplained {
-        article_id: String,
-        explanations: HashMap<(String, String), String>,
-    },
     BrainRelatedExplained {
         request: u64,
         memory_id: String,
@@ -1087,6 +1083,8 @@ pub struct App {
     pub(crate) intel_insights_running: HashSet<String>,
     pub(crate) intel_actors_reviewing: HashSet<String>,
     pub(crate) intel_links_reviewing: HashSet<String>,
+    pub(crate) intel_insight_lifecycle: String,
+    pub(crate) intel_evidence_confidence: Option<intel_recon::EvidenceConfidence>,
     pub(crate) intel_link_explanations: HashMap<(String, String), String>,
     pub(crate) intel_report_running: HashMap<String, Arc<AtomicBool>>,
     pub gnews_key: String,
@@ -1488,6 +1486,8 @@ impl App {
             intel_insights_running: HashSet::new(),
             intel_actors_reviewing: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
+            intel_insight_lifecycle: "legacy/unassessed".into(),
+            intel_evidence_confidence: None,
             intel_link_explanations: HashMap::new(),
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
@@ -1548,14 +1548,7 @@ impl App {
 
     pub fn insight_summary(&self, memory_id: &str) -> Option<String> {
         let insight = self.store.insight_for_memory(memory_id).ok().flatten()?;
-        let mut lines = vec![format!(
-            "{} · {} → {} · {} · {:.0}%",
-            insight.entity,
-            insight.predicate,
-            insight.object_value,
-            insight.classification,
-            insight.confidence * 100.0
-        )];
+        let mut lines = vec![insight.presentation()];
         lines.push(format!(
             "{} evidence link{}",
             insight.sources.len(),
@@ -3697,6 +3690,7 @@ impl App {
 
     fn refresh_intel_briefing(&mut self) {
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
+            self.intel_evidence_confidence = None;
             self.intel_claims.clear();
             self.intel_relations.clear();
             self.intel_link_explanations.clear();
@@ -3705,6 +3699,11 @@ impl App {
             self.intel_sections.clear();
             return;
         };
+        self.intel_insight_lifecycle=self.store.connection().query_row("SELECT lifecycle FROM insight_owner_state WHERE owner_kind IN ('article','atlas') AND owner_id=?1 ORDER BY CASE owner_kind WHEN 'article' THEN 0 ELSE 1 END LIMIT 1",[&article.id],|r|r.get(0)).unwrap_or_else(|_|"legacy/unassessed".into());
+        self.intel_evidence_confidence =
+            intel_recon::article_confidence(self.store.connection(), &article.id)
+                .ok()
+                .flatten();
         self.intel_claims = self
             .store
             .atlas_claims_for_article(&article.run_id, &article.id)
@@ -3722,6 +3721,16 @@ impl App {
             .store
             .get_intel_link_explanations(&article.id)
             .unwrap_or_default();
+        for (left, right) in self.intel_link_explanations.keys() {
+            if !self
+                .intel_relations
+                .iter()
+                .any(|(l, r, _)| l == left && r == right)
+            {
+                self.intel_relations
+                    .push((left.clone(), right.clone(), "assessed".into()));
+            }
+        }
         self.intel_body = self
             .store
             .article_body_for_article(&article.id)
@@ -3987,6 +3996,13 @@ impl App {
     }
 
     fn queue_intel_actors_review(&mut self) {
+        if self
+            .intel_claims
+            .iter()
+            .any(|c| c.fingerprint.starts_with("v2:"))
+        {
+            return;
+        }
         let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
             return;
         };
@@ -4035,42 +4051,14 @@ impl App {
     }
 
     fn queue_intel_links_explanation(&mut self) {
-        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
-            return;
-        };
-        if self.intel_relations.is_empty() {
-            return;
+        // Stored assessed rationales were produced with the owner snapshot.
+        // Viewing the brief never authorizes new investigative model work.
+        if let Some(article) = self.intel_articles.get(self.intel_sel) {
+            self.intel_link_explanations = self
+                .store
+                .get_intel_link_explanations(&article.id)
+                .unwrap_or_default();
         }
-        if self.intel_links_reviewing.contains(&article.id) {
-            return;
-        }
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        self.intel_links_reviewing.insert(article.id.clone());
-        let summarizer = provider::role_secret(&self.auth, &self.settings, "summarization")
-            .ok()
-            .filter(|s| provider::resolved_key(s).is_some());
-        let article_id = article.id.clone();
-        let article_title = article.title.clone();
-        let claims = self.intel_claims.clone();
-        let relations = self.intel_relations.clone();
-        let tx = self.work_tx.clone();
-
-        tokio::spawn(async move {
-            let explanations = intel_recon::explain_intel_links_with_model(
-                summarizer.as_ref(),
-                &article_title,
-                &claims,
-                &relations,
-            )
-            .await;
-
-            let _ = tx.send(WorkEvent::IntelLinksExplained {
-                article_id,
-                explanations,
-            });
-        });
     }
 
     pub(crate) fn intel_recon_mode(&self) -> ReportMode {
@@ -5263,25 +5251,6 @@ impl App {
                     .is_some_and(|a| a.id == article_id);
                 if selected {
                     self.refresh_intel_briefing();
-                }
-                selected
-                    && self.module == Some(ModuleId::Intel)
-                    && self.intel_page == IntelPage::Briefing
-            }
-            WorkEvent::IntelLinksExplained {
-                article_id,
-                explanations,
-            } => {
-                self.intel_links_reviewing.remove(&article_id);
-                let _ = self
-                    .store
-                    .save_intel_link_explanations(&article_id, &explanations);
-                let selected = self
-                    .intel_articles
-                    .get(self.intel_sel)
-                    .is_some_and(|a| a.id == article_id);
-                if selected {
-                    self.intel_link_explanations.extend(explanations);
                 }
                 selected
                     && self.module == Some(ModuleId::Intel)
@@ -9654,7 +9623,9 @@ mod tests {
             intel_insights_running: HashSet::new(),
             intel_actors_reviewing: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
+            intel_insight_lifecycle: "legacy/unassessed".into(),
             intel_link_explanations: HashMap::new(),
+            intel_evidence_confidence: None,
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
             brain_graph_for: None,
@@ -11947,6 +11918,59 @@ mod tests {
         std::fs::write(format!("{dir}/{name}.json"), json.to_string()).unwrap();
     }
 
+    #[test]
+    fn brain_derivation_labels_keep_kind_stance_and_history_separate() {
+        let mut app = app();
+        let ids = claim_fixture(&app);
+        app.select(ModuleId::Brain.index());
+        app.reload_memories();
+        assert!(app.open_memory_detail(&ids[0]));
+        let original = app.selected_insight.clone().unwrap();
+        let articles = app.store.atlas_list_articles("run-0412").unwrap();
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        for (kind, lifecycle, relation) in [
+            ("claim", "active", "contradicts"),
+            ("inference", "pending", "insufficient"),
+            ("inference", "previous", "supports"),
+        ] {
+            let mut insight = original.clone();
+            insight.metadata = Some(argos_osint_core::brain_query::InsightMetadata {
+                insight_kind: kind.into(),
+                lifecycle: lifecycle.into(),
+                snapshot_id: "fixture".into(),
+                revision: "fixture".into(),
+                assessment: argos_osint_core::investigation::insights::Assessment {
+                    fidelity: "faithful".into(),
+                    relation: relation.into(),
+                    threshold_passed: true,
+                    rationale: "Original source assertion; world corroboration is separate.".into(),
+                    gaps: vec![],
+                },
+            });
+            app.brain_graph = argos_osint_core::recon::build_claim_graph(&insight, &articles);
+            app.selected_insight = Some(insight);
+            for (width, height) in [(140, 40), (80, 24), (64, 32)] {
+                let text = buffer_text(&render(&mut app, width, height));
+                assert!(
+                    !text.contains("0%"),
+                    "new derivations cannot display an invented confidence"
+                );
+                if width == 140 {
+                    assert!(text.contains(lifecycle), "{text}");
+                }
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("brain-insight-{kind}-{lifecycle}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+            }
+        }
+    }
+
     /// Phase 7 fixture: a claim memory whose Summarization role points at a
     /// scripted local provider; jobs/events go to the test database.
     struct SummaryFx {
@@ -13976,7 +14000,7 @@ mod tests {
         assert!(painted.contains("inferences"), "{painted}");
         assert!(painted.contains("actors"), "{painted}");
         assert!(painted.contains("links"), "{painted}");
-        assert!(painted.contains("related context"), "{painted}");
+        assert!(!painted.contains("related context"), "{painted}");
         assert!(painted.contains("Acme Corp"), "{painted}");
 
         // Scroll left column
@@ -14009,6 +14033,135 @@ mod tests {
             "{painted_link_rev}"
         );
         app.intel_links_reviewing.clear();
+        // Actual buffers for the new lifecycle contract; legacy fixtures above
+        // continue to verify compatibility and independent section scrolling.
+        app.scrolls.intel_extracted = 0;
+        app.intel_claims[0].classification = "claim".into();
+        app.intel_claims[0].fingerprint = "v2:claim-fixture".into();
+        app.intel_claims[1].fingerprint = "v2:inference-fixture".into();
+        app.intel_relations = vec![(
+            "v2:claim-fixture".into(),
+            "v2:inference-fixture".into(),
+            "supports".into(),
+        )];
+        app.intel_link_explanations.insert(
+            ("v2:claim-fixture".into(), "v2:inference-fixture".into()),
+            "[supports · assessed] Original launch evidence supports the qualified conclusion."
+                .into(),
+        );
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        let full = app.intel_claims.clone();
+        for status in [
+            "active",
+            "pending",
+            "previous",
+            "insufficient_evidence",
+            "corroborated",
+            "disputed",
+        ] {
+            app.intel_insight_lifecycle = if matches!(status, "corroborated" | "disputed") {
+                "active"
+            } else {
+                status
+            }
+            .into();
+            app.intel_evidence_confidence = Some(intel_recon::EvidenceConfidence {
+                score: Some(match status {
+                    "corroborated" => 80,
+                    "disputed" => 20,
+                    "insufficient_evidence" => 40,
+                    _ => 60,
+                }),
+                claims: 1,
+                faithful: 1,
+                corroborated: usize::from(status == "corroborated"),
+                disputed: usize::from(status == "disputed"),
+                complete_coverage: status != "insufficient_evidence",
+                provisional: status != "corroborated",
+            });
+            app.intel_claims = full.clone();
+            let label = status.replace('_', " ");
+            app.intel_claims[0].claim =
+                format!("[claim · {label}] Acme reportedly launched Widget.");
+            if status == "insufficient_evidence" {
+                app.intel_claims.truncate(1);
+                app.intel_relations.clear();
+            } else {
+                app.intel_claims[1].claim = format!("[inference · {status}] Widget may pressure competitors; single-source premise.");
+            }
+            for (width, height) in [(160, 50), (120, 40), (80, 24), (60, 18), (40, 12)] {
+                let buffer = render(&mut app, width, height);
+                let text = buffer
+                    .content
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>();
+                assert!(!text.contains("related context"));
+                assert!(!text.contains("Brief rating value"));
+                assert!(!text.contains("CONFIRMED"));
+                if width >= 80 {
+                    assert!(text.contains("claims"));
+                    assert!(text.find("confidence").unwrap() < text.find("claims").unwrap());
+                    let left = app
+                        .layout
+                        .borrow()
+                        .entries
+                        .iter()
+                        .find(|entry| entry.target == Target::IntelLeftColumn)
+                        .unwrap()
+                        .rect;
+                    assert_eq!(
+                        super::super::ui::hit_test(&app, left.x + 1, left.y + 1),
+                        Some(Target::IntelLeftColumn)
+                    );
+                }
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("intel-insights-{status}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                    if width <= 60 {
+                        app.scrolls.intel_extracted =
+                            super::super::ui::intel_extracted_scroll_max(&app);
+                        dump_cells(
+                            &mut app,
+                            dir,
+                            &format!("intel-insights-{status}-scrolled-{width}x{height}"),
+                            width,
+                            height,
+                        );
+                        app.scrolls.intel_extracted = 0;
+                    }
+                }
+            }
+        }
+        app.intel_claims.clear();
+        app.intel_evidence_confidence = Some(Default::default());
+        let empty = render(&mut app, 160, 50);
+        let text = empty
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("assessment"));
+        assert!(!text.contains("Brief rating value"));
+        assert!(text.contains("N/A"));
+        if let Some(dir) = &dir {
+            dump_cells(&mut app, dir, "intel-confidence-empty-160x50", 160, 50);
+            app.intel_evidence_confidence = None;
+            app.intel_insight_lifecycle = "legacy/unassessed".into();
+            let initial = render(&mut app, 160, 50);
+            assert!(initial
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+                .contains("20/100"));
+            dump_cells(&mut app, dir, "intel-confidence-initial-160x50", 160, 50);
+        }
     }
 
     fn intel_brief_image_article(id: &str, image_url: &str) -> AtlasArticleRow {

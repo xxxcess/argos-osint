@@ -215,9 +215,7 @@ pub fn assess_claim_against_passages(
     }
 
     let has_contradiction = relevant.iter().any(|p| p.stance == ClaimStance::Disputed);
-    let has_support = relevant
-        .iter()
-        .any(|p| p.stance == ClaimStance::Supported || p.stance == ClaimStance::Mention);
+    let has_support = relevant.iter().any(|p| p.stance == ClaimStance::Supported);
 
     let (stance, rationale) = if has_contradiction {
         (

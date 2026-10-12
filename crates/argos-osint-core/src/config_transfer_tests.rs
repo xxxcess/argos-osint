@@ -756,6 +756,7 @@ mod tests {
             ..Default::default()
         };
         settings.nlp.mode = crate::nlp::Mode::Select;
+        settings.insight_recall_limit = Some(12);
         settings.recon_limits.max_rounds = 7;
         settings.recon_limits.hunter_credits = 12345;
         settings.defaults.recon = assignment("google", "old-recon", &[]);
@@ -781,6 +782,7 @@ mod tests {
         );
         assert_eq!(settings.recon_limits.hunter_credits, 12345);
         assert_eq!(settings.nlp.mode, crate::nlp::Mode::Select);
+        assert_eq!(settings.insight_recall_limit, Some(12));
         assert_eq!(
             settings.osint_user_agent, "local-agent",
             "the OSINT user agent is preserved"

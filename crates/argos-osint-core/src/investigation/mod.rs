@@ -5,6 +5,8 @@ pub mod decisions;
 pub mod engine;
 pub mod evidence;
 pub mod gates;
+pub mod insight_persist;
+pub mod insights;
 pub mod patterns;
 pub mod persist;
 pub mod policy;

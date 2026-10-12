@@ -299,13 +299,14 @@ pub async fn dispatch() -> Result<()> {
             Ok(())
         }
         Some(Command::Recall { query, limit }) => {
-            let hits = open_store()?.recall(&query, limit)?;
+            let store = open_store()?;
+            let hits = store.recall(&query, limit)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
                     &hits
                         .iter()
-                        .map(|hit| serde_json::json!({"score":hit.score,"memory":hit.memory}))
+                        .map(|hit| serde_json::json!({"score":hit.score,"memory":hit.memory,"insight_metadata":argos_osint_core::brain_query::insight_metadata(store.connection(),&hit.memory.id).ok().flatten()}))
                         .collect::<Vec<_>>()
                 )?
             );

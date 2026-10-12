@@ -118,7 +118,7 @@ def capture(args):
         str(path.relative_to(ROOT)): digest(path)
         for folder in ("crates", "scripts", ".opencode")
         for path in sorted((ROOT / folder).rglob("*"))
-        if path.is_file() and path.suffix in (".rs", ".py", ".json", ".md", ".mjs", ".toml")
+        if path.is_file() and path.suffix in (".rs", ".py", ".json", ".md", ".mjs", ".toml", ".sql")
         and not any(part in ("__pycache__", "node_modules") for part in path.parts)
     }
     scratch = ROOT / ".agent-scratch"

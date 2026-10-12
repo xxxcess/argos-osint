@@ -250,7 +250,7 @@ fn upgrade_schema_27_preserves_unrelated_data() {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        28
+        29
     );
     assert_eq!(
         store
@@ -260,4 +260,89 @@ fn upgrade_schema_27_preserves_unrelated_data() {
             .unwrap(),
         "preserved"
     );
+}
+
+#[tokio::test]
+async fn auto_complete_policy_preserves_prose_in_every_mode_and_fallback() {
+    let text = "東京 😀 Alice denied the allegation.\n\nCorrection: no site opened.".repeat(80);
+    for mode in [Mode::Off, Mode::Annotate, Mode::Select, Mode::Auto] {
+        let mut source = Source::derived("policy-fixture", "1", &text);
+        source.language_hint = Some("ja".into());
+        let prepared = prepare_with_policy(
+            source,
+            &PreparePolicy {
+                purpose: "claims".into(),
+                coverage_requirement: CoverageRequirement::Complete,
+                need_entities: true,
+                byte_budget: 128,
+            },
+            "Alice",
+            5,
+            Arc::new(AtomicBool::new(false)),
+            mode,
+        )
+        .await;
+        assert_eq!(prepared.text, text);
+        assert!(prepared.coverage.complete);
+        assert_eq!(prepared.effective_action, EffectiveAction::RequiresWindows);
+    }
+    let text = "No names appear here; the proposal remains uncertain.";
+    let source = Source::derived("fits", "1", text);
+    let prepared = prepare_with_policy(
+        source,
+        &PreparePolicy {
+            purpose: "claims".into(),
+            coverage_requirement: CoverageRequirement::Optional,
+            need_entities: true,
+            byte_budget: 4096,
+        },
+        "proposal",
+        4,
+        Arc::new(AtomicBool::new(false)),
+        Mode::Auto,
+    )
+    .await;
+    assert_eq!(prepared.text, text);
+    assert!(prepared.coverage.complete);
+}
+
+/// Process-isolated measurement; run once per ARGOS_NLP_BENCH_MODE with a fresh ARGOS_HOME.
+#[tokio::test]
+#[ignore]
+async fn preparation_performance() {
+    let mode: Mode = serde_json::from_value(serde_json::json!(std::env::var(
+        "ARGOS_NLP_BENCH_MODE"
+    )
+    .expect("set benchmark mode")))
+    .unwrap();
+    for (workload,base) in [("short","Alice Smith allegedly met Acme in 2020. Correction: Alice denied the allegation.".to_owned()),("pressure",format!("Alice Smith attributed the Acme announcement.\n\n{}Correction: Alice denied the $1.2 billion estimate; not $2 billion.","Unrelated background paragraph.\n\n".repeat(80)))] {
+        let mut cold=Vec::new();let mut warm=Vec::new();let mut sizes=Vec::new();let mut retained=0;
+        let mut parser=Vec::new();let mut queue=Vec::new();let mut cache_hits=0;
+        for sample in 0..10 {
+            let text=format!("{base}\nMeasurement fixture {sample}.");
+            let source=Source::derived("benchmark","1",&text);
+            let policy=PreparePolicy{purpose:"benchmark".into(),coverage_requirement:CoverageRequirement::Complete,need_entities:true,byte_budget:512};
+            for (phase,timings) in [("cold",&mut cold),("warm",&mut warm)] {
+                let cached = crate::store::Store::open(&crate::paths::db_path()).ok().and_then(|s| cache::get(&s.conn,&source,&source.context()).ok().flatten()).is_some();
+                let started=std::time::Instant::now();
+                let prepared=prepare_with_policy(source.clone(),&policy,"Alice Acme",128,Arc::new(AtomicBool::new(false)),mode).await;
+                timings.push(started.elapsed().as_micros() as u64);
+                sizes.push(serde_json::to_vec(&prepared).unwrap().len());
+                if mode != Mode::Off {
+                    cache_hits += usize::from(cached);
+                    if let Some(a)=crate::store::Store::open(&crate::paths::db_path()).ok().and_then(|s| cache::get(&s.conn,&source,&source.context()).ok().flatten()) {
+                        parser.push(if cached {0} else {a.metrics.parser_ms});
+                        queue.push(if cached {0} else {a.metrics.queue_wait_ms});
+                    }
+                }
+                assert_eq!(prepared.text,text,"mandatory evidence lost: {mode:?} {phase}");
+                assert!(prepared.coverage.complete);
+                assert!(prepared.text.contains("denied"));
+                retained+=1;
+            }
+        }
+        cold.sort();warm.sort();parser.sort();queue.sort();
+        let percentile = |values:&Vec<u64>, p:usize| values.get((values.len()*p).div_ceil(100).saturating_sub(1)).copied();
+        eprintln!("nlp_benchmark {}",serde_json::json!({"mode":mode,"stage":"preparation","workload":workload,"samples_per_phase":10,"cold_p50_us":cold[4],"cold_p95_us":cold[9],"warm_p50_us":warm[4],"warm_p95_us":warm[9],"parser_p50_ms":percentile(&parser,50),"parser_p95_ms":percentile(&parser,95),"queue_p50_ms":percentile(&queue,50),"queue_p95_ms":percentile(&queue,95),"cache_hits":cache_hits,"prepared_bytes_min":sizes.iter().min(),"prepared_bytes_max":sizes.iter().max(),"coverage":"complete","retained_assertions_and_corrections":retained,"outbound_requests":0,"provider_tokens":null,"model_latency_ms":null,"cache":"cold first use; warm same source repeat"}));
+    }
 }

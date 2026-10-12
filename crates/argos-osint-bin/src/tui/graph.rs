@@ -137,6 +137,13 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
         " recon path "
     }
     .to_string();
+    if let Some(metadata) = app
+        .selected_insight
+        .as_ref()
+        .and_then(|insight| insight.metadata.as_ref())
+    {
+        title = format!(" {} path · {} ", metadata.insight_kind, metadata.lifecycle);
+    }
     if app.focus == Target::DetailPath {
         title.push_str("· focused ");
     }

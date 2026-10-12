@@ -345,8 +345,40 @@ impl WorkerPool {
         let owner = process_owner();
         vec![
             Self::spawn_index_drainer(db_path.clone(), owner.clone()),
-            Self::spawn_summary_flush_drainer(db_path, owner),
+            Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),
+            Self::spawn_insight_refresh_drainer(db_path, owner),
         ]
+    }
+
+    pub fn spawn_insight_refresh_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let _ = std::thread::Builder::new()
+            .name("argos-insight-refresh".into())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                while !flag.load(Ordering::Acquire) {
+                    let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
+                        try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
+                    });
+                    if elected {
+                        let auth = crate::secrets::AuthFile::load().unwrap_or_default();
+                        let settings = crate::provider::SettingsFile::load().unwrap_or_default();
+                        let _ = runtime.block_on(
+                            crate::investigation::insight_persist::recover_refreshes(
+                                &db_path, &auth, &settings, &flag,
+                            ),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            });
+        Self { stop }
     }
 
     pub fn stop(&self) {

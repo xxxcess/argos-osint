@@ -136,17 +136,13 @@ impl DecisionState {
             map.insert("candidate".into(), cand.clone());
         }
 
-        if !self.evidence.is_empty() {
-            map.insert("evidence".into(), json!(self.evidence));
-        }
+        map.insert("evidence".into(), json!(self.evidence));
 
         if !self.computed_checks.is_empty() {
             map.insert("computed_checks".into(), json!(self.computed_checks));
         }
 
-        if !self.missing_context.is_empty() {
-            map.insert("missing_context".into(), json!(self.missing_context));
-        }
+        map.insert("missing_context".into(), json!(self.missing_context));
 
         for (k, v) in &self.custom {
             map.insert(k.clone(), v.clone());

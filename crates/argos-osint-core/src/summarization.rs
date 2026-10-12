@@ -1151,6 +1151,7 @@ mod preparation_tests {
             crate::nlp::Mode::Off,
             crate::nlp::Mode::Annotate,
             crate::nlp::Mode::Select,
+            crate::nlp::Mode::Auto,
         ] {
             let server = mock::serve(vec![mock::ok_json(
                 "[source-one] Alice Smith denied the estimate; the report remains uncertain.",
@@ -1184,7 +1185,7 @@ mod preparation_tests {
             let requests = server.requests.lock().unwrap();
             let body = requests[0].split("\r\n\r\n").nth(1).unwrap();
             wire_sizes.push(body.len());
-            if mode == crate::nlp::Mode::Select {
+            if matches!(mode, crate::nlp::Mode::Select | crate::nlp::Mode::Auto) {
                 assert!(body.contains("denied the $1.2 billion"));
                 assert!(body.contains("attributed"));
                 assert!(result.coverage.partial);
@@ -1193,6 +1194,7 @@ mod preparation_tests {
         }
         assert_eq!(wire_sizes[0], wire_sizes[1]);
         assert!(wire_sizes[2] < wire_sizes[0], "{wire_sizes:?}");
-        eprintln!("summary gold source_bytes={} off_wire_bytes={} annotate_wire_bytes={} select_wire_bytes={} requests_per_mode=1",text.len(),wire_sizes[0],wire_sizes[1],wire_sizes[2]);
+        assert!(wire_sizes[3] < wire_sizes[0], "{wire_sizes:?}");
+        eprintln!("summary gold source_bytes={} off_wire_bytes={} annotate_wire_bytes={} select_wire_bytes={} auto_wire_bytes={} requests_per_mode=1",text.len(),wire_sizes[0],wire_sizes[1],wire_sizes[2],wire_sizes[3]);
     }
 }

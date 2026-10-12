@@ -6,6 +6,7 @@ mod body_filter;
 mod brain;
 mod briefing_view;
 mod classify_mode;
+mod confidence;
 mod jobs;
 mod ledger;
 mod modes;
@@ -39,6 +40,7 @@ pub use classify_mode::{
     heuristic_prompt_mode, parse_mode_choice, parse_mode_from_chat, ModeClassifyInput,
     PromptModeClassifyInput,
 };
+pub use confidence::{article_confidence, EvidenceConfidence};
 pub use jobs::{
     active_job_for_mode, cancel_job, create_report_job, pause_job, resume_job, retry_failed_tasks,
     scoped_section_plan, start_report_worker, IntelReportEvent, ReportScope,

@@ -42,6 +42,7 @@ pub enum GraphEdgeKind {
     Answers,
     Concerns,
     Supports,
+    Reports,
     DerivedFrom,
     DiscoveredIn,
 }
@@ -53,6 +54,7 @@ impl GraphEdgeKind {
             Self::Answers => "answers",
             Self::Concerns => "concerns",
             Self::Supports => "supports",
+            Self::Reports => "reports",
             Self::DerivedFrom => "derived_from",
             Self::DiscoveredIn => "discovered_in",
         }
@@ -341,12 +343,11 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
         kind: GraphNodeKind::Finding,
         label: format!("{} → {}", insight.predicate, insight.object_value),
         detail: format!(
-            "{} · {} → {}\n{} · {:.0}%\n{}",
+            "{} · {} → {}\n{}\n{}",
             insight.entity,
             insight.predicate,
             insight.object_value,
-            insight.classification,
-            insight.confidence * 100.0,
+            insight.presentation(),
             insight.topic
         ),
         tags: Vec::new(),
@@ -449,7 +450,11 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
         graph.edge(GraphEdge {
             from: evidence.clone(),
             to: finding.clone(),
-            kind: GraphEdgeKind::Supports,
+            kind: if insight.metadata.is_some() {
+                GraphEdgeKind::Reports
+            } else {
+                GraphEdgeKind::Supports
+            },
             directive: None,
         });
         graph.edge(GraphEdge {
@@ -476,10 +481,13 @@ pub fn build_claim_graph(
         "{} {} {}",
         insight.entity, insight.predicate, insight.object_value
     );
-    let level = if insight.classification == "fact" {
-        "Level: fact. Both the entity and the object are in an article title."
+    let level = if let Some(metadata) = &insight.metadata {
+        format!(
+            "Kind: {} · {} · {}. Source assertions remain claims.",
+            metadata.insight_kind, metadata.lifecycle, metadata.assessment.relation
+        )
     } else {
-        "Level: inference. A span is outside an article title, or the article is context."
+        format!("Legacy level: {} · unassessed.", insight.classification)
     };
     graph.node(GraphNode {
         id: "investigation".into(),
@@ -496,11 +504,16 @@ pub fn build_claim_graph(
         kind: GraphNodeKind::Directive,
         label: "articles".into(),
         detail: format!(
-            "{}\nSupporting articles are the hard evidence for this claim.",
+            "{}\n{}",
             if insight.topic.trim().is_empty() {
                 "articles"
             } else {
                 insight.topic.trim()
+            },
+            if insight.metadata.is_some() {
+                "Original passages establish source attribution; corroboration remains separate."
+            } else {
+                "Supporting articles are the hard evidence for this legacy claim."
             }
         ),
         tags: vec!["articles".into()],
@@ -540,12 +553,11 @@ pub fn build_claim_graph(
         kind: GraphNodeKind::Finding,
         label: format!("{} → {}", insight.predicate, insight.object_value),
         detail: format!(
-            "{} · {} → {}\n{} · {:.0}%\n{}\n{level}",
+            "{} · {} → {}\n{}\n{}\n{level}",
             insight.entity,
             insight.predicate,
             insight.object_value,
-            insight.classification,
-            insight.confidence * 100.0,
+            insight.presentation(),
             insight.topic
         ),
         tags: Vec::new(),
@@ -624,7 +636,11 @@ pub fn build_claim_graph(
         graph.edge(GraphEdge {
             from: evidence.clone(),
             to: finding.clone(),
-            kind: GraphEdgeKind::Supports,
+            kind: if insight.metadata.is_some() {
+                GraphEdgeKind::Reports
+            } else {
+                GraphEdgeKind::Supports
+            },
             directive: Some("articles".into()),
         });
         graph.edge(GraphEdge {
@@ -1144,6 +1160,7 @@ mod tests {
 
     fn sample() -> (InsightView, Plan) {
         let insight = InsightView {
+            metadata: None,
             memory_id: "m1".into(),
             entity: "elon musk".into(),
             predicate: "employs".into(),

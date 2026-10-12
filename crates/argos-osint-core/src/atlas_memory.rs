@@ -1350,6 +1350,8 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    #[cfg(feature = "lancedb")]
+    use std::{cell::Cell, rc::Rc};
 
     use super::*;
     use crate::atlas::{run_atlas, AtlasEvent, Cursor, RunInput, RunStats, Stop};

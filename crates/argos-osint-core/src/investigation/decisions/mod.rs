@@ -12,7 +12,7 @@ pub mod templates;
 #[cfg(test)]
 pub mod tests;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -27,8 +27,47 @@ pub use contracts::{
 pub use policy::{DecisionPolicy, EnforcementOutcome, ThresholdProfile};
 pub use state::DecisionState;
 
-use crate::provider::{complete, decide, ChatMessage};
+use crate::provider::{ChatMessage, SettingsFile};
+use crate::recon::model_exec::{self, DecisionsAdapter, OperationScope};
+use crate::secrets::AuthFile;
 use crate::secrets::ProviderSecret;
+
+pub struct ContractAdapter<'a> {
+    pub contract: &'a DecisionContract,
+    pub state: &'a DecisionState,
+}
+impl DecisionsAdapter<NormalizedDecisionResult> for ContractAdapter<'_> {
+    fn compile_native(&self) -> (serde_json::Value, serde_json::Value) {
+        compile_native(self.contract, &self.state.to_value())
+    }
+    fn parse_native(
+        &self,
+        response: &crate::provider::DecisionsResponse,
+    ) -> Result<NormalizedDecisionResult, String> {
+        parse_native_response(response, self.contract).map_err(|e| e.to_string())
+    }
+    fn compile_chat(&self) -> Vec<ChatMessage> {
+        let (system, user) = compile_general_model_prompt(self.contract, &self.state.to_value());
+        vec![
+            ChatMessage {
+                role: "system".into(),
+                content: system,
+                tool_call_id: None,
+                tool_calls: vec![],
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: user,
+                tool_call_id: None,
+                tool_calls: vec![],
+            },
+        ]
+    }
+    fn parse_chat(&self, raw: &str) -> Result<NormalizedDecisionResult, String> {
+        parse_general_model_response(raw, self.contract, "", DecisionAdapterKind::ValidatedText)
+            .map_err(|e| e.to_string())
+    }
+}
 
 /// Core service for evaluating adaptive decision contracts.
 #[derive(Clone, Debug, Default)]
@@ -50,44 +89,53 @@ impl DecisionService {
         NormalizedDecisionResult,
         BTreeMap<String, EnforcementOutcome>,
     )> {
-        let adapter = resolve_adapter(&secret.model, &secret.kind);
-        let start = Instant::now();
-
-        let state_val = state.to_value();
-
-        let mut result = match adapter {
-            DecisionAdapterKind::NativeDecisions => {
-                let (native_state, native_questions) = compile_native(contract, &state_val);
-                let resp = decide(secret, &native_state, &native_questions)
-                    .await
-                    .context("call native decisions API")?;
-                parse_native_response(&resp, contract).context("parse native decisions response")?
-            }
-            _ => {
-                let (system_prompt, user_prompt) =
-                    compile_general_model_prompt(contract, &state_val);
-                let messages = [
-                    ChatMessage {
-                        role: "system".into(),
-                        content: system_prompt,
-                        tool_call_id: None,
-                        tool_calls: Vec::new(),
-                    },
-                    ChatMessage {
-                        role: "user".into(),
-                        content: user_prompt,
-                        tool_call_id: None,
-                        tool_calls: Vec::new(),
-                    },
-                ];
-                let completion = complete(secret, &messages, &[], |_| {})
-                    .await
-                    .context("call general model for decision")?;
-                parse_general_model_response(&completion.content, contract, &secret.model, adapter)
-                    .context("parse general-model decision response")?
-            }
+        let mut auth = AuthFile::default();
+        auth.set_account(secret.clone());
+        let mut settings = SettingsFile::default();
+        let assignment = crate::provider::ModelAssignment {
+            provider: secret.kind.clone(),
+            model: secret.model.clone(),
+            ..Default::default()
         };
+        // This compatibility entrypoint receives an already resolved route.
+        settings.defaults.synthesis = assignment.clone();
+        settings.defaults.classifier = assignment.clone();
+        settings.defaults.recon = assignment;
+        let id = format!(
+            "decision:{}:{}",
+            contract.template_name,
+            crate::nlp::cache::hash(&state.to_value().to_string())
+        );
+        let scope = OperationScope::new(&id, &contract.role_id);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.evaluate_shared(
+            &auth, &settings, &scope, contract, state, policy, &cancel, None,
+        )
+        .await
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate_shared(
+        &self,
+        auth: &AuthFile,
+        settings: &SettingsFile,
+        scope: &OperationScope<'_>,
+        contract: &DecisionContract,
+        state: &DecisionState,
+        policy: &DecisionPolicy,
+        cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        db_path: Option<&std::path::Path>,
+    ) -> Result<(
+        NormalizedDecisionResult,
+        BTreeMap<String, EnforcementOutcome>,
+    )> {
+        let start = Instant::now();
+        let adapter = ContractAdapter { contract, state };
+        let (mut result, report) = model_exec::execute_decisions_or_chat(
+            auth, settings, scope, &adapter, cancel, None, db_path,
+        )
+        .await?;
+        result.model_used = report.effective_model;
         result.latency_ms = start.elapsed().as_millis() as u64;
 
         let mut outcomes = BTreeMap::new();

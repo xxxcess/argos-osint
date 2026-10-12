@@ -15,6 +15,8 @@ use crate::profile_stats;
 mod graph_summaries;
 mod publication;
 pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
+#[cfg(all(test, feature = "lancedb"))]
+pub(crate) use publication::fault as publication_fault;
 pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
 pub use publication::{
     memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
@@ -41,7 +43,7 @@ pub struct GraphSummary {
 /// activity-history tables plus additive timing columns on the model attempt
 /// and tool call records. 28 adds immutable NLP artifacts/references/features and
 /// complete summary-result envelopes; existing facts are preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 28;
+pub const SCHEMA_VERSION: i64 = 29;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -728,6 +730,10 @@ impl Store {
                 crate::nlp::cache::migrate(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 28)?;
             }
+            if version < 29 {
+                crate::investigation::insight_persist::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 29)?;
+            }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
             if version < 26 {
@@ -1146,7 +1152,7 @@ impl Store {
                         && claim.article_id.trim() == article_id,
                     "invalid staged claim during commit"
                 );
-                let fingerprint = insight_fingerprint(&namespace, &entity, &predicate, &object);
+                let fingerprint = atlas_claim_identity(claim);
                 let existing: Option<String> = self
                     .conn
                     .query_row(
@@ -1512,6 +1518,18 @@ impl Store {
                 self.tombstone_memory(id, "user_delete")?;
                 crate::nlp::cache::remove_owner(&self.conn, "memory", id)?;
             }
+            self.conn.execute("UPDATE insight_owner_state SET lifecycle='previous',last_error='memory premise deleted' WHERE active_snapshot_id IN (SELECT d.snapshot_id FROM insight_derivations d JOIN insight_derivation_evidence e ON e.derivation_id=d.id WHERE e.memory_id=?1)",[id])?;
+            self.conn.execute("UPDATE insight_derivations SET status='blocked_premise' WHERE id IN (SELECT e.derivation_id FROM insight_derivation_evidence e WHERE e.premise_id IN (SELECT json_extract(item_json,'$.id') FROM insight_derivations WHERE memory_id=?1))",[id])?;
+            self.conn.execute("UPDATE insight_owner_state SET lifecycle='previous',last_error='claim premise deleted' WHERE active_snapshot_id IN (SELECT snapshot_id FROM insight_derivations WHERE status='blocked_premise')",[])?;
+            self.conn.execute("UPDATE insight_derivation_links SET status='deleted_endpoint' WHERE left_id IN (SELECT json_extract(item_json,'$.id') FROM insight_derivations WHERE memory_id=?1) OR right_id IN (SELECT json_extract(item_json,'$.id') FROM insight_derivations WHERE memory_id=?1)",[id])?;
+            self.conn.execute(
+                "UPDATE insight_derivations SET memory_id=NULL,status='deleted' WHERE memory_id=?1",
+                [id],
+            )?;
+            self.conn.execute(
+                "UPDATE insight_derivation_evidence SET memory_id=NULL WHERE memory_id=?1",
+                [id],
+            )?;
             self.conn.execute("DELETE FROM insight_sources WHERE fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
             self.conn.execute("DELETE FROM insight_relations WHERE left_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1) OR right_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
             self.conn
@@ -1746,6 +1764,7 @@ impl Store {
             crate::nlp::cache::remove_owner(&self.conn, "atlas_run", id)?;
             self.conn
                 .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
+            crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
             Ok(self
                 .conn
                 .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?
@@ -1771,7 +1790,7 @@ impl Store {
         let fingerprints: Vec<String> = {
             let mut stmt = self.conn.prepare(
                 "SELECT DISTINCT fingerprint FROM insight_sources \
-                 WHERE run_id=?1 AND answer_id=?2 AND call_id=?3",
+                 WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas' AND owner_id=?3)) AND (call_id=?3 OR call_id='article:'||?3)",
             )?;
             let rows = stmt.query_map(params![run_id, answer_id, article_id], |row| row.get(0))?;
             rows.collect::<rusqlite::Result<_>>()?
@@ -1784,7 +1803,7 @@ impl Store {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<usize> {
             let removed = self.conn.execute(
-                "DELETE FROM insight_sources WHERE run_id=?1 AND answer_id=?2 AND call_id=?3",
+                "DELETE FROM insight_sources WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas' AND owner_id=?3)) AND (call_id=?3 OR call_id='article:'||?3)",
                 params![run_id, answer_id, article_id],
             )?;
             let mut orphaned = 0usize;
@@ -1834,6 +1853,7 @@ impl Store {
                 [article_id],
             );
             queued = self.queue_index_for(&doomed)?;
+            crate::investigation::insight_persist::reconcile_deleted_memories(&self.conn)?;
             Ok(orphaned)
         })();
         match result {
@@ -1855,13 +1875,13 @@ impl Store {
         let answer_id = atlas_answer_id(run_id);
         let fingerprints: Vec<String> = {
             let mut stmt = self.conn.prepare(
-                "SELECT DISTINCT fingerprint FROM insight_sources WHERE run_id=?1 AND answer_id=?2",
+                "SELECT DISTINCT fingerprint FROM insight_sources WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas'))",
             )?;
             let rows = stmt.query_map(params![run_id, answer_id], |row| row.get(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         self.conn.execute(
-            "DELETE FROM insight_sources WHERE run_id=?1 AND answer_id=?2",
+            "DELETE FROM insight_sources WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas'))",
             params![run_id, answer_id],
         )?;
         let mut doomed: Vec<String> = Vec::new();
@@ -1914,6 +1934,7 @@ impl Store {
         self.queue_index_for(&doomed)?;
         // Checkpoints, receipts and repair status follow the run's retention.
         publication::delete_run_memory_state(&self.conn, run_id)?;
+        crate::investigation::insight_persist::reconcile_deleted_memories(&self.conn)?;
         Ok(())
     }
 
@@ -1964,6 +1985,7 @@ impl Store {
             "DELETE FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
             params![run_id, article_id],
         )?;
+        crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
         Ok(())
     }
 
@@ -2072,6 +2094,16 @@ impl Store {
         run_id: &str,
         article_id: &str,
     ) -> Result<Vec<AtlasArticleClaim>> {
+        if let Some(rows) =
+            crate::investigation::insight_persist::article_claim_rows(&self.conn, article_id)?
+        {
+            return Ok(rows);
+        }
+        if let Some(rows) =
+            crate::investigation::insight_persist::atlas_claim_rows(&self.conn, article_id)?
+        {
+            return Ok(rows);
+        }
         let answer_id = atlas_answer_id(run_id);
         let mut stmt = self.conn.prepare(
             "SELECT c.fingerprint, c.entity_id, c.predicate, c.object_value, c.topic,
@@ -2134,6 +2166,27 @@ impl Store {
         &self,
         article_id: &str,
     ) -> Result<HashMap<(String, String), String>> {
+        let active:Option<String>=self.conn.query_row("SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='article' AND owner_id=?1 AND active_snapshot_id<>''",[article_id],|r|r.get(0)).optional()?;
+        if let Some(active) = active {
+            let mut stmt=self.conn.prepare("SELECT left_id,right_id,relation,rationale,status FROM insight_derivation_links WHERE snapshot_id=?1 ORDER BY id")?;
+            let mut map = HashMap::new();
+            for row in stmt.query_map([active], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })? {
+                let (left, right, relation, rationale, status) = row?;
+                map.insert(
+                    (left, right),
+                    format!("[{relation} · {status}] {rationale}"),
+                );
+            }
+            return Ok(map);
+        }
         let mut stmt = self.conn.prepare(
             "SELECT left_id, right_id, explanation
              FROM intel_link_explanations
@@ -2301,6 +2354,7 @@ impl Store {
                         .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?;
                 }
             }
+            crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
             Ok(ids)
         })();
         match result {
@@ -2560,6 +2614,36 @@ fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::brain::Memory>
 /// Fingerprint Recon uses: the JSON array of namespace, entity, predicate, and object.
 pub fn insight_fingerprint(namespace: &str, entity: &str, predicate: &str, object: &str) -> String {
     serde_json::to_string(&(namespace, entity, predicate, object)).unwrap_or_default()
+}
+
+/// Qualified source assertions never merge with a legacy triple or with a
+/// differently attributed, dated, negated or modal statement.
+pub fn atlas_claim_identity(claim: &AtlasInsightClaim) -> String {
+    if claim.fingerprint.starts_with("v2:") {
+        return claim.fingerprint.clone();
+    }
+    if claim.classification != "claim" {
+        return insight_fingerprint(
+            &claim.namespace.trim().to_lowercase(),
+            &claim.entity.trim().to_lowercase(),
+            &claim.predicate.trim().to_lowercase(),
+            &claim.object.trim().to_lowercase(),
+        );
+    }
+    format!(
+        "v2:{}",
+        crate::nlp::cache::key(&serde_json::json!([
+            "claim",
+            claim.article_id,
+            claim.namespace,
+            claim.entity.to_lowercase(),
+            claim.predicate.to_lowercase(),
+            claim.object.to_lowercase(),
+            claim.claim.split_whitespace().collect::<Vec<_>>().join(" "),
+            claim.source_url,
+            claim.published_at
+        ]))
+    )
 }
 
 pub(crate) fn atlas_brief_id(conn: &Connection, run_id: &str) -> Result<Option<String>> {

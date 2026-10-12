@@ -71,7 +71,7 @@ pub fn bucket_extracted_with_explanations(
     for claim in claims {
         let line = ExtractedLine {
             text: claim_label(claim),
-            confidence: Some(claim.confidence),
+            confidence: (!claim.fingerprint.starts_with("v2:")).then_some(claim.confidence),
         };
         if context_fps.contains(claim.fingerprint.as_str()) {
             if context.len() < MAX_CONTEXT {
@@ -79,12 +79,17 @@ pub fn bucket_extracted_with_explanations(
             }
             continue;
         }
-        if claim.classification == "fact" {
+        if matches!(claim.classification.as_str(), "claim" | "fact") {
             if facts.len() < MAX_FACTS {
                 facts.push(line);
             }
-        } else if inferences.len() < MAX_INFERENCES {
+        } else if claim.classification == "inference" && inferences.len() < MAX_INFERENCES {
             inferences.push(line);
+        } else if facts.len() < MAX_FACTS {
+            facts.push(ExtractedLine {
+                text: format!("[legacy/unassessed] {}", line.text),
+                confidence: None,
+            });
         }
     }
 

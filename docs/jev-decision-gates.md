@@ -60,3 +60,9 @@ Application code owns surface restrictions, budgets, credentials, and recovery. 
 - Defaults pane: active model, inheritance, adapter (`native_decisions`, `strict_json_schema`, …)
 - Live: `Deciding… · <model> · <gate>` then `Decision · <summary> [<outcome>] · <model>`
 - Jev has no thinking tokens. Other-model reasoning stays in collapsed thinking rows.
+
+## Label and threshold are separate
+
+`SemanticGateResult` retains the normalized label and policy outcome. `Pass` means the classification cleared its threshold; it does not mean support. Publication requires `faithful` **and** Pass. Corroboration requires `supports` **and** Pass; `contradicts`, `mentions_only` and `insufficient` never satisfy that condition. Identity admission requires `same_entity` and Pass.
+
+`DecisionState::to_value` always emits canonical `evidence` and `missing_context` arrays, including empty arrays. `DecisionService::evaluate_shared` compiles the finite contract through `model_exec` and its Decisions adapter, so assessment shares account admission, retries, fallback order and cancellation. Free-chat extraction independently skips Decisions-only routes.

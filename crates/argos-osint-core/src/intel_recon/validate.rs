@@ -99,7 +99,7 @@ pub fn validate_article_body(
         };
     }
 
-    // Short complete articles are allowed when the title matches; snippets alone are not.
+    // Title overlap is identity evidence, never proof of acquisition completeness.
     if words < 20 {
         return BodyValidation {
             quality: BodyQuality::Unavailable,
@@ -111,8 +111,8 @@ pub fn validate_article_body(
 
     if words < 120 && title_hit {
         return BodyValidation {
-            quality: BodyQuality::Complete,
-            rationale: "short but complete article".into(),
+            quality: BodyQuality::Uncertain,
+            rationale: "short title-matching extract; acquisition coverage unknown".into(),
             cleaned_markdown: cleaned,
             content_hash: hash,
         };
@@ -242,10 +242,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_complete_article_passes() {
+    fn short_title_matching_text_has_uncertain_story_coverage() {
         let body = "Geneva talks resume.\n\nDiplomats from France and Germany met today to discuss the ceasefire proposal after overnight shelling near the border crossing.";
         let v = validate_article_body(body, "Geneva talks resume", "https://example.com/a");
-        assert_eq!(v.quality, BodyQuality::Complete);
+        assert_eq!(v.quality, BodyQuality::Uncertain);
     }
 
     #[test]

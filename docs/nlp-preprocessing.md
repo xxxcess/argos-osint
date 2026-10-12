@@ -9,11 +9,13 @@ Argos embeds pinned Compromise 14.18.0 and dates 3.9.0 through rquickjs 0.14.0. 
 The local `config.toml` setting is independent of portable Profile schema v1; importing a Profile preserves it:
 
 ```toml
+insight_recall_limit = 20 # optional root setting, clamped to 10–20 total candidates
+
 [nlp]
-mode = "annotate" # off | annotate | select
+mode = "auto" # auto | off | annotate | select
 ```
 
-`annotate` is the default. It caches complete annotations while preserving legacy prose selection. `off` bypasses parsing. `select` chooses verbatim passages and enables strict block decisions for article cleanup. Both crates default to `lancedb` and `nlp`; CI verifies NLP enabled and disabled with LanceDB disabled. The feature-disabled API reports `Disabled` and retains bounded legacy text. Debug builds optimize only the QuickJS C dependency to make interrupt deadlines practical.
+`auto` is the default. Typed `PreparePolicy` reserves a serialized prose budget and declares whether coverage is optional or complete. `Prepared` carries verbatim text, source-local candidate entities, coverage, selection and the effective action. Auto keeps all prose when it fits; optional pressure can select original passages. Complete coverage always retains the whole source and requires windows when oversized, including with NLP disabled. Empty or unsupported entity discovery falls back to native/model discovery. Explicit `off`, `annotate` and `select` remain supported; annotate retains its legacy optional prose path. Both crates default to `lancedb` and `nlp`; CI verifies NLP enabled and disabled with LanceDB disabled.
 
 ## Evidence and ownership
 
@@ -31,7 +33,7 @@ The bridge obtains one sentence/term tree, then returns only compact candidate s
 
 ## Passage and model contracts
 
-Selection keeps complete original paragraphs in source order with explicit separators. Paragraph units preserve sentence attribution, quotation closure and adjacent context. Literal focus, candidate-entity, correction/uncertainty and numeric/date/quote signals rank passages; opening context and correction units are protected. If a protected unit exceeds the budget, selection returns `BudgetExceeded` and the caller uses its legacy bounded fallback. No extra extraction window or model operation is introduced.
+Optional selection keeps complete original paragraphs in source order with explicit separators. Paragraph units preserve sentence attribution, quotation closure and adjacent context. Literal focus, candidate-entity, correction/uncertainty and numeric/date/quote signals rank passages; opening context and correction units are protected. If a protected unit exceeds the budget, selection returns `BudgetExceeded`. Complete-coverage work retains all evidence and uses overlapping windows regardless of NLP mode; missing windows withhold inferences rather than substitute a bounded prefix.
 
 Budgets are serialized UTF-8 bytes, including JSON escaping and message overhead, rather than token counts. Existing smaller field/output budgets remain. Selected and omitted sentence IDs make partial coverage explicit. Body claims are accepted against only the transmitted windows of that exact article artifact, plus title/description evidence; the maximum remains eight accepted body claims. Cleanup requests in select mode demand exactly one Boolean decision per reviewed block ID. Missing, duplicate, unknown or malformed IDs preserve the baseline; unreviewed blocks always remain. Rust assembles retained source characters verbatim and revalidates the body.
 
@@ -41,8 +43,8 @@ Summary identity covers all ordered sources, supplied/computed hashes, metadata,
 
 | Path | Preparation and evidence behavior |
 | --- | --- |
-| Article acquisition/refinement | Persist raw acquisition; cache whole prose; strict block decisions in select mode; retain unreviewed blocks and baseline on failures |
-| Atlas body claims | Select before the 12,000-character fallback; carry artifact/ranges into validation; retain title/description evidence and atomic replacement |
+| Article acquisition/refinement | Persist raw acquisition; cache whole prose; use prepared effective action for strict block decisions; retain unreviewed blocks and baseline on failures. Report workers retain captured settings/routes/cancellation |
+| Atlas body claims | Claims-only shared extraction over complete retained windows, exact artifact/range validation and atomic publication; no inference, context packet or semantic-link requests |
 | Firecrawl / Recon pages | Reference full acquisitions separately from bounded observations; prepare before compaction, then reuse for synthesis and claim mining |
 | Recon bindings | Run native extraction first; focus existing model requests; retain occurrence, ownership, platform and format gates |
 | Directives / prior / Brain | Preserve mandatory question/directive/state fields; prepare optional prose without adding requests |
@@ -57,7 +59,9 @@ Offline unit fixtures cover the actual JS runtime/plugin, exact Unicode spans, r
 
 The structured JSON gold input produces invalid offsets in the pinned parser. Its acceptance path explicitly checks `Failed`, rejects selection and retains the original bounded source with a diagnostic. The multilingual fixture similarly checks `Unsupported` and safe fallback. English entity misses remain valid data; they do not remove material evidence. The quotation fixture covers an opening attribution before the focused paragraph and a closing delimiter after it.
 
-### Recorded fixture measurements (2026-10-11)
+### Earlier implementation fixture measurements (2026-10-11)
+
+Historical measurements below concern the earlier three-mode implementation. They are not a speedup claim for the shared assessment/window pipeline; full coverage and semantic assessment can add requests.
 
 | Fixture | Observed result |
 | --- | --- |
@@ -67,4 +71,43 @@ The structured JSON gold input produces invalid offsets in the pinned parser. It
 
 These are single observations from a concurrent offline test suite on the local host. They establish byte/count and evidence acceptance, not throughput or latency targets. No live provider token usage was available. The small gold set exercises clean/noisy English, missing entities, numerical disputes, multilingual prose, code and structured extracts; it does not establish broad entity accuracy or production workload savings.
 
-Local validation passed `cargo fmt --all --check`, both locked no-default-features Clippy lanes with `-D warnings`, and both workspace test lanes with `ARGOS_EMBED` unset. NLP enabled: 187 binary, 724 core and 3 fixture checks passed. NLP disabled: 187 binary, 719 core and 3 fixture checks passed. Each lane retained eight ignored tests. CI includes both lanes on the existing macOS Intel/ARM and Linux x86/ARM matrix; those remote runs are separate from this local validation.
+The earlier implementation validation passed `cargo fmt --all --check`, both locked no-default-features Clippy lanes with `-D warnings`, and both workspace test lanes with `ARGOS_EMBED` unset. NLP enabled: 187 binary, 724 core and 3 fixture checks passed. NLP disabled: 187 binary, 719 core and 3 fixture checks passed. Each lane retained eight ignored tests. CI includes both lanes on the existing macOS Intel/ARM and Linux x86/ARM matrix; those remote runs are separate from this local validation.
+
+## Investigative coverage and publication
+
+The shared `investigation::insights` service runs source claim extraction through Claim Assessor, assesses fidelity with finite labels, checks readiness, then runs Synthesis over original evidence windows. Candidate entities are source local and preserve exact forms and byte mentions; they do not establish identity or support. A negative classification with a passing threshold does not authorize publication.
+
+Atlas ingestion supplies full title and description to the claims stage and stops there. Full article reasoning requires retained acquisition evidence, complete Claim Assessor coverage and complete Synthesis coverage; rewritten display text cannot certify completeness. Recon requires completed required tasks, at least two substantive roots with different artifacts, and a faithful cited premise. Search snippets and duplicate acquisitions do not satisfy the gate. Caps disclose partial enumeration and do not stop window coverage.
+
+Schema 29 adds article/Recon owner generations, immutable snapshots, derivations, source and premise evidence, typed links and stage checkpoints. Exact-task refresh workers renew leases and publish the canonical Brain rows, provenance, active pointer and index outbox in one fenced transaction. Successful stages are reused; exhausted chains are not silently restarted. Pending and failed generations retain previous history. Legacy extraction jobs keep their explicit contract marker.
+
+## Implementation measurements (2026-10-11)
+
+### Progressive Intel confidence
+
+Focus Brief retains Assessment and places Confidence above Claims in the left, independently scrollable column. New insights use an explicit 0–100 evidence-confidence rubric, separate from source reliability and a calibrated probability of truth. Initial source material starts at 20; a valid empty claim set is N/A. Across the current source claims, faithful extraction contributes up to 20 points, complete acquisition/claim analysis contributes 20, and independently assessed corroboration contributes up to 40 (20 for one additional root, 40 for two). Contradicted claims subtract up to 40; assessment gaps subtract up to 15. The aggregate averages claim contributions, caps at 95, and caps partial enumeration at 85.
+
+Only faithful, passing `supports` assessments receive corroboration credit. Shared origin roots, artifact hashes or identical article URLs, including transitive copies, collapse; unknown roots, mentions and more raw tool calls earn no credit. Unassessed/user-edited claims receive no fidelity or support bonus. Scores update from committed assessments as details are discovered, and may decrease when counterevidence arrives. Pending/previous owners retain their last score with a history label until refresh commits. These scores do not alter reasoning/publication gates. Legacy numeric confidence and Admiralty grades remain labeled legacy; source reliability remains separate. No new model calls or schema changes are needed for this projection.
+
+The final locked feature lanes passed formatting, strict Clippy and workspace tests with `ARGOS_EMBED` unset: 188 binary tests in each lane, 739 core tests with NLP disabled, 744 with NLP enabled, and three search fixtures in each. Each lane has nine ignored tests. Scoped visual review inspected 44 current Intel confidence/lifecycle captures and nine Brain captures. Existing map/icon font fallback and live terminal/provider behavior remain outside that visual certification.
+
+The separate default-feature vector lane passed both cached MiniLM tests: paraphrase ranking and LanceDB/Store retrieval of the expected memory ID. The restored LanceDB-only Atlas publication rollback/retry fixture also passed; its missing test imports/helper alias were repaired without changing production behavior.
+
+Four separate processes used fresh state directories, identical short and pressure evidence, complete coverage and a 512-byte preparation budget. Each workload used ten cold and ten warm samples. Cold means the first use of a source, not restarting the engine for every sample. The short workload includes initial engine startup; pressure follows with the initialized engine. Warm repeats reuse the exact annotation. Complete coverage retains all original evidence, so pressure requires downstream windows instead of selection. Times below measure preparation, excluding benchmark cache preflight and model work.
+
+| Workload | Mode | Cold p50 / p95 (ms) | Warm p50 / p95 (ms) | Serialized Prepared bytes | Warm cache hits |
+| --- | --- | --- | --- | --- | --- |
+| Short | off | 0.047 / 0.127 | 0.030 / 0.041 | 360 | 0 |
+| Short | annotate | 435.780 / 1,624.439 | 22.586 / 29.589 | 800 | 10 |
+| Short | select | 381.020 / 1,586.083 | 20.436 / 26.059 | 800 | 10 |
+| Short | auto | 451.981 / 2,137.918 | 27.829 / 56.372 | 800 | 10 |
+| Pressure | off | 0.359 / 0.473 | 0.380 / 0.411 | 3,204 | 0 |
+| Pressure | annotate | 143.821 / 200.123 | 24.698 / 31.469 | 3,648 | 10 |
+| Pressure | select | 131.652 / 174.007 | 23.582 / 35.763 | 3,648 | 10 |
+| Pressure | auto | 184.853 / 222.182 | 31.720 / 36.393 | 3,648 | 10 |
+
+All 160 preparation checks retained the original assertions, attribution, denials and corrections with complete coverage. Outbound model requests were zero in every preparation workload, a zero request delta from off. Parser p50 across cold and warm samples was zero because cache hits perform no parse; parser p95 was 453/440/627 ms for short annotate/select/auto and 155/130/178 ms under pressure. Measured queue p50/p95 was zero at millisecond resolution. Off bypasses parsing and has no parser/queue measurement.
+
+The claims-only Atlas fixture independently verifies one extraction request and one fidelity request, zero inference/context/link-generation requests, and zero additional requests on identical replay. The scripted summarization fixture verifies one request per mode and retention of late denial and attribution. Provider tokens and production model latency were not measured. These fixtures establish coverage and request behavior; they do not establish a stack-wide speedup percentage or a throughput target.
+
+For the 53,711-byte scripted summary source, serialized request bodies were 12,878 bytes in off and annotate, and 709 bytes in select and auto. Each mode made one request, a zero request delta from off. This optional selection fixture is separate from the complete-coverage preparation workloads above.

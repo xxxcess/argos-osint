@@ -15,9 +15,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use super::{
-    atlas_answer_id, atlas_brief_id, insight_fingerprint, new_id, AtlasInsightClaim, Store,
-};
+use super::{atlas_answer_id, atlas_brief_id, new_id, AtlasInsightClaim, Store};
 use crate::brain::MemorySource;
 use crate::brain_lance;
 use crate::tasks::{self, IndexEnqueue, IndexOutcome};
@@ -774,11 +772,10 @@ impl Store {
                     continue;
                 }
                 let entity = claim.entity.trim().to_ascii_lowercase();
-                let namespace = claim.namespace.trim().to_ascii_lowercase();
                 let predicate = claim.predicate.trim().to_ascii_lowercase();
                 let object = claim.object.trim().to_ascii_lowercase();
                 let sentence = claim.claim.trim();
-                let fingerprint = insight_fingerprint(&namespace, &entity, &predicate, &object);
+                let fingerprint = super::atlas_claim_identity(claim);
                 let existing: Option<String> = self
                     .conn
                     .query_row(
@@ -803,6 +800,25 @@ impl Store {
                     Some(memory_id) => {
                         let row_exists = memory_text(&self.conn, &memory_id)?.is_some();
                         if row_exists {
+                            // Shared extraction already committed this cycle's canonical
+                            // row. Count its creation once in the cycle receipt rather
+                            // than report it as a memory from an earlier investigation.
+                            let staged_here = if fingerprint.starts_with("v2:") && !options.repair {
+                                let json: String = self.conn.query_row(
+                                    "SELECT source_json FROM memories WHERE id=?1",
+                                    [&memory_id],
+                                    |r| r.get(0),
+                                )?;
+                                serde_json::from_str::<MemorySource>(&json).is_ok_and(|source| {
+                                    source.app == "atlas"
+                                        && source.conversation_id == run_id
+                                        && source.reference.as_deref().is_some_and(|reference| {
+                                            reference.starts_with("isnap:atlas:")
+                                        })
+                                })
+                            } else {
+                                false
+                            };
                             if let Some(app) = &options.retag_app {
                                 let current: String = self.conn.query_row(
                                     "SELECT source_json FROM memories WHERE id=?1",
@@ -826,8 +842,14 @@ impl Store {
                                     retagged += 1;
                                 }
                             }
-                            receipt.reused += 1;
-                            if !receipt.reused_memory_ids.contains(&memory_id)
+                            if staged_here && !receipt.created_memory_ids.contains(&memory_id) {
+                                receipt.created += 1;
+                                receipt.created_memory_ids.push(memory_id.clone());
+                            } else {
+                                receipt.reused += 1;
+                            }
+                            if !staged_here
+                                && !receipt.reused_memory_ids.contains(&memory_id)
                                 && !receipt.created_memory_ids.contains(&memory_id)
                             {
                                 receipt.reused_memory_ids.push(memory_id.clone());

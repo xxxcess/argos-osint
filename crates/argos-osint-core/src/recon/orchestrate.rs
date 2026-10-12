@@ -2769,6 +2769,12 @@ pub(crate) fn recall_for_turn(
     mode: &str,
     run_id: &str,
 ) -> Result<(Vec<super::RecallInsight>, bool, BrainResourceSummary)> {
+    if store
+        .get_thread(thread_id)?
+        .is_some_and(|t| !t.recall_insights)
+    {
+        return Ok((Vec::new(), true, BrainResourceSummary::default()));
+    }
     let thread_entities = store.thread_entities(thread_id)?;
     let query = crate::brain_query::BrainQuery {
         current_question: question.to_string(),
@@ -2782,14 +2788,14 @@ pub(crate) fn recall_for_turn(
         allow_background: false,
     };
 
-    let text_hits = store.recall(question, query.candidate_limit)?;
+    let text_hits = crate::brain_query::recall_candidates(store, "recon", run_id, question)?;
     let unfamiliar = super::brain_is_thin(&text_hits);
-    let mut recalled = store.recon_recall(&thread_entities)?;
+    let mut recalled: Vec<super::RecallInsight> = Vec::new();
     let subject = super::question_subject(question);
 
     let mut admitted_count = 0;
     for hit in &text_hits {
-        if admitted_count >= 6 {
+        if recalled.len() >= 5 {
             break;
         }
         if !crate::brain_query::admit_memory(&query, &hit.memory, &policy) {
@@ -2808,6 +2814,7 @@ pub(crate) fn recall_for_turn(
         });
         admitted_count += 1;
     }
+    recalled.truncate(5);
     let resources = brain_resources::summarize_for_recall(store, &recalled, question)?;
     // The recall relevance gate: one row per completed recall query, with the
     // candidate and accepted hit counts and a bounded rejection label.

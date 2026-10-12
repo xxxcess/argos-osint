@@ -162,7 +162,7 @@ Packet: question, classified mode, Brain facts (data, omitted when empty), direc
 - Evaluate each directive. Tool evidence is citable. Brain may inform; it is not a citation id. Tool evidence wins on conflict.
 - Answer the question first, then one `D1:` line per directive (met / partly / not), citations, one narrowing sentence only when unmet.
 - One evidence id per bracket. Validate each `call-…` on its own (`[a, b]`, `[a; b]`, `[a][b]`).
-- Unknown id: one repair, then drop unknowns if at least one valid citation remains. If completed evidence exists and no valid citation is left, keep the answer; Brain extraction infers support and marks those claims as inferences.
+- Unknown id: one repair, then drop unknowns if at least one valid citation remains. If completed evidence exists and no valid citation is left, keep the bounded uncited answer. New-policy insights come from pre-answer original-evidence assessment; they never infer citations from answer prose. Explicit legacy extraction retries retain their old contract.
 - Stored answers normalize to `[a][b]`. Separate extraction derives atomic Brain claims. Retry with `recon retry-insights`.
 
 ## Turn telemetry and streaming synthesis
@@ -527,4 +527,16 @@ Scaled confidence: `clamp(base × reliability_factor × credibility_factor, 0, 1
 
 ## Local preprocessing
 
-The process-shared NLP worker, immutable source references and migration 28 caches are described in [nlp-preprocessing.md](nlp-preprocessing.md). Annotate is the default; select retains verbatim windows and explicit partial coverage before existing model operations. [Evidence flow](diagrams/nlp-preprocessing.html).
+The process-shared NLP worker, immutable source references and migration 28 caches are described in [nlp-preprocessing.md](nlp-preprocessing.md). Auto is the default; complete investigative coverage retains original evidence windows before assessment. [Evidence flow](diagrams/nlp-preprocessing.html).
+
+## Investigative snapshots (schema 29)
+
+`investigation/insights.rs` owns the shared extraction, fidelity, readiness and inference contracts; `insight_persist.rs` owns exact refresh dispatch and transactional activation. Source-local entities retain original mentions. `claim_assessor` inherits Synthesis when unset, while explicit routes remain independent. Free-chat execution skips Decisions-only routes in place; finite contracts use the shared Decisions adapter and preserve both label and threshold outcome.
+
+Atlas extract-v3 uses title and description for attributed claims only. It generates no context insights, investigative inferences or semantic links. Full article and Recon evidence enters the same service. Complete article acquisition plus full coverage in both stages is necessary for article inference; Recon requires substantive independent roots and fulfilled required tasks. Analytical prose receives the same withheld status.
+
+Intel tasks follow acquire → async inventory → collect → async assess → refresh_insights → sections/BLUF → finalize. Article generations are captured independently from report revisions; superseded report modes cannot publish into a newer generation. A body refresh during active Recon preserves the prior baseline pending collection. Stage receipts include source/route/prompt identity; exact refresh recovery cannot claim unrelated pool tasks.
+
+`insight_owner_state`, `insight_snapshots`, `insight_derivations`, `insight_derivation_evidence` and `insight_derivation_links` add provenance to the existing Brain database. Before active mutation, publication verifies desired generation, immutable artifact/body/tool/memory revisions and the task lease owner, epoch, state and expiry. Canonical memories, sources, premise lineage, typed links, active head and index outbox commit together. User edits remain canonical; deleted items retain historical provenance with deleted status. Qualified v2 identities separate modality, polarity, attribution and time; legacy identities remain readable.
+
+Recall retrieves 20 unique candidates total by default; the local `insight_recall_limit` setting is clamped to 10–20. It admits at most five within 1,500 estimated tokens/6,000 serialized bytes and recovers original retained evidence locally. Current-owner outputs, common roots and missing lineage do not become independent support. Similarity browsing remains a separate display feature. See [Brain recall](diagrams/brain-recall.html), [Intel refresh](diagrams/intel-report.html) and [persistence](diagrams/persistence.html).

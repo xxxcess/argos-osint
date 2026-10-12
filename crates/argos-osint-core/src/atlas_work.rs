@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::store::AtlasArticleRow;
 use crate::telemetry::{EventKind, TelemetryEvent, Trigger};
 
-pub const EXTRACT_CONTRACT: &str = "extract-v2";
+pub const EXTRACT_CONTRACT: &str = "extract-v3";
 pub const STAGE_EXTRACT: i32 = 4;
 
 /// Stage ids recorded on work units. Extraction is the only stage that writes

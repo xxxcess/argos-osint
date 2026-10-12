@@ -19,7 +19,10 @@ pub fn rows(
 ) -> Vec<(Line<'static>, Option<Target>)> {
     if view.loading {
         return vec![(
-            Line::from(Span::styled("Loading related articles…", theme::dim())),
+            Line::from(Span::styled(
+                super::anim::loading("Loading related articles"),
+                theme::dim(),
+            )),
             None,
         )];
     }

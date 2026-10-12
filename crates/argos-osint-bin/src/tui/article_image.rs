@@ -195,7 +195,8 @@ impl ArticleImages {
             }
         }
         frame.render_widget(
-            ratatui::widgets::Paragraph::new("Loading image…").style(super::theme::muted()),
+            ratatui::widgets::Paragraph::new(super::anim::loading("Loading image"))
+                .style(super::theme::muted()),
             area,
         );
     }

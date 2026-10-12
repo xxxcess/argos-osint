@@ -9537,6 +9537,8 @@ pub async fn run(mut app: App) -> Result<()> {
     let mut memory_watch = argos_osint_core::store::MemoryChangeWatcher::new(&app.store);
     let mut memory_polled = std::time::Instant::now();
     let mut dirty = true;
+    // Set when the last draw painted a loading animation (see `anim`).
+    let mut animated = false;
     loop {
         if pump(&mut app) {
             dirty = true;
@@ -9575,10 +9577,12 @@ pub async fn run(mut app: App) -> Result<()> {
                 app.screen = Rect::new(0, 0, size.width, size.height);
             }
             super::ui::normalize(&mut app);
+            super::anim::take_animated();
             terminal.draw(|frame| {
                 app.screen = frame.area();
                 super::ui::draw(frame, &app)
             })?;
+            animated = super::anim::take_animated();
             if app.atlas_map_hold {
                 app.atlas_map_hold = false;
                 dirty = true;
@@ -9609,7 +9613,8 @@ pub async fn run(mut app: App) -> Result<()> {
         if atlas_countdown_visible(&app) {
             wait = wait.min(until_next_second());
         }
-        if atlas_extracting_visible(&app)
+        if animated
+            || atlas_extracting_visible(&app)
             || intel_body_loading_visible(&app)
             || intel_insights_loading_visible(&app)
             || intel_summary_loading_visible(&app)
@@ -9627,6 +9632,7 @@ pub async fn run(mut app: App) -> Result<()> {
                 app.flush_draft();
             }
             if composer_focused
+                || animated
                 || atlas_countdown_visible(&app)
                 || atlas_extracting_visible(&app)
                 || intel_body_loading_visible(&app)
@@ -12518,6 +12524,96 @@ mod tests {
                 size.0,
                 size.1,
             );
+        }
+    }
+
+    /// Put `app` on one screen's loading state.
+    fn loading_state(app: &mut App, screen: &str) {
+        match screen {
+            "jobs" => {
+                app.select(ModuleId::Jobs.index());
+                app.jobs.rows.clear();
+                app.jobs.loaded = false;
+                app.jobs.error = None;
+            }
+            "logs" => {
+                app.select(ModuleId::Logs.index());
+                app.logs.rows.clear();
+                app.logs.loaded = false;
+                app.logs.error = None;
+            }
+            "brain" => {
+                app.select(ModuleId::Brain.index());
+                app.memory_error = None;
+                app.memories_loaded = false;
+            }
+            "profile" => {
+                app.select(ModuleId::System.index());
+                app.profile.snapshot = None;
+                app.profile.error = None;
+                app.profile.loading = true;
+            }
+            "atlas-map" => {
+                app.select(ModuleId::Atlas.index());
+                app.atlas_map_hold = true;
+            }
+            other => panic!("unknown screen {other}"),
+        }
+    }
+
+    const LOADING_SCREENS: [(&str, &str); 5] = [
+        ("jobs", "Loading jobs"),
+        ("logs", "Loading events"),
+        ("brain", "Loading memories"),
+        ("profile", "Loading statistics"),
+        ("atlas-map", "Loading country"),
+    ];
+
+    /// Every loading state paints the shared spinner, and it advances per frame.
+    #[test]
+    fn loading_states_animate_across_frames() {
+        for (screen, label) in LOADING_SCREENS {
+            let mut frames = Vec::new();
+            for index in 0..3u64 {
+                let mut app = app();
+                loading_state(&mut app, screen);
+                super::super::anim::take_animated();
+                let text = super::super::anim::with_frame(index, || {
+                    buffer_text(&render(&mut app, 120, 36))
+                });
+                assert!(
+                    super::super::anim::take_animated(),
+                    "{screen}: draw marks the frame animated"
+                );
+                let glyph = super::super::anim::spinner_at(index);
+                assert!(
+                    text.contains(&format!("{glyph} {label}")),
+                    "{screen} frame {index} missing `{glyph} {label}`:\n{text}"
+                );
+                frames.push(text);
+            }
+            assert_ne!(frames[0], frames[1], "{screen}: frame 0→1 advances");
+            assert_ne!(frames[1], frames[2], "{screen}: frame 1→2 advances");
+        }
+    }
+
+    /// Cell dumps of each loading state at three consecutive frames.
+    /// `ARGOS_SCREEN_DIR=/workspace/screens/loading-anim cargo test -p argos-osint-bin dump_loading_animation_frames -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_loading_animation_frames() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (screen, _) in LOADING_SCREENS {
+            for index in 0..3u64 {
+                let mut app = app();
+                loading_state(&mut app, screen);
+                super::super::anim::with_frame(index, || {
+                    dump_cells(&mut app, &dir, &format!("{screen}-f{index}"), 120, 36)
+                });
+            }
         }
     }
 

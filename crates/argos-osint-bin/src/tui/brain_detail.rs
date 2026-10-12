@@ -261,7 +261,9 @@ pub enum RelRow {
 pub fn related_rows(view: &RelatedView) -> Vec<RelRow> {
     match &view.state {
         RelatedState::Idle | RelatedState::Loading => {
-            return vec![RelRow::Note("Loading related memories…".into())]
+            return vec![RelRow::Note(super::anim::loading(
+                "Loading related memories",
+            ))]
         }
         RelatedState::Failed(err) => {
             return vec![RelRow::Note(format!("Related memories unavailable: {err}"))]

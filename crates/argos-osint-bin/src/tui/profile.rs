@@ -1598,9 +1598,12 @@ fn draw_status_strip(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.profile.loading {
         Line::from(Span::styled(
             if app.profile.snapshot.is_some() {
-                "Refreshing · showing previous snapshot"
+                format!(
+                    "{} Refreshing · showing previous snapshot",
+                    super::anim::spinner()
+                )
             } else {
-                "Loading statistics"
+                super::anim::loading("Loading statistics")
             },
             theme::warn(),
         ))
@@ -2228,7 +2231,7 @@ fn kpis(app: &App) -> Vec<Kpi> {
             .map(|label| Kpi {
                 label,
                 value: "N/A".into(),
-                coverage: "Loading statistics".into(),
+                coverage: super::anim::loading("Loading statistics"),
             })
             .collect();
     };
@@ -2514,7 +2517,7 @@ fn kpis(app: &App) -> Vec<Kpi> {
 }
 fn attention_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let Some(s) = &app.profile.snapshot else {
-        return vec![Line::raw("Loading statistics")];
+        return vec![Line::raw(super::anim::loading("Loading statistics"))];
     };
     if s.attention.is_empty() {
         return vec![
@@ -2568,9 +2571,9 @@ fn attention_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 fn dashboard_lines(app: &App, w: &WidgetSpec, width: usize, height: usize) -> Vec<Line<'static>> {
     let Some(s) = app.profile.snapshot.as_ref() else {
         return vec![Line::raw(if app.profile.error.is_some() {
-            "Unavailable statistics"
+            "Unavailable statistics".to_string()
         } else {
-            "Loading statistics"
+            super::anim::loading("Loading statistics")
         })];
     };
     let mut lines = Vec::new();
@@ -3488,7 +3491,7 @@ fn report_datasets(app: &App, widget: &WidgetSpec) -> Vec<(&'static str, serde_j
 
 fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
     let Some(snapshot) = &app.profile.snapshot else {
-        return vec![Line::raw("Loading statistics")];
+        return vec![Line::raw(super::anim::loading("Loading statistics"))];
     };
     let rows = sorted_rows(app, widget, snapshot);
     let mut lines = Vec::new();
@@ -3573,7 +3576,7 @@ fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<
 }
 fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
     let Some(snapshot) = &app.profile.snapshot else {
-        return vec![Line::raw("Loading statistics")];
+        return vec![Line::raw(super::anim::loading("Loading statistics"))];
     };
     let buckets = count_buckets(widget, snapshot);
     let selected = app

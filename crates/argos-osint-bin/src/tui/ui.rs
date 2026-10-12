@@ -4846,7 +4846,7 @@ pub(crate) fn tab_strip_layout(area: Rect, app: &App) -> Vec<TabStripItem> {
             let is_close_focused = app.focus == Target::TabClose(visual_idx);
 
             let indicator = if app.running_thread(thread_id) {
-                Some("◌")
+                Some(super::anim::spinner())
             } else if app.tab_unreads.contains(thread_id) {
                 Some("●")
             } else if app
@@ -6387,7 +6387,7 @@ pub(crate) fn memory_list_note(app: &App) -> (String, ratatui::style::Style) {
         );
     }
     if !app.memories_loaded {
-        return ("Loading memories…".into(), theme::dim());
+        return (super::anim::loading("Loading memories"), theme::dim());
     }
     let query = app.brain_query.trim();
     if !query.is_empty() {
@@ -8224,7 +8224,7 @@ fn draw_clipped_intel_loading(
     let Some((inner_vis, _)) = intersect_abs(viewport, inner) else {
         return;
     };
-    let label = format!("{} {phase}", loading_spinner_frame());
+    let label = format!("{} {phase}", super::anim::spinner());
     draw_centered_loading_card(frame, inner_vis, &label, detail);
 }
 
@@ -8391,7 +8391,7 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
     // Insight re-extract from cleaned body.
     let (insights_title, insights_detail) = if insights_running {
         (
-            format!("{} Extracting insights", loading_spinner_frame()),
+            format!("{} Extracting insights", super::anim::spinner()),
             intel_insights_progress_detail(app),
         )
     } else if message.to_ascii_lowercase().contains("insight") {
@@ -8418,7 +8418,7 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
     // Classifier-recommended recon mode.
     let mode_pending = app.intel_mode_classifying && app.intel_recon_recommended_for == article.id;
     let mode_label = if mode_pending {
-        format!("{} Classifying recon mode", loading_spinner_frame())
+        format!("{} Classifying recon mode", super::anim::spinner())
     } else {
         format!("Mode · {}", app.intel_recon_recommended.title())
     };
@@ -9065,7 +9065,7 @@ fn draw_intel_summary_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, 
 fn intel_report_progress_lines(app: &App) -> (String, Option<String>) {
     let Some(article) = app.intel_articles.get(app.intel_sel) else {
         return (
-            format!("{} Generating report", loading_spinner_frame()),
+            format!("{} Generating report", super::anim::spinner()),
             None,
         );
     };
@@ -9076,7 +9076,7 @@ fn intel_report_progress_lines(app: &App) -> (String, Option<String>) {
     });
     let Some(job) = active_job else {
         return (
-            format!("{} Generating report", loading_spinner_frame()),
+            format!("{} Generating report", super::anim::spinner()),
             None,
         );
     };
@@ -9085,7 +9085,7 @@ fn intel_report_progress_lines(app: &App) -> (String, Option<String>) {
         .unwrap_or(job.mode.as_str());
     let label = format!(
         "{} Generating {} report",
-        loading_spinner_frame(),
+        super::anim::spinner(),
         mode_title
     );
 
@@ -9144,7 +9144,7 @@ fn draw_intel_section_loading(frame: &mut Frame, area: Rect, title: &str, phase:
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let label = format!("{} {phase}", loading_spinner_frame());
+    let label = format!("{} {phase}", super::anim::spinner());
     let detail = intel_insights_progress_detail(app);
     draw_centered_loading_card(frame, inner, &label, detail.as_deref());
 }
@@ -9220,7 +9220,7 @@ fn intel_body_progress_lines(app: &App) -> (String, Option<String>) {
     } else {
         "Retrieving full article"
     };
-    let label = format!("{} {phase}", loading_spinner_frame());
+    let label = format!("{} {phase}", super::anim::spinner());
     let detail = if message.is_empty()
         || message.eq_ignore_ascii_case(phase)
         || message.eq_ignore_ascii_case(&format!("{phase}…"))
@@ -9230,15 +9230,6 @@ fn intel_body_progress_lines(app: &App) -> (String, Option<String>) {
         Some(message.to_string())
     };
     (label, detail)
-}
-
-fn loading_spinner_frame() -> &'static str {
-    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let frame = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| (elapsed.as_millis() / 80) as usize % FRAMES.len())
-        .unwrap_or(0);
-    FRAMES[frame]
 }
 
 fn intel_brief_reports_lines(app: &App, width: usize) -> Vec<Line<'static>> {
@@ -9378,7 +9369,11 @@ fn draw_atlas_coverage(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!(" · Warnings {}", coverage.warnings), theme::dim()),
         ]),
         Line::from(Span::styled(
-            format!("Stage: {}", app.atlas_status),
+            if atlas_extracting(app) {
+                format!("{} Stage: {}", super::anim::spinner(), app.atlas_status)
+            } else {
+                format!("Stage: {}", app.atlas_status)
+            },
             theme::accent(),
         )),
     ];
@@ -9629,7 +9624,7 @@ fn draw_map_or_hold(frame: &mut Frame, app: &App, area: Rect) {
     if app.atlas_map_hold {
         frame.render_widget(Clear, area);
         frame.render_widget(
-            Paragraph::new("Loading country")
+            Paragraph::new(super::anim::loading("Loading country"))
                 .alignment(Alignment::Center)
                 .style(theme::dim())
                 .block(pane(" map ")),
@@ -10052,7 +10047,7 @@ fn draw_add_fallback(frame: &mut Frame, app: &App) {
     } else if app.catalog_for == provider && app.model_catalog.is_empty() {
         "This account returned no models.".into()
     } else if app.catalog_for != provider {
-        "Loading models this account can call…".into()
+        super::anim::loading("Loading models this account can call")
     } else {
         format!(
             "{} models · unknown capabilities stay selectable",

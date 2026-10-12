@@ -484,7 +484,7 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect) {
     }
     if view.rows.is_empty() {
         let text = if !view.loaded && view.error.is_none() {
-            "Loading events…".to_string()
+            super::anim::loading("Loading events")
         } else if view.filter().min_severity.is_some()
             || !view.app.is_empty()
             || !view.job.is_empty()

@@ -1,3 +1,4 @@
+mod anim;
 mod app;
 mod article_image;
 mod atlas_table;

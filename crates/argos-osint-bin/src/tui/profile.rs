@@ -1361,7 +1361,7 @@ pub fn draw_profile(frame: &mut Frame, app: &App, area: Rect) {
             draw_filter_strip(frame, app, layout.controls);
             if !layout.too_small {
                 for (metric, rect) in kpis(app).iter().zip(&layout.kpis) {
-                    panels::kpi(frame, *rect, metric);
+                    panels::kpi_with(frame, *rect, metric, &kpi_visual(app, metric));
                 }
             }
             if layout.too_small {
@@ -2099,6 +2099,67 @@ fn draw_section_body(frame: &mut Frame, app: &App, area: Rect) {
             app.focus == Target::ProfileCard(geometry.index),
             panels::clipped(lines, width),
         );
+    }
+}
+/// Pick the glanceable shape for one KPI tile from the same snapshot the value
+/// came from. Percentages become direction-coloured gauges; counts and
+/// latencies become sparklines of the section's bucketed history.
+fn kpi_visual(app: &App, metric: &Kpi) -> panels::KpiVisual {
+    let Some(snapshot) = app.profile.snapshot.as_ref() else {
+        return panels::KpiVisual::None;
+    };
+    if let Some(value) = metric
+        .value
+        .strip_suffix('%')
+        .and_then(|v| v.trim().parse::<f64>().ok())
+    {
+        let lower = metric.label.to_ascii_lowercase();
+        let higher_is_better = !(lower.contains("error")
+            || lower.contains("failure")
+            || lower.contains("share") && lower.contains("publisher"));
+        return panels::KpiVisual::Ratio {
+            value: value / 100.0,
+            higher_is_better,
+        };
+    }
+    let counts = |id: &str| -> panels::KpiVisual {
+        let Some(widget) = view_spec(id) else {
+            return panels::KpiVisual::None;
+        };
+        panels::KpiVisual::Trend(
+            count_buckets(widget, snapshot)
+                .iter()
+                .map(|b| b.available.then(|| b.total()))
+                .collect(),
+        )
+    };
+    let percentile = |id: &str, key: &str| -> panels::KpiVisual {
+        let Some(widget) = view_spec(id) else {
+            return panels::KpiVisual::None;
+        };
+        panels::KpiVisual::Trend(
+            series_points(widget, snapshot)
+                .iter()
+                .map(|p| {
+                    p.series
+                        .iter()
+                        .find(|(k, _)| k == key)
+                        .and_then(|(_, v)| *v)
+                        .map(|v| v.max(0.0) as u64)
+                })
+                .collect(),
+        )
+    };
+    match metric.label {
+        "Distinct new articles" => counts("intel.volume"),
+        "Terminal runs" => counts("recon.outcomes"),
+        "Terminal cycles" => counts("atlas.cycles"),
+        "Sends" => counts("models.by_role"),
+        "Final operation failures" => counts("models.failures"),
+        "Logical calls" => counts("tools.outcomes"),
+        "Successful model p95" => percentile("models.latency", "p95_ms"),
+        "Queue p95" => percentile("models.queue", "p95_ms"),
+        _ => panels::KpiVisual::None,
     }
 }
 fn rate_kpi(label: &'static str, numerator: u64, denominator: u64, note: &str) -> Kpi {

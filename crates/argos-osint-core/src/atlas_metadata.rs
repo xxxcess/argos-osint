@@ -44,6 +44,75 @@ pub struct ArticleMention {
     pub end_byte: usize,
     pub original_text: String,
 }
+
+/// An article-local named candidate, never a claim of involvement or identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArticleActor {
+    pub id: String,
+    pub type_hint: String,
+    pub display_name: String,
+    pub spellings: Vec<String>,
+    pub mentions: Vec<ArticleMention>,
+}
+
+pub fn article_actors(article: &AtlasArticleRow, metadata: &ArticleMetadata) -> Vec<ArticleActor> {
+    if metadata.input_hash != input_hash(article)
+        || metadata.entity_state != MetadataState::Complete
+    {
+        return Vec::new();
+    }
+    let mut actors: Vec<ArticleActor> = Vec::new();
+    for mention in &metadata.mentions {
+        let kind = match mention.type_hint.as_str() {
+            "person" => "person",
+            "org" | "organization" => "organization",
+            "place" => "place",
+            "unknown" | "unresolved" => "unresolved",
+            _ => continue,
+        };
+        let text = match mention.field.as_str() {
+            "title" => &article.title,
+            "description" => &article.description,
+            _ => continue,
+        };
+        if mention.start_byte >= mention.end_byte
+            || text.get(mention.start_byte..mention.end_byte) != Some(&mention.original_text)
+            || mention.original_text.trim().is_empty()
+        {
+            continue;
+        }
+        // Normalize spelling, not aliases. Typed names from this packet share
+        // only article-local identity; cross-source identity requires assessment.
+        let key = mention
+            .original_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        let id = format!(
+            "actor:{}:{}",
+            article.id,
+            nlp::cache::hash(&format!("{kind}:{key}"))
+        );
+        if let Some(actor) = actors.iter_mut().find(|actor| actor.id == id) {
+            if !actor.spellings.contains(&mention.original_text) {
+                actor.spellings.push(mention.original_text.clone());
+            }
+            if !actor.mentions.contains(mention) {
+                actor.mentions.push(mention.clone());
+            }
+        } else {
+            actors.push(ArticleActor {
+                id,
+                type_hint: kind.into(),
+                display_name: mention.original_text.clone(),
+                spellings: vec![mention.original_text.clone()],
+                mentions: vec![mention.clone()],
+            });
+        }
+    }
+    actors
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublisherPrior {
     pub observation: rsp::SourceReliabilityObservation,
@@ -307,6 +376,7 @@ impl Store {
                 ],
             )?;
         }
+        crate::intel_recon::persist_article_rating(&tx, &metadata.article_id)?;
         tx.commit()?;
         Ok(true)
     }
@@ -648,6 +718,39 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn actor_projection_validates_utf8_repeated_mentions_types_and_staleness() {
+        let mut a = article();
+        a.title = "🌎 Jane Doe meets Jane Doe".into();
+        a.description = "Jane Doe met Acme.".into();
+        let mut metadata = ArticleMetadata::pending(&a);
+        metadata.entity_state = MetadataState::Complete;
+        for (field, start, end, text, kind) in [
+            ("title", 5, 13, "Jane Doe", "person"),
+            ("title", 20, 28, "Jane Doe", "person"),
+            ("description", 0, 8, "Jane Doe", "person"),
+            ("description", 13, 17, "Acme", "org"),
+            ("title", 1, 3, "bad", "person"),
+            ("description", 0, 8, "Jane Doe", "date"),
+        ] {
+            metadata.mentions.push(ArticleMention {
+                type_hint: kind.into(),
+                comparison_key: text.to_lowercase(),
+                field: field.into(),
+                start_byte: start,
+                end_byte: end,
+                original_text: text.into(),
+            });
+        }
+        let actors = article_actors(&a, &metadata);
+        assert_eq!(actors.len(), 2);
+        assert_eq!(actors[0].mentions.len(), 3);
+        a.description.push('!');
+        assert!(article_actors(&a, &metadata).is_empty());
+        metadata.input_hash = input_hash(&a);
+        metadata.entity_state = MetadataState::Unavailable;
+        assert!(article_actors(&a, &metadata).is_empty());
+    }
     fn article() -> AtlasArticleRow {
         AtlasArticleRow {
             run_id: "r".into(),

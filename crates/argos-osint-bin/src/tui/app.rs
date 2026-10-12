@@ -589,6 +589,7 @@ pub enum ButtonId {
     JobsRetry,
     JobsCancel,
     JobsOpenSource,
+    JobsClearOld,
     LogsLevel,
     LogsApp,
     LogsFollow,
@@ -598,6 +599,7 @@ pub enum ButtonId {
     RouterVerify,
     RouterAdvanced,
     IntelFullReport,
+    IntelBodyMore,
     GoogleSave,
     GoogleVerify,
     GoogleAdvanced,
@@ -686,6 +688,7 @@ pub enum Target {
     BrainRecall,
     /// The Intel briefing extracted left stack (scroll focus).
     IntelLeftColumn,
+    IntelFullArticle,
     IntelPreview,
 }
 
@@ -784,9 +787,6 @@ enum WorkEvent {
     IntelReconMode {
         article_id: String,
         mode: ReportMode,
-    },
-    IntelActorsReviewed {
-        article_id: String,
     },
     BrainRelatedExplained {
         request: u64,
@@ -1100,9 +1100,11 @@ pub struct App {
     pub(crate) intel_body_running: HashSet<String>,
     /// Article ids whose cleaned-body insight re-extract is still in flight.
     pub(crate) intel_insights_running: HashSet<String>,
-    pub(crate) intel_actors_reviewing: HashSet<String>,
     pub(crate) intel_links_reviewing: HashSet<String>,
     pub(crate) intel_insight_lifecycle: String,
+    pub(crate) intel_actors: Vec<argos_osint_core::atlas_metadata::ArticleActor>,
+    pub(crate) intel_actor_state: String,
+    pub(crate) intel_refresh_status: String,
     pub(crate) intel_evidence_confidence: Option<intel_recon::EvidenceConfidence>,
     pub(crate) intel_metadata_present: bool,
     pub(crate) intel_publisher_prior: Option<argos_osint_core::atlas_metadata::PublisherPrior>,
@@ -1507,9 +1509,11 @@ impl App {
             intel_recon_focus: IntelReconFocus::Tab(0),
             intel_body_running: HashSet::new(),
             intel_insights_running: HashSet::new(),
-            intel_actors_reviewing: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
             intel_insight_lifecycle: "legacy/unassessed".into(),
+            intel_actors: Vec::new(),
+            intel_actor_state: "pending".into(),
+            intel_refresh_status: "Waiting".into(),
             intel_evidence_confidence: None,
             intel_metadata_present: false,
             intel_publisher_prior: None,
@@ -1708,7 +1712,7 @@ impl App {
             Ok(format!("Job {}", super::logs::short_id(id)))
         } else {
             Ok(format!(
-                "Job {} is no longer in history",
+                "Job history expired · {}",
                 super::logs::short_id(id)
             ))
         }
@@ -3702,12 +3706,17 @@ impl App {
         self.scrolls.intel_extracted = 0;
         self.refresh_intel_briefing();
         self.sync_intel_brief_task_ui();
+        let _ = argos_osint_core::investigation::insight_persist::schedule_article_refresh(
+            &self.store,
+            &article,
+            &self.settings,
+            true,
+        );
         self.ensure_article_body_fetch(false);
         // Keep an in-flight classifier result; only re-queue when idle for this article.
         if !(self.intel_mode_classifying && self.intel_recon_recommended_for == article.id) {
             self.queue_intel_recon_mode_classify();
         }
-        self.queue_intel_actors_review();
         self.queue_intel_links_explanation();
         self.set_focus(Target::Button(ButtonId::IntelReports));
         self.status = format!("Brief · {}", article.title);
@@ -3717,6 +3726,8 @@ impl App {
     fn refresh_intel_briefing(&mut self) {
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
             self.intel_evidence_confidence = None;
+            self.intel_actors.clear();
+            self.intel_actor_state = "unavailable".into();
             self.intel_metadata_present = false;
             self.intel_publisher_prior = None;
             self.intel_related = Default::default();
@@ -3733,6 +3744,15 @@ impl App {
             .atlas_metadata(&article.run_id, &article.id)
             .ok()
             .flatten();
+        self.intel_actors = metadata
+            .as_ref()
+            .map(|metadata| argos_osint_core::atlas_metadata::article_actors(article, metadata))
+            .unwrap_or_default();
+        self.intel_actor_state = metadata
+            .as_ref()
+            .map(|m| m.entity_state.as_str())
+            .unwrap_or("pending")
+            .into();
         self.intel_metadata_present = metadata.is_some();
         self.intel_publisher_prior = metadata.and_then(|metadata| metadata.publisher_prior);
         match self
@@ -3753,6 +3773,42 @@ impl App {
             }
         }
         self.intel_insight_lifecycle=self.store.connection().query_row("SELECT lifecycle FROM insight_owner_state WHERE owner_kind IN ('article','atlas') AND owner_id=?1 ORDER BY CASE owner_kind WHEN 'article' THEN 0 ELSE 1 END LIMIT 1",[&article.id],|r|r.get(0)).unwrap_or_else(|_|"legacy/unassessed".into());
+        if let Ok(Some(output)) = argos_osint_core::investigation::insight_persist::active_output(
+            self.store.connection(),
+            "article",
+            &article.id,
+        ) {
+            for entity in output.entities {
+                let name = entity.original_forms.first().cloned().unwrap_or_default();
+                if name.trim().is_empty()
+                    || self.intel_actors.iter().any(|a| {
+                        a.type_hint == entity.type_hint
+                            && a.display_name.eq_ignore_ascii_case(&name)
+                    })
+                {
+                    continue;
+                }
+                self.intel_actors
+                    .push(argos_osint_core::atlas_metadata::ArticleActor {
+                        id: entity.id,
+                        type_hint: entity.type_hint,
+                        display_name: name,
+                        spellings: entity.original_forms,
+                        mentions: Vec::new(),
+                    });
+            }
+        }
+        self.intel_refresh_status =
+            argos_osint_core::investigation::insight_persist::article_refresh_status(
+                self.store.connection(),
+                &article.id,
+            )
+            .unwrap_or_else(|error| error.to_string());
+        if matches!(self.intel_refresh_status.as_str(), "Published" | "Indexed")
+            || self.intel_refresh_status.starts_with("Previous")
+        {
+            self.intel_insights_running.remove(&article.id);
+        }
         self.intel_evidence_confidence =
             intel_recon::article_confidence(self.store.connection(), &article.id)
                 .ok()
@@ -4084,61 +4140,6 @@ impl App {
             // Falls back to the default mode on its own; never an error.
             tracked::finish(job, "classifier", &Ok::<(), String>(()), None);
             let _ = tx.send(WorkEvent::IntelReconMode { article_id, mode });
-        });
-    }
-
-    fn queue_intel_actors_review(&mut self) {
-        if self
-            .intel_claims
-            .iter()
-            .any(|c| c.fingerprint.starts_with("v2:"))
-        {
-            return;
-        }
-        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
-            return;
-        };
-        if self.intel_actors_reviewing.contains(&article.id) {
-            return;
-        }
-        let candidates: Vec<String> = self
-            .intel_claims
-            .iter()
-            .map(|c| c.entity.clone())
-            .filter(|e| !e.trim().is_empty())
-            .collect();
-        if candidates.is_empty() {
-            return;
-        }
-        self.intel_actors_reviewing.insert(article.id.clone());
-        if tokio::runtime::Handle::try_current().is_err() {
-            self.intel_actors_reviewing.remove(&article.id);
-            return;
-        }
-        let resolver = intel_recon::resolve_actor_reviewer_secret(&self.auth, &self.settings);
-        let article_id = article.id.clone();
-        let article_title = article.title.clone();
-        let article_desc = article.description.clone();
-        let run_id = article.run_id.clone();
-        let tx = self.work_tx.clone();
-        let db = paths::db_path();
-
-        tokio::spawn(async move {
-            let result = intel_recon::review_article_actors(
-                resolver.as_ref(),
-                &article_title,
-                &article_desc,
-                &candidates,
-            )
-            .await;
-
-            if let Ok(review) = result {
-                if let Ok(store) = Store::open(&db) {
-                    let _ =
-                        intel_recon::apply_reviewed_actors(&store, &run_id, &article_id, &review);
-                }
-            }
-            let _ = tx.send(WorkEvent::IntelActorsReviewed { article_id });
         });
     }
 
@@ -5238,6 +5239,11 @@ impl App {
                     | intel_recon::BodyFetchEvent::InsightsFailed { article_id, .. }
                     | intel_recon::BodyFetchEvent::Failed { article_id, .. } => article_id.clone(),
                 };
+                let focused = self
+                    .intel_articles
+                    .get(self.intel_sel)
+                    .is_some_and(|a| a.id == article_id);
+                let prior_message = self.intel_body_message.clone();
                 let mut insights_done = false;
                 let mut is_retrieval_ready = false;
                 match event {
@@ -5286,10 +5292,9 @@ impl App {
                         self.intel_body_message = "Retrieving full article…".into();
                     }
                 }
-                let focused = self
-                    .intel_articles
-                    .get(self.intel_sel)
-                    .is_some_and(|a| a.id == article_id);
+                if !focused {
+                    self.intel_body_message = prior_message;
+                }
                 if focused && self.intel_page == IntelPage::Briefing {
                     self.intel_body = self
                         .store
@@ -5299,7 +5304,6 @@ impl App {
                     if insights_done || is_retrieval_ready {
                         self.refresh_intel_briefing();
                         self.queue_intel_recon_mode_classify();
-                        self.queue_intel_actors_review();
                         self.queue_intel_links_explanation();
                     }
                 }
@@ -5314,19 +5318,6 @@ impl App {
                     self.intel_recon_recommended = mode;
                     self.intel_recon_recommended_for = article_id;
                     self.intel_mode_classifying = false;
-                }
-                selected
-                    && self.module == Some(ModuleId::Intel)
-                    && self.intel_page == IntelPage::Briefing
-            }
-            WorkEvent::IntelActorsReviewed { article_id } => {
-                self.intel_actors_reviewing.remove(&article_id);
-                let selected = self
-                    .intel_articles
-                    .get(self.intel_sel)
-                    .is_some_and(|a| a.id == article_id);
-                if selected {
-                    self.refresh_intel_briefing();
                 }
                 selected
                     && self.module == Some(ModuleId::Intel)
@@ -5380,7 +5371,6 @@ impl App {
                             .is_some_and(|a| a.id == article_id);
                         if focused && self.intel_page == IntelPage::Briefing {
                             self.refresh_intel_briefing();
-                            self.queue_intel_actors_review();
                             self.queue_intel_links_explanation();
                         }
                     }
@@ -7115,10 +7105,25 @@ impl App {
                     }
                     CancelRequest::NotCancellable => "This job cannot be cancelled safely".into(),
                     CancelRequest::NotRunning => "This job is not running".into(),
-                    CancelRequest::Missing => "This job no longer exists".into(),
+                    CancelRequest::Missing => "Job history expired".into(),
                 })
             }
             ButtonId::JobsOpenSource => self.open_job_source(),
+            ButtonId::JobsClearOld => {
+                let result = self.store.clear_old_jobs().map(|counts| {
+                    format!(
+                        "Cleared {} jobs · stopped {}",
+                        counts.cleared, counts.stopped
+                    )
+                });
+                self.jobs.scroll = 0;
+                self.jobs.detail_scroll = 0;
+                self.jobs.reload(&self.store);
+                self.refresh_intel_briefing();
+                self.sync_intel_brief_task_ui();
+                self.set_focus(Target::Button(ButtonId::JobsClearOld));
+                result
+            }
             ButtonId::LogsLevel => {
                 self.logs.level = self.logs.level.next();
                 self.reload_logs();
@@ -7328,6 +7333,17 @@ impl App {
                     body,
                 };
                 return;
+            }
+            ButtonId::IntelBodyMore => {
+                if let Some(body) = &self.intel_body {
+                    self.overlay = Overlay::Block {
+                        title: "Full article".into(),
+                        body: body.body_markdown.clone(),
+                    };
+                    self.scrolls.popup = 0;
+                    self.set_focus(Target::CloseOverlay);
+                }
+                Ok("Full article".into())
             }
             ButtonId::IntelReconStart => {
                 self.start_intel_report_from_popup();
@@ -7877,7 +7893,9 @@ impl App {
                 self.set_focus(Target::JobRow(self.jobs.sel));
             }
             Target::JobDetail => self.set_focus(Target::JobDetail),
-            Target::IntelLeftColumn | Target::IntelPreview => self.set_focus(target),
+            Target::IntelLeftColumn | Target::IntelPreview | Target::IntelFullArticle => {
+                self.set_focus(target)
+            }
             Target::Choice(index) if self.overlay == Overlay::Palette => {
                 if let Some(id) = self
                     .palette_items()
@@ -9004,6 +9022,15 @@ impl App {
                 self.scrolls.intel_extracted =
                     add_scroll(self.scrolls.intel_extracted, delta * 3).min(max);
             }
+            Target::IntelFullArticle => {
+                let max = super::ui::intel_full_scroll_max(self);
+                let before = self.scrolls.intel_full;
+                self.scrolls.intel_full = add_scroll(before, delta * 3).min(max);
+                if self.scrolls.intel_full == before {
+                    self.scrolls.intel_brief = add_scroll(self.scrolls.intel_brief, delta * 3)
+                        .min(super::ui::intel_brief_scroll_max(self));
+                }
+            }
             _ => match self.module {
                 None => self.move_home(delta),
                 Some(ModuleId::Brain) if self.brain_list_mode == BrainListMode::Create => {}
@@ -9470,8 +9497,18 @@ pub async fn run(mut app: App) -> Result<()> {
         }
         if memory_polled.elapsed() >= Duration::from_secs(1) {
             memory_polled = std::time::Instant::now();
+            if app.module == Some(ModuleId::Intel) && app.intel_page == IntelPage::Briefing {
+                let previous = app.intel_refresh_status.clone();
+                app.refresh_intel_briefing();
+                if previous != app.intel_refresh_status {
+                    dirty = true;
+                }
+            }
             if memory_watch.poll(&app.store).is_some() {
                 app.reload_memories();
+                if app.module == Some(ModuleId::Intel) && app.intel_page == IntelPage::Briefing {
+                    app.refresh_intel_briefing();
+                }
                 dirty = true;
             }
         }
@@ -9854,10 +9891,12 @@ mod tests {
             intel_recon_focus: IntelReconFocus::Tab(0),
             intel_body_running: HashSet::new(),
             intel_insights_running: HashSet::new(),
-            intel_actors_reviewing: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
             intel_insight_lifecycle: "legacy/unassessed".into(),
             intel_link_explanations: HashMap::new(),
+            intel_actors: Vec::new(),
+            intel_actor_state: "pending".into(),
+            intel_refresh_status: "Waiting".into(),
             intel_evidence_confidence: None,
             intel_metadata_present: false,
             intel_publisher_prior: None,
@@ -14400,10 +14439,7 @@ mod tests {
         assert!(painted.contains("links"), "{painted}");
         assert!(!painted.contains("related context"), "{painted}");
         assert!(painted.contains("Acme Corp"), "{painted}");
-        assert!(
-            painted.contains(" █████╗   ██╗"),
-            "legacy A1 badge: {painted}"
-        );
+        assert!(painted.contains("Source F"), "legacy A1 badge: {painted}");
 
         // Scroll left column
         let max = super::super::ui::intel_extracted_scroll_max(&app);
@@ -14413,16 +14449,17 @@ mod tests {
             .unwrap();
 
         // Actor reviewing loading state
-        app.intel_actors_reviewing.insert("art-1".into());
+        app.intel_insights_running.insert("art-1".into());
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
         let painted_actor_rev = screen_text(&terminal);
         assert!(
-            painted_actor_rev.contains("Reviewing actors"),
+            painted_actor_rev.contains("Acme Corp")
+                && !painted_actor_rev.contains("Reviewing actors"),
             "{painted_actor_rev}"
         );
-        app.intel_actors_reviewing.clear();
+        app.intel_insights_running.clear();
 
         // Link explanation loading state
         app.intel_links_reviewing.insert("art-1".into());
@@ -14475,6 +14512,9 @@ mod tests {
                     _ => 60,
                 }),
                 claims: 1,
+                inferences: 1,
+                information_grade: if status == "corroborated" { 2 } else { 6 },
+                item_scores: Vec::new(),
                 faithful: 1,
                 corroborated: usize::from(status == "corroborated"),
                 disputed: usize::from(status == "disputed"),
@@ -14503,7 +14543,7 @@ mod tests {
                 assert!(!text.contains("CONFIRMED"));
                 if width >= 80 {
                     assert!(
-                        text.contains(" █████╗   ██████╗"),
+                        text.contains("Source F"),
                         "v2 A6 badge missing at {width}x{height}: {text}"
                     );
                     assert!(text.contains("claims"));
@@ -14552,7 +14592,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("assessment"));
+        assert!(!text.contains(" assessment "));
         assert!(!text.contains("Brief rating value"));
         assert!(text.contains("N/A"));
         if let Some(dir) = &dir {
@@ -14567,7 +14607,7 @@ mod tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect::<String>()
-                .contains("publisher-based"));
+                .contains("Brief rating"));
             for (width, height) in [(160, 50), (120, 40), (100, 32), (80, 24), (60, 18)] {
                 dump_cells(
                     &mut app,
@@ -14614,14 +14654,14 @@ mod tests {
         app.intel_publisher_prior = Some(publisher_prior_fixture());
         app.intel_evidence_confidence = None;
         let text = buffer_text(&render(&mut app, 160, 50));
-        assert!(text.contains("85/100"), "{text}");
-        assert!(text.contains("B6"), "{text}");
-        assert!(text.contains("publisher-based"), "{text}");
+        assert!(text.contains("60/100"), "{text}");
+        assert!(text.contains("Information 6"), "{text}");
+        assert!(text.contains("Brief rating"), "{text}");
         assert!(!text.contains("20/100"), "{text}");
         app.intel_publisher_prior = None;
         let text = buffer_text(&render(&mut app, 160, 50));
         assert!(
-            text.contains("F6") && text.contains("unavailable"),
+            text.contains("Source F") && text.contains("N/A"),
             "metadata without a usable prior must not borrow a legacy/cache grade: {text}"
         );
     }
@@ -14643,6 +14683,229 @@ mod tests {
             temperature: 0.8,
             category: "stability".into(),
             seen_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn dump_article_insights_screens() {
+        let mut app = app();
+        app.module = Some(ModuleId::Intel);
+        app.intel_page = IntelPage::Briefing;
+        let article = intel_brief_image_article("actors", "");
+        app.store.atlas_upsert_article(&article).unwrap();
+        app.intel_articles = vec![article.clone()];
+        app.intel_publisher_prior = Some(publisher_prior_fixture());
+        app.intel_metadata_present = true;
+        for i in 0..14 {
+            let name = format!("Actor {i} · Zoë");
+            app.intel_actors
+                .push(argos_osint_core::atlas_metadata::ArticleActor {
+                    id: format!("actor-{i}"),
+                    type_hint: "person".into(),
+                    display_name: name.clone(),
+                    spellings: vec![name.clone()],
+                    mentions: vec![argos_osint_core::atlas_metadata::ArticleMention {
+                        type_hint: "person".into(),
+                        comparison_key: name.to_lowercase(),
+                        field: "title".into(),
+                        start_byte: 0,
+                        end_byte: name.len(),
+                        original_text: name,
+                    }],
+                });
+        }
+        app.intel_actor_state = "complete".into();
+        app.intel_refresh_status = "Waiting · complete article details required".into();
+        let body = app
+            .store
+            .ensure_article_body(
+                &article.id,
+                &article.run_id,
+                &article.url,
+                &article.source_domain,
+                &article.source_name,
+            )
+            .unwrap();
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 32),
+            (80, 24),
+            (60, 18),
+            (40, 20),
+        ] {
+            app.compact_pages[ModuleId::Intel.index()] = 0;
+            app.scrolls.intel_extracted = 0;
+            let buffer = render(&mut app, width, height);
+            let text = buffer_text(&buffer);
+            if width >= 80 {
+                assert!(text.contains("60/100"));
+                assert!(!text.contains(" assessment "));
+            }
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("intel-actors-without-claims-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+            app.scrolls.intel_extracted = super::super::ui::intel_extracted_scroll_max(&app);
+            let _ = render(&mut app, width, height);
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("intel-actors-tail-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+            app.compact_pages[ModuleId::Intel.index()] = 1;
+            app.scrolls.intel_brief = 0;
+            app.set_focus(Target::IntelFullArticle);
+            let geometry = super::super::ui::intel_center_geometry_for(&app).unwrap();
+            app.scrolls.intel_brief =
+                (geometry.brief.3 + 3).min(super::super::ui::intel_brief_scroll_max(&app));
+            app.intel_body_running.insert(article.id.clone());
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("intel-body-bordered-loading-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+            app.intel_body_running.clear();
+            app.intel_body_message = "Acquisition failed · retained previous insights".into();
+            app.intel_body = Some(body.clone());
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("intel-body-bordered-error-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+            let text="A complete retained article paragraph with qualifications, attribution and Unicode Zoë. ".repeat(120);
+            app.store
+                .commit_article_body(
+                    &body.id,
+                    &text,
+                    "fixture",
+                    "complete",
+                    "fixture",
+                    &article.url,
+                    "fixture",
+                    false,
+                )
+                .unwrap();
+            app.intel_body = app.store.article_body_for_article(&article.id).unwrap();
+            app.intel_body_message.clear();
+            app.scrolls.intel_full = 0;
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("intel-body-bordered-long-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+            if width >= 60 {
+                let _ = render(&mut app, width, height);
+                let body_rect = app
+                    .layout
+                    .borrow()
+                    .entries
+                    .iter()
+                    .find(|e| e.target == Target::IntelFullArticle)
+                    .expect("Full article focus target")
+                    .rect;
+                assert_eq!(
+                    super::super::ui::hit_test(&app, body_rect.x + 1, body_rect.y + 1),
+                    Some(Target::IntelFullArticle)
+                );
+                assert!(super::super::ui::focus_order(&app).contains(&Target::IntelFullArticle));
+                app.set_focus(Target::IntelFullArticle);
+                let parent = app.scrolls.intel_brief;
+                app.move_vertical(1);
+                assert!(app.scrolls.intel_full > 0);
+                assert_eq!(app.scrolls.intel_brief, parent);
+                super::super::ui::page(&mut app, 1);
+                assert!(app.scrolls.intel_full >= 6);
+                assert_eq!(app.scrolls.intel_brief, parent);
+                app.scrolls.intel_full = 0;
+                let _ = render(&mut app, width, height);
+                let more = app
+                    .layout
+                    .borrow()
+                    .entries
+                    .iter()
+                    .find(|e| e.target == Target::Button(ButtonId::IntelBodyMore))
+                    .expect("Full article See more must be reachable")
+                    .rect;
+                assert_eq!(
+                    super::super::ui::hit_test(&app, more.x + 1, more.y + 1),
+                    Some(Target::Button(ButtonId::IntelBodyMore))
+                );
+                assert!(super::super::ui::focus_order(&app)
+                    .contains(&Target::Button(ButtonId::IntelBodyMore)));
+                let saved = app.scrolls.intel_brief;
+                app.activate_button(ButtonId::IntelBodyMore);
+                assert!(
+                    matches!(&app.overlay,Overlay::Block {title,body} if title=="Full article" && body==&text)
+                );
+                app.handle_key(crossterm::event::KeyCode::Esc.into());
+                assert_eq!(app.scrolls.intel_brief, saved);
+                app.scrolls.intel_full = u16::MAX;
+                let _ = render(&mut app, width, height);
+                assert!(
+                    !app.layout
+                        .borrow()
+                        .entries
+                        .iter()
+                        .any(|e| e.target == Target::Button(ButtonId::IntelBodyMore)),
+                    "See more disappears at the bottom"
+                );
+            }
+            app.intel_body = None;
+            app.intel_body_message.clear();
+            app.scrolls.intel_brief = 0;
+            app.scrolls.intel_full = 0;
+            app.scrolls.intel_extracted = 0;
+        }
+        app.module = Some(ModuleId::Jobs);
+        app.jobs.reload(&app.store);
+        app.set_focus(Target::Button(ButtonId::JobsClearOld));
+        for (width, height) in [(160, 50), (80, 24), (60, 18)] {
+            let buffer = render(&mut app, width, height);
+            assert!(buffer_text(&buffer).contains("Clear old jobs"));
+            let target = app
+                .layout
+                .borrow()
+                .entries
+                .iter()
+                .find(|entry| entry.target == Target::Button(ButtonId::JobsClearOld))
+                .unwrap()
+                .rect;
+            assert_eq!(
+                super::super::ui::hit_test(&app, target.x + 1, target.y + 1),
+                Some(Target::Button(ButtonId::JobsClearOld))
+            );
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("jobs-clear-old-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
         }
     }
 

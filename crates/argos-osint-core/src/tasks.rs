@@ -366,6 +366,7 @@ pub fn backoff_delay(attempt: u32) -> Duration {
 
 /// Apply the shared durable-task schema (versioned by the caller via store migrate).
 pub fn migrate_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(include_str!("schema_article_refresh.sql"))?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS argos_jobs (
@@ -718,6 +719,9 @@ pub fn enqueue_job(conn: &Connection, job: &NewJob, now: &str) -> Result<()> {
 
 /// Register a job before launching work. Idempotent on `job.id`.
 pub fn enqueue_job_with(conn: &Connection, job: &NewJob, meta: &JobMeta, now: &str) -> Result<()> {
+    crate::job_cleanup::register_reference(conn, &job.id, &meta.resource_ref, &meta.operation)?;
+    crate::job_cleanup::register_reference(conn, &job.id, &job.owner_scope, &meta.operation)?;
+    crate::job_cleanup::ensure_admissible(conn, &job.id, now)?;
     conn.execute(
         "INSERT OR IGNORE INTO argos_jobs(id,kind,owner_scope,input_revision,state,created_at,updated_at,deadline_at,
             parent_id,app,operation,title,run_ref,resource_ref,correlation_id,queued_at)
@@ -742,6 +746,7 @@ pub fn enqueue_job_with(conn: &Connection, job: &NewJob, meta: &JobMeta, now: &s
 }
 
 pub fn enqueue_task(conn: &Connection, task: &NewTask, now: &str) -> Result<bool> {
+    crate::job_cleanup::ensure_admissible(conn, &task.job_id, now)?;
     if !task.dedupe_key.is_empty() {
         let existing: Option<String> = conn
             .query_row(
@@ -875,6 +880,8 @@ fn claim_with(
             blocked_reason=''
          WHERE id = {selector}
            AND state IN ('queued','retry_scheduled')
+           AND EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=argos_tasks.job_id AND julianday(j.created_at)>=julianday(?3)-3 AND j.cancel_requested=0)
+           AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=argos_tasks.job_id)
          RETURNING id, job_id, operation, lease_epoch, attempts, max_attempts,
                    input_ref, input_hash, source_revision, created_at, retry_since, queue_ms"
     );
@@ -998,8 +1005,10 @@ pub fn complete_claimed(
     let n = conn.execute(
         "UPDATE argos_tasks SET state='completed', result_ref=?1, lease_owner='', lease_until='',
             error_category='', error_message='', updated_at=?2, finished_at=?2, active_ms=active_ms+?3
-         WHERE id=?4 AND lease_owner=?5 AND lease_epoch=?6 AND state='running'",
-        params![result_ref, now, duration, claimed.id, claimed.owner, claimed.epoch],
+         WHERE id=?4 AND lease_owner=?5 AND lease_epoch=?6 AND state='running' AND job_id=?7
+           AND EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=argos_tasks.job_id AND julianday(j.created_at)>=julianday(?2)-3 AND j.cancel_requested=0)
+           AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=argos_tasks.job_id)",
+        params![result_ref, now, duration, claimed.id, claimed.owner, claimed.epoch, claimed.job_id],
     )?;
     if n == 0 {
         return Ok(false);
@@ -1030,15 +1039,15 @@ pub fn fail_claimed(
             "UPDATE argos_tasks SET state='retry_scheduled', next_eligible_at=?1, error_category=?2,
                 error_message=?3, lease_owner='', lease_until='', updated_at=?4, retry_since=?4,
                 active_ms=active_ms+?5
-             WHERE id=?6 AND lease_owner=?7 AND lease_epoch=?8 AND state='running'",
-            params![next, error.category.as_str(), message, now, duration, claimed.id, claimed.owner, claimed.epoch],
+             WHERE id=?6 AND lease_owner=?7 AND lease_epoch=?8 AND state='running' AND job_id=?9",
+            params![next, error.category.as_str(), message, now, duration, claimed.id, claimed.owner, claimed.epoch, claimed.job_id],
         )?
     } else {
         conn.execute(
             "UPDATE argos_tasks SET state='failed', error_category=?1, error_message=?2,
                 lease_owner='', lease_until='', updated_at=?3, finished_at=?3, active_ms=active_ms+?4
-             WHERE id=?5 AND lease_owner=?6 AND lease_epoch=?7 AND state='running'",
-            params![error.category.as_str(), message, now, duration, claimed.id, claimed.owner, claimed.epoch],
+             WHERE id=?5 AND lease_owner=?6 AND lease_epoch=?7 AND state='running' AND job_id=?8",
+            params![error.category.as_str(), message, now, duration, claimed.id, claimed.owner, claimed.epoch, claimed.job_id],
         )?
     };
     if n == 0 {
@@ -1077,7 +1086,9 @@ pub fn block_claimed(
     let n = conn.execute(
         "UPDATE argos_tasks SET state='paused', blocked_reason=?1, attempts=MAX(attempts-1,0),
             lease_owner='', lease_until='', updated_at=?2
-         WHERE id=?3 AND lease_owner=?4 AND lease_epoch=?5 AND state='running'",
+         WHERE id=?3 AND lease_owner=?4 AND lease_epoch=?5 AND state='running'
+           AND EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=argos_tasks.job_id AND julianday(j.created_at)>=julianday(?2)-3 AND j.cancel_requested=0)
+           AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=argos_tasks.job_id)",
         params![reason, now, claimed.id, claimed.owner, claimed.epoch],
     )?;
     if n == 0 {
@@ -1203,7 +1214,9 @@ pub fn renew_lease(
     let lease_until = lease_deadline(now, lease_secs);
     let n = conn.execute(
         "UPDATE argos_tasks SET lease_until=?1, updated_at=?2, heartbeat_at=?2
-         WHERE id=?3 AND lease_owner=?4 AND lease_epoch=?5 AND state='running'",
+         WHERE id=?3 AND lease_owner=?4 AND lease_epoch=?5 AND state='running'
+           AND EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=argos_tasks.job_id AND julianday(j.created_at)>=julianday(?2)-3 AND j.cancel_requested=0)
+           AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=argos_tasks.job_id)",
         params![lease_until, now, id, owner, epoch],
     )?;
     Ok(n > 0)
@@ -1480,13 +1493,27 @@ pub fn ensure_service_job(
     app: &str,
     title: &str,
     now: &str,
-) -> Result<()> {
+) -> Result<String> {
+    let existing: Option<String> = conn.query_row("SELECT id FROM argos_jobs WHERE kind='service' AND (id=?1 OR id LIKE ?2) AND julianday(created_at)>=julianday(?3)-3 AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=argos_jobs.id) ORDER BY julianday(created_at) DESC LIMIT 1",params![id,format!("{id}:g:%"),now],|r|r.get(0)).optional()?;
+    let id = if let Some(existing) = existing {
+        existing
+    } else if crate::job_cleanup::retired(conn, id)?
+        || conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM argos_jobs WHERE id=?1)",
+            [id],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        format!("{id}:g:{}", crate::job_registry::new_job_id("service"))
+    } else {
+        id.to_owned()
+    };
     conn.execute(
         "INSERT OR IGNORE INTO argos_jobs(id,kind,owner_scope,input_revision,state,created_at,updated_at,deadline_at,app,operation,title,queued_at)
          VALUES (?1,'service',?2,'','running',?3,?3,'',?2,'service',?4,?3)",
         params![id, app, now, title],
     )?;
-    Ok(())
+    Ok(id)
 }
 
 /// One durable index-outbox row and its leased task.
@@ -1556,10 +1583,7 @@ pub fn enqueue_index_work(
     }
     let job_id = match parent_job {
         Some(job) if !job.is_empty() => job.to_string(),
-        _ => {
-            ensure_service_job(conn, INDEX_SERVICE_JOB, "brain", "Local index worker", now)?;
-            INDEX_SERVICE_JOB.to_string()
-        }
+        _ => ensure_service_job(conn, INDEX_SERVICE_JOB, "brain", "Local index worker", now)?,
     };
     conn.execute(
         "INSERT INTO argos_index_changes(record_kind,record_id,revision,operation,state,created_at,updated_at,work_key,content_hash,job_id)
@@ -1639,13 +1663,17 @@ pub fn adopt_untracked_index_changes(conn: &Connection, now: &str) -> Result<usi
             )?;
             continue;
         }
-        ensure_service_job(conn, INDEX_SERVICE_JOB, "brain", "Local index worker", now)?;
-        let task_id = format!("idx-{seq}");
+        let service =
+            ensure_service_job(conn, INDEX_SERVICE_JOB, "brain", "Local index worker", now)?;
+        let task_id = format!(
+            "idx-{seq}:{}",
+            crate::job_registry::new_job_id("index-adoption")
+        );
         enqueue_task(
             conn,
             &NewTask {
                 id: task_id.clone(),
-                job_id: INDEX_SERVICE_JOB.into(),
+                job_id: service.clone(),
                 operation: op.into(),
                 dedupe_key: String::new(),
                 priority: 70,
@@ -1659,7 +1687,7 @@ pub fn adopt_untracked_index_changes(conn: &Connection, now: &str) -> Result<usi
         )?;
         conn.execute(
             "UPDATE argos_index_changes SET task_id=?1, work_key=?2, operation=?3, state='pending', job_id=?4, updated_at=?5 WHERE seq=?6",
-            params![task_id, key, op, INDEX_SERVICE_JOB, now, seq],
+            params![task_id, key, op, service, now, seq],
         )?;
         adopted += 1;
     }

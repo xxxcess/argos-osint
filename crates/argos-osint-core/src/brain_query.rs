@@ -109,7 +109,7 @@ pub fn insight_metadata(
     memory_id: &str,
 ) -> anyhow::Result<Option<InsightMetadata>> {
     use rusqlite::OptionalExtension;
-    let row = conn.query_row("SELECT d.insight_kind,d.assessment_json,CASE WHEN h.active_snapshot_id=s.id THEN h.lifecycle ELSE 'previous' END,s.id,d.revision,m.text FROM insight_derivations d JOIN memories m ON m.id=d.memory_id JOIN insight_snapshots s ON s.id=d.snapshot_id JOIN insight_owner_state h ON h.owner_kind=s.owner_kind AND h.owner_id=s.owner_id WHERE d.memory_id=?1 AND d.status<>'deleted' ORDER BY (h.active_snapshot_id=s.id) DESC,s.created_at DESC,s.id DESC LIMIT 1",[memory_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?))).optional()?;
+    let row = conn.query_row("SELECT d.insight_kind,d.assessment_json,CASE WHEN h.active_snapshot_id=s.id THEN h.lifecycle ELSE 'previous' END,s.id,d.revision,m.text FROM insight_derivations d JOIN memories m ON m.id=d.memory_id JOIN insight_snapshots s ON s.id=d.snapshot_id JOIN insight_owner_state h ON h.owner_kind=s.owner_kind AND h.owner_id=s.owner_id WHERE d.memory_id=?1 AND d.status NOT IN ('deleted','retired') ORDER BY (h.active_snapshot_id=s.id) DESC,s.created_at DESC,s.id DESC LIMIT 1",[memory_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?))).optional()?;
     row.map(
         |(insight_kind, assessment, lifecycle, snapshot_id, revision, text)| {
             let current_revision = crate::store::memory_revision(&text);
@@ -152,7 +152,7 @@ pub fn load_memory_evidence(
     memory_id: &str,
 ) -> anyhow::Result<Option<MemoryEvidence>> {
     use rusqlite::OptionalExtension;
-    let row:Option<(String,String,String,String,String,String)>=conn.query_row("SELECT m.text,d.insight_kind,d.assessment_json,s.owner_kind,s.owner_id,d.id FROM memories m JOIN insight_derivations d ON d.memory_id=m.id JOIN insight_snapshots s ON s.id=d.snapshot_id WHERE m.id=?1 ORDER BY s.generation DESC LIMIT 1",[memory_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+    let row:Option<(String,String,String,String,String,String)>=conn.query_row("SELECT m.text,d.insight_kind,d.assessment_json,s.owner_kind,s.owner_id,d.id FROM memories m JOIN insight_derivations d ON d.memory_id=m.id JOIN insight_snapshots s ON s.id=d.snapshot_id WHERE m.id=?1 AND d.status NOT IN ('deleted','retired') ORDER BY s.generation DESC LIMIT 1",[memory_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
     let Some((text, kind, assessment, owner_kind, owner_id, derivation)) = row else {
         return load_legacy_memory_evidence(conn, memory_id);
     };

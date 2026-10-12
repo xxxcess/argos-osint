@@ -364,7 +364,7 @@ impl Store {
     pub fn article_origins_for_memory(&self, memory_id: &str) -> Result<Vec<ArticleOrigin>> {
         // Resolve each source independently: exact ids first, explicit URLs only as fallback.
         let mut refs: Vec<(Option<String>, String, Option<String>)> = Vec::new();
-        let mut stmt=self.conn.prepare("SELECT s.owner_kind,s.owner_id,e.source_id,e.evidence_json FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id LEFT JOIN insight_derivation_evidence e ON e.derivation_id=d.id WHERE d.memory_id=?1 AND d.status<>'deleted'")?;
+        let mut stmt=self.conn.prepare("SELECT s.owner_kind,s.owner_id,e.source_id,e.evidence_json FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id LEFT JOIN insight_derivation_evidence e ON e.derivation_id=d.id WHERE d.memory_id=?1 AND d.status NOT IN ('deleted','retired')")?;
         for row in stmt.query_map([memory_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,

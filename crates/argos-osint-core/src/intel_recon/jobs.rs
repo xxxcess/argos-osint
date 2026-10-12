@@ -144,11 +144,10 @@ pub fn create_report_job(
     let revision = store.next_job_revision(&article.id, mode.as_str())?;
     // Insight generations are article-owned; report mode/revision generations
     // cannot independently publish competing article baselines.
-    let insight_generation = crate::investigation::insight_persist::advance_generation(
+    let insight_generation = crate::investigation::insight_persist::desired_generation(
         &store.conn,
         "article",
         &article.id,
-        &chrono::Utc::now().to_rfc3339(),
     )?;
 
     let budget = serde_json::json!({
@@ -213,13 +212,6 @@ pub fn create_report_job(
         &serde_json::json!([collect]).to_string(),
         "pending",
     )?;
-    let refresh = store.insert_report_task(
-        &job.id,
-        "refresh_insights",
-        "",
-        &serde_json::json!([assess]).to_string(),
-        "pending",
-    )?;
 
     let include_bluf = plan.iter().any(|section| section.key == "bluf");
     let mut section_task_ids = Vec::new();
@@ -231,7 +223,7 @@ pub fn create_report_job(
             &job.id,
             "synthesize",
             section.key,
-            &serde_json::json!([refresh]).to_string(),
+            &serde_json::json!([assess]).to_string(),
             "pending",
         )?;
         section_task_ids.push(tid);
@@ -239,7 +231,7 @@ pub fn create_report_job(
     let mut finalize_deps = section_task_ids.clone();
     if include_bluf {
         let bluf_deps = if section_task_ids.is_empty() {
-            serde_json::json!([refresh])
+            serde_json::json!([assess])
         } else {
             serde_json::json!(section_task_ids.clone())
         };

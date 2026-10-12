@@ -325,14 +325,16 @@ impl WorkerPool {
                     // Service-health row; batches/tasks supply the job history.
                     if loops.is_multiple_of(40) {
                         let now = chrono::Utc::now().to_rfc3339();
-                        let _ = tasks::ensure_service_job(
+                        let service = tasks::ensure_service_job(
                             &conn,
                             SUMMARY_SERVICE_JOB,
                             "brain",
                             "Summary flush worker",
                             &now,
                         );
-                        let _ = tasks::refresh_job_state(&conn, SUMMARY_SERVICE_JOB, &now);
+                        if let Ok(service) = service {
+                            let _ = tasks::refresh_job_state(&conn, &service, &now);
+                        }
                     }
                     loops = loops.wrapping_add(1);
                     let _ = drain_summary_flush(&conn, &owner, secret.as_ref());
@@ -345,6 +347,9 @@ impl WorkerPool {
 
     /// Spawn the default local pools (index + summary) for one state root.
     pub fn spawn_default(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
+        if let Ok(store) = crate::store::Store::open(&db_path) {
+            let _ = store.clear_old_jobs();
+        }
         let owner = process_owner();
         vec![
             Self::spawn_index_drainer(db_path.clone(), owner.clone()),

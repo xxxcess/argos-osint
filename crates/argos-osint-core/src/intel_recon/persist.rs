@@ -82,7 +82,7 @@ pub struct IntelInvestigationRow {
     pub updated_at: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IntelReportJobRow {
     pub id: String,
     pub investigation_id: String,
@@ -129,7 +129,7 @@ pub struct IntelReportTaskRow {
     pub lease_epoch: i64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IntelReportSectionRow {
     pub id: String,
     pub job_id: String,
@@ -572,7 +572,25 @@ impl Store {
              ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([article_id], job_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut jobs = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let retained = self.conn.prepare("SELECT details_json FROM intel_report_results WHERE article_id=?1 AND job_id NOT IN (SELECT id FROM intel_report_jobs) ORDER BY completion_sequence DESC")?.query_map([article_id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for json in retained {
+            let bundle: serde_json::Value = serde_json::from_str(&json)?;
+            if let Ok(mut job) = serde_json::from_value::<IntelReportJobRow>(bundle["job"].clone())
+            {
+                job.state = "completed".into();
+                job.stage = "Job history expired · retained result".into();
+                jobs.push(job);
+            }
+        }
+        jobs.retain(|j| {
+            j.stage.starts_with("Job history expired")
+                || chrono::DateTime::parse_from_rfc3339(&j.started_at).is_ok_and(|t| {
+                    t.with_timezone(&chrono::Utc)
+                        >= chrono::Utc::now() - chrono::Duration::hours(72)
+                })
+        });
+        Ok(jobs)
     }
 
     pub fn active_intel_job(
@@ -753,7 +771,16 @@ impl Store {
              FROM intel_report_sections WHERE job_id=?1 ORDER BY ordinal",
         )?;
         let rows = stmt.query_map([job_id], section_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let sections = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        if !sections.is_empty() {
+            return Ok(sections);
+        }
+        let retained:Option<String> = self.conn.query_row("SELECT details_json FROM intel_report_results WHERE job_id=?1 ORDER BY generation DESC LIMIT 1",[job_id],|r|r.get(0)).optional()?;
+        if let Some(json) = retained {
+            let bundle: serde_json::Value = serde_json::from_str(&json)?;
+            return Ok(serde_json::from_value(bundle["sections"].clone()).unwrap_or_default());
+        }
+        Ok(sections)
     }
 
     pub fn upsert_report_section_markdown(
@@ -767,6 +794,8 @@ impl Store {
         assessment_version: i64,
         waiting_on: &str,
     ) -> Result<()> {
+        let eligible: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM intel_report_jobs WHERE id=?1 AND state NOT IN ('cancelled','failed') AND julianday(started_at)>=julianday('now')-3 AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=intel_report_jobs.id))",[job_id],|r|r.get(0))?;
+        anyhow::ensure!(eligible, "report retired before section commit");
         self.conn.execute(
             "UPDATE intel_report_sections SET
                 markdown=?3, status=?4, evidence_ids_json=?5, judgment_json=?6,
@@ -852,6 +881,10 @@ impl Store {
         owner: &str,
         lease_secs: i64,
     ) -> Result<Option<IntelReportTaskRow>> {
+        let eligible:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM intel_report_jobs WHERE id=?1 AND state NOT IN ('cancelled','paused','failed','completed') AND julianday(started_at)>=julianday('now')-3 AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=?1))",[job_id],|r|r.get(0))?;
+        if !eligible {
+            return Ok(None);
+        }
         let tasks = self.intel_report_tasks(job_id)?;
         let completed: std::collections::HashSet<String> = tasks
             .iter()
@@ -926,7 +959,8 @@ impl Store {
             "UPDATE intel_report_tasks SET
                 status='completed', output_ref=?2, lease_owner='', lease_until='',
                 error='', updated_at=?3
-             WHERE id=?1 AND lease_epoch=?4",
+             WHERE id=?1 AND lease_epoch=?4
+               AND EXISTS(SELECT 1 FROM intel_report_jobs j WHERE j.id=intel_report_tasks.job_id AND j.state<>'cancelled' AND julianday(j.started_at)>=julianday('now')-3 AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=j.id))",
             params![id, output_ref, now(), lease_epoch],
         )?;
         Ok(updated == 1)

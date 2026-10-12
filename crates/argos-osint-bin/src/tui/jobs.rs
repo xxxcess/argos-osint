@@ -13,9 +13,7 @@ use ratatui::Frame;
 use super::app::{App, ButtonId, FieldId, Target};
 use super::logs::local_time;
 use super::theme;
-use super::ui::{
-    button_areas, contains, draw_button_state, draw_field, fit, inset, pane, ACTION_H, FIELD_H,
-};
+use super::ui::{contains, draw_button_state, draw_field, fit, inset, pane, ACTION_H, FIELD_H};
 
 pub const PAGE: usize = 200;
 /// Below this body width the table and detail share one panel.
@@ -181,7 +179,21 @@ pub struct JobsAreas {
 pub fn areas(body: Rect, view: &JobsView) -> JobsAreas {
     let summary_h = 1.min(body.height);
     let search_h = FIELD_H.min(body.height.saturating_sub(summary_h));
-    let actions_h = ACTION_H.min(body.height.saturating_sub(summary_h + search_h));
+    let ids = buttons(view, true);
+    let labels = ids
+        .iter()
+        .map(|id| button_label(view, *id))
+        .collect::<Vec<_>>();
+    let refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let virtual_rects = super::components::wrapped_action_rects(
+        Rect::new(0, 0, body.width, u16::MAX),
+        &refs,
+        ACTION_H,
+    );
+    let required = virtual_rects
+        .last()
+        .map_or(ACTION_H, |r| r.y.saturating_add(r.height));
+    let actions_h = required.min(body.height.saturating_sub(summary_h + search_h));
     let rest_y = body.y + summary_h + search_h + actions_h;
     let rest_h = body.height.saturating_sub(summary_h + search_h + actions_h);
     let at = |offset: u16, height: u16| Rect {
@@ -240,7 +252,11 @@ pub fn areas(body: Rect, view: &JobsView) -> JobsAreas {
 /// Action buttons in paint/hit order. Retry and Open source appear only when
 /// they are truthful for the selected job.
 pub fn buttons(view: &JobsView, can_open_source: bool) -> Vec<ButtonId> {
-    let mut out = vec![ButtonId::JobsStatus, ButtonId::JobsApp];
+    let mut out = vec![
+        ButtonId::JobsStatus,
+        ButtonId::JobsApp,
+        ButtonId::JobsClearOld,
+    ];
     if view.selected().is_some() {
         out.push(ButtonId::JobsViewLogs);
     }
@@ -270,9 +286,22 @@ fn button_label(view: &JobsView, button: ButtonId) -> String {
         ButtonId::JobsViewLogs => "View logs".into(),
         ButtonId::JobsRetry => "Retry failed".into(),
         ButtonId::JobsCancel => "Cancel".into(),
+        ButtonId::JobsClearOld => "Clear old jobs".into(),
         ButtonId::JobsOpenSource => "Open source".into(),
         _ => String::new(),
     }
+}
+
+fn action_geometry(area: Rect, view: &JobsView, ids: &[ButtonId]) -> Vec<Rect> {
+    let labels = ids
+        .iter()
+        .map(|id| button_label(view, *id))
+        .collect::<Vec<_>>();
+    super::components::wrapped_action_rects(
+        area,
+        &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+        ACTION_H,
+    )
 }
 
 pub fn summary_text(counts: &JobCounts) -> String {
@@ -587,7 +616,7 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect, can_open_source: bool) {
     );
     draw_field(frame, app, FieldId::JobsSearch, "filter", a.search);
     let ids = buttons(view, can_open_source);
-    for (button, rect) in ids.iter().zip(button_areas(a.actions, ids.len())) {
+    for (button, rect) in ids.iter().zip(action_geometry(a.actions, view, &ids)) {
         draw_button_state(
             frame,
             app,
@@ -691,7 +720,7 @@ pub fn hit(app: &App, body: Rect, x: u16, y: u16, can_open_source: bool) -> Opti
         let ids = buttons(view, can_open_source);
         return ids
             .iter()
-            .zip(button_areas(a.actions, ids.len()))
+            .zip(action_geometry(a.actions, view, &ids))
             .find(|(_, rect)| contains(*rect, x, y))
             .map(|(button, _)| Target::Button(*button));
     }

@@ -63,6 +63,10 @@ impl SourceReliability {
         }
     }
 
+    pub fn brief_score(self) -> Option<f64> {
+        (self != Self::F).then(|| self.meter() * 100.0)
+    }
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_uppercase().as_str() {
             "A" => Some(Self::A),
@@ -88,6 +92,9 @@ pub enum InformationCredibility {
 }
 
 impl InformationCredibility {
+    pub fn brief_score(self) -> Option<f64> {
+        (self != Self::CannotBeJudged).then(|| self.meter() * 100.0)
+    }
     pub fn as_u8(self) -> u8 {
         self as u8
     }

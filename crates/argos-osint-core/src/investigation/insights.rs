@@ -8,8 +8,8 @@ use serde_json::Value;
 pub use crate::nlp::EntityCandidate;
 use crate::nlp::{cache::hash, spans::paragraphs, Span};
 
-pub const CONTRACT: &str = "insights-v1";
-pub const READINESS_POLICY: &str = "readiness-v1";
+pub const CONTRACT: &str = "insights-v2";
+pub const READINESS_POLICY: &str = "readiness-v2";
 pub const ARTICLE_CLAIM_LIMIT: usize = 8;
 pub const RECON_CLAIM_LIMIT: usize = 5;
 pub const INFERENCE_LIMIT: usize = 5;
@@ -292,6 +292,7 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     ]));
     {
         let store = crate::store::Store::open(db_path)?;
+        super::insight_persist::validate_dispatch(&store.conn, input)?;
         let saved: Option<(String, String)> = store
             .conn
             .query_row(
@@ -382,13 +383,18 @@ pub async fn run_pipeline(
         "atlas" => Surface::Atlas,
         "article" => Surface::Article,
         "recon" => Surface::Recon,
+        "recon_report" => Surface::Report,
         _ => anyhow::bail!("unknown insight surface"),
     };
     let cap = match surface {
         Surface::Atlas => 1,
         Surface::Recon => RECON_CLAIM_LIMIT,
-        Surface::Article => ARTICLE_CLAIM_LIMIT,
+        Surface::Article | Surface::Report => ARTICLE_CLAIM_LIMIT,
     };
+    ensure!(
+        input.surface != "article" || super::insight_persist::article_details_eligible(input),
+        "waiting for complete article details"
+    );
     let mut output = PipelineOutput::default();
     // Preparation never discards evidence for full-coverage stages, even with NLP off.
     for evidence in &input.evidence {
@@ -507,6 +513,60 @@ pub async fn run_pipeline(
                 db_path,
             )
             .await?;
+            claim.support_receipts.clear();
+            if claim.assessment.faithful() && surface == Surface::Report {
+                let store = crate::store::Store::open(db_path)?;
+                let details: String = store.conn.query_row(
+                    "SELECT details_json FROM intel_report_results WHERE source_hash=?1",
+                    [&evidence.reference.acquisition_id],
+                    |r| r.get(0),
+                )?;
+                let bundle: Value = serde_json::from_str(&details)?;
+                if let Some(entries) = bundle["support_receipts"].as_array() {
+                    for entry in entries {
+                        if entry[0]
+                            .as_str()
+                            .is_some_and(|s| normalized(s) == normalized(&claim.text))
+                        {
+                            if let Some(json) = entry[1].as_str() {
+                                let receipts: Vec<SupportReceipt> = serde_json::from_str(json)?;
+                                for receipt in receipts {
+                                    if receipt.threshold_passed && !receipt.lineage.is_empty() {
+                                        claim.support_receipts.push(receipt);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if claim.assessment.faithful() && matches!(surface, Surface::Article | Surface::Recon) {
+                for reference in &claim.evidence_refs {
+                    let relation = assess_fidelity(
+                        input,
+                        "corroboration",
+                        &claim.id,
+                        &claim.text,
+                        std::slice::from_ref(reference),
+                        auth,
+                        settings,
+                        cancel,
+                        db_path,
+                    )
+                    .await?;
+                    if relation.threshold_passed
+                        && matches!(relation.relation.as_str(), "supports" | "contradicts")
+                    {
+                        claim.support_receipts.push(SupportReceipt {
+                            source: reference.clone(),
+                            relation: relation.relation.clone(),
+                            threshold_passed: true,
+                            lineage: input.snapshot.key.clone(),
+                        });
+                        claim.assessment.relation = relation.relation;
+                    }
+                }
+            }
             if !output
                 .claims
                 .iter()
@@ -618,6 +678,12 @@ pub async fn run_pipeline(
                     if relation.threshold_passed
                         && matches!(relation.relation.as_str(), "supports" | "contradicts")
                     {
+                        claim.support_receipts.push(SupportReceipt {
+                            source: reference.clone(),
+                            relation: relation.relation.clone(),
+                            threshold_passed: true,
+                            lineage: input.snapshot.key.clone(),
+                        });
                         if relation.relation == "contradicts"
                             || claim.assessment.relation != "contradicts"
                         {
@@ -630,13 +696,6 @@ pub async fn run_pipeline(
                 }
             }
         }
-    }
-    if output.claims.len() > cap {
-        output.limit_reached = true;
-        output.partial_enumeration = true;
-        // Later windows can qualify or correct earlier assertions. Do not stop
-        // examining evidence when the display cap is reached.
-        output.claims.drain(..output.claims.len() - cap);
     }
     input.snapshot.assessed_claim_refs = output.claims.iter().map(|c| c.id.clone()).collect();
     output.entities = input.snapshot.entities.clone();
@@ -1295,6 +1354,7 @@ async fn assess_fidelity(
     ]));
     {
         let store = crate::store::Store::open(db_path)?;
+        super::insight_persist::validate_dispatch(&store.conn, input)?;
         let saved: Option<(String, String)> = store
             .conn
             .query_row(
@@ -1464,6 +1524,18 @@ pub struct SourceClaim {
     pub evidence_refs: Vec<EvidenceRef>,
     pub extraction_scope: String,
     pub assessment: Assessment,
+    #[serde(default)]
+    pub support_receipts: Vec<SupportReceipt>,
+}
+
+/// A passed relation decision against a particular retained passage. Neither
+/// a pooled citation nor a textual-fidelity decision creates this receipt.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SupportReceipt {
+    pub source: EvidenceRef,
+    pub relation: String,
+    pub threshold_passed: bool,
+    pub lineage: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1551,6 +1623,7 @@ pub enum Surface {
     Atlas,
     Article,
     Recon,
+    Report,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Readiness {
@@ -1581,7 +1654,7 @@ pub fn readiness(
         .filter(|e| {
             e.relevant
                 && e.substantive
-                && (surface == Surface::Article
+                && (matches!(surface, Surface::Article | Surface::Report)
                     || claims.iter().any(|c| {
                         c.assessment.faithful() && c.evidence_refs.iter().any(|r| e.validate_ref(r))
                     }))
@@ -1590,7 +1663,7 @@ pub fn readiness(
                     || e.reference.source_id.starts_with("body:"))
         })
         .collect();
-    if surface == Surface::Article {
+    if matches!(surface, Surface::Article | Surface::Report) {
         if !relevant
             .iter()
             .any(|e| e.complete_story && !e.known_truncation)
@@ -1621,17 +1694,19 @@ pub fn readiness(
                 .push("fewer than two relevant substantive acquisition roots".into());
         }
     }
-    if !claims.iter().any(|c| {
-        c.assessment.faithful()
-            && !c.evidence_refs.is_empty()
-            && c.evidence_refs
-                .iter()
-                .all(|r| evidence.iter().any(|e| e.validate_ref(r)))
-    }) {
+    if !matches!(surface, Surface::Article | Surface::Report)
+        && !claims.iter().any(|c| {
+            c.assessment.faithful()
+                && !c.evidence_refs.is_empty()
+                && c.evidence_refs
+                    .iter()
+                    .all(|r| evidence.iter().any(|e| e.validate_ref(r)))
+        })
+    {
         out.gaps.push("no faithfully assessed cited premise".into());
     }
     out.input_eligible = out.gaps.is_empty();
-    if surface == Surface::Article
+    if matches!(surface, Surface::Article | Surface::Report)
         && !relevant.iter().all(|e| {
             coverage
                 .iter()
@@ -2098,6 +2173,7 @@ mod tests {
     }
     fn premise(e: &RetainedEvidence) -> SourceClaim {
         SourceClaim {
+            support_receipts: Vec::new(),
             id: "c".into(),
             subject_ref: "body:a:entity:acme".into(),
             predicate: "opened".into(),
@@ -2304,6 +2380,7 @@ mod tests {
     #[test]
     fn qualified_assertions_do_not_merge() {
         let mut claim = SourceClaim {
+            support_receipts: Vec::new(),
             id: "c".into(),
             subject_ref: "source:actor".into(),
             predicate: "said".into(),

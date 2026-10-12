@@ -40,7 +40,8 @@ pub use classify_mode::{
     heuristic_prompt_mode, parse_mode_choice, parse_mode_from_chat, ModeClassifyInput,
     PromptModeClassifyInput,
 };
-pub use confidence::{article_confidence, EvidenceConfidence};
+pub(crate) use confidence::persist_article_rating;
+pub use confidence::{article_confidence, initial_rating, EvidenceConfidence};
 pub use jobs::{
     active_job_for_mode, cancel_job, create_report_job, pause_job, resume_job, retry_failed_tasks,
     scoped_section_plan, start_report_worker, IntelReportEvent, ReportScope,

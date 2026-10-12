@@ -39,7 +39,6 @@ pub const INDEXING_DISABLED_LINE: &str = "Saved; semantic indexing disabled";
 pub const MISSING_PAYLOAD_LINE: &str = "Extraction data missing; re-extraction required";
 
 const REPAIR_PROGRESS_KEY: &str = "atlas_memory_repair_progress";
-const STARTUP_REPAIR_KEY: &str = "atlas_memory_repair_v1";
 
 /// State of one independently tracked child step of the memory lifecycle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,6 +582,7 @@ pub fn index_and_verify(
     barrier: Barrier,
     mut progress: impl FnMut(u32, u32),
 ) -> Result<Phase5Report> {
+    ensure_historical_contract(store, &receipt.run_id)?;
     let mut round = 0u32;
     loop {
         let verification = store.verify_atlas_publication(receipt)?;
@@ -737,6 +737,23 @@ fn run_row(store: &Store, run_id: &str) -> Result<Option<crate::store::AtlasRunR
         .find(|run| run.id == run_id))
 }
 
+/// Explicit historical maintenance must never create cycle memories for the
+/// classification-only contract. Read raw JSON to retain legacy compatibility.
+pub fn ensure_historical_contract(store: &Store, run_id: &str) -> Result<()> {
+    let Some(run) = run_row(store, run_id)? else {
+        anyhow::bail!("Atlas run {run_id} not found");
+    };
+    let stats: serde_json::Value = serde_json::from_str(&run.stats_json).unwrap_or_default();
+    anyhow::ensure!(
+        stats
+            .get("contract_version")
+            .and_then(serde_json::Value::as_str)
+            != Some(crate::atlas_work::COLLECTION_CONTRACT),
+        "Repair/Verify are restricted to historical Atlas contracts"
+    );
+    Ok(())
+}
+
 /// Re-verify a finished run's stored receipt and update its memory phase.
 /// Only the memory-derived state changes (e.g. `partial` → `completed` once the
 /// background pool finished indexing); extraction dates/outcomes are untouched.
@@ -745,6 +762,9 @@ pub fn refresh_run_indexing(store: &Store, run_id: &str) -> Result<Option<Memory
     let Some(run) = run_row(store, run_id)? else {
         return Ok(None);
     };
+    if ensure_historical_contract(store, run_id).is_err() {
+        return Ok(None);
+    }
     if matches!(run.state.as_str(), "running" | "paused") {
         return Ok(None);
     }
@@ -834,6 +854,7 @@ pub struct RunRepair {
 /// the run's historical extraction outcome; status lands in
 /// `argos_atlas_repairs`.
 pub fn repair_run(store: &Store, run_id: &str, job_id: Option<&str>) -> Result<RunRepair> {
+    ensure_historical_contract(store, run_id)?;
     let mut out = RunRepair {
         run_id: run_id.into(),
         status: RepairStatus::Verified,
@@ -1028,7 +1049,8 @@ pub fn repair_page(
     let ids: Vec<(String, String)> = {
         let mut stmt = store.conn.prepare(
             "SELECT started_at, id FROM atlas_runs
-             WHERE (started_at > ?1 OR (started_at = ?1 AND id > ?2))
+             WHERE (NOT json_valid(stats_json) OR COALESCE(json_extract(stats_json,'$.contract_version'),'') <> 'atlas-collection-v1')
+             AND (started_at > ?1 OR (started_at = ?1 AND id > ?2))
              ORDER BY started_at, id LIMIT ?3",
         )?;
         let rows = stmt
@@ -1040,6 +1062,7 @@ pub fn repair_page(
         rows
     };
     let mut results = Vec::new();
+    tasks::retire_atlas_insight_work(&store.conn, &chrono::Utc::now().to_rfc3339())?;
     if !progress.job_id.is_empty() {
         register_repair_job(store, &progress.job_id)?;
     }
@@ -1251,43 +1274,12 @@ pub fn spawn_repair(db_path: std::path::PathBuf, restart: bool) -> bool {
     spawned
 }
 
-/// One-time background reconciliation after the phase-5 migration; resumes an
-/// interrupted pass on the next start.
+/// Compatibility entry point: retire obsolete work without startup publication.
 pub fn spawn_startup_reconciliation(db_path: std::path::PathBuf) -> bool {
-    let Ok(store) = Store::open(&db_path) else {
-        return false;
-    };
-    if store
-        .app_state_get(STARTUP_REPAIR_KEY)
-        .ok()
-        .flatten()
-        .as_deref()
-        == Some("done")
-    {
-        return false;
+    if let Ok(store) = Store::open(&db_path) {
+        let _ = tasks::retire_atlas_insight_work(&store.conn, &chrono::Utc::now().to_rfc3339());
     }
-    drop(store);
-    if REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
-        return false;
-    }
-    std::thread::Builder::new()
-        .name("argos-atlas-reconcile".into())
-        .spawn(move || {
-            if let Ok(store) = Store::open(&db_path) {
-                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_repair_job(&store, 16, false)
-                }));
-                match ran {
-                    Ok(Ok(_)) => {
-                        let _ = store.app_state_set(STARTUP_REPAIR_KEY, "done");
-                    }
-                    Ok(Err(_)) => {}
-                    Err(_) => mark_repair_interrupted(&store, "repair stopped by a panic"),
-                }
-            }
-            REPAIR_RUNNING.store(false, Ordering::SeqCst);
-        })
-        .is_ok()
+    false
 }
 
 /// Targeted re-extraction for a run whose payload was lost: rewinds it to the
@@ -1295,6 +1287,7 @@ pub fn spawn_startup_reconciliation(db_path: std::path::PathBuf) -> bool {
 /// re-fetched) and parks it so `run_atlas` can resume that run. Returns false
 /// when no source articles are retained.
 pub fn prepare_reextraction(store: &Store, run_id: &str) -> Result<bool> {
+    ensure_historical_contract(store, run_id)?;
     let Some(run) = run_row(store, run_id)? else {
         return Ok(false);
     };
@@ -1322,45 +1315,12 @@ pub fn prepare_reextraction(store: &Store, run_id: &str) -> Result<bool> {
 }
 
 #[cfg(test)]
-pub(crate) mod testing {
-    use std::cell::RefCell;
-
-    use crate::atlas_insights::Extraction;
-
-    type Hook = Box<dyn FnMut() -> anyhow::Result<Extraction>>;
-
-    thread_local! {
-        static EXTRACT: RefCell<Option<Hook>> = RefCell::new(None);
-    }
-
-    /// Mock the synthesis model for `run_atlas` on this thread.
-    pub(crate) fn mock_extraction(hook: impl FnMut() -> anyhow::Result<Extraction> + 'static) {
-        EXTRACT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-    }
-
-    pub(crate) fn clear() {
-        EXTRACT.with(|slot| *slot.borrow_mut() = None);
-    }
-
-    pub(crate) fn take_extraction() -> Option<anyhow::Result<Extraction>> {
-        EXTRACT.with(|slot| slot.borrow_mut().as_mut().map(|hook| hook()))
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-    #[cfg(feature = "lancedb")]
-    use std::{cell::Cell, rc::Rc};
-
     use super::*;
-    use crate::atlas::{run_atlas, AtlasEvent, Cursor, RunInput, RunStats, Stop};
+    use crate::atlas::{Cursor, RunStats};
     use crate::atlas_insights::{Extraction, Settled};
     use crate::embed::testing as embed_testing;
-    use crate::secrets::ProviderSecret;
     use crate::store::AtlasArticleRow;
-
-    const RUN: &str = "atlas-p5";
 
     fn claim(entity: &str, object: &str, article: &str) -> AtlasInsightClaim {
         AtlasInsightClaim {
@@ -1411,567 +1371,6 @@ mod tests {
             warnings: Vec::new(),
             diagnostics: Vec::new(),
         }
-    }
-
-    fn secret() -> ProviderSecret {
-        ProviderSecret {
-            kind: "openrouter".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            model: "openai/gpt-4o-mini".into(),
-            api_key: Some("test".into()),
-            stt_model: None,
-            device: None,
-        }
-    }
-
-    /// Disk store with one run parked at phase 4 (after classification).
-    fn seeded(dir: &tempfile::TempDir, cursor: Cursor, state: &str) -> std::path::PathBuf {
-        let path = dir.path().join("argos.db");
-        let store = Store::open(&path).unwrap();
-        store
-            .atlas_insert_run(
-                RUN,
-                &serde_json::to_string(&cursor).unwrap(),
-                &serde_json::to_string(&RunStats::default()).unwrap(),
-            )
-            .unwrap();
-        store.atlas_set_state(RUN, state, "", false).unwrap();
-        store
-            .atlas_upsert_article(&AtlasArticleRow {
-                run_id: RUN.into(),
-                id: "art-1".into(),
-                title: "Acme opens Lisbon office; Globex moves to Porto".into(),
-                description: String::new(),
-                url: "https://news.example/art-1".into(),
-                country: "pt".into(),
-                source_name: "Desk".into(),
-                source_domain: "news.example".into(),
-                published_at: String::new(),
-                provider: "newsapi".into(),
-                temperature: 1.0,
-                category: "economic".into(),
-                seen_at: String::new(),
-                author: String::new(),
-                image_url: String::new(),
-            })
-            .unwrap();
-        path
-    }
-
-    fn phase4() -> Cursor {
-        Cursor {
-            phase: 4,
-            leg: "insights".into(),
-            from: "2026-10-04T00:00:00Z".into(),
-            ..Cursor::default()
-        }
-    }
-
-    struct Ran {
-        stop: Stop,
-        events: Vec<AtlasEvent>,
-    }
-
-    async fn run(path: &std::path::Path, synth: Option<ProviderSecret>) -> Ran {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let sink = events.clone();
-        let pause = AtomicBool::new(false);
-        let keys = crate::osint::ProviderKeys::default();
-        let stop = run_atlas(
-            RunInput {
-                db_path: path,
-                pause: &pause,
-                keys: &keys,
-                user_agent: "Argos test",
-                pace: false,
-                resume: true,
-                feed: &[],
-                classifier: None,
-                synthesizer: synth,
-                synthesizer_fallbacks: &[],
-                run_id: Some(RUN),
-            },
-            move |event| sink.lock().unwrap().push(event),
-            |_call| Box::pin(async { Err(anyhow::anyhow!("phase 4/5 must not fetch news")) }),
-        )
-        .await
-        .unwrap();
-        let events = events.lock().unwrap().clone();
-        Ran { stop, events }
-    }
-
-    fn run_state(store: &Store) -> (String, String, RunStats, Cursor) {
-        let run = store
-            .atlas_list_runs()
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == RUN)
-            .unwrap();
-        (
-            run.state,
-            run.note,
-            serde_json::from_str(&run.stats_json).unwrap(),
-            serde_json::from_str(&run.cursor_json).unwrap(),
-        )
-    }
-
-    fn atlas_memory_count(store: &Store) -> usize {
-        store
-            .list_memories()
-            .unwrap()
-            .into_iter()
-            .filter(|m| m.source.conversation_id == RUN)
-            .count()
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[tokio::test]
-    async fn successful_run_publishes_indexes_verifies_and_completes() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let path = seeded(&dir, phase4(), "paused");
-        testing::mock_extraction(|| Ok(extraction(claims(), false)));
-        let ran = run(&path, Some(secret())).await;
-        testing::clear();
-        assert_eq!(ran.stop, Stop::Finished);
-        let store = Store::open(&path).unwrap();
-        let (state, _note, stats, cursor) = run_state(&store);
-        assert_eq!(state, "completed");
-        assert_eq!((cursor.phase, cursor.leg.as_str()), (5, "verified"));
-        let m = &stats.memories;
-        assert_eq!(
-            (m.extraction, m.publication, m.indexing),
-            (
-                StepState::Completed,
-                StepState::Completed,
-                StepState::Completed
-            )
-        );
-        assert_eq!((m.extracted, m.accepted, m.created, m.reused), (2, 2, 2, 0));
-        assert!(m.brief);
-        assert_eq!((m.indexed, m.required), (3, 3));
-        assert_eq!(
-            m.line(),
-            "Memories: 2 new claims · 1 brief · 3/3 index ready"
-        );
-        // Visible in the same session (SQLite list), brief counted separately.
-        assert_eq!(atlas_memory_count(&store), 3);
-        assert!(ran.events.iter().any(
-            |e| matches!(e, AtlasEvent::MemoriesChanged { memory_ids, .. } if memory_ids.len() == 3)
-        ));
-        assert!(ran.events.iter().any(|e| matches!(
-            e,
-            AtlasEvent::MemoryProgress {
-                indexed: 3,
-                required: 3
-            }
-        )));
-        let receipt = store.atlas_publication_receipt(RUN).unwrap().unwrap();
-        assert!(receipt.reconciles());
-        assert!(store
-            .verify_atlas_publication(&receipt)
-            .unwrap()
-            .coverage
-            .complete());
-        assert!(load_checkpoint(&store, RUN).unwrap().is_some());
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[tokio::test]
-    async fn publication_failure_is_failed_not_completed_and_retry_uses_the_checkpoint() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let path = seeded(&dir, phase4(), "paused");
-        let calls = Rc::new(Cell::new(0u32));
-        let counter = calls.clone();
-        testing::mock_extraction(move || {
-            counter.set(counter.get() + 1);
-            Ok(extraction(claims(), false))
-        });
-        crate::store::publication_fault::fail_publish(Some("disk I/O error"));
-        let ran = run(&path, Some(secret())).await;
-        crate::store::publication_fault::fail_publish(None);
-        assert!(
-            matches!(&ran.stop, Stop::Failed(msg) if msg.contains("not saved")),
-            "{:?}",
-            ran.stop
-        );
-        let store = Store::open(&path).unwrap();
-        let (state, note, stats, cursor) = run_state(&store);
-        assert_eq!(state, "failed");
-        assert!(note.contains("disk I/O error"), "{note}");
-        assert_eq!(stats.memories.publication, StepState::Failed);
-        // Extraction counts are kept apart from (zero) saved counts.
-        assert_eq!((stats.memories.extracted, stats.memories.created), (2, 0));
-        assert!(stats.memories.line().starts_with("Memories: not saved"));
-        assert_eq!(
-            atlas_memory_count(&store),
-            0,
-            "the failed transaction rolled back"
-        );
-        assert_eq!((cursor.phase, cursor.leg.as_str()), (4, "publish"));
-        let jobs = cycle_jobs(&store);
-        assert_eq!(jobs.len(), 2, "{jobs:?}");
-        assert_eq!(
-            jobs[0].1, "failed",
-            "a failed publication never reads completed"
-        );
-        assert_eq!(jobs[1].1, "failed");
-        drop(store);
-
-        // Retry resumes the failed run from the saved payload; no new extraction.
-        let ran = run(&path, Some(secret())).await;
-        testing::clear();
-        assert_eq!(ran.stop, Stop::Finished);
-        assert_eq!(calls.get(), 1, "successful extraction is never rerun");
-        let store = Store::open(&path).unwrap();
-        let (state, _, stats, _) = run_state(&store);
-        assert_eq!(state, "completed");
-        assert_eq!((stats.memories.created, stats.memories.indexed), (2, 3));
-        assert_eq!(atlas_memory_count(&store), 3);
-        let jobs = cycle_jobs(&store);
-        assert_eq!(
-            (jobs[0].1.as_str(), jobs[0].2),
-            ("completed", 2),
-            "{jobs:?}"
-        );
-        assert_eq!(jobs.len(), 3, "one parent, phases 4 and 5: {jobs:?}");
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[tokio::test]
-    async fn embedding_failure_keeps_memories_visible_reports_partial_and_retry_verifies() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let path = seeded(&dir, phase4(), "paused");
-        testing::mock_extraction(|| Ok(extraction(claims(), false)));
-        let failing = embed_testing::fail();
-        let ran = run(&path, Some(secret())).await;
-        testing::clear();
-        assert_eq!(ran.stop, Stop::Finished);
-        let store = Store::open(&path).unwrap();
-        let (state, note, stats, cursor) = run_state(&store);
-        assert_eq!(state, "waiting");
-        assert_eq!(stats.memories.indexing, StepState::Running);
-        assert_eq!((stats.memories.indexed, stats.memories.required), (0, 3));
-        assert!(note.contains("0/3 index ready"), "{note}");
-        assert_eq!(
-            atlas_memory_count(&store),
-            3,
-            "memories visible without vectors"
-        );
-        assert_eq!(cursor.phase, 5);
-        // Jobs: one cycle job (partial) with the phase 4 and 5 children.
-        let jobs = cycle_jobs(&store);
-        assert_eq!(jobs.len(), 3, "{jobs:?}");
-        assert_eq!(jobs[0].1, "waiting", "{jobs:?}");
-        assert_eq!(
-            &jobs[1..],
-            &[
-                (format!("{}-p4", jobs[0].0), "completed".into(), 1),
-                (format!("{}-p5", jobs[0].0), "waiting".into(), 1),
-            ]
-        );
-        drop(failing);
-        // The background pool retries; once it has, the refresh reaches verified status.
-        drop(store);
-        let ran = run(&path, Some(secret())).await;
-        assert_eq!(ran.stop, Stop::Finished);
-        let store = Store::open(&path).unwrap();
-        let (state, _, stats, _) = run_state(&store);
-        assert_eq!(state, "completed");
-        assert_eq!((stats.memories.indexed, stats.memories.required), (3, 3));
-        // Retry reused the cycle job and only re-ran phase 5; the successful
-        // extraction phase was not repeated.
-        let jobs = cycle_jobs(&store);
-        assert_eq!(jobs.len(), 3, "{jobs:?}");
-        assert_eq!((jobs[0].1.as_str(), jobs[0].2), ("completed", 2));
-        assert_eq!(
-            &jobs[1..],
-            &[
-                (format!("{}-p4", jobs[0].0), "completed".into(), 1),
-                (format!("{}-p5", jobs[0].0), "completed".into(), 2),
-            ]
-        );
-    }
-
-    /// Atlas cycle jobs (parent first, then phase children): id, state, attempts.
-    fn cycle_jobs(store: &Store) -> Vec<(String, String, i64)> {
-        let mut stmt = store
-            .conn
-            .prepare(
-                "SELECT id, state, attempts_used FROM argos_jobs
-                 WHERE operation='atlas_cycle' OR operation LIKE 'atlas_phase_%'
-                 ORDER BY parent_id<>'', id",
-            )
-            .unwrap();
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[tokio::test]
-    async fn background_indexing_then_refresh_upgrades_a_partial_run() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let path = seeded(&dir, phase4(), "paused");
-        testing::mock_extraction(|| Ok(extraction(claims(), false)));
-        {
-            let _failing = embed_testing::fail();
-            run(&path, Some(secret())).await;
-        }
-        testing::clear();
-        let store = Store::open(&path).unwrap();
-        assert_eq!(run_state(&store).0, "waiting");
-        // Index pool drains the durable outbox (retries are due immediately here).
-        store
-            .conn
-            .execute(
-                "UPDATE argos_tasks SET next_eligible_at='' WHERE state='retry_scheduled'",
-                [],
-            )
-            .unwrap();
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        crate::scheduler::drain_index_once(&conn, &store, "test-pool", 16).unwrap();
-        let phase = refresh_run_indexing(&store, RUN).unwrap().unwrap();
-        assert_eq!(phase.indexing, StepState::Completed);
-        let (state, note, _, _) = run_state(&store);
-        assert_eq!(state, "completed");
-        assert!(note.contains("3/3 index ready"), "{note}");
-    }
-
-    #[tokio::test]
-    async fn disabled_embeddings_save_memories_and_say_so_honestly() {
-        let _off = embed_testing::disable();
-        let dir = tempfile::tempdir().unwrap();
-        let path = seeded(&dir, phase4(), "paused");
-        testing::mock_extraction(|| Ok(extraction(claims(), false)));
-        let ran = run(&path, Some(secret())).await;
-        testing::clear();
-        assert_eq!(ran.stop, Stop::Finished);
-        let store = Store::open(&path).unwrap();
-        let (state, note, stats, _) = run_state(&store);
-        assert_eq!(state, "blocked");
-        assert_eq!(stats.memories.indexing, StepState::Blocked);
-        assert_eq!(stats.memories.publication, StepState::Completed);
-        assert!(note.contains(INDEXING_DISABLED_LINE), "{note}");
-        assert!(!note.contains("indexed"), "never claims indexing: {note}");
-        assert_eq!(atlas_memory_count(&store), 3);
-        let active: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM argos_index_changes WHERE state IN ('pending','running','blocked')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(active, 3, "outstanding work stays queued for enablement");
-    }
-
-    #[tokio::test]
-    async fn missing_synthesis_is_blocked_and_extraction_failure_is_failed() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let path = seeded(&dir, phase4(), "paused");
-        let ran = run(&path, None).await;
-        assert_eq!(ran.stop, Stop::Finished);
-        let store = Store::open(&path).unwrap();
-        let (state, note, stats, cursor) = run_state(&store);
-        assert_eq!(state, "blocked");
-        assert!(note.contains("Synthesis is not configured"), "{note}");
-        assert_eq!(stats.memories.extraction, StepState::Blocked);
-        assert_eq!((cursor.phase, cursor.leg.as_str()), (4, "insights"));
-        drop(store);
-
-        // Configuration fixed, but the model call fails: failed, not "zero findings".
-        testing::mock_extraction(|| Err(anyhow::anyhow!("401 invalid key")));
-        let ran = run(&path, Some(secret())).await;
-        testing::clear();
-        assert!(matches!(ran.stop, Stop::Failed(_)));
-        let store = Store::open(&path).unwrap();
-        let (state, _, stats, _) = run_state(&store);
-        assert_eq!(state, "failed");
-        assert_eq!(stats.memories.extraction, StepState::Failed);
-        assert_eq!(atlas_memory_count(&store), 0);
-    }
-
-    #[tokio::test]
-    async fn zero_accepted_insights_is_a_completed_noop() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let path = seeded(&dir, phase4(), "paused");
-        testing::mock_extraction(|| Ok(extraction(Vec::new(), false)));
-        let ran = run(&path, Some(secret())).await;
-        testing::clear();
-        assert_eq!(ran.stop, Stop::Finished);
-        let store = Store::open(&path).unwrap();
-        let (state, note, stats, _) = run_state(&store);
-        assert_eq!(state, "completed");
-        assert_eq!(stats.memories.publication, StepState::Skipped);
-        assert_eq!(stats.memories.indexing, StepState::Skipped);
-        assert!(note.contains("none"), "{note}");
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[tokio::test]
-    async fn partial_extraction_is_partial_and_keeps_saved_results() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let path = seeded(&dir, phase4(), "paused");
-        testing::mock_extraction(|| Ok(extraction(claims(), true)));
-        run(&path, Some(secret())).await;
-        testing::clear();
-        let store = Store::open(&path).unwrap();
-        let (state, _, stats, _) = run_state(&store);
-        assert_eq!(state, "partial");
-        assert_eq!(stats.memories.extraction, StepState::Partial);
-        assert_eq!(stats.memories.indexing, StepState::Completed);
-        assert_eq!(atlas_memory_count(&store), 3);
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[tokio::test]
-    async fn crash_after_checkpoint_resumes_without_reextracting() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        // Process died after the checkpoint commit but before the cursor moved.
-        let path = seeded(&dir, phase4(), "paused");
-        {
-            let store = Store::open(&path).unwrap();
-            let x = extraction(claims(), false);
-            save_checkpoint(
-                &store,
-                RUN,
-                CheckpointInput {
-                    claims: &x.settled.claims,
-                    relations: &x.settled.relations,
-                    brief: &x.settled.brief,
-                    entity_path: "",
-                    stats: &x.settled.stats,
-                    partial: false,
-                    notes: Vec::new(),
-                    initial_confidences: x.settled.initial_confidences.clone(),
-                },
-            )
-            .unwrap();
-        }
-        testing::mock_extraction(|| panic!("extraction must not rerun"));
-        let ran = run(&path, Some(secret())).await;
-        testing::clear();
-        assert_eq!(ran.stop, Stop::Finished);
-        let store = Store::open(&path).unwrap();
-        assert_eq!(run_state(&store).0, "completed");
-        assert_eq!(atlas_memory_count(&store), 3);
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[tokio::test]
-    async fn pause_in_phase5_parks_then_resumes_from_the_stored_receipt() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let path = seeded(&dir, phase4(), "paused");
-        {
-            let store = Store::open(&path).unwrap();
-            let x = extraction(claims(), false);
-            let cp = save_checkpoint(
-                &store,
-                RUN,
-                CheckpointInput {
-                    claims: &x.settled.claims,
-                    relations: &x.settled.relations,
-                    brief: &x.settled.brief,
-                    entity_path: "",
-                    stats: &x.settled.stats,
-                    partial: false,
-                    notes: Vec::new(),
-                    initial_confidences: x.settled.initial_confidences.clone(),
-                },
-            )
-            .unwrap();
-            publish_checkpoint(&store, &cp, None, false, None).unwrap();
-            let cursor = Cursor {
-                phase: 5,
-                leg: "index".into(),
-                ..phase4()
-            };
-            store
-                .atlas_save(
-                    RUN,
-                    &serde_json::to_string(&cursor).unwrap(),
-                    &serde_json::to_string(&RunStats::default()).unwrap(),
-                )
-                .unwrap();
-        }
-        // Paused before phase 5 work: parks, keeps the cursor.
-        let pause = AtomicBool::new(true);
-        let keys = crate::osint::ProviderKeys::default();
-        let stop = run_atlas(
-            RunInput {
-                db_path: &path,
-                pause: &pause,
-                keys: &keys,
-                user_agent: "t",
-                pace: false,
-                resume: true,
-                feed: &[],
-                classifier: None,
-                synthesizer: None,
-                synthesizer_fallbacks: &[],
-                run_id: None,
-            },
-            |_| {},
-            |_call| Box::pin(async { Err(anyhow::anyhow!("no fetch")) }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(stop, Stop::Paused);
-        let store = Store::open(&path).unwrap();
-        let (state, _, _, cursor) = run_state(&store);
-        assert_eq!((state.as_str(), cursor.phase), ("paused", 5));
-        drop(store);
-        testing::mock_extraction(|| panic!("phase 5 never re-extracts"));
-        let ran = run(&path, None).await;
-        testing::clear();
-        assert_eq!(ran.stop, Stop::Finished);
-        let store = Store::open(&path).unwrap();
-        let (state, _, stats, _) = run_state(&store);
-        assert_eq!(state, "completed");
-        assert_eq!((stats.memories.created, stats.memories.indexed), (2, 3));
-        // No duplicate memories from the resumed run.
-        assert_eq!(atlas_memory_count(&store), 3);
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[tokio::test]
-    async fn enabling_embeddings_resumes_outstanding_work_and_upgrades_the_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = {
-            let _off = embed_testing::disable();
-            let path = seeded(&dir, phase4(), "paused");
-            testing::mock_extraction(|| Ok(extraction(claims(), false)));
-            run(&path, Some(secret())).await;
-            testing::clear();
-            let store = Store::open(&path).unwrap();
-            // The pool parks disabled work as blocked (configuration missing).
-            let conn = rusqlite::Connection::open(&path).unwrap();
-            crate::scheduler::drain_index_once(&conn, &store, "pool", 16).unwrap();
-            assert_eq!(run_state(&store).0, "blocked");
-            path
-        };
-        let _fake = embed_testing::fake();
-        let store = Store::open(&path).unwrap();
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        assert_eq!(
-            crate::scheduler::drain_index_once(&conn, &store, "pool", 16).unwrap(),
-            3
-        );
-        assert_eq!(refresh_incomplete_runs(&store, 8).unwrap(), 1);
-        let (state, note, stats, _) = run_state(&store);
-        assert_eq!(state, "completed");
-        assert_eq!((stats.memories.indexed, stats.memories.required), (3, 3));
-        assert!(note.contains("3/3 index ready"), "{note}");
     }
 
     // ---- Repair Atlas memories -------------------------------------------

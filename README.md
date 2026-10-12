@@ -15,7 +15,7 @@ Only Recon has a chat. Everything else is fields, lists, and buttons. Observatio
 | App | What it does | Read more |
 | --- | --- | --- |
 | Intel | Browse Atlas headlines and run a cited report on one article | [Usage](docs/usage.md#intel) · [Report](docs/diagrams/intel-report.html) |
-| Atlas | Two-phase news cycle: discovery, country heat, regional headlines | [Usage](docs/usage.md#atlas) · [Cycle](docs/diagrams/atlas-pipeline.html) |
+| Atlas | Classifier-only news collection, country heat, local metadata and Related leads | [Usage](docs/usage.md#atlas) · [Cycle](docs/diagrams/atlas-pipeline.html) |
 | Brain | Saved memories, recall, and investigation path graphs | [Usage](docs/usage.md#other-apps) · [Recall](docs/diagrams/brain-recall.html) |
 | Recon | Evidence-driven investigations with a planner, binder, and synthesis | [Usage](docs/usage.md#recon) · [Architecture](docs/architecture.md) · [Turn](docs/diagrams/recon-turn.html) |
 | Tools | Manual OSINT catalog (internal id `Osint`) | [Providers](docs/providers.md) · [Catalog](docs/diagrams/osint-providers.html) |

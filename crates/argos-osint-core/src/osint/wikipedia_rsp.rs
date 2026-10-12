@@ -3,11 +3,13 @@
 
 use super::source_eval::SourceReliability;
 use anyhow::{anyhow, Result};
+use futures_util::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const APP_STATE_KEY: &str = "wikipedia_rsp_index";
 pub const CACHE_TTL: Duration = Duration::from_secs(30 * 86_400);
@@ -127,7 +129,7 @@ impl RspIndex {
         }
         self.entries.iter().find(|entry| {
             let entry_name = normalize_name(&entry.name);
-            entry_name == needle || entry_name.contains(&needle) || needle.contains(&entry_name)
+            entry_name == needle
         })
     }
 
@@ -200,7 +202,6 @@ impl SourceReliabilityObservation {
 }
 
 struct CachedIndex {
-    loaded_at: Instant,
     index: RspIndex,
 }
 
@@ -212,10 +213,7 @@ fn cache() -> &'static Mutex<Option<CachedIndex>> {
 /// Install an index into the process cache (tests and store warm path).
 pub fn install_index(index: RspIndex) {
     if let Ok(mut guard) = cache().lock() {
-        *guard = Some(CachedIndex {
-            loaded_at: Instant::now(),
-            index,
-        });
+        *guard = Some(CachedIndex { index });
     }
 }
 
@@ -223,7 +221,7 @@ pub fn install_index(index: RspIndex) {
 pub fn cached_index() -> Option<RspIndex> {
     let guard = cache().lock().ok()?;
     let cached = guard.as_ref()?;
-    if cached.loaded_at.elapsed() > CACHE_TTL {
+    if !index_is_fresh(&cached.index) {
         return None;
     }
     Some(cached.index.clone())
@@ -398,19 +396,59 @@ fn parse_summary(chunk: &str) -> String {
 }
 
 pub fn normalize_host(raw: &str) -> String {
-    let host = raw
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
+    let raw = raw.trim();
+    let candidate = if raw.contains("://") {
+        raw.to_owned()
+    } else {
+        format!("https://{raw}")
+    };
+    let Ok(url) = reqwest::Url::parse(&candidate) else {
+        return String::new();
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return String::new();
+    }
+    url.host_str()
         .unwrap_or("")
         .trim_start_matches("www.")
         .trim_end_matches('.')
-        .to_ascii_lowercase();
-    host.chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '.' || *ch == '-')
-        .collect()
+        .to_ascii_lowercase()
+}
+
+/// Durable freshness uses acquisition time, never process installation time.
+pub fn index_is_fresh(index: &RspIndex) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&index.fetched_at)
+        .ok()
+        .is_some_and(|at| {
+            let age = chrono::Utc::now().signed_duration_since(at);
+            age.num_seconds() >= 0 && age.num_seconds() < CACHE_TTL.as_secs() as i64
+        })
+}
+pub fn last_good_index() -> Option<RspIndex> {
+    cache().lock().ok()?.as_ref().map(|c| c.index.clone())
+}
+static REFRESHING: AtomicBool = AtomicBool::new(false);
+fn refresh_in_background(user_agent: &str, db_path: Option<std::path::PathBuf>) {
+    if REFRESHING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let agent = user_agent.to_owned();
+    tokio::spawn(async move {
+        if let Ok(index) = fetch_index(&agent).await {
+            if let Some(store) = db_path
+                .as_deref()
+                .and_then(|db| crate::store::Store::open(db).ok())
+            {
+                if let Ok(json) = index_to_json(&index) {
+                    let _ = store.app_state_set(APP_STATE_KEY, &json);
+                }
+            }
+        }
+        REFRESHING.store(false, Ordering::Release);
+    });
 }
 
 fn normalize_name(raw: &str) -> String {
@@ -484,59 +522,87 @@ pub fn observation_for(
 /// Fetch all RSP letter pages and build an index.
 pub async fn fetch_index(user_agent: &str) -> Result<RspIndex> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(45))
+        .timeout(Duration::from_secs(20))
         .user_agent(user_agent)
         .build()?;
-    let mut entries = Vec::new();
-    for page in RSP_PAGES {
-        let body = client
-            .get(API)
-            .query(&[
-                ("action", "parse"),
-                ("page", *page),
-                ("prop", "wikitext"),
-                ("formatversion", "2"),
-                ("format", "json"),
-            ])
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
-        let value: Value = serde_json::from_str(&body)?;
-        let wikitext = value
-            .pointer("/parse/wikitext")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("RSP parse missing wikitext for {page}"))?;
-        entries.extend(parse_rsp_wikitext(wikitext));
-    }
-    anyhow::ensure!(!entries.is_empty(), "RSP index parsed zero entries");
-    let index = RspIndex::build(entries, chrono::Utc::now().to_rfc3339());
+    let work = async {
+        let pages: Vec<Vec<RspEntry>> =
+            stream::iter(RSP_PAGES.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .map(|page| {
+                    let client = client.clone();
+                    async move {
+                        let value: Value = client
+                            .get(API)
+                            .query(&[
+                                ("action", "parse"),
+                                ("page", page.as_str()),
+                                ("prop", "wikitext"),
+                                ("formatversion", "2"),
+                                ("format", "json"),
+                            ])
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .json()
+                            .await?;
+                        let text = value
+                            .pointer("/parse/wikitext")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| anyhow!("RSP parse missing wikitext for {page}"))?;
+                        Ok::<_, anyhow::Error>(parse_rsp_wikitext(text))
+                    }
+                })
+                .buffer_unordered(3)
+                .try_collect()
+                .await?;
+        let entries: Vec<_> = pages.into_iter().flatten().collect();
+        anyhow::ensure!(!entries.is_empty(), "RSP index parsed zero entries");
+        Ok::<_, anyhow::Error>(RspIndex::build(entries, chrono::Utc::now().to_rfc3339()))
+    };
+    let index = tokio::time::timeout(Duration::from_secs(60), work)
+        .await
+        .map_err(|_| anyhow!("RSP refresh exceeded 60 seconds"))??;
     install_index(index.clone());
     Ok(index)
 }
 
-/// Return a warm index: process cache, else fetch.
 pub async fn ensure_index(user_agent: &str) -> Result<RspIndex> {
-    if let Some(index) = cached_index() {
-        return Ok(index);
-    }
-    fetch_index(user_agent).await
+    warm_with_store_json(None, user_agent)
+        .await
+        .map(|(index, _)| index)
 }
-
-/// Warm from durable app_state JSON when present and fresh enough, else fetch.
+/// Last complete data remains usable and explicitly stale during a single refresh.
 pub async fn warm_with_store_json(
     stored: Option<&str>,
     user_agent: &str,
 ) -> Result<(RspIndex, bool)> {
-    if let Some(raw) = stored {
-        if let Ok(index) = index_from_json(raw) {
-            if !index.entries.is_empty() {
-                install_index(index.clone());
-                return Ok((index, false));
-            }
-        }
+    warm_with_store_json_for_db(stored, user_agent, None).await
+}
+pub async fn warm_with_store_json_for_db(
+    stored: Option<&str>,
+    user_agent: &str,
+    db_path: Option<std::path::PathBuf>,
+) -> Result<(RspIndex, bool)> {
+    if let Some(index) = cached_index() {
+        return Ok((index, false));
     }
+    if let Some(index) = stored
+        .and_then(|s| index_from_json(s).ok())
+        .filter(|i| !i.entries.is_empty())
+    {
+        install_index(index.clone());
+        if !index_is_fresh(&index) {
+            refresh_in_background(user_agent, db_path.clone())
+        }
+        return Ok((index, false));
+    }
+    if let Some(index) = last_good_index() {
+        refresh_in_background(user_agent, db_path.clone());
+        return Ok((index, false));
+    }
+    // Serialize a cold refresh across callers as well as the stale refresh path.
+    static COLD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = COLD.lock().await;
     if let Some(index) = cached_index() {
         return Ok((index, false));
     }
@@ -547,6 +613,38 @@ pub async fn warm_with_store_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_ttl_and_host_spoofing_are_checked() {
+        let fresh = RspIndex::build(vec![], chrono::Utc::now().to_rfc3339());
+        assert!(index_is_fresh(&fresh));
+        let expired = RspIndex::build(
+            vec![],
+            (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+        );
+        assert!(!index_is_fresh(&expired));
+        assert!(!index_is_fresh(&RspIndex::build(vec![], "invalid".into())));
+        assert_eq!(
+            normalize_host("https://bbc.co.uk@evil.example/story"),
+            "evil.example"
+        );
+        assert_eq!(normalize_host("https://BBC.CO.UK:443/story"), "bbc.co.uk");
+        let index = RspIndex::build(
+            vec![RspEntry {
+                name: "BBC".into(),
+                domains: vec!["bbc.co.uk".into()],
+                status: RspStatus::GenerallyReliable,
+                blacklisted: false,
+                last_year: String::new(),
+                summary: String::new(),
+            }],
+            fresh.fetched_at,
+        );
+        assert!(index.lookup_domain("bbc.co.uk.evil.example").is_none());
+        assert!(index.lookup_domain("bbc.co.ukevil.example").is_none());
+        assert!(index.lookup_domain("news.bbc.co.uk").is_some());
+        assert!(index.lookup_publisher("BBC impersonator").is_none());
+    }
 
     const SAMPLE: &str = r#"
 {| class="wikitable"

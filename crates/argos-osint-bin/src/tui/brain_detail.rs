@@ -32,6 +32,8 @@ pub enum RelatedState {
 #[derive(Clone, Debug, Default)]
 pub struct RelatedView {
     pub items: Vec<RelatedMemory>,
+    pub articles: super::related_articles::ArticleRelatedView,
+    pub articles_selected: bool,
     pub state: RelatedState,
     pub sel: usize,
     pub scroll: u16,
@@ -53,6 +55,9 @@ pub struct DetailSnapshot {
     pub memory_id: String,
     pub related_sel: usize,
     pub related_scroll: u16,
+    pub articles_selected: bool,
+    pub article_scroll: u16,
+    pub article_sel: usize,
     pub path_scroll: u16,
     pub summary_scroll: u16,
     pub focus: Target,
@@ -136,7 +141,13 @@ pub struct DetailAreas {
 
 pub fn pane_of(focus: Target) -> DetailPane {
     match focus {
-        Target::RelatedRow(_) => DetailPane::Related,
+        Target::RelatedRow(_)
+        | Target::BrainRelatedArticle(_)
+        | Target::Button(
+            ButtonId::BrainRelatedMemories
+            | ButtonId::BrainRelatedArticles
+            | ButtonId::BrainRelatedMore,
+        ) => DetailPane::Related,
         Target::DetailSummary => DetailPane::Summary,
         Target::Button(button) if super::summary_card::is_card_button(button) => {
             DetailPane::Summary
@@ -282,8 +293,16 @@ pub fn related_rows(view: &RelatedView) -> Vec<RelRow> {
 }
 
 /// Related item under a point, or `None` for headers, notes, and misses.
+fn related_content_area(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    )
+}
 pub fn related_at(view: &RelatedView, area: Rect, x: u16, y: u16) -> Option<usize> {
-    let content = inner(area);
+    let content = inner(related_content_area(area));
     if !contains(content, x, y) {
         return None;
     }
@@ -296,12 +315,12 @@ pub fn related_at(view: &RelatedView, area: Rect, x: u16, y: u16) -> Option<usiz
 
 pub fn related_scroll_max(view: &RelatedView, area: Rect) -> u16 {
     let rows = related_rows(view).len();
-    rows.saturating_sub(inner(area).height as usize) as u16
+    rows.saturating_sub(inner(related_content_area(area)).height as usize) as u16
 }
 
 /// Scroll so the selected item's two lines are visible.
 pub fn reveal_related(view: &mut RelatedView, area: Rect) {
-    let height = inner(area).height.max(1) as usize;
+    let height = inner(related_content_area(area)).height.max(1) as usize;
     let rows = related_rows(view);
     let Some(top) = rows.iter().position(|row| *row == RelRow::Title(view.sel)) else {
         return;
@@ -322,7 +341,38 @@ pub fn reveal_related(view: &mut RelatedView, area: Rect) {
 }
 
 pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+    let tabs = Rect::new(area.x, area.y, area.width, 1);
+    let left = Rect::new(tabs.x, tabs.y, tabs.width / 2, 1);
+    let right = Rect::new(tabs.x + left.width, tabs.y, tabs.width - left.width, 1);
+    let articles_selected = app.brain_detail.related.articles_selected;
+    super::ui::draw_button_state(
+        frame,
+        app,
+        ButtonId::BrainRelatedMemories,
+        "Memories",
+        left,
+        !articles_selected,
+    );
+    super::ui::draw_button_state(
+        frame,
+        app,
+        ButtonId::BrainRelatedArticles,
+        &format!(
+            "Articles ({})",
+            app.brain_detail.related.articles.page.total
+        ),
+        right,
+        articles_selected,
+    );
+    let area = related_content_area(area);
     let view = &app.brain_detail.related;
+    if view.articles_selected {
+        draw_article_related(frame, app, area);
+        return;
+    }
     let focused = matches!(app.focus, Target::RelatedRow(_));
     let width = inner(area).width as usize;
 
@@ -400,6 +450,42 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
             .scroll((view.scroll, 0)),
         area,
     );
+}
+
+fn draw_article_related(frame: &mut Frame, app: &App, area: Rect) {
+    let view = &app.brain_detail.related.articles;
+    let content = inner(area);
+    let more = view.page.has_more;
+    let row_height = content.height.saturating_sub(u16::from(more));
+    let rows = super::related_articles::rows(view, content.width as usize, true);
+    for (offset, (_, target)) in rows
+        .iter()
+        .skip(view.scroll as usize)
+        .take(row_height as usize)
+        .enumerate()
+    {
+        if let Some(target) = target {
+            app.layout.borrow_mut().register(
+                *target,
+                Rect::new(content.x, content.y + offset as u16, content.width, 1),
+            );
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(rows.into_iter().map(|(line, _)| line).collect::<Vec<_>>())
+            .block(panel(" Related · shared mentions "))
+            .scroll((view.scroll, 0)),
+        area,
+    );
+    if more && content.height > 0 {
+        super::ui::draw_button(
+            frame,
+            app,
+            ButtonId::BrainRelatedMore,
+            "See more",
+            Rect::new(content.x, content.y + content.height - 1, content.width, 1),
+        );
+    }
 }
 
 /// One-line strip above the graph: Back, mode, title, history depth.

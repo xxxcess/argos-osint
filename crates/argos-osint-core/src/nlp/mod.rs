@@ -491,6 +491,48 @@ pub async fn prepare_mode(
     prepare_with_policy(source, &policy, focus, fallback_chars, cancel, mode).await
 }
 
+/// Complete local annotations using an explicit cache database. The policy
+/// keeps entity preparation typed and does not permit pressure-driven selection.
+/// None means process cache only, which is useful for isolated callers/tests.
+pub async fn annotate_with_policy(
+    source: &Source,
+    policy: &PreparePolicy,
+    cancel: Arc<AtomicBool>,
+    mode: Mode,
+    db_path: Option<&std::path::Path>,
+) -> Annotation {
+    let context = source.context();
+    if mode == Mode::Off || !cfg!(feature = "nlp") {
+        return Annotation::terminal(source, &context, Status::Disabled);
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Annotation::terminal(source, &context, Status::Cancelled);
+    }
+    let cached = db_path
+        .and_then(|db| crate::store::Store::open(db).ok())
+        .and_then(|s| cache::get(&s.conn, source, &context).ok().flatten());
+    let annotation = match cached {
+        Some(a) => a,
+        None => {
+            Service::shared()
+                .annotate(source.clone(), context.clone(), cancel)
+                .await
+        }
+    };
+    if policy.coverage_requirement == CoverageRequirement::Complete
+        && annotation.status == Status::Complete
+        && !annotation.validate(source)
+    {
+        return Annotation::terminal(source, &context, Status::Failed);
+    }
+    if annotation.status == Status::Complete {
+        if let Some(store) = db_path.and_then(|db| crate::store::Store::open(db).ok()) {
+            let _ = cache::put(&store.conn, source, &context, &annotation);
+        }
+    }
+    annotation
+}
+
 pub async fn prepare_with_policy(
     source: Source,
     policy: &PreparePolicy,
@@ -552,25 +594,8 @@ pub async fn prepare_with_policy(
         out.diagnostic = Some("NLP Cancelled".into());
         return out;
     }
-    let context = source.context();
-    let cached = {
-        crate::store::Store::open(&crate::paths::db_path())
-            .ok()
-            .and_then(|s| cache::get(&s.conn, &source, &context).ok().flatten())
-    };
-    let a = match cached {
-        Some(a) => a,
-        None => {
-            Service::shared()
-                .annotate(source.clone(), context.clone(), cancel.clone())
-                .await
-        }
-    };
-    if a.status == Status::Complete {
-        if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-            let _ = cache::put(&store.conn, &source, &context, &a);
-        }
-    }
+    let db_path = crate::paths::db_path();
+    let a = annotate_with_policy(&source, policy, cancel.clone(), mode, Some(&db_path)).await;
     let candidates = entity_candidates(&source, &a);
     if (mode == Mode::Auto && whole)
         || mode == Mode::Annotate

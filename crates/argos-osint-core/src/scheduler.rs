@@ -276,6 +276,7 @@ impl WorkerPool {
                         continue;
                     }
                     let now = chrono::Utc::now().to_rfc3339();
+                    let _ = tasks::retire_atlas_insight_work(&conn, &now);
                     let _ = tasks::interrupt_expired_leases(&conn, &now);
                     if let Ok(store) = crate::store::Store::open(&db_path) {
                         let drained = drain_index_once(&conn, &store, &owner, 16).unwrap_or(0);
@@ -316,6 +317,8 @@ impl WorkerPool {
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
                     }
+                    let _ =
+                        tasks::retire_atlas_insight_work(&conn, &chrono::Utc::now().to_rfc3339());
                     // Best-effort: load summarization role secret when configured.
                     // Never invents success when auth/settings/secret are missing.
                     let secret = load_summarization_secret();

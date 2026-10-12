@@ -250,7 +250,7 @@ fn upgrade_schema_27_preserves_unrelated_data() {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        29
+        crate::store::SCHEMA_VERSION
     );
     assert_eq!(
         store

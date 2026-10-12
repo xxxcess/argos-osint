@@ -458,42 +458,19 @@ ConfigLock::acquire()            # .argos-config.lock, heartbeat + stale takeove
 
 [![Atlas news cycle](diagrams/atlas-pipeline.svg)](diagrams/atlas-pipeline.html)
 
-News cycle with durable extraction, publication, and indexing. Pause stores a cursor; Resume continues from the saved phase and retries only incomplete packets.
+`atlas-collection-v1` is a classification-only news cycle. Native discovery and regional coverage retain provider quotas and deduplication; Classifier is the only model role. Local entities and publisher priors provide metadata, then exact shared mentions produce tentative Related article leads. Cycles publish no Brain memories or vector/index obligations. Pause stores receipts; Resume retries unresolved classification and native metadata.
 
-| Phase | Providers | Shape |
+| Stage | Execution | Unit |
 | --- | --- | --- |
-| 1 Discovery | GNews Search `/api/v4/search`, NewsData `/api/1/latest` | 10 articles, English, 48 h, no country filter. GNews queries packed under 200 chars. |
-| 2 Headlines | NewsAPI country headlines (`pageSize` 20), Currents (`page_size` 20) | Kept countries, Group 1 first. |
-| 3 Classify | Classifier role | Category tag per article (`unk` without a classifier). |
-| 4 Extract | Synthesis role + ordered fallbacks | Lead claims required; supplemental context optional. Validated packets persist atomically with dispositions and a completion receipt. |
-| 5 Index | Local MiniLM / Jaccard | Publication then required memory IDs + brief. Incomplete index stays Waiting while background retries continue. |
+| Discovery and coverage | GNews/NewsData, then NewsAPI/Currents; existing quotas and heat bands | Article |
+| Classification | Eight-row batches, 32 KiB ceiling; shared Classifier executor/fallbacks | Article, with wire attempts separate |
+| Entities | Complete original title/description, bounded local NLP; no model fallback | Article metadata |
+| Publisher prior | Immutable native WP:RSP index per pass; domain suffix match | Article metadata |
+| Related | Local posting lists and verified spans; category-qualified pair seed | Canonical article pair |
 
-Country tally split 20/30/30/20. Group 1 temperature 1.0; Group 2 0.99–0.70; Group 3 0.69–0.10; Group 4 dropped.
+Completed requires successful required classification and settled enabled metadata. Metadata failures produce warnings; valid `unk`, empty entities and unrated publishers succeed. Unresolved required IDs yield partial/failed/blocked. Legacy extraction/index telemetry remains explicitly historical. Old unfinished runs preserve categories and resume native metadata; historical `unk` provenance is flagged. Explicit historical CLI Repair/Verify rejects new cycles. The TUI has no Repair memories or startup publication.
 
-Daily quota ledger (free-tier): GNews 100, NewsData 200, NewsAPI 100 (includes Recon), Currents 250.
-
-Dedup: URL hash, exact normalized title, or fuzzy title &gt; 0.85 when the other publisher ranks higher. Set includes live feed, current run, and 36-hour retention.
-
-Cycle outcome is derived from durable obligations, not a sticky Partial flag:
-
-| State | Meaning |
-| --- | --- |
-| completed | Required lead, publication, and indexing succeeded. Optional context failures become warnings. |
-| waiting | Eligible work remains (including background indexing). |
-| blocked | Required configuration is missing (for example embeddings disabled when indexing is required). |
-| partial | Recovery exhausted with useful output but missing required work. |
-| failed | No useful required output. |
-
-- Packet identity = stage + canonical input IDs/revisions + contract version
-- Empty legacy output refs are not treated as success; those packets re-extract
-- Indexed count includes the cycle brief (+1 vs created claims). Compare IDs and revisions, not created vs indexed totals
-- Diagnostics: `12 new claims · 1 brief · 13/13 index ready`
-- SQLite stores the run, cursor, country stats, packet units, and publication receipts
-- Headline text stays in the session feed
-- Origins: `United States (US)`
-- History list plus Web Mercator Braille map (default world view ~1.20× prior scale; pan/zoom until reset)
-- Insights tables fill inner width and wrap; tall rows scroll by rendered lines
-- Atlas cycle jobs: parent `atlas_cycle` plus phase children; waiting/blocked are not terminal
+See [classification and Related articles](atlas-classification-and-related-articles.md) for schema 30, receipts, publisher scores, exact lineage, deletion and navigation. Country bands, native quotas, map, origins, history and retained headlines remain unchanged. Coverage replaces the current-cycle Insights pane.
 
 GNews, NewsData, Currents are catalog tools for manual runs and omitted from the Recon picker.
 
@@ -533,7 +510,7 @@ The process-shared NLP worker, immutable source references and migration 28 cach
 
 `investigation/insights.rs` owns the shared extraction, fidelity, readiness and inference contracts; `insight_persist.rs` owns exact refresh dispatch and transactional activation. Source-local entities retain original mentions. `claim_assessor` inherits Synthesis when unset, while explicit routes remain independent. Free-chat execution skips Decisions-only routes in place; finite contracts use the shared Decisions adapter and preserve both label and threshold outcome.
 
-Atlas extract-v3 uses title and description for attributed claims only. It generates no context insights, investigative inferences or semantic links. Full article and Recon evidence enters the same service. Complete article acquisition plus full coverage in both stages is necessary for article inference; Recon requires substantive independent roots and fulfilled required tasks. Analytical prose receives the same withheld status.
+Atlas collection-v1 performs classification and local metadata only; historical extract-v3 claims remain readable. Full Intel article and Recon evidence enters the investigative service. Complete article acquisition plus full coverage in both stages is necessary for article inference; Recon requires substantive independent roots and fulfilled required tasks. Analytical prose receives the same withheld status.
 
 Intel tasks follow acquire → async inventory → collect → async assess → refresh_insights → sections/BLUF → finalize. Article generations are captured independently from report revisions; superseded report modes cannot publish into a newer generation. A body refresh during active Recon preserves the prior baseline pending collection. Stage receipts include source/route/prompt identity; exact refresh recovery cannot claim unrelated pool tasks.
 

@@ -17,7 +17,7 @@ Exactly **20 primary views** are registered: Intel 4, Recon 5, Atlas 3, Models 4
 | `recon.diversity` | Category/Eligible/Corroborated/Shortfall table | Independent successes, attempted tools and reasons |
 | `recon.directives` | 100% resolution bars by actual mode, N | Answered/partial/unresolved/blocked/unknown assessments |
 | `recon.unresolved` | Full-width Live selectable table | Run/Directive/Reason/Evidence/Next action; progress and full prose in detail |
-| `atlas.backlog` | Stage/Unit/Queued/Blocked/Oldest table | Discovery dispositions/errors; articles, packets and memories stay distinct |
+| `atlas.backlog` | Stage/Unit/Queued/Blocked/Oldest table | Current collection/classification/native metadata coverage; historical packets/memories explicitly legacy |
 | `atlas.cycles` | Absolute terminal-outcome time columns | Mean/p95 cycle-duration lines; Live states separate |
 | `atlas.temperature` | Signed diverging bars around zero | Comparable prior/current scores, origin/articles; incomparable N/A |
 | `models.capacity` | Quota/concurrency meters and table | Sends/limit, pace, queue/oldest age, cooldown/source |

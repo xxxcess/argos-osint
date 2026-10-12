@@ -131,17 +131,6 @@ pub fn column_widths(inner_width: u16, min: &[u16], flex_last: bool) -> Vec<u16>
     widths
 }
 
-pub struct WrappedTable<'a> {
-    pub area: Rect,
-    pub headers: &'a [&'a str],
-    pub rows: &'a [Vec<String>],
-    pub min_widths: &'a [u16],
-    pub scroll_lines: usize,
-    pub focused: bool,
-    pub title: &'a str,
-    pub prefix: Vec<Line<'static>>,
-}
-
 pub fn border_style() -> Style {
     Style::default().fg(theme::BORDER).bg(theme::BG)
 }
@@ -277,53 +266,6 @@ pub fn render_table_lines<R: AsRef<[String]>>(
     }
     rendered.push(bottom_border_line(widths));
     rendered
-}
-
-pub fn render_wrapped_table(frame: &mut Frame, table: WrappedTable<'_>) {
-    let WrappedTable {
-        area,
-        headers,
-        rows,
-        min_widths,
-        scroll_lines,
-        focused,
-        title,
-        prefix,
-    } = table;
-    let title = if focused {
-        format!("{title} · focused")
-    } else {
-        title.to_string()
-    };
-    frame.render_widget(pane(&title), area);
-    let mut inner = inset(area);
-    if inner.width <= 2 || inner.height == 0 {
-        return;
-    }
-    if !prefix.is_empty() {
-        let prefix_h = (prefix.len() as u16).min(inner.height);
-        frame.render_widget(
-            Paragraph::new(prefix),
-            Rect {
-                height: prefix_h,
-                ..inner
-            },
-        );
-        inner.y = inner.y.saturating_add(prefix_h);
-        inner.height = inner.height.saturating_sub(prefix_h);
-        if inner.height == 0 {
-            return;
-        }
-    }
-    let avail = inner.width.saturating_sub(2);
-    let widths = column_widths(avail, min_widths, false);
-    if widths.is_empty() {
-        return;
-    }
-    let rendered = render_table_lines(headers, rows, &widths, 8);
-    let skip = scroll_lines.min(rendered.len().saturating_sub(1));
-    let visible: Vec<Line<'static>> = rendered.into_iter().skip(skip).collect();
-    frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), inner);
 }
 
 pub fn draw_origins(frame: &mut Frame, view: OriginsView<'_>) {

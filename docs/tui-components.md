@@ -106,7 +106,7 @@ Bulletin preview text is vertically centered when shorter than its viewport and 
 normally when overflowing. Native graphics preserve photographic detail; half-block
 fallback is inherently limited to two color samples per terminal cell.
 
-Home shrinks its logo and uses two launcher columns on short screens. Recon uses a transcript and 30% context column at 110 cells; compact screens expose Transcript/Investigation pages. Intel uses three columns at 132 cells, two at 100–131, and Extracted/Reader/Context pages on smaller or short screens. Its article reader is borderless. Atlas exposes compact Origins/Insights/Headlines pages. Brain supports Split/Graph/Related/Summary expansion. Tools and Models expose list/editor pages; the model role list registers its rows. System exposes Host/Paths pages on short screens.
+Home shrinks its logo and uses two launcher columns on short screens. Recon uses a transcript and 30% context column at 110 cells; compact screens expose Transcript/Investigation pages. Intel uses three columns at 132 cells, two at 100–131, and Extracted/Reader/Context pages on smaller or short screens. Its article reader is borderless. Atlas exposes compact Origins/Coverage/Headlines pages. Brain supports Split/Graph/Related/Summary expansion. Tools and Models expose list/editor pages; the model role list registers its rows. System exposes Host/Paths pages on short screens.
 
 
 ## Shared navigation and portable configuration
@@ -122,3 +122,7 @@ Intel imagery uses the Ratatui image adapter with protocol detection once outsid
 Recon uses a SURFACE user band with ACCENT edge, quiet Markdown synthesis and expandable evidence activity. Failed activities keep a short reason visible. Transcript offsets are usize, Unicode padding uses terminal cells, completed Markdown keeps revision/width caches, and cached block/local-row anchors preserve history during updates. Jump to latest resumes follow; previous/next-turn commands select user-query boundaries.
 
 Acceptance and reproducible capture: [tui-verification.md](tui-verification.md), tests `dump_overhaul_screens` and `analytics_viewports_and_data_states`. Scope capture to affected apps/pages and states using the verification guide; shared layout changes cover affected consumers at all six viewport sizes including 40×20. Full shell/theme/navigation changes use both suites. Capture into a fresh plan directory and inspect the selected actual PNGs. Live graphics/browser checks are recorded separately from TestBackend evidence.
+
+## Related article rows
+
+`related_articles::ArticleRelatedView` supplies immutable bounded pages and a shared local row renderer for Intel Focus Brief and Brain Related. Brain uses TabBar choices Memories / Articles (N); article-derived insights initially select Articles. Related rows register exact target rectangles, show source/category/shared mentions and tentative status, and preserve offsets on Back. A continuation button remains anchored below the scroll pane. Reads occur before draw and list reasons make no model calls. Stale or missing authoritative article revisions cannot open another row. Atlas compact Coverage uses classifications, entity availability, publisher-prior availability and Related pairs; historical memory counts remain Legacy.

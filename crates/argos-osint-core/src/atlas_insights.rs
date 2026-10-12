@@ -2376,7 +2376,10 @@ mod tests {
 | Wire is generally reliable for news reporting according to community consensus discussions.
 | {{WP:RSPUSES|wire.example}}
 "#;
-        install_index(RspIndex::build(parse_rsp_wikitext(sample), "t".into()));
+        install_index(RspIndex::build(
+            parse_rsp_wikitext(sample),
+            chrono::Utc::now().to_rfc3339(),
+        ));
         let mut art = article(
             "a1",
             "military",
@@ -2421,7 +2424,10 @@ mod tests {
  | Wire is generally reliable for news reporting according to community consensus discussions.
  | {{WP:RSPUSES|wire.example}}
 "#;
-        install_index(RspIndex::build(parse_rsp_wikitext(sample), "t".into()));
+        install_index(RspIndex::build(
+            parse_rsp_wikitext(sample),
+            chrono::Utc::now().to_rfc3339(),
+        ));
         let mut art = article(
             "a1",
             "military",

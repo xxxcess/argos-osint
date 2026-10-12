@@ -474,8 +474,16 @@ fn note_attempt(
         .with_id(attempt_id)
         .canonical(attempt_id)
         .at(now_rfc3339())
-        .app(TELEMETRY_APP)
-        .trigger(TELEMETRY_TRIGGER)
+        .app(if facts.operation_id.starts_with("atlas-classify-") {
+            "atlas"
+        } else {
+            TELEMETRY_APP
+        })
+        .trigger(if facts.operation_id.starts_with("atlas-classify-") {
+            Trigger::AtlasCycle
+        } else {
+            TELEMETRY_TRIGGER
+        })
         .provider(&facts.provider)
         .role(&facts.role)
         .model(&facts.model)
@@ -542,8 +550,16 @@ fn note_operation(
         ))
         .canonical(scope.operation_id)
         .at(now_rfc3339())
-        .app(TELEMETRY_APP)
-        .trigger(TELEMETRY_TRIGGER)
+        .app(if scope.operation_id.starts_with("atlas-classify-") {
+            "atlas"
+        } else {
+            TELEMETRY_APP
+        })
+        .trigger(if scope.operation_id.starts_with("atlas-classify-") {
+            Trigger::AtlasCycle
+        } else {
+            TELEMETRY_TRIGGER
+        })
         .provider(effective_provider)
         .role(scope.role)
         .model(effective_model)

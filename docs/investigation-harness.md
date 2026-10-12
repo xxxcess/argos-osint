@@ -71,7 +71,7 @@ Defaults live under **Models → Defaults**. Empty derived roles inherit. Explic
 
 ## Persistence
 
-SQLite (current schema version 29; harness tables from v20+):
+SQLite (current schema version 30; harness tables from v20+):
 
 | Table | Contents |
 | --- | --- |
@@ -89,3 +89,5 @@ SQLite (current schema version 29; harness tables from v20+):
 Recon stages insights from retained tools before the analytical answer. Its new `insights-v1` extraction receipt prevents answer mining and citation retrofit; legacy queued jobs retain `legacy-v1` dispatch. Article reports delegate to one durable `insight_refresh` task after asynchronous inventory, collection and assessment. Section and BLUF prose consume its readiness result; insufficient evidence produces observations and gaps.
 
 See [NLP coverage](nlp-preprocessing.md) and the [shared harness](diagrams/investigation-harness.html). Schema 29 stores generation, lease-fenced activation, immutable original evidence and stage receipts alongside canonical Brain records.
+
+Atlas uses [classification-only collection and Related articles](atlas-classification-and-related-articles.md). Its local shared mentions are tentative browsing leads, separate from investigative claims, assessed Links and evidence confidence. Current Atlas stages count article metadata; historical memory units retain legacy labels.

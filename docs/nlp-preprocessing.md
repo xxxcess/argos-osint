@@ -44,7 +44,7 @@ Summary identity covers all ordered sources, supplied/computed hashes, metadata,
 | Path | Preparation and evidence behavior |
 | --- | --- |
 | Article acquisition/refinement | Persist raw acquisition; cache whole prose; use prepared effective action for strict block decisions; retain unreviewed blocks and baseline on failures. Report workers retain captured settings/routes/cancellation |
-| Atlas body claims | Claims-only shared extraction over complete retained windows, exact artifact/range validation and atomic publication; no inference, context packet or semantic-link requests |
+| Atlas title/description | Complete local candidate mentions including unk articles; source spans and comparison keys; no model fallback or claim publication |
 | Firecrawl / Recon pages | Reference full acquisitions separately from bounded observations; prepare before compaction, then reuse for synthesis and claim mining |
 | Recon bindings | Run native extraction first; focus existing model requests; retain occurrence, ownership, platform and format gates |
 | Directives / prior / Brain | Preserve mandatory question/directive/state fields; prepare optional prose without adding requests |
@@ -77,7 +77,7 @@ The earlier implementation validation passed `cargo fmt --all --check`, both loc
 
 The shared `investigation::insights` service runs source claim extraction through Claim Assessor, assesses fidelity with finite labels, checks readiness, then runs Synthesis over original evidence windows. Candidate entities are source local and preserve exact forms and byte mentions; they do not establish identity or support. A negative classification with a passing threshold does not authorize publication.
 
-Atlas ingestion supplies full title and description to the claims stage and stops there. Full article reasoning requires retained acquisition evidence, complete Claim Assessor coverage and complete Synthesis coverage; rewritten display text cannot certify completeness. Recon requires completed required tasks, at least two substantive roots with different artifacts, and a faithful cited premise. Search snippets and duplicate acquisitions do not satisfy the gate. Caps disclose partial enumeration and do not stop window coverage.
+Atlas collection-v1 supplies complete original title and description to local candidate inventory only. It makes no claims, fidelity, inference or publication requests; see [Atlas classification and Related](atlas-classification-and-related-articles.md). Full article reasoning requires retained acquisition evidence, complete Claim Assessor coverage and complete Synthesis coverage; rewritten display text cannot certify completeness. Recon requires completed required tasks, at least two substantive roots with different artifacts, and a faithful cited premise. Search snippets and duplicate acquisitions do not satisfy the gate. Caps disclose partial enumeration and do not stop window coverage.
 
 Schema 29 adds article/Recon owner generations, immutable snapshots, derivations, source and premise evidence, typed links and stage checkpoints. Exact-task refresh workers renew leases and publish the canonical Brain rows, provenance, active pointer and index outbox in one fenced transaction. Successful stages are reused; exhausted chains are not silently restarted. Pending and failed generations retain previous history. Legacy extraction jobs keep their explicit contract marker.
 

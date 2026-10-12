@@ -51,7 +51,7 @@ Atlas headline board: tabs, day filter, search, hero story.
 - Mode button → Verify / Explain / Assess Outlook / Full Assessment (Jobs-backed)
 - Busy work on this article hides Summary and the launch control
 
-Intel Focus Brief shows Confidence above Claims in the left column and keeps Assessment in the context column. The provisional evidence score updates after committed claim assessments: full coverage and independent corroboration raise it, while counterevidence lowers it. Source reliability remains separate. Pending/previous scores stay labeled while refresh runs; empty assessed claim sets show N/A. Scroll the left column to reach all sections at compact sizes.
+Intel Focus Brief shows Confidence above Claims in the left column and keeps Assessment in the context column. The provisional evidence score updates after committed claim assessments: full coverage and independent corroboration raise it, while counterevidence lowers it. Source reliability remains separate. Pending/previous scores stay labeled while refresh runs; empty assessed claim sets show N/A. Scroll the left column to reach all sections at compact sizes. Related sits immediately below assessed Links; its shared mentions are tentative leads. The publisher-based initial score stays separate from the later evidence score.
 
 Confidence retains the original large ASCII Admiralty grade and color gradient beside the score, stacking them at narrow widths. Legacy grades remain intact; new evidence scores use information grade 6 (cannot be judged), since the evidence rubric does not assign an Admiralty truth rating.
 
@@ -61,12 +61,13 @@ Details: [concepts.md](concepts.md) · [architecture.md](architecture.md#intel-r
 
 ### Atlas
 
-Two-phase news cycle:
+Classification-only news cycle:
 
 1. GNews + NewsData, 48 h, score countries
 2. NewsAPI + Currents headlines for kept bands
+3. Classifier batches overlap local entities and publisher priors; Related matches shared title/description mentions
 
-Pause stores a cursor. Resume continues and retries only incomplete packets. History + Braille world map follow the selected cycle (default world view about 1.20× the previous scale). Insights tables wrap to inner width. Incomplete indexing stays **waiting** while background retries continue; optional context failures complete with warnings.
+Pause preserves article receipts. Resume retries unresolved Classifier/native metadata work. History and the Braille map follow the selected cycle. Coverage shows classification, entities, publisher priors and Related leads. Atlas alone creates no Brain insights; article analysis begins in Intel. See [classification and Related](atlas-classification-and-related-articles.md).
 
 Pipeline and quotas: [architecture.md](architecture.md#atlas).
 

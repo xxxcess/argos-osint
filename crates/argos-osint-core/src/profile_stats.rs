@@ -2818,7 +2818,7 @@ impl Reader<'_> {
             blocked_now: self.atlas_current_state(&live_cycles, "blocked"),
             note: "Temperature is Argos's own score and tier is ordinal, so tiers are a \
                    distribution plus a descriptive mean rather than an interval scale. \
-                   Waiting and blocked are current counts, never fabricated completions."
+                   Waiting and blocked are current counts, never fabricated completions. Article metadata stages are independent cohorts; legacy packet/memory rows retain their units."
                 .to_string(),
         }
     }
@@ -3004,11 +3004,16 @@ impl Reader<'_> {
         // The latest transition per (stage, unit) is that unit's current state.
         let mut units: HashMap<(String, String), StageUnit> = HashMap::new();
         for (row, at) in loaded.timed() {
+            if row.label("contract_version") == "atlas-collection-v1" {
+                continue;
+            }
+
             let stage = if row.dims.tool.is_empty() {
                 row.label("stage")
             } else {
                 row.dims.tool.clone()
             };
+            let stage = format!("legacy · {stage}");
             let unit_id = if row.call_id.is_empty() {
                 row.label("unit_id")
             } else {
@@ -3064,6 +3069,43 @@ impl Reader<'_> {
             }
             let _ = unit_id;
         }
+        // New-contract work comes from retained article metadata, not legacy
+        // packet/memory events. Each stage counts its own article cohort.
+        if has_table(self.conn, "atlas_article_metadata") {
+            if let Ok(mut statement) = self.conn.prepare(
+                "SELECT r.state,r.stats_json,COALESCE(m.classification_status,'pending'),COALESCE(m.entity_state,'pending'),COALESCE(m.reliability_state,'pending') FROM atlas_articles a JOIN atlas_runs r ON r.id=a.run_id LEFT JOIN atlas_article_metadata m ON m.run_id=a.run_id AND m.article_id=a.article_id"
+            ) {
+                if let Ok(metadata) = statement.query_map([], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,String>(4)?))) {
+                    for (run_state, stats, classification, entities, publishers) in metadata.flatten() {
+                        let stats: serde_json::Value = serde_json::from_str(&stats).unwrap_or_default();
+                        if stats.get("contract_version").and_then(serde_json::Value::as_str) != Some("atlas-collection-v1") { continue; }
+                        for (stage,status) in [("classification",classification),("entities",entities),("publishers",publishers)] {
+                            let state = if status=="pending" { if run_state=="running" { "queued" } else { "waiting" } } else { &status };
+                            if !matches!(state,"queued"|"running"|"waiting"|"blocked") { continue; }
+                            let entry = rows.entry((stage.into(), "article".into())).or_insert_with(|| BacklogRow { stage:stage.into(),unit:"article".into(),..Default::default() });
+                            match state { "queued"=>entry.queued+=1,"running"=>entry.running+=1,"waiting"=>entry.waiting+=1,"blocked"=>entry.blocked+=1,_=>{} }
+                            // A metadata record has no authoritative queue timestamp.
+                            // Keep age unavailable instead of substituting ingestion time.
+                        }
+                    }
+                }
+            }
+        }
+        if has_table(self.conn, "argos_tasks") {
+            if let Ok(mut statement)=self.conn.prepare("SELECT state,created_at,error_category FROM argos_tasks WHERE operation='atlas_related' AND state IN ('queued','running','waiting','blocked')") {
+                if let Ok(tasks)=statement.query_map([],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))) {
+                    for (state,created,error) in tasks.flatten() {
+                        let entry=rows.entry(("related".into(),"cycle".into())).or_insert_with(|| BacklogRow{stage:"related".into(),unit:"cycle".into(),..Default::default()});
+                        match state.as_str(){"queued"=>entry.queued+=1,"running"=>entry.running+=1,"waiting"=>entry.waiting+=1,"blocked"=>entry.blocked+=1,_=>{}}
+                        if let Ok(created)=DateTime::parse_from_rfc3339(&created) {
+                            let age=now.signed_duration_since(created).num_milliseconds().max(0);
+                            entry.oldest_pending_ms=Some(entry.oldest_pending_ms.map_or(age,|old| old.max(age)));
+                        }
+                        if state=="blocked" { entry.latest_error_category=error; }
+                    }
+                }
+            }
+        }
         let mut rows: Vec<BacklogRow> = rows.into_values().collect();
         rows.sort_by(|a, b| a.stage.cmp(&b.stage));
         rows
@@ -3115,7 +3157,7 @@ struct StageUnit {
     at: DateTime<Utc>,
     /// Current state: queued, running, waiting, blocked, done.
     state: String,
-    /// The unit this stage counts (article, packet, memory).
+    /// The unit this stage counts (article/metadata; legacy packet/memory are labeled).
     unit: String,
     /// Terminal reason recorded for the unit.
     reason: String,
@@ -5272,6 +5314,42 @@ mod snapshot_tests {
                 .sum::<u64>(),
             7
         );
+    }
+
+    #[test]
+    fn collection_backlog_uses_durable_article_stages_without_legacy_units() {
+        let store = store();
+        store
+            .atlas_insert_run(
+                "collection",
+                "{}",
+                r#"{"contract_version":"atlas-collection-v1"}"#,
+            )
+            .unwrap();
+        store
+            .atlas_set_state("collection", "paused", "", false)
+            .unwrap();
+        store.connection().execute("INSERT INTO atlas_articles(run_id,article_id,title,description,url,country,source_name,source_domain,published_at,provider,temperature,category,seen_at) VALUES('collection','article','Title','','https://example.com/article','us','Wire','example.com','','fixture',0,'unk','2026-10-12T00:00:00Z')",[]).unwrap();
+        let snapshot = snapshot_at(&store, &Period::H1, Utc::now());
+        for stage in ["classification", "entities", "publishers"] {
+            let row = snapshot
+                .atlas
+                .backlog
+                .iter()
+                .find(|row| row.stage == stage)
+                .unwrap();
+            assert_eq!(row.unit, "article");
+            assert_eq!(row.waiting, 1);
+            assert_eq!(
+                row.oldest_pending_ms, None,
+                "queue age is unavailable without a native timestamp"
+            );
+        }
+        assert!(!snapshot
+            .atlas
+            .backlog
+            .iter()
+            .any(|row| matches!(row.unit.as_str(), "memory" | "packet")));
     }
 
     #[test]

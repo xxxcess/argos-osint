@@ -1,6 +1,5 @@
 mod app;
 mod article_image;
-mod atlas_actions;
 mod atlas_table;
 mod brain_detail;
 mod commands;
@@ -19,6 +18,7 @@ pub mod profile_components;
 pub mod profile_config;
 pub mod profile_layout;
 mod recon_parts;
+mod related_articles;
 mod summary_card;
 mod theme;
 mod tool_catalog;

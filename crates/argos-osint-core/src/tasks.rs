@@ -208,12 +208,36 @@ pub fn pool_for_operation(operation: &str) -> &'static str {
 
 /// Map an operation name onto its attempt policy kind.
 pub fn operation_kind(operation: &str) -> OperationKind {
+    match operation {
+        "atlas_entities" | "atlas_related" | "atlas_metadata" => return OperationKind::LocalIndex,
+        "atlas_publishers" | "atlas_collect" | "atlas_collection" => {
+            return OperationKind::NetworkCollect
+        }
+        _ => {}
+    }
     match pool_for_operation(operation) {
         POOL_SUMMARY => OperationKind::Summarization,
         POOL_INDEX => OperationKind::LocalIndex,
         POOL_NETWORK => OperationKind::NetworkCollect,
         _ => OperationKind::OtherLlm,
     }
+}
+
+/// Fence obsolete Atlas insight children without touching shared memory-index work.
+/// Advancing the lease epoch prevents a previously claimed worker from publishing.
+pub fn retire_atlas_insight_work(conn: &Connection, now: &str) -> rusqlite::Result<usize> {
+    // The first upgrade sweep captures a cutoff so later explicit historical
+    // Repair jobs remain available. Obsolete extraction/refresh stays fenced.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    )?;
+    conn.execute("INSERT OR IGNORE INTO app_state(key,value) VALUES ('atlas_collection_retirement_cutoff',?1)", [now])?;
+    let removed_jobs = "WITH RECURSIVE removed(id) AS (SELECT id FROM argos_jobs WHERE operation IN ('atlas_phase_4','atlas_phase_5','atlas_extract','atlas_insights','atlas_publish','atlas_index','atlas_brief','atlas_repair') OR (kind='atlas_memory_repair' AND created_at <= (SELECT value FROM app_state WHERE key='atlas_collection_retirement_cutoff')) UNION SELECT j.id FROM argos_jobs j JOIN removed r ON j.parent_id=r.id WHERE j.operation NOT IN ('index_upsert','index_remove','index_rebuild','upsert','remove','rebuild','generation_rebuild')) SELECT id FROM removed";
+    let retired = format!("operation IN ('atlas_phase_4','atlas_phase_5','atlas_extract','atlas_insights','atlas_publish','atlas_index','atlas_brief','atlas_repair') OR (operation='atlas_memory_repair' AND created_at <= (SELECT value FROM app_state WHERE key='atlas_collection_retirement_cutoff')) OR (job_id IN ({removed_jobs}) AND operation NOT IN ('index_upsert','index_remove','index_rebuild','upsert','remove','rebuild','generation_rebuild')) OR (operation='insight_refresh' AND (job_id IN (SELECT id FROM argos_jobs WHERE app='atlas' OR owner_scope='atlas' OR owner_scope LIKE 'atlas:%') OR (json_valid(input_ref) AND (json_extract(input_ref,'$.surface')='atlas' OR json_extract(input_ref,'$.snapshot.owner_kind')='atlas'))))");
+    conn.execute(&format!("UPDATE argos_attempts SET finished_at=?1,outcome='cancelled',error_category='cancelled_or_stale' WHERE finished_at='' AND task_id IN (SELECT id FROM argos_tasks WHERE state IN ('queued','running','retry_scheduled','paused') AND ({retired}))"), [now])?;
+    let changed = conn.execute(&format!("UPDATE argos_tasks SET state='cancelled',lease_epoch=lease_epoch+1,lease_owner='',lease_until='',error_category='cancelled_or_stale',error_message='Atlas collection contract retired insight work',updated_at=?1 WHERE state IN ('queued','running','retry_scheduled','paused') AND ({retired})"), [now])?;
+    conn.execute(&format!("UPDATE argos_jobs SET state='cancelled',cancel_requested=1,reason='Atlas collection contract retired insight work',updated_at=?1 WHERE state IN ('queued','running','retry_scheduled','paused','waiting') AND (id IN ({removed_jobs}) OR (operation='insight_refresh' AND (app='atlas' OR owner_scope='atlas' OR owner_scope LIKE 'atlas:%')))"), [now])?;
+    Ok(changed)
 }
 
 /// Operation family used to pick the attempt budget.
@@ -2072,6 +2096,59 @@ mod tests {
             now,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn atlas_retirement_fences_refresh_and_preserves_investigation_and_index_work() {
+        let conn = mem();
+        let now = "2026-10-12T00:00:00Z";
+        job(&conn, "atlas-job", now);
+        job(&conn, "intel-job", now);
+        conn.execute(
+            "UPDATE argos_jobs SET app='atlas',owner_scope='atlas:article' WHERE id='atlas-job'",
+            [],
+        )
+        .unwrap();
+        task(&conn, "atlas-refresh", "atlas-job", "insight_refresh", now);
+        task(&conn, "removed-phase", "atlas-job", "atlas_phase_4", now);
+        task(&conn, "shared-index", "atlas-job", "index_upsert", now);
+        task(&conn, "intel-refresh", "intel-job", "insight_refresh", now);
+        task(&conn, "surface-atlas", "intel-job", "insight_refresh", now);
+        conn.execute(
+            "UPDATE argos_tasks SET input_ref='{\"surface\":\"atlas\"}' WHERE id='surface-atlas'",
+            [],
+        )
+        .unwrap();
+        let claimed = claim_task(&conn, "atlas-refresh", "old-worker", 120, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retire_atlas_insight_work(&conn, now).unwrap(), 3);
+        assert!(!complete_claimed(&conn, &claimed, "forbidden", now).unwrap());
+        for id in ["shared-index", "intel-refresh"] {
+            let state: String = conn
+                .query_row("SELECT state FROM argos_tasks WHERE id=?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(state, "queued");
+        }
+        assert_eq!(retire_atlas_insight_work(&conn, now).unwrap(), 0);
+    }
+
+    #[test]
+    fn atlas_native_metadata_uses_native_attempt_policies() {
+        for operation in ["atlas_entities", "atlas_related"] {
+            assert_eq!(pool_for_operation(operation), POOL_ATLAS);
+            assert_eq!(operation_kind(operation), OperationKind::LocalIndex);
+        }
+        assert_eq!(
+            operation_kind("atlas_publishers"),
+            OperationKind::NetworkCollect
+        );
+        assert_eq!(
+            operation_kind("atlas_classification"),
+            OperationKind::OtherLlm
+        );
     }
 
     #[test]

@@ -538,14 +538,6 @@ pub const COMMANDS: &[CommandDefinition] = &[
         ModuleId::Atlas,
     ),
     local(
-        "atlas-repair",
-        "Repair Atlas memories",
-        "Requeue missing saved memories or vectors",
-        "",
-        "Atlas",
-        ModuleId::Atlas,
-    ),
-    local(
         "intel-search",
         "Search Intel",
         "Focus the article search field",

@@ -1213,11 +1213,38 @@ pub struct DecisionsResponse {
     pub id: String,
     #[serde(default)]
     pub model: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_decision_answers")]
     pub answers: std::collections::BTreeMap<String, DecisionAnswer>,
     /// `usage.cost` in USD, when reported.
     #[serde(default)]
     pub cost: Option<f64>,
+}
+
+fn unique_decision_answers<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<std::collections::BTreeMap<String, DecisionAnswer>, D::Error> {
+    struct Answers;
+    impl<'de> serde::de::Visitor<'de> for Answers {
+        type Value = std::collections::BTreeMap<String, DecisionAnswer>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("unique question IDs")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut answers = std::collections::BTreeMap::new();
+            while let Some((id, answer)) = map.next_entry::<String, DecisionAnswer>()? {
+                if answers.insert(id.clone(), answer).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate question ID {id}"
+                    )));
+                }
+            }
+            Ok(answers)
+        }
+    }
+    deserializer.deserialize_map(Answers)
 }
 
 /// `https://openrouter.ai/api/v1` becomes `https://openrouter.ai/api/alpha/decisions`.
@@ -1230,7 +1257,7 @@ pub fn decisions_url(base_url: &str) -> String {
 pub fn parse_decisions(text: &str) -> Result<DecisionsResponse> {
     let value: Value = serde_json::from_str(text).context("decisions JSON")?;
     let mut response: DecisionsResponse =
-        serde_json::from_value(value.clone()).context("decisions response")?;
+        serde_json::from_str(text).context("decisions response")?;
     response.cost = value.pointer("/usage/cost").and_then(Value::as_f64);
     for (qid, ans) in &response.answers {
         if !ans.is_valid_distribution(0.05) {

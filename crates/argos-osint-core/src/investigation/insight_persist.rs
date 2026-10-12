@@ -320,6 +320,10 @@ pub fn enqueue_refresh(
     settings: &crate::provider::SettingsFile,
     now: &str,
 ) -> Result<String> {
+    ensure!(
+        input.surface != "atlas" && input.snapshot.owner_kind != "atlas",
+        "Atlas cycles cannot enqueue insight refreshes"
+    );
     input.snapshot.key = super::insights::input_key(input, settings);
     let job_id = format!(
         "insight-refresh:{}:{}:{}",
@@ -377,6 +381,7 @@ pub async fn run_refresh_slice(
 ) -> Result<Option<PipelineOutput>> {
     let claimed = {
         let store = crate::store::Store::open(db_path)?;
+        crate::tasks::retire_atlas_insight_work(&store.conn, &chrono::Utc::now().to_rfc3339())?;
         let is_refresh: bool = store.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM argos_tasks WHERE id=?1 AND operation='insight_refresh')",
             [task_id],
@@ -396,6 +401,10 @@ pub async fn run_refresh_slice(
         task
     };
     let mut input: PipelineInput = serde_json::from_str(&claimed.input_ref)?;
+    ensure!(
+        input.surface != "atlas" && input.snapshot.owner_kind != "atlas",
+        "Atlas insight refresh retired"
+    );
     let result = if super::insights::input_key(&input, settings) != claimed.input_hash {
         Err(anyhow::anyhow!(
             "captured route/preparation contract changed"
@@ -520,6 +529,7 @@ pub async fn recover_refreshes(
     let ids = {
         let store = crate::store::Store::open(db_path)?;
         let now = chrono::Utc::now().to_rfc3339();
+        crate::tasks::retire_atlas_insight_work(&store.conn, &now)?;
         store.conn.execute("UPDATE argos_attempts SET finished_at=?1,outcome='lease_expired',error_category='lease_expired' WHERE finished_at='' AND task_id IN (SELECT id FROM argos_tasks WHERE operation='insight_refresh' AND state='running' AND julianday(lease_until)<=julianday(?1))", [&now])?;
         store.conn.execute("UPDATE argos_tasks SET state='queued',lease_owner='',lease_until='',max_attempts=attempts+1,updated_at=?1 WHERE operation='insight_refresh' AND state='running' AND julianday(lease_until)<=julianday(?1)", [&now])?;
         let mut stmt=store.conn.prepare("SELECT id FROM argos_tasks WHERE operation='insight_refresh' AND state IN ('queued','retry_scheduled') ORDER BY created_at,id")?;
@@ -843,6 +853,10 @@ pub fn publish_snapshot<F>(
 where
     F: FnOnce(&Transaction<'_>, &str) -> Result<()>,
 {
+    ensure!(
+        snapshot.owner_kind != "atlas",
+        "Atlas insight publication retired"
+    );
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     if desired_generation(&tx, &snapshot.owner_kind, &snapshot.owner_id)? != snapshot.generation
         || snapshot.key != fence.live_input_key

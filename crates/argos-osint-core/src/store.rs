@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// activity-history tables plus additive timing columns on the model attempt
 /// and tool call records. 28 adds immutable NLP artifacts/references/features and
 /// complete summary-result envelopes; existing facts are preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 29;
+pub const SCHEMA_VERSION: i64 = 30;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -733,6 +733,12 @@ impl Store {
             if version < 29 {
                 crate::investigation::insight_persist::migrate(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 29)?;
+            }
+
+            if version < 30 {
+                self.conn
+                    .execute_batch(include_str!("schema_atlas_metadata.sql"))?;
+                self.conn.pragma_update(None, "user_version", 30)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
@@ -2709,7 +2715,7 @@ pub struct AtlasRunRow {
 }
 
 /// One headline saved for an Atlas run. `category` is an OSINT tag or `unk`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AtlasArticleRow {
     pub run_id: String,
     pub id: String,

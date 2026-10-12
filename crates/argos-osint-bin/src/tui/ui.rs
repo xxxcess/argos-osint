@@ -18,7 +18,6 @@ use super::app::{
 };
 use super::theme;
 use argos_osint_core::atlas;
-use argos_osint_core::atlas_insights;
 use argos_osint_core::intel_recon::{self, ReportMode};
 use argos_osint_core::osint;
 use argos_osint_core::provider;
@@ -2809,6 +2808,14 @@ pub fn page(app: &mut App, direction: i32) {
             nudge(&mut app.scrolls.recall, direction * 6, 10_000);
         }
         Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => match app.focus {
+            Target::BrainRelatedArticle(_) => {
+                let area = detail_areas(app).related;
+                let view = &mut app.brain_detail.related.articles;
+                let max = (1 + view.page.rows.len() * 4)
+                    .saturating_sub(area.height.saturating_sub(4) as usize)
+                    .min(u16::MAX as usize) as u16;
+                nudge(&mut view.scroll, direction * 4, max);
+            }
             Target::RelatedRow(_) => {
                 let area = detail_areas(app).related;
                 let max = super::brain_detail::related_scroll_max(&app.brain_detail.related, area);
@@ -4480,7 +4487,11 @@ pub(super) fn draw_button_state(
     }
     if matches!(
         button,
-        ButtonId::FallbackTab(_) | ButtonId::AtlasWorld | ButtonId::AtlasNews
+        ButtonId::FallbackTab(_)
+            | ButtonId::AtlasWorld
+            | ButtonId::AtlasNews
+            | ButtonId::BrainRelatedMemories
+            | ButtonId::BrainRelatedArticles
     ) {
         super::components::tab_button(
             frame,
@@ -6386,7 +6397,8 @@ pub(crate) fn memory_list_note(app: &App) -> (String, ratatui::style::Style) {
         );
     }
     (
-        "No memories yet. Create one, or run Atlas or Recon to save insights.".into(),
+        "No memories yet. Create one, or analyze an article in Intel or investigate with Recon."
+            .into(),
         theme::dim(),
     )
 }
@@ -7422,6 +7434,48 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             draw_clipped_md_pane(frame, left, layout.links, " links ", &layout.links_lines, 0);
         }
+        draw_clipped_md_pane(
+            frame,
+            left,
+            layout.related,
+            " Related · shared mentions ",
+            &layout.related_lines,
+            0,
+        );
+        let rows = super::related_articles::rows(
+            &app.intel_related,
+            left.width.saturating_sub(2) as usize,
+            false,
+        );
+        for (offset, (_, target)) in rows.iter().enumerate() {
+            if let Some(target) = target {
+                let row = abs_rect(
+                    left.x + 1,
+                    layout.related.y + 1 + offset as i32,
+                    left.width.saturating_sub(2),
+                    1,
+                );
+                if let Some((rect, _)) = intersect_abs(left, row) {
+                    app.layout.borrow_mut().register(*target, rect);
+                }
+            }
+        }
+        if app.intel_related.page.has_more {
+            let button = abs_rect(
+                left.x + 1,
+                layout.related.y + i32::from(layout.related.height) - 2,
+                left.width.saturating_sub(2),
+                1,
+            );
+            draw_clipped_button(
+                frame,
+                app,
+                left,
+                button,
+                ButtonId::IntelRelatedMore,
+                "See more",
+            );
+        }
     }
 
     // Side panes stay fixed; only the center stack scrolls.
@@ -7988,6 +8042,8 @@ struct IntelExtractedLayout {
     inferences: AbsRect,
     actors: AbsRect,
     links: AbsRect,
+    related: AbsRect,
+    related_lines: Vec<Line<'static>>,
     claims_lines: Vec<Line<'static>>,
     confidence_lines: Vec<Line<'static>>,
     inferences_lines: Vec<Line<'static>>,
@@ -8041,6 +8097,10 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let inferences_lines = parse_extracted_md(&inferences_md, inner_w);
     let actors_lines = parse_extracted_md(&actors_md, inner_w);
     let links_lines = parse_extracted_md(&links_md, inner_w);
+    let related_lines = super::related_articles::rows(&app.intel_related, inner_w, false)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect::<Vec<_>>();
 
     let insights_loading = intel_insights_loading(app);
     let claims_loading = insights_loading && buckets.facts.is_empty();
@@ -8061,13 +8121,16 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let inferences_h = section_h(inferences_lines.len(), inferences_loading);
     let actors_h = section_h(actors_lines.len(), actors_loading);
     let links_h = section_h(links_lines.len(), links_loading);
+    let related_h = section_h(related_lines.len(), false)
+        .saturating_add(u16::from(app.intel_related.page.has_more));
 
     let confidence_h = section_h(confidence_lines.len(), false);
     let total = confidence_h
         .saturating_add(claims_h)
         .saturating_add(inferences_h)
         .saturating_add(actors_h)
-        .saturating_add(links_h);
+        .saturating_add(links_h)
+        .saturating_add(related_h);
     let stack_scroll_max = total.saturating_sub(viewport.height);
     let scroll = app.scrolls.intel_extracted.min(stack_scroll_max) as i32;
 
@@ -8081,10 +8144,14 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let actors = abs_rect(viewport.x, y, viewport.width, actors_h);
     y += i32::from(actors_h);
     let links = abs_rect(viewport.x, y, viewport.width, links_h);
+    y += i32::from(links_h);
+    let related = abs_rect(viewport.x, y, viewport.width, related_h);
 
     Some(IntelExtractedLayout {
         confidence,
         confidence_lines,
+        related,
+        related_lines,
         claims,
         inferences,
         actors,
@@ -8099,6 +8166,28 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         links_loading,
         stack_scroll_max,
     })
+}
+
+pub fn reveal_intel_related(app: &mut App, index: usize) {
+    let body = chrome(app.screen, app).body;
+    let (left, _, _) = intel_briefing_areas(app, body);
+    let Some(layout) = intel_extracted_layout(app, left) else {
+        return;
+    };
+    let top = layout.related.y + 2 + (index * 4) as i32;
+    let bottom = top + 3;
+    if top < i32::from(left.y) {
+        app.scrolls.intel_extracted = app
+            .scrolls
+            .intel_extracted
+            .saturating_sub((i32::from(left.y) - top) as u16);
+    } else if bottom >= i32::from(left.y + left.height) {
+        app.scrolls.intel_extracted = app
+            .scrolls
+            .intel_extracted
+            .saturating_add((bottom + 1 - i32::from(left.y + left.height)) as u16)
+            .min(layout.stack_scroll_max);
+    }
 }
 
 pub fn intel_extracted_scroll_max(app: &App) -> u16 {
@@ -8358,7 +8447,9 @@ fn draw_intel_assessment(frame: &mut Frame, app: &App, area: Rect) {
 
 fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let eval = intel_source_evaluation(app);
-    let new_policy = app.intel_insight_lifecycle != "legacy/unassessed"
+    let new_policy = app.intel_metadata_present
+        || app.intel_publisher_prior.is_some()
+        || app.intel_insight_lifecycle != "legacy/unassessed"
         || app.intel_claims.is_empty()
         || app
             .intel_claims
@@ -8370,14 +8461,35 @@ fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             lines.push(Line::from(Span::styled(row, style)));
         }
     };
+    let initial = app
+        .intel_publisher_prior
+        .as_ref()
+        .and_then(|prior| prior.score);
+    add(
+        format!(
+            "Initial confidence · publisher-based: {}{}",
+            initial
+                .map(|score| format!("{score:.0}/100"))
+                .unwrap_or_else(|| "N/A · unrated".into()),
+            if app
+                .intel_publisher_prior
+                .as_ref()
+                .is_some_and(|prior| prior.stale)
+            {
+                " · stale"
+            } else {
+                ""
+            }
+        ),
+        theme::text(),
+    );
+    add(
+        "Information credibility: unassessed (6)".into(),
+        theme::dim(),
+    );
     if new_policy {
         let estimate = app.intel_evidence_confidence.as_ref();
-        let initial = app
-            .intel_articles
-            .get(app.intel_sel)
-            .filter(|a| !a.title.trim().is_empty() || !a.description.trim().is_empty())
-            .map(|_| 20);
-        let score = estimate.map(|e| e.score).unwrap_or(initial);
+        let score = estimate.and_then(|e| e.score);
         let status = if app.intel_insight_lifecycle == "pending" {
             "previous · refresh pending".to_owned()
         } else if app.intel_insight_lifecycle == "previous" {
@@ -8391,7 +8503,7 @@ fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         };
         add(
             format!(
-                "{} · {status}",
+                "Evidence confidence: {} · {status}",
                 score
                     .map(|s| format!("{s}/100"))
                     .unwrap_or_else(|| "N/A · no claims".into())
@@ -8419,10 +8531,7 @@ fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 theme::dim(),
             );
         } else {
-            add(
-                "Initial source evidence; assessment pending".into(),
-                theme::dim(),
-            );
+            add("Evidence assessment pending".into(), theme::dim());
         }
         add(
             format!(
@@ -8431,6 +8540,7 @@ fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             ),
             theme::dim(),
         );
+        add(eval.footnote.clone(), theme::dim());
         add("Information 6 · CANNOT BE JUDGED".into(), theme::dim());
         add("Evidence score · not a probability".into(), theme::dim());
     } else {
@@ -8467,9 +8577,11 @@ fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let art = grade_ascii_lines(&format!("{}{digit}", eval.reliability_letter));
     let art_width = art.iter().map(|row| row.chars().count()).max().unwrap_or(0);
     let style = Style::default()
-        .fg(grade_score_color(
-            (eval.reliability_meter + credibility_meter) * 0.5,
-        ))
+        .fg(grade_score_color(if new_policy {
+            eval.reliability_meter
+        } else {
+            (eval.reliability_meter + credibility_meter) * 0.5
+        }))
         .add_modifier(Modifier::BOLD);
     if width >= art_width + 16 {
         let mut details = Vec::new();
@@ -8672,6 +8784,38 @@ fn intel_source_evaluation(app: &App) -> IntelSourceEval {
     use argos_osint_core::osint::{
         best_credibility, wikipedia_rsp, InformationCredibility, SourceReliability,
     };
+    if let Some(prior) = &app.intel_publisher_prior {
+        let observation = &prior.observation;
+        let reliability =
+            SourceReliability::parse(&observation.reliability).unwrap_or(SourceReliability::F);
+        return IntelSourceEval {
+            reliability_letter: reliability.as_str().into(),
+            reliability_label: observation.reliability_label.clone(),
+            reliability_meter: reliability.meter(),
+            credibility_digit: "6".into(),
+            credibility_label: InformationCredibility::CannotBeJudged.label().into(),
+            credibility_meter: 0.0,
+            footnote: format!(
+                "{}6 · {} · {}{} · {}",
+                reliability.as_str(),
+                observation.domain,
+                observation.rsp_status_label,
+                if prior.stale { " · stale" } else { "" },
+                observation.rsp_url
+            ),
+        };
+    }
+    if app.intel_metadata_present {
+        return IntelSourceEval {
+            reliability_letter: "F".into(),
+            reliability_label: SourceReliability::F.label().into(),
+            reliability_meter: 0.0,
+            credibility_digit: "6".into(),
+            credibility_label: InformationCredibility::CannotBeJudged.label().into(),
+            credibility_meter: 0.0,
+            footnote: "F6 · publisher prior unavailable".into(),
+        };
+    }
     let article = app.intel_articles.get(app.intel_sel);
     let domain = article.map(|row| row.source_domain.as_str()).unwrap_or("");
     let (reliability, entry) = match wikipedia_rsp::cached_index() {
@@ -9198,77 +9342,67 @@ fn draw_atlas(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_atlas_insights(frame: &mut Frame, app: &App, area: Rect) {
-    if atlas_extracting(app) {
-        let block = pane(" insights ");
-        let inner = inset(area);
-        frame.render_widget(block, area);
-        let (label, metric) = insights_progress_lines(app);
-        let mut lines = vec![Line::from(Span::styled(label, theme::dim()))];
-        if let Some(metric) = metric {
-            lines.push(Line::from(Span::styled(metric, theme::dim())));
-        }
-        let height = lines.len() as u16;
-        let y = inner.y + inner.height.saturating_sub(height) / 2;
-        let centered = Rect {
-            x: inner.x,
-            y,
-            width: inner.width,
-            height: height.min(inner.height),
-        };
-        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), centered);
-        return;
+fn draw_atlas_coverage(frame: &mut Frame, app: &App, area: Rect) {
+    let coverage = &app.atlas_stats.coverage;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "Classifications {}/{}",
+                coverage.classified, coverage.articles
+            ),
+            theme::text(),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "Unresolved: {} failed · {} blocked",
+                coverage.classification_failed, coverage.classification_blocked
+            ),
+            theme::dim(),
+        )),
+        Line::from(format!(
+            "Entities {} available · {} unavailable",
+            coverage.entities_available, coverage.entities_unavailable
+        )),
+        Line::from(format!(
+            "Publisher priors {} available · {} unavailable",
+            coverage.publishers_available, coverage.publishers_unavailable
+        )),
+        Line::from(vec![
+            Span::raw(format!(
+                "Related {} pairs · shared mentions only",
+                coverage.related_pairs
+            )),
+            Span::styled(format!(" · Warnings {}", coverage.warnings), theme::dim()),
+        ]),
+        Line::from(Span::styled(
+            format!("Stage: {}", app.atlas_status),
+            theme::accent(),
+        )),
+    ];
+    if coverage.legacy_unknown > 0 {
+        lines.insert(
+            1,
+            Line::from(Span::styled(
+                format!(
+                    "Legacy unk provenance: {} · not reclassified",
+                    coverage.legacy_unknown
+                ),
+                theme::dim(),
+            )),
+        );
     }
-    let memories = app.atlas_stats.memories.line();
-    let stats = atlas_insights::insight_stats_line(&app.atlas_stats.insights);
-    let mut prefix = Vec::new();
-    if !memories.is_empty() {
-        prefix.push(Line::from(Span::styled(memories, theme::dim())));
-    }
-    prefix.push(Line::from(Span::styled(stats, theme::dim())));
-    let rows: Vec<Vec<String>> = app
-        .atlas_stats
-        .insights
-        .rows
-        .iter()
-        .map(|row| {
-            vec![
-                row.entity.clone(),
-                row.predicate.clone(),
-                row.object.clone(),
-                row.topic.clone(),
-                row.classification.clone(),
-            ]
-        })
-        .collect();
-    super::atlas_table::render_wrapped_table(
-        frame,
-        super::atlas_table::WrappedTable {
-            area,
-            headers: &["Entity", "Predicate", "Object", "Topic", "Class"],
-            rows: &rows,
-            min_widths: &[12, 10, 12, 8, 8],
-            scroll_lines: app.scrolls.insights as usize,
-            focused: false,
-            title: " insights ",
-            prefix,
-        },
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(pane(" coverage "))
+            .wrap(Wrap { trim: false })
+            .scroll((app.scrolls.insights, 0)),
+        area,
     );
 }
 
-/// True while the live pipeline is in the insight-extraction step.
+/// Native metadata and classifier work use the live stage label.
 pub(crate) fn atlas_extracting(app: &App) -> bool {
-    app.atlas_pause.is_some()
-        && (app.atlas_insight_progress.is_some() || app.atlas_status == "Extracting insights")
-}
-
-fn insights_progress_lines(app: &App) -> (String, Option<String>) {
-    let label = format!("{} Extracting insights", loading_spinner_frame());
-    let metric = app
-        .atlas_insight_progress
-        .filter(|(_, total)| *total > 0)
-        .map(|(done, total)| format!("{done} / {total}"));
-    (label, metric)
+    app.atlas_pause.is_some() && !app.atlas_status.is_empty()
 }
 
 fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
@@ -9278,7 +9412,7 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
             frame,
             app,
             Rect::new(area.x, area.y + ACTION_H, area.width, 1),
-            &["Origins", "Insights", "Headlines"],
+            &["Origins", "Coverage", "Headlines"],
         );
     }
     let buttons = button_areas(actions, 3);
@@ -9314,7 +9448,7 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
             focused: app.focus == Target::AtlasCycleStats,
         },
     );
-    draw_atlas_insights(frame, app, insights);
+    draw_atlas_coverage(frame, app, insights);
     let rows = inset(feed);
     for row in 0..rows.height as usize {
         let index = app.scrolls.atlas_feed as usize + row;
@@ -9398,7 +9532,7 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
     frame.render_widget(Paragraph::new(lines).block(pane(" news cycle ")), cycles);
-    let buttons = button_areas(actions, 4);
+    let buttons = button_areas(actions, 3);
     let live = atlas_history_live_label(app);
     draw_button(frame, app, ButtonId::AtlasLive, &live, buttons[0]);
     if app.atlas_can_resume() {
@@ -9414,14 +9548,7 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
             false,
         );
     }
-    draw_button(
-        frame,
-        app,
-        ButtonId::AtlasRepair,
-        "Repair memories",
-        buttons[2],
-    );
-    draw_button(frame, app, ButtonId::AtlasDelete, "Delete", buttons[3]);
+    draw_button(frame, app, ButtonId::AtlasDelete, "Delete", buttons[2]);
 }
 
 /// Date on the left, pipeline state on the right.
@@ -9459,11 +9586,21 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
         .filter(|row| row.articles > 0)
         .collect();
     let summary = format!(
-        "Articles {}  {}",
+        "Articles {} · classified {} · Related {} pairs",
         stats.article_total(),
-        atlas_insights::insight_stats_line(&stats.insights)
+        stats.coverage.classified,
+        stats.coverage.related_pairs
     );
-    let memories = stats.memories.line();
+    let coverage = if stats.contract_version == "atlas-collection-v1" {
+        format!(
+            "Entities {} · publisher priors {} · warnings {}",
+            stats.coverage.entities_available,
+            stats.coverage.publishers_available,
+            stats.coverage.warnings
+        )
+    } else {
+        format!("Legacy memory publication · {}", stats.memories.line())
+    };
     app.layout
         .borrow_mut()
         .register(Target::AtlasCycleStats, area);
@@ -9478,7 +9615,7 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
             empty: "No country statistics for this cycle.",
             prefix: vec![
                 Line::from(Span::styled(summary, theme::dim())),
-                Line::from(Span::styled(memories, theme::dim())),
+                Line::from(Span::styled(coverage, theme::dim())),
             ],
             focused: app.focus == Target::AtlasCycleStats,
         },
@@ -9590,11 +9727,10 @@ fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
         let (actions, _map, stats, cycles) = atlas_runs_areas(body);
         if contains(actions, x, y) {
-            let slots = button_areas(actions, 4);
+            let slots = button_areas(actions, 3);
             let buttons = [
                 ButtonId::AtlasLive,
                 ButtonId::AtlasResume,
-                ButtonId::AtlasRepair,
                 ButtonId::AtlasDelete,
             ];
             return slots
@@ -9806,13 +9942,13 @@ fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools · 8 Models · 9 Profile\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
         Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nThe mode button under the full article opens Verify / Explain / Assess Outlook / Full Assessment\nJobs pane tracks focus-brief background progress and recon reports\nEsc returns from briefing to bulletin, or from bulletin to home",
-        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 60 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 60 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, Repair memories, and Delete sit between the map and those panes. Resume continues the selected cycle when it stopped while saving or indexing memories. Repair memories rechecks saved cycles and requeues missing memories or vectors (progress in Jobs). When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
+        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 60 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 60 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, and Delete sit between the map and those panes. Resume continues retained collection/classification and native metadata. Coverage shows classifications, entities, publisher priors, and Related pairs. Atlas collects articles without creating Brain memories. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon investigation\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between transcript and prompt\n↑↓ select a query, plan, evidence activity, or answer\n←→ or h/l fold the selected Plan or activity\nEnter toggles that fold · o inspects the captured source · f opens full text\n◉ brain opens memories used by Synthesis\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "Profile\n\nTab / Shift+Tab traverse controls; Enter activates\nOverview / System / Configs · t switches analytics/host · x Configs\n0 Summary · 1–5 Intel/Recon/Atlas/Models/Tools · [ / ] apps\nTab reveals panels · Arrows select rows/buckets · Enter or m expands\nLeft/Right selects buckets · v chart/table · s sort · g provider fold · PageUp/PageDown or wheel scroll\np period · f six dimension filters · c clears filters\nPicker: type to search, Tab dimension, arrows select, Enter apply\nr refreshes statistics in Overview, hardware in System\nEsc restores grid or returns home · Ctrl+K commands",
         Some(ModuleId::Logs) => "Logs\n\nDurable events from every app and background worker, kept 24 hours\nThe header counts errors, warnings, and failures in the last hour\nFilter narrows by text. Level, App, and the job filter narrow further\n↑↓ select an event · Enter or click folds its detail\nf toggles live follow. Moving off the newest event pauses it\no or Open job shows the event's job in Jobs\nOpened from Jobs, Esc or Back to job returns there\nClear events removes events only; jobs, results, and memories stay\nCtrl+U/Ctrl+D and the wheel scroll the list",
         Some(ModuleId::Jobs) => "Jobs\n\nBackground work with timing, attempts, and errors\nActive work is listed first, then recent history, then service workers\nStatus and App filter the table. Filter matches title, id, operation, or error\n↑↓ select a job · Enter opens its detail (full screen when narrow)\nl or View logs opens Logs filtered to the job and its phases\nRetry failed requeues only failed index or summary tasks; completed work is kept\nOpen source jumps to the Atlas cycle or investigation when there is one\nUnknown historic timing shows Unavailable\nEsc closes the detail, then returns home",
-        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe detail shows the path graph on top, Related on the left, and Summary on the right\nNarrow terminals stack Related above Summary; the focused one gets more room\nRelated lists other memories: linked ones (shared claim relation, source, entity, or investigation) first, then similar ones, which are not evidence\nTab moves between Back, the graph, Related, and Summary\n↑↓ select a related memory · Enter or click opens it, even when Find hides it\nEsc or Back returns to the previous memory, then to the list with its Find and selection\nThe list keeps its selection and Find when memories change elsewhere\nIf memories cannot be read, the last loaded list stays and the error is shown and logged\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
+        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe detail shows the path graph on top, Related on the left, and Summary on the right\nNarrow terminals stack Related above Summary; the focused one gets more room\nRelated has Memories / Articles tabs. Articles use shared headline/description entities and remain tentative leads; Enter opens the exact article in Intel. Memories lists other memories: linked ones (shared claim relation, source, entity, or investigation) first, then similar ones, which are not evidence\nTab moves between Back, the graph, Related, and Summary\n↑↓ select a related memory · Enter or click opens it, even when Find hides it\nEsc or Back returns to the previous memory, then to the list with its Find and selection\nThe list keeps its selection and Find when memories change elsewhere\nIf memories cannot be read, the last loaded list stays and the error is shown and logged\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
         Some(ModuleId::Providers) => "Models\n\nEach account tab stores that provider only\nDefaults sets every role's primary model and ordered fallbacks\nFallbacks are tried top to bottom after primary retries (4 then 3 each)\nAdd fallback opens Google, Nvidia, or OpenRouter catalogs\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
         _ => "Controls\n\nTab moves between fields and buttons\n1–9 switch apps when not typing in a field\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }

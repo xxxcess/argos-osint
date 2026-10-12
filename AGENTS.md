@@ -47,7 +47,7 @@ OpenCode: load `argos-commit` or `/ecc-commit` for commit tasks. `plan` prepares
 ## State & Config (all under `~/.argos`, override with `ARGOS_HOME`)
 | File | Purpose |
 |------|---------|
-| `argos.db` | SQLite: Brain memories, threads, runs, calls, cache, entities, provenance, Atlas packets, recon model operations (schema 26) |
+| `argos.db` | SQLite: Brain memories, threads, runs, calls, cache, entities, provenance, legacy Atlas packets, article metadata/Related pairs, recon model operations (schema 30) |
 | `memory_lancedb/` | LanceDB vectors for Brain (table `brain_memories`, 384-dim) |
 | `config.toml` | Role defaults (Recon, Tool picker, Synthesis, Classifier, Summarization), OSINT settings, recon limits |
 | `auth.json` | Provider credentials (OpenRouter, Google, Nvidia, and preserved legacy Grok/OpenAI accounts) — owner-only perms on Unix |
@@ -96,7 +96,7 @@ argos memories reindex   # rebuild LanceDB index
 - **Primary OSINT**: Firecrawl, SociaVault, Hunter. Hunter inputs: prompt, Firecrawl, SociaVault, or earlier Hunter. Catalog: 66 tools (67 ids with `hunter_tech_lookup` alias). Whoxy is a prepaid WHOIS-history provider (`PlanInterval::Never`). Holehe is a keyless email-registration lookup (Twitter/Spotify/Pinterest native adapters; 123 catalog entries).
 - **Recon turn**: Brain recall → directives (d1–d5) → mandatory discovery (diversity) → picker (1 pick/request, ≤13) → binder → shared `tool_runner` → streaming synthesis via `model_exec`. Figure: `docs/diagrams/recon-turn.html`. Elapsed-time clocks are telemetry; they do not terminate a turn.
 - **Intel**: jobs on an Atlas article; `intel_report_attempts` for dispatch counts; Summary = selected `bluf`. Figure: `docs/diagrams/intel-report.html`.
-- **Atlas**: GNews/NewsData discovery → NewsAPI/Currents headlines; phase 4 durable packets; phase 5 index/verify. Outcomes: completed / waiting / blocked / partial / failed. Optional context failures are warnings. Indexed +1 (brief) is expected.
+- **Atlas**: GNews/NewsData discovery → NewsAPI/Currents headlines → Classifier-only batches with local entities/publisher priors → tentative Related article leads. New cycles publish no Brain memories or vector/index work. Metadata failures are warnings; unresolved classification blocks or partially completes. Legacy packets/indexing remain historical. See [the classification/Related contract](docs/atlas-classification-and-related-articles.md).
 - **Retries**: primary 4 attempts (10/20/30s waits), each fallback 3 (10/20s). One retry owner; `complete()` is one-shot streaming. Figure: `docs/diagrams/atlas-pipeline.html`.
 - **IDs**: Tools=`Osint`, Models=`Providers`, Profile=`System`.
 
@@ -242,3 +242,5 @@ Scratch = agent-only helpers Argos does not need to build or test (`*.py`, `*.sh
 
 
 TUI overhaul navigation/component contract: read `docs/tui-design-spec.md` and `docs/tui-components.md`, including Shared navigation and portable configuration. Preserve three Profile pages, independent TabBar focus/activation, nested dataset offsets, background image resources, exact-revision Verify/Save and usize transcript scroll. Scope captures to affected Argos apps, pages, states and viewport thresholds using `docs/tui-verification.md`. Select `--test` and `--include` explicitly; use `--size` for affected thresholds and record `--reason`. Shared components require representative affected consumers; shared shell/theme/global navigation or a full overhaul requires both fixture suites with `--all`. Unrelated apps need no PNGs. Generation does not complete visual review.
+
+Atlas cycle changes follow [classification-only Atlas cycles](docs/atlas-classification-and-related-articles.md): Classifier-only collection-v1, native metadata and tentative Related leads; preserve independent Intel/Recon publication and historical evidence.

@@ -252,7 +252,7 @@ enum DefaultsCommand {
 
 #[derive(Subcommand)]
 enum AtlasCommand {
-    /// Repair Atlas memories for a run, restoring from checkpoint or reconstructing receipt.
+    /// Repair historical Atlas memory publication (legacy contracts only).
     Repair {
         #[arg(long, default_value = "")]
         run_id: String,
@@ -265,7 +265,7 @@ enum AtlasCommand {
         #[arg(long)]
         run_id: String,
     },
-    /// Verify Atlas coverage for a run (check indexed memories vs required).
+    /// Verify historical Atlas memory coverage (legacy contracts only).
     Verify {
         #[arg(long, default_value = "")]
         run_id: String,
@@ -889,10 +889,27 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
     }
 }
 
+fn reject_collection_maintenance(
+    store: &argos_osint_core::store::Store,
+    run_id: &str,
+) -> Result<String> {
+    let runs = store.atlas_list_runs()?;
+    let run = if run_id.is_empty() {
+        runs.first()
+    } else {
+        runs.iter().find(|run| run.id == run_id)
+    }
+    .ok_or_else(|| anyhow!("Atlas run {run_id} not found"))?;
+    let stats: serde_json::Value = serde_json::from_str(&run.stats_json).unwrap_or_default();
+    anyhow::ensure!(stats.get("contract_version").and_then(serde_json::Value::as_str) != Some("atlas-collection-v1"), "Repair/Verify are historical memory maintenance only; atlas-collection-v1 cycles do not publish memories");
+    Ok(run.id.clone())
+}
+
 async fn atlas_command(command: AtlasCommand) -> Result<()> {
     match command {
         AtlasCommand::Repair { run_id, page } => {
             let store = open_store()?;
+            let run_id = reject_collection_maintenance(&store, &run_id)?;
             let repair = argos_osint_core::atlas_memory::repair_run(&store, &run_id, None)?;
             print_json(&serde_json::json!({
                 "run_id": run_id,
@@ -917,10 +934,54 @@ async fn atlas_command(command: AtlasCommand) -> Result<()> {
                 .into_iter()
                 .find(|r| r.id == run_id)
                 .ok_or_else(|| anyhow!("Atlas run {run_id} not found"))?;
-            store.atlas_set_state(&run_id, "running", "", false)?;
+            anyhow::ensure!(
+                argos_osint_core::atlas::resumable(&run),
+                "This cycle has nothing to resume"
+            );
+            let auth = AuthFile::load()?;
+            let settings = SettingsFile::load()?;
+            let keys = osint::ProviderKeys {
+                gnews: settings.provider_key("gnews"),
+                gnews_fallback: settings.provider_fallback_key("gnews"),
+                newsdata: settings.provider_key("newsdata"),
+                newsdata_fallback: settings.provider_fallback_key("newsdata"),
+                currents: settings.provider_key("currents"),
+                currents_fallback: settings.provider_fallback_key("currents"),
+                newsapi: settings.provider_key("newsapi"),
+                newsapi_fallback: settings.provider_fallback_key("newsapi"),
+                ..Default::default()
+            };
+            let classifier = provider::role_secret(&auth, &settings, "classifier").ok();
+            let pause = Arc::new(AtomicBool::new(false));
+            let signal_pause = pause.clone();
+            let signal = tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    signal_pause.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            let outcome = argos_osint_core::atlas::run_live(
+                &paths::db_path(),
+                &pause,
+                &keys,
+                osint::effective_user_agent(Some(&settings.osint_user_agent)),
+                argos_osint_core::atlas::LiveRun::Run(run_id.clone()),
+                &[],
+                classifier,
+                None,
+                &[],
+                |_| {},
+            )
+            .await;
+            signal.abort();
+            outcome?;
+            let run = store
+                .atlas_list_runs()?
+                .into_iter()
+                .find(|run| run.id == run_id)
+                .ok_or_else(|| anyhow!("Resumed Atlas cycle disappeared"))?;
             print_json(&serde_json::json!({
                 "run_id": run_id,
-                "state": "running",
+                "state": run.state,
                 "run": serde_json::json!({
                     "id": run.id,
                     "state": run.state,
@@ -932,6 +993,7 @@ async fn atlas_command(command: AtlasCommand) -> Result<()> {
         }
         AtlasCommand::Verify { run_id } => {
             let store = open_store()?;
+            let run_id = reject_collection_maintenance(&store, &run_id)?;
             let receipt = store.atlas_publication_receipt(&run_id)?;
             let receipt = match receipt {
                 Some(r) => r,
@@ -1003,6 +1065,32 @@ fn write_turn_event(event: &recon::TurnEvent, out: &mut impl std::io::Write) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atlas_memory_maintenance_accepts_historical_and_rejects_collection_contracts() {
+        let store = Store::memory().unwrap();
+        store.atlas_insert_run("historical", "{}", "{}").unwrap();
+        store
+            .atlas_insert_run(
+                "collection",
+                "{}",
+                r#"{"contract_version":"atlas-collection-v1"}"#,
+            )
+            .unwrap();
+        assert!(reject_collection_maintenance(&store, "historical").is_ok());
+        let error = reject_collection_maintenance(&store, "collection")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("historical memory maintenance"), "{error}");
+        assert!(reject_collection_maintenance(&store, "missing").is_err());
+        store
+            .atlas_insert_run("latest-history", "{}", "{}")
+            .unwrap();
+        assert_eq!(
+            reject_collection_maintenance(&store, "").unwrap(),
+            "latest-history"
+        );
+    }
 
     #[test]
     fn defaults_show_includes_the_tool_picker_transport() {

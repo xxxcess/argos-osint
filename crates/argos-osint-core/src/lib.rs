@@ -15,8 +15,12 @@
 )]
 
 pub mod atlas;
+pub mod atlas_classify;
+#[cfg(test)]
+mod atlas_classify_tests;
 pub mod atlas_insights;
 pub mod atlas_memory;
+pub mod atlas_metadata;
 pub mod atlas_recall_tests;
 pub mod atlas_work;
 pub mod brain;
@@ -52,6 +56,7 @@ pub mod provider_diag;
 pub mod provider_metrics;
 pub mod provider_request;
 pub mod recon;
+pub mod related_articles;
 pub mod related_memories;
 pub mod reliability_faults;
 pub mod scheduler;

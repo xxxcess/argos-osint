@@ -7,6 +7,13 @@ use sha2::{Digest, Sha256};
 use crate::store::AtlasArticleRow;
 use crate::telemetry::{EventKind, TelemetryEvent, Trigger};
 
+pub const COLLECTION_CONTRACT: &str = "atlas-collection-v1";
+// New IDs never reinterpret persisted extract/publication/index manifests.
+pub const STAGE_CLASSIFICATION: i32 = 8;
+pub const STAGE_ENTITIES: i32 = 9;
+pub const STAGE_PUBLISHERS: i32 = 10;
+pub const STAGE_RELATED: i32 = 11;
+
 pub const EXTRACT_CONTRACT: &str = "extract-v3";
 pub const STAGE_EXTRACT: i32 = 4;
 
@@ -43,7 +50,8 @@ pub fn unit_disposition_label(disposition: &str) -> &'static str {
 /// one grand total: articles, packets and memories are different work.
 pub fn stage_unit(stage: i32) -> &'static str {
     match stage {
-        STAGE_COLLECTION => "article",
+        STAGE_COLLECTION | STAGE_CLASSIFICATION | STAGE_ENTITIES | STAGE_PUBLISHERS => "article",
+        STAGE_RELATED => "pair",
         STAGE_EXTRACT => "packet",
         STAGE_PUBLICATION | STAGE_INDEXING => "memory",
         _ => "unit",
@@ -55,6 +63,10 @@ pub fn stage_unit(stage: i32) -> &'static str {
 pub fn stage_label(stage: i32) -> &'static str {
     match stage {
         STAGE_COLLECTION => "collection",
+        STAGE_CLASSIFICATION => "classification",
+        STAGE_ENTITIES => "entities",
+        STAGE_PUBLISHERS => "publishers",
+        STAGE_RELATED => "related",
         STAGE_EXTRACT => "extraction",
         STAGE_PUBLICATION => "publication",
         STAGE_INDEXING => "indexing",

@@ -1,8 +1,8 @@
 //! Atlas collects regional headlines, tags them, and stores the run's statistics.
 //!
 //! Phase 1 reads the latest headlines. Phase 2 headlines are saved on the run and
-//! tagged by the classifier model. The synthesis model then writes a handful of
-//! span-checked claims into Brain. The database keeps the run, its cursor, the country table,
+//! tagged in Classifier-only batches. Local entity and publisher metadata builds
+//! tentative Related article leads; cycles never publish Brain memories. The database keeps
 //! the articles, and the daily request counts.
 
 use std::collections::{BTreeMap, HashMap};
@@ -18,10 +18,10 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::atlas_insights::{self, InsightStats};
-use crate::atlas_memory::{self, StepState};
+use crate::atlas_memory;
 use crate::osint::atlas_news::{self, Hit};
 use crate::osint::ProviderKeys;
-use crate::provider::{self, DecisionsResponse};
+use crate::provider::DecisionsResponse;
 use crate::secrets::ProviderSecret;
 use crate::store::{AtlasArticleRow, AtlasRunRow, Store};
 use crate::telemetry::{self, EventKind, TelemetryEvent, Trigger};
@@ -645,7 +645,7 @@ impl CycleTelemetry {
             "completed" => "none",
             "waiting" => "incomplete_work",
             "blocked" => "configuration",
-            "failed" => "publication_failed",
+            "failed" => "classification_failed",
             _ => "unknown",
         };
         let event = TelemetryEvent::new(EventKind::AtlasCycle)
@@ -671,7 +671,8 @@ impl CycleTelemetry {
                 "candidates": self.candidates,
                 "origins": stats.origins.len(),
                 "scoring_version": ORIGIN_SCORING_VERSION,
-                "memories": crate::atlas_memory::memory_cycle_payload(&stats.memories),
+                "contract_version": stats.contract_version,
+                "coverage": stats.coverage,
             }));
         let event = event.with_id(format!("atlas-cycle-{}", self.run_id));
         let _ = telemetry::record(&self.db, &event);
@@ -685,11 +686,10 @@ fn stage_counts(stats: &RunStats) -> serde_json::Value {
         "discovered": stats.counts.values().sum::<u32>(),
         "articles": stats.article_total(),
         "origins": stats.origins.len(),
-        "memories_extracted": stats.memories.extracted,
-        "memories_accepted": stats.memories.accepted,
-        "memories_required": stats.memories.required,
-        "memories_indexed": stats.memories.indexed,
-        "memories_pending": stats.memories.pending,
+        "classified": stats.coverage.classified,
+        "entities_available": stats.coverage.entities_available,
+        "publishers_available": stats.coverage.publishers_available,
+        "related_pairs": stats.coverage.related_pairs,
     })
 }
 
@@ -757,8 +757,33 @@ pub struct OriginStat {
     pub articles: u32,
 }
 
+/// Current collection stages count article coverage independently.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CoverageStats {
+    pub articles: u32,
+    #[serde(default)]
+    pub acquisition_failures: u32,
+    pub classified: u32,
+    #[serde(default)]
+    pub legacy_unknown: u32,
+    pub classification_failed: u32,
+    pub classification_blocked: u32,
+    pub entities_available: u32,
+    pub entities_unavailable: u32,
+    pub publishers_available: u32,
+    pub publishers_unavailable: u32,
+    pub related_pairs: u32,
+    pub warnings: u32,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct RunStats {
+    #[serde(default)]
+    pub contract_version: String,
+    #[serde(default)]
+    pub coverage: CoverageStats,
+    #[serde(default)]
+    pub acquisition_retry: Option<Cursor>,
     pub counts: BTreeMap<String, u32>,
     pub origins: Vec<OriginStat>,
     pub scored: bool,
@@ -783,7 +808,11 @@ impl RunStats {
 
     /// Articles kept for this news cycle across every origin.
     pub fn article_total(&self) -> u32 {
-        self.origins.iter().map(|row| row.articles).sum()
+        if self.contract_version == crate::atlas_work::COLLECTION_CONTRACT {
+            self.coverage.articles
+        } else {
+            self.origins.iter().map(|row| row.articles).sum()
+        }
     }
 }
 
@@ -1157,9 +1186,23 @@ pub fn format_run_card(run: &AtlasRunRow) -> String {
     }
     lines.push(String::new());
     lines.push(format!("Articles {}", stats.article_total()));
-    lines.push(atlas_insights::insight_stats_line(&stats.insights));
-    if stats.memories.started() {
-        lines.push(stats.memories.line());
+    if stats.contract_version == crate::atlas_work::COLLECTION_CONTRACT {
+        lines.push(format!(
+            "Coverage · classified {}/{} · entities {} · publisher priors {} · Related {}",
+            stats.coverage.classified,
+            stats.coverage.articles,
+            stats.coverage.entities_available,
+            stats.coverage.publishers_available,
+            stats.coverage.related_pairs
+        ));
+    } else {
+        lines.push(format!(
+            "Legacy · {}",
+            atlas_insights::insight_stats_line(&stats.insights)
+        ));
+        if stats.memories.started() {
+            lines.push(stats.memories.line());
+        }
     }
     lines.push(String::new());
     let origins: Vec<&OriginStat> = stats
@@ -1396,7 +1439,7 @@ fn apply_hits(
     store: &Store,
     run_id: &str,
     tel: &mut CycleTelemetry,
-) -> Result<()> {
+) -> Result<Vec<AtlasArticleRow>> {
     if provider == "gnews" || provider == "newsdata" {
         for hit in hits {
             *stats.counts.entry(hit.country.clone()).or_default() += 1;
@@ -1414,7 +1457,7 @@ fn apply_hits(
                 })
                 .collect();
         }
-        return Ok(());
+        return Ok(Vec::new());
     }
     // Already-retained rows for this run, with the ingestion time first seen, so
     // a repeated headline is reported as retained-existing instead of new volume.
@@ -1423,6 +1466,7 @@ fn apply_hits(
         .into_iter()
         .map(|row| (row.id, row.seen_at))
         .collect();
+    let mut inventory_rows = Vec::new();
     for hit in hits {
         let temperature = stats
             .origins
@@ -1458,7 +1502,9 @@ fn apply_hits(
                     "retained_new"
                 };
                 remember(seen, &article, None);
-                store.atlas_upsert_article(&article_row(run_id, &article))?;
+                let row = article_row(run_id, &article);
+                store.atlas_upsert_article(&row)?;
+                inventory_rows.push(row);
                 retained.insert(article.id.clone(), article.seen_at.clone());
                 tel.candidate(&article, provider, disposition, None, None);
                 emit(AtlasEvent::Article(article));
@@ -1466,13 +1512,31 @@ fn apply_hits(
             Verdict::Replace(id) => {
                 // Only replace inside this run. A hit already stored in another
                 // retained run is ignored so TTL history is not reprocessed.
-                if store.atlas_article(run_id, &id)?.is_none() {
+                let Some(replaced) = store.atlas_article(run_id, &id)? else {
                     tel.candidate(&article, provider, "duplicate_in_cycle", None, None);
                     continue;
+                };
+                if replaced.country != article.country {
+                    if let Some(origin) = stats
+                        .origins
+                        .iter_mut()
+                        .find(|o| o.country == replaced.country)
+                    {
+                        origin.articles = origin.articles.saturating_sub(1);
+                    }
+                    if let Some(origin) = stats
+                        .origins
+                        .iter_mut()
+                        .find(|o| o.country == article.country)
+                    {
+                        origin.articles += 1;
+                    }
                 }
                 store.atlas_delete_article(run_id, &id)?;
                 remember(seen, &article, Some(&id));
-                store.atlas_upsert_article(&article_row(run_id, &article))?;
+                let row = article_row(run_id, &article);
+                store.atlas_upsert_article(&row)?;
+                inventory_rows.push(row);
                 retained.remove(&id);
                 retained.insert(article.id.clone(), article.seen_at.clone());
                 tel.candidate(&article, provider, "retained_new", Some(id.as_str()), None);
@@ -1480,7 +1544,8 @@ fn apply_hits(
             }
         }
     }
-    Ok(())
+    stats.coverage.articles = store.atlas_list_articles(run_id)?.len() as u32;
+    Ok(inventory_rows)
 }
 
 fn article_row(run_id: &str, article: &FeedArticle) -> AtlasArticleRow {
@@ -1573,7 +1638,7 @@ pub fn resumable(run: &AtlasRunRow) -> bool {
     matches!(
         run.state.as_str(),
         "failed" | "partial" | "blocked" | "waiting"
-    ) && (cursor.phase == 5 || (cursor.phase == 4 && cursor.leg != "insights_done"))
+    ) && cursor.phase >= 1
 }
 
 /// Phase names shown as child jobs of an Atlas cycle.
@@ -1582,8 +1647,8 @@ pub fn phase_title(phase: u8) -> &'static str {
         1 => "Latest headlines",
         2 => "Local coverage",
         3 => "Classify articles",
-        4 => "Extract and save insights",
-        _ => "Index and verify memories",
+        4 => "Local article metadata",
+        _ => "Related article leads",
     }
 }
 
@@ -1637,11 +1702,16 @@ impl AtlasJob {
         let Some(parent) = &self.job else {
             return;
         };
-        parent.phase(phase_title(phase), Some(phase as i64 - 1), Some(5));
+        parent.phase(phase_title(phase), None, None);
         let spec = crate::job_registry::JobSpec::new(
             "atlas",
-            &format!("atlas_phase_{phase}"),
-            format!("Phase {phase} · {}", phase_title(phase)),
+            match phase {
+                3 => "atlas_classification",
+                4 => "atlas_metadata",
+                5 => "atlas_related",
+                _ => "atlas_collection",
+            },
+            phase_title(phase),
         )
         .with_id(format!("{}-p{phase}", parent.id()));
         self.phase = parent.child(spec).ok().map(|child| (phase, child));
@@ -1716,6 +1786,21 @@ where
             .find(|run| run.id == run_id)
             .map(|run| (run.state, run.note))
     };
+    if let Err(error) = &result {
+        if let Ok(tracker) = tracker.lock() {
+            if !tracker.run_id.is_empty() {
+                if let Ok(store) = Store::open(&db_path) {
+                    let message = error.to_string();
+                    let state = if message.starts_with("Enter the ") {
+                        "blocked"
+                    } else {
+                        "failed"
+                    };
+                    let _ = store.atlas_set_state(&tracker.run_id, state, &message, true);
+                }
+            }
+        }
+    }
     let outcome = match &result {
         Ok(Stop::Paused) => Finish::Paused {
             summary: "paused; resume continues from the saved cursor".into(),
@@ -1739,7 +1824,15 @@ where
             },
             None => Finish::completed(),
         },
-        Err(err) => Finish::failed("error", format!("{err:#}")),
+        Err(err) => {
+            if run_state().is_some_and(|(state, _)| state == "blocked") {
+                Finish::Blocked {
+                    summary: format!("{err:#}"),
+                }
+            } else {
+                Finish::failed("error", format!("{err:#}"))
+            }
+        }
     };
     if let Ok(mut job) = tracker.lock() {
         job.close(outcome);
@@ -1747,17 +1840,29 @@ where
     result
 }
 
+fn cycle_paused(job: &std::sync::Mutex<AtlasJob>, pause: &AtomicBool) -> bool {
+    if job
+        .lock()
+        .ok()
+        .and_then(|job| job.job.as_ref().map(|handle| handle.is_cancelled()))
+        .unwrap_or(false)
+    {
+        pause.store(true, Ordering::Relaxed);
+    }
+    pause.load(Ordering::Relaxed)
+}
+
 async fn run_atlas_inner<F>(
     input: RunInput<'_>,
     mut emit: impl FnMut(AtlasEvent) + Send,
     mut fetch: F,
-    job: &std::sync::Mutex<AtlasJob>,
+    tracker: &std::sync::Mutex<AtlasJob>,
 ) -> Result<Stop>
 where
     F: FnMut(HttpCall) -> FetchFut + Send,
 {
     let track = |phase: u8| {
-        if let Ok(mut job) = job.lock() {
+        if let Ok(mut job) = tracker.lock() {
             job.enter(phase);
         }
     };
@@ -1770,8 +1875,8 @@ where
         resume,
         feed,
         classifier,
-        synthesizer,
-        synthesizer_fallbacks,
+        synthesizer: _,
+        synthesizer_fallbacks: _,
         run_id: resume_id,
     } = input;
     let store = Store::open(db_path)?;
@@ -1809,7 +1914,44 @@ where
         )?;
         (id, cursor, RunStats::default())
     };
-    if let Ok(mut job) = job.lock() {
+    let legacy = stats.contract_version != crate::atlas_work::COLLECTION_CONTRACT;
+    if legacy && cursor.phase >= 3 {
+        // Preserve historical categories and expose ambiguous completed unk rows.
+        // Unprocessed old phase-3 rows still require classification.
+        for (index, article) in store.atlas_list_articles(&run_id)?.iter().enumerate() {
+            let status = if article.category == "unk" {
+                if cursor.phase >= 4 || index < cursor.country {
+                    "legacy_unknown"
+                } else {
+                    continue;
+                }
+            } else if CATEGORY_IDS.contains(&article.category.as_str()) {
+                "classified"
+            } else {
+                "failed"
+            };
+            let hash = crate::atlas_metadata::input_hash(article);
+            store.atlas_set_classification(
+                &run_id,
+                &article.id,
+                &hash,
+                status,
+                r#"{"provenance":"legacy classification"}"#,
+                None,
+            )?;
+        }
+        if cursor.phase >= 4 {
+            cursor.phase = 4;
+            cursor.leg = "metadata".into();
+        }
+    }
+    if resume && cursor.phase <= 2 {
+        stats.coverage.acquisition_failures = 0;
+        stats.acquisition_retry = None;
+    }
+    stats.contract_version = crate::atlas_work::COLLECTION_CONTRACT.into();
+    save(&store, &run_id, &cursor, &stats)?;
+    if let Ok(mut job) = tracker.lock() {
         job.start(&run_id);
     }
     if cursor.from.is_empty() {
@@ -1823,15 +1965,7 @@ where
         .find(|run| run.id == run_id)
         .map(|run| run.started_at)
         .unwrap_or_default();
-    let cycle_mode = if resume {
-        if resume_id.is_some() {
-            "repair"
-        } else {
-            "resumed"
-        }
-    } else {
-        "fresh"
-    };
+    let cycle_mode = if resume { "resumed" } else { "fresh" };
     let mut tel = CycleTelemetry::new(db_path, &run_id, cycle_mode, cycle_started_at);
     if cursor.phase <= 1 {
         require_either(&keys.gnews, &keys.gnews_fallback, "GNews API key")?;
@@ -1858,6 +1992,8 @@ where
     } else {
         user_agent.to_string()
     };
+
+    let inventory = crate::atlas_metadata::NativeInventory::start(db_path, &run_id, &user_agent);
 
     if cursor.phase <= 1 {
         track(1);
@@ -1886,8 +2022,19 @@ where
                     page_token: token.clone(),
                     kept,
                 };
-                if pause.load(Ordering::Relaxed) {
+                if cycle_paused(tracker, pause) {
                     return park(&store, &run_id, &here, &stats, &mut emit, &mut tel);
+                }
+                let receipt_key = format!("atlas-native-v1:{run_id}:discovery:{provider}:{page}");
+                if let Some(raw) = store.app_state_get(&receipt_key)? {
+                    let receipt: serde_json::Value = serde_json::from_str(&raw)?;
+                    kept = receipt["kept"].as_u64().unwrap_or(kept as u64) as u32;
+                    token = receipt["token"].as_str().unwrap_or("").into();
+                    page += 1;
+                    if receipt["stop"].as_bool().unwrap_or(false) {
+                        break;
+                    }
+                    continue;
                 }
                 let (primary, fallback) = keys.pair(provider);
                 let Some(key) = open_key(&store, provider, primary, fallback)? else {
@@ -1912,6 +2059,7 @@ where
                     page + 1
                 )));
                 let mut stop_provider = false;
+                let mut acquisition_ok = false;
                 let fetched = fetch_with_spare_key(
                     &mut fetch,
                     &user_agent,
@@ -1931,6 +2079,7 @@ where
                         let more = atlas_news::next_page(provider, &body);
                         match atlas_news::discovery_hits(provider, &body) {
                             Ok(mut hits) => {
+                                acquisition_ok = true;
                                 hits.retain(|hit| {
                                     published_in_window(&hit.published_at, &cursor.from)
                                 });
@@ -1951,6 +2100,10 @@ where
                                 }
                             }
                             Err(err) => {
+                                stats.coverage.acquisition_failures += 1;
+                                if stats.acquisition_retry.is_none() {
+                                    stats.acquisition_retry = Some(here.clone());
+                                }
                                 emit(parse_fault(provider, err.to_string(), &body));
                                 stop_provider = true;
                             }
@@ -1958,10 +2111,24 @@ where
                     }
                     None => {
                         if let Some(fault) = fetched.fault {
+                            stats.coverage.acquisition_failures += 1;
+                            if stats.acquisition_retry.is_none() {
+                                stats.acquisition_retry = Some(here.clone());
+                            }
                             emit(AtlasEvent::Fault(fault));
                         }
                         stop_provider = true;
                     }
+                }
+                if acquisition_ok {
+                    save_native_receipt(
+                        &store,
+                        &run_id,
+                        &receipt_key,
+                        &here,
+                        &stats,
+                        &serde_json::json!({"kept":kept,"token":token,"stop":stop_provider || kept>=PHASE1_TARGET || page+1>=PHASE1_MAX_PAGES}),
+                    )?;
                 }
                 let _ = store.atlas_quota_bump(&bucket, &utc_day())?;
                 page += 1;
@@ -2021,7 +2188,7 @@ where
         tel.enter_stage("collection", "article", &stats);
         require_either(&keys.newsapi, &keys.newsapi_fallback, "NewsAPI key")?;
         require_either(&keys.currents, &keys.currents_fallback, "Currents API key")?;
-        if stats.origins.is_empty() {
+        if stats.origins.is_empty() && stats.coverage.acquisition_failures == 0 {
             store.atlas_set_state(
                 &run_id,
                 "completed",
@@ -2068,7 +2235,7 @@ where
             if job_is_before(job, &cursor) {
                 continue;
             }
-            if pause.load(Ordering::Relaxed) {
+            if cycle_paused(tracker, pause) {
                 return park(
                     &store,
                     &run_id,
@@ -2077,6 +2244,13 @@ where
                     &mut emit,
                     &mut tel,
                 );
+            }
+            let receipt_key = format!(
+                "atlas-native-v1:{run_id}:coverage:{}:{}",
+                job.provider, countries[job.country]
+            );
+            if store.app_state_get(&receipt_key)?.is_some() {
+                continue;
             }
             let country = &countries[job.country];
             let supported = match job.provider {
@@ -2123,20 +2297,56 @@ where
             let bucket = fetched.bucket;
             match fetched.body {
                 Some(body) => match atlas_news::headline_hits(job.provider, country, &body) {
-                    Ok(hits) => apply_hits(
-                        &hits,
-                        job.provider,
-                        &mut stats,
-                        &mut seen,
-                        &mut emit,
-                        &store,
-                        &run_id,
-                        &mut tel,
-                    )?,
-                    Err(err) => emit(parse_fault(job.provider, err.to_string(), &body)),
+                    Ok(hits) => {
+                        let rows = apply_hits(
+                            &hits,
+                            job.provider,
+                            &mut stats,
+                            &mut seen,
+                            &mut emit,
+                            &store,
+                            &run_id,
+                            &mut tel,
+                        )?;
+                        save_native_receipt(
+                            &store,
+                            &run_id,
+                            &receipt_key,
+                            &cursor_at(job, &cursor.from),
+                            &stats,
+                            &serde_json::json!({"completed":true}),
+                        )?;
+                        for row in rows {
+                            let queued = inventory.queue(&row);
+                            tokio::pin!(queued);
+                            loop {
+                                tokio::select! {
+                                    result = &mut queued => { result?; break; },
+                                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                                        if cycle_paused(tracker,pause) {
+                                            inventory.cancel();
+                                            let next = next_after_phase2(job,countries.len());
+                                            return park(&store,&run_id,&cursor_at(&next,&cursor.from),&stats,&mut emit,&mut tel);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        stats.coverage.acquisition_failures += 1;
+                        if stats.acquisition_retry.is_none() {
+                            stats.acquisition_retry = Some(cursor_at(job, &cursor.from));
+                        }
+                        emit(parse_fault(job.provider, err.to_string(), &body));
+                    }
                 },
                 None => {
                     if let Some(fault) = fetched.fault {
+                        stats.coverage.acquisition_failures += 1;
+                        if stats.acquisition_retry.is_none() {
+                            stats.acquisition_retry = Some(cursor_at(job, &cursor.from));
+                        }
                         emit(AtlasEvent::Fault(fault));
                     }
                 }
@@ -2166,7 +2376,9 @@ where
                 "Currents was not queried for {names}. Latest news has no feed for those countries."
             )));
         }
-        prune_empty_origins(&mut stats);
+        if stats.coverage.acquisition_failures == 0 {
+            prune_empty_origins(&mut stats);
+        }
         cursor = Cursor {
             phase: 3,
             chunk: 0,
@@ -2180,480 +2392,278 @@ where
         emit(AtlasEvent::Stats(stats.clone()));
     }
 
+    // Poll native metadata alongside Classifier requests. Dropping an invocation
+    // cancels any admitted NLP work; no detached cycle worker survives Pause.
+    struct NativeCancel(Arc<AtomicBool>);
+    impl Drop for NativeCancel {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let native_cancel = NativeCancel(Arc::new(AtomicBool::new(false)));
+    let native_work = async {
+        inventory.finish().await?;
+        crate::atlas_metadata::process_run(db_path, &run_id, native_cancel.0.clone(), &user_agent)
+            .await
+    };
+    tokio::pin!(native_work);
+    let mut native_result = None;
     if cursor.phase == 3 {
         track(3);
-        // Classification is part of article collection; it never opens a stage of
-        // its own so stage units stay comparable.
+        tel.enter_stage("classification", "article", &stats);
         let articles = store.atlas_list_articles(&run_id)?;
-        if !articles.is_empty() && classifier.is_none() {
-            emit(AtlasEvent::Note(
-                "Classifier is not configured. Articles stay tagged unk.".into(),
-            ));
+        stats.coverage.articles = articles.len() as u32;
+        let mut pending = Vec::new();
+        for article in articles {
+            let hash = crate::atlas_metadata::input_hash(&article);
+            let receipt = store.atlas_metadata(&run_id, &article.id)?;
+            if receipt.as_ref().is_some_and(|m| {
+                m.input_hash == hash
+                    && matches!(
+                        m.classification_status.as_str(),
+                        "classified" | "legacy_unknown"
+                    )
+            }) {
+                continue;
+            }
+            pending.push(article);
         }
-        if let Some(secret) = classifier.as_ref().filter(|_| !articles.is_empty()) {
-            let mut noted = false;
-            let total = articles.len();
-            for (index, row) in articles.iter().enumerate().skip(cursor.country) {
-                if pause.load(Ordering::Relaxed) {
-                    cursor.country = index;
-                    cursor.phase = 3;
-                    cursor.leg = "classify".into();
+        if let Some(secret) = classifier.as_ref() {
+            // Borrowed pause flags are mirrored for the shared cancellable executor.
+            let cancel = Arc::new(AtomicBool::new(cycle_paused(tracker, pause)));
+            for (batch_index, batch) in
+                crate::atlas_classify::batches_for_model(&pending, &secret.model)
+                    .into_iter()
+                    .enumerate()
+            {
+                if cycle_paused(tracker, pause) {
                     return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
                 }
                 emit(AtlasEvent::Status(format!(
-                    "Classifying {}/{total}",
-                    index + 1
+                    "Classifier batch {} · {} articles",
+                    batch_index + 1,
+                    batch.len()
                 )));
-                let article = article_from_row(row);
-                let category = match tag_article(secret, &article).await {
-                    Ok(category) => category,
-                    Err(err) => {
-                        if !noted {
-                            emit(AtlasEvent::Note(format!(
-                                "Classifier could not tag an article ({err})."
-                            )));
-                            noted = true;
+                for article in &batch {
+                    store.atlas_set_classification(
+                        &run_id,
+                        &article.id,
+                        &crate::atlas_metadata::input_hash(article),
+                        "running",
+                        "",
+                        None,
+                    )?;
+                }
+                let work = crate::atlas_classify::execute(
+                    db_path,
+                    &run_id,
+                    secret,
+                    batch.clone(),
+                    &cancel,
+                );
+                tokio::pin!(work);
+                let (receipt, error) = loop {
+                    tokio::select! {
+                        result = &mut work => break result,
+                        result = &mut native_work, if native_result.is_none() => { native_result = Some(result?); },
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                            if cycle_paused(tracker,pause) { cancel.store(true,Ordering::Relaxed); }
                         }
-                        "failed".into()
                     }
                 };
-                let category = category_tag(&category).to_string();
-                store.atlas_set_category(&run_id, &row.id, &category)?;
-                emit(AtlasEvent::Classified {
-                    id: row.id.clone(),
-                    category,
-                });
-                cursor.country = index + 1;
-                cursor.phase = 3;
-                cursor.leg = "classify".into();
-                save(&store, &run_id, &cursor, &stats)?;
-            }
-        }
-        cursor = Cursor {
-            phase: 4,
-            chunk: 0,
-            leg: "insights".into(),
-            country: 0,
-            from: cursor.from.clone(),
-            page_token: String::new(),
-            kept: 0,
-        };
-        save(&store, &run_id, &cursor, &stats)?;
-    }
-
-    // Runs saved before phase 5 marked publication with `insights_done`; that
-    // marker is not proof of publication or indexing, so verify in phase 5.
-    if cursor.phase == 4 && cursor.leg == "insights_done" {
-        cursor = phase5_cursor(&cursor);
-    }
-    // Partial phase-5 resume still retries missing required extraction.
-    if cursor.phase == 5 && atlas_insights::required_extraction_incomplete(&store, &run_id) {
-        cursor.phase = 4;
-        cursor.leg = "insights".into();
-        save(&store, &run_id, &cursor, &stats)?;
-    }
-    // Snapshot of the memory lifecycle before phase 4/5 touch it, so only the
-    // child steps that actually changed get a stage row.
-    let mut memories_before = stats.memories.clone();
-
-    if cursor.phase == 4 && cursor.leg != "publish" {
-        track(4);
-        tel.enter_stage("extraction", "packet", &stats);
-        if pause.load(Ordering::Relaxed) {
-            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
-        }
-        stats.memories = atlas_memory::MemoryPhase {
-            extraction: StepState::Running,
-            ..Default::default()
-        };
-        let articles = store.atlas_list_articles(&run_id)?;
-        let extraction_incomplete = atlas_insights::required_extraction_incomplete(&store, &run_id);
-        if let Some(checkpoint) = atlas_memory::load_checkpoint(&store, &run_id)? {
-            if !checkpoint.partial && !extraction_incomplete {
-                // Crash after a complete checkpoint: never rerun a successful extraction.
-                stats.insights = checkpoint.stats.clone();
-                stats.memories.extracted = checkpoint.claims.len() as u32;
-                stats.memories.extraction = StepState::Completed;
-            } else {
-                // Old Partial flag is not authoritative; retry failed packets.
-                stats.insights = checkpoint.stats.clone();
-                stats.memories.extracted = checkpoint.claims.len() as u32;
-                stats.memories.extraction = StepState::Running;
-            }
-        }
-        if matches!(
-            stats.memories.extraction,
-            StepState::Pending | StepState::Running
-        ) {
-            let resume = if extraction_incomplete {
-                None
-            } else {
-                atlas_insights::resume_stats(
-                    &store,
-                    &run_id,
-                    &articles,
-                    &stats.origins,
-                    &stats.insights,
-                )?
-            };
-            if let Some(existing) = resume {
-                // Published by an older build without a checkpoint: verify in phase 5.
-                stats.memories.extracted = existing.claims;
-                stats.insights = existing;
-                stats.memories.extraction = StepState::Completed;
-                stats.memories.publication = StepState::Completed;
-                cursor = phase5_cursor(&cursor);
-            } else if let Some(secret) = synthesizer.as_ref() {
-                if provider::is_decisions_model(&secret.model) {
-                    if articles.is_empty() {
-                        stats.memories.extraction = StepState::Skipped;
+                if let Some(error) = &error {
+                    emit(AtlasEvent::Note(format!(
+                        "Classifier batch incomplete: {error}"
+                    )));
+                }
+                for article in &batch {
+                    let category = receipt.get(&article.id);
+                    let status = if category.is_some() {
+                        "classified"
+                    } else if cancel.load(Ordering::Relaxed) {
+                        "pending"
+                    } else if error
+                        .as_ref()
+                        .is_some_and(|error| error.starts_with("all routes blocked"))
+                    {
+                        "blocked"
                     } else {
-                        emit(AtlasEvent::Note(
-                        "Synthesis is a decisions model, so no claims were extracted. Choose a chat model for Synthesis."
-                            .into(),
-                    ));
-                        stats.memories.extraction = StepState::Blocked;
-                        stats.memories.detail =
-                            "Synthesis is a decisions model; choose a chat model".into();
-                    }
-                } else {
-                    emit(AtlasEvent::Status("Extracting insights".into()));
-                    #[cfg(test)]
-                    let mocked = atlas_memory::testing::take_extraction();
-                    #[cfg(not(test))]
-                    let mocked: Option<Result<atlas_insights::Extraction>> = None;
-                    let extracted = match mocked {
-                        Some(result) => result,
-                        None => {
-                            let stored_rsp = store
-                                .app_state_get(crate::osint::wikipedia_rsp::APP_STATE_KEY)
-                                .ok()
-                                .flatten();
-                            match refresh_rsp_index(stored_rsp, user_agent.clone()).await {
-                                Ok(Some(json)) => {
-                                    let _ = store.app_state_set(
-                                        crate::osint::wikipedia_rsp::APP_STATE_KEY,
-                                        &json,
-                                    );
-                                }
-                                Ok(None) => {}
-                                Err(err) => emit(AtlasEvent::Note(format!(
-                                    "WP:RSP source reliability index was not refreshed ({err})."
-                                ))),
-                            }
-                            atlas_insights::extract(
-                                db_path,
-                                &run_id,
-                                secret,
-                                synthesizer_fallbacks,
-                                classifier.as_ref(),
-                                &articles,
-                                &stats.origins,
-                                false,
-                                |done, total| {
-                                    emit(AtlasEvent::InsightProgress { done, total });
-                                },
-                            )
-                            .await
-                        }
+                        "failed"
                     };
-                    match extracted {
-                        Ok(extraction) => {
-                            let mut notes = Vec::new();
-                            if let Some(err) = &extraction.extract_error {
-                                notes.push(format!("Some insight packets were skipped ({err})."));
-                            }
-                            if let Some(err) = &extraction.peer_error {
-                                notes.push(format!(
-                                    "Classifier peer matching failed; using overlap ({err})."
-                                ));
-                            }
-                            if let Some(err) = &extraction.context_error {
-                                notes.push(format!("Context claims were not extracted ({err})."));
-                            }
-                            notes.extend(extraction.warnings.iter().cloned());
-                            notes.extend(extraction.diagnostics.iter().cloned());
-                            for note in &notes {
-                                emit(AtlasEvent::Note(note.clone()));
-                            }
-                            let partial = extraction.extract_error.is_some();
-                            let settled = &extraction.settled;
-                            let checkpoint = atlas_memory::save_checkpoint(
-                                &store,
-                                &run_id,
-                                atlas_memory::CheckpointInput {
-                                    claims: &settled.claims,
-                                    relations: &settled.relations,
-                                    brief: &settled.brief,
-                                    entity_path: &settled.entity_path,
-                                    stats: &settled.stats,
-                                    partial,
-                                    notes,
-                                    initial_confidences: settled.initial_confidences.clone(),
-                                },
-                            )?;
-                            stats.insights = extraction.settled.stats;
-                            stats.memories.revision = checkpoint.revision;
-                            stats.memories.extracted = checkpoint.claims.len() as u32;
-                            stats.memories.extraction = if partial {
-                                StepState::Partial
-                            } else {
-                                StepState::Completed
-                            };
-                            if partial {
-                                stats.memories.detail = "some insight packets failed".into();
-                            }
-                        }
-                        Err(err) => {
-                            emit(AtlasEvent::Note(format!(
-                                "Insights were not extracted ({err})."
-                            )));
-                            stats.memories.extraction = StepState::Failed;
-                            stats.memories.detail = format!("insights were not extracted ({err})");
+                    let receipt_json = serde_json::to_string(
+                        &serde_json::json!({"category":category,"prompt_version":crate::atlas_classify::PROMPT_VERSION,"diagnostic":error}),
+                    )?;
+                    store.atlas_set_classification(
+                        &run_id,
+                        &article.id,
+                        &crate::atlas_metadata::input_hash(article),
+                        status,
+                        &receipt_json,
+                        category.map(String::as_str),
+                    )?;
+                    if let Some(category) = category {
+                        emit(AtlasEvent::Classified {
+                            id: article.id.clone(),
+                            category: category.clone(),
+                        });
+                    }
+                }
+                save(&store, &run_id, &cursor, &stats)?;
+                if cycle_paused(tracker, pause) {
+                    return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
+                }
+            }
+        } else if !pending.is_empty() {
+            emit(AtlasEvent::Note(
+                "Classifier is not configured; required classification is blocked.".into(),
+            ));
+            for article in pending {
+                store.atlas_set_classification(
+                    &run_id,
+                    &article.id,
+                    &crate::atlas_metadata::input_hash(&article),
+                    "blocked",
+                    r#"{"diagnostic":"Classifier is not configured"}"#,
+                    None,
+                )?;
+            }
+        }
+        cursor.phase = 4;
+        cursor.leg = "metadata".into();
+        save(&store, &run_id, &cursor, &stats)?;
+    }
+    if cursor.phase >= 4 {
+        track(4);
+        tel.enter_stage("metadata", "article", &stats);
+        if cycle_paused(tracker, pause) {
+            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
+        }
+        emit(AtlasEvent::Status(
+            "Local entities and publisher priors".into(),
+        ));
+        let coverage = if let Some(coverage) = native_result.take() {
+            coverage
+        } else {
+            loop {
+                tokio::select! {
+                    result = &mut native_work => break result?,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                        if cycle_paused(tracker,pause) {
+                            native_cancel.0.store(true,Ordering::Relaxed);
+                            return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel);
                         }
                     }
                 }
-            } else if articles.is_empty() {
-                stats.memories.extraction = StepState::Skipped;
-            } else {
-                emit(AtlasEvent::Note(
-                    "Synthesis is not configured. No insights extracted.".into(),
-                ));
-                stats.memories.extraction = StepState::Blocked;
-                stats.memories.detail = "Synthesis is not configured".into();
             }
-        } // pending/running extraction
-        match stats.memories.extraction {
-            StepState::Completed | StepState::Partial if cursor.phase == 4 => {
-                cursor.leg = "publish".into();
-            }
-            StepState::Skipped => {
-                stats.memories.publication = StepState::Skipped;
-                stats.memories.indexing = StepState::Skipped;
-                cursor.leg = "insights_done".into();
-            }
-            _ => {}
-        }
-        save(&store, &run_id, &cursor, &stats)?;
-        record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
-        if matches!(
-            stats.memories.extraction,
-            StepState::Failed | StepState::Blocked
-        ) {
-            // Cursor stays on extraction: a resume after fixing the cause re-extracts.
-            return finish(&store, &run_id, &stats, &mut emit, &mut tel);
-        }
-    }
+        };
+        stats.coverage.entities_available = coverage.entities_complete;
+        stats.coverage.entities_unavailable = coverage.entities_unavailable;
+        stats.coverage.publishers_available = coverage.publishers_available;
 
-    if cursor.phase == 4 && cursor.leg == "publish" {
-        track(4);
-        tel.enter_stage("publication", "memory", &stats);
-        if pause.load(Ordering::Relaxed) {
+        stats.coverage.warnings = coverage.warnings.len() as u32;
+        for warning in coverage.warnings {
+            emit(AtlasEvent::Note(warning));
+        }
+        if cycle_paused(tracker, pause) {
             return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
         }
-        let Some(checkpoint) = atlas_memory::load_checkpoint(&store, &run_id)? else {
-            stats.memories.extraction = StepState::Failed;
-            stats.memories.detail = atlas_memory::MISSING_PAYLOAD_LINE.into();
-            cursor.leg = "insights".into();
-            save(&store, &run_id, &cursor, &stats)?;
-            record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
-            return finish(&store, &run_id, &stats, &mut emit, &mut tel);
-        };
-        if !stats.memories.started() {
-            stats.memories.extraction = if checkpoint.partial {
-                StepState::Partial
-            } else {
-                StepState::Completed
-            };
-            stats.memories.extracted = checkpoint.claims.len() as u32;
-            stats.insights = checkpoint.stats.clone();
-        }
-        stats.memories.revision = checkpoint.revision.clone();
-        stats.memories.publication = StepState::Running;
-        emit(AtlasEvent::Status("Saving memories".into()));
-        match atlas_memory::publish_checkpoint(&store, &checkpoint, None, false, None) {
-            Ok(receipt) => {
-                stats.memories.apply_receipt(&receipt);
-                if !receipt.affected_memory_ids.is_empty() {
-                    emit(AtlasEvent::MemoriesChanged {
-                        run_id: run_id.clone(),
-                        memory_ids: receipt.affected_memory_ids.clone(),
-                    });
-                }
-                // `insights_done` only after durable publication exists.
-                cursor = phase5_cursor(&cursor);
-                save(&store, &run_id, &cursor, &stats)?;
-                record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
-            }
-            Err(err) => {
-                let message = format!("{err:#}");
-                emit(AtlasEvent::Note(format!(
-                    "Insights were extracted but not saved ({message}). Resume retries from the saved extraction."
-                )));
-                stats.memories.publication = StepState::Failed;
-                stats.memories.detail = format!("insights were not saved ({message})");
-                save(&store, &run_id, &cursor, &stats)?;
-                record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
-                return finish(&store, &run_id, &stats, &mut emit, &mut tel);
-            }
-        }
-    }
-
-    if cursor.phase == 5 {
+        cursor.phase = 5;
+        cursor.leg = "related".into();
         track(5);
-        tel.enter_stage("indexing", "memory", &stats);
-        if pause.load(Ordering::Relaxed) {
-            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
-        }
-        let receipt = match store.atlas_publication_receipt(&run_id)? {
-            Some(receipt) => receipt,
-            None => atlas_memory::legacy_receipt(&store, &run_id, None)?,
-        };
-        if !stats.memories.started() {
-            stats.memories.extraction = StepState::Completed;
-            stats.memories.extracted = stats.insights.claims;
-        }
-        if matches!(
-            stats.memories.publication,
-            StepState::Pending | StepState::Running
-        ) || stats.memories.revision != receipt.revision
-        {
-            stats.memories.apply_receipt(&receipt);
-        }
-        stats.memories.indexing = StepState::Running;
-        emit(AtlasEvent::Status("Indexing memories".into()));
-        let report = atlas_memory::index_and_verify(
-            &store,
-            &receipt,
-            Some(pause),
-            atlas_memory::Barrier::default(),
-            |indexed, required| emit(AtlasEvent::MemoryProgress { indexed, required }),
-        )?;
-        stats.memories.apply_verification(&report.verification);
-        if report.paused {
-            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
-        }
-        cursor.leg = "verified".into();
+        tel.enter_stage("related", "pair", &stats);
+        emit(AtlasEvent::Status(
+            "Building shared headline/description leads".into(),
+        ));
+        stats.coverage.related_pairs = crate::related_articles::build(&store, &run_id)? as u32;
+        cursor.leg = "related_done".into();
         save(&store, &run_id, &cursor, &stats)?;
-        record_memory_stages(db_path, &run_id, &mut memories_before, &stats.memories);
     }
-
-    finish(&store, &run_id, &stats, &mut emit, &mut tel)
-}
-
-/// Records the memory-lifecycle stage rows that changed, then advances the
-/// snapshot so the same transition is never written twice.
-fn record_memory_stages(
-    db_path: &Path,
-    run_id: &str,
-    before: &mut atlas_memory::MemoryPhase,
-    current: &atlas_memory::MemoryPhase,
-) {
-    atlas_memory::record_memory_stage_telemetry(db_path, run_id, before, current);
-    *before = current.clone();
-}
-
-fn phase5_cursor(cursor: &Cursor) -> Cursor {
-    Cursor {
-        phase: 5,
-        chunk: 0,
-        leg: "index".into(),
-        country: 0,
-        from: cursor.from.clone(),
-        page_token: String::new(),
-        kept: 0,
+    // Completion depends on article classification, never on Brain indexing.
+    let articles = store.atlas_list_articles(&run_id)?;
+    stats.coverage.articles = articles.len() as u32;
+    stats.coverage.classified = 0;
+    stats.coverage.legacy_unknown = 0;
+    stats.coverage.classification_failed = 0;
+    stats.coverage.classification_blocked = 0;
+    for article in &articles {
+        match store
+            .atlas_metadata(&run_id, &article.id)?
+            .map(|m| m.classification_status)
+            .as_deref()
+        {
+            Some("classified") => stats.coverage.classified += 1,
+            Some("legacy_unknown") => stats.coverage.legacy_unknown += 1,
+            Some("blocked") => stats.coverage.classification_blocked += 1,
+            _ => stats.coverage.classification_failed += 1,
+        }
     }
+    stats.coverage.publishers_unavailable = stats
+        .coverage
+        .articles
+        .saturating_sub(stats.coverage.publishers_available);
+    let state = if stats.coverage.classification_blocked > 0 {
+        "blocked"
+    } else if stats.coverage.classification_failed > 0 || stats.coverage.acquisition_failures > 0 {
+        if stats.coverage.classified > 0 || stats.coverage.legacy_unknown > 0 {
+            "partial"
+        } else {
+            "failed"
+        }
+    } else {
+        "completed"
+    };
+    let note = format!(
+        "Classification {}/{} · legacy unk {} · entities {} · publisher priors {} · Related {} · acquisition failures {}{}",
+        stats.coverage.classified,
+        stats.coverage.articles,
+        stats.coverage.legacy_unknown,
+        stats.coverage.entities_available,
+        stats.coverage.publishers_available,
+        stats.coverage.related_pairs,
+        stats.coverage.acquisition_failures,
+        if stats.coverage.warnings > 0 {
+            " · metadata warnings"
+        } else {
+            ""
+        }
+    );
+    // Resume retries unresolved required classification and reuses all receipts.
+    if state != "completed" {
+        if let Some(retry) = &stats.acquisition_retry {
+            cursor = retry.clone();
+        } else {
+            cursor.phase = 3;
+            cursor.leg = "classify".into();
+        }
+    }
+    save(&store, &run_id, &cursor, &stats)?;
+    store.atlas_set_state(&run_id, state, &note, true)?;
+    emit(AtlasEvent::Stats(stats.clone()));
+    emit(AtlasEvent::Status(note.clone()));
+    tel.close_stage(state, &stats);
+    tel.cycle(state, &stats);
+    Ok(if state == "failed" {
+        Stop::Failed(note)
+    } else {
+        Stop::Finished
+    })
 }
 
-/// Derive the stored run state from the durable child states. A failed save can
-/// never be reported as completed, and extraction counts are never shown as
-/// saved counts.
-fn finish(
+/// The completion receipt and statistics commit together, preventing a crash
+/// from skipping unapplied discovery counts or replaying an applied page.
+fn save_native_receipt(
     store: &Store,
     run_id: &str,
+    key: &str,
+    cursor: &Cursor,
     stats: &RunStats,
-    emit: &mut impl FnMut(AtlasEvent),
-    tel: &mut CycleTelemetry,
-) -> Result<Stop> {
-    let work = store
-        .atlas_get_all_unit_manifests(run_id)
-        .unwrap_or_default();
-    let packet_outcome = crate::atlas_work::reduce_cycle_outcome(&work);
-    let mut outcome = stats.memories.outcome();
-    if matches!(
-        packet_outcome,
-        crate::atlas_work::CycleOutcome::CompletedWithWarnings(_)
-    ) && outcome == atlas_memory::CycleOutcome::Completed
-    {
-        // Optional packet failures stay completed-with-warnings in the note.
-    }
-    if packet_outcome == crate::atlas_work::CycleOutcome::Partial
-        && outcome == atlas_memory::CycleOutcome::Completed
-    {
-        outcome = atlas_memory::CycleOutcome::Partial;
-    }
-    let mut note = stats.memories.note();
-    if let crate::atlas_work::CycleOutcome::CompletedWithWarnings(warnings) = packet_outcome {
-        if !warnings.is_empty() {
-            note = format!("{note} · {}", warnings.join("; "));
-        }
-    }
-    store.atlas_set_state(
-        run_id,
-        outcome.as_state(),
-        &note,
-        matches!(
-            outcome,
-            atlas_memory::CycleOutcome::Completed
-                | atlas_memory::CycleOutcome::Partial
-                | atlas_memory::CycleOutcome::Blocked
-                | atlas_memory::CycleOutcome::Failed
-        ),
-    )?;
-    let status = match outcome {
-        atlas_memory::CycleOutcome::Completed => "Pipeline complete".to_string(),
-        atlas_memory::CycleOutcome::Waiting => "Pipeline waiting on remaining work".into(),
-        atlas_memory::CycleOutcome::Partial => "Pipeline finished with incomplete work".into(),
-        atlas_memory::CycleOutcome::Blocked => "Pipeline blocked by configuration".into(),
-        atlas_memory::CycleOutcome::Failed => "Pipeline failed".into(),
-    };
-    emit(AtlasEvent::Status(status));
-    emit(AtlasEvent::Stats(stats.clone()));
-    // Terminal cycle telemetry: one row per run, written after the durable state
-    // so the recorded outcome is the state the run actually reached.
-    tel.close_stage(
-        if matches!(outcome, atlas_memory::CycleOutcome::Failed) {
-            "interrupted"
-        } else {
-            "completed"
-        },
-        stats,
-    );
-    tel.cycle(
-        crate::atlas_work::cycle_outcome_label(outcome.as_state()),
-        stats,
-    );
-    Ok(match outcome {
-        atlas_memory::CycleOutcome::Failed => Stop::Failed(if note.is_empty() {
-            "Atlas memory publication failed".into()
-        } else {
-            note
-        }),
-        _ => Stop::Finished,
-    })
-}
-
-/// Refresh the WP:RSP reliability index. Takes owned inputs so no `Store`
-/// borrow is held across the await (the pipeline future must stay `Send`).
-/// Returns the JSON to store when a fresh index was fetched.
-async fn refresh_rsp_index(stored: Option<String>, user_agent: String) -> Result<Option<String>> {
-    let (index, fetched) =
-        crate::osint::wikipedia_rsp::warm_with_store_json(stored.as_deref(), &user_agent).await?;
-    Ok(if fetched {
-        crate::osint::wikipedia_rsp::index_to_json(&index).ok()
-    } else {
-        None
-    })
+    receipt: &serde_json::Value,
+) -> Result<()> {
+    let tx = store.conn.unchecked_transaction()?;
+    store.app_state_set(key, &serde_json::to_string(receipt)?)?;
+    save(store, run_id, cursor, stats)?;
+    tx.commit()?;
+    Ok(())
 }
 
 fn next_after_phase2(job: &Job, countries: usize) -> Job {
@@ -2673,30 +2683,6 @@ fn next_after_phase2(job: &Job, countries: usize) -> Job {
     } else {
         job.clone()
     }
-}
-
-async fn tag_article(secret: &ProviderSecret, article: &FeedArticle) -> Result<String> {
-    if provider::is_decisions_model(&secret.model) {
-        let (state, questions) = classification_request(article);
-        let response = provider::decide(secret, &state, &questions).await?;
-        return Ok(category_from_decisions(&response));
-    }
-    let messages = [
-        provider::ChatMessage {
-            role: "system".into(),
-            content: "Reply with one category id only: geopolitical, economic, military, information, stability, technology, or unk.".into(),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        },
-        provider::ChatMessage {
-            role: "user".into(),
-            content: format!("{}\n\n{}", article.title, article.description),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        },
-    ];
-    let done = provider::complete(secret, &messages, &[], |_| {}).await?;
-    Ok(normalize_category(&done.content))
 }
 
 fn published_in_window(published: &str, from: &str) -> bool {
@@ -3086,10 +3072,11 @@ mod telemetry_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider;
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
-    async fn insights_do_not_call_a_decisions_model() {
+    async fn legacy_resume_ignores_decisions_synthesis_configuration() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("atlas.db");
         let store = Store::open(&path).unwrap();
@@ -3166,9 +3153,13 @@ mod tests {
         .unwrap();
         assert_eq!(stop, Stop::Finished);
         let notes = notes.lock().unwrap();
-        assert!(notes
-            .iter()
-            .any(|note| note.contains("decisions model") && note.contains("Synthesis")));
+        assert!(!notes.iter().any(|note| note.contains("Synthesis")));
+        let store = Store::open(&path).unwrap();
+        assert!(store.list_memories().unwrap().is_empty());
+        assert_eq!(
+            store.atlas_latest_run().unwrap().unwrap().state,
+            "completed"
+        );
     }
 
     #[test]
@@ -4046,6 +4037,109 @@ mod tests {
         let countries: Vec<_> = articles.iter().map(|row| row.country.as_str()).collect();
         assert!(countries.contains(&"gb"), "{countries:?}");
         assert!(countries.contains(&"de"), "{countries:?}");
+    }
+
+    #[tokio::test]
+    async fn collection_resume_retries_failed_provider_and_reuses_success_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        let store = Store::open(&db).unwrap();
+        let stats = RunStats {
+            contract_version: crate::atlas_work::COLLECTION_CONTRACT.into(),
+            scored: true,
+            origins: vec![OriginStat {
+                country: "us".into(),
+                tier: 1,
+                temperature: 1.0,
+                volume: 1,
+                articles: 0,
+            }],
+            ..Default::default()
+        };
+        let cursor = Cursor {
+            phase: 2,
+            leg: "newsapi".into(),
+            from: "2026-09-30T00:00:00Z".into(),
+            ..Default::default()
+        };
+        store
+            .atlas_insert_run(
+                "native-retry",
+                &serde_json::to_string(&cursor).unwrap(),
+                &serde_json::to_string(&stats).unwrap(),
+            )
+            .unwrap();
+        store
+            .atlas_set_state("native-retry", "paused", "", false)
+            .unwrap();
+        let pause = AtomicBool::new(false);
+        let keys = keys();
+        let _ = run_atlas(
+            RunInput {
+                db_path: &db,
+                pause: &pause,
+                keys: &keys,
+                user_agent: "fixture",
+                pace: false,
+                resume: true,
+                feed: &[],
+                classifier: None,
+                synthesizer: None,
+                synthesizer_fallbacks: &[],
+                run_id: Some("native-retry"),
+            },
+            |_| {},
+            |call| {
+                Box::pin(async move {
+                    if call.provider == "currents" {
+                        Err(anyhow!("offline failed acquisition"))
+                    } else {
+                        Ok(reply_for(&call))
+                    }
+                })
+            },
+        )
+        .await
+        .unwrap();
+        let run = store.atlas_latest_run().unwrap().unwrap();
+        assert_eq!(
+            parse_stats(&run.stats_json).coverage.acquisition_failures,
+            1
+        );
+        let retry = parse_cursor(&run.cursor_json);
+        assert_eq!((retry.phase, retry.leg.as_str()), (2, "currents"));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let captured = calls.clone();
+        let _ = run_atlas(
+            RunInput {
+                db_path: &db,
+                pause: &pause,
+                keys: &keys,
+                user_agent: "fixture",
+                pace: false,
+                resume: true,
+                feed: &[],
+                classifier: None,
+                synthesizer: None,
+                synthesizer_fallbacks: &[],
+                run_id: Some("native-retry"),
+            },
+            |_| {},
+            move |call| {
+                captured.lock().unwrap().push(call.provider.clone());
+                Box::pin(async move { Ok(reply_for(&call)) })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec!["currents"]);
+        assert_eq!(
+            parse_stats(&store.atlas_latest_run().unwrap().unwrap().stats_json)
+                .coverage
+                .acquisition_failures,
+            0
+        );
+        assert!(store.list_memories().unwrap().is_empty());
     }
 
     fn keys() -> ProviderKeys {

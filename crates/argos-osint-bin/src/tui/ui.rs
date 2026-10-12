@@ -5348,16 +5348,20 @@ pub(crate) fn cursor_blink_visible() -> bool {
 }
 
 fn composer_prompt_text<'a>(
-    input: &'a str,
-    cursor: usize,
+    app: &'a App,
     is_focused: bool,
     blink_on: bool,
     is_home: bool,
 ) -> Text<'a> {
+    let input = app.input.as_str();
+    let cursor = app.cursor;
     let placeholder = if is_home {
-        "Ask anything... e.g. \"What is known about example.org?\""
+        format!(
+            "Ask anything... e.g. \"{}\"",
+            app.recon_tip_text().unwrap_or_default()
+        )
     } else {
-        "Ask a follow-up... e.g. \"Dig deeper into the latest findings\""
+        "Ask a follow-up... e.g. \"Dig deeper into the latest findings\"".to_string()
     };
 
     if input.is_empty() {
@@ -5513,8 +5517,7 @@ pub(crate) fn draw_composer(
         };
         let is_focused = app.focus == Target::Field(FieldId::Composer);
         let blink_on = cursor_blink_visible();
-        let prompt_text =
-            composer_prompt_text(&app.input, app.cursor, is_focused, blink_on, is_home);
+        let prompt_text = composer_prompt_text(app, is_focused, blink_on, is_home);
         let alignment = if is_home {
             Alignment::Center
         } else {

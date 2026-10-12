@@ -85,7 +85,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     CommandDefinition {
         id: "intel",
         label: "Open Intel",
-        description: "Review briefings and articles",
+        description: "Browse headlines and briefings",
         shortcut: "1",
         category: "Navigation",
         module: None,
@@ -94,7 +94,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     CommandDefinition {
         id: "atlas",
         label: "Open Atlas",
-        description: "Monitor news cycles",
+        description: "Collect and classify news cycles",
         shortcut: "2",
         category: "Navigation",
         module: None,
@@ -103,7 +103,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     CommandDefinition {
         id: "brain",
         label: "Open Brain",
-        description: "Explore saved intelligence",
+        description: "Explore saved memories",
         shortcut: "3",
         category: "Navigation",
         module: None,
@@ -148,7 +148,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     CommandDefinition {
         id: "models",
         label: "Open Models",
-        description: "Configure AI role defaults",
+        description: "Configure providers and role models",
         shortcut: "8",
         category: "Navigation",
         module: None,
@@ -157,7 +157,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     CommandDefinition {
         id: "profile",
         label: "Open Profile",
-        description: "Inspect host and storage",
+        description: "Open analytics, host, and configs",
         shortcut: "9",
         category: "Navigation",
         module: None,

@@ -31,7 +31,7 @@ pub enum SystemTab {
     /// Activity: the 20 primary analytics views.
     #[default]
     Overview,
-    /// Host, Paths, Logs.
+    /// Host and Paths.
     System,
     Configs,
 }

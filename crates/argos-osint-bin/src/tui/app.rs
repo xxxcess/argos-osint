@@ -82,18 +82,64 @@ impl ModuleId {
     }
     pub fn blurb(self) -> &'static str {
         match self {
-            Self::Intel => "Review intelligence briefings and investigate emerging stories",
-            Self::Recon => "Run evidence-driven OSINT investigations",
-            Self::Brain => "Recall and explore connected intelligence",
-            Self::Atlas => "Map and track the global news cycle",
-            Self::Jobs => "Track work running across Argos",
-            Self::Logs => "Trace activity, failures, and execution",
+            Self::Intel => "Browse classified headlines and run article briefings",
+            Self::Recon => "Run evidence-driven OSINT investigations on any target",
+            Self::Brain => "Explore saved memories, their paths, and related evidence",
+            Self::Atlas => "Collect and classify global headlines on a live map",
+            Self::Jobs => "Track background jobs, timing, retries, and cancels",
+            Self::Logs => "Follow durable events, errors, and per-job logs",
             Self::Osint => "Browse, configure, and run OSINT tools",
-            Self::Providers => "Configure AI providers and intelligence roles",
-            Self::System => "Inspect host hardware and Argos storage",
+            Self::Providers => "Set provider accounts and per-role model fallbacks",
+            Self::System => "Usage analytics, host details, and config transfer",
         }
     }
 }
+
+/// Rotating Home composer examples, one per Recon target type the tool
+/// catalog covers (`osint::contracts::IntelligenceCategory`). `(kind, example)`.
+pub const RECON_TIPS: &[(&str, &str)] = &[
+    ("domain", "What is known about example.org?"),
+    ("person", "Who is Jane Example, CEO of Acme Robotics?"),
+    ("username", "Which sites use the handle @jdoe42?"),
+    ("email", "Where is jane@example.com registered?"),
+    ("phone", "What is publicly linked to +1 202 555 0143?"),
+    ("ip", "Who operates 203.0.113.7 and what does it expose?"),
+    ("company", "Who owns Acme Robotics and what has it filed?"),
+    ("news", "What is the latest on the Acme Robotics recall?"),
+    ("legal", "Which court cases or dockets name Acme Robotics?"),
+    (
+        "social",
+        "What has @acmerobotics posted on Instagram lately?",
+    ),
+    ("url", "Is https://example.com/login a phishing page?"),
+    (
+        "history",
+        "How has example.org changed in the Wayback Machine?",
+    ),
+    ("code", "Which GitHub repos belong to acme-robotics?"),
+    (
+        "cve",
+        "Is CVE-2024-3094 exploited, and what does it affect?",
+    ),
+    (
+        "package",
+        "Does the npm package left-pad have known vulnerabilities?",
+    ),
+    (
+        "bitcoin",
+        "What has Bitcoin address 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa received?",
+    ),
+    (
+        "place",
+        "What is near 1600 Pennsylvania Ave NW, Washington?",
+    ),
+    (
+        "publisher",
+        "How reliable is the Daily Example as a source?",
+    ),
+];
+/// How long one Home composer tip stays before the next one.
+pub const RECON_TIP_EVERY: Duration = Duration::from_secs(6);
 
 /// Launch state machine for Home composer submissions
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1036,6 +1082,10 @@ pub struct App {
     pub status: String,
     /// Page sizes (inner viewport height) for `see more` buttons, set during rendering.
     pub see_more_pages: std::cell::Cell<[u16; 3]>, // [detail, recall, popup]
+    /// Index into [`RECON_TIPS`] shown as the empty Home composer placeholder.
+    pub recon_tip: usize,
+    /// When the current tip appeared; rotation waits [`RECON_TIP_EVERY`].
+    pub recon_tip_at: Instant,
     pub memories: Vec<Memory>,
     pub selected_insight: Option<recon::InsightView>,
     pub memory_sel: usize,
@@ -1199,6 +1249,30 @@ fn open_external_url(url: &str) -> Result<()> {
 }
 
 impl App {
+    /// The Home composer placeholder, or `None` once the user has typed.
+    pub fn recon_tip_text(&self) -> Option<&'static str> {
+        self.input
+            .is_empty()
+            .then(|| RECON_TIPS[self.recon_tip % RECON_TIPS.len()].1)
+    }
+
+    /// Advance to the next tip once [`RECON_TIP_EVERY`] has passed with an
+    /// empty composer. Typing freezes rotation; the clock restarts so a
+    /// cleared composer shows each tip for a full interval. Returns true
+    /// when the visible tip changed.
+    pub fn advance_recon_tip(&mut self, now: Instant) -> bool {
+        if !self.input.is_empty() {
+            self.recon_tip_at = now;
+            return false;
+        }
+        if now.saturating_duration_since(self.recon_tip_at) < RECON_TIP_EVERY {
+            return false;
+        }
+        self.recon_tip = (self.recon_tip + 1) % RECON_TIPS.len();
+        self.recon_tip_at = now;
+        true
+    }
+
     pub(crate) fn selected_intel_busy(&self) -> bool {
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
             return false;
@@ -1460,6 +1534,8 @@ impl App {
             layout: std::cell::RefCell::new(LayoutRegistry::default()),
             status: "ready".into(),
             see_more_pages: std::cell::Cell::new([8, 8, 8]),
+            recon_tip: 0,
+            recon_tip_at: Instant::now(),
             memories,
             selected_insight: None,
             memory_sel: 0,
@@ -9541,6 +9617,9 @@ pub async fn run(mut app: App) -> Result<()> {
             wait = wait.min(Duration::from_millis(80));
         }
         if !event::poll(wait)? {
+            if app.module.is_none() && app.advance_recon_tip(Instant::now()) {
+                dirty = true;
+            }
             if app.module == Some(ModuleId::Recon)
                 && app.focus == Target::Field(FieldId::Composer)
                 && app.draft_dirty
@@ -9677,6 +9756,8 @@ mod tests {
             provider_page: ProviderPage::Defaults,
             layout: std::cell::RefCell::new(LayoutRegistry::default()),
             see_more_pages: std::cell::Cell::new([8, 8, 8]),
+            recon_tip: 0,
+            recon_tip_at: Instant::now(),
             input: String::new(),
             brain_app: String::new(),
             brain_conversation: String::new(),
@@ -10061,19 +10142,19 @@ mod tests {
         );
         assert_eq!(
             ModuleId::Intel.blurb(),
-            "Review intelligence briefings and investigate emerging stories"
+            "Browse classified headlines and run article briefings"
         );
         assert_eq!(
             ModuleId::Atlas.blurb(),
-            "Map and track the global news cycle"
+            "Collect and classify global headlines on a live map"
         );
         assert_eq!(
             ModuleId::Brain.blurb(),
-            "Recall and explore connected intelligence"
+            "Explore saved memories, their paths, and related evidence"
         );
         assert_eq!(
             ModuleId::Recon.blurb(),
-            "Run evidence-driven OSINT investigations"
+            "Run evidence-driven OSINT investigations on any target"
         );
     }
 
@@ -11156,7 +11237,7 @@ mod tests {
         assert_eq!(ModuleId::Providers.title(), "Models");
         assert_eq!(
             ModuleId::System.blurb(),
-            "Inspect host hardware and Argos storage"
+            "Usage analytics, host details, and config transfer"
         );
         // 1–9 from home.
         for (index, module) in ModuleId::ALL.iter().enumerate() {
@@ -12303,6 +12384,141 @@ mod tests {
         dump_cells(&mut app, &dir, "brain-claim-detail", 140, 40);
         app.screen = Rect::new(0, 0, 64, 32);
         dump_cells(&mut app, &dir, "brain-claim-detail-narrow", 64, 32);
+    }
+
+    #[test]
+    fn recon_tips_cover_every_catalog_target_type_once() {
+        use argos_osint_core::osint::contracts::IntelligenceCategory as C;
+        let kinds: Vec<&str> = RECON_TIPS.iter().map(|(k, _)| *k).collect();
+        let mut unique = kinds.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), kinds.len(), "duplicate tip kinds");
+        for required in [
+            "person",
+            "username",
+            "email",
+            "phone",
+            "domain",
+            "ip",
+            "company",
+            "news",
+            "legal",
+            "social",
+            "url",
+            "history",
+            "code",
+            "cve",
+            "package",
+            "bitcoin",
+            "place",
+            "publisher",
+        ] {
+            assert!(kinds.contains(&required), "missing tip for {required}");
+        }
+        // Every catalog category has at least one tip that exercises it.
+        let by_category = |c: C| -> &[&str] {
+            match c {
+                C::WebDiscovery => &["url", "domain"],
+                C::NewsEvents => &["news"],
+                C::PublisherContext => &["publisher"],
+                C::LegalProceedings => &["legal"],
+                C::Organizations => &["company"],
+                C::ProfessionalIdentity => &["person", "email"],
+                C::SocialContent => &["social"],
+                C::PublicAccountCorroboration => &["username"],
+                C::DomainNetwork => &["domain", "ip"],
+                C::HistoricalWeb => &["history"],
+                C::SoftwareCode => &["code"],
+                C::Geography => &["place"],
+                C::Bitcoin => &["bitcoin"],
+                C::Vulnerabilities => &["cve", "package", "ip"],
+                C::EmailRegistration => &["email"],
+            }
+        };
+        for c in [
+            C::WebDiscovery,
+            C::NewsEvents,
+            C::PublisherContext,
+            C::LegalProceedings,
+            C::Organizations,
+            C::ProfessionalIdentity,
+            C::SocialContent,
+            C::PublicAccountCorroboration,
+            C::DomainNetwork,
+            C::HistoricalWeb,
+            C::SoftwareCode,
+            C::Geography,
+            C::Bitcoin,
+            C::Vulnerabilities,
+            C::EmailRegistration,
+        ] {
+            assert!(by_category(c).iter().any(|k| kinds.contains(k)), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn recon_tips_rotate_in_order_on_the_interval_and_wrap() {
+        let mut app = app();
+        let start = Instant::now();
+        app.recon_tip_at = start;
+        assert_eq!(app.recon_tip_text(), Some(RECON_TIPS[0].1));
+        assert!(!app.advance_recon_tip(start + RECON_TIP_EVERY / 2));
+        let mut now = start;
+        for step in 1..=RECON_TIPS.len() {
+            now += RECON_TIP_EVERY;
+            assert!(app.advance_recon_tip(now));
+            assert_eq!(app.recon_tip, step % RECON_TIPS.len());
+        }
+        assert_eq!(app.recon_tip_text(), Some(RECON_TIPS[0].1));
+    }
+
+    #[test]
+    fn recon_tip_hides_and_freezes_while_typing() {
+        let mut app = app();
+        let start = Instant::now();
+        app.recon_tip_at = start;
+        app.input = "who is".into();
+        assert_eq!(app.recon_tip_text(), None);
+        assert!(!app.advance_recon_tip(start + RECON_TIP_EVERY * 3));
+        assert_eq!(app.recon_tip, 0);
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(!text.contains("Ask anything"), "{text}");
+        app.input.clear();
+        // Clearing restarts the interval rather than skipping ahead.
+        assert!(!app.advance_recon_tip(start + RECON_TIP_EVERY * 3));
+        assert!(app.advance_recon_tip(start + RECON_TIP_EVERY * 4));
+        assert_eq!(app.recon_tip, 1);
+        let text = buffer_text(&render(&mut app, 160, 40));
+        assert!(text.contains(RECON_TIPS[1].1), "{text}");
+    }
+
+    /// Home with the current app descriptions and several composer tips:
+    /// `ARGOS_SCREEN_DIR=... cargo test -p argos-osint-bin dump_home_tips -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_home_tips_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = app();
+        for (tip, size) in [
+            (0usize, (160u16, 48u16)),
+            (3, (160, 48)),
+            (8, (120, 40)),
+            (13, (120, 40)),
+            (15, (100, 32)),
+        ] {
+            app.recon_tip = tip;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("home-tip-{}-{}x{}", RECON_TIPS[tip].0, size.0, size.1),
+                size.0,
+                size.1,
+            );
+        }
     }
 
     fn dump_cells(app: &mut App, dir: &str, name: &str, width: u16, height: u16) {

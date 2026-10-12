@@ -96,10 +96,6 @@ pub fn visual_spans(visual: &KpiVisual, width: usize) -> Vec<Span<'static>> {
     }
 }
 
-pub fn kpi(frame: &mut Frame, area: Rect, metric: &Kpi) {
-    kpi_with(frame, area, metric, &KpiVisual::None);
-}
-
 pub fn kpi_with(frame: &mut Frame, area: Rect, metric: &Kpi, visual: &KpiVisual) {
     if area.width == 0 || area.height == 0 {
         return;

@@ -63,6 +63,8 @@ pub struct OperationScope<'a> {
     pub insight_contract: bool,
     /// Per-stage completion ceiling for the insight lane (defaults to 8,192).
     pub completion_tokens: Option<u32>,
+    /// Requested reasoning effort for this operation (provider default if unset).
+    pub reasoning: crate::request_policy::ReasoningEffort,
 }
 
 impl<'a> OperationScope<'a> {
@@ -75,7 +77,13 @@ impl<'a> OperationScope<'a> {
             generation: 1,
             insight_contract: false,
             completion_tokens: None,
+            reasoning: crate::request_policy::ReasoningEffort::Default,
         }
+    }
+
+    pub fn with_reasoning(mut self, effort: crate::request_policy::ReasoningEffort) -> Self {
+        self.reasoning = effort;
+        self
     }
 
     pub fn with_run(mut self, run_id: &'a str) -> Self {
@@ -1031,7 +1039,11 @@ where
 
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
-    let completion_tokens = scope.completion_tokens.unwrap_or(8192);
+    let insight_policy = crate::request_policy::RequestPolicy {
+        max_output_tokens: Some(scope.completion_tokens.unwrap_or(8192)),
+        json_object: true,
+        reasoning: scope.reasoning,
+    };
     let mut attempt_counter = 0u32;
     let mut last_route_idx = 0usize;
     let on_event_shared = on_event.clone();
@@ -1188,7 +1200,7 @@ where
                     &secret,
                     &messages_vec,
                     transport,
-                    completion_tokens,
+                    &insight_policy,
                     Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
                     progress_sink.as_deref(),
                 )
@@ -1479,6 +1491,7 @@ where
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
     let stage_tokens = scope.completion_tokens;
+    let stage_reasoning = scope.reasoning;
     let mut attempt_counter = 0u32;
     let on_event_shared = on_event.clone();
     let op_id = scope.operation_id.to_string();
@@ -1731,7 +1744,11 @@ where
                         Deadlines::native_decision(),
                         None,
                         None,
-                        Some(stage_tokens.unwrap_or(2048)),
+                        &crate::request_policy::RequestPolicy {
+                            max_output_tokens: Some(stage_tokens.unwrap_or(2048)),
+                            json_object: true,
+                            reasoning: stage_reasoning,
+                        },
                     )
                     .await
                 } else {

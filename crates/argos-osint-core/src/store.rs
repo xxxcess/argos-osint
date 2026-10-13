@@ -15,8 +15,6 @@ use crate::profile_stats;
 mod graph_summaries;
 mod publication;
 pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
-#[cfg(all(test, feature = "lancedb"))]
-pub(crate) use publication::fault as publication_fault;
 pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
 pub use publication::{
     memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
@@ -43,7 +41,9 @@ pub struct GraphSummary {
 /// activity-history tables plus additive timing columns on the model attempt
 /// and tool call records. 28 adds immutable NLP artifacts/references/features and
 /// complete summary-result envelopes; existing facts are preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 36;
+/// 37 adds the unified Brain graph (typed kinds, actors, endpoints) and brief
+/// stage timings; `atomic_claim` memories migrate to claim/inference in place.
+pub const SCHEMA_VERSION: i64 = 37;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -876,6 +876,13 @@ impl Store {
                         ON intel_inference_article_leads(article_id, source_generation);",
                 )?;
                 self.conn.pragma_update(None, "user_version", 36)?;
+            }
+            if version < 37 {
+                // Additive: unified Brain typed kinds/actors/endpoints, the
+                // atomic_claim → claim/inference migration (IDs preserved) and
+                // per-stage Intel brief timing.
+                crate::brain_schema::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 37)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final

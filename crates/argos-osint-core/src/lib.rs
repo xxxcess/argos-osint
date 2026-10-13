@@ -27,6 +27,7 @@ pub mod brain;
 #[cfg_attr(not(feature = "lancedb"), path = "brain_lance_off.rs")]
 pub mod brain_lance;
 pub mod brain_query;
+pub mod brain_schema;
 pub mod config_commit;
 pub mod config_transfer;
 #[cfg(test)]
@@ -60,6 +61,7 @@ pub mod recon;
 pub mod related_articles;
 pub mod related_memories;
 pub mod reliability_faults;
+pub mod request_policy;
 pub mod scheduler;
 pub mod secrets;
 pub mod store;

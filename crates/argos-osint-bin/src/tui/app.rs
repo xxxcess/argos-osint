@@ -13076,15 +13076,16 @@ mod tests {
             assessments: assess.iter().map(|(a, s)| (*a, s.to_string())).collect(),
         };
         // (name, state, stage, activity, age, facts, expected [claims, insights, links])
-        let frames: Vec<(
-            &str,
-            &str,
-            &str,
-            &str,
+        type Frame<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a str,
             Option<u64>,
             ArtifactFacts,
-            [&str; 3],
-        )> = vec![
+            [&'a str; 3],
+        );
+        let frames: Vec<Frame> = vec![
             (
                 "1-queued",
                 "queued",

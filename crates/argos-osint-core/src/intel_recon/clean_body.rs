@@ -378,7 +378,8 @@ impl BlockDecider for RuntimeDecider<'_> {
                 batch.first().map(|b| b.id).unwrap_or(0)
             );
             let scope = crate::recon::model_exec::OperationScope::new(&operation_id, "classifier")
-                .with_completion_tokens(CLEANUP_TOKENS);
+                .with_completion_tokens(CLEANUP_TOKENS)
+                .with_reasoning(crate::request_policy::ReasoningEffort::Low);
             let (ranges, _) = crate::recon::model_exec::execute_decisions_or_chat(
                 &self.runtime.auth,
                 &self.runtime.settings,

@@ -193,7 +193,7 @@ impl Store {
     }
 
     fn build_brief_graph(&self, memory_id: &str) -> anyhow::Result<MemoryGraph> {
-        let mut stmt = self.conn.prepare("SELECT member_id FROM memory_brief_memberships WHERE brief_id=?1 AND member_type='atomic_claim'")?;
+        let mut stmt = self.conn.prepare("SELECT member_id FROM memory_brief_memberships WHERE brief_id=?1 AND member_type IN ('atomic_claim','claim','inference')")?;
         let members: Vec<String> = stmt
             .query_map([memory_id], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?;

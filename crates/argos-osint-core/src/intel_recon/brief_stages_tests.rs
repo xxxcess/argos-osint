@@ -72,6 +72,7 @@ struct Seen {
     user: String,
     system: String,
     tokens: u32,
+    reasoning: crate::request_policy::ReasoningEffort,
 }
 
 #[derive(Default)]
@@ -210,6 +211,7 @@ impl StageBackend for Mock {
                 user: request.user.clone(),
                 system: request.system.clone(),
                 tokens: request.completion_tokens,
+                reasoning: request.reasoning,
             });
             if self.hang.contains(&request.stage) {
                 loop {
@@ -297,6 +299,14 @@ async fn one_chain_ordered_dispatch_scoped_inputs_and_no_repeat_requests() {
         seen.iter().map(|s| s.tokens).collect::<Vec<_>>(),
         [2048, 3072, 1536]
     );
+    // §2 request policy: extraction/linking low effort, inference default.
+    {
+        use crate::request_policy::ReasoningEffort::{Default, Low};
+        assert_eq!(
+            seen.iter().map(|s| s.reasoning).collect::<Vec<_>>(),
+            [Low, Default, Low]
+        );
+    }
     // Claims: title/description only.
     assert!(seen[0].user.contains("Unions denied"));
     assert!(!seen[0].user.contains("harbour master"));
@@ -1033,4 +1043,58 @@ fn shared_country_alone_yields_no_lead_and_explanations_name_the_gap() {
     );
     assert_eq!(gapless["withheld"], 2);
     assert_eq!(gapless["empty_reason"], "no inference-specific overlap");
+}
+
+// §2/§7 timing: every stage records a counts-only timing row and Logs event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_stage_records_timing_aggregates_without_text() {
+    let db = db();
+    let job = {
+        let store = Store::open(&db.path).unwrap();
+        ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap()
+    };
+    let mut mock = Mock::happy();
+    mock.delay = Some(Duration::from_millis(60));
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let store = Store::open(&db.path).unwrap();
+    let timings = crate::intel_recon::brief_timing::for_job(&store.conn, &job).unwrap();
+    let ops: Vec<&str> = timings.iter().map(|t| t.operation.as_str()).collect();
+    assert_eq!(
+        ops,
+        [
+            "intel_brief_body",
+            "intel_brief_claims",
+            "intel_brief_inferences",
+            "intel_brief_links"
+        ]
+    );
+    for t in &timings {
+        assert_eq!(t.outcome, "committed");
+        assert!(t.total_ms >= t.local_ms + t.fidelity_ms, "{t:?}");
+        if t.operation != "intel_brief_body" {
+            assert!(t.generation_ms >= 60, "model wall time measured: {t:?}");
+            assert!(t.total_ms >= t.generation_ms, "{t:?}");
+        }
+        assert!(t.queue_ms >= 0 && t.persistence_ms >= 0);
+    }
+    let messages: Vec<String> = store
+        .conn
+        .prepare(
+            "SELECT message FROM argos_events WHERE event_type='intel_brief.timing' AND job_id=?1",
+        )
+        .unwrap()
+        .query_map([&job], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(messages.len(), 4);
+    for m in &messages {
+        assert!(m.contains("total ") && m.contains("generation "), "{m}");
+        for secret_or_text in ["Unions denied", "insurance", "harbour", TITLE] {
+            assert!(!m.contains(secret_or_text), "timing log leaked text: {m}");
+        }
+    }
 }

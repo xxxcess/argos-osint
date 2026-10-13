@@ -9,11 +9,11 @@ Legend: **done** / **partial** / **deferred** / pending.
 
 | § | Item | Status | Phase |
 |---|------|--------|-------|
-| 2 | Output-limit support decoupled from JSON mode; compatible fields for Google/Nvidia/OpenRouter; unknown transports diagnosed | pending | 1 |
-| 2 | Capability-aware reasoning effort/budget in operation policy; unsupported options do not repeatedly fail a route | pending | 1 |
-| 2 | Per-stage timing aggregation (local, admission, first meaningful output, generation, fidelity, backoff, persistence, total); active substep + role/model in Jobs/Logs; progress sinks wired | pending | 1 |
-| 4 | `MemoryKind` actor/claim/inference/link/related + legacy kinds; typed payload/version/revision/lifecycle; one transactional writer; `EndpointRef` | pending | 1 |
-| 4 | Migration: atomic_claim→Claim, insight classification→Claim/Inference, IDs preserved | pending | 1 |
+| 2 | Output-limit support decoupled from JSON mode; compatible fields for Google/Nvidia/OpenRouter; unknown transports diagnosed | **done** — `request_policy::{RequestPolicy, capabilities, apply}`: `max_tokens` (OpenRouter/Google/Nvidia/x.ai), `max_completion_tokens` (OpenAI), `unsupported-policy:*` diagnostic otherwise; `response_format` still only on JSON-mode adapters; wire fixtures in `provider_attempt_policy_tests.rs` | 1 |
+| 2 | Capability-aware reasoning effort/budget in operation policy; unsupported options do not repeatedly fail a route | **done** — `ReasoningEffort` on `OperationScope`/`StageRequest` (Claims/fidelity/cleanup/Links low, Inferences default), per-dialect fields + hidden-reasoning reserve; a 400/422 naming a sent option is learned per (provider, model, field), resent once without it, skipped thereafter; `AttemptReport.policy_diagnostics`. Per-operation *configurable* overrides arrive with `operation_overrides` (phase 2) | 1 |
+| 2 | Per-stage timing aggregation (local, admission, first meaningful output, generation, fidelity, backoff, persistence, total); active substep + role/model in Jobs/Logs; progress sinks wired | **done** — `brief_timing`: task-local `StageClock`, attempt-row aggregation, `intel_brief_stage_timings` (schema 37) + counts-only `intel_brief.timing` Logs event; header activity (`headers_ms`) kept separate from first meaningful output; RuntimeBackend sinks write `substep · Role · provider/model · state` to the stage activity label shown in Jobs/brief panel. Live provider measurement deferred to phase 5 comparison | 1 |
+| 4 | `MemoryKind` actor/claim/inference/link/related + legacy kinds; typed payload/version/revision/lifecycle; one transactional writer; `EndpointRef` | **partial** — kinds (legacy `atomic_claim` decodes as Claim), discriminated `MemoryPayload`, `EndpointRef`, `Lifecycle`, schema-37 typed columns + actor/endpoint/legacy-map tables done; the single transactional writer is phase 3 | 1 |
+| 4 | Migration: atomic_claim→Claim, insight classification→Claim/Inference, IDs preserved | **done** — `brain_schema::migrate_claim_kinds` (derivation kind, then classification receipt; manual/summary untouched; memberships retyped); publication writes claim/inference; graph reads both spellings | 1 |
 | 2 | Structural HTML prose extraction; soft-wrap normalization with offsets | pending | 2 |
 | 2 | Block-aware chrome cues (no substring `share`/`related`) | pending | 2 |
 | 2 | Parse once, remap spans, `SentenceIndex` persisted and consumed by all stages + canonical publication | pending | 2 |
@@ -30,3 +30,7 @@ Legend: **done** / **partial** / **deferred** / pending.
 | 5 | Backfill + lifecycle (`atlas_delete_run` fix, redirects, TTL safety) | pending | 3–4 |
 | 2 | Focused vs full-body path comparison on a fixed corpus (measured) | pending | 5 |
 | 7 | All acceptance checks, test matrix, screenshots, docs/diagrams/graphify | pending | 5 |
+
+## Phase log
+
+- **Phase 1** — request policy, unsupported-option recovery, stage timing + live labels, canonical Brain kinds/payloads, schema 37 and the claim/inference migration. Also fixed three pre-existing `clippy --all-targets -D warnings` failures on main (test-only `with_frame`, a complex test tuple type, an unused test re-export). No UI layout change, so no screenshots this phase.

@@ -21,6 +21,7 @@ use crate::provider_diag::{
     classify_status, provider_error, request_id, retry_after_uncapped, Category, ProviderFailure,
     Stage, StreamState,
 };
+use crate::request_policy::RequestPolicy;
 use crate::secrets::ProviderSecret;
 
 /// How the single request is made.
@@ -148,6 +149,8 @@ pub struct AttemptReport {
     pub endpoint: String,
     pub elapsed_ms: u64,
     pub outcome: Result<Completion, ProviderFailure>,
+    /// Request-policy diagnostics (unsupported/learned options). Never text.
+    pub policy_diagnostics: Vec<String>,
 }
 
 /// Is this connection served by a subprocess rather than HTTP?
@@ -173,7 +176,16 @@ pub async fn attempt_with_observer(
     deadlines: Deadlines,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> AttemptReport {
-    attempt_options(secret, messages, transport, deadlines, observer, None, None).await
+    attempt_options(
+        secret,
+        messages,
+        transport,
+        deadlines,
+        observer,
+        None,
+        &RequestPolicy::default(),
+    )
+    .await
 }
 
 /// Only the insight contract lane requests structured JSON and completion bounds.
@@ -182,7 +194,7 @@ pub async fn attempt_insight(
     secret: &ProviderSecret,
     messages: &[ChatMessage],
     transport: Transport,
-    completion_tokens: u32,
+    policy: &RequestPolicy,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
     progress: Option<&ProgressFn>,
 ) -> AttemptReport {
@@ -192,13 +204,7 @@ pub async fn attempt_insight(
         Deadlines::insight_non_stream()
     };
     attempt_full(
-        secret,
-        messages,
-        transport,
-        deadlines,
-        observer,
-        progress,
-        Some(completion_tokens),
+        secret, messages, transport, deadlines, observer, progress, policy,
     )
     .await
 }
@@ -211,16 +217,10 @@ pub async fn attempt_full(
     deadlines: Deadlines,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
     progress: Option<&ProgressFn>,
-    completion_tokens: Option<u32>,
+    policy: &RequestPolicy,
 ) -> AttemptReport {
     attempt_options(
-        secret,
-        messages,
-        transport,
-        deadlines,
-        observer,
-        progress,
-        completion_tokens,
+        secret, messages, transport, deadlines, observer, progress, policy,
     )
     .await
 }
@@ -232,7 +232,7 @@ async fn attempt_options(
     deadlines: Deadlines,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
     progress: Option<&ProgressFn>,
-    completion_tokens: Option<u32>,
+    policy: &RequestPolicy,
 ) -> AttemptReport {
     let started = Instant::now();
     let kind = provider::effective_kind(secret);
@@ -271,10 +271,16 @@ async fn attempt_options(
                 f.elapsed_ms = started.elapsed().as_millis() as u64;
                 f
             }),
+            policy_diagnostics: if policy.is_empty() {
+                vec![]
+            } else {
+                vec!["unsupported-policy:subscription transport".into()]
+            },
         };
     }
     let mut first_ms = None;
     let mut stream_state = StreamState::default();
+    let mut policy_diagnostics = Vec::new();
     let outcome = run(
         secret,
         messages,
@@ -286,7 +292,8 @@ async fn attempt_options(
         &mut stream_state,
         observer,
         progress,
-        completion_tokens,
+        policy,
+        &mut policy_diagnostics,
     )
     .await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -303,6 +310,7 @@ async fn attempt_options(
             }
             f
         }),
+        policy_diagnostics,
     }
 }
 
@@ -318,7 +326,8 @@ async fn run(
     state: &mut StreamState,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
     progress: Option<&ProgressFn>,
-    completion_tokens: Option<u32>,
+    policy: &RequestPolicy,
+    diagnostics: &mut Vec<String>,
 ) -> Result<Completion, ProviderFailure> {
     let client = reqwest::Client::builder()
         .connect_timeout(deadlines.connect)
@@ -326,11 +335,58 @@ async fn run(
         .map_err(|e| {
             ProviderFailure::from_error(Stage::Configuration, Category::Configuration, &e)
         })?;
-    let mut body = provider::chat_body(secret, messages, &[], transport == Transport::Stream);
-    if let Some(tokens) = completion_tokens {
-        provider::insight_output_options(secret, &mut body, tokens);
+    let kind = provider::effective_kind(secret);
+    // One recovery for options the route rejects: learn them and resend
+    // without them, so later dispatches skip them before sending.
+    let mut resent = false;
+    loop {
+        let mut body = provider::chat_body(secret, messages, &[], transport == Transport::Stream);
+        diagnostics.extend(crate::request_policy::apply(secret, &mut body, policy));
+        match send_once(
+            &client, secret, &body, transport, deadlines, endpoint, started, first_ms, state,
+            observer, progress,
+        )
+        .await
+        {
+            Err(f) if !resent && matches!(f.http_status, Some(400 | 422)) && !policy.is_empty() => {
+                let message = format!(
+                    "{} {} {}",
+                    f.message,
+                    f.provider_message.as_deref().unwrap_or(""),
+                    f.provider_code.as_deref().unwrap_or("")
+                );
+                let fields = crate::request_policy::rejected_fields(&body, &message);
+                if fields.is_empty() {
+                    return Err(f);
+                }
+                for field in fields {
+                    crate::request_policy::learn_unsupported(&kind, &secret.model, field);
+                    diagnostics.push(format!(
+                        "unsupported-policy:{field} rejected; resent without it"
+                    ));
+                }
+                resent = true;
+            }
+            other => return other,
+        }
     }
-    let req = provider::authorize(client.post(endpoint).json(&body), secret)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_once(
+    client: &reqwest::Client,
+    secret: &ProviderSecret,
+    body: &Value,
+    transport: Transport,
+    deadlines: Deadlines,
+    endpoint: &str,
+    started: Instant,
+    first_ms: &mut Option<u64>,
+    state: &mut StreamState,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+    progress: Option<&ProgressFn>,
+) -> Result<Completion, ProviderFailure> {
+    let req = provider::authorize(client.post(endpoint).json(body), secret)
         .await
         .map_err(|err| {
             let mut f = ProviderFailure::from_anyhow(Stage::Configuration, &err);
@@ -1030,6 +1086,10 @@ pub mod mock {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "provider_attempt_policy_tests.rs"]
+mod policy_tests;
 
 #[cfg(test)]
 mod tests {

@@ -42,6 +42,7 @@ pub fn frame() -> u64 {
 }
 
 /// Run `f` with the frame index pinned to `index` (restored afterwards).
+#[cfg(test)]
 pub fn with_frame<R>(index: u64, f: impl FnOnce() -> R) -> R {
     let prev = PINNED.with(|p| p.replace(Some(index)));
     let out = f();

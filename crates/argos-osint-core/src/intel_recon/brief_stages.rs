@@ -56,6 +56,8 @@ pub struct StageRequest {
     pub system: String,
     pub user: String,
     pub completion_tokens: u32,
+    /// Stage reasoning effort (spec §2: extraction/linking low, inference default).
+    pub reasoning: crate::request_policy::ReasoningEffort,
     pub validator: Validator,
 }
 
@@ -659,7 +661,11 @@ async fn generate(
     let validator = request.validator.clone();
     let task = request.task_id.clone();
     activity(db_path, &task, "waiting for model");
-    let raw = backend.generate(request, cancel).await?;
+    let raw = super::brief_timing::timed(
+        super::brief_timing::Phase::Model,
+        backend.generate(request, cancel),
+    )
+    .await?;
     activity(db_path, &task, "validating");
     validator(&raw).map_err(|e| anyhow!("invalid stage output: {e}"))?;
     strict_json(&raw)
@@ -722,6 +728,7 @@ async fn execute(
                     system: format!("{CLAIMS_PROMPT}{STRICT_JSON}{CLAIMS_SHAPE}"),
                     user: claims_user(&article),
                     completion_tokens: CLAIMS_TOKENS,
+                    reasoning: crate::request_policy::ReasoningEffort::Low,
                     validator,
                 },
             )
@@ -787,6 +794,7 @@ async fn execute(
                         system: format!("{INFERENCES_PROMPT}{STRICT_JSON}{INFERENCES_SHAPE}"),
                         user: inferences_user(&claims, window, &carried),
                         completion_tokens: INFERENCES_TOKENS,
+                        reasoning: crate::request_policy::ReasoningEffort::Default,
                         validator,
                     },
                 )
@@ -863,6 +871,7 @@ async fn execute(
                     system: format!("{LINKS_PROMPT}{STRICT_JSON}{LEADS_SHAPE}"),
                     user: links_user(&inferences, &candidates),
                     completion_tokens: LINKS_TOKENS,
+                    reasoning: crate::request_policy::ReasoningEffort::Low,
                     validator,
                 },
             )
@@ -984,7 +993,11 @@ async fn apply_fidelity(
         })
         .collect();
     activity(db_path, task_id, "checking fidelity");
-    let labels = assess_cached(db_path, backend, task_id, items, cancel).await?;
+    let labels = super::brief_timing::timed(
+        super::brief_timing::Phase::Fidelity,
+        assess_cached(db_path, backend, task_id, items, cancel),
+    )
+    .await?;
     let mut kept = Vec::new();
     for mut item in list {
         let label = labels
@@ -1063,10 +1076,26 @@ pub async fn run_next_stage(
             }
         })
     };
+    let stage_clock = std::time::Instant::now();
+    let clock = super::brief_timing::StageClock::default();
     let result = tokio::select! {
-        r = execute(db_path, &claimed, backend, &cancel) => r,
+        r = super::brief_timing::with_clock(
+            clock.clone(),
+            execute(db_path, &claimed, backend, &cancel),
+        ) => r,
         _ = cancelled(cancel.clone()) => Err(anyhow!("cancelled")),
     };
+    {
+        // Local work = stage wall time not spent in model/fidelity chains.
+        use super::brief_timing::{note_on, peek, Phase};
+        let remote = peek(&clock, Phase::Model) + peek(&clock, Phase::Fidelity);
+        note_on(
+            &clock,
+            Phase::Local,
+            stage_clock.elapsed().saturating_sub(remote),
+        );
+    }
+    let persist_clock = std::time::Instant::now();
     // Commit while the heartbeat still covers the lease, then stop it.
     let outcome = {
         let store = Store::open(db_path)?;
@@ -1130,11 +1159,43 @@ pub async fn run_next_stage(
             }
         }
     };
+    let persistence = persist_clock.elapsed();
     done.store(true, Ordering::Release);
     let _ = heartbeat.await;
     // Logs carry the same stage row as the brief panel and Jobs.
     if let Ok(store) = Store::open_light(db_path) {
         let _ = brief_pipeline::set_activity(&store.conn, &claimed.id, "");
+        let outcome_label = match &outcome {
+            StageOutcome::Committed { .. } => "committed",
+            StageOutcome::Failed { .. } => "failed",
+            StageOutcome::Stale { .. } => "stale",
+        };
+        if let Ok(timing) = super::brief_timing::collect(
+            &store.conn,
+            &claimed,
+            &clock,
+            stage_clock.elapsed(),
+            persistence,
+            outcome_label,
+        ) {
+            let _ = super::brief_timing::persist(&store.conn, &timing, &now());
+            let _ = crate::events::record_event(
+                &store.conn,
+                &crate::events::NewEvent {
+                    severity: None,
+                    app: "intel".into(),
+                    event_type: "intel_brief.timing".into(),
+                    message: format!(
+                        "{} · {}",
+                        claimed.operation,
+                        super::brief_timing::summary(&timing)
+                    ),
+                    job_id: claimed.job_id.clone(),
+                    task_id: claimed.id.clone(),
+                    ..Default::default()
+                },
+            );
+        }
         if let Some(view) = brief_pipeline::stage_views(&store.conn, &claimed.job_id)
             .ok()
             .and_then(|v| v.into_iter().find(|v| v.operation == operation))
@@ -1351,7 +1412,8 @@ impl StageBackend for RuntimeBackend {
             let scope =
                 crate::recon::model_exec::OperationScope::new(&operation_id, "claim_assessor")
                     .with_task(task_id)
-                    .with_completion_tokens(super::brief_fidelity::FIDELITY_TOKENS);
+                    .with_completion_tokens(super::brief_fidelity::FIDELITY_TOKENS)
+                    .with_reasoning(crate::request_policy::ReasoningEffort::Low);
             let adapter = super::brief_fidelity::FidelityDecisions { items: &items };
             let (labels, _) = crate::recon::model_exec::execute_decisions_or_chat(
                 &self.auth,
@@ -1359,7 +1421,12 @@ impl StageBackend for RuntimeBackend {
                 &scope,
                 &adapter,
                 cancel,
-                None,
+                Some(super::brief_timing::activity_sink(
+                    &self.db_path,
+                    task_id,
+                    "checking fidelity",
+                    scope.role,
+                )),
                 Some(self.db_path.as_path()),
             )
             .await?;
@@ -1391,7 +1458,8 @@ impl StageBackend for RuntimeBackend {
             let scope = crate::recon::model_exec::OperationScope::new(&operation_id, request.role)
                 .with_task(&request.task_id)
                 .with_insight_contract()
-                .with_completion_tokens(request.completion_tokens);
+                .with_completion_tokens(request.completion_tokens)
+                .with_reasoning(request.reasoning);
             let messages = [
                 crate::provider::ChatMessage {
                     role: "system".into(),
@@ -1414,7 +1482,12 @@ impl StageBackend for RuntimeBackend {
                 &messages,
                 move |raw| validator(raw),
                 cancel,
-                None,
+                Some(super::brief_timing::activity_sink(
+                    &self.db_path,
+                    &request.task_id,
+                    &request.stage,
+                    request.role,
+                )),
                 None,
                 Some(self.db_path.as_path()),
                 true,

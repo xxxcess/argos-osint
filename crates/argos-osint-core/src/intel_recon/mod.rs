@@ -8,6 +8,7 @@ pub mod brief_canonical;
 pub mod brief_fidelity;
 pub mod brief_pipeline;
 pub mod brief_stages;
+pub mod brief_timing;
 mod briefing_view;
 mod classify_mode;
 pub mod clean_body;

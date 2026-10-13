@@ -1487,8 +1487,15 @@ impl StageBackend for RuntimeBackend {
 
     fn related(&mut self, article: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>> {
         let store = Store::open(&self.db_path)?;
+        // All retained cycles by default, one row per URL.
         Ok(store
-            .related_articles(&article.run_id, &article.id, 0, 50)?
+            .related_articles_global(
+                &article.run_id,
+                &article.id,
+                crate::related_global::RelatedScope::AllRetained,
+                None,
+                50,
+            )?
             .rows
             .into_iter()
             .map(|r| r.article)
@@ -1614,6 +1621,10 @@ pub fn stage_revisions(
         "after": inferences,
         "prompt": LINKS_PROMPT,
         "generate": route(Some(OP_LINKS_GENERATE), "synthesis"),
+        // Link candidates come from Brain actors and all-retained Related.
+        "identity_index": crate::brain_actors::IDENTITY_INDEX_VERSION,
+        "actor_index": crate::atlas_actor_index::INDEX_CONTRACT,
+        "related_scope": "all_retained",
     }));
     vec![body, claims, inferences, links]
 }

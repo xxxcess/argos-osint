@@ -674,3 +674,115 @@ async fn all_unk_cycle_classifies_and_finishes_without_brain_or_nonclassifier_ca
         AtlasEvent::MemoryProgress { .. } | AtlasEvent::MemoriesChanged { .. }
     )));
 }
+
+async fn run_phase6(db: &std::path::Path, run: &str) -> crate::atlas::Stop {
+    use crate::atlas::{run_atlas, RunInput};
+    let pause = AtomicBool::new(false);
+    let keys = crate::osint::ProviderKeys::default();
+    run_atlas(
+        RunInput {
+            db_path: db,
+            pause: &pause,
+            keys: &keys,
+            user_agent: "Argos offline",
+            pace: false,
+            resume: true,
+            feed: &[],
+            classifier: None,
+            synthesizer: None,
+            synthesizer_fallbacks: &[],
+            run_id: Some(run),
+        },
+        |_| {},
+        |_| Box::pin(async { panic!("phase-6 resume must not discover") }),
+    )
+    .await
+    .unwrap()
+}
+
+/// A v1 cycle stopped after phase 5 resumes phase 6 only: no discovery,
+/// classification or metadata replay; a failed index write keeps the cycle
+/// partial at phase 6 and the next resume completes only the missing unit.
+#[tokio::test]
+async fn phase6_resume_indexes_only_and_failed_writes_prevent_completion() {
+    use crate::atlas::{Cursor, RunStats, Stop};
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("argos.db");
+    setup(&db);
+    let store = Store::open(&db).unwrap();
+    let stats = RunStats {
+        contract_version: crate::atlas_work::COLLECTION_CONTRACT_V1.into(),
+        ..RunStats::default()
+    };
+    let cursor = Cursor {
+        phase: 6,
+        leg: "actor_articles".into(),
+        ..Cursor::default()
+    };
+    store
+        .atlas_insert_run(
+            "p6",
+            &serde_json::to_string(&cursor).unwrap(),
+            &serde_json::to_string(&stats).unwrap(),
+        )
+        .unwrap();
+    store.atlas_set_state("p6", "partial", "", true).unwrap();
+    for (id, title, names) in [
+        ("a", "Jane Doe speaks", vec!["Jane Doe"]),
+        ("bad", "John Roe speaks", vec!["John Roe"]),
+        ("z", "Weather is mild", vec![]),
+    ] {
+        crate::atlas_actor_index::tests::seed(&store, "p6", id, title, &names);
+        let row = store.atlas_article("p6", id).unwrap().unwrap();
+        store
+            .atlas_set_classification(
+                "p6",
+                id,
+                &crate::atlas_metadata::input_hash(&row),
+                "classified",
+                "{}",
+                None,
+            )
+            .unwrap();
+    }
+    store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER fail_bad BEFORE INSERT ON brain_actor_mentions WHEN NEW.origin_id='bad'
+             BEGIN SELECT RAISE(ABORT,'injected'); END;",
+        )
+        .unwrap();
+    assert_eq!(run_phase6(&db, "p6").await, Stop::Finished);
+    let run = store.atlas_latest_run().unwrap().unwrap();
+    assert_eq!(run.state, "partial", "{}", run.note);
+    let stats: RunStats = serde_json::from_str(&run.stats_json).unwrap();
+    assert_eq!(
+        stats.contract_version,
+        crate::atlas_work::COLLECTION_CONTRACT
+    );
+    assert_eq!(
+        (
+            stats.coverage.actor_indexed,
+            stats.coverage.actor_index_failed,
+            stats.coverage.actor_zero
+        ),
+        (2, 1, 1)
+    );
+    let cursor: Cursor = serde_json::from_str(&run.cursor_json).unwrap();
+    assert_eq!(cursor.phase, 6, "resume targets phase 6 only");
+    assert!(crate::atlas::resumable(&run));
+    store.conn.execute_batch("DROP TRIGGER fail_bad").unwrap();
+    assert_eq!(run_phase6(&db, "p6").await, Stop::Finished);
+    let run = store.atlas_latest_run().unwrap().unwrap();
+    assert_eq!(run.state, "completed", "{}", run.note);
+    let receipts: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM atlas_article_index WHERE run_id='p6'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipts, 3);
+    assert!(run.note.contains("actors indexed 3/3"), "{}", run.note);
+}

@@ -121,3 +121,15 @@ CREATE TABLE IF NOT EXISTS brain_backfill_receipts (
     completed_at TEXT NOT NULL,
     PRIMARY KEY (source, unit_id)
 );
+
+-- Atlas phase 6 receipt: one per article occurrence, written atomically with
+-- the occurrence's actor bindings, mention Links and bounded Related records.
+CREATE TABLE IF NOT EXISTS atlas_article_index (
+    run_id TEXT NOT NULL,
+    article_id TEXT NOT NULL,
+    input_revision TEXT NOT NULL,
+    index_checksum TEXT NOT NULL,
+    actor_coverage TEXT NOT NULL DEFAULT '',
+    indexed_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, article_id)
+);

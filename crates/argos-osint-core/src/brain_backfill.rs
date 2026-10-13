@@ -91,9 +91,34 @@ fn units(conn: &Connection, source: &str) -> Result<Vec<(String, String)>> {
     if source == "atlas_articles" && !has_table(conn, "atlas_article_metadata")? {
         return Ok(vec![]);
     }
+    revisions(conn, sql, [])
+}
+
+const ATLAS_RUN_UNITS: &str = "SELECT a.run_id||'/'||a.article_id,
+       json_array(a.title,a.description,a.category,
+         (SELECT metadata_json FROM atlas_article_metadata m WHERE m.run_id=a.run_id AND m.article_id=a.article_id))
+     FROM atlas_articles a WHERE a.run_id=?1 ORDER BY a.article_id";
+
+/// `(unit, revision)` for one Atlas run's article occurrences, using the exact
+/// revision the historical backfill uses, so a phase-6 receipt also satisfies
+/// the backfill and the two never index one occurrence twice.
+pub(crate) fn atlas_run_units(conn: &Connection, run_id: &str) -> Result<Vec<(String, String)>> {
+    if !has_table(conn, "atlas_article_metadata")? {
+        return Ok(vec![]);
+    }
+    revisions(conn, ATLAS_RUN_UNITS, [run_id])
+}
+
+fn revisions<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    args: P,
+) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .query_map(args, |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows
         .into_iter()

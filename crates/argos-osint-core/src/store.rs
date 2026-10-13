@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// complete summary-result envelopes; existing facts are preserved unchanged.
 /// 37 adds the unified Brain graph (typed kinds, actors, endpoints) and brief
 /// stage timings; `atomic_claim` memories migrate to claim/inference in place.
-pub const SCHEMA_VERSION: i64 = 38;
+pub const SCHEMA_VERSION: i64 = 39;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -889,6 +889,11 @@ impl Store {
                 // actor backfill receipts (idempotent re-run of the Brain DDL).
                 crate::brain_schema::migrate(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 38)?;
+            }
+            if version < 39 {
+                // Additive: Atlas phase-6 atlas_article_index receipts.
+                crate::brain_schema::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 39)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
@@ -2809,7 +2814,7 @@ fn like_needle(query: &str) -> String {
     format!("%{escaped}%")
 }
 
-fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::brain::Memory> {
+pub(crate) fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::brain::Memory> {
     let source: String = row.get(5)?;
     let source = serde_json::from_str(&source).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err))

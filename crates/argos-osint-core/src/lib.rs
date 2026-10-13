@@ -15,6 +15,7 @@
 )]
 
 pub mod atlas;
+pub mod atlas_actor_index;
 pub mod atlas_classify;
 #[cfg(test)]
 mod atlas_classify_tests;
@@ -26,6 +27,7 @@ pub mod atlas_work;
 pub mod brain;
 pub mod brain_actors;
 pub mod brain_backfill;
+pub mod brain_kinds;
 #[cfg_attr(not(feature = "lancedb"), path = "brain_lance_off.rs")]
 pub mod brain_lance;
 pub mod brain_query;
@@ -61,6 +63,7 @@ pub mod provider_metrics;
 pub mod provider_request;
 pub mod recon;
 pub mod related_articles;
+pub mod related_global;
 pub mod related_memories;
 pub mod reliability_faults;
 pub mod request_policy;

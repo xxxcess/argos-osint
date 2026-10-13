@@ -51,7 +51,22 @@ pub fn recall_candidates_with_limit(
     query: &str,
     candidate_limit: usize,
 ) -> anyhow::Result<Vec<crate::brain::ScoredMemory>> {
+    recall_candidates_for(store, owner_kind, owner_id, query, candidate_limit, &[])
+}
+
+/// Bounded recall restricted to `allowed_kinds` (empty = default evidence
+/// kinds). The kind set is part of the recall-cache identity, so a cached
+/// default-kind set is never served to a typed query or vice versa.
+pub fn recall_candidates_for(
+    store: &crate::store::Store,
+    owner_kind: &str,
+    owner_id: &str,
+    query: &str,
+    candidate_limit: usize,
+    allowed_kinds: &[MemoryKind],
+) -> anyhow::Result<Vec<crate::brain::ScoredMemory>> {
     let candidate_limit = candidate_limit.clamp(10, 20);
+    let kinds = crate::brain_kinds::kinds_key(allowed_kinds);
     let generation = if owner_kind == "article" {
         crate::investigation::insight_persist::desired_generation(
             &store.conn,
@@ -61,7 +76,11 @@ pub fn recall_candidates_with_limit(
     } else {
         0
     };
-    let key = format!("insight-recall:{owner_kind}:{owner_id}:{generation}");
+    let key = if kinds.is_empty() {
+        format!("insight-recall:{owner_kind}:{owner_id}:{generation}")
+    } else {
+        format!("insight-recall:{owner_kind}:{owner_id}:{generation}:kinds={kinds}")
+    };
     if !owner_id.is_empty() {
         if let Some(json) = store.app_state_get(&key)? {
             let ids: Vec<(String, f32)> = serde_json::from_str(&json)?;
@@ -75,12 +94,31 @@ pub fn recall_candidates_with_limit(
         }
     }
     let mut seen = std::collections::BTreeSet::new();
-    let hits: Vec<_> = store
-        .recall(query, candidate_limit)?
-        .into_iter()
-        .filter(|hit| seen.insert(hit.memory.id.clone()))
-        .take(candidate_limit)
-        .collect();
+    let mut pool = store.recall(query, candidate_limit * 3)?;
+    // Structural kinds are outside default recall; typed queries asking for
+    // them read the kind listing directly (text match, unscored order).
+    for kind in allowed_kinds.iter().filter(|k| {
+        matches!(
+            k,
+            MemoryKind::Actor | MemoryKind::Link | MemoryKind::Related
+        )
+    }) {
+        for memory in store.list_memories_by_kind(Some(*kind), query)? {
+            pool.push(crate::brain::ScoredMemory { memory, score: 0.0 });
+        }
+    }
+    let mut hits = Vec::new();
+    for hit in pool {
+        if hits.len() >= candidate_limit {
+            break;
+        }
+        let kind = crate::brain_kinds::memory_kind(store, &hit.memory.id)?;
+        if crate::brain_kinds::kind_allowed(allowed_kinds, kind)
+            && seen.insert(hit.memory.id.clone())
+        {
+            hits.push(hit);
+        }
+    }
     if !owner_id.is_empty() {
         store.app_state_set(
             &key,

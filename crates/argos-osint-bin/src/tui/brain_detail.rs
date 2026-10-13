@@ -497,7 +497,7 @@ fn draw_article_related(frame: &mut Frame, app: &App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(panel(" Related · shared mentions "))
+            .block(panel(" Related · all retained cycles "))
             .scroll((view.scroll, 0)),
         area,
     );

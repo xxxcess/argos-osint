@@ -745,10 +745,10 @@ pub fn ensure_historical_contract(store: &Store, run_id: &str) -> Result<()> {
     };
     let stats: serde_json::Value = serde_json::from_str(&run.stats_json).unwrap_or_default();
     anyhow::ensure!(
-        stats
+        !stats
             .get("contract_version")
             .and_then(serde_json::Value::as_str)
-            != Some(crate::atlas_work::COLLECTION_CONTRACT),
+            .is_some_and(crate::atlas_work::is_collection_contract),
         "Repair/Verify are restricted to historical Atlas contracts"
     );
     Ok(())
@@ -1049,7 +1049,7 @@ pub fn repair_page(
     let ids: Vec<(String, String)> = {
         let mut stmt = store.conn.prepare(
             "SELECT started_at, id FROM atlas_runs
-             WHERE (NOT json_valid(stats_json) OR COALESCE(json_extract(stats_json,'$.contract_version'),'') <> 'atlas-collection-v1')
+             WHERE (NOT json_valid(stats_json) OR COALESCE(json_extract(stats_json,'$.contract_version'),'') NOT IN ('atlas-collection-v1','atlas-collection-v2'))
              AND (started_at > ?1 OR (started_at = ?1 AND id > ?2))
              ORDER BY started_at, id LIMIT ?3",
         )?;

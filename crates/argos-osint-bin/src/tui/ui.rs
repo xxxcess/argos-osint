@@ -3695,8 +3695,13 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         return Some(Target::Field(FieldId::BrainQuery));
     }
     if contains(layout.actions, x, y) {
-        let buttons = button_areas(layout.actions, 3);
-        let ids = [ButtonId::CreateMemory, ButtonId::Pin, ButtonId::Delete];
+        let buttons = button_areas(layout.actions, 4);
+        let ids = [
+            ButtonId::CreateMemory,
+            ButtonId::Pin,
+            ButtonId::Delete,
+            ButtonId::BrainKind,
+        ];
         return buttons
             .iter()
             .position(|rect| contains(*rect, x, y))
@@ -5026,7 +5031,9 @@ fn header_detail(app: &App) -> String {
             BrainListMode::List => "memories".into(),
             BrainListMode::Create => "new memory".into(),
             BrainListMode::Graph => {
-                if app.detail_claim() {
+                if let Some(title) = super::app::structural_title(app) {
+                    title.trim().into()
+                } else if app.detail_claim() {
                     "claim path".into()
                 } else {
                     "recon path".into()
@@ -6338,7 +6345,7 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         frame.render_widget(List::new(items).block(pane(&title)), layout.list);
     }
-    let action_buttons = button_areas(layout.actions, 3);
+    let action_buttons = button_areas(layout.actions, 4);
     draw_button(
         frame,
         app,
@@ -6348,6 +6355,13 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     );
     draw_button(frame, app, ButtonId::Pin, "Pin", action_buttons[1]);
     draw_button(frame, app, ButtonId::Delete, "Delete", action_buttons[2]);
+    draw_button(
+        frame,
+        app,
+        ButtonId::BrainKind,
+        &format!("Kind: {}", super::app::brain_kind_label(app.brain_kind)),
+        action_buttons[3],
+    );
     let recalled = if matches!(app.focus, Target::Memory(_)) {
         if let Some(insight) = &app.selected_insight {
             memory_anchors_text(insight)
@@ -6387,12 +6401,19 @@ fn memory_list_title(app: &App) -> String {
     if app.memory_error.is_some() && !app.memories.is_empty() {
         return " memories · read failed · showing last loaded list ".into();
     }
+    let kind = app
+        .brain_kind
+        .map(|k| format!(" · {}", super::app::brain_kind_label(Some(k))))
+        .unwrap_or_default();
     if !app.brain_query.trim().is_empty() && app.memories_loaded {
         return format!(
-            " memories · Find active · {} of {} ",
+            " memories{kind} · Find active · {} of {} ",
             app.memories.len(),
             app.memory_total
         );
+    }
+    if app.brain_kind.is_some() {
+        return format!(" memories{kind} · {} ", app.memories.len());
     }
     " memories ".into()
 }
@@ -9796,7 +9817,8 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
         stats.coverage.classified,
         stats.coverage.related_pairs
     );
-    let coverage = if stats.contract_version == "atlas-collection-v1" {
+    let coverage = if argos_osint_core::atlas_work::is_collection_contract(&stats.contract_version)
+    {
         format!(
             "Entities {} · publisher priors {} · warnings {}",
             stats.coverage.entities_available,

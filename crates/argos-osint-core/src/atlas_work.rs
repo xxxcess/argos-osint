@@ -7,7 +7,20 @@ use sha2::{Digest, Sha256};
 use crate::store::AtlasArticleRow;
 use crate::telemetry::{EventKind, TelemetryEvent, Trigger};
 
-pub const COLLECTION_CONTRACT: &str = "atlas-collection-v1";
+/// Collection contract written by new cycles (v2 adds phase 6: index actors
+/// and articles through Brain). v1 cycles are the same collection model
+/// without phase 6; recognise both through [`is_collection_contract`].
+pub const COLLECTION_CONTRACT: &str = "atlas-collection-v2";
+pub const COLLECTION_CONTRACT_V1: &str = "atlas-collection-v1";
+pub const COLLECTION_CONTRACTS: [&str; 2] = [COLLECTION_CONTRACT_V1, COLLECTION_CONTRACT];
+/// Phase 6 work units (one per retained article occurrence).
+pub const STAGE_ACTOR_ARTICLES: i32 = 12;
+
+/// True for every collection-model contract (never the historical memory
+/// extraction contracts), so v2 never enters old extraction/repair paths.
+pub fn is_collection_contract(version: &str) -> bool {
+    COLLECTION_CONTRACTS.contains(&version)
+}
 // New IDs never reinterpret persisted extract/publication/index manifests.
 pub const STAGE_CLASSIFICATION: i32 = 8;
 pub const STAGE_ENTITIES: i32 = 9;
@@ -50,7 +63,8 @@ pub fn unit_disposition_label(disposition: &str) -> &'static str {
 /// one grand total: articles, packets and memories are different work.
 pub fn stage_unit(stage: i32) -> &'static str {
     match stage {
-        STAGE_COLLECTION | STAGE_CLASSIFICATION | STAGE_ENTITIES | STAGE_PUBLISHERS => "article",
+        STAGE_COLLECTION | STAGE_CLASSIFICATION | STAGE_ENTITIES | STAGE_PUBLISHERS
+        | STAGE_ACTOR_ARTICLES => "article",
         STAGE_RELATED => "pair",
         STAGE_EXTRACT => "packet",
         STAGE_PUBLICATION | STAGE_INDEXING => "memory",
@@ -67,6 +81,7 @@ pub fn stage_label(stage: i32) -> &'static str {
         STAGE_ENTITIES => "entities",
         STAGE_PUBLISHERS => "publishers",
         STAGE_RELATED => "related",
+        STAGE_ACTOR_ARTICLES => "actor_articles",
         STAGE_EXTRACT => "extraction",
         STAGE_PUBLICATION => "publication",
         STAGE_INDEXING => "indexing",

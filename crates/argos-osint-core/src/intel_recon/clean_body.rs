@@ -15,7 +15,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::body_filter::{chunk_article_body, BodyChunk, IrrelevantRange};
+use super::body_filter::{paragraph_blocks, BodyChunk, IrrelevantRange};
 use super::validate::{validate_article_body, BodyQuality};
 
 /// Artifact transform shared by display and extraction.
@@ -58,6 +58,10 @@ pub struct CleanArtifact {
     /// truncation, receipt hash matching this acquisition.
     #[serde(default)]
     pub acquisition_complete: bool,
+    /// Sentence index of exactly `markdown` (spec §2.1.4). Absent on
+    /// artifacts written before the index existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sentence_index: Option<super::sentence_index::SentenceIndex>,
 }
 
 /// Decides keep/remove over a batch of supplied blocks (Classifier route or a
@@ -124,42 +128,267 @@ fn link_ratio(text: &str) -> f64 {
     links as f64 / (words(text).max(1) as f64 / 8.0).max(1.0)
 }
 
-/// Clearly story prose is kept without a model decision. Everything else that
-/// survived deterministic validation is ambiguous. Anchors (title/description
-/// entities from local NLP) only *add* confidence; their absence never makes a
-/// block removable.
-pub fn is_ambiguous(block: &BodyChunk, anchors: &[String]) -> bool {
-    let text = block.text.trim();
-    let sentences = text.matches(['.', '!', '?', '"', '”']).count();
+/// Local block classification (spec §2.2). Chrome is decided from block
+/// structure, never from a cue word appearing somewhere inside story prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockClass {
+    /// Story prose or context: kept locally.
+    Story,
+    /// Unmistakable page chrome: removed locally (coverage still revalidated).
+    Chrome,
+    /// Genuinely uncertain: Classifier review (kept when unavailable).
+    Ambiguous,
+}
+
+/// Whole-block chrome labels (after stripping markup/punctuation).
+const CHROME_LABELS: &[&str] = &[
+    "advertisement",
+    "advertising",
+    "sponsored",
+    "sponsored content",
+    "related",
+    "related stories",
+    "related articles",
+    "related content",
+    "related coverage",
+    "read more",
+    "read next",
+    "more stories",
+    "more from",
+    "most read",
+    "most popular",
+    "trending",
+    "trending now",
+    "recommended",
+    "recommended for you",
+    "you may also like",
+    "share",
+    "share this",
+    "share this article",
+    "share this story",
+    "follow us",
+    "comments",
+    "show comments",
+    "subscribe",
+    "sign up",
+    "newsletter",
+    "all rights reserved",
+    "cookie settings",
+    "skip to content",
+    "skip to main content",
+    "back to top",
+];
+
+/// Call-to-action/legal openers that mark a short block as chrome.
+const CHROME_OPENERS: &[&str] = &[
+    "advertisement",
+    "sponsored content",
+    "subscribe to",
+    "subscribe now",
+    "sign up for",
+    "sign up to",
+    "follow us on",
+    "share this",
+    "share on",
+    "read more:",
+    "related:",
+    "related stories:",
+    "click here to",
+    "we use cookies",
+    "this site uses cookies",
+    "©",
+    "copyright ©",
+    "all rights reserved",
+];
+
+/// Visible text with markdown link targets, emphasis and heading/list
+/// markers removed, lower-cased.
+fn visible_lower(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ']' && chars.peek() == Some(&'(') {
+            // Skip the link target.
+            for t in chars.by_ref() {
+                if t == ')' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if matches!(c, '[' | '*' | '_' | '`') {
+            continue;
+        }
+        out.push(c);
+    }
+    out.lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches('#')
+                .trim_start_matches(['-', '+', '>'])
+                .trim()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn label_of(visible: &str) -> String {
+    visible
+        .split(|c: char| !(c.is_alphanumeric() || c == '©'))
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn list_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("- ")
+        || t.starts_with("* ")
+        || t.starts_with("+ ")
+        || t.split_once(". ")
+            .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Navigation-like structure: several short list/link lines, no sentences.
+fn navigation(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines.len() >= 3
+        && lines.iter().all(|l| {
+            let w = words(l);
+            w <= 8 && (list_line(l) || l.contains("](")) && !l.trim_end().ends_with(['.', '?', '!'])
+        })
+}
+
+fn terminal(text: &str) -> bool {
+    text.matches(['.', '!', '?', '"', '”', '’']).count() >= 1
+}
+
+fn long_prose(text: &str) -> bool {
+    words(text) >= 25
+        && terminal(text)
+        && link_ratio(text) < 0.5
+        && !text.lines().filter(|l| !l.trim().is_empty()).all(list_line)
+}
+
+/// Classify block `index` of `blocks` using its structure and paragraph
+/// context. Anchors (title/description entities from local NLP) only add keep
+/// confidence; their absence never makes a block removable.
+pub fn classify_block(blocks: &[BodyChunk], index: usize, anchors: &[String]) -> BlockClass {
+    let text = blocks[index].text.trim();
+    let visible = visible_lower(text);
+    let label = label_of(&visible);
+    let n_words = words(&label);
+    // 1. Standalone chrome labels/headings ("Related stories", "Share").
+    if n_words <= 6 && CHROME_LABELS.iter().any(|c| label == *c) {
+        return BlockClass::Chrome;
+    }
+    // 2. Short call-to-action / legal blocks opening with a chrome phrase.
+    if n_words < 40
+        && CHROME_OPENERS
+            .iter()
+            .any(|o| visible.trim_start().starts_with(o))
+    {
+        return BlockClass::Chrome;
+    }
+    // 3. Link dumps and navigation lists.
+    let links = text.matches("](").count();
+    if navigation(text) || (links >= 3 && link_ratio(text) >= 0.5 && !terminal(&label)) {
+        return BlockClass::Chrome;
+    }
+    // 4. Complete story prose stays local, whatever words it contains
+    //    ("shares fell", "related to the inquiry").
+    if long_prose(text) {
+        return BlockClass::Story;
+    }
     let lower = text.to_lowercase();
-    let chrome_cue = [
-        "advertisement",
-        "sponsored",
-        "subscribe",
-        "newsletter",
-        "sign up",
-        "cookie",
-        "related",
-        "read more",
-        "share",
-        "follow us",
-        "comments",
-        "©",
-        "all rights reserved",
-    ]
-    .iter()
-    .any(|cue| lower.contains(cue));
     let anchored = anchors
         .iter()
         .any(|a| !a.is_empty() && lower.contains(&a.to_lowercase()));
-    let prose = words(text) >= 25 && sentences >= 1 && link_ratio(text) < 0.5;
-    if prose && !chrome_cue {
-        return false;
+    let sentence = terminal(text) && link_ratio(text) < 0.5 && !navigation(text);
+    if anchored && sentence {
+        return BlockClass::Story;
     }
-    if anchored && sentences >= 1 && link_ratio(text) < 0.5 && !chrome_cue {
-        return false;
+    // 5. Paragraph context: a short complete sentence inside a run of story
+    //    prose is story context (quotes, corrections, qualifiers). The run may
+    //    pass through other short sentences ("said X." / quote / "Correction:").
+    let short_sentence = |b: &BodyChunk| {
+        let t = b.text.trim();
+        terminal(t) && words(t) >= 8 && link_ratio(t) < 0.3 && !navigation(t)
+    };
+    let reaches_story = |mut i: usize, step: isize| loop {
+        let Some(next) = i.checked_add_signed(step).filter(|n| *n < blocks.len()) else {
+            return false;
+        };
+        let t = blocks[next].text.trim();
+        if long_prose(t) {
+            return true;
+        }
+        if !short_sentence(&blocks[next]) {
+            return false;
+        }
+        i = next;
+    };
+    if sentence
+        && short_sentence(&blocks[index])
+        && (reaches_story(index, -1) || reaches_story(index, 1))
+    {
+        return BlockClass::Story;
     }
-    true
+    BlockClass::Ambiguous
+}
+
+/// Context-free compatibility wrapper: true when the block needs a decision
+/// (ambiguous or chrome).
+pub fn is_ambiguous(block: &BodyChunk, anchors: &[String]) -> bool {
+    classify_block(std::slice::from_ref(block), 0, anchors) != BlockClass::Story
+}
+
+/// Join soft line wraps inside a paragraph (spec §2.1). A single newline
+/// between two prose lines becomes a space; markdown structure (headings,
+/// lists, quotes, tables, fences, hard breaks) and paragraph breaks are kept.
+/// Length-preserving — every byte offset is unchanged, so raw→baseline
+/// coordinates stay the identity. Returns (text, joined line count).
+pub fn unwrap_soft_wraps(text: &str) -> (String, usize) {
+    let structural = |line: &str| {
+        let t = line.trim_start();
+        t.is_empty()
+            || t.starts_with('#')
+            || t.starts_with('>')
+            || t.starts_with('|')
+            || t.starts_with("```")
+            || list_line(t)
+    };
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut out = String::with_capacity(text.len());
+    let mut joined = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let next = lines.get(i + 1).copied();
+        let body = line.trim_end_matches(['\n', '\r']);
+        let ending = &line[body.len()..];
+        let join = ending.ends_with('\n')
+            && next.is_some_and(|n| {
+                let nb = n.trim_end_matches(['\n', '\r']);
+                !structural(body)
+                    && !structural(nb)
+                    && !body.ends_with("  ")
+                    && !body.ends_with('\\')
+                    && (!body.trim_end().ends_with(['.', '!', '?', ':', '"', '”'])
+                        || nb
+                            .trim_start()
+                            .chars()
+                            .next()
+                            .is_some_and(char::is_lowercase))
+            });
+        out.push_str(body);
+        if join {
+            joined += 1;
+            out.push_str(&" ".repeat(ending.len()));
+        } else {
+            out.push_str(ending);
+        }
+    }
+    (out, joined)
 }
 
 fn excerpt(text: &str, from_end: bool) -> String {
@@ -230,15 +459,29 @@ pub async fn clean_article(
     mut decider: Option<&mut dyn BlockDecider>,
 ) -> CleanArtifact {
     let baseline = validate_article_body(scraped, title, url);
-    let text = baseline.cleaned_markdown.clone();
+    let (text, soft_wraps) = unwrap_soft_wraps(&baseline.cleaned_markdown);
     let mut diagnostics = Vec::new();
-    let blocks = chunk_article_body(&text);
+    if soft_wraps > 0 {
+        diagnostics.push(format!("joined {soft_wraps} soft line wrap(s)"));
+    }
+    let blocks = paragraph_blocks(&text);
+    let classes: Vec<BlockClass> = (0..blocks.len())
+        .map(|i| classify_block(&blocks, i, anchors))
+        .collect();
     let ambiguous: Vec<usize> = blocks
         .iter()
-        .filter(|b| is_ambiguous(b, anchors))
+        .filter(|b| classes[b.id] == BlockClass::Ambiguous)
         .map(|b| b.id)
         .collect();
-    let mut ranges: Vec<IrrelevantRange> = Vec::new();
+    let mut ranges: Vec<IrrelevantRange> = blocks
+        .iter()
+        .filter(|b| classes[b.id] == BlockClass::Chrome)
+        .map(|b| IrrelevantRange {
+            start: b.start,
+            end: b.end,
+            reason: "local chrome cue".into(),
+        })
+        .collect();
     let mut batches = 0;
     if !ambiguous.is_empty() && !matches!(baseline.quality, BodyQuality::Unavailable) {
         match decider.as_deref_mut() {
@@ -302,15 +545,16 @@ pub async fn clean_article(
             removed.clear();
         } else {
             quality = revalidated.quality;
-            rationale = format!(
-                "{}; classifier removed {} block(s)",
-                rationale,
-                removed.len()
-            );
+            rationale = format!("{}; removed {} chrome block(s)", rationale, removed.len());
         }
     }
     let _ = description;
+    let sentence_index = Some(super::sentence_index::SentenceIndex::local(
+        &clean,
+        "no baseline annotation supplied",
+    ));
     CleanArtifact {
+        sentence_index,
         content_hash: super::validate::content_hash(&clean),
         markdown: clean,
         baseline_hash: baseline.content_hash,
@@ -378,7 +622,15 @@ impl BlockDecider for RuntimeDecider<'_> {
                 batch.first().map(|b| b.id).unwrap_or(0)
             );
             let scope = crate::recon::model_exec::OperationScope::new(&operation_id, "classifier")
-                .with_completion_tokens(CLEANUP_TOKENS);
+                .with_completion_tokens(CLEANUP_TOKENS)
+                .with_reasoning(crate::request_policy::ReasoningEffort::Low)
+                .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision);
+            // Brief-owned cleanup is user-waiting work.
+            let scope = if self.runtime.job_id.starts_with("intel-brief:") {
+                scope.with_interactive()
+            } else {
+                scope
+            };
             let (ranges, _) = crate::recon::model_exec::execute_decisions_or_chat(
                 &self.runtime.auth,
                 &self.runtime.settings,

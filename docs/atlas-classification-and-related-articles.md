@@ -24,13 +24,19 @@ Schema 30 adds `atlas_article_metadata`, `atlas_article_mentions` and `atlas_rel
 
 Intel places Related below assessed Links. Brain's Related pane separates Memories from Articles for article-derived insights. Lineage uses exact derivation evidence and legacy source run/call IDs, with canonical explicit URLs as fallback; prose similarity never supplies lineage. Opening a row selects that exact article's Intel Focus Brief, including `unk`, and preserves the prior view for Back. Loading a list makes zero model calls.
 
+## Phase 6 and cross-cycle Related (schema 39–40)
+
+Phase 6 ("Index actors and articles", stage 12, unit `article`, label `actor_articles`) binds each retained occurrence through `brain_actors` and writes an `atlas_article_index(run_id, article_id, input_revision, index_checksum, actor_coverage, indexed_at)` receipt in the same savepoint as the occurrence's actor mentions, `mentioned_in` Links and ≤20 tentative Related records. Transactions hold ≤100 occurrences. The receipt revision equals the historical backfill revision, so the backfill drainer never indexes the same occurrence twice. A changed title/description/metadata invalidates the receipt and re-indexes only that occurrence.
+
+`related_global.rs` reads Related across cycles: `RelatedScope::AllRetained` (default) starts from every retained occurrence of the source URL and adds Brain Related records and articles sharing a **canonical** Actor (merges/redirects followed); `ThisCycle` keeps only the source cycle's shared-mention leads. One row per canonical URL lists every origin occurrence, cycle count, bases and whether it is tentative or established by a shared Actor. `actor_articles` lists every article mentioning an Actor. Intel Related, Brain Related Articles and the brief Links stage (`RuntimeBackend::related`) use it; the Related pane header toggles scope.
+
 ## Completion, recovery and compatibility
 
 Collection/classification is required. Enabled metadata settles independently; disabled metadata is skipped, parser/lookup failures give warnings and unavailable coverage. Valid `unk`, empty entities and unrated publishers are successful outcomes. Missing Classifier configuration blocks required classification; exhausted unresolved IDs yield partial or failed cycles. Pause preserves receipts and Resume retries unresolved work. Native acquisition receipts commit with their statistics, so a failed acquisition can resume without replaying successful source requests or double counting discovery pages.
 
-Old unfinished extraction/indexing cycles resume through retained classifications and native metadata. Ambiguous historical `unk` is flagged as legacy provenance rather than bulk reclassified. Historical insights and shared indexing services remain readable. Atlas-owned obsolete refresh/repair work is fenced at upgrade; Intel/Recon work continues. Explicit CLI Repair/Verify remains for historical contracts and rejects `atlas-collection-v1`. The Atlas TUI no longer exposes Repair memories or startup reconciliation.
+Old unfinished extraction/indexing cycles resume through retained classifications and native metadata. Ambiguous historical `unk` is flagged as legacy provenance rather than bulk reclassified. Historical insights and shared indexing services remain readable. Atlas-owned obsolete refresh/repair work is fenced at upgrade; Intel/Recon work continues. Explicit CLI Repair/Verify remains for historical contracts and rejects `atlas-collection-v1` and `atlas-collection-v2`. The Atlas TUI no longer exposes Repair memories or startup reconciliation.
 
-Profile retains `atlas.backlog`, `atlas.cycles` and `atlas.temperature`. Current telemetry counts articles and metadata coverage; overlapping stage counts are not summed. Historical memory units are explicitly legacy. Running Atlas alone no longer fills Brain.
+Profile retains `atlas.backlog`, `atlas.cycles` and `atlas.temperature`. Current telemetry counts articles and metadata coverage; overlapping stage counts are not summed. Historical memory units are explicitly legacy. Running Atlas publishes no claim memories; phase 6 writes only Brain identity/relationship records (Actors, `mentioned_in` Links, tentative Related).
 
 ## Verification
 

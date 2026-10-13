@@ -275,6 +275,24 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
+    details_lines.push(Line::raw(""));
+    details_lines.push(Line::from(Span::styled(
+        "Brief operations",
+        theme::accent().add_modifier(Modifier::BOLD),
+    )));
+    for row in brief_operation_rows(&app.settings.defaults) {
+        let style = if row.role == sel_info.meta.role.settings_key() {
+            theme::text()
+        } else {
+            theme::dim()
+        };
+        details_lines.push(Line::from(Span::styled(row.render(), style)));
+    }
+    details_lines.push(Line::from(Span::styled(
+        "Set via operation_overrides in config import; unset inherits.",
+        theme::dim(),
+    )));
+
     let p = Paragraph::new(details_lines)
         .block(
             Block::default()
@@ -284,4 +302,82 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         )
         .wrap(Wrap { trim: true });
     frame.render_widget(p, editor_area);
+}
+
+/// One Brief operation's effective route (spec §3 "operation overrides").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BriefOperationRow {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub role: &'static str,
+    pub provider: String,
+    pub model: String,
+    pub overridden: bool,
+}
+
+impl BriefOperationRow {
+    pub fn render(&self) -> String {
+        let source = if self.overridden {
+            "override".to_string()
+        } else {
+            format!("← {}", self.role)
+        };
+        let target = if self.provider.is_empty() && self.model.is_empty() {
+            "unset".to_string()
+        } else {
+            format!("{}/{}", self.provider, self.model)
+        };
+        format!("  {:<18} {target}  {source}", self.label)
+    }
+}
+
+pub fn brief_operation_rows(defaults: &provider::RoleDefaults) -> Vec<BriefOperationRow> {
+    provider::BRIEF_OPERATIONS
+        .iter()
+        .map(|&(key, label, role)| {
+            let (a, overridden) = defaults.resolve_operation(Some(key), role);
+            BriefOperationRow {
+                key,
+                label,
+                role,
+                provider: a.provider,
+                model: a.model,
+                overridden,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod brief_operation_tests {
+    use super::*;
+
+    #[test]
+    fn rows_show_inheritance_and_overrides() {
+        let mut d = provider::RoleDefaults::default();
+        d.synthesis.provider = "openrouter".into();
+        d.synthesis.model = "openai/gpt-4o".into();
+        d.operation_overrides.insert(
+            provider::OP_LINKS_GENERATE.into(),
+            provider::ModelAssignment {
+                provider: "google".into(),
+                model: "gemini-2.5-flash".into(),
+                ..Default::default()
+            },
+        );
+        let rows = brief_operation_rows(&d);
+        assert_eq!(rows.len(), provider::BRIEF_OPERATIONS.len());
+        let links = rows
+            .iter()
+            .find(|r| r.key == provider::OP_LINKS_GENERATE)
+            .unwrap();
+        assert!(links.overridden);
+        assert!(links.render().contains("google/gemini-2.5-flash  override"));
+        let inf = rows
+            .iter()
+            .find(|r| r.key == provider::OP_INFERENCES_GENERATE)
+            .unwrap();
+        assert!(!inf.overridden);
+        assert!(inf.render().contains("← synthesis"));
+    }
 }

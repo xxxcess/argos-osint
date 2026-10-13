@@ -1335,6 +1335,7 @@ pub fn write_derivations(
                 }
                 tx.execute("INSERT OR IGNORE INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'investigation',?6,0,?7,?7)",params![fingerprint,mid,subject,predicate,object,kind,now])?;
                 crate::store::enqueue_memory_index_on(tx, std::slice::from_ref(&mid), None)?;
+                crate::brain_backfill::bind_claim_subject(tx, &fingerprint)?;
                 for reference in &refs {
                     let thread_id = if input.snapshot.owner_kind == "recon" {
                         tx.query_row(

@@ -8,6 +8,7 @@ pub mod brief_canonical;
 pub mod brief_fidelity;
 pub mod brief_pipeline;
 pub mod brief_stages;
+pub mod brief_timing;
 mod briefing_view;
 mod classify_mode;
 pub mod clean_body;
@@ -15,8 +16,10 @@ mod confidence;
 mod jobs;
 mod ledger;
 pub(crate) mod modes;
+pub mod passage_packets;
 mod persist;
 mod replace_insights;
+pub mod sentence_index;
 mod synthesize;
 #[cfg(test)]
 mod tests_acceptance;

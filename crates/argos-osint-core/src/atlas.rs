@@ -774,6 +774,15 @@ pub struct CoverageStats {
     pub publishers_unavailable: u32,
     pub related_pairs: u32,
     pub warnings: u32,
+    /// Phase 6 (v2): occurrences with a current `atlas_article_index` receipt.
+    #[serde(default)]
+    pub actor_indexed: u32,
+    /// Phase 6 occurrences indexed with zero bindable actors.
+    #[serde(default)]
+    pub actor_zero: u32,
+    /// Phase 6 occurrences whose index write failed (no receipt).
+    #[serde(default)]
+    pub actor_index_failed: u32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -808,7 +817,7 @@ impl RunStats {
 
     /// Articles kept for this news cycle across every origin.
     pub fn article_total(&self) -> u32 {
-        if self.contract_version == crate::atlas_work::COLLECTION_CONTRACT {
+        if crate::atlas_work::is_collection_contract(&self.contract_version) {
             self.coverage.articles
         } else {
             self.origins.iter().map(|row| row.articles).sum()
@@ -1186,7 +1195,7 @@ pub fn format_run_card(run: &AtlasRunRow) -> String {
     }
     lines.push(String::new());
     lines.push(format!("Articles {}", stats.article_total()));
-    if stats.contract_version == crate::atlas_work::COLLECTION_CONTRACT {
+    if crate::atlas_work::is_collection_contract(&stats.contract_version) {
         lines.push(format!(
             "Coverage · classified {}/{} · entities {} · publisher priors {} · Related {}",
             stats.coverage.classified,
@@ -1648,7 +1657,8 @@ pub fn phase_title(phase: u8) -> &'static str {
         2 => "Local coverage",
         3 => "Classify articles",
         4 => "Local article metadata",
-        _ => "Related article leads",
+        5 => "Related article leads",
+        _ => "Index actors and articles",
     }
 }
 
@@ -1914,7 +1924,7 @@ where
         )?;
         (id, cursor, RunStats::default())
     };
-    let legacy = stats.contract_version != crate::atlas_work::COLLECTION_CONTRACT;
+    let legacy = !crate::atlas_work::is_collection_contract(&stats.contract_version);
     if legacy && cursor.phase >= 3 {
         // Preserve historical categories and expose ambiguous completed unk rows.
         // Unprocessed old phase-3 rows still require classification.
@@ -2532,7 +2542,8 @@ where
         cursor.leg = "metadata".into();
         save(&store, &run_id, &cursor, &stats)?;
     }
-    if cursor.phase >= 4 {
+    // Stage-specific admission: a phase-6 resume never replays 4/5.
+    if (4..6).contains(&cursor.phase) {
         track(4);
         tel.enter_stage("metadata", "article", &stats);
         if cycle_paused(tracker, pause) {
@@ -2575,7 +2586,32 @@ where
             "Building shared headline/description leads".into(),
         ));
         stats.coverage.related_pairs = crate::related_articles::build(&store, &run_id)? as u32;
-        cursor.leg = "related_done".into();
+        cursor.phase = 6;
+        cursor.leg = "actor_articles".into();
+        save(&store, &run_id, &cursor, &stats)?;
+    }
+    let mut actor_index_incomplete = false;
+    if cursor.phase >= 6 {
+        track(6);
+        tel.enter_stage(
+            crate::atlas_work::stage_label(crate::atlas_work::STAGE_ACTOR_ARTICLES),
+            crate::atlas_work::stage_unit(crate::atlas_work::STAGE_ACTOR_ARTICLES),
+            &stats,
+        );
+        emit(AtlasEvent::Status("Index actors and articles".into()));
+        let report =
+            crate::atlas_actor_index::index_run(&store, &run_id, &|| cycle_paused(tracker, pause))?;
+        stats.coverage.actor_indexed = report.reused + report.indexed;
+        stats.coverage.actor_zero = report.zero_actor;
+        stats.coverage.actor_index_failed = report.failed;
+        for error in report.errors.iter().take(5) {
+            emit(AtlasEvent::Note(format!("Actor index failed: {error}")));
+        }
+        if report.stopped {
+            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
+        }
+        actor_index_incomplete = !report.complete();
+        cursor.leg = "actor_articles_done".into();
         save(&store, &run_id, &cursor, &stats)?;
     }
     // Completion depends on article classification, never on Brain indexing.
@@ -2603,7 +2639,10 @@ where
         .saturating_sub(stats.coverage.publishers_available);
     let state = if stats.coverage.classification_blocked > 0 {
         "blocked"
-    } else if stats.coverage.classification_failed > 0 || stats.coverage.acquisition_failures > 0 {
+    } else if stats.coverage.classification_failed > 0
+        || stats.coverage.acquisition_failures > 0
+        || actor_index_incomplete
+    {
         if stats.coverage.classified > 0 || stats.coverage.legacy_unknown > 0 {
             "partial"
         } else {
@@ -2613,13 +2652,17 @@ where
         "completed"
     };
     let note = format!(
-        "Classification {}/{} · legacy unk {} · entities {} · publisher priors {} · Related {} · acquisition failures {}{}",
+        "Classification {}/{} · legacy unk {} · entities {} · publisher priors {} · Related {} · actors indexed {}/{} (zero-actor {}, failed {}) · acquisition failures {}{}",
         stats.coverage.classified,
         stats.coverage.articles,
         stats.coverage.legacy_unknown,
         stats.coverage.entities_available,
         stats.coverage.publishers_available,
         stats.coverage.related_pairs,
+        stats.coverage.actor_indexed,
+        stats.coverage.articles,
+        stats.coverage.actor_zero,
+        stats.coverage.actor_index_failed,
         stats.coverage.acquisition_failures,
         if stats.coverage.warnings > 0 {
             " · metadata warnings"
@@ -2631,6 +2674,13 @@ where
     if state != "completed" {
         if let Some(retry) = &stats.acquisition_retry {
             cursor = retry.clone();
+        } else if stats.coverage.classification_failed == 0
+            && stats.coverage.classification_blocked == 0
+            && actor_index_incomplete
+        {
+            // Only phase 6 is unfinished: resume retries missing receipts only.
+            cursor.phase = 6;
+            cursor.leg = "actor_articles".into();
         } else {
             cursor.phase = 3;
             cursor.leg = "classify".into();

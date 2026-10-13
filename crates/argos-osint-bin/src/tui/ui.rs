@@ -254,10 +254,16 @@ fn model_areas(app: &App, area: Rect) -> Vec<Rect> {
             Constraint::Length(ACTION_H),
             Constraint::Min(4),
             Constraint::Length(ACTION_H),
-            Constraint::Min(0),
+            // Retry note (3) + role list/details incl. Brief operations: sized
+            // to its content so the fallback list, not the details, absorbs
+            // short terminals (fallbacks keep their 4-row minimum).
+            Constraint::Length(MODEL_ROLES_H),
         ],
     )
 }
+
+/// Height of the role list/details pane (note + bordered details content).
+const MODEL_ROLES_H: u16 = 18;
 
 fn dashboard_areas(area: Rect) -> (Rect, Rect, Rect) {
     let rows = split_vertical(
@@ -3689,8 +3695,13 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         return Some(Target::Field(FieldId::BrainQuery));
     }
     if contains(layout.actions, x, y) {
-        let buttons = button_areas(layout.actions, 3);
-        let ids = [ButtonId::CreateMemory, ButtonId::Pin, ButtonId::Delete];
+        let buttons = button_areas(layout.actions, 4);
+        let ids = [
+            ButtonId::CreateMemory,
+            ButtonId::Pin,
+            ButtonId::Delete,
+            ButtonId::BrainKind,
+        ];
         return buttons
             .iter()
             .position(|rect| contains(*rect, x, y))
@@ -5020,7 +5031,9 @@ fn header_detail(app: &App) -> String {
             BrainListMode::List => "memories".into(),
             BrainListMode::Create => "new memory".into(),
             BrainListMode::Graph => {
-                if app.detail_claim() {
+                if let Some(title) = super::app::structural_title(app) {
+                    title.trim().into()
+                } else if app.detail_claim() {
                     "claim path".into()
                 } else {
                     "recon path".into()
@@ -6332,7 +6345,7 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         frame.render_widget(List::new(items).block(pane(&title)), layout.list);
     }
-    let action_buttons = button_areas(layout.actions, 3);
+    let action_buttons = button_areas(layout.actions, 4);
     draw_button(
         frame,
         app,
@@ -6342,6 +6355,13 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     );
     draw_button(frame, app, ButtonId::Pin, "Pin", action_buttons[1]);
     draw_button(frame, app, ButtonId::Delete, "Delete", action_buttons[2]);
+    draw_button(
+        frame,
+        app,
+        ButtonId::BrainKind,
+        &format!("Kind: {}", super::app::brain_kind_label(app.brain_kind)),
+        action_buttons[3],
+    );
     let recalled = if matches!(app.focus, Target::Memory(_)) {
         if let Some(insight) = &app.selected_insight {
             memory_anchors_text(insight)
@@ -6381,12 +6401,19 @@ fn memory_list_title(app: &App) -> String {
     if app.memory_error.is_some() && !app.memories.is_empty() {
         return " memories · read failed · showing last loaded list ".into();
     }
+    let kind = app
+        .brain_kind
+        .map(|k| format!(" · {}", super::app::brain_kind_label(Some(k))))
+        .unwrap_or_default();
     if !app.brain_query.trim().is_empty() && app.memories_loaded {
         return format!(
-            " memories · Find active · {} of {} ",
+            " memories{kind} · Find active · {} of {} ",
             app.memories.len(),
             app.memory_total
         );
+    }
+    if app.brain_kind.is_some() {
+        return format!(" memories{kind} · {} ", app.memories.len());
     }
     " memories ".into()
 }
@@ -7439,7 +7466,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             frame,
             left,
             layout.related,
-            " Related · shared mentions ",
+            " Related ",
             &layout.related_lines,
             0,
         );
@@ -9790,13 +9817,28 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
         stats.coverage.classified,
         stats.coverage.related_pairs
     );
-    let coverage = if stats.contract_version == "atlas-collection-v1" {
-        format!(
+    let coverage = if argos_osint_core::atlas_work::is_collection_contract(&stats.contract_version)
+    {
+        let mut line = format!(
             "Entities {} · publisher priors {} · warnings {}",
             stats.coverage.entities_available,
             stats.coverage.publishers_available,
             stats.coverage.warnings
-        )
+        );
+        // Phase 6 (v2): Brain actor indexing coverage.
+        if stats.contract_version == argos_osint_core::atlas_work::COLLECTION_CONTRACT {
+            line.push_str(&format!(
+                " · actors {}/{}{}",
+                stats.coverage.actor_indexed,
+                stats.coverage.articles,
+                if stats.coverage.actor_index_failed > 0 {
+                    format!(" · {} failed", stats.coverage.actor_index_failed)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        line
     } else {
         format!("Legacy memory publication · {}", stats.memories.line())
     };
@@ -10144,7 +10186,7 @@ fn help_text(app: &App) -> &'static str {
         Some(ModuleId::System) => "Profile\n\nTab / Shift+Tab traverse controls; Enter activates\nOverview / System / Configs · t switches analytics/host · x Configs\n0 Summary · 1–5 Intel/Recon/Atlas/Models/Tools · [ / ] apps\nTab reveals panels · Arrows select rows/buckets · Enter or m expands\nLeft/Right selects buckets · v chart/table · s sort · g provider fold · PageUp/PageDown or wheel scroll\np period · f six dimension filters · c clears filters\nPicker: type to search, Tab dimension, arrows select, Enter apply\nr refreshes statistics in Overview, hardware in System\nEsc restores grid or returns home · Ctrl+K commands",
         Some(ModuleId::Logs) => "Logs\n\nDurable events from every app and background worker, kept 24 hours\nThe header counts errors, warnings, and failures in the last hour\nFilter narrows by text. Level, App, and the job filter narrow further\n↑↓ select an event · Enter or click folds its detail\nf toggles live follow. Moving off the newest event pauses it\no or Open job shows the event's job in Jobs\nOpened from Jobs, Esc or Back to job returns there\nClear events removes events only; jobs, results, and memories stay\nCtrl+U/Ctrl+D and the wheel scroll the list",
         Some(ModuleId::Jobs) => "Jobs\n\nBackground work with timing, attempts, and errors\nActive work is listed first, then recent history, then service workers\nStatus and App filter the table. Filter matches title, id, operation, or error\n↑↓ select a job · Enter opens its detail (full screen when narrow)\nl or View logs opens Logs filtered to the job and its phases\nRetry failed requeues only failed index or summary tasks; completed work is kept\nOpen source jumps to the Atlas cycle or investigation when there is one\nUnknown historic timing shows Unavailable\nEsc closes the detail, then returns home",
-        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe detail shows the path graph on top, Related on the left, and Summary on the right\nNarrow terminals stack Related above Summary; the focused one gets more room\nRelated has Memories / Articles tabs. Articles use shared headline/description entities and remain tentative leads; Enter opens the exact article in Intel. Memories lists other memories: linked ones (shared claim relation, source, entity, or investigation) first, then similar ones, which are not evidence\nTab moves between Back, the graph, Related, and Summary\n↑↓ select a related memory · Enter or click opens it, even when Find hides it\nEsc or Back returns to the previous memory, then to the list with its Find and selection\nThe list keeps its selection and Find when memories change elsewhere\nIf memories cannot be read, the last loaded list stays and the error is shown and logged\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
+        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe detail shows the path graph on top, Related on the left, and Summary on the right\nNarrow terminals stack Related above Summary; the focused one gets more room\nRelated has Memories / Articles tabs. Articles span all retained cycles, one row per URL with its cycles; shared-mention and same-name leads stay tentative, a shared canonical actor shows as same actor; Enter opens the exact article in Intel. Memories lists other memories: linked ones (shared claim relation, source, entity, or investigation) first, then similar ones, which are not evidence\nTab moves between Back, the graph, Related, and Summary\n↑↓ select a related memory · Enter or click opens it, even when Find hides it\nEsc or Back returns to the previous memory, then to the list with its Find and selection\nThe list keeps its selection and Find when memories change elsewhere\nIf memories cannot be read, the last loaded list stays and the error is shown and logged\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nKind cycles the list: All, Actor, Claim, Inference, Link, Related; an Actor opens its actor graph (──▶ observed Links, ┄┄ tentative Related)\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
         Some(ModuleId::Providers) => "Models\n\nEach account tab stores that provider only\nDefaults sets every role's primary model and ordered fallbacks\nFallbacks are tried top to bottom after primary retries (4 then 3 each)\nAdd fallback opens Google, Nvidia, or OpenRouter catalogs\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
         _ => "Controls\n\nTab moves between fields and buttons\n1–9 switch apps when not typing in a field\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }

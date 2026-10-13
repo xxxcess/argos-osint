@@ -37,6 +37,17 @@ pub struct IrrelevantRange {
 /// character offsets. Prefers paragraph boundaries; force-splits oversized blocks
 /// and isolates common sponsored / related-link headings.
 pub fn chunk_article_body(text: &str) -> Vec<BodyChunk> {
+    split_blocks(text, true)
+}
+
+/// Paragraph-level blocks without small-block merging, for block-aware chrome
+/// classification: a standalone "Share" or byline line must be judged on its
+/// own, never merged into neighbouring story prose.
+pub fn paragraph_blocks(text: &str) -> Vec<BodyChunk> {
+    split_blocks(text, false)
+}
+
+fn split_blocks(text: &str, merge: bool) -> Vec<BodyChunk> {
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
         return Vec::new();
@@ -74,7 +85,9 @@ pub fn chunk_article_body(text: &str) -> Vec<BodyChunk> {
             i += 1;
         }
     }
-    merge_small_blocks(&mut blocks, &chars);
+    if merge {
+        merge_small_blocks(&mut blocks, &chars);
+    }
     blocks
         .into_iter()
         .enumerate()

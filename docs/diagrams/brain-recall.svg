@@ -1,6 +1,6 @@
       <svg role="img" aria-labelledby="brain-recall-title brain-recall-desc" viewBox="0 0 800 280" xmlns="http://www.w3.org/2000/svg">
         <title id="brain-recall-title">Brain recall</title>
-        <desc id="brain-recall-desc">Memories persist in SQLite. Optional MiniLM vectors live in LanceDB. Recall hybrid-ranks Jaccard and vectors, then original evidence admission precedes inference; current-owner outputs do not become independent support.</desc>
+        <desc id="brain-recall-desc">Memories persist in SQLite. Optional MiniLM vectors live in LanceDB. Recall hybrid-ranks Jaccard and vectors, then original evidence admission precedes inference; current-owner outputs do not become independent support. Actor, Link and Related records are excluded from default recall and admitted only when a query requests their kind.</desc>
 
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
@@ -30,6 +30,7 @@
         <rect x="708" y="48" width="128" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
         <text x="772.0" y="76" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">Assess</text>
         <text x="772.0" y="94" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">original lineage</text>
+        <text x="400" y="202" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#4f5d75">DEFAULT KINDS CLAIM · INFERENCE · ACTOR / LINK / RELATED ONLY VIA allowed_kinds (KIND SET KEYS THE CACHE)</text>
         <text x="400" y="220" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#4f5d75">ARGOS_EMBED=0 → JACCARD ONLY</text>
         <text x="400" y="252" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">No refetch: identity + source lineage + distinct roots; similarity remains browsing.</text>
 

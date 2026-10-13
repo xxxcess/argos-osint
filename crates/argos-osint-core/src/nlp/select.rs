@@ -43,7 +43,8 @@ impl Selection {
                 .any(|r| r.slice(&source.prose).is_some_and(|s| s.contains(quote)))
     }
 }
-fn marker(text: &str) -> bool {
+/// Correction/denial/uncertainty markers protected by every selection.
+pub(crate) fn marker(text: &str) -> bool {
     [
         "correction",
         "corrected",

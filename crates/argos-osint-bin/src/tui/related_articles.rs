@@ -12,6 +12,16 @@ pub struct ArticleRelatedView {
     pub scroll: u16,
 }
 
+/// Labelled bases ("same actor: X", "Shared mentions: …") print as-is;
+/// bare mention names keep the shared-mentions label.
+pub fn basis_text(basis: &[String]) -> String {
+    if basis.iter().all(|b| b.contains(": ")) && !basis.is_empty() {
+        basis.join("; ")
+    } else {
+        format!("Shared mentions: {}", basis.join(", "))
+    }
+}
+
 pub fn rows(
     view: &ArticleRelatedView,
     width: usize,
@@ -35,32 +45,50 @@ pub fn rows(
             None,
         )];
     }
+    let scope = if view.page.coverage == "this cycle" {
+        "This cycle"
+    } else {
+        "All retained cycles"
+    };
+    let toggle = (
+        Line::from(Span::styled(
+            fit(&format!("Scope: {scope} · click to switch"), width),
+            theme::accent(),
+        )),
+        Some(Target::Button(super::app::ButtonId::RelatedScope)),
+    );
     if view.page.rows.is_empty() {
-        return vec![(
-            Line::from(Span::styled(
-                fit(
-                    &format!(
-                        "No related articles · {}",
-                        if view.page.coverage.is_empty() {
-                            "coverage unavailable"
-                        } else {
-                            &view.page.coverage
-                        }
+        return vec![
+            toggle,
+            (
+                Line::from(Span::styled(
+                    fit(
+                        &format!(
+                            "No related articles · {}",
+                            if view.page.coverage.is_empty() {
+                                "coverage unavailable"
+                            } else {
+                                &view.page.coverage
+                            }
+                        ),
+                        width,
                     ),
-                    width,
-                ),
+                    theme::dim(),
+                )),
+                None,
+            ),
+        ];
+    }
+    let mut lines = vec![
+        toggle,
+        (
+            Line::from(Span::styled(
+                fit("One row per article URL · cycles and basis below", width),
                 theme::dim(),
             )),
             None,
-        )];
-    }
-    let mut lines = vec![(
-        Line::from(Span::styled(
-            fit("Shared headline/description entities · tentative", width),
-            theme::dim(),
-        )),
-        None,
-    )];
+        ),
+    ];
     for (index, item) in view.page.rows.iter().enumerate() {
         let target = if brain {
             Target::BrainRelatedArticle(index)
@@ -80,9 +108,21 @@ pub fn rows(
             Line::from(Span::styled(
                 fit(
                     &format!(
-                        "{} · {} · tentative{}",
+                        "{} · {} · {} · {} cycle{} · {}{}",
                         item.article.source_name,
                         item.article.category,
+                        item.article.published_at.get(..10).unwrap_or("undated"),
+                        item.originating_run_ids.len().max(1),
+                        if item.originating_run_ids.len() > 1 {
+                            "s"
+                        } else {
+                            ""
+                        },
+                        if item.established {
+                            "same actor"
+                        } else {
+                            "tentative"
+                        },
                         if item.place_only {
                             " · place-only"
                         } else {
@@ -97,10 +137,7 @@ pub fn rows(
         ));
         lines.push((
             Line::from(Span::styled(
-                fit(
-                    &format!("Shared mentions: {}", item.shared_mentions.join(", ")),
-                    width,
-                ),
+                fit(&basis_text(&item.shared_mentions), width),
                 theme::muted(),
             )),
             Some(target),

@@ -3004,7 +3004,7 @@ impl Reader<'_> {
         // The latest transition per (stage, unit) is that unit's current state.
         let mut units: HashMap<(String, String), StageUnit> = HashMap::new();
         for (row, at) in loaded.timed() {
-            if row.label("contract_version") == "atlas-collection-v1" {
+            if crate::atlas_work::is_collection_contract(&row.label("contract_version")) {
                 continue;
             }
 
@@ -3078,7 +3078,7 @@ impl Reader<'_> {
                 if let Ok(metadata) = statement.query_map([], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,String>(4)?))) {
                     for (run_state, stats, classification, entities, publishers) in metadata.flatten() {
                         let stats: serde_json::Value = serde_json::from_str(&stats).unwrap_or_default();
-                        if stats.get("contract_version").and_then(serde_json::Value::as_str) != Some("atlas-collection-v1") { continue; }
+                        if !stats.get("contract_version").and_then(serde_json::Value::as_str).is_some_and(crate::atlas_work::is_collection_contract) { continue; }
                         for (stage,status) in [("classification",classification),("entities",entities),("publishers",publishers)] {
                             let state = if status=="pending" { if run_state=="running" { "queued" } else { "waiting" } } else { &status };
                             if !matches!(state,"queued"|"running"|"waiting"|"blocked") { continue; }

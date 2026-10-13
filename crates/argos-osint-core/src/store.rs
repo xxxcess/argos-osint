@@ -15,8 +15,6 @@ use crate::profile_stats;
 mod graph_summaries;
 mod publication;
 pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
-#[cfg(all(test, feature = "lancedb"))]
-pub(crate) use publication::fault as publication_fault;
 pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
 pub use publication::{
     memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
@@ -43,7 +41,9 @@ pub struct GraphSummary {
 /// activity-history tables plus additive timing columns on the model attempt
 /// and tool call records. 28 adds immutable NLP artifacts/references/features and
 /// complete summary-result envelopes; existing facts are preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 36;
+/// 37 adds the unified Brain graph (typed kinds, actors, endpoints) and brief
+/// stage timings; `atomic_claim` memories migrate to claim/inference in place.
+pub const SCHEMA_VERSION: i64 = 40;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -877,6 +877,29 @@ impl Store {
                 )?;
                 self.conn.pragma_update(None, "user_version", 36)?;
             }
+            if version < 37 {
+                // Additive: unified Brain typed kinds/actors/endpoints, the
+                // atomic_claim → claim/inference migration (IDs preserved) and
+                // per-stage Intel brief timing.
+                crate::brain_schema::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 37)?;
+            }
+            if version < 38 {
+                // Additive: dispatch declarations on attempt records and Brain
+                // actor backfill receipts (idempotent re-run of the Brain DDL).
+                crate::brain_schema::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 38)?;
+            }
+            if version < 39 {
+                // Additive: Atlas phase-6 atlas_article_index receipts.
+                crate::brain_schema::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 39)?;
+            }
+            if version < 40 {
+                // Additive: Brain lifecycle guard triggers (TTL/delete safety).
+                crate::brain_schema::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 40)?;
+            }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
             if version < 26 {
@@ -908,7 +931,9 @@ impl Store {
     }
 
     pub fn list_memories(&self) -> Result<Vec<Memory>> {
-        let mut stmt = self.conn.prepare("SELECT id,text,category,pinned,created_at,source_json FROM memories ORDER BY pinned DESC,created_at DESC")?;
+        // Default Brain listing: evidence/user memories. Actor/Link/Related
+        // structural records are browsed through typed kind filters.
+        let mut stmt = self.conn.prepare("SELECT id,text,category,pinned,created_at,source_json FROM memories m WHERE NOT EXISTS (SELECT 1 FROM memory_metadata t WHERE t.memory_id=m.id AND t.memory_kind IN ('actor','link','related')) ORDER BY pinned DESC,created_at DESC")?;
         let rows = stmt.query_map([], |row| {
             let source: String = row.get(5)?;
             let source = serde_json::from_str(&source).map_err(|err| {
@@ -991,7 +1016,10 @@ impl Store {
     /// the memory ids whose index state it may have changed. Index failure never
     /// fails the write; the outbox keeps the work. Inside a caller's transaction
     /// it only adds statements (the caller commits; the pool indexes).
-    fn write_then_index<T>(&self, write: impl FnOnce() -> Result<(T, Vec<String>)>) -> Result<T> {
+    pub(crate) fn write_then_index<T>(
+        &self,
+        write: impl FnOnce() -> Result<(T, Vec<String>)>,
+    ) -> Result<T> {
         let own_tx = self.conn.is_autocommit();
         if own_tx {
             self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -1028,7 +1056,14 @@ impl Store {
     /// Falls back to Jaccard alone when embedding is off or the index fails; an
     /// index problem never fails the caller.
     pub fn recall(&self, query: &str, top_k: usize) -> Result<Vec<ScoredMemory>> {
-        let memories = self.list_memories()?;
+        // Actor records serve identity lookup and Link/Related records serve
+        // exploration; neither is independent evidence for default recall.
+        let structural = self.structural_memory_ids()?;
+        let memories: Vec<Memory> = self
+            .list_memories()?
+            .into_iter()
+            .filter(|m| !structural.contains(&m.id))
+            .collect();
         if query.trim().is_empty() || memories.is_empty() || top_k == 0 {
             return Ok(Vec::new());
         }
@@ -1046,6 +1081,17 @@ impl Store {
         };
         ranked = boost_with_passage_hybrid(query, &memories, ranked, top_k);
         Ok(ranked)
+    }
+
+    /// Actor/Link/Related memory IDs (excluded from default evidence recall).
+    pub fn structural_memory_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT memory_id FROM memory_metadata WHERE memory_kind IN ('actor','link','related')",
+        )?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
     }
 
     /// True when recall will use the vector index (embedding on, file-backed store).
@@ -1335,6 +1381,7 @@ impl Store {
                             claim.rsp_status.trim(),
                         ],
                     )?;
+                    crate::brain_backfill::bind_claim_subject(&self.conn, &fingerprint)?;
                 }
                 self.conn.execute(
                     "INSERT OR IGNORE INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url,published_at) VALUES (?1,NULL,?2,?3,?4,?5,?6)",
@@ -1904,7 +1951,18 @@ impl Store {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<bool> {
             self.delete_cycle_memories(id)?;
-            self.conn.execute("DELETE FROM nlp_source_refs WHERE owner_kind='article' AND owner_id IN(SELECT article_id FROM atlas_articles WHERE run_id=?1)",[id])?;
+            // Remove this cycle's Brain origin contributions; shared Actors
+            // and records supported by another origin survive.
+            crate::brain_actors::retire_origin(
+                &self.conn,
+                "article",
+                id,
+                &chrono::Utc::now().to_rfc3339(),
+            )?;
+            self.conn.execute("DELETE FROM brain_backfill_receipts WHERE source='atlas_articles' AND unit_id LIKE ?1 || '/%'", [id])?;
+            // Article IDs are URL-based and shared across cycles: keep NLP refs
+            // an article still needs in another retained cycle.
+            self.conn.execute("DELETE FROM nlp_source_refs WHERE owner_kind='article' AND owner_id IN(SELECT article_id FROM atlas_articles WHERE run_id=?1) AND owner_id NOT IN(SELECT article_id FROM atlas_articles WHERE run_id<>?1)",[id])?;
             crate::nlp::cache::remove_owner(&self.conn, "atlas_run", id)?;
             self.conn
                 .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
@@ -2180,9 +2238,15 @@ impl Store {
 
     pub fn atlas_article(&self, run_id: &str, article_id: &str) -> Result<Option<AtlasArticleRow>> {
         Ok(self
-            .atlas_list_articles(run_id)?
-            .into_iter()
-            .find(|row| row.id == article_id))
+            .conn
+            .query_row(
+                "SELECT run_id, article_id, title, description, url, country, source_name, source_domain,
+                        published_at, provider, temperature, category, seen_at, author, image_url
+                 FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
+                params![run_id, article_id],
+                atlas_article_from_row,
+            )
+            .optional()?)
     }
 
     /// Distinct UTC calendar days (`YYYY-MM-DD`) that have an Atlas run, newest first.
@@ -2755,7 +2819,7 @@ fn like_needle(query: &str) -> String {
     format!("%{escaped}%")
 }
 
-fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::brain::Memory> {
+pub(crate) fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::brain::Memory> {
     let source: String = row.get(5)?;
     let source = serde_json::from_str(&source).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err))
@@ -2868,7 +2932,7 @@ pub struct AtlasRunRow {
 }
 
 /// One headline saved for an Atlas run. `category` is an OSINT tag or `unk`.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AtlasArticleRow {
     pub run_id: String,
     pub id: String,

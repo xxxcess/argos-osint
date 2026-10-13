@@ -2,7 +2,8 @@
 //!
 //! Every row is an existing canonical memory, identified by its memory id.
 //! Explicit relationships come from stored rows (claim relations, shared
-//! source articles or tool results, the same entity, the same investigation).
+//! source articles or tool results, the same canonical Brain Actor, the same
+//! investigation). Name resemblance is a labelled candidate, never identity.
 //! Similarity-only suggestions come from recall and are labelled as such;
 //! similarity is never presented as evidence. Graph evidence nodes that have
 //! no canonical memory never become rows.
@@ -176,21 +177,53 @@ impl Store {
             offer(id, RANK_SOURCE, reason);
         }
 
-        // The same entity.
+        // The same canonical Brain Actor (redirect-aware). Names never decide
+        // identity here; see the name-resemblance candidates below.
+        let own_actors: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT actor_id FROM brain_memory_actor_refs WHERE memory_id=?1",
+            )?;
+            let rows = stmt
+                .query_map([memory_id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut actor_linked: HashSet<String> = HashSet::new();
+        for actor in own_actors {
+            let root = crate::brain_actors::resolve(&self.conn, &actor)?;
+            let name = crate::brain_actors::actor(&self.conn, &root)?
+                .map(|a| a.display_name)
+                .unwrap_or_else(|| root.clone());
+            for equivalent in crate::brain_actors::equivalent_ids(&self.conn, &root)? {
+                let mut stmt = self.conn.prepare(
+                    "SELECT DISTINCT r.memory_id FROM brain_memory_actor_refs r
+                     LEFT JOIN memory_metadata m ON m.memory_id=r.memory_id
+                     WHERE r.actor_id=?1
+                       AND IFNULL(m.memory_kind,'claim') NOT IN ('actor','link','related')
+                       AND IFNULL(m.lifecycle,'active')='active'",
+                )?;
+                let rows = stmt
+                    .query_map([&equivalent], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for id in rows {
+                    actor_linked.insert(id.clone());
+                    offer(id, RANK_ENTITY, format!("same actor: {name}"));
+                }
+            }
+        }
+
+        // Name resemblance between claim subjects: a labelled candidate only.
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT c2.memory_id, c1.entity_id
              FROM insight_claims c1
              JOIN insight_claims c2 ON lower(c2.entity_id) = lower(c1.entity_id)
              WHERE c1.memory_id = ?1 AND c1.entity_id <> ''",
         )?;
-        let rows = stmt
+        let name_matches = stmt
             .query_map([memory_id], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (id, entity) in rows {
-            offer(id, RANK_ENTITY, format!("same entity: {entity}"));
-        }
 
         // The same investigation thread.
         let mut stmt = self.conn.prepare(
@@ -235,6 +268,23 @@ impl Store {
                 )
             })
             .collect();
+
+        let mut name_rows = Vec::new();
+        for (id, entity) in name_matches {
+            if id == memory_id || actor_linked.contains(&id) || !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(target) = self.get_memory(&id)? {
+                name_rows.push(row(
+                    &target,
+                    format!("same name, unconfirmed identity: {entity} · not evidence"),
+                    RelationKind::Similar,
+                    0.0,
+                ));
+            }
+        }
+        name_rows.truncate(limits.similar);
+        out.extend(name_rows);
 
         if limits.similar > 0 {
             let reason = if self.vectors_enabled() {
@@ -309,8 +359,13 @@ pub fn format_meaningful_link_reason(reason: &str) -> String {
         }
     } else if let Some(rest) = reason.strip_prefix("same source article:") {
         format!("Shares source report: {}", rest.trim())
-    } else if let Some(rest) = reason.strip_prefix("same entity:") {
+    } else if let Some(rest) = reason.strip_prefix("same actor:") {
         format!("Shares common actor: {}", rest.trim())
+    } else if let Some(rest) = reason.strip_prefix("same name, unconfirmed identity:") {
+        format!(
+            "Same name, identity not confirmed: {}",
+            rest.trim().trim_end_matches("· not evidence").trim()
+        )
     } else if reason == "cites the same tool result" {
         "Cites the same OSINT tool result".to_string()
     } else if reason == "same investigation" {
@@ -514,11 +569,19 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "deduplicated by memory id");
         assert_eq!(ids[0], revised, "claim relation ranks first");
         assert_eq!(ids[1], shared, "shared article next");
-        assert_eq!(ids[2], entity, "same entity next");
+        assert_eq!(ids[2], entity, "same-name candidate next");
         assert_eq!(rows[0].reason, "claim relation: conflict or revision");
         assert_eq!(rows[1].reason, "same source article");
-        assert_eq!(rows[2].reason, "same entity: Harbor Authority");
-        assert!(rows[..3].iter().all(|r| r.kind == RelationKind::Explicit));
+        assert_eq!(
+            rows[2].reason,
+            "same name, unconfirmed identity: Harbor Authority · not evidence"
+        );
+        assert!(rows[..2].iter().all(|r| r.kind == RelationKind::Explicit));
+        assert_eq!(
+            rows[2].kind,
+            RelationKind::Similar,
+            "names are not identity"
+        );
         let similar_row = rows
             .iter()
             .find(|r| r.memory_id == similar)

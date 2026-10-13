@@ -103,6 +103,7 @@ fn complete_chain(store: &Store, article: &AtlasArticleRow, rev: &str) -> String
             input_revision: rev.into(),
             role_snapshot: "{}".into(),
             title: article.title.clone(),
+            stage_revisions: vec![],
         },
         &now(),
     )
@@ -213,6 +214,7 @@ fn canonical_failure_rolls_back_without_failing_the_stage() {
             input_revision: "r1".into(),
             role_snapshot: "{}".into(),
             title: String::new(),
+            stage_revisions: vec![],
         },
         &now(),
     )

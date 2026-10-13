@@ -12,6 +12,7 @@ use argos_osint_core::job_registry::{CancelRequest, JobSpec};
 use argos_osint_core::paths;
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::recon::model_exec;
+use argos_osint_core::related_global::RelatedScope;
 use argos_osint_core::related_memories::{RelatedLimits, RelatedMemory};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
@@ -613,6 +614,10 @@ pub enum ButtonId {
     IntelJobCancel,
     IntelJobRetry,
     CreateMemory,
+    /// Cycle the Brain kind filter (All → Actor → Claim → Inference → Link → Related).
+    BrainKind,
+    /// Toggle Related articles between all retained cycles and this cycle.
+    RelatedScope,
     BrainBack,
     /// Back in the memory detail history (or to the Brain list).
     BrainDetailBack,
@@ -1185,6 +1190,12 @@ pub struct App {
     pub whoxy_key: String,
     pub whoxy_fallback: String,
     pub brain_graph: recon::MemoryGraph,
+    /// Typed payload lines of the open memory (kind header first).
+    pub brain_typed: Vec<String>,
+    /// Brain list kind filter; `None` = default evidence listing.
+    pub brain_kind: Option<argos_osint_core::memory_metadata::MemoryKind>,
+    /// Related articles scope shared by Intel and Brain (all cycles default).
+    pub related_scope: RelatedScope,
     brain_graph_for: Option<String>,
     /// Open memory detail (graph, Related, Summary), independent of `memory_sel`.
     pub brain_detail: super::brain_detail::BrainDetail,
@@ -1618,6 +1629,9 @@ impl App {
             intel_link_explanations: HashMap::new(),
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
+            brain_typed: Vec::new(),
+            brain_kind: None,
+            related_scope: RelatedScope::default(),
             brain_graph_for: None,
             brain_detail: Default::default(),
             memory_total,
@@ -3954,7 +3968,8 @@ impl App {
         self.intel_publisher_prior = metadata.and_then(|metadata| metadata.publisher_prior);
         match self
             .store
-            .related_articles(&article.run_id, &article.id, 0, 20)
+            .related_articles_global(&article.run_id, &article.id, self.related_scope, None, 20)
+            .map(|page| page.into_page(0))
         {
             Ok(page) => {
                 self.intel_related = super::related_articles::ArticleRelatedView {
@@ -6024,6 +6039,15 @@ impl App {
             anyhow::bail!(fault);
         }
         let query = self.brain_query.trim();
+        if let Some(kind) = self.brain_kind {
+            let list = self.store.list_memories_by_kind(Some(kind), query)?;
+            let total = if query.is_empty() {
+                list.len()
+            } else {
+                self.store.list_memories_by_kind(Some(kind), "")?.len()
+            };
+            return Ok((list, total));
+        }
         if query.is_empty() {
             let list = self.store.list_memories()?;
             let total = list.len();
@@ -6032,6 +6056,64 @@ impl App {
             let list = self.store.search_memories(query)?;
             Ok((list, self.store.memory_count()?))
         }
+    }
+
+    /// Switch Related between all retained cycles and the source cycle and
+    /// reload the open Intel article and Brain memory Related lists.
+    pub(crate) fn toggle_related_scope(&mut self) {
+        self.related_scope = self.related_scope.toggle();
+        if let Some(article) = self.intel_articles.get(self.intel_sel).cloned() {
+            match self.store.related_articles_global(
+                &article.run_id,
+                &article.id,
+                self.related_scope,
+                None,
+                20,
+            ) {
+                Ok(page) => {
+                    self.intel_related.page = page.into_page(0);
+                    self.intel_related.error = None;
+                }
+                Err(error) => self.intel_related.error = Some(error.to_string()),
+            }
+            self.intel_related.sel = 0;
+            self.intel_related.scroll = 0;
+        }
+        if let Some(memory) = self.brain_detail.memory_id().map(str::to_string) {
+            let view = &mut self.brain_detail.related.articles;
+            match self.store.related_articles_global_for_memory(
+                &memory,
+                self.related_scope,
+                None,
+                20,
+            ) {
+                Ok(page) => {
+                    view.page = page.into_page(0);
+                    view.error = None;
+                }
+                Err(error) => view.error = Some(error.to_string()),
+            }
+            view.sel = 0;
+            view.scroll = 0;
+        }
+        self.status = format!("Related: {}", self.related_scope.label());
+    }
+
+    /// Next Brain kind filter: All, then each of the five core kinds.
+    pub(crate) fn cycle_brain_kind(&mut self) {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let order = MemoryKind::CORE;
+        self.brain_kind = match self.brain_kind {
+            None => Some(order[0]),
+            Some(kind) => order
+                .iter()
+                .position(|k| *k == kind)
+                .and_then(|i| order.get(i + 1).copied()),
+        };
+        self.memory_sel = 0;
+        self.scrolls.memories = 0;
+        self.reload_memories();
+        self.status = format!("Brain kind: {}", brain_kind_label(self.brain_kind));
     }
 
     pub(crate) fn reload_memories(&mut self) {
@@ -6195,6 +6277,8 @@ impl App {
     ) {
         self.brain_list_mode = BrainListMode::Graph;
         self.brain_graph = graph;
+        self.brain_typed = argos_osint_core::brain_kinds::typed_detail(&self.store, &memory.id)
+            .unwrap_or_default();
         self.brain_graph_for = Some(memory.id.clone());
         self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
         self.graph_summary.clear();
@@ -6213,7 +6297,11 @@ impl App {
             .unwrap_or_default();
         self.brain_detail.related.articles_selected =
             restore.map_or(!origins.is_empty(), |snapshot| snapshot.articles_selected);
-        match self.store.related_articles_for_memory(&memory.id, 0, 20) {
+        match self
+            .store
+            .related_articles_global_for_memory(&memory.id, self.related_scope, None, 20)
+            .map(|page| page.into_page(0))
+        {
             Ok(page) => {
                 self.brain_detail.related.articles = super::related_articles::ArticleRelatedView {
                     page,
@@ -6451,14 +6539,28 @@ impl App {
                 .brain_detail
                 .memory_id()
                 .ok_or_else(|| anyhow::anyhow!("No memory selected"))?;
-            self.store.related_articles_for_memory(memory, offset, 20)?
+            self.store
+                .related_articles_global_for_memory(
+                    memory,
+                    self.related_scope,
+                    Some(&offset.to_string()),
+                    20,
+                )?
+                .into_page(offset)
         } else {
             let article = self
                 .intel_articles
                 .get(self.intel_sel)
                 .ok_or_else(|| anyhow::anyhow!("No article selected"))?;
             self.store
-                .related_articles(&article.run_id, &article.id, offset, 20)?
+                .related_articles_global(
+                    &article.run_id,
+                    &article.id,
+                    self.related_scope,
+                    Some(&offset.to_string()),
+                    20,
+                )?
+                .into_page(offset)
         };
         let view = if brain {
             &mut self.brain_detail.related.articles
@@ -6747,6 +6849,14 @@ impl App {
                 if self.module.is_none() {
                     self.set_focus(Target::Field(FieldId::Composer));
                 }
+                return;
+            }
+            ButtonId::BrainKind => {
+                self.cycle_brain_kind();
+                return;
+            }
+            ButtonId::RelatedScope => {
+                self.toggle_related_scope();
                 return;
             }
             ButtonId::CreateMemory => {
@@ -8109,11 +8219,18 @@ impl App {
     }
 
     fn activate_path_line(&mut self, index: usize) {
-        let lines = if self.brain_graph.is_empty() {
-            Vec::new()
+        // Same line list as drawn: typed header, then the path (or its
+        // one-line empty note).
+        let path = if self.brain_graph.is_empty() {
+            vec![super::graph::PathLine {
+                text: String::new(),
+                article_id: String::new(),
+                run_id: String::new(),
+            }]
         } else {
             super::graph::path_lines(&self.brain_graph)
         };
+        let lines = super::graph::with_typed(&self.brain_typed, path);
         let Some(line) = lines.get(index) else {
             return;
         };
@@ -9737,6 +9854,23 @@ fn mouse_dirties(kind: MouseEventKind) -> bool {
     )
 }
 
+/// Button/title label for the Brain kind filter.
+pub(crate) fn brain_kind_label(
+    kind: Option<argos_osint_core::memory_metadata::MemoryKind>,
+) -> &'static str {
+    kind.map_or("All", argos_osint_core::brain_kinds::kind_title)
+}
+
+/// Path-pane title for Actor/Link/Related details (`None` for claim/recon).
+pub(crate) fn structural_title(app: &App) -> Option<&'static str> {
+    match app.brain_typed.first().map(String::as_str) {
+        Some("Kind: Actor") => Some(" actor graph "),
+        Some("Kind: Link") => Some(" link graph "),
+        Some("Kind: Related") => Some(" related lead "),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9948,6 +10082,9 @@ mod tests {
             related_back: Vec::new(),
             intel_report_running: HashMap::new(),
             brain_graph: recon::MemoryGraph::default(),
+            brain_typed: Vec::new(),
+            brain_kind: None,
+            related_scope: RelatedScope::default(),
             brain_graph_for: None,
             brain_detail: Default::default(),
             memory_total: 0,
@@ -12191,6 +12328,7 @@ mod tests {
                 shared_mentions: vec!["Northwind Ferries".into(), "Baltic".into()],
                 originating_run_ids: vec!["run-0412".into()],
                 place_only: false,
+                ..Default::default()
             }],
             total: 1,
             offset: 0,
@@ -12668,6 +12806,433 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore]
+    fn dump_brain_graph_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (120, 40)] {
+            let mut app = app();
+            app.settings.defaults.synthesis.provider = "openrouter".into();
+            app.settings.defaults.synthesis.model = "openai/gpt-4o".into();
+            app.settings.defaults.operation_overrides.insert(
+                argos_osint_core::provider::OP_LINKS_GENERATE.into(),
+                argos_osint_core::provider::ModelAssignment {
+                    provider: "google".into(),
+                    model: "gemini-2.5-flash".into(),
+                    ..Default::default()
+                },
+            );
+            app.select(ModuleId::Providers.index());
+            app.provider_page = ProviderPage::Defaults;
+            app.defaults_role = DefaultsRole::Synthesis;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("models-defaults-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+    }
+
+    /// Two retained cycles indexed through Atlas phase 6: actors, mention
+    /// Links, Related leads, plus one evidence memory. Returns the actor ids
+    /// of "Ana Ruiz" in each cycle (merged into one canonical actor).
+    fn brain_world(app: &App) -> (String, String) {
+        use argos_osint_core::atlas_metadata::{ArticleMention, ArticleMetadata, MetadataState};
+        let store = &app.store;
+        let rows = [
+            (
+                "run-1012",
+                "k1",
+                "Ana Ruiz opens Gdansk port talks",
+                "2026-10-12T08:00:00Z",
+                vec!["Ana Ruiz"],
+            ),
+            (
+                "run-1012",
+                "k2",
+                "Ana Ruiz meets Northwind Ferries board",
+                "2026-10-12T09:30:00Z",
+                vec!["Ana Ruiz", "Northwind Ferries"],
+            ),
+            (
+                "run-1013",
+                "k3",
+                "Northwind Ferries resumes Baltic crossings",
+                "2026-10-13T06:10:00Z",
+                vec!["Northwind Ferries"],
+            ),
+            (
+                "run-1013",
+                "k2",
+                "Ana Ruiz meets Northwind Ferries board",
+                "2026-10-12T09:30:00Z",
+                vec!["Ana Ruiz", "Northwind Ferries"],
+            ),
+            (
+                "run-1013",
+                "k4",
+                "Ana Ruiz signs Gdansk ferry accord",
+                "2026-10-13T07:45:00Z",
+                vec!["Ana Ruiz"],
+            ),
+        ];
+        for (run, id, title, at, names) in rows {
+            let _ =
+                store.atlas_insert_run(run, "{}", r#"{"contract_version":"atlas-collection-v2"}"#);
+            let article = AtlasArticleRow {
+                run_id: run.into(),
+                id: id.into(),
+                title: title.into(),
+                url: format!("https://news.example/{id}"),
+                country: "PL".into(),
+                source_name: "Baltic Wire".into(),
+                source_domain: "news.example".into(),
+                published_at: at.into(),
+                provider: "gnews".into(),
+                temperature: 0.5,
+                category: "economic".into(),
+                seen_at: at.into(),
+                ..Default::default()
+            };
+            store.atlas_upsert_article(&article).unwrap();
+            let mut m = ArticleMetadata::pending(&article);
+            m.entity_state = MetadataState::Complete;
+            for n in names {
+                let start = title.find(n).unwrap();
+                m.mentions.push(ArticleMention {
+                    type_hint: if n.contains("Ferries") {
+                        "organization"
+                    } else {
+                        "person"
+                    }
+                    .into(),
+                    comparison_key: n.to_lowercase(),
+                    field: "title".into(),
+                    start_byte: start,
+                    end_byte: start + n.len(),
+                    original_text: n.into(),
+                });
+            }
+            store.atlas_save_metadata(&m).unwrap();
+        }
+        for run in ["run-1012", "run-1013"] {
+            argos_osint_core::related_articles::build(store, run).unwrap();
+            let report =
+                argos_osint_core::atlas_actor_index::index_run(store, run, &|| false).unwrap();
+            assert!(report.complete(), "{report:?}");
+        }
+        let actor = |article: &str| -> String {
+            store
+                .connection()
+                .query_row(
+                    "SELECT m.actor_id FROM brain_actor_mentions m JOIN brain_actors a ON a.actor_id=m.actor_id
+                     WHERE m.origin_id=?1 AND a.display_name='Ana Ruiz' LIMIT 1",
+                    [article],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let (k1, k4) = (actor("k1"), actor("k4"));
+        store
+            .merge_actors(
+                &k4,
+                &k1,
+                &serde_json::json!({"analyst":"fixture","reason":"same official"}),
+            )
+            .unwrap();
+        store
+            .add_memory(
+                "Ana Ruiz signed the Gdansk ferry accord",
+                "fact",
+                false,
+                MemorySource {
+                    app: "atlas".into(),
+                    conversation_id: "run-1013".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        (k1, k4)
+    }
+
+    fn open_kind(app: &mut App, kind: argos_osint_core::memory_metadata::MemoryKind) {
+        app.select(ModuleId::Brain.index());
+        while app.brain_kind != Some(kind) {
+            app.cycle_brain_kind();
+        }
+    }
+
+    #[test]
+    fn brain_kind_filter_cycles_five_kinds_with_typed_detail_and_distinct_edges() {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let mut app = app();
+        let (canonical, merged) = brain_world(&app);
+        app.select(ModuleId::Brain.index());
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Kind: All"), "{text}");
+        assert_eq!(app.memories.len(), 1, "default list is evidence only");
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            click(&mut app, Target::Button(ButtonId::BrainKind));
+            seen.push(app.brain_kind);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                Some(MemoryKind::Actor),
+                Some(MemoryKind::Claim),
+                Some(MemoryKind::Inference),
+                Some(MemoryKind::Link),
+                Some(MemoryKind::Related),
+                None
+            ]
+        );
+        open_kind(&mut app, MemoryKind::Actor);
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("memories · Actor"), "{text}");
+        assert!(text.contains("Kind: Actor"), "{text}");
+        // Merged actor opens as its canonical node, shown once.
+        assert!(app.open_memory_detail(&merged));
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Merged into"), "{text}");
+        assert_eq!(
+            app.brain_graph
+                .nodes
+                .iter()
+                .filter(|n| n.kind == recon::GraphNodeKind::Actor)
+                .count(),
+            1
+        );
+        assert!(app
+            .brain_graph
+            .node(&format!("actor:{canonical}"))
+            .is_some());
+        assert!(text.contains("──▶ mentioned_in"), "{text}");
+        assert!(text.contains("link (observed)"), "{text}");
+        // Articles from both cycles via the canonical actor.
+        assert!(
+            text.contains("Gdansk port talks") && text.contains("Gdansk ferry accord"),
+            "{text}"
+        );
+        // Brain Related Articles for an actor: every article mentioning the
+        // canonical actor, all retained cycles.
+        let articles = &app.brain_detail.related.articles.page;
+        assert_eq!(articles.coverage, "all retained cycles");
+        assert!(articles.rows.iter().all(|r| r.established));
+        assert!(articles.rows.iter().any(|r| r.article.id == "k1"));
+        assert!(articles.rows.iter().any(|r| r.article.id == "k4"));
+        open_kind(&mut app, MemoryKind::Related);
+        assert!(!app.memories.is_empty());
+        let related = app.memories[0].id.clone();
+        assert!(app.open_memory_detail(&related));
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Kind: Related"), "{text}");
+        assert!(text.contains("┄┄"), "{text}");
+        assert!(text.contains("related (tentative)"), "{text}");
+        assert!(text.contains("tentative · not evidence"), "{text}");
+        assert!(
+            !text.contains("──▶"),
+            "Related never draws as a Link: {text}"
+        );
+    }
+
+    #[test]
+    fn related_pane_defaults_to_all_retained_cycles_one_row_per_url() {
+        let mut app = app();
+        brain_world(&app);
+        app.select(ModuleId::Brain.index());
+        let memory = app.memories[0].id.clone();
+        // Article origin for the evidence memory.
+        app.store
+            .connection()
+            .execute(
+                "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at)
+                 VALUES('fp-k4',?1,'Ana Ruiz','signed','accord','t','news',0.9,'x','x')",
+                [&memory],
+            )
+            .unwrap();
+        app.store
+            .connection()
+            .execute(
+                "INSERT INTO insight_sources(fingerprint,run_id,call_id,source_url) VALUES('fp-k4','run-1013','article:k4','https://news.example/k4')",
+                [],
+            )
+            .ok();
+        assert!(app.open_memory_detail(&memory));
+        app.brain_detail.related.articles_selected = true;
+        let page = &app.brain_detail.related.articles.page;
+        assert_eq!(page.coverage, "all retained cycles");
+        let urls: Vec<_> = page.rows.iter().map(|r| r.article.url.clone()).collect();
+        let mut unique = urls.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), urls.len(), "{urls:?}");
+        if let Some(k2) = page.rows.iter().find(|r| r.article.id == "k2") {
+            assert_eq!(k2.originating_run_ids.len(), 2, "{k2:?}");
+        }
+    }
+
+    #[test]
+    fn related_scope_toggle_switches_all_cycles_and_this_cycle() {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let mut app = app();
+        brain_world(&app);
+        open_kind(&mut app, MemoryKind::Related);
+        let lead = app.memories[0].id.clone();
+        assert!(app.open_memory_detail(&lead));
+        app.brain_detail.related.articles_selected = true;
+        let all = app.brain_detail.related.articles.page.clone();
+        assert_eq!(all.coverage, "all retained cycles");
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Scope: All retained cycles"), "{text}");
+        click(&mut app, Target::Button(ButtonId::RelatedScope));
+        assert_eq!(app.related_scope, RelatedScope::ThisCycle);
+        let page = &app.brain_detail.related.articles.page;
+        assert_eq!(page.coverage, "this cycle");
+        assert!(page.total <= all.total);
+        // Each row of this cycle stays inside a single origin cycle.
+        assert!(page.rows.iter().all(|r| r.originating_run_ids.len() == 1));
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Scope: This cycle"), "{text}");
+        click(&mut app, Target::Button(ButtonId::RelatedScope));
+        assert_eq!(app.related_scope, RelatedScope::AllRetained);
+        assert_eq!(app.brain_detail.related.articles.page.total, all.total);
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_brain_phase5_screens() {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (120, 40)] {
+            let mut app = app();
+            brain_world(&app);
+            open_kind(&mut app, MemoryKind::Related);
+            let lead = app.memories[0].id.clone();
+            assert!(app.open_memory_detail(&lead));
+            app.brain_detail.related.articles_selected = true;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("related-scope-all-{width}x{height}"),
+                width,
+                height,
+            );
+            app.toggle_related_scope();
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("related-scope-cycle-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut app = self::app();
+            brain_world(&app);
+            let stats = serde_json::to_value(argos_osint_core::atlas::RunStats {
+                contract_version: argos_osint_core::atlas_work::COLLECTION_CONTRACT.into(),
+                coverage: argos_osint_core::atlas::CoverageStats {
+                    articles: 3,
+                    classified: 3,
+                    entities_available: 3,
+                    publishers_available: 3,
+                    related_pairs: 2,
+                    actor_indexed: 2,
+                    actor_index_failed: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+            app.store
+                .atlas_insert_run(
+                    "run-1014",
+                    r#"{"phase":6,"chunk":0,"leg":"actor_articles","country":0,"from":""}"#,
+                    &stats.to_string(),
+                )
+                .unwrap();
+            app.store
+                .atlas_set_state(
+                    "run-1014",
+                    "partial",
+                    "Classification 3/3 · legacy unk 0 · entities 3 · publisher priors 3 · Related 2 · actors indexed 2/3 (zero-actor 0, failed 1) · acquisition failures 0",
+                    true,
+                )
+                .unwrap();
+            app.select(ModuleId::Atlas.index());
+            if let Some(i) = app.atlas_runs.iter().position(|r| r.id == "run-1014") {
+                app.atlas_run_sel = i;
+            }
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("atlas-phase6-partial-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_brain_kind_screens() {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (120, 40)] {
+            let mut app = app();
+            let (canonical, _) = brain_world(&app);
+            app.select(ModuleId::Brain.index());
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("brain-list-all-{width}x{height}"),
+                width,
+                height,
+            );
+            for kind in [MemoryKind::Actor, MemoryKind::Link, MemoryKind::Related] {
+                open_kind(&mut app, kind);
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("brain-list-{}-{width}x{height}", kind.as_str()),
+                    width,
+                    height,
+                );
+            }
+            open_kind(&mut app, MemoryKind::Actor);
+            assert!(app.open_memory_detail(&canonical));
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("brain-actor-graph-{width}x{height}"),
+                width,
+                height,
+            );
+            app.leave_brain_detail();
+            open_kind(&mut app, MemoryKind::Related);
+            let related = app.memories[0].id.clone();
+            assert!(app.open_memory_detail(&related));
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("brain-related-graph-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+    }
+
     fn dump_cells(app: &mut App, dir: &str, name: &str, width: u16, height: u16) {
         let buffer = render(app, width, height);
         let mut cells = Vec::new();
@@ -13076,15 +13641,16 @@ mod tests {
             assessments: assess.iter().map(|(a, s)| (*a, s.to_string())).collect(),
         };
         // (name, state, stage, activity, age, facts, expected [claims, insights, links])
-        let frames: Vec<(
-            &str,
-            &str,
-            &str,
-            &str,
+        type Frame<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a str,
             Option<u64>,
             ArtifactFacts,
-            [&str; 3],
-        )> = vec![
+            [&'a str; 3],
+        );
+        let frames: Vec<Frame> = vec![
             (
                 "1-queued",
                 "queued",

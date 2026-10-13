@@ -63,6 +63,7 @@ fn inputs(rev: &str) -> BriefInputs {
         input_revision: rev.into(),
         role_snapshot: "{}".into(),
         title: TITLE.into(),
+        stage_revisions: vec![],
     }
 }
 
@@ -72,6 +73,7 @@ struct Seen {
     user: String,
     system: String,
     tokens: u32,
+    reasoning: crate::request_policy::ReasoningEffort,
 }
 
 #[derive(Default)]
@@ -210,6 +212,7 @@ impl StageBackend for Mock {
                 user: request.user.clone(),
                 system: request.system.clone(),
                 tokens: request.completion_tokens,
+                reasoning: request.reasoning,
             });
             if self.hang.contains(&request.stage) {
                 loop {
@@ -297,6 +300,14 @@ async fn one_chain_ordered_dispatch_scoped_inputs_and_no_repeat_requests() {
         seen.iter().map(|s| s.tokens).collect::<Vec<_>>(),
         [2048, 3072, 1536]
     );
+    // §2 request policy: extraction/linking low effort, inference default.
+    {
+        use crate::request_policy::ReasoningEffort::{Default, Low};
+        assert_eq!(
+            seen.iter().map(|s| s.reasoning).collect::<Vec<_>>(),
+            [Low, Default, Low]
+        );
+    }
     // Claims: title/description only.
     assert!(seen[0].user.contains("Unions denied"));
     assert!(!seen[0].user.contains("harbour master"));
@@ -1033,4 +1044,175 @@ fn shared_country_alone_yields_no_lead_and_explanations_name_the_gap() {
     );
     assert_eq!(gapless["withheld"], 2);
     assert_eq!(gapless["empty_reason"], "no inference-specific overlap");
+}
+
+// §2/§7 timing: every stage records a counts-only timing row and Logs event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_stage_records_timing_aggregates_without_text() {
+    let db = db();
+    let job = {
+        let store = Store::open(&db.path).unwrap();
+        ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap()
+    };
+    let mut mock = Mock::happy();
+    mock.delay = Some(Duration::from_millis(60));
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let store = Store::open(&db.path).unwrap();
+    let timings = crate::intel_recon::brief_timing::for_job(&store.conn, &job).unwrap();
+    let ops: Vec<&str> = timings.iter().map(|t| t.operation.as_str()).collect();
+    assert_eq!(
+        ops,
+        [
+            "intel_brief_body",
+            "intel_brief_claims",
+            "intel_brief_inferences",
+            "intel_brief_links"
+        ]
+    );
+    for t in &timings {
+        assert_eq!(t.outcome, "committed");
+        assert!(t.total_ms >= t.local_ms + t.fidelity_ms, "{t:?}");
+        if t.operation != "intel_brief_body" {
+            assert!(t.generation_ms >= 60, "model wall time measured: {t:?}");
+            assert!(t.total_ms >= t.generation_ms, "{t:?}");
+        }
+        assert!(t.queue_ms >= 0 && t.persistence_ms >= 0);
+    }
+    let messages: Vec<String> = store
+        .conn
+        .prepare(
+            "SELECT message FROM argos_events WHERE event_type='intel_brief.timing' AND job_id=?1",
+        )
+        .unwrap()
+        .query_map([&job], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(messages.len(), 4);
+    for m in &messages {
+        assert!(m.contains("total ") && m.contains("generation "), "{m}");
+        for secret_or_text in ["Unions denied", "insurance", "harbour", TITLE] {
+            assert!(!m.contains(secret_or_text), "timing log leaked text: {m}");
+        }
+    }
+}
+
+// §7: a Links-only route change reuses body, Claims and Inferences checkpoints.
+#[test]
+fn links_route_change_moves_only_the_links_revision() {
+    let a = article("r", "a1", TITLE, DESC, "u");
+    let mut s = crate::provider::SettingsFile::default();
+    let before = stage_revisions(&a, &s);
+    s.defaults.operation_overrides.insert(
+        crate::provider::OP_LINKS_GENERATE.into(),
+        crate::provider::ModelAssignment {
+            provider: "openrouter".into(),
+            model: "openai/gpt-4o-mini".into(),
+            ..Default::default()
+        },
+    );
+    let after = stage_revisions(&a, &s);
+    assert_eq!(before[..3], after[..3]);
+    assert_ne!(before[3], after[3]);
+    // A Claims change moves every later stage.
+    s.defaults.operation_overrides.insert(
+        crate::provider::OP_CLAIMS_GENERATE.into(),
+        crate::provider::ModelAssignment {
+            provider: "openrouter".into(),
+            model: "openai/gpt-4o".into(),
+            ..Default::default()
+        },
+    );
+    let claims = stage_revisions(&a, &s);
+    assert_eq!(claims[0], after[0]);
+    assert!(claims[1..].iter().zip(&after[1..]).all(|(x, y)| x != y));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn links_only_change_reuses_checkpoints_and_reruns_links() {
+    let db = db();
+    let mut first = inputs("r1");
+    first.stage_revisions = vec!["b".into(), "c".into(), "i".into(), "l1".into()];
+    ensure_chain(&Store::open(&db.path).unwrap().conn, &first, &now()).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut mock = Mock::happy();
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let first_calls = mock.seen.lock().unwrap().len();
+    assert!(first_calls >= 3);
+    let mut second = inputs("r2");
+    second.stage_revisions = vec!["b".into(), "c".into(), "i".into(), "l2".into()];
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &second, &now()).unwrap();
+    let mut next = Mock::happy();
+    drain(&db.path, "w1", &mut next, &cancel, &cfg())
+        .await
+        .unwrap();
+    let stages: Vec<String> = next
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.stage.clone())
+        .collect();
+    assert_eq!(stages, ["intel_brief_links"], "only Links dispatches");
+    assert_eq!(next.prepared, 0, "body checkpoint reused");
+    let store = Store::open(&db.path).unwrap();
+    assert!(stage_output(&store, &job, "intel_brief_claims").is_ok());
+    assert_eq!(
+        brief_pipeline::published_brief(&store.conn, "a1")
+            .unwrap()
+            .unwrap()
+            .0,
+        2
+    );
+}
+
+#[test]
+fn request_windows_fit_the_serialized_request_budget() {
+    let body: Vec<Sentence> = (0..400)
+        .map(|i| Sentence {
+            id: format!("b{i}"),
+            text: format!(
+                "Sentence {i} says “quoted” things about the ministry and its budget in detail."
+            ),
+            start_byte: 0,
+            end_byte: 0,
+        })
+        .collect();
+    let system = format!("{INFERENCES_PROMPT}{STRICT_JSON}");
+    let claims = json!({"claims":[{"id":"c1","text":"A claim."}]});
+    let budget = 12_000;
+    let windows = request_windows(&body, &system, &claims, budget);
+    assert!(windows.len() > 1);
+    let flat: Vec<String> = windows.concat().into_iter().map(|s| s.id).collect();
+    assert_eq!(
+        flat,
+        body.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+        "ordered, complete"
+    );
+    for w in &windows {
+        let compiled = system.len() + inferences_user(&claims, w, &json!([])).len();
+        assert!(compiled + CARRIED_RESERVE_BYTES <= budget, "{compiled}");
+    }
+}
+
+#[test]
+fn fidelity_modes_route_extraction_to_evidence_curator_and_support_to_assessor() {
+    use crate::intel_recon::brief_fidelity::FidelityMode;
+    let e = FidelityMode::for_kind("claim");
+    let s = FidelityMode::for_kind("inference");
+    assert_eq!(e.role(), "evidence_curator");
+    assert_eq!(s.role(), "claim_assessor");
+    assert_eq!(e.operation_key(), None);
+    assert_eq!(
+        s.operation_key(),
+        Some(crate::provider::OP_INFERENCES_ASSESS)
+    );
+    let labels: Vec<String> = e.labels().into_iter().map(|(l, _)| l).collect();
+    assert!(labels.iter().any(|l| l == "faithful"));
+    assert_ne!(e.version(), s.version());
 }

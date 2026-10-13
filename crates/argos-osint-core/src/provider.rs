@@ -469,6 +469,37 @@ pub struct RoleDefaults {
     /// Optional compatible fallback for decision roles.
     #[serde(default)]
     pub decision_fallback: Option<ModelAssignment>,
+    /// Optional per-operation route overrides (spec §3), keyed by
+    /// [`BRIEF_OPERATIONS`]. Unset or empty entries inherit their logical
+    /// role chain; role semantics and source scope never change.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub operation_overrides: std::collections::BTreeMap<String, ModelAssignment>,
+    /// Measured oversized-story path (spec §2): Inferences read actor-focused
+    /// passage packets instead of every body window. Off until the held-out
+    /// quality comparison clears it; the full-body path stays the default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub focused_oversized_brief: bool,
+}
+
+pub const OP_CLAIMS_GENERATE: &str = "intel_brief_claims.generate";
+pub const OP_INFERENCES_GENERATE: &str = "intel_brief_inferences.generate";
+pub const OP_LINKS_GENERATE: &str = "intel_brief_links.generate";
+pub const OP_INFERENCES_ASSESS: &str = "intel_brief_inferences.assess";
+
+/// Overridable brief operations: (key, label, inherited logical role).
+pub const BRIEF_OPERATIONS: [(&str, &str, &str); 4] = [
+    (OP_CLAIMS_GENERATE, "Claims", "claim_assessor"),
+    (OP_INFERENCES_GENERATE, "Inferences", "synthesis"),
+    (OP_INFERENCES_ASSESS, "Inference support", "claim_assessor"),
+    (OP_LINKS_GENERATE, "Links", "synthesis"),
+];
+
+/// Logical role an operation key inherits, if it is a known operation.
+pub fn operation_role(key: &str) -> Option<&'static str> {
+    BRIEF_OPERATIONS
+        .iter()
+        .find(|(k, _, _)| *k == key)
+        .map(|(_, _, r)| *r)
 }
 
 /// Pinned default for the tool picker. The `~typesafe/jev-latest` alias is accepted
@@ -654,6 +685,27 @@ impl RoleDefaults {
             "tool_picker" => (self.tool_picker.clone(), None),
             _ => (self.recon.clone(), None),
         }
+    }
+
+    /// Resolved assignment for an operation: a non-empty override wins,
+    /// otherwise the logical role chain. Returns (assignment, overridden).
+    pub fn resolve_operation(
+        &self,
+        operation: Option<&str>,
+        role: &str,
+    ) -> (ModelAssignment, bool) {
+        if let Some(a) = operation
+            .and_then(|k| self.operation_overrides.get(k))
+            .filter(|a| !a.provider.trim().is_empty() || !a.model.trim().is_empty())
+        {
+            return (a.clone(), true);
+        }
+        (self.resolve_role(role).0, false)
+    }
+
+    /// Clear one operation override (back to role inheritance).
+    pub fn reset_operation(&mut self, operation: &str) -> bool {
+        self.operation_overrides.remove(operation).is_some()
     }
 
     /// Seeds the default decision model if unset.
@@ -1413,16 +1465,6 @@ pub(crate) fn chat_body(
         body["tool_choice"] = json!("auto");
     }
     body
-}
-
-/// Opt in only on the existing capability-mapped JSON-mode transports. Unknown
-/// endpoints keep strict local validation without unsupported request fields.
-pub(crate) fn insight_output_options(secret: &ProviderSecret, body: &mut Value, tokens: u32) {
-    use crate::investigation::decisions::{resolve_adapter, DecisionAdapterKind};
-    if resolve_adapter(&secret.model, &effective_kind(secret)) == DecisionAdapterKind::JsonMode {
-        body["response_format"] = json!({"type":"json_object"});
-        body["max_tokens"] = json!(tokens);
-    }
 }
 
 fn message_json(m: &ChatMessage) -> Value {

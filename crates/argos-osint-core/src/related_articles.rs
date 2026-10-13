@@ -8,12 +8,17 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub const MATCH_VERSION: &str = "shared-headline-entities-v1";
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RelatedArticle {
     pub article: AtlasArticleRow,
+    /// Shared mentions (per-cycle leads) or labelled bases (all-retained).
     pub shared_mentions: Vec<String>,
     pub originating_run_ids: Vec<String>,
     pub place_only: bool,
+    /// All-retained rows: every occurrence of this URL.
+    pub origins: Vec<ArticleOrigin>,
+    /// False only when a shared canonical actor established the row.
+    pub established: bool,
 }
 impl RelatedArticle {
     pub fn reason(&self) -> String {
@@ -296,7 +301,7 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
 fn revision(a: &AtlasArticleRow) -> String {
     crate::nlp::cache::hash(&format!("{}:{}", atlas_metadata::input_hash(a), a.category))
 }
-fn canonical_url(raw: &str) -> String {
+pub(crate) fn canonical_url(raw: &str) -> String {
     reqwest::Url::parse(raw)
         .map(|mut u| {
             u.set_fragment(None);
@@ -343,6 +348,7 @@ impl Store {
                 shared_mentions: shared.into_iter().map(|m| m.original_text).collect(),
                 originating_run_ids: vec![run_id.into()],
                 place_only: named_count == 0,
+                ..RelatedArticle::default()
             });
         }
         let total = rows.len();

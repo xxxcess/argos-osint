@@ -20,6 +20,8 @@ pub enum GraphNodeKind {
     Finding,
     Evidence,
     Source,
+    /// One node per canonical Brain actor (merged actors collapse into it).
+    Actor,
 }
 
 impl GraphNodeKind {
@@ -32,6 +34,7 @@ impl GraphNodeKind {
             Self::Finding => "Finding",
             Self::Evidence => "Evidence",
             Self::Source => "Source",
+            Self::Actor => "Actor",
         }
     }
 }
@@ -45,6 +48,10 @@ pub enum GraphEdgeKind {
     Reports,
     DerivedFrom,
     DiscoveredIn,
+    /// Observed Brain Link (relation in `GraphEdge::directive`).
+    Link,
+    /// Tentative Brain Related lead; never evidence.
+    Related,
 }
 
 impl GraphEdgeKind {
@@ -57,6 +64,8 @@ impl GraphEdgeKind {
             Self::Reports => "reports",
             Self::DerivedFrom => "derived_from",
             Self::DiscoveredIn => "discovered_in",
+            Self::Link => "link",
+            Self::Related => "related",
         }
     }
 }
@@ -80,6 +89,7 @@ pub struct GraphEdge {
     pub from: String,
     pub to: String,
     pub kind: GraphEdgeKind,
+    /// Directive id; for [`GraphEdgeKind::Link`] the Link relation.
     pub directive: Option<String>,
 }
 
@@ -145,6 +155,7 @@ impl Store {
 
         match kind_str.as_str() {
             "cycle_brief" => self.build_brief_graph(memory_id),
+            "actor" | "link" | "related" => self.build_actor_graph(memory_id, &kind_str),
             "manual_note" | "user_profile" | "investigation_digest" | "source_summary" => {
                 Ok(MemoryGraph::default())
             }
@@ -192,8 +203,193 @@ impl Store {
         Ok(build_memory_graph(&insight, &plans))
     }
 
+    /// Actor/Link/Related graph: one node per canonical actor, article
+    /// occurrences as evidence nodes, observed Link edges and tentative
+    /// Related edges kept as distinct edge kinds.
+    fn build_actor_graph(&self, memory_id: &str, kind: &str) -> anyhow::Result<MemoryGraph> {
+        use crate::memory_metadata::{EndpointRef, MemoryPayload};
+        const MAX_ARTICLES: usize = 40;
+        let mut graph = GraphBuilder::default();
+        let mut articles: Vec<(String, String)> = Vec::new();
+        let mut related_memories: Vec<String> = Vec::new();
+        match kind {
+            "actor" => {
+                let canonical = crate::brain_actors::resolve(&self.conn, memory_id)?;
+                let actor = self.actor_node(&mut graph, &canonical)?;
+                let ids = crate::brain_actors::equivalent_ids(&self.conn, &canonical)?;
+                for id in &ids {
+                    let mut stmt = self.conn.prepare(
+                        "SELECT t.origin,t.ref_id,s.memory_id FROM brain_memory_endpoints s
+                         JOIN brain_memory_endpoints t ON t.memory_id=s.memory_id AND t.side='target' AND t.endpoint_kind='article'
+                         JOIN memory_metadata mm ON mm.memory_id=s.memory_id AND mm.memory_kind='link' AND mm.lifecycle<>'retired'
+                         WHERE s.side='source' AND s.endpoint_kind='memory' AND s.ref_id=?1 ORDER BY t.origin DESC, t.ref_id",
+                    )?;
+                    let rows = stmt
+                        .query_map([id], |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                            ))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    for (run, article, link) in rows {
+                        if articles.len() >= MAX_ARTICLES {
+                            break;
+                        }
+                        let Some(node) = self.article_node(&mut graph, &run, &article)? else {
+                            continue;
+                        };
+                        let relation = match self.memory_payload(&link)? {
+                            Some(MemoryPayload::Link(p)) => p.relation,
+                            _ => "link".into(),
+                        };
+                        graph.edge(GraphEdge {
+                            from: actor.clone(),
+                            to: node,
+                            kind: GraphEdgeKind::Link,
+                            directive: Some(relation),
+                        });
+                        articles.push((run, article));
+                    }
+                }
+                for (run, article) in &articles {
+                    let mut stmt = self.conn.prepare(
+                        "SELECT e.memory_id FROM brain_memory_endpoints e
+                         JOIN memory_metadata mm ON mm.memory_id=e.memory_id AND mm.memory_kind='related' AND mm.lifecycle<>'retired'
+                         WHERE e.endpoint_kind='article' AND e.origin=?1 AND e.ref_id=?2",
+                    )?;
+                    related_memories.extend(
+                        stmt.query_map([run, article], |r| r.get::<_, String>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()?,
+                    );
+                }
+            }
+            "link" | "related" => {
+                let endpoint = |g: &mut GraphBuilder,
+                                e: &EndpointRef|
+                 -> anyhow::Result<Option<String>> {
+                    match e {
+                        EndpointRef::Memory { memory_id, .. } => {
+                            let canonical = crate::brain_actors::resolve(&self.conn, memory_id)?;
+                            Ok(Some(self.actor_node(g, &canonical)?))
+                        }
+                        EndpointRef::Article {
+                            run_id, article_id, ..
+                        } => self.article_node(g, run_id, article_id),
+                        EndpointRef::Source { .. } => Ok(None),
+                    }
+                };
+                match self.memory_payload(memory_id)? {
+                    Some(MemoryPayload::Link(p)) => {
+                        if let (Some(a), Some(b)) = (
+                            endpoint(&mut graph, &p.source)?,
+                            endpoint(&mut graph, &p.target)?,
+                        ) {
+                            graph.edge(GraphEdge {
+                                from: a,
+                                to: b,
+                                kind: GraphEdgeKind::Link,
+                                directive: Some(p.relation),
+                            });
+                        }
+                    }
+                    Some(MemoryPayload::Related(_)) => related_memories.push(memory_id.into()),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        related_memories.sort();
+        related_memories.dedup();
+        // One Related edge per unordered article pair (records exist per side).
+        let mut pairs = HashSet::new();
+        for related in related_memories {
+            if let Some(MemoryPayload::Related(p)) = self.memory_payload(&related)? {
+                let (
+                    EndpointRef::Article {
+                        run_id: ar,
+                        article_id: aa,
+                        ..
+                    },
+                    EndpointRef::Article {
+                        run_id: br,
+                        article_id: ba,
+                        ..
+                    },
+                ) = (&p.source, &p.target)
+                else {
+                    continue;
+                };
+                let mut key = [format!("{ar}/{aa}"), format!("{br}/{ba}")];
+                key.sort();
+                if !pairs.insert(key) {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (
+                    self.article_node(&mut graph, ar, aa)?,
+                    self.article_node(&mut graph, br, ba)?,
+                ) {
+                    graph.edge(GraphEdge {
+                        from: a,
+                        to: b,
+                        kind: GraphEdgeKind::Related,
+                        directive: Some(p.basis),
+                    });
+                }
+            }
+        }
+        Ok(MemoryGraph {
+            nodes: graph.nodes,
+            edges: graph.edges,
+        })
+    }
+
+    fn actor_node(&self, graph: &mut GraphBuilder, canonical: &str) -> anyhow::Result<String> {
+        let row = crate::brain_actors::actor(&self.conn, canonical)?;
+        let (label, detail) = row
+            .map(|a| {
+                (
+                    a.display_name.clone(),
+                    format!("{} · {}", a.display_name, a.subtype),
+                )
+            })
+            .unwrap_or_else(|| (canonical.to_string(), canonical.to_string()));
+        Ok(graph.node(GraphNode {
+            id: format!("actor:{canonical}"),
+            kind: GraphNodeKind::Actor,
+            label,
+            detail,
+            tags: vec![],
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
+        }))
+    }
+
+    fn article_node(
+        &self,
+        graph: &mut GraphBuilder,
+        run: &str,
+        article: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let Some(a) = self.atlas_article(run, article)? else {
+            return Ok(None);
+        };
+        Ok(Some(graph.node(GraphNode {
+            id: format!("article:{run}/{article}"),
+            kind: GraphNodeKind::Evidence,
+            label: a.title.clone(),
+            detail: format!("{} · {}", a.source_name, a.title),
+            tags: vec![],
+            article_id: a.id.clone(),
+            run_id: a.run_id.clone(),
+            published_at: a.published_at.clone(),
+        })))
+    }
+
     fn build_brief_graph(&self, memory_id: &str) -> anyhow::Result<MemoryGraph> {
-        let mut stmt = self.conn.prepare("SELECT member_id FROM memory_brief_memberships WHERE brief_id=?1 AND member_type='atomic_claim'")?;
+        let mut stmt = self.conn.prepare("SELECT member_id FROM memory_brief_memberships WHERE brief_id=?1 AND member_type IN ('atomic_claim','claim','inference')")?;
         let members: Vec<String> = stmt
             .query_map([memory_id], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?;

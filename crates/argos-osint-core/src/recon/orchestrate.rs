@@ -2787,7 +2787,14 @@ pub(crate) fn recall_for_turn(
         allow_background: false,
     };
 
-    let text_hits = crate::brain_query::recall_candidates(store, "recon", run_id, question)?;
+    let text_hits = crate::brain_query::recall_candidates_for(
+        store,
+        "recon",
+        run_id,
+        question,
+        query.candidate_limit,
+        &query.allowed_kinds,
+    )?;
     let unfamiliar = super::brain_is_thin(&text_hits);
     let mut recalled: Vec<super::RecallInsight> = Vec::new();
     let subject = super::question_subject(question);

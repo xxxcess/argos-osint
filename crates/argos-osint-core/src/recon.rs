@@ -4238,6 +4238,7 @@ fn persist_claims(
             written.push(memory_id.clone());
             touched.push(memory_id.clone());
             tx.execute("INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![fingerprint,memory_id,entity,predicate,object,claim_value.get("topic").and_then(Value::as_str).unwrap_or(""),claim_value.get("classification").and_then(Value::as_str).unwrap_or("fact"),claim_value.get("confidence").and_then(Value::as_f64).unwrap_or(0.5),now(),now()])?;
+            crate::brain_backfill::bind_claim_subject(&tx, &fingerprint)?;
             let mut stmt=tx.prepare("SELECT fingerprint FROM insight_claims WHERE entity_id=?1 AND predicate=?2 AND fingerprint<>?3")?;
             let other: Vec<String> = stmt
                 .query_map(params![entity, predicate, fingerprint], |r| r.get(0))?

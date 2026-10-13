@@ -903,7 +903,7 @@ fn reject_collection_maintenance(
     }
     .ok_or_else(|| anyhow!("Atlas run {run_id} not found"))?;
     let stats: serde_json::Value = serde_json::from_str(&run.stats_json).unwrap_or_default();
-    anyhow::ensure!(stats.get("contract_version").and_then(serde_json::Value::as_str) != Some("atlas-collection-v1"), "Repair/Verify are historical memory maintenance only; atlas-collection-v1 cycles do not publish memories");
+    anyhow::ensure!(!stats.get("contract_version").and_then(serde_json::Value::as_str).is_some_and(argos_osint_core::atlas_work::is_collection_contract), "Repair/Verify are historical memory maintenance only; atlas-collection cycles do not publish memories");
     Ok(run.id.clone())
 }
 

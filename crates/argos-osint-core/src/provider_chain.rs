@@ -178,6 +178,9 @@ pub struct ExecuteOptions {
     pub admission_account: String,
     /// Operation-specific bound. Ordinary callers retain the 4/3 policy.
     pub attempt_limit: Option<u32>,
+    /// User-waiting work (e.g. an open Intel brief): takes freed slots ahead
+    /// of background callers on the same account, within the same limit.
+    pub interactive: bool,
 }
 
 impl ExecuteOptions {
@@ -343,12 +346,17 @@ where
             let guard = if admission_key.is_empty() {
                 None
             } else {
+                let _waiting = opts
+                    .interactive
+                    .then(|| tasks::InteractiveWait::register(admission_key));
                 loop {
                     if cancelled(&opts) {
                         report.cancelled = true;
                         break None;
                     }
-                    if let Some(g) = AdmissionGuard::try_enter(admission_key) {
+                    if let Some(g) =
+                        AdmissionGuard::try_enter_class(admission_key, opts.interactive)
+                    {
                         break Some(g);
                     }
                     if sleep_recorded(&opts, Duration::from_millis(50)).await {

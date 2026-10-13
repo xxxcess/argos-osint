@@ -63,6 +63,40 @@ pub struct OperationScope<'a> {
     pub insight_contract: bool,
     /// Per-stage completion ceiling for the insight lane (defaults to 8,192).
     pub completion_tokens: Option<u32>,
+    /// Requested reasoning effort for this operation (provider default if unset).
+    pub reasoning: crate::request_policy::ReasoningEffort,
+    /// Operation key (e.g. `intel_brief_links.generate`) for route overrides.
+    pub operation_key: Option<&'a str>,
+    /// Declared response format of this dispatch.
+    pub response_format: ResponseFormat,
+    /// Input revision the dispatch was compiled from (cache/audit identity).
+    pub input_revision: Option<&'a str>,
+    /// A user is waiting on this result (admission priority, no preemption).
+    pub interactive: bool,
+}
+
+/// Declared response format (spec §3). `BoundedDecision` may use native Jev
+/// or constrained chat; `GeneratedJson`/`Prose` skip Decisions-only routes
+/// without spending an attempt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormat {
+    BoundedDecision,
+    #[default]
+    GeneratedJson,
+    Prose,
+}
+
+/// The declaration every dispatch carries, recorded for audit.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DispatchDeclaration {
+    pub logical_role: String,
+    pub operation_key: String,
+    pub response_format: ResponseFormat,
+    pub input_revision: String,
+    pub request_policy: crate::request_policy::RequestPolicy,
+    /// True when an operation override supplied the route chain.
+    pub overridden: bool,
 }
 
 impl<'a> OperationScope<'a> {
@@ -75,7 +109,57 @@ impl<'a> OperationScope<'a> {
             generation: 1,
             insight_contract: false,
             completion_tokens: None,
+            reasoning: crate::request_policy::ReasoningEffort::Default,
+            operation_key: None,
+            response_format: ResponseFormat::GeneratedJson,
+            input_revision: None,
+            interactive: false,
         }
+    }
+
+    pub fn with_interactive(mut self) -> Self {
+        self.interactive = true;
+        self
+    }
+
+    pub fn with_operation(mut self, key: &'a str) -> Self {
+        self.operation_key = Some(key);
+        self
+    }
+
+    pub fn with_format(mut self, format: ResponseFormat) -> Self {
+        self.response_format = format;
+        self
+    }
+
+    pub fn with_input_revision(mut self, revision: &'a str) -> Self {
+        self.input_revision = Some(revision);
+        self
+    }
+
+    /// The dispatch declaration for `policy`.
+    pub fn declaration(
+        &self,
+        settings: &SettingsFile,
+        policy: crate::request_policy::RequestPolicy,
+    ) -> DispatchDeclaration {
+        let canonical = provider::role_name(self.role).unwrap_or(self.role);
+        DispatchDeclaration {
+            logical_role: canonical.to_string(),
+            operation_key: self.operation_key.unwrap_or("").to_string(),
+            response_format: self.response_format,
+            input_revision: self.input_revision.unwrap_or("").to_string(),
+            request_policy: policy,
+            overridden: settings
+                .defaults
+                .resolve_operation(self.operation_key, canonical)
+                .1,
+        }
+    }
+
+    pub fn with_reasoning(mut self, effort: crate::request_policy::ReasoningEffort) -> Self {
+        self.reasoning = effort;
+        self
     }
 
     pub fn with_run(mut self, run_id: &'a str) -> Self {
@@ -374,8 +458,18 @@ pub fn resolve_role_routes(
     settings: &SettingsFile,
     role: &str,
 ) -> (Vec<Route>, Vec<ProviderSecret>) {
+    resolve_operation_routes(auth, settings, role, None)
+}
+
+/// Route chain for an operation: its override when set, else the role chain.
+pub fn resolve_operation_routes(
+    auth: &AuthFile,
+    settings: &SettingsFile,
+    role: &str,
+    operation: Option<&str>,
+) -> (Vec<Route>, Vec<ProviderSecret>) {
     let canonical = provider::role_name(role).unwrap_or(role);
-    let (assignment, _inherited) = settings.defaults.resolve_role(canonical);
+    let (assignment, _overridden) = settings.defaults.resolve_operation(operation, canonical);
     let chain = assignment.chain();
     let mut routes = Vec::with_capacity(chain.len());
     let mut secrets = Vec::with_capacity(chain.len());
@@ -879,6 +973,7 @@ fn record_attempt_start(
     route: &Route,
     transport: &str,
     queued_at: &str,
+    declaration: &str,
 ) -> Result<String> {
     let attempt_id = canonical_attempt_id(operation_id, generation, route_index, attempt);
     let Some(db_path) = db_path else {
@@ -890,11 +985,12 @@ fn record_attempt_start(
         "INSERT INTO recon_model_attempts (
            id, operation_id, generation, route_index, attempt,
            provider, account, model, transport, dispatched,
-           outcome, queued_at, admitted_at, started_at, finished_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'running', ?10, ?11, ?11, '')
+           outcome, queued_at, admitted_at, started_at, finished_at, declaration_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'running', ?10, ?11, ?11, '', ?12)
          ON CONFLICT(operation_id, generation, route_index, attempt) DO UPDATE SET
            outcome = 'running', queued_at = excluded.queued_at, admitted_at = excluded.admitted_at,
-            started_at = excluded.started_at, finished_at = ''",
+            started_at = excluded.started_at, finished_at = '',
+            declaration_json = excluded.declaration_json",
         rusqlite::params![
             attempt_id,
             operation_id,
@@ -907,6 +1003,7 @@ fn record_attempt_start(
             transport,
             queued_at,
             now,
+            declaration,
         ],
     )?;
     Ok(attempt_id)
@@ -1010,7 +1107,8 @@ where
     } else {
         let _ = ensure_operation(db_path, scope, "");
     }
-    let (mut routes, secrets) = resolve_role_routes(auth, settings, scope.role);
+    let (mut routes, secrets) =
+        resolve_operation_routes(auth, settings, scope.role, scope.operation_key);
     // Free-chat extraction cannot dispatch a Decisions-only model. Keep route
     // indices and declared fallback order so audit and secrets remain aligned.
     for (route, secret) in routes.iter_mut().zip(&secrets) {
@@ -1031,7 +1129,14 @@ where
 
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
-    let completion_tokens = scope.completion_tokens.unwrap_or(8192);
+    let insight_policy = crate::request_policy::RequestPolicy {
+        max_output_tokens: Some(scope.completion_tokens.unwrap_or(8192)),
+        json_object: true,
+        reasoning: scope.reasoning,
+    };
+    let declaration = Arc::new(
+        serde_json::to_string(&scope.declaration(settings, insight_policy)).unwrap_or_default(),
+    );
     let mut attempt_counter = 0u32;
     let mut last_route_idx = 0usize;
     let on_event_shared = on_event.clone();
@@ -1069,6 +1174,7 @@ where
         let role = role.clone();
         let run_id = run_id.clone();
         let queued_at = queued_at.clone();
+        let declaration = declaration.clone();
 
         async move {
             if insight_contract
@@ -1090,6 +1196,7 @@ where
                 &route_cloned,
                 transport.as_str(),
                 &queued_at,
+                &declaration,
             )
             .map_err(|error| {
                 DispatchError::from_failure(ProviderFailure::new(
@@ -1188,7 +1295,7 @@ where
                     &secret,
                     &messages_vec,
                     transport,
-                    completion_tokens,
+                    &insight_policy,
                     Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
                     progress_sink.as_deref(),
                 )
@@ -1396,6 +1503,7 @@ where
         recorded_waits: None,
         admission_account: String::new(),
         attempt_limit: insight_contract.then_some(2),
+        interactive: scope.interactive,
     };
 
     let report = provider_chain::execute(&routes, dispatch, opts).await;
@@ -1464,7 +1572,8 @@ where
     } else {
         let _ = ensure_operation(db_path, scope, "");
     }
-    let (mut routes, secrets) = resolve_role_routes(auth, settings, scope.role);
+    let (mut routes, secrets) =
+        resolve_operation_routes(auth, settings, scope.role, scope.operation_key);
     // Capability is resolved separately from endpoint availability: a Jev
     // route without a supported native connection is skipped (zero requests,
     // no attempt/RPM/retry consumed); it is never sent to chat.
@@ -1479,6 +1588,18 @@ where
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
     let stage_tokens = scope.completion_tokens;
+    let stage_reasoning = scope.reasoning;
+    let declaration = Arc::new(
+        serde_json::to_string(&scope.declaration(
+            settings,
+            crate::request_policy::RequestPolicy {
+                max_output_tokens: stage_tokens,
+                json_object: false,
+                reasoning: stage_reasoning,
+            },
+        ))
+        .unwrap_or_default(),
+    );
     let mut attempt_counter = 0u32;
     let on_event_shared = on_event.clone();
     let op_id = scope.operation_id.to_string();
@@ -1505,6 +1626,7 @@ where
         let run_id = run_id.clone();
         let queued_at = queued_at.clone();
         let repairs = repairs.clone();
+        let declaration = declaration.clone();
 
         async move {
             let attempt_db_id = record_attempt_start(
@@ -1516,6 +1638,7 @@ where
                 &route_cloned,
                 transport,
                 &queued_at,
+                &declaration,
             )
             .map_err(|error| {
                 DispatchError::from_failure(ProviderFailure::new(
@@ -1731,7 +1854,11 @@ where
                         Deadlines::native_decision(),
                         None,
                         None,
-                        Some(stage_tokens.unwrap_or(2048)),
+                        &crate::request_policy::RequestPolicy {
+                            max_output_tokens: Some(stage_tokens.unwrap_or(2048)),
+                            json_object: true,
+                            reasoning: stage_reasoning,
+                        },
                     )
                     .await
                 } else {
@@ -1883,6 +2010,7 @@ where
         recorded_waits: None,
         admission_account: String::new(),
         attempt_limit: insight_contract.then_some(2),
+        interactive: scope.interactive,
     };
 
     let report = provider_chain::execute(&routes, dispatch, opts).await;

@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-use argos_osint_core::recon::{recon_path, GraphNodeKind, MemoryGraph};
+use argos_osint_core::recon::{recon_path, GraphEdgeKind, GraphNodeKind, MemoryGraph};
 
 use super::app::{App, Target};
 use super::brain_detail;
@@ -104,6 +104,7 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     } else {
         path_lines(&app.brain_graph)
     };
+    let lines = with_typed(&app.brain_typed, lines);
     let widest = lines
         .iter()
         .map(|line| line.text.chars().count())
@@ -131,7 +132,9 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
         height: legend_h,
     };
     let path_area = path_content(area, legend_h);
-    let mut title = if claim {
+    let mut title = if let Some(kind) = super::app::structural_title(app) {
+        kind
+    } else if claim {
         " claim path "
     } else {
         " recon path "
@@ -295,10 +298,122 @@ fn legend_parts(app: &App, claim: bool) -> Vec<String> {
     );
     push(&mut parts, GraphNodeKind::Finding, "finding");
     push(&mut parts, GraphNodeKind::Source, "source");
+    push(&mut parts, GraphNodeKind::Actor, "actor");
+    let edge = |kind| app.brain_graph.edges.iter().any(|e| e.kind == kind);
+    if edge(GraphEdgeKind::Link) {
+        parts.push(format!("{LINK_MARK} link (observed)"));
+    }
+    if edge(GraphEdgeKind::Related) {
+        parts.push(format!("{RELATED_MARK} related (tentative)"));
+    }
     parts
 }
 
+/// Observed Link edges draw solid; tentative Related edges draw dashed.
+pub(crate) const LINK_MARK: &str = "──▶";
+pub(crate) const RELATED_MARK: &str = "┄┄";
+
+/// Actor graph: each canonical actor once, its observed Links to articles,
+/// then tentative Related leads between articles (distinct marks).
+fn actor_path_lines(graph: &MemoryGraph) -> Vec<PathLine> {
+    let mut lines = Vec::new();
+    let article = |id: &str| graph.node(id);
+    let line = |text: String, node: Option<&argos_osint_core::recon::GraphNode>| PathLine {
+        text,
+        article_id: node.map(|n| n.article_id.clone()).unwrap_or_default(),
+        run_id: node.map(|n| n.run_id.clone()).unwrap_or_default(),
+    };
+    let date = |n: &argos_osint_core::recon::GraphNode| {
+        n.published_at
+            .get(..10)
+            .map(|d| format!("{d}  "))
+            .unwrap_or_default()
+    };
+    for actor in graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == GraphNodeKind::Actor)
+    {
+        lines.push(line(
+            format!("{}  {}", glyph(actor.kind), actor.detail),
+            None,
+        ));
+        let links: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == GraphEdgeKind::Link && e.from == actor.id)
+            .collect();
+        for (i, edge) in links.iter().enumerate() {
+            let mark = if i + 1 == links.len() { "└" } else { "├" };
+            if let Some(target) = article(&edge.to) {
+                lines.push(line(
+                    format!(
+                        "{mark}{LINK_MARK} {} {}  {}{}",
+                        edge.directive.as_deref().unwrap_or("link"),
+                        glyph(target.kind),
+                        date(target),
+                        target.label
+                    ),
+                    Some(target),
+                ));
+            }
+        }
+    }
+    let related: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind == GraphEdgeKind::Related)
+        .collect();
+    if !related.is_empty() {
+        lines.push(line(
+            "Related leads · tentative · not evidence".into(),
+            None,
+        ));
+    }
+    for edge in related {
+        let (Some(a), Some(b)) = (article(&edge.from), article(&edge.to)) else {
+            continue;
+        };
+        lines.push(line(format!("  {}  {}", glyph(a.kind), a.label), Some(a)));
+        lines.push(line(
+            format!(
+                "  {RELATED_MARK} {} {}  {}{}",
+                edge.directive.as_deref().unwrap_or("related"),
+                glyph(b.kind),
+                date(b),
+                b.label
+            ),
+            Some(b),
+        ));
+    }
+    lines
+}
+
+/// Typed payload header (kind, typed fields) above the path lines.
+pub(crate) fn with_typed(typed: &[String], lines: Vec<PathLine>) -> Vec<PathLine> {
+    if typed.is_empty() {
+        return lines;
+    }
+    let blank = |text: String| PathLine {
+        text,
+        article_id: String::new(),
+        run_id: String::new(),
+    };
+    let mut out: Vec<PathLine> = typed.iter().cloned().map(blank).collect();
+    out.push(blank(String::new()));
+    out.extend(lines);
+    out
+}
+
 pub(crate) fn path_lines(graph: &MemoryGraph) -> Vec<PathLine> {
+    if graph.nodes.iter().any(|n| n.kind == GraphNodeKind::Actor)
+        || graph
+            .edges
+            .iter()
+            .any(|e| matches!(e.kind, GraphEdgeKind::Link | GraphEdgeKind::Related))
+    {
+        return actor_path_lines(graph);
+    }
     let path = recon_path(graph);
     let mut lines = Vec::new();
     if let Some(investigation) = graph
@@ -399,6 +514,7 @@ fn glyph(kind: GraphNodeKind) -> &'static str {
         GraphNodeKind::Evidence => "·",
         GraphNodeKind::Source => "○",
         GraphNodeKind::Investigation => "▣",
+        GraphNodeKind::Actor => "◉",
     }
 }
 

@@ -361,8 +361,39 @@ impl WorkerPool {
             Self::spawn_index_drainer(db_path.clone(), owner.clone()),
             Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),
             Self::spawn_insight_refresh_drainer(db_path.clone(), owner.clone()),
+            Self::spawn_brain_backfill_drainer(db_path.clone(), owner.clone()),
             Self::spawn_intel_brief_drainer(db_path, owner),
         ]
+    }
+
+    /// Local, resumable Brain actor/relationship backfill over every retained
+    /// cycle and legacy reference (spec §5). Bounded batches while elected;
+    /// idles once coverage is complete. No model/network/embedding work.
+    pub fn spawn_brain_backfill_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let _ = std::thread::Builder::new()
+            .name("argos-brain-backfill".into())
+            .spawn(move || {
+                while !flag.load(Ordering::Acquire) {
+                    let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
+                        try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
+                    });
+                    let complete = elected
+                        && crate::store::Store::open(&db_path)
+                            .and_then(|s| s.brain_backfill(crate::brain_backfill::BATCH))
+                            .map(|r| r.complete)
+                            .unwrap_or(false);
+                    let pause = if !elected || complete { 30 } else { 1 };
+                    for _ in 0..pause * 4 {
+                        if flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+            });
+        Self { stop }
     }
 
     /// Dedicated Intel brief stage runner. A multi-thread runtime keeps the

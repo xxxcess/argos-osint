@@ -320,14 +320,14 @@ impl BriefOperationRow {
         let source = if self.overridden {
             "override".to_string()
         } else {
-            format!("inherits {}", self.role)
+            format!("← {}", self.role)
         };
         let target = if self.provider.is_empty() && self.model.is_empty() {
             "unset".to_string()
         } else {
-            format!("{} / {}", self.provider, self.model)
+            format!("{}/{}", self.provider, self.model)
         };
-        format!("  {:<28} {target}  ({source})", self.label)
+        format!("  {:<18} {target}  {source}", self.label)
     }
 }
 
@@ -372,14 +372,12 @@ mod brief_operation_tests {
             .find(|r| r.key == provider::OP_LINKS_GENERATE)
             .unwrap();
         assert!(links.overridden);
-        assert!(links
-            .render()
-            .contains("google / gemini-2.5-flash  (override)"));
+        assert!(links.render().contains("google/gemini-2.5-flash  override"));
         let inf = rows
             .iter()
             .find(|r| r.key == provider::OP_INFERENCES_GENERATE)
             .unwrap();
         assert!(!inf.overridden);
-        assert!(inf.render().contains("inherits synthesis"));
+        assert!(inf.render().contains("← synthesis"));
     }
 }

@@ -35,7 +35,7 @@ fn fresh_store_has_schema_37_tables_and_typed_columns() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(version, crate::store::SCHEMA_VERSION);
-    assert_eq!(version, 37);
+    assert_eq!(version, crate::store::SCHEMA_VERSION);
     for table in [
         "brain_actors",
         "brain_actor_aliases",

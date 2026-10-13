@@ -110,3 +110,14 @@ CREATE TABLE IF NOT EXISTS intel_brief_stage_timings (
     recorded_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS intel_brief_timing_job ON intel_brief_stage_timings(job_id);
+
+-- Schema 38: resumable local Brain backfill receipts (per source unit) and
+-- per-source high-water state.
+CREATE TABLE IF NOT EXISTS brain_backfill_receipts (
+    source TEXT NOT NULL,
+    unit_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    coverage TEXT NOT NULL DEFAULT '',
+    completed_at TEXT NOT NULL,
+    PRIMARY KEY (source, unit_id)
+);

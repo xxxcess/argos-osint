@@ -11,6 +11,9 @@ use rusqlite::params;
 use serde_json::{json, Value};
 use std::sync::{atomic::AtomicBool, Arc};
 
+/// Evidence memories (Brain Actor/Link/Related records are structural).
+const EVIDENCE_MEMORIES: &str = "SELECT COUNT(*) FROM memories m WHERE NOT EXISTS (SELECT 1 FROM memory_metadata t WHERE t.memory_id=m.id AND t.memory_kind IN ('actor','link','related'))";
+
 fn print_attempt_timings(store: &Store, task_id: &str) {
     let mut statement = store
         .conn
@@ -282,8 +285,7 @@ async fn report_eight_five_eight_is_five_requests_atomic_publication_and_zero_re
     assert_eq!(
         store
             .conn
-            .query_row("SELECT COUNT(*) FROM memories", [], |r| r
-                .get::<_, usize>(0))
+            .query_row(EVIDENCE_MEMORIES, [], |r| r.get::<_, usize>(0))
             .unwrap(),
         13
     );
@@ -490,8 +492,7 @@ async fn partial_assessment_keeps_qualified_items_and_explicit_epoch_preserves_c
     assert_eq!(
         store
             .conn
-            .query_row("SELECT COUNT(*) FROM memories", [], |r| r
-                .get::<_, usize>(0))
+            .query_row(EVIDENCE_MEMORIES, [], |r| r.get::<_, usize>(0))
             .unwrap(),
         1
     );

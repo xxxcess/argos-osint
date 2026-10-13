@@ -898,6 +898,7 @@ impl Store {
                                 claim.rsp_status.trim(),
                             ],
                         )?;
+                        crate::brain_backfill::bind_claim_subject(&self.conn, &fingerprint)?;
                         let others: Vec<String> = {
                             let mut stmt = self.conn.prepare(
                                 "SELECT fingerprint FROM insight_claims WHERE entity_id=?1 AND predicate=?2 AND fingerprint<>?3",

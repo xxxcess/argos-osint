@@ -337,3 +337,63 @@ fn operation_override_routes_only_its_operation() {
         ["local:synth-model"]
     );
 }
+
+// §3: every attempt record carries its dispatch declaration.
+#[tokio::test]
+async fn attempt_records_persist_the_dispatch_declaration() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("argos.db");
+    drop(Store::open(&db).unwrap());
+    let server = mock::serve(vec![mock::ok_json("{}", "stop")]).await;
+    let auth = auth(&server.base_url, Some("or-fixture"));
+    let mut settings = assessor(("local", "fixture"), &[]);
+    settings.defaults.synthesis = ModelAssignment {
+        provider: "local".into(),
+        model: "synth".into(),
+        ..Default::default()
+    };
+    settings.defaults.operation_overrides.insert(
+        provider::OP_LINKS_GENERATE.into(),
+        ModelAssignment {
+            provider: "local".into(),
+            model: "links-model".into(),
+            ..Default::default()
+        },
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    let scope = OperationScope::new("decl-op", "synthesis")
+        .with_operation(provider::OP_LINKS_GENERATE)
+        .with_format(ResponseFormat::GeneratedJson)
+        .with_input_revision("rev-7");
+    execute_chat(
+        &auth,
+        &settings,
+        &scope,
+        &user("Links as JSON"),
+        |_| Ok(()),
+        &cancel,
+        None,
+        None,
+        Some(&db),
+        false,
+    )
+    .await
+    .unwrap();
+    let store = Store::open(&db).unwrap();
+    let (model, raw): (String, String) = store
+        .conn
+        .query_row(
+            "SELECT model, declaration_json FROM recon_model_attempts WHERE operation_id='decl-op'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(model, "links-model");
+    let d: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(d["logical_role"], "synthesis");
+    assert_eq!(d["operation_key"], provider::OP_LINKS_GENERATE);
+    assert_eq!(d["response_format"], "generated_json");
+    assert_eq!(d["input_revision"], "rev-7");
+    assert_eq!(d["overridden"], true);
+    assert!(d["request_policy"].is_object());
+}

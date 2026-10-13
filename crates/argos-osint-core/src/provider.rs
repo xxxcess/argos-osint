@@ -483,14 +483,10 @@ pub const OP_INFERENCES_ASSESS: &str = "intel_brief_inferences.assess";
 
 /// Overridable brief operations: (key, label, inherited logical role).
 pub const BRIEF_OPERATIONS: [(&str, &str, &str); 4] = [
-    (OP_CLAIMS_GENERATE, "Claims · generate", "claim_assessor"),
-    (OP_INFERENCES_GENERATE, "Inferences · generate", "synthesis"),
-    (
-        OP_INFERENCES_ASSESS,
-        "Inferences · assess support",
-        "claim_assessor",
-    ),
-    (OP_LINKS_GENERATE, "Links · generate", "synthesis"),
+    (OP_CLAIMS_GENERATE, "Claims", "claim_assessor"),
+    (OP_INFERENCES_GENERATE, "Inferences", "synthesis"),
+    (OP_INFERENCES_ASSESS, "Inference support", "claim_assessor"),
+    (OP_LINKS_GENERATE, "Links", "synthesis"),
 ];
 
 /// Logical role an operation key inherits, if it is a known operation.

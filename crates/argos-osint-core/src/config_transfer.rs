@@ -1211,14 +1211,26 @@ fn check_role_compatibility(
                 ),
             ));
         }
-        if GENERAL_ROLES.contains(&role) && decisions {
-            issues.push(issue(
-                &child(pointer, "primary"),
-                format!("a decisions model cannot serve the {role} role"),
-            ));
-        }
+    }
+    // A Jev primary is valid on general roles: bounded decisions use it
+    // natively and generated JSON/prose skip it for the first chat-capable
+    // fallback (spec §3). Only roles that never take bounded decisions need
+    // at least one chat-capable route in the chain.
+    if GENERATIVE_ONLY_ROLES.contains(&role)
+        && !routes.is_empty()
+        && routes
+            .iter()
+            .all(|r| provider::is_decisions_model(&r.model))
+    {
+        issues.push(issue(
+            &child(pointer, "primary"),
+            format!("the {role} role needs a chat-capable route; decisions models alone cannot serve it"),
+        ));
     }
 }
+
+/// General roles whose operations are all generated JSON/prose.
+const GENERATIVE_ONLY_ROLES: &[&str] = &["recon", "synthesis", "summarization"];
 
 fn check_route_reference(
     route: &Route,

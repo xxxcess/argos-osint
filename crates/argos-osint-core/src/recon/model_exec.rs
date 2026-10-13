@@ -973,6 +973,7 @@ fn record_attempt_start(
     route: &Route,
     transport: &str,
     queued_at: &str,
+    declaration: &str,
 ) -> Result<String> {
     let attempt_id = canonical_attempt_id(operation_id, generation, route_index, attempt);
     let Some(db_path) = db_path else {
@@ -984,11 +985,12 @@ fn record_attempt_start(
         "INSERT INTO recon_model_attempts (
            id, operation_id, generation, route_index, attempt,
            provider, account, model, transport, dispatched,
-           outcome, queued_at, admitted_at, started_at, finished_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'running', ?10, ?11, ?11, '')
+           outcome, queued_at, admitted_at, started_at, finished_at, declaration_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'running', ?10, ?11, ?11, '', ?12)
          ON CONFLICT(operation_id, generation, route_index, attempt) DO UPDATE SET
            outcome = 'running', queued_at = excluded.queued_at, admitted_at = excluded.admitted_at,
-            started_at = excluded.started_at, finished_at = ''",
+            started_at = excluded.started_at, finished_at = '',
+            declaration_json = excluded.declaration_json",
         rusqlite::params![
             attempt_id,
             operation_id,
@@ -1001,6 +1003,7 @@ fn record_attempt_start(
             transport,
             queued_at,
             now,
+            declaration,
         ],
     )?;
     Ok(attempt_id)
@@ -1131,6 +1134,9 @@ where
         json_object: true,
         reasoning: scope.reasoning,
     };
+    let declaration = Arc::new(
+        serde_json::to_string(&scope.declaration(settings, insight_policy)).unwrap_or_default(),
+    );
     let mut attempt_counter = 0u32;
     let mut last_route_idx = 0usize;
     let on_event_shared = on_event.clone();
@@ -1168,6 +1174,7 @@ where
         let role = role.clone();
         let run_id = run_id.clone();
         let queued_at = queued_at.clone();
+        let declaration = declaration.clone();
 
         async move {
             if insight_contract
@@ -1189,6 +1196,7 @@ where
                 &route_cloned,
                 transport.as_str(),
                 &queued_at,
+                &declaration,
             )
             .map_err(|error| {
                 DispatchError::from_failure(ProviderFailure::new(
@@ -1581,6 +1589,17 @@ where
     let insight_contract = scope.insight_contract;
     let stage_tokens = scope.completion_tokens;
     let stage_reasoning = scope.reasoning;
+    let declaration = Arc::new(
+        serde_json::to_string(&scope.declaration(
+            settings,
+            crate::request_policy::RequestPolicy {
+                max_output_tokens: stage_tokens,
+                json_object: false,
+                reasoning: stage_reasoning,
+            },
+        ))
+        .unwrap_or_default(),
+    );
     let mut attempt_counter = 0u32;
     let on_event_shared = on_event.clone();
     let op_id = scope.operation_id.to_string();
@@ -1607,6 +1626,7 @@ where
         let run_id = run_id.clone();
         let queued_at = queued_at.clone();
         let repairs = repairs.clone();
+        let declaration = declaration.clone();
 
         async move {
             let attempt_db_id = record_attempt_start(
@@ -1618,6 +1638,7 @@ where
                 &route_cloned,
                 transport,
                 &queued_at,
+                &declaration,
             )
             .map_err(|error| {
                 DispatchError::from_failure(ProviderFailure::new(

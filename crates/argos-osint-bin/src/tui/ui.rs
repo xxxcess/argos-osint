@@ -254,10 +254,16 @@ fn model_areas(app: &App, area: Rect) -> Vec<Rect> {
             Constraint::Length(ACTION_H),
             Constraint::Min(4),
             Constraint::Length(ACTION_H),
-            Constraint::Min(0),
+            // Retry note (3) + role list/details incl. Brief operations: sized
+            // to its content so the fallback list, not the details, absorbs
+            // short terminals (fallbacks keep their 4-row minimum).
+            Constraint::Length(MODEL_ROLES_H),
         ],
     )
 }
+
+/// Height of the role list/details pane (note + bordered details content).
+const MODEL_ROLES_H: u16 = 18;
 
 fn dashboard_areas(area: Rect) -> (Rect, Rect, Rect) {
     let rows = split_vertical(

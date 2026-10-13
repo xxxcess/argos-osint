@@ -340,6 +340,69 @@ mod tests {
         );
     }
 
+    // §7: existing Jev role primaries survive import/export; operation
+    // overrides are additive and resettable.
+    #[test]
+    fn five_jev_role_primaries_survive_round_trip_with_overrides() {
+        let mut settings = SettingsFile::default();
+        settings.defaults.synthesis = assignment("openrouter", "openai/gpt-4o", &[]);
+        let jev_roles = [
+            "tool_picker",
+            "decision_model",
+            "classifier",
+            "entity_resolver",
+            "claim_assessor",
+        ];
+        for role in jev_roles {
+            let fallbacks: &[(&str, &str)] = if role == "tool_picker" || role == "decision_model" {
+                &[("openrouter", "~typesafe/jev-latest")]
+            } else {
+                &[("openrouter", "openai/gpt-4o-mini")]
+            };
+            *settings.defaults.role_mut(role).unwrap() = assignment("openrouter", JEVE, fallbacks);
+        }
+        settings.defaults.operation_overrides.insert(
+            crate::provider::OP_INFERENCES_ASSESS.into(),
+            assignment("openrouter", "openai/gpt-4o-mini", &[]),
+        );
+        let auth = inline_account("openrouter", "fake-key-1");
+        let quotas = QuotaSettingsFile {
+            settings: vec![rate_limit_entry("openrouter")],
+        };
+        let text = serialize_document(&export_document(&settings, &auth, &quotas)).unwrap();
+        let plan = parse_document(&text).expect("Jev primaries re-import");
+        let mut restored = SettingsFile::default();
+        apply_import(
+            &plan,
+            &mut restored,
+            &mut AuthFile::default(),
+            &mut QuotaSettingsFile { settings: vec![] },
+        )
+        .unwrap();
+        for role in jev_roles {
+            let a = restored.defaults.role_mut(role).unwrap();
+            assert_eq!(
+                (a.provider.as_str(), a.model.as_str()),
+                ("openrouter", JEVE),
+                "{role}"
+            );
+        }
+        assert_eq!(
+            toml::to_string_pretty(&settings.defaults).unwrap(),
+            toml::to_string_pretty(&restored.defaults).unwrap()
+        );
+        // Resetting the override leaves every role primary untouched.
+        assert!(restored
+            .defaults
+            .reset_operation(crate::provider::OP_INFERENCES_ASSESS));
+        let (route, overridden) = restored.defaults.resolve_operation(
+            Some(crate::provider::OP_INFERENCES_ASSESS),
+            "claim_assessor",
+        );
+        assert!(!overridden);
+        assert_eq!(route.model, JEVE);
+    }
+
     #[test]
     fn operation_overrides_round_trip_and_unknown_keys_are_rejected() {
         let mut settings = SettingsFile::default();

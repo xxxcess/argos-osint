@@ -1,4 +1,4 @@
-//! Schema-37 Brain migration: typed columns on `memory_metadata` and the
+//! Schema-37/38 Brain migration: typed columns on `memory_metadata` and the
 //! claim/inference kind migration preserving memory IDs (spec §4).
 
 use anyhow::Result;
@@ -37,6 +37,20 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             // Per-stage dependency hashes for checkpoint reuse (spec §3).
             conn.execute_batch(
                 "ALTER TABLE intel_brief_runs ADD COLUMN stage_revisions_json TEXT NOT NULL DEFAULT '[]'",
+            )?;
+        }
+    }
+    if has_table(conn, "recon_model_attempts")? {
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('recon_model_attempts') WHERE name='declaration_json'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            // Dispatch declaration (role, operation, format, input revision,
+            // policy, override) recorded on every attempt (spec §3).
+            conn.execute_batch(
+                "ALTER TABLE recon_model_attempts ADD COLUMN declaration_json TEXT NOT NULL DEFAULT '{}'",
             )?;
         }
     }

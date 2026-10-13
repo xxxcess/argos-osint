@@ -175,10 +175,11 @@ mod acceptance {
             &chrono::Utc::now().to_rfc3339(),
         )
         .unwrap();
-        assert!(
+        assert_eq!(
             insight_persist::recover_refreshes(&db, &auth, &settings, &cancel)
                 .await
-                .is_err()
+                .unwrap(),
+            0
         );
         assert_eq!(
             store
@@ -244,14 +245,27 @@ mod acceptance {
             admiralty: "B6".into(),
             rsp_status: String::new(),
         };
+        let mut unedited = old.clone();
+        unedited.predicate = "archives".into();
+        unedited.claim = "Geneva archives earlier talks".into();
         store
-            .persist_atlas_insights(&art.run_id, &[old], &[], "", "")
+            .persist_atlas_insights(&art.run_id, &[old, unedited], &[], "", "")
             .unwrap();
         let old_memory: String = store
             .conn
-            .query_row("SELECT memory_id FROM insight_claims LIMIT 1", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT memory_id FROM insight_claims WHERE predicate='hosts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let unedited_memory: String = store
+            .conn
+            .query_row(
+                "SELECT memory_id FROM insight_claims WHERE predicate='archives'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         store
             .update_memory(
@@ -334,9 +348,13 @@ mod acceptance {
             .atlas_claims_for_article(&art.run_id, &art.id)
             .unwrap()
             .is_empty());
-        assert!(store.get_memory(&old_memory).unwrap().is_none());
+        assert_eq!(
+            store.get_memory(&old_memory).unwrap().unwrap().text,
+            "User edited this article-owned assertion"
+        );
+        assert!(store.get_memory(&unedited_memory).unwrap().is_none());
         assert!(store.get_memory(&manual.id).unwrap().is_some());
-        assert!(store.conn.query_row("SELECT EXISTS(SELECT 1 FROM argos_index_changes WHERE record_id=?1 AND operation='index_remove')",[&old_memory],|r|r.get::<_,bool>(0)).unwrap());
+        assert!(store.conn.query_row("SELECT EXISTS(SELECT 1 FROM argos_index_changes WHERE record_id=?1 AND operation='index_remove')",[&unedited_memory],|r|r.get::<_,bool>(0)).unwrap());
         assert_eq!(server.hits(), 2);
         for request in server.requests.lock().unwrap().iter() {
             assert!(request.contains("Complete report contains no supported conclusions"));

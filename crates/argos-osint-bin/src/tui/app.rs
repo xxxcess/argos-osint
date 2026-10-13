@@ -553,6 +553,8 @@ pub enum ButtonId {
     IntelDay,
     /// Center briefing launcher labeled with the classified recon mode.
     IntelReports,
+    IntelExtractionRetry,
+    IntelExtractionJob,
     IntelReconStart,
     IntelBodyRetry,
     IntelBodyRefresh,
@@ -1102,6 +1104,8 @@ pub struct App {
     pub(crate) intel_insights_running: HashSet<String>,
     pub(crate) intel_links_reviewing: HashSet<String>,
     pub(crate) intel_insight_lifecycle: String,
+    pub(crate) intel_extraction_progress:
+        Option<argos_osint_core::investigation::insight_execution::Progress>,
     pub(crate) intel_actors: Vec<argos_osint_core::atlas_metadata::ArticleActor>,
     pub(crate) intel_actor_state: String,
     pub(crate) intel_refresh_status: String,
@@ -1511,6 +1515,7 @@ impl App {
             intel_insights_running: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
             intel_insight_lifecycle: "legacy/unassessed".into(),
+            intel_extraction_progress: None,
             intel_actors: Vec::new(),
             intel_actor_state: "pending".into(),
             intel_refresh_status: "Waiting".into(),
@@ -2526,6 +2531,8 @@ impl App {
             }
             "intel-search" => self.set_focus(Target::Field(FieldId::IntelSearch)),
             "intel-recon" => self.activate_button(ButtonId::IntelReports),
+            "intel-extraction-retry" => self.activate_button(ButtonId::IntelExtractionRetry),
+            "intel-extraction-job" => self.activate_button(ButtonId::IntelExtractionJob),
             "intel-refresh" => self.activate_button(ButtonId::IntelBodyRefresh),
             "intel-retry" => self.activate_button(ButtonId::IntelBodyRetry),
             "intel-job" => self.activate_button(ButtonId::IntelJobOpen),
@@ -3723,7 +3730,48 @@ impl App {
         self.persist_view_session();
     }
 
+    fn retry_selected_extraction(&mut self) -> Result<String> {
+        let Some(article) = self.intel_articles.get(self.intel_sel) else {
+            return Ok("No article selected".into());
+        };
+        let Some(progress) = argos_osint_core::investigation::insight_execution::owner_progress(
+            self.store.connection(),
+            "article",
+            &article.id,
+        )?
+        else {
+            return Ok("No extraction task".into());
+        };
+        let retried = argos_osint_core::investigation::insight_execution::retry_extraction(
+            self.store.connection(),
+            &progress.task_id,
+        )?;
+        self.refresh_intel_briefing();
+        Ok(if retried {
+            "Retry extraction queued; completed work retained"
+        } else {
+            "No recoverable extraction work"
+        }
+        .into())
+    }
+
+    fn open_selected_extraction_job(&mut self) -> Result<String> {
+        let Some(article) = self.intel_articles.get(self.intel_sel) else {
+            return Ok("No article selected".into());
+        };
+        let Some(progress) = argos_osint_core::investigation::insight_execution::owner_progress(
+            self.store.connection(),
+            "article",
+            &article.id,
+        )?
+        else {
+            return Ok("No extraction job".into());
+        };
+        self.open_job(&progress.job_id)
+    }
+
     fn refresh_intel_briefing(&mut self) {
+        self.intel_extraction_progress = None;
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
             self.intel_evidence_confidence = None;
             self.intel_actors.clear();
@@ -3772,6 +3820,14 @@ impl App {
                 }
             }
         }
+        self.intel_extraction_progress =
+            argos_osint_core::investigation::insight_execution::owner_progress(
+                self.store.connection(),
+                "article",
+                &article.id,
+            )
+            .ok()
+            .flatten();
         self.intel_insight_lifecycle=self.store.connection().query_row("SELECT lifecycle FROM insight_owner_state WHERE owner_kind IN ('article','atlas') AND owner_id=?1 ORDER BY CASE owner_kind WHEN 'article' THEN 0 ELSE 1 END LIMIT 1",[&article.id],|r|r.get(0)).unwrap_or_else(|_|"legacy/unassessed".into());
         if let Ok(Some(output)) = argos_osint_core::investigation::insight_persist::active_output(
             self.store.connection(),
@@ -7296,6 +7352,8 @@ impl App {
                 self.open_intel_day_picker();
                 return;
             }
+            ButtonId::IntelExtractionRetry => self.retry_selected_extraction(),
+            ButtonId::IntelExtractionJob => self.open_selected_extraction_job(),
             ButtonId::IntelReports => {
                 if !self.selected_intel_busy() {
                     self.open_intel_recon_popup();
@@ -9893,6 +9951,7 @@ mod tests {
             intel_insights_running: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
             intel_insight_lifecycle: "legacy/unassessed".into(),
+            intel_extraction_progress: None,
             intel_link_explanations: HashMap::new(),
             intel_actors: Vec::new(),
             intel_actor_state: "pending".into(),
@@ -12363,6 +12422,134 @@ mod tests {
         }
         let json = serde_json::json!({"width": width, "height": height, "cells": cells});
         std::fs::write(format!("{dir}/{name}.json"), json.to_string()).unwrap();
+    }
+
+    #[test]
+    fn insight_reliability_screens() {
+        use argos_osint_core::{
+            investigation::insight_execution::Progress,
+            jobs_view::{JobDetail, JobRow, TaskRow},
+        };
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        if let Some(dir) = &dir {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for (width, height) in [(160, 50), (80, 24), (60, 18)] {
+            let mut app = app();
+            let (_, article) = related_ui_fixture(&mut app);
+            for state in ["failed", "published"] {
+                let progress=Progress {task_id:"insight-fixture-task".into(),job_id:"insight-fixture-job".into(),retry_epoch:1,stage:if state=="failed" {"assessment"} else {"published"}.into(),state:if state=="failed" {"failed"} else {"completed"}.into(),windows_done:2,windows_total:2,batches_done:1,batches_total:2,withheld_count:3,route:"Route: local/fixture · attempt 2 · fail".into(),error:if state=="failed" {"assessment: invalid_result; missing question q1:publication after bounded repair"} else {"optional link batch unavailable; qualified claims published"}.into(),retryable:true,index_status:"Index pending: 5/5".into()};
+                app.select(ModuleId::Intel.index());
+                app.intel_articles = vec![article.clone()];
+                app.intel_sel = 0;
+                app.intel_page = IntelPage::Briefing;
+                app.intel_insight_lifecycle = if state == "failed" {
+                    "previous"
+                } else {
+                    "active"
+                }
+                .into();
+                app.intel_extraction_progress = Some(progress.clone());
+                app.compact_pages[ModuleId::Intel.index()] = 0;
+                app.scrolls.intel_extracted = 0;
+                let buffer = render(&mut app, width, height);
+                assert!(
+                    super::super::ui::focus_order(&app)
+                        .contains(&Target::Button(ButtonId::IntelReports))
+                        || width < 100
+                );
+                if width == 160 {
+                    assert!(buffer_text(&buffer).contains("Withheld"));
+                }
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("insight-intel-{state}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+                let job = JobRow {
+                    id: progress.job_id.clone(),
+                    app: "intel".into(),
+                    operation: "insight_refresh".into(),
+                    title: "Assess and refresh investigative insights".into(),
+                    state: progress.state.clone(),
+                    ..Default::default()
+                };
+                app.select(ModuleId::Jobs.index());
+                app.jobs.rows = vec![job.clone()];
+                app.jobs.sel = 0;
+                app.jobs.detail = Some(JobDetail {
+                    job,
+                    retryable: 1,
+                    tasks: vec![TaskRow {
+                        id: progress.task_id.clone(),
+                        operation: "insight_refresh".into(),
+                        state: progress.state.clone(),
+                        ..Default::default()
+                    }],
+                    insight_progress: vec![progress],
+                    ..Default::default()
+                });
+                app.jobs.detail_open = true;
+                app.jobs.detail_scroll = 0;
+                let buffer = render(&mut app, width, height);
+                assert!(buffer_text(&buffer).contains("Retry extraction"));
+                let target = Target::Button(ButtonId::JobsRetry);
+                assert!(super::super::ui::focus_order(&app).contains(&target));
+                assert!(hit(&app, target));
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("insight-jobs-{state}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+            }
+            app.select(ModuleId::Intel.index());
+            app.overlay = Overlay::None;
+            let items = app.palette_items();
+            assert!(items.iter().any(|i| i.id == "intel-extraction-retry"));
+            assert!(items.iter().any(|i| i.id == "intel-extraction-job"));
+            app.open_palette();
+            app.palette_query = "extraction".into();
+            let buffer = render(&mut app, width, height);
+            assert!(buffer_text(&buffer).contains("Retry extraction"));
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("insight-palette-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extraction_actions_resolve_selected_article_instead_of_stale_display_progress() {
+        let mut app = app();
+        let (_, article) = related_ui_fixture(&mut app);
+        app.select(ModuleId::Intel.index());
+        app.intel_articles = vec![article];
+        app.intel_sel = 0;
+        app.intel_extraction_progress = Some(
+            argos_osint_core::investigation::insight_execution::Progress {
+                task_id: "other-owner-task".into(),
+                job_id: "other-owner-job".into(),
+                ..Default::default()
+            },
+        );
+        app.activate_button(ButtonId::IntelExtractionRetry);
+        assert_eq!(app.status, "No extraction task");
+        app.activate_button(ButtonId::IntelExtractionJob);
+        assert_eq!(app.status, "No extraction job");
+        assert_eq!(app.module, Some(ModuleId::Intel));
     }
 
     #[test]

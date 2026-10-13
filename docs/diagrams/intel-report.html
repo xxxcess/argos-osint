@@ -18,16 +18,17 @@
     <div class="eyebrow">Data flow</div>
     <h1>Intel report job</h1>
     <div class="frame">
-      <svg role="img" aria-labelledby="intel-title intel-desc" viewBox="0 0 800 460" xmlns="http://www.w3.org/2000/svg">
+      <svg role="img" aria-labelledby="intel-title intel-desc" viewBox="0 0 800 520" xmlns="http://www.w3.org/2000/svg">
 <title id="intel-title">Article and report insight publication</title>
 <desc id="intel-desc">Ingestion exposes Actors only. A Focus Brief visit queues validated complete article details. Completed sections and BLUF commit an immutable report bundle and completion sequence, then queue exclusive report extraction. Both use the same refresh queue, atomic Brain replacement and canonical index outbox. Partial or failed reports never replace insights.</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
-<rect width="800" height="460" fill="#f5f5f5"/>
+<rect width="800" height="520" fill="#f5f5f5"/>
 <g fill="none" stroke="#4f5d75" marker-end="url(#arrow)">
 <path d="M195 80 H215"/><path d="M390 80 H410"/>
 <path d="M497 120 V250 H250 V315 H290"/>
 <path d="M195 195 H215"/><path d="M390 195 H410"/><path d="M585 195 H605"/>
 <path d="M692 235 V265 H395 V285"/><path d="M500 315 H560"/><path d="M665 345 V375"/>
+<path d="M395 345 V365 H125 V375"/><path d="M230 405 H260 V315 H290"/>
 </g>
 <g font-family="Geist,system-ui,sans-serif" font-size="12" text-anchor="middle" fill="#2d3142">
 <rect x="20" y="40" width="175" height="80" rx="6" fill="#fff" stroke="#2d3142"/><text x="107" y="72">Atlas article + Actors</text><text x="107" y="94" font-size="10" fill="#7a8399">Classifier-only ingestion</text>
@@ -37,10 +38,11 @@
 <rect x="215" y="155" width="175" height="80" rx="6" fill="#fff" stroke="#2d3142"/><text x="302" y="187">Sections / BLUF</text><text x="302" y="209" font-size="10" fill="#7a8399">enabled scope durably complete</text>
 <rect x="410" y="155" width="175" height="80" rx="6" fill="#fff" stroke="#2d3142"/><text x="497" y="187">Commit report result</text><text x="497" y="209" font-size="10" fill="#7a8399">immutable bundle + sequence</text>
 <rect x="605" y="155" width="175" height="80" rx="6" fill="#fff" stroke="#2d3142"/><text x="692" y="187">Select latest completion</text><text x="692" y="209" font-size="10" fill="#7a8399">report-only input; recall off</text>
-<rect x="290" y="285" width="210" height="60" rx="6" fill="#fff" stroke="#2d3142"/><text x="395" y="310">Shared insight refresh queue</text><text x="395" y="330" font-size="10" fill="#7a8399">dedupe + generation + lease fences</text>
-<rect x="560" y="285" width="210" height="60" rx="6" fill="#fff4ee" stroke="#eb6c36"/><text x="665" y="310">Atomic Brain replacement</text><text x="665" y="330" font-size="10" fill="#7a8399">Claims / Inferences / Links + rating</text>
-<rect x="560" y="375" width="210" height="60" rx="6" fill="#fff4ee" stroke="#eb6c36"/><text x="665" y="400">Canonical index / graph</text><text x="665" y="420" font-size="10" fill="#7a8399">upserts + removals; history retained</text>
-<text x="225" y="410" font-family="Instrument Serif,serif" font-size="14" font-style="italic">Report completion does not wait for extraction.</text>
+<rect x="290" y="285" width="210" height="60" rx="6" fill="#fff" stroke="#2d3142"/><text x="395" y="310">Shared insight refresh queue</text><text x="395" y="330" font-size="10" fill="#7a8399">two-op slices + batches ≤8 + leases</text>
+<rect x="560" y="285" width="210" height="60" rx="6" fill="#fff4ee" stroke="#eb6c36"/><text x="665" y="310">Atomic Brain replacement</text><text x="665" y="330" font-size="10" fill="#7a8399">qualified items + explicit optional gaps</text>
+<rect x="560" y="375" width="210" height="60" rx="6" fill="#fff4ee" stroke="#eb6c36"/><text x="665" y="400">Canonical index / graph</text><text x="665" y="420" font-size="10" fill="#7a8399">exact revision acknowledgment; own retry</text>
+<rect x="20" y="375" width="210" height="60" rx="6" fill="#fff" stroke="#2d3142"/><text x="125" y="398">Failure: retain previous</text><text x="125" y="419" font-size="10" fill="#7a8399">explicit Retry extraction epoch</text>
+<text x="395" y="484" font-family="Instrument Serif,serif" font-size="14" font-style="italic">Mandatory coverage or all-withheld failure preserves history; optional gaps can publish.</text>
 </g></svg>
     </div>
   </main>

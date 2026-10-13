@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// activity-history tables plus additive timing columns on the model attempt
 /// and tool call records. 28 adds immutable NLP artifacts/references/features and
 /// complete summary-result envelopes; existing facts are preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 31;
+pub const SCHEMA_VERSION: i64 = 32;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -745,6 +745,11 @@ impl Store {
                 self.conn
                     .execute_batch(include_str!("schema_article_refresh.sql"))?;
                 self.conn.pragma_update(None, "user_version", 31)?;
+            }
+            if version < 32 {
+                self.conn
+                    .execute_batch(include_str!("schema_insight_execution.sql"))?;
+                self.conn.pragma_update(None, "user_version", 32)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final

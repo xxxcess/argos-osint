@@ -8124,7 +8124,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         }
     }
     let claims_md = extracted_claims_markdown(&buckets.facts);
-    let inferences_md = if buckets.inferences.is_empty() {
+    let mut inferences_md = if buckets.inferences.is_empty() {
         format!(
             "_{} · inferences withheld until evidence is ready_",
             app.intel_insight_lifecycle.replace('_', " ")
@@ -8132,6 +8132,9 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     } else {
         extracted_inferences_markdown(&buckets.inferences)
     };
+    if let Some(progress) = &app.intel_extraction_progress {
+        inferences_md = format!("{}\n\n{inferences_md}", progress.lines().join("\n"));
+    }
     let actors_md = if buckets.actors.is_empty() {
         format!("_NLP {}_", app.intel_actor_state)
     } else {

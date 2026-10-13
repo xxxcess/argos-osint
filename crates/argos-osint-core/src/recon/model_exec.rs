@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -59,6 +59,8 @@ pub struct OperationScope<'a> {
     pub run_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
     pub generation: u32,
+    /// Insight-only bounded repair/fallback policy; other operations retain their policy.
+    pub insight_contract: bool,
 }
 
 impl<'a> OperationScope<'a> {
@@ -69,6 +71,7 @@ impl<'a> OperationScope<'a> {
             run_id: None,
             task_id: None,
             generation: 1,
+            insight_contract: false,
         }
     }
 
@@ -85,6 +88,127 @@ impl<'a> OperationScope<'a> {
     pub fn with_generation(mut self, generation: u32) -> Self {
         self.generation = generation;
         self
+    }
+
+    pub fn with_insight_contract(mut self) -> Self {
+        self.insight_contract = true;
+        self
+    }
+}
+
+/// An executor failure, distinct from local validation and persistence errors.
+#[derive(Debug)]
+pub struct ModelOperationError {
+    pub category: Option<Category>,
+    pub requests: u32,
+    pub history: Vec<provider_chain::AttemptRecord>,
+    pub message: String,
+}
+
+impl std::fmt::Display for ModelOperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ({} dispatched attempts): {}",
+            self.message,
+            self.requests,
+            self.history
+                .iter()
+                .map(|r| format!("route {} {}: {}", r.route_index, r.outcome, r.reason))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    }
+}
+impl std::error::Error for ModelOperationError {}
+
+impl ModelOperationError {
+    pub fn can_withhold(&self) -> bool {
+        !matches!(
+            self.category,
+            Some(
+                Category::Cancelled
+                    | Category::Refused
+                    | Category::MalformedRequest
+                    | Category::Persistence
+            )
+        )
+    }
+}
+
+fn chain_error<T>(report: &ChainReport<T>) -> anyhow::Error {
+    let termination = if report.cancelled {
+        "operation cancelled"
+    } else if report.blocked {
+        "all routes blocked"
+    } else if report.stopped {
+        "model operation stopped"
+    } else {
+        "model routes exhausted"
+    };
+    let message = report
+        .terminal_failure
+        .as_ref()
+        .map(|failure| {
+            format!(
+                "{termination}: {}/{}: {}{}",
+                failure.stage.label(),
+                failure.category.as_str(),
+                failure.message,
+                failure
+                    .request_id
+                    .as_deref()
+                    .map(|id| format!("; request {id}"))
+                    .unwrap_or_default()
+            )
+        })
+        .unwrap_or_else(|| termination.into());
+    ModelOperationError {
+        category: report.terminal_failure.as_ref().map(|f| f.category),
+        requests: report.requests,
+        history: report.history.clone(),
+        message,
+    }
+    .into()
+}
+
+/// One repair per compatible route, counted as a wire attempt by the chain.
+#[derive(Default)]
+struct OutputRepairs(std::sync::Mutex<std::collections::BTreeMap<usize, String>>);
+
+impl OutputRepairs {
+    fn messages(&self, route: usize, messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        let mut messages = messages.to_vec();
+        if let Some(error) = self.0.lock().unwrap().get(&route) {
+            messages.push(ChatMessage {
+                role: "user".into(),
+                content: format!("Repair the previous output contract failure: {error}. Return the complete valid answer JSON using only supplied IDs and evidence. No explanation."),
+                tool_call_id: None,
+                tool_calls: vec![],
+            });
+        }
+        messages
+    }
+
+    fn failure(&self, route: usize, error: String, stage: Stage) -> DispatchError {
+        let mut errors = self.0.lock().unwrap();
+        let repaired = errors
+            .insert(
+                route,
+                crate::events::redact(&error).chars().take(512).collect(),
+            )
+            .is_some();
+        let mut failure = DispatchError::from_failure(ProviderFailure::new(
+            stage,
+            Category::InvalidResult,
+            error,
+        ));
+        failure.disposition = if repaired {
+            provider_chain::RetryDisposition::NextRoute
+        } else {
+            provider_chain::RetryDisposition::RetryRoute
+        };
+        failure
     }
 }
 
@@ -430,6 +554,7 @@ struct AttemptFacts {
     transport: String,
     route_index: u32,
     attempt: u32,
+    strict_persistence: bool,
 }
 
 impl AttemptFacts {
@@ -454,6 +579,7 @@ impl AttemptFacts {
             transport: transport.to_string(),
             route_index,
             attempt,
+            strict_persistence: false,
         }
     }
 }
@@ -578,6 +704,8 @@ fn note_operation(
 /// Freeze one attempt's measured timings, persist them on the durable attempt
 /// row, and emit exactly one `model_attempt` telemetry row. Best-effort: a
 /// telemetry failure never fails the attempt.
+// The shared chain carries one complete typed provider diagnostic per failure.
+#[allow(clippy::result_large_err)]
 fn finish_attempt(
     db_path: Option<&Path>,
     attempt_id: &str,
@@ -586,13 +714,22 @@ fn finish_attempt(
     timings: &mut AttemptTimings,
     elapsed_ms: u64,
     stream_completed: bool,
-) {
+) -> Result<(), DispatchError> {
     // No adapter in this module reports token usage yet, so the columns stay at
     // their defaults rather than being guessed.
     timings.usage(None, None);
     timings.finish(elapsed_ms, stream_completed);
-    let _ = record_attempt_finish(db_path, attempt_id, outcome, timings);
+    if let Err(error) = record_attempt_finish(db_path, attempt_id, outcome, timings) {
+        if facts.strict_persistence {
+            return Err(DispatchError::from_failure(ProviderFailure::new(
+                Stage::Persistence,
+                Category::Persistence,
+                error.to_string(),
+            )));
+        }
+    }
     note_attempt(db_path, attempt_id, facts, outcome, timings);
+    Ok(())
 }
 
 /// Persist an operation record as pending/running if db is present.
@@ -778,7 +915,11 @@ pub async fn execute_chat<V>(
 where
     V: Fn(&str) -> Result<(), String> + Send + Sync,
 {
-    let _ = ensure_operation(db_path, scope, "");
+    if scope.insight_contract {
+        ensure_operation(db_path, scope, "")?;
+    } else {
+        let _ = ensure_operation(db_path, scope, "");
+    }
     let (mut routes, secrets) = resolve_role_routes(auth, settings, scope.role);
     // Free-chat extraction cannot dispatch a Decisions-only model. Keep route
     // indices and declared fallback order so audit and secrets remain aligned.
@@ -788,6 +929,8 @@ where
         }
     }
 
+    let repairs = Arc::new(OutputRepairs::default());
+    let insight_contract = scope.insight_contract;
     let mut attempt_counter = 0u32;
     let mut last_route_idx = 0usize;
     let on_event_shared = on_event.clone();
@@ -810,7 +953,12 @@ where
         } else {
             Transport::NonStream
         };
-        let messages_vec = messages.to_vec();
+        let messages_vec = if insight_contract {
+            repairs.messages(route_idx, messages)
+        } else {
+            messages.to_vec()
+        };
+        let repairs = repairs.clone();
         let text_obs = text_observer.clone();
         let val = Arc::clone(&validator);
         let on_event_step = on_event_shared.clone();
@@ -822,6 +970,16 @@ where
         let queued_at = queued_at.clone();
 
         async move {
+            if insight_contract
+                && crate::nlp::message_bytes(&messages_vec, &Value::Null)
+                    > crate::investigation::insights::REQUEST_BYTES
+            {
+                return Err(DispatchError::from_failure(ProviderFailure::new(
+                    Stage::Configuration,
+                    Category::MalformedRequest,
+                    "compiled insight request exceeds byte budget",
+                )));
+            }
             let attempt_db_id = record_attempt_start(
                 db_path_buf.as_deref(),
                 &op_id,
@@ -832,8 +990,19 @@ where
                 transport.as_str(),
                 &queued_at,
             )
-            .unwrap_or_default();
-            let facts = AttemptFacts::new(
+            .map_err(|error| {
+                DispatchError::from_failure(ProviderFailure::new(
+                    Stage::Persistence,
+                    Category::Persistence,
+                    error.to_string(),
+                ))
+            });
+            let attempt_db_id = if insight_contract {
+                attempt_db_id?
+            } else {
+                attempt_db_id.unwrap_or_default()
+            };
+            let mut facts = AttemptFacts::new(
                 &op_id,
                 generation,
                 &role,
@@ -843,6 +1012,7 @@ where
                 route_idx as u32,
                 attempt_num,
             );
+            facts.strict_persistence = insight_contract;
 
             // Notify attempt start
             if let Some(sink) = &on_event_step {
@@ -899,14 +1069,18 @@ where
             };
 
             timings.sent();
-            let rep = provider_attempt::attempt_with_observer(
-                &secret,
-                &messages_vec,
-                transport,
-                Deadlines::default(),
-                Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
-            )
-            .await;
+            let rep = if insight_contract {
+                provider_attempt::attempt_insight(&secret, &messages_vec, transport, 8192).await
+            } else {
+                provider_attempt::attempt_with_observer(
+                    &secret,
+                    &messages_vec,
+                    transport,
+                    Deadlines::default(),
+                    Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
+                )
+                .await
+            };
 
             if let Ok(slot) = first_at.lock() {
                 if let Some((at, instant)) = slot.as_ref() {
@@ -950,7 +1124,7 @@ where
                             &mut timings,
                             elapsed_ms,
                             false,
-                        );
+                        )?;
                         if let Some(sink) = &on_event_step {
                             sink(ModelExecEvent::AttemptReset {
                                 operation_id: op_id.clone(),
@@ -993,7 +1167,7 @@ where
                             &mut timings,
                             elapsed_ms,
                             false,
-                        );
+                        )?;
                         if let Some(sink) = &on_event_step {
                             sink(ModelExecEvent::AttemptReset {
                                 operation_id: op_id.clone(),
@@ -1008,7 +1182,11 @@ where
                                 chars,
                             });
                         }
-                        return Err(DispatchError::from_failure(f));
+                        return Err(if insight_contract {
+                            repairs.failure(route_idx, val_err, Stage::Validation)
+                        } else {
+                            DispatchError::from_failure(f)
+                        });
                     }
 
                     // Success!
@@ -1021,7 +1199,7 @@ where
                         &mut timings,
                         elapsed_ms,
                         matches!(transport, Transport::Stream) && finish_reason.is_some(),
-                    );
+                    )?;
                     if let Some(sink) = &on_event_step {
                         sink(ModelExecEvent::AttemptFinish {
                             operation_id: op_id.clone(),
@@ -1063,7 +1241,7 @@ where
                         &mut timings,
                         elapsed_ms,
                         failure.stream.done_marker,
-                    );
+                    )?;
 
                     if let Some(sink) = &on_event_step {
                         sink(ModelExecEvent::AttemptReset {
@@ -1095,6 +1273,7 @@ where
         cancel: Some(cancel.clone()),
         recorded_waits: None,
         admission_account: String::new(),
+        attempt_limit: insight_contract.then_some(2),
     };
 
     let report = provider_chain::execute(&routes, dispatch, opts).await;
@@ -1121,18 +1300,18 @@ where
     if let Some(value) = report.value.clone() {
         let _ = save_operation_draft(db_path, scope.operation_id, &value);
         Ok((value, report))
-    } else if report.cancelled {
-        let _ = update_operation_status(db_path, scope.operation_id, "cancelled", None);
-        Err(anyhow!("operation cancelled"))
-    } else if report.blocked {
-        let _ = update_operation_status(db_path, scope.operation_id, "failed", None);
-        Err(anyhow!("all routes blocked: {}", report.failure_message()))
     } else {
-        let _ = update_operation_status(db_path, scope.operation_id, "failed", None);
-        Err(anyhow!(
-            "model chain exhausted: {}",
-            report.failure_message()
-        ))
+        let _ = update_operation_status(
+            db_path,
+            scope.operation_id,
+            if report.cancelled {
+                "cancelled"
+            } else {
+                "failed"
+            },
+            None,
+        );
+        Err(chain_error(&report))
     }
 }
 
@@ -1158,9 +1337,15 @@ where
     T: Clone + Send + 'static,
     A: DecisionsAdapter<T>,
 {
-    let _ = ensure_operation(db_path, scope, "");
+    if scope.insight_contract {
+        ensure_operation(db_path, scope, "")?;
+    } else {
+        let _ = ensure_operation(db_path, scope, "");
+    }
     let (routes, secrets) = resolve_role_routes(auth, settings, scope.role);
 
+    let repairs = Arc::new(OutputRepairs::default());
+    let insight_contract = scope.insight_contract;
     let mut attempt_counter = 0u32;
     let on_event_shared = on_event.clone();
     let op_id = scope.operation_id.to_string();
@@ -1186,6 +1371,7 @@ where
         let role = role.clone();
         let run_id = run_id.clone();
         let queued_at = queued_at.clone();
+        let repairs = repairs.clone();
 
         async move {
             let attempt_db_id = record_attempt_start(
@@ -1198,8 +1384,19 @@ where
                 transport,
                 &queued_at,
             )
-            .unwrap_or_default();
-            let facts = AttemptFacts::new(
+            .map_err(|error| {
+                DispatchError::from_failure(ProviderFailure::new(
+                    Stage::Persistence,
+                    Category::Persistence,
+                    error.to_string(),
+                ))
+            });
+            let attempt_db_id = if insight_contract {
+                attempt_db_id?
+            } else {
+                attempt_db_id.unwrap_or_default()
+            };
+            let mut facts = AttemptFacts::new(
                 &op_id,
                 generation,
                 &role,
@@ -1209,6 +1406,7 @@ where
                 route_idx as u32,
                 attempt_num,
             );
+            facts.strict_persistence = insight_contract;
 
             if let Some(sink) = &on_event_step {
                 sink(ModelExecEvent::AttemptStart {
@@ -1229,7 +1427,23 @@ where
             timings.sent();
 
             if is_native {
-                let (native_state, native_questions) = adapter.compile_native();
+                let (mut native_state, native_questions) = adapter.compile_native();
+                if insight_contract {
+                    if let Some(error) = repairs.0.lock().unwrap().get(&route_idx) {
+                        native_state["output_validation_error"] = Value::String(error.clone());
+                    }
+                    if serde_json::to_vec(&serde_json::json!([native_state, native_questions]))
+                        .map_or(true, |b| {
+                            b.len() > crate::investigation::insights::REQUEST_BYTES
+                        })
+                    {
+                        return Err(DispatchError::from_failure(ProviderFailure::new(
+                            Stage::Configuration,
+                            Category::MalformedRequest,
+                            "compiled native assessment exceeds byte budget",
+                        )));
+                    }
+                }
                 match provider::decide(&secret, &native_state, &native_questions).await {
                     Ok(resp) => {
                         let elapsed_ms = start_t.elapsed().as_millis() as u64;
@@ -1244,7 +1458,7 @@ where
                                     &mut timings,
                                     elapsed_ms,
                                     false,
-                                );
+                                )?;
                                 if let Some(sink) = &on_event_step {
                                     sink(ModelExecEvent::AttemptFinish {
                                         operation_id: op_id,
@@ -1281,7 +1495,7 @@ where
                                     &mut timings,
                                     elapsed_ms,
                                     false,
-                                );
+                                )?;
                                 if let Some(sink) = &on_event_step {
                                     sink(ModelExecEvent::AttemptReset {
                                         operation_id: op_id.clone(),
@@ -1296,14 +1510,26 @@ where
                                         chars: 0,
                                     });
                                 }
-                                Err(DispatchError::from_failure(f))
+                                Err(if insight_contract {
+                                    repairs.failure(route_idx, parse_err, Stage::Validation)
+                                } else {
+                                    DispatchError::from_failure(f)
+                                })
                             }
                         }
                     }
                     Err(decide_err) => {
                         let elapsed_ms = start_t.elapsed().as_millis() as u64;
                         let f = ProviderFailure::from_anyhow(Stage::Response, &decide_err);
-                        let err = DispatchError::from_failure(f.clone());
+                        let err = if insight_contract
+                            && matches!(
+                                f.category,
+                                Category::InvalidResult | Category::MalformedPayload
+                            ) {
+                            repairs.failure(route_idx, f.message.clone(), Stage::Validation)
+                        } else {
+                            DispatchError::from_failure(f.clone())
+                        };
                         timings.reported_ttfb_ms(f.first_response_ms);
                         let outcome = AttemptOutcome::failed(
                             if err.cancelled { "cancel" } else { "fail" },
@@ -1323,7 +1549,7 @@ where
                             &mut timings,
                             elapsed_ms,
                             false,
-                        );
+                        )?;
                         if let Some(sink) = &on_event_step {
                             sink(ModelExecEvent::AttemptReset {
                                 operation_id: op_id.clone(),
@@ -1347,14 +1573,38 @@ where
                 }
             } else {
                 // Chat fallback: re-compile for chat
-                let chat_messages = adapter.compile_chat();
-                let rep = provider_attempt::attempt(
-                    &secret,
-                    &chat_messages,
-                    Transport::NonStream,
-                    Deadlines::default(),
-                )
-                .await;
+                let chat_messages = if insight_contract {
+                    repairs.messages(route_idx, &adapter.compile_chat())
+                } else {
+                    adapter.compile_chat()
+                };
+                if insight_contract
+                    && crate::nlp::message_bytes(&chat_messages, &Value::Null)
+                        > crate::investigation::insights::REQUEST_BYTES
+                {
+                    return Err(DispatchError::from_failure(ProviderFailure::new(
+                        Stage::Configuration,
+                        Category::MalformedRequest,
+                        "compiled assessment exceeds byte budget",
+                    )));
+                }
+                let rep = if insight_contract {
+                    provider_attempt::attempt_insight(
+                        &secret,
+                        &chat_messages,
+                        Transport::NonStream,
+                        2048,
+                    )
+                    .await
+                } else {
+                    provider_attempt::attempt(
+                        &secret,
+                        &chat_messages,
+                        Transport::NonStream,
+                        Deadlines::default(),
+                    )
+                    .await
+                };
 
                 let elapsed_ms = start_t.elapsed().as_millis() as u64;
 
@@ -1376,7 +1626,7 @@ where
                                     &mut timings,
                                     elapsed_ms,
                                     false,
-                                );
+                                )?;
                                 if let Some(sink) = &on_event_step {
                                     sink(ModelExecEvent::AttemptFinish {
                                         operation_id: op_id,
@@ -1413,7 +1663,7 @@ where
                                     &mut timings,
                                     elapsed_ms,
                                     false,
-                                );
+                                )?;
                                 if let Some(sink) = &on_event_step {
                                     sink(ModelExecEvent::AttemptReset {
                                         operation_id: op_id.clone(),
@@ -1428,7 +1678,11 @@ where
                                         chars,
                                     });
                                 }
-                                Err(DispatchError::from_failure(f))
+                                Err(if insight_contract {
+                                    repairs.failure(route_idx, parse_err, Stage::Validation)
+                                } else {
+                                    DispatchError::from_failure(f)
+                                })
                             }
                         }
                     }
@@ -1458,7 +1712,7 @@ where
                             &mut timings,
                             elapsed_ms,
                             failure.stream.done_marker,
-                        );
+                        )?;
 
                         if let Some(sink) = &on_event_step {
                             sink(ModelExecEvent::AttemptReset {
@@ -1490,6 +1744,7 @@ where
         cancel: Some(cancel.clone()),
         recorded_waits: None,
         admission_account: String::new(),
+        attempt_limit: insight_contract.then_some(2),
     };
 
     let report = provider_chain::execute(&routes, dispatch, opts).await;
@@ -1515,18 +1770,18 @@ where
 
     if let Some(value) = report.value.clone() {
         Ok((value, report))
-    } else if report.cancelled {
-        let _ = update_operation_status(db_path, scope.operation_id, "cancelled", None);
-        Err(anyhow!("operation cancelled"))
-    } else if report.blocked {
-        let _ = update_operation_status(db_path, scope.operation_id, "failed", None);
-        Err(anyhow!("all routes blocked: {}", report.failure_message()))
     } else {
-        let _ = update_operation_status(db_path, scope.operation_id, "failed", None);
-        Err(anyhow!(
-            "model chain exhausted: {}",
-            report.failure_message()
-        ))
+        let _ = update_operation_status(
+            db_path,
+            scope.operation_id,
+            if report.cancelled {
+                "cancelled"
+            } else {
+                "failed"
+            },
+            None,
+        );
+        Err(chain_error(&report))
     }
 }
 

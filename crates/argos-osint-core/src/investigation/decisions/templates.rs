@@ -269,3 +269,39 @@ pub fn template_publication() -> DecisionContract {
         )],
     )
 }
+
+/// ID-addressed questions reuse the exact single-item labels and thresholds.
+pub fn template_insight_batch(
+    items: &[(String, String)],
+    policy: &mut super::DecisionPolicy,
+) -> DecisionContract {
+    let mut questions = Vec::new();
+    for (id, kind) in items {
+        let templates = match kind.as_str() {
+            "claim" => vec![template_publication(), template_claim_relation()],
+            "corroboration" => vec![template_claim_relation()],
+            "identity" => vec![template_entity_binding()],
+            "memory_relevance" => vec![template_evidence_relevance()],
+            _ => vec![template_publication()],
+        };
+        for template in templates {
+            for (original, mut question) in template.questions {
+                question.id = format!("{id}:{original}");
+                question.instructions = format!("For candidate item {id}, using ONLY its evidence_ids in the shared evidence dictionary: {}", question.instructions);
+                policy.bind_question(&question.id, &original);
+                questions.push(question);
+            }
+        }
+    }
+    DecisionContract::new(
+        if items.iter().all(|(_, kind)| kind == "identity") {
+            "entity_resolver"
+        } else {
+            "claim_assessor"
+        },
+        "insight_batch",
+        "insights-v3",
+        ["candidate", "evidence"],
+        questions,
+    )
+}

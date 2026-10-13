@@ -324,13 +324,15 @@ fn schedule_article_refresh_on(
     if expired {
         return Ok(None);
     }
-    let prior: Option<(String, String)> = store.conn.query_row(
-        "SELECT id,input_ref FROM argos_tasks WHERE operation='insight_refresh' AND job_id IN (SELECT id FROM argos_jobs WHERE owner_scope=?1) ORDER BY created_at DESC,rowid DESC LIMIT 1",
-        [format!("article:{}",article.id)], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-    if let Some((id, json)) = prior {
+    let prior: Option<(String, String,String,String)> = store.conn.query_row(
+        "SELECT id,input_ref,role_snapshot,input_hash FROM argos_tasks WHERE operation='insight_refresh' AND job_id IN (SELECT id FROM argos_jobs WHERE owner_scope=?1) ORDER BY created_at DESC,rowid DESC LIMIT 1",
+        [format!("article:{}",article.id)], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    if let Some((id, json, captured, stored_hash)) = prior {
         if let Ok(mut prior) = serde_json::from_str::<PipelineInput>(&json) {
+            let captured = serde_json::from_str::<crate::provider::SettingsFile>(&captured)?;
+            let compatible = super::insights::input_key(&prior, &captured) == stored_hash;
             prior.snapshot.generation = 0;
-            if super::insights::input_key(&prior, settings) == identity {
+            if compatible && super::insights::input_key(&prior, &captured) == identity {
                 return Ok(Some(id));
             }
         }
@@ -364,6 +366,8 @@ pub fn active_output(conn: &Connection, kind: &str, owner: &str) -> Result<Optio
     let stored: serde_json::Value = serde_json::from_str(&readiness)?;
     output.limit_reached = stored["limit_reached"].as_bool().unwrap_or(false);
     output.partial_enumeration = stored["partial_enumeration"].as_bool().unwrap_or(false);
+    output.item_gaps = serde_json::from_value(stored["item_gaps"].clone()).unwrap_or_default();
+    output.withheld_count = stored["withheld_count"].as_u64().unwrap_or(0) as usize;
     if let Some(value) = stored.get("readiness") {
         output.readiness = serde_json::from_value(value.clone())?;
     }
@@ -561,7 +565,11 @@ pub fn enqueue_refresh(
             deadline_at: String::new(),
         },
         &crate::tasks::JobMeta {
-            app: input.snapshot.owner_kind.clone(),
+            app: if input.snapshot.owner_kind == "article" {
+                "intel".into()
+            } else {
+                input.snapshot.owner_kind.clone()
+            },
             operation: "insight_refresh".into(),
             resource_ref: input.snapshot.owner_id.clone(),
             title: "Assess and refresh investigative insights".into(),
@@ -656,7 +664,9 @@ pub async fn run_refresh_slice(
             "captured route/preparation contract changed"
         ))
     } else {
-        let refresh = super::insights::run_pipeline(&mut input, auth, settings, cancel, db_path);
+        let refresh = super::insight_execution::slice(super::insights::run_pipeline(
+            &mut input, auth, settings, cancel, db_path,
+        ));
         tokio::pin!(refresh);
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
         let result = loop {
@@ -672,9 +682,16 @@ pub async fn run_refresh_slice(
     };
     let now = chrono::Utc::now().to_rfc3339();
     let mut store = crate::store::Store::open(db_path)?;
-    let output = match result {
+    let mut output = match result {
         Ok(output) => output,
         Err(error) => {
+            if error.is::<super::insight_execution::SliceYield>() {
+                let n=store.conn.execute("UPDATE argos_tasks SET state='queued',max_attempts=attempts+1,lease_owner='',lease_until='',updated_at=?4 WHERE id=?1 AND state='running' AND lease_owner=?2 AND lease_epoch=?3 AND julianday(lease_until)>julianday(?4)",params![claimed.id,claimed.owner,claimed.epoch,now])?;
+                ensure!(n == 1, "refresh lease lost before continuation");
+                store.conn.execute("UPDATE argos_attempts SET finished_at=?2,outcome='slice_complete' WHERE task_id=?1 AND finished_at=''",params![claimed.id,now])?;
+                crate::tasks::refresh_job_state(&store.conn, &claimed.job_id, &now)?;
+                return Ok(None);
+            }
             record_terminal_failure(
                 &store.conn,
                 &input.snapshot.owner_kind,
@@ -698,7 +715,11 @@ pub async fn run_refresh_slice(
                 &claimed,
                 crate::tasks::OperationKind::OtherLlm,
                 &crate::tasks::TaskError::new(
-                    crate::tasks::ErrorCategory::Unknown,
+                    error
+                        .downcast_ref::<crate::recon::model_exec::ModelOperationError>()
+                        .and_then(|e| e.category)
+                        .map(|c| c.task_category())
+                        .unwrap_or(crate::tasks::ErrorCategory::Unknown),
                     error.to_string(),
                 ),
                 &now,
@@ -706,6 +727,15 @@ pub async fn run_refresh_slice(
             return Err(error);
         }
     };
+    // Reduced and later repaired snapshots have distinct publication identities,
+    // while stage checkpoint identity remains independent of execution epoch.
+    input.snapshot.key = crate::nlp::cache::key(&serde_json::json!([input.snapshot.key, output]));
+    for inference in &mut output.inferences {
+        inference.snapshot_key = input.snapshot.key.clone();
+    }
+    for link in &mut output.links {
+        link.snapshot_key = input.snapshot.key.clone();
+    }
     if cancel.load(std::sync::atomic::Ordering::Acquire) {
         store.conn.execute("UPDATE insight_owner_state SET lifecycle='pending',last_error='cancelled; evidence dirty' WHERE owner_kind=?1 AND owner_id=?2 AND desired_generation=?3", params![input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation])?;
         crate::tasks::block_claimed(&store.conn, &claimed, "cancelled; evidence dirty", &now)?;
@@ -747,6 +777,13 @@ pub async fn run_refresh_slice(
         |tx, snapshot_id| {
             validate_live_evidence(tx, &input.snapshot)?;
             write_derivations(tx, snapshot_id, &input, &output, &now)?;
+            super::insight_execution::progress(
+                tx,
+                &input,
+                "published",
+                None,
+                Some(output.withheld_count),
+            )?;
             Ok(())
         },
     );
@@ -772,7 +809,11 @@ pub async fn run_refresh_slice(
                     &claimed,
                     crate::tasks::OperationKind::OtherLlm,
                     &crate::tasks::TaskError::new(
-                        crate::tasks::ErrorCategory::Unknown,
+                        error
+                            .downcast_ref::<crate::recon::model_exec::ModelOperationError>()
+                            .and_then(|e| e.category)
+                            .map(|c| c.task_category())
+                            .unwrap_or(crate::tasks::ErrorCategory::Unknown),
                         error.to_string(),
                     ),
                     &now,
@@ -802,7 +843,18 @@ pub async fn recover_refreshes(
             if let Some(article) =
                 run.and_then(|run| store.atlas_article(&run, &owner).ok().flatten())
             {
-                schedule_article_refresh(&store, &article, settings, false)?;
+                if let Err(error) = schedule_article_refresh(&store, &article, settings, false) {
+                    let _ = crate::events::record_event(
+                        &store.conn,
+                        &crate::events::NewEvent {
+                            app: "intel".into(),
+                            event_type: "insight.recovery_error".into(),
+                            message: error.to_string(),
+                            resource_ref: owner,
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
         crate::tasks::retire_atlas_insight_work(&store.conn, &now)?;
@@ -829,14 +881,35 @@ pub async fn recover_refreshes(
             serde_json::from_str::<crate::provider::SettingsFile>(&json)
                 .unwrap_or_else(|_| settings.clone())
         };
-        if run_refresh_slice(db_path, &id, auth, &captured, cancel)
-            .await?
-            .is_some()
-        {
-            completed += 1;
+        match run_refresh_slice(db_path, &id, auth, &captured, cancel).await {
+            Ok(Some(_)) => completed += 1,
+            Ok(None) => {}
+            Err(error) => {
+                let store = crate::store::Store::open(db_path)?;
+                let _ = crate::events::record_event(
+                    &store.conn,
+                    &crate::events::NewEvent {
+                        app: "intel".into(),
+                        event_type: "insight.recovery_error".into(),
+                        message: error.to_string(),
+                        task_id: id,
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
     Ok(completed)
+}
+
+pub(super) fn validate_retry(conn: &Connection, input: &PipelineInput) -> Result<()> {
+    validate_live_evidence(conn, &input.snapshot)?;
+    ensure!(
+        desired_generation(conn, &input.snapshot.owner_kind, &input.snapshot.owner_id)?
+            == input.snapshot.generation,
+        "refresh superseded; cannot retry"
+    );
+    Ok(())
 }
 
 pub(super) fn validate_dispatch(conn: &Connection, input: &PipelineInput) -> Result<()> {
@@ -1110,7 +1183,7 @@ fn write_derivations(
         publisher,
         report,
     );
-    tx.execute("UPDATE insight_snapshots SET readiness_json=?2,model_versions_json=(SELECT json_group_array(json(route_json)) FROM insight_stage_checkpoints WHERE owner_kind=?3 AND owner_id=?4 AND generation=?5 AND state='completed') WHERE id=?1",params![snapshot_id,serde_json::json!({"readiness":output.readiness,"limit_reached":output.limit_reached,"partial_enumeration":output.partial_enumeration,"rating":{"policy":"brief-rating-v2","input_mode":input.surface,"source_hash":crate::nlp::cache::key(&serde_json::json!(input.snapshot.source_refs)),"estimate":rating}}).to_string(),input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation])?;
+    tx.execute("UPDATE insight_snapshots SET readiness_json=?2,model_versions_json=(SELECT json_group_array(json(route_json)) FROM insight_stage_checkpoints WHERE owner_kind=?3 AND owner_id=?4 AND generation=?5 AND state='completed') WHERE id=?1",params![snapshot_id,serde_json::json!({"readiness":output.readiness,"limit_reached":output.limit_reached,"partial_enumeration":output.partial_enumeration,"item_gaps":output.item_gaps,"withheld_count":output.withheld_count,"rating":{"policy":"brief-rating-v2","input_mode":input.surface,"source_hash":crate::nlp::cache::key(&serde_json::json!(input.snapshot.source_refs)),"estimate":rating}}).to_string(),input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation])?;
     for link in &output.links {
         let left = &link.typed_endpoints[0];
         let right = &link.typed_endpoints[1];
@@ -1157,6 +1230,14 @@ fn retire_article_associations(
             [&fp],
         )?;
         if retained.contains(&fp) {
+            continue;
+        }
+        let edited: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM insight_user_edits WHERE memory_id=?1)",
+            [&memory],
+            |r| r.get(0),
+        )?;
+        if edited {
             continue;
         }
         let owned: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1 AND json_extract(source_json,'$.app') IN ('article','atlas'))",[&memory],|r|r.get(0))?;
@@ -1509,6 +1590,38 @@ mod tests {
         assert!(
             store.get_memory(&mid).unwrap().is_some(),
             "an independent owner was globally suppressed"
+        );
+    }
+
+    #[test]
+    fn report_replacement_retires_associations_but_preserves_removed_user_edits() {
+        let store = crate::store::Store::memory().unwrap();
+        store.conn.execute_batch("INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES('edited','User correction','investigation',0,'fixture','{\"app\":\"article\",\"conversation_id\":\"owner\",\"message_id\":null,\"reference\":null}'); INSERT INTO insight_user_edits(memory_id) VALUES('edited'); INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES('edit-fp','edited','Acme','announced','project','investigation','claim',0,'fixture','fixture');").unwrap();
+        store.conn.execute("INSERT INTO insight_snapshots(id,owner_kind,owner_id,generation,input_key,inputs_json,entities_json,coverage_json,readiness_json,contract_version,policy_version,created_at) VALUES('previous','article','owner',1,'key','{}','[]','[]','{}','fixture','fixture','fixture')",[]).unwrap();
+        store.conn.execute("INSERT INTO insight_derivations(id,snapshot_id,fingerprint,memory_id,insight_kind,status,revision,item_json,assessment_json) VALUES('derivation','previous','edit-fp','edited','claim','assessed','revision','{}','{}')",[]).unwrap();
+        retire_article_associations(&store.conn, "owner", &PipelineOutput::default()).unwrap();
+        assert_eq!(
+            store.get_memory("edited").unwrap().unwrap().text,
+            "User correction"
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT status FROM insight_derivations WHERE id='derivation'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "retired"
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM insight_user_edits", [], |r| r
+                    .get::<_, usize>(0))
+                .unwrap(),
+            1
         );
     }
 

@@ -284,7 +284,22 @@ fn button_label(view: &JobsView, button: ButtonId) -> String {
             }
         ),
         ButtonId::JobsViewLogs => "View logs".into(),
-        ButtonId::JobsRetry => "Retry failed".into(),
+        ButtonId::JobsRetry => if view
+            .detail
+            .as_ref()
+            .is_some_and(|d| !d.insight_progress.is_empty())
+        {
+            "Retry extraction"
+        } else if view.detail.as_ref().is_some_and(|d| {
+            d.tasks
+                .iter()
+                .any(|t| argos_osint_core::tasks::INDEX_OPERATIONS.contains(&t.operation.as_str()))
+        }) {
+            "Retry index"
+        } else {
+            "Retry failed"
+        }
+        .into(),
         ButtonId::JobsCancel => "Cancel".into(),
         ButtonId::JobsClearOld => "Clear old jobs".into(),
         ButtonId::JobsOpenSource => "Open source".into(),
@@ -466,6 +481,9 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
     ];
     if !job.operation.is_empty() {
         lines.push(format!("Operation: {}", job.operation));
+    }
+    for progress in &detail.insight_progress {
+        lines.extend(progress.lines());
     }
     if job.cancel_requested && matches!(job.state.as_str(), "running" | "queued") {
         lines.push("Cancelling… (stops at the next safe point)".into());

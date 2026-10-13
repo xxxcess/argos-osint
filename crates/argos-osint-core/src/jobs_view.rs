@@ -270,6 +270,8 @@ pub struct JobDetail {
     pub retryable: i64,
     /// The job finished more than the event retention ago and no events remain.
     pub events_expired: bool,
+    #[serde(default)]
+    pub insight_progress: Vec<crate::investigation::insight_execution::Progress>,
 }
 
 const JOB_COLUMNS: &str =
@@ -505,7 +507,7 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
-    let retryable: i64 = conn.query_row(
+    let mut retryable: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1 AND {}",
             retryable_sql()
@@ -513,6 +515,15 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
         [id],
         |r| r.get(0),
     )?;
+    let mut insight_progress = Vec::new();
+    for task in &tasks {
+        if let Some(progress) =
+            crate::investigation::insight_execution::task_progress(conn, &task.id)?
+        {
+            retryable += i64::from(progress.retryable);
+            insight_progress.push(progress);
+        }
+    }
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(events::DEFAULT_RETENTION_HOURS);
     let events_expired = job.events == 0
         && parse(&job.finished_at)
@@ -526,6 +537,7 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
         attempts,
         retryable,
         events_expired,
+        insight_progress,
     }))
 }
 
@@ -534,7 +546,7 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
 /// repeated. Returns how many tasks were requeued.
 pub fn retry_failed_tasks(conn: &Connection, id: &str) -> Result<usize> {
     let now = chrono::Utc::now().to_rfc3339();
-    let n = conn.execute(
+    let mut n = conn.execute(
         &format!(
             "UPDATE argos_tasks SET state='queued', attempts=0, next_eligible_at='', lease_owner='',
                 lease_until='', error_category='', error_message='', finished_at='', updated_at=?2
@@ -543,6 +555,15 @@ pub fn retry_failed_tasks(conn: &Connection, id: &str) -> Result<usize> {
         ),
         params![id, now],
     )?;
+    let ids = conn
+        .prepare("SELECT id FROM argos_tasks WHERE job_id=?1 AND operation='insight_refresh'")?
+        .query_map([id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for task in ids {
+        if crate::investigation::insight_execution::retry_extraction(conn, &task)? {
+            n += 1;
+        }
+    }
     if n > 0 {
         conn.execute(
             "UPDATE OR IGNORE argos_index_changes SET state='pending', error_category='', error_message='', updated_at=?2

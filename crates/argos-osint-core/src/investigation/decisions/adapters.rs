@@ -110,9 +110,8 @@ Return exactly one JSON object matching OUTPUT_SCHEMA, with no Markdown or surro
         let schema_item = json!({
             "type": "string",
             "enum": allowed_labels,
-            "description": q.instructions
         });
-        schema_answers.insert(qid.clone(), json!({ "label": schema_item }));
+        schema_answers.insert(qid.clone(), json!({ "type":"object","properties":{"label":schema_item},"required":["label"],"additionalProperties":false }));
     }
 
     let output_schema = json!({
@@ -136,9 +135,9 @@ Return exactly one JSON object matching OUTPUT_SCHEMA, with no Markdown or surro
 
     let user = format!(
         "CONTRACT:\n{}\n\nSTATE:\n{}\n\nOUTPUT_SCHEMA:\n{}",
-        serde_json::to_string_pretty(&contract_val).unwrap_or_default(),
-        serde_json::to_string_pretty(state_val).unwrap_or_default(),
-        serde_json::to_string_pretty(&output_schema).unwrap_or_default()
+        serde_json::to_string(&contract_val).unwrap_or_default(),
+        serde_json::to_string(state_val).unwrap_or_default(),
+        serde_json::to_string(&output_schema).unwrap_or_default()
     );
 
     (system, user)
@@ -150,6 +149,10 @@ pub fn parse_native_response(
     contract: &DecisionContract,
 ) -> Result<NormalizedDecisionResult> {
     let mut answers = BTreeMap::new();
+    ensure!(
+        resp.answers.len() == contract.questions.len(),
+        "unexpected or missing question IDs"
+    );
 
     for (qid, qspec) in &contract.questions {
         let answer = resp
@@ -275,13 +278,18 @@ pub fn parse_general_model_response(
         .ok_or_else(|| anyhow!("unclosed JSON object in response"))?;
     let json_slice = &cleaned[start..=end];
 
-    let val: Value =
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(deserialize_with = "unique_answers")]
+        answers: BTreeMap<String, Value>,
+    }
+    let val: Reply =
         serde_json::from_str(json_slice).context("parse general-model decision JSON")?;
-
-    let answers_obj = val
-        .get("answers")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("response missing 'answers' object"))?;
+    let answers_obj = &val.answers;
+    ensure!(
+        answers_obj.len() == contract.questions.len(),
+        "unexpected or missing question IDs"
+    );
 
     let mut answers = BTreeMap::new();
 
@@ -358,4 +366,31 @@ pub fn parse_general_model_response(
         latency_ms: 0,
         validation_status: DecisionValidationStatus::Valid,
     })
+}
+
+fn unique_answers<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, Value>, D::Error> {
+    struct Answers;
+    impl<'de> serde::de::Visitor<'de> for Answers {
+        type Value = BTreeMap<String, Value>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("unique question IDs")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut answers = BTreeMap::new();
+            while let Some((id, answer)) = map.next_entry::<String, Value>()? {
+                if answers.insert(id.clone(), answer).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate question ID {id}"
+                    )));
+                }
+            }
+            Ok(answers)
+        }
+    }
+    deserializer.deserialize_map(Answers)
 }

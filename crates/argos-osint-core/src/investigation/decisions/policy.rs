@@ -64,6 +64,15 @@ pub struct DecisionPolicy {
 }
 
 impl DecisionPolicy {
+    /// Bind a dynamic batch question to its original gate profile.
+    pub fn bind_question(&mut self, dynamic_id: &str, original_id: &str) {
+        let profile = self
+            .question_profiles
+            .get(original_id)
+            .unwrap_or(&self.default_profile)
+            .clone();
+        self.question_profiles.insert(dynamic_id.into(), profile);
+    }
     pub fn new() -> Self {
         Self::default()
     }

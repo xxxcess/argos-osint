@@ -1289,7 +1289,14 @@ pub async fn decide(
     if !status.is_success() {
         return Err(anyhow!("provider {status}: {text}"));
     }
-    parse_decisions(&text)
+    parse_decisions(&text).map_err(|error| {
+        crate::provider_diag::ProviderFailure::new(
+            crate::provider_diag::Stage::Parse,
+            crate::provider_diag::Category::MalformedPayload,
+            error.to_string(),
+        )
+        .into()
+    })
 }
 
 async fn complete_once(
@@ -1357,6 +1364,16 @@ pub(crate) fn chat_body(
         body["tool_choice"] = json!("auto");
     }
     body
+}
+
+/// Opt in only on the existing capability-mapped JSON-mode transports. Unknown
+/// endpoints keep strict local validation without unsupported request fields.
+pub(crate) fn insight_output_options(secret: &ProviderSecret, body: &mut Value, tokens: u32) {
+    use crate::investigation::decisions::{resolve_adapter, DecisionAdapterKind};
+    if resolve_adapter(&secret.model, &effective_kind(secret)) == DecisionAdapterKind::JsonMode {
+        body["response_format"] = json!({"type":"json_object"});
+        body["max_tokens"] = json!(tokens);
+    }
 }
 
 fn message_json(m: &ChatMessage) -> Value {

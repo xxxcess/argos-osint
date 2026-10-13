@@ -71,7 +71,7 @@ Defaults live under **Models → Defaults**. Empty derived roles inherit. Explic
 
 ## Persistence
 
-SQLite (current schema version 30; harness tables from v20+):
+SQLite (current schema version 32; harness tables from v20+):
 
 | Table | Contents |
 | --- | --- |
@@ -85,6 +85,14 @@ SQLite (current schema version 30; harness tables from v20+):
 ## Shared claims and derivations
 
 `investigation::insights` owns candidate packets, qualified source claims, evidence readiness, Synthesis inferences and assessed typed links. Preparation remains separate from assessment. A source allegation, denial or speculation remains an attributed claim. Kind, fidelity, evidence relation and lifecycle are independent. Mentions are candidates, never support.
+
+The `insights-v3` assessment lane uses at most eight items per compiled-budget batch and a deduplicated original-evidence dictionary. Claims are canonicalized and capped before assessment; inferences and links share final batches. One-window report extraction with eight claims, five inferences and eight links targets five successful logical operations: extraction, claim batch, Synthesis, and two final batches. Actual wire attempts include bounded repairs, failures and declared fallback routes; fixtures measure those separately from successful operations.
+
+Insight operations allow at most two wire attempts per route, including one output-contract repair with precise validation errors. A second invalid output advances to the next compatible declared route. The shared executor owns all retry/admission, records exact stage/category/attempts/skips, and links operations to the refresh task (and Recon run where applicable). Ordinary callers keep their 4-primary/3-fallback policy and terminal `InvalidResult`. Refusal, cancellation, invalid local input and persistence failure remain terminal. JSON output/completion limits are requested only for capability-mapped JSON-mode transports; unknown endpoints use strict local answer validation. Private model reasoning is never accepted as answer JSON.
+
+Durable refreshes yield after two uncached logical operations, renewing their lease while a request runs. Continuations reuse successful checkpoints and return to the fair owner queue. Optional unavailable assessments settle as withheld with gaps; faithful attributed claims remain eligible without invented corroboration. Mandatory extraction/Synthesis failures, stale evidence or lease, cancellation and all-withheld model failures preserve the active snapshot. A legitimate assessed empty result is distinct. Reduced snapshots and later repaired snapshots have separate publication identities, with Brain/provenance/head/index outbox committed together.
+
+Schema 32 adds `insight_refresh_execution` for explicit retry epochs and progress; it does not reset old checkpoints. **Retry extraction** admits one bounded epoch for recoverable unfinished work and clears only that owner's failed/cancelled dispatch barriers. Reopening a brief and restart never admit new retry epochs. Compatible completed work remains reusable; relevant role changes are compared against the prior task's captured `role_snapshot`, not recomputed with today's routes. Deleted, superseded and history-retired work cannot be retried. Recovery logs an individual owner's error and continues with later owners. Index retries remain a separate local worker action and make no inference requests.
 
 Recon stages insights from retained tools before the analytical answer. Its new `insights-v1` extraction receipt prevents answer mining and citation retrofit; legacy queued jobs retain `legacy-v1` dispatch. Article reports delegate to one durable `insight_refresh` task after asynchronous inventory, collection and assessment. Section and BLUF prose consume its readiness result; insufficient evidence produces observations and gaps.
 

@@ -418,6 +418,22 @@ pub const COMMANDS: &[CommandDefinition] = &[
         ModuleId::Jobs,
     ),
     local(
+        "intel-extraction-retry",
+        "Retry extraction",
+        "Retry unfinished insight work, retaining completed checkpoints",
+        "",
+        "Intel",
+        ModuleId::Intel,
+    ),
+    local(
+        "intel-extraction-job",
+        "Open extraction job",
+        "Inspect extraction, publication and index progress",
+        "",
+        "Intel",
+        ModuleId::Intel,
+    ),
+    local(
         "jobs-retry",
         "Retry failed job",
         "Retry an eligible failed operation",

@@ -98,6 +98,35 @@ pub async fn attempt_with_observer(
     deadlines: Deadlines,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> AttemptReport {
+    attempt_options(secret, messages, transport, deadlines, observer, None).await
+}
+
+/// Only the insight contract lane requests structured JSON and completion bounds.
+pub async fn attempt_insight(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    transport: Transport,
+    completion_tokens: u32,
+) -> AttemptReport {
+    attempt_options(
+        secret,
+        messages,
+        transport,
+        Deadlines::default(),
+        None,
+        Some(completion_tokens),
+    )
+    .await
+}
+
+async fn attempt_options(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    transport: Transport,
+    deadlines: Deadlines,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+    completion_tokens: Option<u32>,
+) -> AttemptReport {
     let started = Instant::now();
     let kind = provider::effective_kind(secret);
     let endpoint = format!(
@@ -149,6 +178,7 @@ pub async fn attempt_with_observer(
         &mut first_ms,
         &mut stream_state,
         observer,
+        completion_tokens,
     )
     .await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -179,6 +209,7 @@ async fn run(
     first_ms: &mut Option<u64>,
     state: &mut StreamState,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+    completion_tokens: Option<u32>,
 ) -> Result<Completion, ProviderFailure> {
     let client = reqwest::Client::builder()
         .connect_timeout(deadlines.connect)
@@ -186,7 +217,10 @@ async fn run(
         .map_err(|e| {
             ProviderFailure::from_error(Stage::Configuration, Category::Configuration, &e)
         })?;
-    let body = provider::chat_body(secret, messages, &[], transport == Transport::Stream);
+    let mut body = provider::chat_body(secret, messages, &[], transport == Transport::Stream);
+    if let Some(tokens) = completion_tokens {
+        provider::insight_output_options(secret, &mut body, tokens);
+    }
     let req = provider::authorize(client.post(endpoint).json(&body), secret)
         .await
         .map_err(|err| {

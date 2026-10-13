@@ -12561,6 +12561,56 @@ mod tests {
         }
     }
 
+    /// True when some `glyph label` occurrence sits centered (±1 cell) between
+    /// its panel's borders, horizontally and vertically.
+    fn loading_glyph_centered(buffer: &ratatui::buffer::Buffer, glyph: &str, label: &str) -> bool {
+        let area = buffer.area;
+        let sym = |x: u16, y: u16| buffer[(x, y)].symbol().to_string();
+        let is_v = |s: &str| {
+            matches!(
+                s,
+                "│" | "┃" | "║" | "┌" | "┐" | "└" | "┘" | "╭" | "╮" | "╰" | "╯"
+            )
+        };
+        let is_h = |s: &str| {
+            matches!(
+                s,
+                "─" | "━" | "═" | "┌" | "┐" | "└" | "┘" | "╭" | "╮" | "╰" | "╯"
+            )
+        };
+        let text_w = 2 + label.chars().count() as u16 + 3;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if sym(x, y) != glyph || x + text_w > area.width {
+                    continue;
+                }
+                let row: String = (x..x + text_w - 3).map(|cx| sym(cx, y)).collect();
+                if row != format!("{glyph} {label}") {
+                    continue;
+                }
+                let Some(left) = (0..x).rev().find(|&cx| is_v(&sym(cx, y))) else {
+                    continue;
+                };
+                let end = x + text_w;
+                let Some(right) = (end..area.width).find(|&cx| is_v(&sym(cx, y))) else {
+                    continue;
+                };
+                let Some(top) = (0..y).rev().find(|&cy| is_h(&sym(x, cy))) else {
+                    continue;
+                };
+                let Some(bottom) = (y + 1..area.height).find(|&cy| is_h(&sym(x, cy))) else {
+                    continue;
+                };
+                let (lg, rg) = (x - left - 1, right - end);
+                let (tg, bg) = (y - top - 1, bottom - y - 1);
+                if lg.abs_diff(rg) <= 1 && tg.abs_diff(bg) <= 1 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     const LOADING_SCREENS: [(&str, &str); 5] = [
         ("jobs", "Loading jobs"),
         ("logs", "Loading events"),
@@ -12589,6 +12639,11 @@ mod tests {
                 assert!(
                     text.contains(&format!("{glyph} {label}")),
                     "{screen} frame {index} missing `{glyph} {label}`:\n{text}"
+                );
+                let buffer = super::super::anim::with_frame(index, || render(&mut app, 120, 36));
+                assert!(
+                    loading_glyph_centered(&buffer, glyph, label),
+                    "{screen} frame {index}: `{glyph} {label}` not centered in its panel:\n{text}"
                 );
                 frames.push(text);
             }

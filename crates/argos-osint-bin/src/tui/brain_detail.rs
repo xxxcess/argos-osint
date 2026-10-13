@@ -401,40 +401,52 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
         current_y += 1;
     }
 
-    let lines: Vec<Line> = related_rows(view)
-        .into_iter()
-        .map(|row| match row {
-            RelRow::Header(text) => Line::from(Span::styled(fit(text, width), theme::accent())),
-            RelRow::Note(text) => Line::from(Span::styled(fit(&text, width), theme::dim())),
-            RelRow::Title(index) => {
-                let item = &view.items[index];
-                let mark = match item.kind {
-                    RelationKind::Explicit => "⇄",
-                    RelationKind::Similar => "≈",
-                };
-                let style = if index == view.sel && focused {
-                    theme::selected()
-                } else if index == view.sel {
-                    theme::text().add_modifier(ratatui::style::Modifier::BOLD)
-                } else {
-                    theme::text()
-                };
-                Line::from(Span::styled(
-                    fit(&format!("{mark} {}", item.title), width),
-                    style,
-                ))
-            }
-            RelRow::Reason(index) => {
-                let item = &view.items[index];
-                let reason_text =
-                    argos_osint_core::related_memories::format_meaningful_link_reason(&item.reason);
-                Line::from(Span::styled(
-                    fit(&format!("  {} · {}", reason_text, item.provenance), width),
-                    theme::muted(),
-                ))
-            }
-        })
-        .collect();
+    let loading = matches!(view.state, RelatedState::Idle | RelatedState::Loading);
+    let lines: Vec<Line> = if loading {
+        super::anim::centered_lines(
+            "Loading related memories",
+            theme::dim(),
+            inner_area.width,
+            inner_area.height,
+        )
+    } else {
+        related_rows(view)
+            .into_iter()
+            .map(|row| match row {
+                RelRow::Header(text) => Line::from(Span::styled(fit(text, width), theme::accent())),
+                RelRow::Note(text) => Line::from(Span::styled(fit(&text, width), theme::dim())),
+                RelRow::Title(index) => {
+                    let item = &view.items[index];
+                    let mark = match item.kind {
+                        RelationKind::Explicit => "⇄",
+                        RelationKind::Similar => "≈",
+                    };
+                    let style = if index == view.sel && focused {
+                        theme::selected()
+                    } else if index == view.sel {
+                        theme::text().add_modifier(ratatui::style::Modifier::BOLD)
+                    } else {
+                        theme::text()
+                    };
+                    Line::from(Span::styled(
+                        fit(&format!("{mark} {}", item.title), width),
+                        style,
+                    ))
+                }
+                RelRow::Reason(index) => {
+                    let item = &view.items[index];
+                    let reason_text =
+                        argos_osint_core::related_memories::format_meaningful_link_reason(
+                            &item.reason,
+                        );
+                    Line::from(Span::styled(
+                        fit(&format!("  {} · {}", reason_text, item.provenance), width),
+                        theme::muted(),
+                    ))
+                }
+            })
+            .collect()
+    };
     let title = match view.state {
         RelatedState::Ready if !view.items.is_empty() => {
             format!(" related · {} ", view.items.len())
@@ -473,8 +485,18 @@ fn draw_article_related(frame: &mut Frame, app: &App, area: Rect) {
             );
         }
     }
+    let lines = if view.loading {
+        super::anim::centered_lines(
+            "Loading related articles",
+            theme::dim(),
+            content.width,
+            content.height,
+        )
+    } else {
+        rows.into_iter().map(|(line, _)| line).collect::<Vec<_>>()
+    };
     frame.render_widget(
-        Paragraph::new(rows.into_iter().map(|(line, _)| line).collect::<Vec<_>>())
+        Paragraph::new(lines)
             .block(panel(" Related · shared mentions "))
             .scroll((view.scroll, 0)),
         area,

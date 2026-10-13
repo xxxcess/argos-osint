@@ -96,6 +96,70 @@ pub fn loading(label: &str) -> String {
     format!("{} {label}{}", spinner_at(index), dots_at(index))
 }
 
+/// Fit `text` to `width` columns: truncated with `…` when too wide.
+pub fn fit_width(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if text.width() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// Left padding that centers `text` (fitted to `width`) horizontally.
+pub fn center_text(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let fitted = fit_width(text, width);
+    let pad = (width - fitted.width()) / 2;
+    format!("{}{fitted}", " ".repeat(pad))
+}
+
+/// Animated loading line for `label`, centered in a `width`×`height` panel
+/// body: `(height - 1) / 2` blank rows above, then the horizontally centered
+/// line (truncated with `…` when wider than the panel). Empty for a 0 size.
+pub fn centered_lines(
+    label: &str,
+    style: ratatui::style::Style,
+    width: u16,
+    height: u16,
+) -> Vec<ratatui::text::Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let text = loading(label);
+    let mut lines = vec![ratatui::text::Line::raw(""); usize::from((height - 1) / 2)];
+    lines.push(ratatui::text::Line::styled(
+        center_text(&text, usize::from(width)),
+        style,
+    ));
+    lines
+}
+
+/// Draw the animated loading line centered in `area` (a panel's inner rect).
+pub fn draw_centered(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    label: &str,
+    style: ratatui::style::Style,
+) {
+    use ratatui::widgets::Widget;
+    ratatui::widgets::Paragraph::new(centered_lines(label, style, area.width, area.height))
+        .render(area, buf);
+}
+
 /// Job status cell: spinner while running, pulse while queued/waiting.
 pub fn job_state_label(state: &str, label: &str) -> String {
     match state {
@@ -128,6 +192,57 @@ mod tests {
         assert_eq!(pulse_at(PULSE_HOLD * 3), PULSE[3]);
         assert_eq!(pulse_at(PULSE_HOLD * 4), PULSE[0]);
         assert!(DOTS.iter().all(|d| d.chars().count() == 3), "fixed width");
+    }
+
+    fn row_of(lines: &[ratatui::text::Line<'_>]) -> (usize, String) {
+        let last = lines.last().unwrap();
+        (lines.len() - 1, last.to_string())
+    }
+
+    #[test]
+    fn centered_lines_center_odd_and_even_sizes() {
+        let style = ratatui::style::Style::default();
+        // "⠋ Loading   " is 12 columns wide.
+        for (w, h, row, pad) in [
+            (20u16, 9u16, 4, 4),
+            (21, 10, 4, 4),
+            (13, 1, 0, 0),
+            (12, 2, 0, 0),
+        ] {
+            let lines = with_frame(0, || centered_lines("Loading", style, w, h));
+            let (r, text) = row_of(&lines);
+            assert_eq!(r, row, "{w}x{h} row");
+            assert_eq!(text.len() - text.trim_start().len(), pad, "{w}x{h} pad");
+            assert!(text.trim_start().starts_with("⠋ Loading"));
+        }
+    }
+
+    #[test]
+    fn centered_lines_handle_tiny_and_wide() {
+        let style = ratatui::style::Style::default();
+        assert!(centered_lines("Loading", style, 0, 5).is_empty());
+        assert!(centered_lines("Loading", style, 5, 0).is_empty());
+        let one = with_frame(0, || centered_lines("Loading", style, 1, 1));
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].to_string(), "…");
+        let wide = with_frame(0, || {
+            centered_lines("Loading a very long label", style, 10, 3)
+        });
+        let (row, text) = row_of(&wide);
+        assert_eq!(row, 1);
+        assert_eq!(text, "⠋ Loading…");
+        assert_eq!(unicode_width::UnicodeWidthStr::width(text.as_str()), 10);
+    }
+
+    #[test]
+    fn draw_centered_paints_glyph_at_center() {
+        let area = ratatui::layout::Rect::new(2, 1, 30, 7);
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 10));
+        with_frame(3, || {
+            draw_centered(&mut buf, area, "Loading", Default::default())
+        });
+        // 12-col line in 30 cols → pad 9; 7 rows → row 3.
+        assert_eq!(buf[(2 + 9, 1 + 3)].symbol(), SPINNER[3]);
     }
 
     #[test]

@@ -6307,7 +6307,12 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
     let title = memory_list_title(app);
-    if items.is_empty() {
+    if items.is_empty() && app.memory_error.is_none() && !app.memories_loaded {
+        let block = pane(&title);
+        let inner = block.inner(layout.list);
+        frame.render_widget(block, layout.list);
+        super::anim::draw_centered(frame.buffer_mut(), inner, "Loading memories", theme::dim());
+    } else if items.is_empty() {
         let (text, style) = memory_list_note(app);
         frame.render_widget(
             Paragraph::new(text)
@@ -9623,13 +9628,10 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_map_or_hold(frame: &mut Frame, app: &App, area: Rect) {
     if app.atlas_map_hold {
         frame.render_widget(Clear, area);
-        frame.render_widget(
-            Paragraph::new(super::anim::loading("Loading country"))
-                .alignment(Alignment::Center)
-                .style(theme::dim())
-                .block(pane(" map ")),
-            area,
-        );
+        let block = pane(" map ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        super::anim::draw_centered(frame.buffer_mut(), inner, "Loading country", theme::dim());
         return;
     }
     super::map::draw_world_map(frame, app, area);

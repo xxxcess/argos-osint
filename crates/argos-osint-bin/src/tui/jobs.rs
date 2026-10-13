@@ -607,10 +607,16 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect, can_open_source: bool) {
                 theme::error(),
             )));
         }
-        if view.rows.is_empty() {
-            let text = if !view.loaded && view.error.is_none() {
-                super::anim::loading("Loading jobs")
-            } else if view.status != JobStatusFilter::All
+        let inner = inset(a.table);
+        if view.rows.is_empty() && !view.loaded && view.error.is_none() {
+            lines = super::anim::centered_lines(
+                "Loading jobs",
+                theme::dim(),
+                inner.width,
+                inner.height,
+            );
+        } else if view.rows.is_empty() {
+            let text = if view.status != JobStatusFilter::All
                 || !view.app.is_empty()
                 || !view.search.trim().is_empty()
             {

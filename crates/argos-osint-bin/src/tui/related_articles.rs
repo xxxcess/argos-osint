@@ -20,7 +20,7 @@ pub fn rows(
     if view.loading {
         return vec![(
             Line::from(Span::styled(
-                super::anim::loading("Loading related articles"),
+                super::anim::center_text(&super::anim::loading("Loading related articles"), width),
                 theme::dim(),
             )),
             None,

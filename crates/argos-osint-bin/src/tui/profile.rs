@@ -2570,11 +2570,15 @@ fn attention_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 }
 fn dashboard_lines(app: &App, w: &WidgetSpec, width: usize, height: usize) -> Vec<Line<'static>> {
     let Some(s) = app.profile.snapshot.as_ref() else {
-        return vec![Line::raw(if app.profile.error.is_some() {
-            "Unavailable statistics".to_string()
-        } else {
-            super::anim::loading("Loading statistics")
-        })];
+        if app.profile.error.is_some() {
+            return vec![Line::raw("Unavailable statistics")];
+        }
+        return super::anim::centered_lines(
+            "Loading statistics",
+            ratatui::style::Style::default(),
+            width.min(usize::from(u16::MAX)) as u16,
+            height.min(usize::from(u16::MAX)) as u16,
+        );
     };
     let mut lines = Vec::new();
     if w.applicable_filters.is_empty() {
@@ -3388,6 +3392,10 @@ fn categorical_plot(
     lines
 }
 fn report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
+    if app.profile.snapshot.is_none() {
+        // Animated: never cache a spinner frame.
+        return build_report_detail_lines(app, widget, width);
+    }
     let key = (
         widget.id,
         width,
@@ -3808,7 +3816,16 @@ fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
     );
     for section in &sections.sections {
         if section.index == datasets.len() {
-            let lines = report_detail_lines(app, widget, section.rect.width);
+            let lines = if app.profile.snapshot.is_none() {
+                super::anim::centered_lines(
+                    "Loading statistics",
+                    ratatui::style::Style::default(),
+                    section.rect.width,
+                    section.rect.height,
+                )
+            } else {
+                report_detail_lines(app, widget, section.rect.width)
+            };
             let viewport = section.rect.height as usize;
             let offset = app
                 .profile

@@ -527,6 +527,71 @@ pub fn validate_leads(
     }))
 }
 
+/// Content terms for lead overlap: lower-case words of 4+ characters that are
+/// neither stop words nor country names (geography alone is not an overlap).
+fn content_terms(text: &str) -> HashSet<String> {
+    const STOP: &[&str] = &[
+        "that", "this", "with", "from", "have", "after", "before", "said", "says", "will", "would",
+        "could", "their", "there", "they", "were", "been", "being", "into", "over", "under",
+        "about", "also", "more", "than", "when", "which", "while", "only", "other", "report",
+        "reports", "news", "week", "year", "today",
+    ];
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 4)
+        .filter(|w| crate::iso3166::code_for_name(w).is_none())
+        .map(str::to_lowercase)
+        .filter(|w| !STOP.contains(&w.as_str()))
+        .collect()
+}
+
+/// Local semantic gate after format validation (§8.7): a lead must share an
+/// inference-specific term with the metadata it cites (shared country alone
+/// yields no lead) and must name its verification gap. Dropped leads are
+/// counted, never silently promoted.
+pub fn filter_leads(
+    out: &mut Value,
+    inference_texts: &HashMap<String, String>,
+    candidates: &[Candidate],
+) {
+    let leads = out["leads"].as_array().cloned().unwrap_or_default();
+    let mut kept = Vec::new();
+    for lead in leads {
+        let inference = inference_texts
+            .get(lead["inference_id"].as_str().unwrap_or(""))
+            .map(|t| content_terms(t))
+            .unwrap_or_default();
+        let cited: String = candidates
+            .iter()
+            .find(|c| lead["article_id"] == c.article.id.as_str())
+            .map(|c| {
+                lead["metadata_evidence"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| c.sentences.iter().find(|s| e["id"] == s.id.as_str()))
+                    .map(|s| s.text.clone())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        let overlap = !inference.is_disjoint(&content_terms(&cited));
+        let gap = !lead["verification_needed"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .is_empty();
+        if overlap && gap {
+            kept.push(lead);
+        }
+    }
+    let dropped = out["leads"].as_array().map_or(0, Vec::len) - kept.len();
+    if kept.is_empty() && dropped > 0 {
+        out["empty_reason"] = json!("no inference-specific overlap");
+    }
+    out["leads"] = Value::Array(kept);
+    out["withheld"] = json!(dropped);
+}
+
 // ---------- executor ----------
 
 fn now() -> String {
@@ -802,7 +867,19 @@ async fn execute(
                 },
             )
             .await?;
-            let out = validate_leads(&raw.to_string(), &inference_ids, &candidates)?;
+            let mut out = validate_leads(&raw.to_string(), &inference_ids, &candidates)?;
+            let texts: HashMap<String, String> = inferences["inferences"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|i| {
+                    Some((
+                        i["id"].as_str()?.to_string(),
+                        i["text"].as_str()?.to_string(),
+                    ))
+                })
+                .collect();
+            filter_leads(&mut out, &texts, &candidates);
             let n = out["leads"].as_array().map_or(0, Vec::len);
             let reason = if n == 0 {
                 out["empty_reason"].as_str().unwrap_or("").to_string()
@@ -812,6 +889,28 @@ async fn execute(
             Ok((out, n, reason))
         }
         other => bail!("unknown brief stage {other}"),
+    }
+}
+
+/// Canonical inputs for the final commit; any preparation error becomes the
+/// Index footer reason rather than a stage failure.
+fn prepare_canonical(
+    store: &Store,
+    claimed: &ClaimedTask,
+) -> std::result::Result<super::brief_canonical::CanonicalBrief, String> {
+    let prepared = (|| -> Result<_> {
+        let article = article_for(store, &article_id_of(claimed, store)?)?;
+        super::brief_canonical::prepare(
+            store,
+            &article,
+            &stage_output(store, &claimed.job_id, "intel_brief_body")?,
+            &stage_output(store, &claimed.job_id, "intel_brief_claims")?,
+            &stage_output(store, &claimed.job_id, "intel_brief_inferences")?,
+        )
+    })();
+    match prepared {
+        Ok(result) => result,
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -979,13 +1078,19 @@ pub async fn run_next_stage(
                 }
             }
             Ok((value, items, reason)) => {
-                if brief_pipeline::commit_stage(
+                let canonical = if operation == "intel_brief_links" {
+                    Some(prepare_canonical(&store, &claimed))
+                } else {
+                    None
+                };
+                if brief_pipeline::commit_stage_with(
                     &store.conn,
                     &claimed,
                     &value.to_string(),
                     items,
                     &reason,
                     &at,
+                    canonical.as_ref(),
                 )? {
                     StageOutcome::Committed {
                         operation: operation.clone(),

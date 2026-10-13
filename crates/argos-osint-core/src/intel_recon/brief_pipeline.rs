@@ -176,6 +176,29 @@ pub fn commit_stage(
     empty_reason: &str,
     now: &str,
 ) -> Result<bool> {
+    commit_stage_with(
+        conn,
+        claimed,
+        output_json,
+        item_count,
+        empty_reason,
+        now,
+        None,
+    )
+}
+
+/// [`commit_stage`] carrying the prepared canonical inputs for the final stage,
+/// so brief publication, canonical Brain derivations and the index outbox share
+/// the one fenced transaction.
+pub fn commit_stage_with(
+    conn: &Connection,
+    claimed: &ClaimedTask,
+    output_json: &str,
+    item_count: usize,
+    empty_reason: &str,
+    now: &str,
+    canonical: Option<&std::result::Result<super::brief_canonical::CanonicalBrief, String>>,
+) -> Result<bool> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let hash = crate::nlp::cache::hash(output_json);
     if !tasks::complete_claimed(&tx, claimed, &hash, now)? {
@@ -200,7 +223,17 @@ pub fn commit_stage(
             "UPDATE intel_brief_runs SET state='completed',updated_at=?2 WHERE job_id=?1",
             params![claimed.job_id, now],
         )?;
-        publish(&tx, &claimed.job_id, output_json, now)?;
+        if let Some((article_id, snapshot_hash)) = publish(&tx, &claimed.job_id, output_json, now)?
+        {
+            super::brief_canonical::publish_on(
+                &tx,
+                &article_id,
+                &claimed.job_id,
+                canonical,
+                &snapshot_hash,
+                now,
+            )?;
+        }
     }
     tasks::refresh_job_state(&tx, &claimed.job_id, now)?;
     tx.commit()?;
@@ -212,7 +245,12 @@ pub fn commit_stage(
 /// The previous publication stays until this succeeds; an older generation
 /// never overwrites a newer one. Separate from canonical report snapshots, so
 /// a completed Recon report keeps precedence.
-fn publish(tx: &Connection, job_id: &str, links_json: &str, now: &str) -> Result<()> {
+fn publish(
+    tx: &Connection,
+    job_id: &str,
+    links_json: &str,
+    now: &str,
+) -> Result<Option<(String, String)>> {
     let (article_id, generation): (String, i64) = tx.query_row(
         "SELECT article_id,generation FROM intel_brief_runs WHERE job_id=?1",
         [job_id],
@@ -231,6 +269,7 @@ fn publish(tx: &Connection, job_id: &str, links_json: &str, now: &str) -> Result
     let inferences = output("intel_brief_inferences")?;
     let links: serde_json::Value = serde_json::from_str(links_json)?;
     let snapshot = serde_json::json!([body["content_hash"], claims, inferences, links]).to_string();
+    let snapshot_hash = crate::nlp::cache::hash(&snapshot);
     let written = tx.execute(
         "INSERT INTO intel_brief_publications(article_id,job_id,generation,contract,body_hash,snapshot_hash,claims_json,inferences_json,leads_json,published_at)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
@@ -239,12 +278,12 @@ fn publish(tx: &Connection, job_id: &str, links_json: &str, now: &str) -> Result
         params![
             article_id, job_id, generation, CONTRACT,
             body["content_hash"].as_str().unwrap_or(""),
-            crate::nlp::cache::hash(&snapshot),
+            snapshot_hash,
             claims.to_string(), inferences.to_string(), links["leads"].to_string(), now
         ],
     )?;
     if written == 0 {
-        return Ok(());
+        return Ok(None);
     }
     tx.execute(
         "DELETE FROM intel_inference_article_leads WHERE article_id=?1 AND source_generation<=?2",
@@ -281,7 +320,7 @@ fn publish(tx: &Connection, job_id: &str, links_json: &str, now: &str) -> Result
             ],
         )?;
     }
-    Ok(())
+    Ok(Some((article_id, snapshot_hash)))
 }
 
 /// One published lead row for presentation ("Potential corroboration").

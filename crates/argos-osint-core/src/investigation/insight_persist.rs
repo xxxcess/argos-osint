@@ -1,6 +1,6 @@
 //! Immutable derivation history and transaction-scoped publication fencing.
 use anyhow::{ensure, Result};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::insights::{EvidenceSnapshot, CONTRACT, READINESS_POLICY};
 use crate::tasks::ClaimedTask;
@@ -1223,8 +1223,9 @@ fn validate_live_evidence(conn: &Connection, snapshot: &EvidenceSnapshot) -> Res
     Ok(())
 }
 
-fn write_derivations(
-    tx: &Transaction<'_>,
+/// Canonical derivation writer shared by every publication lane.
+pub fn write_derivations(
+    tx: &Connection,
     snapshot_id: &str,
     input: &PipelineInput,
     output: &PipelineOutput,
@@ -1516,8 +1517,56 @@ pub struct PublicationFence<'a> {
     pub live_input_key: &'a str,
 }
 
-/// The callback writes canonical Brain rows, evidence, links and index outbox using this
-/// transaction. No mutation may be performed before the generation/revision/lease checks.
+/// Lane-independent canonical publication, run on the caller's transaction.
+///
+/// Checks the owner's desired generation and live input key, revalidates live
+/// evidence, records the immutable snapshot, runs `publish` (canonical Brain
+/// rows, evidence, links and index outbox) and activates the snapshot. Each lane
+/// supplies its own fence first: the insight-refresh lease
+/// ([`publish_snapshot`]) or the brief chain's fenced Stage-4 commit
+/// (`intel_recon::brief_pipeline::commit_stage`). Returns the snapshot id, or
+/// `None` without writing when the generation/key is stale.
+pub fn publish_snapshot_on<F>(
+    tx: &Connection,
+    snapshot: &EvidenceSnapshot,
+    live_input_key: &str,
+    lifecycle: &str,
+    now: &str,
+    publish: F,
+) -> Result<Option<String>>
+where
+    F: FnOnce(&Connection, &str) -> Result<()>,
+{
+    ensure!(
+        snapshot.owner_kind != "atlas",
+        "Atlas insight publication retired"
+    );
+    if desired_generation(tx, &snapshot.owner_kind, &snapshot.owner_id)? != snapshot.generation
+        || snapshot.key != live_input_key
+    {
+        return Ok(None);
+    }
+    ensure!(
+        ["active", "insufficient_evidence", "blocked"].contains(&lifecycle),
+        "invalid snapshot lifecycle"
+    );
+    validate_live_evidence(tx, snapshot)?;
+    let snapshot_id = format!(
+        "isnap:{}:{}:{}:{}",
+        snapshot.owner_kind, snapshot.owner_id, snapshot.generation, snapshot.key
+    );
+    let existing: Option<String> = tx.query_row("SELECT id FROM insight_snapshots WHERE owner_kind=?1 AND owner_id=?2 AND generation=?3 AND input_key=?4", params![snapshot.owner_kind, snapshot.owner_id, snapshot.generation, snapshot.key], |r| r.get(0)).optional()?;
+    if existing.is_none() {
+        tx.execute("INSERT INTO insight_snapshots(id,owner_kind,owner_id,generation,input_key,inputs_json,entities_json,coverage_json,readiness_json,contract_version,policy_version,created_at)
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![snapshot_id,snapshot.owner_kind,snapshot.owner_id,snapshot.generation,snapshot.key,serde_json::to_string(snapshot)?,serde_json::to_string(&snapshot.entities)?,serde_json::to_string(&snapshot.coverage_by_stage)?,serde_json::json!({"lifecycle":lifecycle}).to_string(),CONTRACT,READINESS_POLICY,now])?;
+        publish(tx, &snapshot_id)?;
+    }
+    tx.execute("UPDATE insight_owner_state SET active_snapshot_id=?4,lifecycle=?5,last_error='',updated_at=?6 WHERE owner_kind=?1 AND owner_id=?2 AND desired_generation=?3", params![snapshot.owner_kind,snapshot.owner_id,snapshot.generation,snapshot_id,lifecycle,now])?;
+    Ok(Some(snapshot_id))
+}
+
+/// Insight-refresh lane: the lease fence around [`publish_snapshot_on`], with
+/// task acknowledgement in the same transaction.
 pub fn publish_snapshot<F>(
     conn: &mut Connection,
     snapshot: &EvidenceSnapshot,
@@ -1526,19 +1575,10 @@ pub fn publish_snapshot<F>(
     publish: F,
 ) -> Result<bool>
 where
-    F: FnOnce(&Transaction<'_>, &str) -> Result<()>,
+    F: FnOnce(&Connection, &str) -> Result<()>,
 {
-    ensure!(
-        snapshot.owner_kind != "atlas",
-        "Atlas insight publication retired"
-    );
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     crate::job_cleanup::ensure_admissible(&tx, &fence.task.job_id, fence.now)?;
-    if desired_generation(&tx, &snapshot.owner_kind, &snapshot.owner_id)? != snapshot.generation
-        || snapshot.key != fence.live_input_key
-    {
-        return Ok(false);
-    }
     let leased = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM argos_tasks WHERE id=?1 AND job_id=?2 AND operation='insight_refresh'
          AND lease_owner=?3 AND lease_epoch=?4 AND state='running' AND julianday(lease_until)>julianday(?5))",
@@ -1546,22 +1586,17 @@ where
     if !leased {
         return Ok(false);
     }
-    ensure!(
-        ["active", "insufficient_evidence", "blocked"].contains(&lifecycle),
-        "invalid snapshot lifecycle"
-    );
-    validate_live_evidence(&tx, snapshot)?;
-    let snapshot_id = format!(
-        "isnap:{}:{}:{}:{}",
-        snapshot.owner_kind, snapshot.owner_id, snapshot.generation, snapshot.key
-    );
-    let existing: Option<String> = tx.query_row("SELECT id FROM insight_snapshots WHERE owner_kind=?1 AND owner_id=?2 AND generation=?3 AND input_key=?4", params![snapshot.owner_kind, snapshot.owner_id, snapshot.generation, snapshot.key], |r| r.get(0)).optional()?;
-    if existing.is_none() {
-        tx.execute("INSERT INTO insight_snapshots(id,owner_kind,owner_id,generation,input_key,inputs_json,entities_json,coverage_json,readiness_json,contract_version,policy_version,created_at)
-            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![snapshot_id,snapshot.owner_kind,snapshot.owner_id,snapshot.generation,snapshot.key,serde_json::to_string(snapshot)?,serde_json::to_string(&snapshot.entities)?,serde_json::to_string(&snapshot.coverage_by_stage)?,serde_json::json!({"lifecycle":lifecycle}).to_string(),CONTRACT,READINESS_POLICY,fence.now])?;
-        publish(&tx, &snapshot_id)?;
-    }
-    tx.execute("UPDATE insight_owner_state SET active_snapshot_id=?4,lifecycle=?5,last_error='',updated_at=?6 WHERE owner_kind=?1 AND owner_id=?2 AND desired_generation=?3", params![snapshot.owner_kind,snapshot.owner_id,snapshot.generation,snapshot_id,lifecycle,fence.now])?;
+    let Some(snapshot_id) = publish_snapshot_on(
+        &tx,
+        snapshot,
+        fence.live_input_key,
+        lifecycle,
+        fence.now,
+        publish,
+    )?
+    else {
+        return Ok(false);
+    };
     ensure!(
         crate::tasks::complete_claimed(&tx, fence.task, &snapshot_id, fence.now)?,
         "publication lease lost"

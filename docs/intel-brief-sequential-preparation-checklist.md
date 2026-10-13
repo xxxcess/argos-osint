@@ -1,61 +1,65 @@
 # Intel Brief — Sequential Preparation and Extraction — checklist
 
 Spec: "Argos Intel Brief — Sequential Preparation and Extraction" (2026-10-13, audited main `bb0dc3a`).
-Branch `feat/intel-brief-sequential-preparation` from origin/main `bb0dc3a857f0afc300d0ed1e0170a52ede1b73c7` (HEAD recheck: identical; main contains #39 and #40/#41).
+Branch `feat/intel-brief-sequential-preparation` from origin/main `bb0dc3a857f0afc300d0ed1e0170a52ede1b73c7`. Rechecked at phase 5: main has not moved, so no merge was needed.
 
-Legend: **done** / **partial** / **deferred** / pending. Phases follow §7's order.
+Legend: **done** / **partial** / **deferred**. Phases follow §7's order (1 tasks, 2 cleanup, 3 stages, 4a wiring + publication, 4b UI + fidelity, 5 canonical + anchors + §8 + docs).
 
-| § | Item | Status | Phase / notes |
-|---|------|--------|---------------|
-| 5 | Reaper race: selection + mutation in one immediate transaction; final CAS rechecks `julianday(lease_until)<=julianday(now)` + owner + epoch | done | 1 · `tasks::interrupt_expired_leases(_in)`; interleaving test |
+## §2–§5 Orchestration, cleanup, stages, publication
+
+| § | Item | Status | Phase / evidence |
+|---|------|--------|------------------|
+| 5 | Reaper race: selection + mutation in one immediate transaction; final CAS rechecks expiry + owner + epoch | done | 1 · `tasks::interrupt_expired_leases(_in)`; interleaving test |
 | 5 | Renewal requires current unexpired ownership | done | 1 · `renew_lease` |
-| 5 | Recovery advances epoch, closes matching attempt (`lease_expired`) | done | 1 |
-| 5 | Recovery cancels the obsolete in-flight operation | partial | 1 · epoch fence rejects all stale writes/renewals; in-process request cancellation lands with stage executors (phase 3) |
-| 5 | Generic and refresh-specific recovery consolidated | done | 1 · `recover_refreshes` calls the shared reaper (removed its non-atomic two-step update) |
-| 5 | Worker recoveries tracked separately from provider attempts; bounded infrastructure policy; `max_attempts=1` not permanent on first expiry | done | 1 · `argos_tasks.recoveries`, `MAX_WORKER_RECOVERIES=3`, attempt refunded |
-| 5 | `argos_task_dependencies(task_id,depends_on)` + brief manifest (`intel_brief_runs`, `intel_brief_stage_outputs`) | done | 1 · schema 35 (additive) |
-| 5 | Ops `intel_brief_{body,claims,inferences,links}` routed to dedicated pool; unrelated/legacy drainers never claim them | done | 1 · `POOL_INTEL_BRIEF` |
-| 5 | Dependency, `next_eligible_at` (julianday) and one-active-stage guard in claim SQL | done | 1 |
-| 5 | Atomic admission of one chain per article generation; all four tasks persisted; only first claimable | done | 1 · `brief_pipeline::ensure_chain` |
-| 5 | Stage commit: immutable output/hash, bind next input, acknowledge, unblock — one transaction, fenced | done | 1 · `commit_stage` |
-| 5 | Failure fails only that stage; dependents `Queued · blocked by <stage>`; Retry resumes it only | done | 1 · `stage_views`, `retry_stage` |
-| 5 | Reopening never resets an exhausted chain; unchanged completed chain issues no work | done | 1 |
-| 5 | New input revisions supersede (epoch fencing); cancellation/deletion stops chain and publication | done | 1 · `supersede_run`, `cancel_chain` |
-| 5 | Lease renewal from claim through publication/ack; lightweight SQLite conn + bounded busy retry; blocking DB work off current-thread loop; renewal-failure/heartbeat-age logging | pending | 3 (stage executors) |
-| 5 | Visits/body-ready/recovery attach to the chain; remove duplicate `tracked::begin` body jobs | pending | 2–4 (`open_intel_briefing` wiring) |
-| 5 | Final Stage-4 atomic publication + index outbox; index failure separate | pending | 3 |
-| 3 | Cleanup order: local baseline → NLP annotation → conditional Classifier (ambiguous blocks only, ≤12/batch, neighbour context, default keep) → local verbatim removals → revalidation + span maps + content hash | done (`intel_recon/clean_body.rs`) | 2 |
-| 3 | Spec cleanup prompt used for Classifier block decisions | done (`BLOCK_SYSTEM`, `CLEANUP_PROMPT`) | 2 |
-| 3 | No Synthesis rewrite; display and extraction consume one `intel-clean-body-v1` artifact | done (`commit_refined_body`, `article_input`) | 2 |
-| 3 | NLP mentions as keep-anchors | partial: title anchors used; NLP annotation still runs/caches but its mentions are not yet fed to the ambiguity heuristic | 2 |
-| 3 | Stage 1 fails on missing/truncated/unvalidated story | done: executor enforces `stage_one_admissible` with the acquisition receipt (`acquisition_complete`) | 2–3 |
-| 4 | Spec prompts for Claims / Inferences / Links, strict JSON, short IDs, Rust-resolved UTF-8 spans | done (`intel_recon/brief_stages.rs`) | 3 |
-| 4 | Local field/count limits (6 claims ≤35w; 5 inferences ≤35w/why ≤45w/≤2 limitations ≤20w; 5 leads ≤40w), unknown-ID / duplicate / fence / links-in-inference rejection | done | 3 |
-| 4 | Budgets 2048/3072/1536 through `OperationScope::with_completion_tokens` → `attempt_insight` (replaces fixed 8,192 in this lane) | done; cleanup batches 512 (`CLEANUP_TOKENS`, 4b) | 3 |
-| 4 | Role routing: Claims → claim_assessor, Inferences/Links → synthesis; Jev skip / all-Jev failure via existing `execute_chat` | done (reused) | 3 |
-| 4 | Long bodies: ordered windows within Stage 3 carrying ≤5 proposals, later windows revise, five total | done | 3 |
-| 4 | Stage 4 local shortlist (self excluded, canonical URL + syndicated-title dedupe, cap 12); no-inference / no-candidate finishes locally | done | 3 |
-| 4 | Batched Claim-assessor fidelity decisions inside Stages 2/3 | done (`brief_fidelity.rs`: ≤12/batch, 1024 tokens, strict label check, receipts cached `intel-fidelity:{hash}`, unfaithful items withheld) | 4b |
-| 4 | `intel_inference_article_leads` persistence | done (schema 36, written in the Stage-4 publication) | 4a |
-| 4 | "Potential corroboration" rendering in Links | done (metadata leads, not confirmed support) | 4b |
-| 5 | Heartbeat from claim through commit/ack on a light connection with bounded busy retry; renewal failures + heartbeat age recorded | done (`Store::open_light`, `intel-brief-heartbeat:*`) | 3 |
-| 5 | Cancellation / deletion / lost lease drop the in-flight request; nothing is written | done | 3 |
-| 5 | Stage failure fails only that stage (model chain is the single retry owner); Retry resumes it | done | 3 |
-| 5 | Brief-owned body retrieval does not schedule a competing article refresh | done (`commit_refined_body`) | 3 |
-| 5 | Final Stage-4 publication: combined snapshot (`intel_brief_publications`) + leads in the fenced Stage-4 commit; previous kept until success; older generation never overwrites newer; separate from report snapshots | done | 4a |
-| 5 | Canonical Brain derivations + index outbox from the brief snapshot | deferred: fidelity now available; canonical `publish_snapshot` is bound to insight-refresh leases/PipelineOutput types | 5 |
-| 2 | `ensure_intel_brief_pipeline` wired into `open_intel_briefing`; no separate refresh/body job on visit; dedicated `argos-intel-brief` runner (multi-thread runtime) in `WorkerPool::spawn_default`; UI polls stage views each tick and reloads on change; Retry resumes the failed stage | done | 4a |
-| 2 | Mode classification lazy (Recon configuration) | done | 4a |
-| 2 | Reload (force refresh) through the chain instead of the legacy body job | done (`reload_intel_brief_pipeline`, `force_body`; legacy `ensure_article_body_fetch` + `WorkEvent::IntelBody` removed) | 4b |
-| 3 | Synthesis body-rewrite functions removed | done | 3 |
-| 8.1 | One chain, 1→2→3→4 order, scoped inputs, zero requests on unchanged reopen | done (`brief_stages_tests.rs`) | 3 |
-| 8.2 | Validator rejections + UTF-8 spans + shortlist dedupe | done | 3 |
-| 8.4 | Stage-3 failure isolation, Retry runs Stage 3 only, empty arrays complete, no-inference Stage 4 uses no model | done | 3 |
-| 8.5 | Heartbeat beyond lease with concurrent reapers, stale output fenced after epoch change, cancellation/parent cancel drop in-flight request, attempts preserved | done; SQLite contention / publication delay / overlapping drainers partially (reaper thread only) | 3 |
-| 8.3 | Cleanup regressions (byline/quote/negation/correction/Unicode verbatim, span maps, classifier missing/failing keeps all, ≤12 sequential batches, degrading removals rejected, incomplete story fails) | done (`clean_body_tests.rs`, 6 tests) | 2 |
-| 4 | Related leads (`intel_inference_article_leads`) | done | 4a |
-| 6 | Shared stage-progress UI (brief Jobs, section headers, global Jobs, Logs); `artifact_steps` no longer copies parent terminal state | done (Step k/4, per-stage rows, one spinner, activity labels, global Jobs `stage_label`, `intel_brief.stage` log events; screens in `docs/screens/intel-sequential/`) | 4b |
-| 7 | Docs/diagrams | pending | 5 |
-| 8.1 | One chain under repeated visits/reopen/recovery; one active stage; order 1→2→3→4; zero work on unchanged completed | partial | 1 · admission/claim level (`repeated_admission_*`, `overlapping_drainers_*`); model-request counts in phase 3 |
-| 8.4 | Stage-3 failure keeps 1/2 completed, 3 failed, 4 blocked; Retry runs 3 only | done | 1 + 4b (`intel_sequential_stage_screens` asserts brief Jobs, panes, global Jobs) |
-| 8.5 | Expiry-selection→renewal→reaper interleaving; crash/reclaim; stale late output; cancellation; overlapping drainers | partial | 1 · done for those; >120s live processing, SQLite contention, publication delay, heartbeat-through-ack: phase 3 |
+| 5 | Recovery advances epoch, closes matching attempt, cancels the obsolete in-flight operation | done | 1 + 3 · epoch fence; `tokio::select` drops the request |
+| 5 | Generic and refresh-specific recovery consolidated | done | 1 |
+| 5 | Worker recoveries tracked separately from provider attempts; bounded policy; attempt refunded | done | 1 · `recoveries`, `MAX_WORKER_RECOVERIES=3` |
+| 5 | Dependencies + brief manifest (`argos_task_dependencies`, `intel_brief_runs`, `intel_brief_stage_outputs`) | done | 1 · schema 35 |
+| 5 | Dedicated `intel_brief` pool; dependency / `next_eligible_at` / one-active-stage guard in claim SQL | done | 1 |
+| 5 | Atomic admission of one chain per article generation; fenced stage commit binds the next input | done | 1 · `ensure_chain`, `commit_stage` |
+| 5 | Failure fails only that stage; dependents `Queued · blocked by <stage>`; Retry resumes it only; exhausted chain never reset | done | 1 + 3 |
+| 5 | New inputs supersede; cancellation / deletion stops chain and publication | done | 1 |
+| 5 | Heartbeat from claim through commit/ack on a light connection with bounded busy retry; heartbeat age and renewal failures recorded | done | 3 · `Store::open_light`, `intel-brief-heartbeat:*` |
+| 5 | Visits / body-ready / recovery / Reload attach to the chain; no duplicate body jobs | done | 4a + 4b · `ensure_intel_brief_pipeline`, `reload_intel_brief_pipeline` |
+| 5 | Final Stage-4 publication: brief snapshot + leads in the fenced commit; previous kept; older generation never overwrites newer | done | 4a · schema 36 |
+| 5 | Canonical Brain derivations + index outbox from the brief through the **shared** publisher (no duplicate path); index failure separate | done | 5 · `insight_persist::publish_snapshot_on` (lane-independent) + `write_derivations`; insight-refresh `publish_snapshot` = lease fence around it; `brief_canonical::{prepare,publish_on,footer}`; savepoint rollback; report precedence |
+| 3 | Cleanup order: baseline → NLP → conditional Classifier (≤12, 512 tokens) → verbatim removals → revalidation + span maps + hash | done | 2 + 4b |
+| 3 | NLP mentions as keep-anchors | done | 5 · `clean_body::nlp_anchors` (body mentions named in title/description + title/description tokens), wired in `body.rs` |
+| 3 | No Synthesis rewrite; display and extraction use one `intel-clean-body-v1` artifact; Full article pane renders it | done | 2 + 3 + 4b |
+| 3 | Stage 1 fails on a missing/truncated/unvalidated story | done | 2–3 |
+| 4 | Spec prompts, strict JSON, short IDs, Rust-resolved UTF-8 spans, local field/count limits | done | 3 |
+| 4 | Budgets 2048 / 3072 / 1536; cleanup 512; fidelity 1024 | done | 3 + 4b (fallback ceiling test in 5) |
+| 4 | Role routing and Jev capability skips via the shared executor | done (reused) | 3 |
+| 4 | Long bodies: ordered windows, ≤5 proposals carried and revised | done | 3 |
+| 4 | Stage 4 local shortlist (self excluded, URL + syndication dedupe, cap 12); local finish when there are no inferences or no candidates | done | 3 |
+| 4 | Lead gate: inference-specific overlap with the cited metadata + a named verification gap; country alone is not an overlap | done | 5 · `filter_leads` |
+| 4 | Claim-assessor fidelity batches in Stages 2/3, cached receipts, unfaithful items withheld | done | 4b |
+| 4 | `intel_inference_article_leads`; "Potential corroboration" rendering | done | 4a + 4b |
+| 2 | Lazy mode classification; Synthesis rewrite removed | done | 3 + 4a |
+
+## §6 UI
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| Step k/4, per-stage rows, one spinner, activity labels, blocker/failure notes | done | 4b · `brief_stage_lines` |
+| Publication / Index footer (Pending / Published · Index pending / Indexed / Not indexed / Index failed / report precedence) | done | 5 · `brief_canonical::footer`, polled every tick |
+| Global Jobs `stage_label`s identical to the brief rows; `intel_brief.stage` log events | done | 4b |
+| Content panes show checkpoints immediately; a parent failure is not copied (artifacts show "Validated · not published") | done | 4b |
+
+## §8 Acceptance
+
+| § | Check | Status | Evidence |
+|---|-------|--------|----------|
+| 8.1 | One chain under repeated visits/reopen/recovery; one active stage; 1→2→3→4; zero requests on unchanged reopen | done | `one_chain_ordered_dispatch_*`, `repeated_admission_*`, UI `7-cached` frame |
+| 8.2 | Scoped inputs; rejection of unknown IDs / invalid UTF-8 / hallucinated sources / overlong / duplicate / sixth inference | done | `validators_reject_*`, `sentence_spans_*` |
+| 8.3 | Cleanup preserves byline/attribution/negation/corrections/quotes/chronology; Unicode; missing NLP/classifier; incomplete acquisition; long-body coverage; a body detail supports an inference without becoming a claim | done | `clean_body_tests.rs` (7 incl. `nlp_mentions_named_in_the_headline_become_keep_anchors`), `long_body_*`, `one_chain_*` |
+| 8.4 | Stage-3 failure: 1/2 completed, 3 failed, 4 blocked in all surfaces; Retry runs 3 only; empty arrays complete; no-inference Stage 4 uses no model | done | `stage_three_failure_*`, `empty_inferences_*`, `intel_sequential_stage_screens` |
+| 8.5 | Reaper interleaving; processing beyond the lease; SQLite contention; publication delay; crash/reclaim; stale late output; cancellation; deletion; overlapping drainers; heartbeat through ack; attempts survive recovery | done (processing beyond lease is scaled: 1 s lease / 2.5 s work, not a literal 120 s) | `renewal_between_*`, `heartbeat_covers_*`, `sqlite_contention_and_publication_delay_*`, `overlapping_live_drainers_*`, `crash_recovery_*`, `stale_worker_output_*`, `cancellation_*` |
+| 8.6 | Jev primary with chat fallback, all-Jev chain, native decision cleanup, token-limit repair, server errors, malformed/unfinished streams, unsupported options; no repeated successful calls | done (shared executor tests reused, plus brief-specific `brief_fidelity_falls_back_to_chat_with_the_stage_budget`) | `model_exec_routing_tests`, `model_exec_format_tests`, `provider_attempt` |
+| 8.7 | Lead explanation names the overlap and the verification gap; shared country alone yields no lead; syndicated copies add nothing; report precedence and canonical provenance/indexing survive | done | `shared_country_alone_yields_no_lead_*`, `shortlist_*`, `brief_canonical_tests.rs` (4) |
+| 8.8 | Brief and Jobs buffers for queued / running / completed / failed / empty / cached states at 160×50, 120×40, 100×32, 80×24, 60×18 and too-small (40×12) | partial | Captured and inspected. At 60×18 the jobs pane shows the Step summary and the stage rows need scrolling. New rows are text; Retry/Reload reuse the existing button geometry, so keyboard/mouse navigation was not separately re-verified in this branch. |
+
+## Not done / out of scope
+
+- Real-provider latency measurements and live-terminal checks: not run (offline mocks only; the OpenRouter key was not used).
+- Runs used `cargo build` and `ARGOS_EMBED=0 cargo test --workspace` (the user's rule). The spec's `scripts/agent_cargo.py --locked --no-default-features` and `--features nlp` matrix was not run separately.

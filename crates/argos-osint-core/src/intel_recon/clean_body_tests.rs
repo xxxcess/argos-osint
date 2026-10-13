@@ -208,3 +208,67 @@ async fn incomplete_or_missing_story_fails_stage_one() {
     let empty = clean_article("", "t", "", "https://x.test/s", &[], None).await;
     assert!(stage_one_admissible(&empty, true).is_err());
 }
+
+#[tokio::test]
+async fn nlp_mentions_named_in_the_headline_become_keep_anchors() {
+    let title = "Ferry halted after harbour master review";
+    let description = "Northwind ferries stopped sailing.";
+    let filler = "Officials described the timetable and the operator's obligations in careful detail for readers, explaining each step of the review. ";
+    let short = "The harbour master said sailings stay paused.";
+    let baseline = format!(
+        "{title}\n\n{}\n\n{short}\n\n{}",
+        filler.repeat(3),
+        filler.repeat(3)
+    );
+    let start = baseline.find("harbour master said").unwrap();
+    let mentions = vec![
+        crate::nlp::Mention {
+            span: crate::nlp::Span {
+                start_byte: start,
+                end_byte: start + "harbour master".len(),
+            },
+            kind: "role".into(),
+        },
+        // A body-only entity is not an anchor: it is not in the headline.
+        crate::nlp::Mention {
+            span: crate::nlp::Span {
+                start_byte: 0,
+                end_byte: 0,
+            },
+            kind: "org".into(),
+        },
+    ];
+    let anchors = nlp_anchors(&baseline, &mentions, title, description);
+    assert!(anchors.iter().any(|a| a == "harbour master"), "{anchors:?}");
+    assert!(
+        anchors.iter().any(|a| a == "Northwind"),
+        "description tokens anchor too"
+    );
+    let block = BodyChunk {
+        id: 1,
+        start: 0,
+        end: short.chars().count(),
+        text: short.into(),
+    };
+    assert!(
+        is_ambiguous(&block, &title_anchors(title)),
+        "title tokens alone miss it"
+    );
+    assert!(
+        !is_ambiguous(&block, &anchors),
+        "NLP anchor keeps the block without a model"
+    );
+    // End to end: the Mock removes it if asked, so survival proves it was kept
+    // without a Classifier decision.
+    let mut m = mock(vec!["harbour master said"]);
+    let out = clean_article(
+        &baseline,
+        title,
+        description,
+        "https://x.test/s",
+        &anchors,
+        Some(&mut m),
+    )
+    .await;
+    assert!(out.markdown.contains(short));
+}

@@ -438,14 +438,31 @@ async fn cancellation_drops_in_flight_request_and_prevents_commit() {
     mock.hang.insert("intel_brief_claims".into());
     let path = db.path.clone();
     let j = job.clone();
+    // Cancel once Claims is actually in flight (not after a fixed sleep, which
+    // races Stage 1 under a loaded test run).
+    let claims_task = brief_pipeline::task_id(&job, "intel_brief_claims");
     let canceller = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(400));
         let store = Store::open(&path).unwrap();
+        for _ in 0..400 {
+            let running: bool = store
+                .conn
+                .query_row(
+                    "SELECT state='running' FROM argos_tasks WHERE id=?1",
+                    [&claims_task],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        std::thread::sleep(Duration::from_millis(100));
         brief_pipeline::cancel_chain(&store.conn, &j, &now()).unwrap();
     });
     let cancel = Arc::new(AtomicBool::new(false));
     let out = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(20),
         drain(&db.path, "w1", &mut mock, &cancel, &cfg()),
     )
     .await
@@ -866,4 +883,154 @@ async fn reload_supersedes_with_forced_body_and_visits_attach() {
         .unwrap();
     assert!(mock.forced);
     assert_eq!(mock.prepared, 1, "superseded chain never ran");
+}
+
+// §8.5: SQLite contention and publication delay. A competing writer holds the
+// write lock repeatedly while stages run and commit; heartbeat renewal retries
+// within its bound, no stage is reaped, and every stage commits exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_contention_and_publication_delay_keep_leases_and_commit_once() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.delay = Some(Duration::from_millis(1200));
+    let path = db.path.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let s = stop.clone();
+    let writer = std::thread::spawn(move || {
+        let store = Store::open(&path).unwrap();
+        let mut held = 0;
+        while !s.load(Ordering::Acquire) {
+            store.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            std::thread::sleep(Duration::from_millis(900));
+            store.conn.execute_batch("COMMIT").unwrap();
+            held += 1;
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        held
+    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    let config = ExecConfig {
+        lease_secs: 3,
+        heartbeat: Duration::from_millis(250),
+    };
+    let out = drain(&db.path, "w1", &mut mock, &cancel, &config)
+        .await
+        .unwrap();
+    stop.store(true, Ordering::Release);
+    assert!(writer.join().unwrap() >= 2, "contention actually happened");
+    assert_eq!(out.len(), 4, "{out:?}");
+    assert!(out
+        .iter()
+        .all(|o| matches!(o, StageOutcome::Committed { .. })));
+    assert_eq!(
+        mock.requests().len(),
+        3,
+        "no repeated successful stage calls"
+    );
+    let store = Store::open(&db.path).unwrap();
+    let recoveries: i64 = store
+        .conn
+        .query_row(
+            "SELECT COALESCE(SUM(recoveries),0) FROM argos_tasks WHERE job_id=?1",
+            [&job],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(recoveries, 0);
+    assert!(rows(&db.path, &job)
+        .iter()
+        .all(|r| r.starts_with("Completed")));
+}
+
+// §8.5: two real drainers race over one chain; each stage runs exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_live_drainers_execute_each_stage_once() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut a = Mock::happy();
+    let mut b = Mock::happy();
+    a.delay = Some(Duration::from_millis(150));
+    b.delay = Some(Duration::from_millis(150));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let config = cfg();
+    let mut committed = Vec::new();
+    // Keep both drainers polling until the chain completes (an idle drainer
+    // returns while the other holds the single active stage).
+    for _ in 0..40 {
+        let (x, y) = tokio::join!(
+            drain(&db.path, "wa", &mut a, &cancel, &config),
+            drain(&db.path, "wb", &mut b, &cancel, &config)
+        );
+        for o in x.unwrap().into_iter().chain(y.unwrap()) {
+            if let StageOutcome::Committed { operation, .. } = o {
+                committed.push(operation);
+            }
+        }
+        if committed.len() == 4 {
+            break;
+        }
+    }
+    committed.sort();
+    assert_eq!(
+        committed,
+        [
+            "intel_brief_body",
+            "intel_brief_claims",
+            "intel_brief_inferences",
+            "intel_brief_links"
+        ]
+    );
+    assert_eq!(a.requests().len() + b.requests().len(), 3);
+    assert_eq!(a.prepared + b.prepared, 1);
+    assert!(rows(&db.path, &job)
+        .iter()
+        .all(|r| r.starts_with("Completed")));
+}
+
+// §8.7: a lead must share an inference-specific term with its cited metadata
+// and name a verification gap; shared country alone yields no lead.
+#[test]
+fn shared_country_alone_yields_no_lead_and_explanations_name_the_gap() {
+    let source = article("r", "a1", TITLE, DESC, "https://example.test/a1");
+    let cands = shortlist(
+        &source,
+        vec![
+            article(
+                "r",
+                "geo",
+                "Lithuania weather update",
+                "Rain across Lithuania.",
+                "https://g.test/1",
+            ),
+            article(
+                "r",
+                "ins",
+                "Ferry insurance lapsed, regulator says",
+                "Certificate expired.",
+                "https://i.test/2",
+            ),
+        ],
+    );
+    let texts = HashMap::from([(
+        "i1".to_string(),
+        "The Lithuania suspension may reflect an insurance lapse.".to_string(),
+    )]);
+    let iids: HashSet<String> = texts.keys().cloned().collect();
+    let raw = r#"{"leads":[{"article_id":"r1","inference_id":"i1","metadata_evidence_ids":["r1.t1"],"why":"Both concern Lithuania.","verification_needed":"Check relevance."},{"article_id":"r2","inference_id":"i1","metadata_evidence_ids":["r2.t1"],"why":"Reports the same insurance lapse; causal link unverified.","verification_needed":"Confirm the lapse date."}]}"#;
+    let mut out = validate_leads(raw, &iids, &cands).unwrap();
+    filter_leads(&mut out, &texts, &cands);
+    let kept = out["leads"].as_array().unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0]["article_id"], "ins");
+    assert_eq!(out["withheld"], 1);
+    let raw2 = r#"{"leads":[{"article_id":"r1","inference_id":"i1","metadata_evidence_ids":["r1.t1"],"why":"Both concern Lithuania.","verification_needed":"Check relevance."},{"article_id":"r2","inference_id":"i1","metadata_evidence_ids":["r2.t1"],"why":"Reports the same insurance lapse; causal link unverified.","verification_needed":""}]}"#;
+    let mut gapless = validate_leads(raw2, &iids, &cands).unwrap();
+    filter_leads(&mut gapless, &texts, &cands);
+    assert!(
+        gapless["leads"].as_array().unwrap().is_empty(),
+        "country-only and gapless leads dropped"
+    );
+    assert_eq!(gapless["withheld"], 2);
+    assert_eq!(gapless["empty_reason"], "no inference-specific overlap");
 }

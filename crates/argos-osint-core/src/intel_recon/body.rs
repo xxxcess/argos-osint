@@ -507,23 +507,33 @@ async fn commit_refined_body(
             .ok()
             .flatten()
     };
+    let mut annotation = cached.filter(|a| a.status == crate::nlp::Status::Complete);
     if runtime
         .map(|r| r.settings.nlp.mode)
         .unwrap_or_else(crate::nlp::configured_mode)
         != crate::nlp::Mode::Off
-        && cached.is_none()
+        && annotation.is_none()
     {
-        let annotation = crate::nlp::Service::shared()
+        let fresh = crate::nlp::Service::shared()
             .annotate(source.clone(), context.clone(), cancel.clone())
             .await;
-        if annotation.status == crate::nlp::Status::Complete {
+        if fresh.status == crate::nlp::Status::Complete {
             let store = Store::open(db_path)?;
-            crate::nlp::cache::put(&store.conn, &source, &context, &annotation)?;
+            crate::nlp::cache::put(&store.conn, &source, &context, &fresh)?;
+            annotation = Some(fresh);
         }
     }
-    // Stage 1: local baseline + conditional Classifier block decisions,
-    // applied locally. No model rewrite: display and extraction share this.
-    let anchors = super::clean_body::title_anchors(title);
+    // Stage 1: local baseline + NLP keep-anchors + conditional Classifier
+    // block decisions, applied locally. No model rewrite: display and
+    // extraction share this. Without NLP, title/description tokens remain.
+    let anchors = super::clean_body::nlp_anchors(
+        &baseline.cleaned_markdown,
+        annotation
+            .as_ref()
+            .map_or(&[][..], |a| a.mentions.as_slice()),
+        title,
+        brief,
+    );
     let mut decider =
         runtime
             .filter(|_| classifier.is_some())

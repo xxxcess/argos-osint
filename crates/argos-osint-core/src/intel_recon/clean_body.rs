@@ -80,6 +80,38 @@ pub fn title_anchors(title: &str) -> Vec<String> {
         .collect()
 }
 
+/// Keep-anchors from the local NLP annotation of the baseline: entity
+/// mentions in the body that the title or description also names, plus the
+/// title/description proper-noun tokens. This catches multi-word and
+/// lower-case story entities (e.g. "harbour master", "Northwind Ferries") so a
+/// block that only names them is not sent to the Classifier. Anchors only add
+/// keep-confidence; they never make a block removable.
+pub fn nlp_anchors(
+    baseline: &str,
+    mentions: &[crate::nlp::Mention],
+    title: &str,
+    description: &str,
+) -> Vec<String> {
+    let headline = format!("{title}\n{description}").to_lowercase();
+    let mut out: Vec<String> = title_anchors(title)
+        .into_iter()
+        .chain(title_anchors(description))
+        .collect();
+    for mention in mentions {
+        let Some(text) = baseline.get(mention.span.start_byte..mention.span.end_byte) else {
+            continue;
+        };
+        let text = text.trim();
+        if text.chars().count() < 3 || !headline.contains(&text.to_lowercase()) {
+            continue;
+        }
+        out.push(text.to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|a| seen.insert(a.to_lowercase()));
+    out
+}
+
 fn words(text: &str) -> usize {
     text.split_whitespace().count()
 }

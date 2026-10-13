@@ -3900,27 +3900,22 @@ impl App {
                         .insert(id.to_string(), row.title);
                 }
             }
-            let article_id = self
-                .intel_articles
-                .get(self.intel_sel)
-                .map(|a| a.id.clone())
-                .unwrap_or_default();
-            let published: Option<String> = conn
-                .query_row(
-                    "SELECT published_at FROM intel_brief_publications WHERE article_id=?1 AND job_id=?2",
-                    [&article_id, &job],
-                    |r| r.get(0),
-                )
-                .ok();
-            self.intel_brief_publication = match published {
-                Some(_) => "Published · brief snapshot (not indexed)".into(),
-                None if self.intel_brief_stages.iter().any(|s| s.state == "failed") => {
-                    "Not published · previous snapshot kept".into()
-                }
-                None => "Pending · after Links".into(),
-            };
             self.refresh_intel_briefing();
         }
+        // Polled every tick: the index outbox drains after the stages commit.
+        let article_id = self
+            .intel_articles
+            .get(self.intel_sel)
+            .map(|a| a.id.clone())
+            .unwrap_or_default();
+        let failed = self.intel_brief_stages.iter().any(|s| s.state == "failed");
+        self.intel_brief_publication = intel_recon::brief_canonical::footer(
+            self.store.connection(),
+            &article_id,
+            &job,
+            failed,
+        )
+        .unwrap_or_default();
         changed
     }
 
@@ -12858,10 +12853,20 @@ mod tests {
             ("4-inferences-failed", 2, None, true, false),
             ("5-completed", 4, None, false, false),
             ("6-empty", 4, None, false, true),
+            ("7-cached", 4, None, false, false),
         ];
-        for (width, height) in [(160, 50), (120, 40), (80, 24)] {
+        // §8.8 widths; narrow and too-small sizes render the failed and
+        // completed frames (geometry changes there), wider ones every state.
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 32),
+            (80, 24),
+            (60, 18),
+            (40, 12),
+        ] {
             for (name, done, running, fail, empty) in &frames {
-                if width == 80 && !name.starts_with('4') {
+                if width <= 80 && !(name.starts_with('4') || name.starts_with('5')) {
                     continue;
                 }
                 let mut app = app();
@@ -12930,6 +12935,21 @@ mod tests {
                     )
                     .unwrap();
                 }
+                if *name == "7-cached" {
+                    // Reopen a completed brief: attaches, schedules nothing.
+                    app.open_intel_briefing();
+                    assert_eq!(app.intel_brief_job.as_deref(), Some(job.as_str()));
+                    let active: i64 = app
+                        .store
+                        .connection()
+                        .query_row(
+                            "SELECT COUNT(*) FROM argos_tasks WHERE job_id LIKE 'intel-brief:%' AND state NOT IN ('completed','superseded')",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(active, 0, "cached reopen enqueues no work");
+                }
                 app.intel_brief_stages.clear();
                 app.refresh_intel_brief_stages();
                 app.compact_pages[ModuleId::Intel.index()] = 0;
@@ -12940,7 +12960,13 @@ mod tests {
                     .iter()
                     .map(|v| format!("{} · {}", v.label, v.row))
                     .collect();
+                // Content asserts where the panes fit without scrolling.
+                let roomy = width >= 120 || (width == 80 && name.starts_with('4'));
                 match *name {
+                    _ if !roomy => {
+                        // Narrow / too-small: rows stay correct and render never panics.
+                        assert!(!rows.is_empty());
+                    }
                     "1-queued" => {
                         assert_eq!(rows[1], "Claims · Queued · after Full article");
                         assert!(text.contains("Step 1/4 · Full article"), "{text}");
@@ -12995,6 +13021,10 @@ mod tests {
                                 .len(),
                             1
                         );
+                    }
+                    "7-cached" => {
+                        assert!(rows.iter().all(|r| r.contains("Completed")), "{rows:?}");
+                        assert!(text.contains("Potential corroboration"));
                     }
                     _ => {
                         assert_eq!(rows[2], "Inferences · Completed · no supported inferences");

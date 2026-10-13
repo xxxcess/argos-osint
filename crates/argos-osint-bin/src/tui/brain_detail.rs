@@ -497,7 +497,14 @@ fn draw_article_related(frame: &mut Frame, app: &App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(panel(" Related · all retained cycles "))
+            .block(panel(&format!(
+                " Related · {} ",
+                if view.page.coverage == "this cycle" {
+                    "this cycle"
+                } else {
+                    "all retained cycles"
+                }
+            )))
             .scroll((view.scroll, 0)),
         area,
     );

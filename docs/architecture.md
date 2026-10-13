@@ -28,6 +28,8 @@ Each turn stores a user message and a run with snapshots of Recon, Tool picker, 
 
 ### Brain recall
 
+Brain stores five canonical kinds — Actor, Claim, Inference, Link, Related — with typed payloads (`memory_metadata.rs`). Default recall admits Claim/Inference; `BrainQuery.allowed_kinds` (`brain_query::recall_candidates_for`) admits structural kinds explicitly and is part of the recall-cache key. Actor identity is owned by `brain_actors.rs` (provisional source-scoped actors, trusted identifiers, merge/split redirects); the Brain list filters by kind and actor graphs show one node per canonical Actor with observed Links (`──▶`) distinct from tentative Related (`┄┄`). Lifecycle guards (schema 40) stop deletes of referenced Actors and retire Link/Related records whose memory endpoint is deleted; operational retention (`job_cleanup`, telemetry prune) never touches Brain tables.
+
 - Recalled memories with sources get a compact **Brain memory resources** packet (article / video / file links plus claim text, ranked by overlap with the prompt).
 - URLs are binder-available (`evidence_id` `brain:…`). They are not listed under picker `known_bindings`.
 - Recon log: **From Brain** vs **From the question**.
@@ -458,7 +460,7 @@ ConfigLock::acquire()            # .argos-config.lock, heartbeat + stale takeove
 
 [![Atlas news cycle](diagrams/atlas-pipeline.svg)](diagrams/atlas-pipeline.html)
 
-`atlas-collection-v1` is a classification-only news cycle. Native discovery and regional coverage retain provider quotas and deduplication; Classifier is the only model role. Local entities and publisher priors provide metadata, then exact shared mentions produce tentative Related article leads. Cycles publish no Brain memories or vector/index obligations. Pause stores receipts; Resume retries unresolved classification and native metadata.
+`atlas-collection-v2` (v1 cycles are recognised by `atlas_work::is_collection_contract` and upgraded on resume) is a classification-only news cycle with a sixth, local Brain indexing phase. Native discovery and regional coverage retain provider quotas and deduplication; Classifier is the only model role. Local entities and publisher priors provide metadata, then exact shared mentions produce tentative Related article leads. Cycles publish no Brain memories or vector/index obligations. Pause stores receipts; Resume retries unresolved classification and native metadata.
 
 | Stage | Execution | Unit |
 | --- | --- | --- |
@@ -467,8 +469,9 @@ ConfigLock::acquire()            # .argos-config.lock, heartbeat + stale takeove
 | Entities | Complete original title/description, bounded local NLP; no model fallback | Article metadata |
 | Publisher prior | Immutable native WP:RSP index per pass; domain suffix match | Article metadata |
 | Related | Local posting lists and verified spans; category-qualified pair seed | Canonical article pair |
+| Index actors and articles (phase 6, `STAGE_ACTOR_ARTICLES=12`) | `atlas_actor_index::index_run`: Brain Actor binding, `mentioned_in` Link, ≤20 tentative Related, `atlas_article_index` receipt per occurrence; ≤100 occurrences per transaction | Article occurrence |
 
-Completed requires successful required classification and settled enabled metadata. Metadata failures produce warnings; valid `unk`, empty entities and unrated publishers succeed. Unresolved required IDs yield partial/failed/blocked. Legacy extraction/index telemetry remains explicitly historical. Old unfinished runs preserve categories and resume native metadata; historical `unk` provenance is flagged. Explicit historical CLI Repair/Verify rejects new cycles. The TUI has no Repair memories or startup publication.
+Completed requires successful required classification, settled enabled metadata and a current phase-6 receipt for every occurrence (zero-actor occurrences are receipted; a failed index write keeps the cycle partial and Resume runs phase 6 only). Atlas owns no actor registry: Brain Actor IDs are shared with Recon and claims, and Related reads (`related_global.rs`, `RelatedScope::AllRetained` by default, `ThisCycle` on the Related toggle) return one row per URL across retained cycles. Metadata failures produce warnings; valid `unk`, empty entities and unrated publishers succeed. Unresolved required IDs yield partial/failed/blocked. Legacy extraction/index telemetry remains explicitly historical. Old unfinished runs preserve categories and resume native metadata; historical `unk` provenance is flagged. Explicit historical CLI Repair/Verify rejects new cycles. The TUI has no Repair memories or startup publication.
 
 See [classification and Related articles](atlas-classification-and-related-articles.md) for schema 30, receipts, publisher scores, exact lineage, deletion and navigation. Country bands, native quotas, map, origins, history and retained headlines remain unchanged. Coverage replaces the current-cycle Insights pane.
 

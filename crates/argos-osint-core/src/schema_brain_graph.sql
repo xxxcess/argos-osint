@@ -133,3 +133,27 @@ CREATE TABLE IF NOT EXISTS atlas_article_index (
     indexed_at TEXT NOT NULL,
     PRIMARY KEY (run_id, article_id)
 );
+
+-- Schema 40 lifecycle guards (spec §5 "Backfill and lifecycle"): operational
+-- cleanup and ad-hoc deletes cannot remove a canonical Actor that is still
+-- pinned, mentioned, referenced or part of a merge lineage (retire instead),
+-- and deleting any memory retires Link/Related records that pointed at it.
+CREATE TRIGGER IF NOT EXISTS brain_guard_actor_delete
+BEFORE DELETE ON memories
+WHEN EXISTS (SELECT 1 FROM brain_actors a WHERE a.actor_id = OLD.id)
+ AND (OLD.pinned = 1
+   OR EXISTS (SELECT 1 FROM brain_actor_mentions m WHERE m.actor_id = OLD.id)
+   OR EXISTS (SELECT 1 FROM brain_memory_actor_refs r WHERE r.actor_id = OLD.id AND r.memory_id <> OLD.id)
+   OR EXISTS (SELECT 1 FROM brain_actor_redirects d WHERE d.from_actor = OLD.id OR d.to_actor = OLD.id))
+BEGIN
+    SELECT RAISE(ABORT, 'brain: canonical actor is still referenced; retire it instead of deleting');
+END;
+
+CREATE TRIGGER IF NOT EXISTS brain_retire_dangling_edges
+AFTER DELETE ON memories
+BEGIN
+    UPDATE memory_metadata SET lifecycle = 'retired'
+     WHERE memory_kind IN ('link', 'related')
+       AND memory_id IN (SELECT memory_id FROM brain_memory_endpoints
+                          WHERE endpoint_kind = 'memory' AND ref_id = OLD.id);
+END;

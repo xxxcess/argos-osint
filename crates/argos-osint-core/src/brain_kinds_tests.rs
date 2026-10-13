@@ -117,3 +117,77 @@ fn allowed_kinds_filter_recall_and_key_the_cache() {
     assert!(kind_allowed(&[], MemoryKind::Claim));
     assert!(!kind_allowed(&[], MemoryKind::Related));
 }
+
+/// TTL / retention audit (spec §5): operational cleanup touches only job
+/// journals and telemetry, never Brain identities or typed memories; a
+/// referenced canonical Actor cannot be deleted; deleting a memory retires
+/// Link/Related records pointing at it.
+#[test]
+fn operational_ttl_never_removes_brain_identities_and_deletes_retire_edges() {
+    let store = world();
+    let count = |sql: &str| -> i64 { store.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    let before = (
+        count("SELECT COUNT(*) FROM brain_actors"),
+        count("SELECT COUNT(*) FROM memories"),
+        count("SELECT COUNT(*) FROM brain_actor_mentions"),
+        count("SELECT COUNT(*) FROM atlas_article_index"),
+    );
+    let far = chrono::Utc::now() + chrono::Duration::days(3650);
+    crate::job_cleanup::cleanup_batch(&store.conn, far).unwrap();
+    assert_eq!(
+        before,
+        (
+            count("SELECT COUNT(*) FROM brain_actors"),
+            count("SELECT COUNT(*) FROM memories"),
+            count("SELECT COUNT(*) FROM brain_actor_mentions"),
+            count("SELECT COUNT(*) FROM atlas_article_index"),
+        )
+    );
+    // A mentioned actor survives any delete path.
+    let actor = store
+        .list_memories_by_kind(Some(MemoryKind::Actor), "")
+        .unwrap()[0]
+        .id
+        .clone();
+    assert!(store.delete_memory(&actor).is_err());
+    assert!(store
+        .conn
+        .execute("DELETE FROM memories WHERE id=?1", [&actor])
+        .is_err());
+    assert!(store.get_memory(&actor).unwrap().is_some());
+    // Deleting a Link's memory endpoint retires the Link.
+    let claim = store.list_memories_by_kind(None, "").unwrap()[0].id.clone();
+    store
+        .conn
+        .execute(
+            "INSERT INTO memory_metadata(memory_id,memory_kind) VALUES(?1,'claim')",
+            [&claim],
+        )
+        .unwrap();
+    let link = store
+        .write_link_memory(&crate::memory_metadata::LinkPayload {
+            source: crate::memory_metadata::EndpointRef::Memory {
+                memory_id: actor.clone(),
+                kind: MemoryKind::Actor,
+            },
+            target: crate::memory_metadata::EndpointRef::Memory {
+                memory_id: claim.clone(),
+                kind: MemoryKind::Claim,
+            },
+            relation: "entity_connection".into(),
+            rationale: "fixture".into(),
+            receipts: vec!["fixture".into()],
+            promoted_from: None,
+        })
+        .unwrap();
+    store.delete_memory(&claim).unwrap();
+    let state: String = store
+        .conn
+        .query_row(
+            "SELECT lifecycle FROM memory_metadata WHERE memory_id=?1",
+            [&link],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "retired");
+}

@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// complete summary-result envelopes; existing facts are preserved unchanged.
 /// 37 adds the unified Brain graph (typed kinds, actors, endpoints) and brief
 /// stage timings; `atomic_claim` memories migrate to claim/inference in place.
-pub const SCHEMA_VERSION: i64 = 39;
+pub const SCHEMA_VERSION: i64 = 40;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -894,6 +894,11 @@ impl Store {
                 // Additive: Atlas phase-6 atlas_article_index receipts.
                 crate::brain_schema::migrate(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 39)?;
+            }
+            if version < 40 {
+                // Additive: Brain lifecycle guard triggers (TTL/delete safety).
+                crate::brain_schema::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 40)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final

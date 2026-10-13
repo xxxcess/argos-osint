@@ -158,6 +158,64 @@ pub fn build_packets(
     }
 }
 
+/// Packet query for an article's Claims: actor names (+ confirmed aliases)
+/// from native metadata, claim predicates/objects/attributions as event
+/// phrases, claim times as dates, and numbers from claim text as quantities.
+pub fn claims_query(actors: &[String], claims: &serde_json::Value) -> PacketQuery {
+    let mut q = PacketQuery {
+        actors: actors.to_vec(),
+        ..PacketQuery::default()
+    };
+    for c in claims["claims"].as_array().into_iter().flatten() {
+        let field = |f: &str| {
+            c[f].as_str()
+                .filter(|v| v.trim().len() >= 3)
+                .map(str::to_string)
+        };
+        q.phrases.extend(field("predicate"));
+        q.phrases.extend(field("object"));
+        q.actors.extend(field("attributed_to"));
+        q.dates.extend(field("time"));
+        for t in c["text"].as_str().unwrap_or("").split_whitespace() {
+            let t = t.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '%');
+            if t.chars().any(|ch| ch.is_ascii_digit()) {
+                q.quantities.push(t.to_string());
+            }
+        }
+    }
+    for list in [
+        &mut q.actors,
+        &mut q.phrases,
+        &mut q.dates,
+        &mut q.quantities,
+    ] {
+        list.sort();
+        list.dedup();
+    }
+    q
+}
+
+/// Focused oversized-story selection: the packet's sentences in document
+/// order (as wire sentences). `None` when nothing matched, so callers keep
+/// the full body rather than reasoning over an empty or protected-only set.
+pub fn focused_sentences(
+    index: &SentenceIndex,
+    clean: &str,
+    query: &PacketQuery,
+) -> Option<(Vec<super::brief_stages::Sentence>, PacketSet)> {
+    let set = build_packets(index, clean, query, 2);
+    if !set.reasons.iter().any(|(_, why)| why == "match") {
+        return None;
+    }
+    let keep: BTreeSet<&str> = set.selected.iter().map(String::as_str).collect();
+    let sentences = index
+        .wire_sentences(clean)
+        .into_iter()
+        .filter(|s| keep.contains(s.id.as_str()))
+        .collect();
+    Some((sentences, set))
+}
+
 impl PacketSet {
     /// Render selected passages in original order; every gap carries an
     /// omission marker naming the omitted original sentence IDs.
@@ -185,3 +243,7 @@ impl PacketSet {
 #[cfg(test)]
 #[path = "passage_packets_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "focused_compare_tests.rs"]
+mod focused_compare;

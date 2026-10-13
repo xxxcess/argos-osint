@@ -474,6 +474,11 @@ pub struct RoleDefaults {
     /// role chain; role semantics and source scope never change.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub operation_overrides: std::collections::BTreeMap<String, ModelAssignment>,
+    /// Measured oversized-story path (spec §2): Inferences read actor-focused
+    /// passage packets instead of every body window. Off until the held-out
+    /// quality comparison clears it; the full-body path stays the default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub focused_oversized_brief: bool,
 }
 
 pub const OP_CLAIMS_GENERATE: &str = "intel_brief_claims.generate";

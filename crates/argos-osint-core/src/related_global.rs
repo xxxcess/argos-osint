@@ -367,7 +367,20 @@ impl Store {
         }
         let mut sources = Vec::new();
         let mut exclude = BTreeSet::new();
-        for origin in self.article_origins_for_memory(memory_id)? {
+        let mut origins = self.article_origins_for_memory(memory_id)?;
+        // Link/Related records start from their article endpoints.
+        let mut stmt = self.conn.prepare(
+            "SELECT origin,ref_id FROM brain_memory_endpoints WHERE memory_id=?1 AND endpoint_kind='article'",
+        )?;
+        for row in stmt.query_map([memory_id], |r| {
+            Ok(ArticleOrigin {
+                run_id: r.get(0)?,
+                article_id: r.get(1)?,
+            })
+        })? {
+            origins.push(row?);
+        }
+        for origin in origins {
             if let Some(a) = self.atlas_article(&origin.run_id, &origin.article_id)? {
                 exclude.insert(url_key(&a));
                 sources.extend(self.occurrences_for(&a, scope)?);

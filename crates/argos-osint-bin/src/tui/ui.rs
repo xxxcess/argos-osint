@@ -7466,7 +7466,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             frame,
             left,
             layout.related,
-            " Related · shared mentions ",
+            " Related ",
             &layout.related_lines,
             0,
         );
@@ -9819,12 +9819,26 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
     );
     let coverage = if argos_osint_core::atlas_work::is_collection_contract(&stats.contract_version)
     {
-        format!(
+        let mut line = format!(
             "Entities {} · publisher priors {} · warnings {}",
             stats.coverage.entities_available,
             stats.coverage.publishers_available,
             stats.coverage.warnings
-        )
+        );
+        // Phase 6 (v2): Brain actor indexing coverage.
+        if stats.contract_version == argos_osint_core::atlas_work::COLLECTION_CONTRACT {
+            line.push_str(&format!(
+                " · actors {}/{}{}",
+                stats.coverage.actor_indexed,
+                stats.coverage.articles,
+                if stats.coverage.actor_index_failed > 0 {
+                    format!(" · {} failed", stats.coverage.actor_index_failed)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        line
     } else {
         format!("Legacy memory publication · {}", stats.memories.line())
     };

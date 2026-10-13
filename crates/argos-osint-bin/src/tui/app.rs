@@ -616,6 +616,8 @@ pub enum ButtonId {
     CreateMemory,
     /// Cycle the Brain kind filter (All → Actor → Claim → Inference → Link → Related).
     BrainKind,
+    /// Toggle Related articles between all retained cycles and this cycle.
+    RelatedScope,
     BrainBack,
     /// Back in the memory detail history (or to the Brain list).
     BrainDetailBack,
@@ -1192,6 +1194,8 @@ pub struct App {
     pub brain_typed: Vec<String>,
     /// Brain list kind filter; `None` = default evidence listing.
     pub brain_kind: Option<argos_osint_core::memory_metadata::MemoryKind>,
+    /// Related articles scope shared by Intel and Brain (all cycles default).
+    pub related_scope: RelatedScope,
     brain_graph_for: Option<String>,
     /// Open memory detail (graph, Related, Summary), independent of `memory_sel`.
     pub brain_detail: super::brain_detail::BrainDetail,
@@ -1627,6 +1631,7 @@ impl App {
             brain_graph: recon::MemoryGraph::default(),
             brain_typed: Vec::new(),
             brain_kind: None,
+            related_scope: RelatedScope::default(),
             brain_graph_for: None,
             brain_detail: Default::default(),
             memory_total,
@@ -3963,13 +3968,7 @@ impl App {
         self.intel_publisher_prior = metadata.and_then(|metadata| metadata.publisher_prior);
         match self
             .store
-            .related_articles_global(
-                &article.run_id,
-                &article.id,
-                RelatedScope::default(),
-                None,
-                20,
-            )
+            .related_articles_global(&article.run_id, &article.id, self.related_scope, None, 20)
             .map(|page| page.into_page(0))
         {
             Ok(page) => {
@@ -6059,6 +6058,47 @@ impl App {
         }
     }
 
+    /// Switch Related between all retained cycles and the source cycle and
+    /// reload the open Intel article and Brain memory Related lists.
+    pub(crate) fn toggle_related_scope(&mut self) {
+        self.related_scope = self.related_scope.toggle();
+        if let Some(article) = self.intel_articles.get(self.intel_sel).cloned() {
+            match self.store.related_articles_global(
+                &article.run_id,
+                &article.id,
+                self.related_scope,
+                None,
+                20,
+            ) {
+                Ok(page) => {
+                    self.intel_related.page = page.into_page(0);
+                    self.intel_related.error = None;
+                }
+                Err(error) => self.intel_related.error = Some(error.to_string()),
+            }
+            self.intel_related.sel = 0;
+            self.intel_related.scroll = 0;
+        }
+        if let Some(memory) = self.brain_detail.memory_id().map(str::to_string) {
+            let view = &mut self.brain_detail.related.articles;
+            match self.store.related_articles_global_for_memory(
+                &memory,
+                self.related_scope,
+                None,
+                20,
+            ) {
+                Ok(page) => {
+                    view.page = page.into_page(0);
+                    view.error = None;
+                }
+                Err(error) => view.error = Some(error.to_string()),
+            }
+            view.sel = 0;
+            view.scroll = 0;
+        }
+        self.status = format!("Related: {}", self.related_scope.label());
+    }
+
     /// Next Brain kind filter: All, then each of the five core kinds.
     pub(crate) fn cycle_brain_kind(&mut self) {
         use argos_osint_core::memory_metadata::MemoryKind;
@@ -6259,7 +6299,7 @@ impl App {
             restore.map_or(!origins.is_empty(), |snapshot| snapshot.articles_selected);
         match self
             .store
-            .related_articles_global_for_memory(&memory.id, RelatedScope::default(), None, 20)
+            .related_articles_global_for_memory(&memory.id, self.related_scope, None, 20)
             .map(|page| page.into_page(0))
         {
             Ok(page) => {
@@ -6502,7 +6542,7 @@ impl App {
             self.store
                 .related_articles_global_for_memory(
                     memory,
-                    RelatedScope::default(),
+                    self.related_scope,
                     Some(&offset.to_string()),
                     20,
                 )?
@@ -6516,7 +6556,7 @@ impl App {
                 .related_articles_global(
                     &article.run_id,
                     &article.id,
-                    RelatedScope::default(),
+                    self.related_scope,
                     Some(&offset.to_string()),
                     20,
                 )?
@@ -6813,6 +6853,10 @@ impl App {
             }
             ButtonId::BrainKind => {
                 self.cycle_brain_kind();
+                return;
+            }
+            ButtonId::RelatedScope => {
+                self.toggle_related_scope();
                 return;
             }
             ButtonId::CreateMemory => {
@@ -10040,6 +10084,7 @@ mod tests {
             brain_graph: recon::MemoryGraph::default(),
             brain_typed: Vec::new(),
             brain_kind: None,
+            related_scope: RelatedScope::default(),
             brain_graph_for: None,
             brain_detail: Default::default(),
             memory_total: 0,
@@ -13030,6 +13075,109 @@ mod tests {
         assert_eq!(unique.len(), urls.len(), "{urls:?}");
         if let Some(k2) = page.rows.iter().find(|r| r.article.id == "k2") {
             assert_eq!(k2.originating_run_ids.len(), 2, "{k2:?}");
+        }
+    }
+
+    #[test]
+    fn related_scope_toggle_switches_all_cycles_and_this_cycle() {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let mut app = app();
+        brain_world(&app);
+        open_kind(&mut app, MemoryKind::Related);
+        let lead = app.memories[0].id.clone();
+        assert!(app.open_memory_detail(&lead));
+        app.brain_detail.related.articles_selected = true;
+        let all = app.brain_detail.related.articles.page.clone();
+        assert_eq!(all.coverage, "all retained cycles");
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Scope: All retained cycles"), "{text}");
+        click(&mut app, Target::Button(ButtonId::RelatedScope));
+        assert_eq!(app.related_scope, RelatedScope::ThisCycle);
+        let page = &app.brain_detail.related.articles.page;
+        assert_eq!(page.coverage, "this cycle");
+        assert!(page.total <= all.total);
+        // Each row of this cycle stays inside a single origin cycle.
+        assert!(page.rows.iter().all(|r| r.originating_run_ids.len() == 1));
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Scope: This cycle"), "{text}");
+        click(&mut app, Target::Button(ButtonId::RelatedScope));
+        assert_eq!(app.related_scope, RelatedScope::AllRetained);
+        assert_eq!(app.brain_detail.related.articles.page.total, all.total);
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_brain_phase5_screens() {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (120, 40)] {
+            let mut app = app();
+            brain_world(&app);
+            open_kind(&mut app, MemoryKind::Related);
+            let lead = app.memories[0].id.clone();
+            assert!(app.open_memory_detail(&lead));
+            app.brain_detail.related.articles_selected = true;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("related-scope-all-{width}x{height}"),
+                width,
+                height,
+            );
+            app.toggle_related_scope();
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("related-scope-cycle-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut app = self::app();
+            brain_world(&app);
+            let stats = serde_json::to_value(argos_osint_core::atlas::RunStats {
+                contract_version: argos_osint_core::atlas_work::COLLECTION_CONTRACT.into(),
+                coverage: argos_osint_core::atlas::CoverageStats {
+                    articles: 3,
+                    classified: 3,
+                    entities_available: 3,
+                    publishers_available: 3,
+                    related_pairs: 2,
+                    actor_indexed: 2,
+                    actor_index_failed: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+            app.store
+                .atlas_insert_run(
+                    "run-1014",
+                    r#"{"phase":6,"chunk":0,"leg":"actor_articles","country":0,"from":""}"#,
+                    &stats.to_string(),
+                )
+                .unwrap();
+            app.store
+                .atlas_set_state(
+                    "run-1014",
+                    "partial",
+                    "Classification 3/3 · legacy unk 0 · entities 3 · publisher priors 3 · Related 2 · actors indexed 2/3 (zero-actor 0, failed 1) · acquisition failures 0",
+                    true,
+                )
+                .unwrap();
+            app.select(ModuleId::Atlas.index());
+            if let Some(i) = app.atlas_runs.iter().position(|r| r.id == "run-1014") {
+                app.atlas_run_sel = i;
+            }
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("atlas-phase6-partial-{width}x{height}"),
+                width,
+                height,
+            );
         }
     }
 

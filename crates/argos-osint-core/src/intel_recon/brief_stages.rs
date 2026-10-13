@@ -87,6 +87,10 @@ pub trait StageBackend: Send {
     ) -> BoxFut<'a, Result<HashMap<String, String>>>;
     /// Existing related articles for Stage 4 (metadata only).
     fn related(&mut self, article: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>>;
+    /// Measured focused oversized-story path enabled (default off).
+    fn focused_oversized(&self) -> bool {
+        false
+    }
     /// Generated JSON request; must honour `cancel`.
     fn generate<'a>(
         &'a mut self,
@@ -807,7 +811,7 @@ async fn execute(
                     stage_output(&store, &job, "intel_brief_claims")?,
                 )
             };
-            let (all, _index) = super::sentence_index::body_sentences(&body);
+            let (all, index_full) = super::sentence_index::body_sentences(&body);
             let claim_ids: HashSet<String> = claims["claims"]
                 .as_array()
                 .into_iter()
@@ -815,7 +819,36 @@ async fn execute(
                 .filter_map(|c| c["id"].as_str().map(str::to_string))
                 .collect();
             let system = format!("{INFERENCES_PROMPT}{STRICT_JSON}{INFERENCES_SHAPE}");
-            let windows = request_windows(&all, &system, &claims, REQUEST_WINDOW_BYTES);
+            let mut windows = request_windows(&all, &system, &claims, REQUEST_WINDOW_BYTES);
+            // Oversized stories may read actor-focused packets (measured path,
+            // opt-in). Fidelity below still reviews against the whole body.
+            let mut focused: Option<super::passage_packets::PacketSet> = None;
+            if windows.len() > 1 && backend.focused_oversized() {
+                let actors: Vec<String> = {
+                    let store = Store::open(db_path)?;
+                    let article = article_for(&store, &article_id_of(claimed, &store)?)?;
+                    store
+                        .atlas_metadata(&article.run_id, &article.id)?
+                        .map(|m| {
+                            crate::atlas_metadata::article_actors(&article, &m)
+                                .into_iter()
+                                .map(|a| a.display_name)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let markdown = body["markdown"].as_str().unwrap_or("");
+                let query = super::passage_packets::claims_query(&actors, &claims);
+                if let Some((selected, set)) =
+                    super::passage_packets::focused_sentences(&index_full, markdown, &query)
+                {
+                    let packed = request_windows(&selected, &system, &claims, REQUEST_WINDOW_BYTES);
+                    if packed.len() < windows.len() {
+                        windows = packed;
+                        focused = Some(set);
+                    }
+                }
+            }
             let mut carried = json!([]);
             let mut covered: Vec<Sentence> = Vec::new();
             let mut last = json!({"inferences":[],"empty_reason":"no supported inferences"});
@@ -862,6 +895,12 @@ async fn execute(
             )
             .await?;
             last["windows"] = json!(windows.len());
+            last["path"] = json!(if focused.is_some() { "focused" } else { "full" });
+            if let Some(set) = &focused {
+                last["packet_coverage"] = json!(set.coverage);
+                last["packet_policy"] = json!(set.policy);
+                last["omitted_ids"] = json!(set.omitted);
+            }
             last["body_hash"] = body["content_hash"].clone();
             let n = last["inferences"].as_array().map_or(0, Vec::len);
             let reason = if n == 0 {
@@ -1485,6 +1524,10 @@ impl StageBackend for RuntimeBackend {
         })
     }
 
+    fn focused_oversized(&self) -> bool {
+        self.settings.defaults.focused_oversized_brief
+    }
+
     fn related(&mut self, article: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>> {
         let store = Store::open(&self.db_path)?;
         // All retained cycles by default, one row per URL.
@@ -1616,6 +1659,8 @@ pub fn stage_revisions(
         "generate": route(Some(OP_INFERENCES_GENERATE), "synthesis"),
         "assess": route(Some(OP_INFERENCES_ASSESS), "claim_assessor"),
         "assess_prompt": super::brief_fidelity::FIDELITY_PROMPT,
+        "focused_oversized": d.focused_oversized_brief,
+        "packet_policy": super::passage_packets::PACKET_POLICY,
     }));
     let links = h(json!({
         "after": inferences,

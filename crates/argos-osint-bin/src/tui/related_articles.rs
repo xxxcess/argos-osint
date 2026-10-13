@@ -45,42 +45,50 @@ pub fn rows(
             None,
         )];
     }
+    let scope = if view.page.coverage == "this cycle" {
+        "This cycle"
+    } else {
+        "All retained cycles"
+    };
+    let toggle = (
+        Line::from(Span::styled(
+            fit(&format!("Scope: {scope} · click to switch"), width),
+            theme::accent(),
+        )),
+        Some(Target::Button(super::app::ButtonId::RelatedScope)),
+    );
     if view.page.rows.is_empty() {
-        return vec![(
-            Line::from(Span::styled(
-                fit(
-                    &format!(
-                        "No related articles · {}",
-                        if view.page.coverage.is_empty() {
-                            "coverage unavailable"
-                        } else {
-                            &view.page.coverage
-                        }
+        return vec![
+            toggle,
+            (
+                Line::from(Span::styled(
+                    fit(
+                        &format!(
+                            "No related articles · {}",
+                            if view.page.coverage.is_empty() {
+                                "coverage unavailable"
+                            } else {
+                                &view.page.coverage
+                            }
+                        ),
+                        width,
                     ),
-                    width,
-                ),
+                    theme::dim(),
+                )),
+                None,
+            ),
+        ];
+    }
+    let mut lines = vec![
+        toggle,
+        (
+            Line::from(Span::styled(
+                fit("One row per article URL · cycles and basis below", width),
                 theme::dim(),
             )),
             None,
-        )];
-    }
-    let mut lines = vec![(
-        Line::from(Span::styled(
-            fit(
-                &format!(
-                    "Related · {} · one row per article URL",
-                    if view.page.coverage.is_empty() {
-                        "all retained cycles"
-                    } else {
-                        &view.page.coverage
-                    }
-                ),
-                width,
-            ),
-            theme::dim(),
-        )),
-        None,
-    )];
+        ),
+    ];
     for (index, item) in view.page.rows.iter().enumerate() {
         let target = if brain {
             Target::BrainRelatedArticle(index)

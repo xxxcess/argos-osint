@@ -65,6 +65,38 @@ pub struct OperationScope<'a> {
     pub completion_tokens: Option<u32>,
     /// Requested reasoning effort for this operation (provider default if unset).
     pub reasoning: crate::request_policy::ReasoningEffort,
+    /// Operation key (e.g. `intel_brief_links.generate`) for route overrides.
+    pub operation_key: Option<&'a str>,
+    /// Declared response format of this dispatch.
+    pub response_format: ResponseFormat,
+    /// Input revision the dispatch was compiled from (cache/audit identity).
+    pub input_revision: Option<&'a str>,
+    /// A user is waiting on this result (admission priority, no preemption).
+    pub interactive: bool,
+}
+
+/// Declared response format (spec §3). `BoundedDecision` may use native Jev
+/// or constrained chat; `GeneratedJson`/`Prose` skip Decisions-only routes
+/// without spending an attempt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormat {
+    BoundedDecision,
+    #[default]
+    GeneratedJson,
+    Prose,
+}
+
+/// The declaration every dispatch carries, recorded for audit.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DispatchDeclaration {
+    pub logical_role: String,
+    pub operation_key: String,
+    pub response_format: ResponseFormat,
+    pub input_revision: String,
+    pub request_policy: crate::request_policy::RequestPolicy,
+    /// True when an operation override supplied the route chain.
+    pub overridden: bool,
 }
 
 impl<'a> OperationScope<'a> {
@@ -78,6 +110,50 @@ impl<'a> OperationScope<'a> {
             insight_contract: false,
             completion_tokens: None,
             reasoning: crate::request_policy::ReasoningEffort::Default,
+            operation_key: None,
+            response_format: ResponseFormat::GeneratedJson,
+            input_revision: None,
+            interactive: false,
+        }
+    }
+
+    pub fn with_interactive(mut self) -> Self {
+        self.interactive = true;
+        self
+    }
+
+    pub fn with_operation(mut self, key: &'a str) -> Self {
+        self.operation_key = Some(key);
+        self
+    }
+
+    pub fn with_format(mut self, format: ResponseFormat) -> Self {
+        self.response_format = format;
+        self
+    }
+
+    pub fn with_input_revision(mut self, revision: &'a str) -> Self {
+        self.input_revision = Some(revision);
+        self
+    }
+
+    /// The dispatch declaration for `policy`.
+    pub fn declaration(
+        &self,
+        settings: &SettingsFile,
+        policy: crate::request_policy::RequestPolicy,
+    ) -> DispatchDeclaration {
+        let canonical = provider::role_name(self.role).unwrap_or(self.role);
+        DispatchDeclaration {
+            logical_role: canonical.to_string(),
+            operation_key: self.operation_key.unwrap_or("").to_string(),
+            response_format: self.response_format,
+            input_revision: self.input_revision.unwrap_or("").to_string(),
+            request_policy: policy,
+            overridden: settings
+                .defaults
+                .resolve_operation(self.operation_key, canonical)
+                .1,
         }
     }
 
@@ -382,8 +458,18 @@ pub fn resolve_role_routes(
     settings: &SettingsFile,
     role: &str,
 ) -> (Vec<Route>, Vec<ProviderSecret>) {
+    resolve_operation_routes(auth, settings, role, None)
+}
+
+/// Route chain for an operation: its override when set, else the role chain.
+pub fn resolve_operation_routes(
+    auth: &AuthFile,
+    settings: &SettingsFile,
+    role: &str,
+    operation: Option<&str>,
+) -> (Vec<Route>, Vec<ProviderSecret>) {
     let canonical = provider::role_name(role).unwrap_or(role);
-    let (assignment, _inherited) = settings.defaults.resolve_role(canonical);
+    let (assignment, _overridden) = settings.defaults.resolve_operation(operation, canonical);
     let chain = assignment.chain();
     let mut routes = Vec::with_capacity(chain.len());
     let mut secrets = Vec::with_capacity(chain.len());
@@ -1018,7 +1104,8 @@ where
     } else {
         let _ = ensure_operation(db_path, scope, "");
     }
-    let (mut routes, secrets) = resolve_role_routes(auth, settings, scope.role);
+    let (mut routes, secrets) =
+        resolve_operation_routes(auth, settings, scope.role, scope.operation_key);
     // Free-chat extraction cannot dispatch a Decisions-only model. Keep route
     // indices and declared fallback order so audit and secrets remain aligned.
     for (route, secret) in routes.iter_mut().zip(&secrets) {
@@ -1408,6 +1495,7 @@ where
         recorded_waits: None,
         admission_account: String::new(),
         attempt_limit: insight_contract.then_some(2),
+        interactive: scope.interactive,
     };
 
     let report = provider_chain::execute(&routes, dispatch, opts).await;
@@ -1476,7 +1564,8 @@ where
     } else {
         let _ = ensure_operation(db_path, scope, "");
     }
-    let (mut routes, secrets) = resolve_role_routes(auth, settings, scope.role);
+    let (mut routes, secrets) =
+        resolve_operation_routes(auth, settings, scope.role, scope.operation_key);
     // Capability is resolved separately from endpoint availability: a Jev
     // route without a supported native connection is skipped (zero requests,
     // no attempt/RPM/retry consumed); it is never sent to chat.
@@ -1900,6 +1989,7 @@ where
         recorded_waits: None,
         admission_account: String::new(),
         attempt_limit: insight_contract.then_some(2),
+        interactive: scope.interactive,
     };
 
     let report = provider_chain::execute(&routes, dispatch, opts).await;

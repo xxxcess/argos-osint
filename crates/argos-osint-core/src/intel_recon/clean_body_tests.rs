@@ -76,7 +76,7 @@ async fn preserves_byline_quote_negation_correction_and_unicode_verbatim() {
     );
     // Clear prose is never sent to the model.
     let sent: Vec<usize> = m.batches.concat();
-    assert!(sent.len() < chunk_article_body(&story()).len());
+    assert!(sent.len() < paragraph_blocks(&story()).len());
 }
 
 #[tokio::test]
@@ -104,10 +104,8 @@ async fn span_maps_point_to_identical_baseline_text() {
 }
 
 #[tokio::test]
-async fn classifier_missing_or_failing_keeps_every_block() {
+async fn classifier_missing_or_failing_keeps_every_uncertain_block() {
     let raw = story();
-    let base =
-        validate_article_body(&raw, "Geneva talks continue", "https://x.test/s").cleaned_markdown;
     let none = clean_article(
         &raw,
         "Geneva talks continue",
@@ -117,12 +115,14 @@ async fn classifier_missing_or_failing_keeps_every_block() {
         None,
     )
     .await;
-    assert_eq!(none.markdown, base);
+    // Ambiguous blocks (the byline) stay; only unmistakable chrome is removed
+    // locally, the same with or without a working Classifier.
+    assert!(none.markdown.contains("By Zoë Müller, Reuters"));
     assert!(none
         .diagnostics
         .iter()
         .any(|d| d.contains("classifier unavailable")));
-    let mut failing = mock(vec!["Advertisement"]);
+    let mut failing = mock(vec!["By Zoë"]);
     failing.fail = true;
     let failed = clean_article(
         &raw,
@@ -133,8 +133,9 @@ async fn classifier_missing_or_failing_keeps_every_block() {
         Some(&mut failing),
     )
     .await;
-    assert_eq!(failed.markdown, base);
-    assert!(failed.removed.is_empty());
+    assert_eq!(failed.markdown, none.markdown);
+    assert_eq!(failed.removed, none.removed);
+    assert!(failed.markdown.contains("By Zoë Müller, Reuters"));
 }
 
 #[tokio::test]
@@ -271,4 +272,95 @@ async fn nlp_mentions_named_in_the_headline_become_keep_anchors() {
     )
     .await;
     assert!(out.markdown.contains(short));
+}
+
+fn chunk(text: &str) -> Vec<BodyChunk> {
+    paragraph_blocks(text)
+}
+
+const PROSE: &str = "Regulators opened an inquiry on Monday after the company disclosed that its quarterly results had been misstated, and the chief executive said the board would cooperate fully with investigators. ";
+
+// §7: "shares fell" and substantive "related" prose stay local.
+#[test]
+fn cue_words_inside_story_prose_stay_local() {
+    for sentence in [
+        "Shares fell 12 percent in early trading as investors weighed the disclosure and analysts cut their forecasts for the year.",
+        "Prosecutors said the payments were related to a consulting contract signed in 2019, which the company has denied was improper.",
+        "Readers can share tips securely, the newspaper said, adding that comments from the ministry were still awaited this week.",
+    ] {
+        let text = format!("{PROSE}{PROSE}\n\n{sentence}\n\n{PROSE}{PROSE}");
+        let blocks = chunk(&text);
+        let idx = blocks.iter().position(|b| b.text.contains(&sentence[..20])).unwrap();
+        assert_eq!(classify_block(&blocks, idx, &[]), BlockClass::Story, "{sentence}");
+    }
+}
+
+#[test]
+fn structural_chrome_is_removed_and_uncertain_blocks_reviewed() {
+    let text = format!(
+        "{PROSE}{PROSE}\n\n## Related stories\n\n- [One](https://x.test/1)\n- [Two](https://x.test/2)\n- [Three](https://x.test/3)\n\nShare\n\nSubscribe to our newsletter for daily updates\n\n© 2026 Example News. All rights reserved.\n\nBy Staff Writer\n\n{PROSE}{PROSE}"
+    );
+    let blocks = chunk(&text);
+    let class_of = |needle: &str| {
+        let i = blocks.iter().position(|b| b.text.contains(needle)).unwrap();
+        classify_block(&blocks, i, &[])
+    };
+    assert_eq!(class_of("Related stories"), BlockClass::Chrome);
+    assert_eq!(class_of("[Two]"), BlockClass::Chrome);
+    assert_eq!(class_of("Share"), BlockClass::Chrome);
+    assert_eq!(class_of("Subscribe to"), BlockClass::Chrome);
+    assert_eq!(class_of("© 2026"), BlockClass::Chrome);
+    assert_eq!(class_of("By Staff Writer"), BlockClass::Ambiguous);
+    assert_eq!(class_of("Regulators opened"), BlockClass::Story);
+}
+
+#[tokio::test]
+async fn ordinary_story_sends_no_classifier_batch() {
+    let text = format!(
+        "{PROSE}{PROSE}\n\nShares fell sharply after the announcement, the exchange said in a short statement.\n\n\"We did not mislead anyone,\" the chief executive said.\n\nCorrection: an earlier version misstated the date of the inquiry.\n\n{PROSE}{PROSE}"
+    );
+    let mut m = mock(vec![]);
+    let a = clean_article(
+        &text,
+        "Regulators open inquiry",
+        "",
+        "https://x.test/s",
+        &[],
+        Some(&mut m),
+    )
+    .await;
+    assert!(m.batches.is_empty(), "{:?}", m.batches);
+    for kept in ["Shares fell", "We did not mislead", "Correction:"] {
+        assert!(a.markdown.contains(kept), "{kept}");
+    }
+}
+
+#[test]
+fn soft_wraps_join_within_paragraphs_preserving_offsets() {
+    let raw = "The minister said the talks\nwould continue next week, and\nthe envoy agreed.\n\n- item one\n- item two\n\n# Heading\nFirst line ends here.\nSecond sentence starts a new line.\nLine with hard break  \nnext line\n\n“Zoë said\nthis.”";
+    let (out, joined) = unwrap_soft_wraps(raw);
+    assert_eq!(out.len(), raw.len(), "byte length preserved");
+    assert!(
+        out.contains("The minister said the talks would continue next week, and the envoy agreed.")
+    );
+    assert!(out.contains("- item one\n- item two"), "lists untouched");
+    assert!(out.contains("# Heading\nFirst line"), "headings untouched");
+    assert!(
+        out.contains("ends here.\nSecond sentence"),
+        "sentence-final line kept"
+    );
+    assert!(
+        out.contains("hard break  \nnext"),
+        "markdown hard break kept"
+    );
+    assert!(out.contains("“Zoë said this.”"), "unicode joined");
+    assert!(out.contains("\n\n"), "paragraph breaks kept");
+    assert_eq!(joined, 3);
+    // Every non-newline byte is at the same offset.
+    for ((a, b), _) in raw.bytes().zip(out.bytes()).zip(0..) {
+        if a != b {
+            assert!(a == b'\n' || a == b'\r');
+            assert_eq!(b, b' ');
+        }
+    }
 }

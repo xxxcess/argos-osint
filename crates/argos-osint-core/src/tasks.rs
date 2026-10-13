@@ -275,9 +275,25 @@ pub struct ProviderAdmission {
     /// Shared cooldown after a rate-limit / 429 (spec §19). Blocks new acquires
     /// for the account until `Instant` elapses.
     cooldown_until: HashMap<String, Instant>,
+    /// Interactive callers currently waiting per account. While any wait,
+    /// background callers do not take a freed slot (no preemption of running
+    /// requests; the per-account limit is unchanged).
+    interactive_waiting: HashMap<String, usize>,
 }
 
 impl ProviderAdmission {
+    /// Acquire for an interactive or background caller.
+    pub fn try_acquire_class(&mut self, account: &str, limit: usize, interactive: bool) -> bool {
+        if !interactive && self.interactive_waiting.get(account).copied().unwrap_or(0) > 0 {
+            return false;
+        }
+        self.try_acquire(account, limit)
+    }
+
+    pub fn interactive_waiting(&self, account: &str) -> usize {
+        self.interactive_waiting.get(account).copied().unwrap_or(0)
+    }
+
     pub fn global() -> &'static Mutex<ProviderAdmission> {
         static SLOT: OnceLock<Mutex<ProviderAdmission>> = OnceLock::new();
         SLOT.get_or_init(|| Mutex::new(ProviderAdmission::default()))
@@ -334,8 +350,13 @@ pub struct AdmissionGuard {
 
 impl AdmissionGuard {
     pub fn try_enter(account: &str) -> Option<Self> {
+        Self::try_enter_class(account, false)
+    }
+
+    /// Enter as an interactive (user-waiting) or background caller.
+    pub fn try_enter_class(account: &str, interactive: bool) -> Option<Self> {
         let mut gate = ProviderAdmission::global().lock().ok()?;
-        if gate.try_acquire(account, DEFAULT_PROVIDER_CONCURRENCY) {
+        if gate.try_acquire_class(account, DEFAULT_PROVIDER_CONCURRENCY, interactive) {
             Some(Self {
                 account: account.to_string(),
             })
@@ -349,6 +370,35 @@ impl Drop for AdmissionGuard {
     fn drop(&mut self) {
         if let Ok(mut gate) = ProviderAdmission::global().lock() {
             gate.release(&self.account);
+        }
+    }
+}
+
+/// Registration of an interactive caller waiting for an account slot.
+pub struct InteractiveWait {
+    account: String,
+}
+
+impl InteractiveWait {
+    pub fn register(account: &str) -> Self {
+        if let Ok(mut gate) = ProviderAdmission::global().lock() {
+            *gate
+                .interactive_waiting
+                .entry(account.to_string())
+                .or_insert(0) += 1;
+        }
+        Self {
+            account: account.to_string(),
+        }
+    }
+}
+
+impl Drop for InteractiveWait {
+    fn drop(&mut self) {
+        if let Ok(mut gate) = ProviderAdmission::global().lock() {
+            if let Some(n) = gate.interactive_waiting.get_mut(&self.account) {
+                *n = n.saturating_sub(1);
+            }
         }
     }
 }
@@ -1954,6 +2004,28 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         migrate_tables(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn interactive_waiters_take_freed_slots_before_background_work() {
+        let mut gate = ProviderAdmission::default();
+        assert!(gate.try_acquire_class("acct", 1, false));
+        // Slot busy: an interactive caller waits.
+        *gate.interactive_waiting.entry("acct".into()).or_default() += 1;
+        assert!(!gate.try_acquire_class("acct", 1, true));
+        gate.release("acct");
+        // Freed slot: background is held back, interactive gets it.
+        assert!(!gate.try_acquire_class("acct", 1, false));
+        assert!(gate.try_acquire_class("acct", 1, true));
+        *gate.interactive_waiting.get_mut("acct").unwrap() -= 1;
+        gate.release("acct");
+        assert!(
+            gate.try_acquire_class("acct", 1, false),
+            "no waiter: background proceeds"
+        );
+        // Other accounts are unaffected.
+        *gate.interactive_waiting.entry("acct".into()).or_default() += 1;
+        assert!(gate.try_acquire_class("other", 1, false));
     }
 
     #[test]

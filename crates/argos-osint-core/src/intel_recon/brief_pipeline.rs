@@ -35,6 +35,10 @@ pub struct BriefInputs {
     /// Captured role settings (JSON) for every stage.
     pub role_snapshot: String,
     pub title: String,
+    /// Per-stage dependency hashes in [`STAGES`] order (spec §3). A new
+    /// generation reuses a predecessor's committed output for each leading
+    /// stage whose hash is unchanged; empty disables reuse.
+    pub stage_revisions: Vec<String>,
 }
 
 /// Task id of one stage in a chain.
@@ -135,11 +139,73 @@ pub fn ensure_chain(conn: &Connection, inputs: &BriefInputs, now: &str) -> Resul
         }
     }
     tx.execute(
-        "INSERT INTO intel_brief_runs(job_id,article_id,generation,contract,input_revision,state,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'active',?6,?6)",
-        params![job_id, inputs.article_id, generation, CONTRACT, inputs.input_revision, now],
+        "INSERT INTO intel_brief_runs(job_id,article_id,generation,contract,input_revision,state,created_at,updated_at,stage_revisions_json) VALUES(?1,?2,?3,?4,?5,'active',?6,?6,?7)",
+        params![job_id, inputs.article_id, generation, CONTRACT, inputs.input_revision, now, serde_json::to_string(&inputs.stage_revisions)?],
     )?;
+    if !inputs.input_revision.contains(":reload:") {
+        reuse_checkpoints(&tx, inputs, &job_id, generation, now)?;
+    }
+    tasks::refresh_job_state(&tx, &job_id, now)?;
     tx.commit()?;
     Ok(job_id)
+}
+
+/// Reuse leading stage checkpoints whose dependency hash is unchanged from
+/// an earlier generation. Links (the last stage) always runs in a new
+/// generation. Returns the number of reused stages.
+fn reuse_checkpoints(
+    tx: &Connection,
+    inputs: &BriefInputs,
+    job_id: &str,
+    generation: i64,
+    now: &str,
+) -> Result<usize> {
+    let mut reused = 0;
+    for (index, (operation, _)) in STAGES.iter().enumerate().take(STAGES.len() - 1) {
+        let Some(revision) = inputs.stage_revisions.get(index).filter(|r| !r.is_empty()) else {
+            break;
+        };
+        let prior: Option<(String, String, i64, String)> = tx
+            .query_row(
+                "SELECT o.output_json,o.output_hash,o.item_count,o.empty_reason
+                 FROM intel_brief_runs r
+                 JOIN intel_brief_stage_outputs o ON o.task_id = r.job_id || ':' || ?4
+                 JOIN argos_tasks t ON t.id = o.task_id AND t.state='completed'
+                 WHERE r.article_id=?1 AND r.generation<?2 AND r.contract=?5
+                   AND json_extract(r.stage_revisions_json, '$[' || ?3 || ']') = ?6
+                 ORDER BY r.generation DESC LIMIT 1",
+                params![
+                    inputs.article_id,
+                    generation,
+                    index as i64,
+                    operation,
+                    CONTRACT,
+                    revision
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((output, hash, items, empty)) = prior else {
+            break;
+        };
+        let id = task_id(job_id, operation);
+        tx.execute(
+            "INSERT OR REPLACE INTO intel_brief_stage_outputs(task_id,job_id,stage,output_hash,output_json,item_count,empty_reason,committed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![id, job_id, operation, hash, output, items, empty, now],
+        )?;
+        tx.execute(
+            "UPDATE argos_tasks SET state='completed', result_ref=?2, error_message='Reused checkpoint · unchanged inputs', updated_at=?3, finished_at=?3 WHERE id=?1 AND state='queued'",
+            params![id, hash, now],
+        )?;
+        if let Some((next_op, _)) = STAGES.get(index + 1) {
+            tx.execute(
+                "UPDATE argos_tasks SET input_ref=?2,input_hash=?3,updated_at=?4 WHERE id=?1 AND state='queued'",
+                params![task_id(job_id, next_op), serde_json::json!({"predecessor":id,"output_hash":hash,"reused":true}).to_string(), hash, now],
+            )?;
+        }
+        reused += 1;
+    }
+    Ok(reused)
 }
 
 fn supersede_run(conn: &Connection, job_id: &str, now: &str) -> Result<()> {

@@ -44,6 +44,11 @@ pub const MAX_CANDIDATES: usize = 12;
 /// Body bytes supplied in one Inferences request; longer bodies are covered
 /// by ordered windows within Stage 3, never truncated.
 pub const BODY_WINDOW_BYTES: usize = 48_000;
+/// Budget for one *serialized compiled* Stage-3 request (system + user
+/// message), spec §2: escaping and sentence-ID overhead count against it.
+pub const REQUEST_WINDOW_BYTES: usize = 56_000;
+/// Reserved for carried prior-window proposals (≤5 inferences).
+pub const CARRIED_RESERVE_BYTES: usize = 6_000;
 
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type Validator = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
@@ -58,6 +63,8 @@ pub struct StageRequest {
     pub completion_tokens: u32,
     /// Stage reasoning effort (spec §2: extraction/linking low, inference default).
     pub reasoning: crate::request_policy::ReasoningEffort,
+    /// Operation key for `defaults.operation_overrides`.
+    pub operation_key: &'static str,
     pub validator: Validator,
 }
 
@@ -223,9 +230,7 @@ fn empty_reason(value: &Value) -> Result<String> {
 // ---------- Stage 2: Claims ----------
 
 pub fn metadata_sentences(article: &AtlasArticleRow) -> Vec<Sentence> {
-    let mut all = sentences("t", &article.title);
-    all.extend(sentences("d", &article.description));
-    all
+    super::sentence_index::metadata_wire(&article.title, &article.description)
 }
 
 pub fn claims_user(article: &AtlasArticleRow) -> String {
@@ -400,6 +405,43 @@ pub fn body_windows(body: &[Sentence], window_bytes: usize) -> Vec<Vec<Sentence>
             size = 0;
         }
         size += s.text.len() + 1;
+        current.push(s.clone());
+    }
+    if !current.is_empty() || windows.is_empty() {
+        windows.push(current);
+    }
+    windows
+}
+
+/// Serialized size of one body sentence as it appears in the request.
+fn wire_cost(s: &Sentence) -> usize {
+    json!({"id": s.id, "text": s.text}).to_string().len() + 1
+}
+
+/// Ordered windows sized against the serialized compiled request: each
+/// window's `system` + `inferences_user(claims, window, carried)` stays within
+/// `budget` when carried proposals fit [`CARRIED_RESERVE_BYTES`]. A single
+/// sentence larger than the remaining budget still gets its own window (never
+/// truncated).
+pub fn request_windows(
+    body: &[Sentence],
+    system: &str,
+    claims: &Value,
+    budget: usize,
+) -> Vec<Vec<Sentence>> {
+    let fixed =
+        system.len() + inferences_user(claims, &[], &json!([])).len() + CARRIED_RESERVE_BYTES;
+    let body_budget = budget.saturating_sub(fixed).max(2_000);
+    let mut windows: Vec<Vec<Sentence>> = Vec::new();
+    let mut current = Vec::new();
+    let mut size = 0;
+    for s in body {
+        let cost = wire_cost(s);
+        if size + cost > body_budget && !current.is_empty() {
+            windows.push(std::mem::take(&mut current));
+            size = 0;
+        }
+        size += cost;
         current.push(s.clone());
     }
     if !current.is_empty() || windows.is_empty() {
@@ -729,6 +771,7 @@ async fn execute(
                     user: claims_user(&article),
                     completion_tokens: CLAIMS_TOKENS,
                     reasoning: crate::request_policy::ReasoningEffort::Low,
+                    operation_key: crate::provider::OP_CLAIMS_GENERATE,
                     validator,
                 },
             )
@@ -764,15 +807,15 @@ async fn execute(
                     stage_output(&store, &job, "intel_brief_claims")?,
                 )
             };
-            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
-            let all = sentences("b", &markdown);
+            let (all, _index) = super::sentence_index::body_sentences(&body);
             let claim_ids: HashSet<String> = claims["claims"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(|c| c["id"].as_str().map(str::to_string))
                 .collect();
-            let windows = body_windows(&all, BODY_WINDOW_BYTES);
+            let system = format!("{INFERENCES_PROMPT}{STRICT_JSON}{INFERENCES_SHAPE}");
+            let windows = request_windows(&all, &system, &claims, REQUEST_WINDOW_BYTES);
             let mut carried = json!([]);
             let mut covered: Vec<Sentence> = Vec::new();
             let mut last = json!({"inferences":[],"empty_reason":"no supported inferences"});
@@ -791,10 +834,11 @@ async fn execute(
                         task_id: claimed.id.clone(),
                         stage: claimed.operation.clone(),
                         role: "synthesis",
-                        system: format!("{INFERENCES_PROMPT}{STRICT_JSON}{INFERENCES_SHAPE}"),
+                        system: system.clone(),
                         user: inferences_user(&claims, window, &carried),
                         completion_tokens: INFERENCES_TOKENS,
                         reasoning: crate::request_policy::ReasoningEffort::Default,
+                        operation_key: crate::provider::OP_INFERENCES_GENERATE,
                         validator,
                     },
                 )
@@ -872,6 +916,7 @@ async fn execute(
                     user: links_user(&inferences, &candidates),
                     completion_tokens: LINKS_TOKENS,
                     reasoning: crate::request_policy::ReasoningEffort::Low,
+                    operation_key: crate::provider::OP_LINKS_GENERATE,
                     validator,
                 },
             )
@@ -1409,12 +1454,18 @@ impl StageBackend for RuntimeBackend {
                 "{task_id}:fidelity:{}",
                 crate::nlp::cache::hash(&items.iter().map(|i| i.receipt_key()).collect::<String>())
             );
-            let scope =
-                crate::recon::model_exec::OperationScope::new(&operation_id, "claim_assessor")
+            let adapter = super::brief_fidelity::FidelityDecisions { items: &items };
+            let mode = adapter.mode();
+            let mut scope =
+                crate::recon::model_exec::OperationScope::new(&operation_id, mode.role())
                     .with_task(task_id)
                     .with_completion_tokens(super::brief_fidelity::FIDELITY_TOKENS)
-                    .with_reasoning(crate::request_policy::ReasoningEffort::Low);
-            let adapter = super::brief_fidelity::FidelityDecisions { items: &items };
+                    .with_reasoning(crate::request_policy::ReasoningEffort::Low)
+                    .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision)
+                    .with_interactive();
+            if let Some(key) = mode.operation_key() {
+                scope = scope.with_operation(key);
+            }
             let (labels, _) = crate::recon::model_exec::execute_decisions_or_chat(
                 &self.auth,
                 &self.settings,
@@ -1459,7 +1510,10 @@ impl StageBackend for RuntimeBackend {
                 .with_task(&request.task_id)
                 .with_insight_contract()
                 .with_completion_tokens(request.completion_tokens)
-                .with_reasoning(request.reasoning);
+                .with_reasoning(request.reasoning)
+                .with_operation(request.operation_key)
+                .with_format(crate::recon::model_exec::ResponseFormat::GeneratedJson)
+                .with_interactive();
             let messages = [
                 crate::provider::ChatMessage {
                     role: "system".into(),
@@ -1514,21 +1568,62 @@ impl RuntimeBackend {
 
 /// Input identity: article metadata, captured role chain and contract.
 /// Changing any of them supersedes the active chain.
+/// Per-stage dependency hashes in stage order (spec §3). Each folds in its
+/// predecessor's hash plus the stage's own inputs: metadata, prompts/contract
+/// versions and the *effective* route chain of the operations it dispatches
+/// (operation override or inherited role). A Links route change therefore
+/// leaves body/Claims/Inferences hashes untouched.
+pub fn stage_revisions(
+    article: &AtlasArticleRow,
+    settings: &crate::provider::SettingsFile,
+) -> Vec<String> {
+    use crate::provider::{
+        OP_CLAIMS_GENERATE, OP_INFERENCES_ASSESS, OP_INFERENCES_GENERATE, OP_LINKS_GENERATE,
+    };
+    let d = &settings.defaults;
+    let route = |op: Option<&str>, role: &str| {
+        serde_json::to_value(d.resolve_operation(op, role).0).unwrap_or(Value::Null)
+    };
+    let h = |v: Value| crate::nlp::cache::hash(&v.to_string());
+    let body = h(json!({
+        "contract": brief_pipeline::CONTRACT,
+        "url": article.url,
+        "transform": super::clean_body::TRANSFORM,
+        "index": super::sentence_index::INDEX_VERSION,
+        "classifier": route(None, "classifier"),
+    }));
+    let claims = h(json!({
+        "after": body,
+        "title": article.title,
+        "description": article.description,
+        "published_at": article.published_at,
+        "prompt": CLAIMS_PROMPT,
+        "generate": route(Some(OP_CLAIMS_GENERATE), "claim_assessor"),
+        "fidelity": route(None, "evidence_curator"),
+        "fidelity_contract": format!("extraction_fidelity:{}", crate::investigation::decisions::templates::TEMPLATE_VERSION),
+    }));
+    let inferences = h(json!({
+        "after": claims,
+        "prompt": INFERENCES_PROMPT,
+        "window": REQUEST_WINDOW_BYTES,
+        "generate": route(Some(OP_INFERENCES_GENERATE), "synthesis"),
+        "assess": route(Some(OP_INFERENCES_ASSESS), "claim_assessor"),
+        "assess_prompt": super::brief_fidelity::FIDELITY_PROMPT,
+    }));
+    let links = h(json!({
+        "after": inferences,
+        "prompt": LINKS_PROMPT,
+        "generate": route(Some(OP_LINKS_GENERATE), "synthesis"),
+    }));
+    vec![body, claims, inferences, links]
+}
+
+/// Chain input revision: the final cumulative stage hash.
 pub fn input_revision(
     article: &AtlasArticleRow,
     settings: &crate::provider::SettingsFile,
 ) -> String {
-    crate::nlp::cache::hash(
-        &json!({
-            "contract": brief_pipeline::CONTRACT,
-            "title": article.title,
-            "description": article.description,
-            "url": article.url,
-            "published_at": article.published_at,
-            "roles": serde_json::to_value(&settings.defaults).unwrap_or(Value::Null),
-        })
-        .to_string(),
-    )
+    stage_revisions(article, settings).pop().unwrap_or_default()
 }
 
 /// Reload: supersede the chain with a forced re-acquisition of the body.
@@ -1545,6 +1640,7 @@ pub fn reload_intel_brief_pipeline(
             input_revision: format!("{}:reload:{}", input_revision(article, settings), now()),
             role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
             title: article.title.clone(),
+            stage_revisions: stage_revisions(article, settings),
         },
         &now(),
     )
@@ -1564,6 +1660,7 @@ pub fn ensure_intel_brief_pipeline(
             input_revision: input_revision(article, settings),
             role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
             title: article.title.clone(),
+            stage_revisions: stage_revisions(article, settings),
         },
         &now(),
     )

@@ -23,6 +23,7 @@ fn inputs(rev: &str) -> BriefInputs {
         input_revision: rev.into(),
         role_snapshot: "{}".into(),
         title: "Ferry suspension".into(),
+        stage_revisions: vec![],
     }
 }
 fn state(store: &Store, id: &str) -> String {

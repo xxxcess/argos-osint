@@ -16,8 +16,10 @@ mod confidence;
 mod jobs;
 mod ledger;
 pub(crate) mod modes;
+pub mod passage_packets;
 mod persist;
 mod replace_insights;
+pub mod sentence_index;
 mod synthesize;
 #[cfg(test)]
 mod tests_acceptance;

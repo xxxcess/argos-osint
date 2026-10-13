@@ -184,6 +184,18 @@ pub fn prepare(
             "displayed body differs from the retained clean artifact".into(),
         ));
     }
+    // Evidence spans come from the artifact's sentence index; a persisted
+    // index must describe exactly the displayed artifact.
+    if !body["sentence_index"].is_null()
+        && !serde_json::from_value::<super::sentence_index::SentenceIndex>(
+            body["sentence_index"].clone(),
+        )
+        .is_ok_and(|i| i.validates(markdown))
+    {
+        return Ok(Err(
+            "sentence index does not match the displayed artifact".into()
+        ));
+    }
     let meta_ev = input
         .evidence
         .iter()

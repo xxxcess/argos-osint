@@ -27,6 +27,19 @@ fn has_table(conn: &Connection, table: &str) -> Result<bool> {
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!("schema_brain_graph.sql"))?;
+    if has_table(conn, "intel_brief_runs")? {
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('intel_brief_runs') WHERE name='stage_revisions_json'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            // Per-stage dependency hashes for checkpoint reuse (spec §3).
+            conn.execute_batch(
+                "ALTER TABLE intel_brief_runs ADD COLUMN stage_revisions_json TEXT NOT NULL DEFAULT '[]'",
+            )?;
+        }
+    }
     if !has_table(conn, "memory_metadata")? {
         return Ok(());
     }

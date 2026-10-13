@@ -12668,6 +12668,38 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore]
+    fn dump_brain_graph_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (120, 40)] {
+            let mut app = app();
+            app.settings.defaults.synthesis.provider = "openrouter".into();
+            app.settings.defaults.synthesis.model = "openai/gpt-4o".into();
+            app.settings.defaults.operation_overrides.insert(
+                argos_osint_core::provider::OP_LINKS_GENERATE.into(),
+                argos_osint_core::provider::ModelAssignment {
+                    provider: "google".into(),
+                    model: "gemini-2.5-flash".into(),
+                    ..Default::default()
+                },
+            );
+            app.select(ModuleId::Providers.index());
+            app.provider_page = ProviderPage::Defaults;
+            app.defaults_role = DefaultsRole::Synthesis;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("models-defaults-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+    }
+
     fn dump_cells(app: &mut App, dir: &str, name: &str, width: u16, height: u16) {
         let buffer = render(app, width, height);
         let mut cells = Vec::new();

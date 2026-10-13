@@ -554,6 +554,14 @@ async fn commit_refined_body(
             .map(|d| d as &mut dyn super::clean_body::BlockDecider),
     )
     .await;
+    // Parse once: the baseline annotation's spans are remapped onto the final
+    // clean artifact (local re-split only where remapping cannot certify).
+    refined.sentence_index = Some(super::sentence_index::SentenceIndex::from_baseline(
+        &refined.markdown,
+        &baseline.cleaned_markdown,
+        annotation.as_ref(),
+        &refined.spans,
+    ));
     let store = Store::open(db_path)?;
     anyhow::ensure!(!cancel.load(Ordering::Acquire), "cancelled");
     let current = store
@@ -885,67 +893,169 @@ fn is_private_host(host: &str) -> bool {
         || h.starts_with("fd")
 }
 
-/// Lightweight main-content extractor for HTML pages.
+/// Structural main-content extraction for HTML pages (spec §2.1).
+///
+/// Prefers `<article>`, then `<main>`, then `<body>`; drops whole non-prose
+/// subtrees (navigation, header/footer, asides, forms, scripts, figures'
+/// media, buttons); block elements become paragraphs, inline text joins with
+/// spaces, list items keep a `- ` marker and headings a `#` marker. Text is
+/// never synthesized: every output word comes from a text node.
 fn html_main_content(html: &str) -> String {
-    let mut text = String::new();
     let lower = html.to_ascii_lowercase();
-    let start = lower
-        .find("<article")
-        .or_else(|| lower.find("<main"))
-        .or_else(|| lower.find("<body"))
+    let region = ["<article", "<main", "<body"]
+        .iter()
+        .find_map(|t| lower.find(t))
         .unwrap_or(0);
-    let slice = &html[start..];
-    let mut in_tag = false;
-    let mut in_script = false;
-    let mut tag = String::new();
-    for ch in slice.chars() {
-        match ch {
-            '<' => {
-                in_tag = true;
-                tag.clear();
-            }
-            '>' if in_tag => {
-                in_tag = false;
-                let name = tag
-                    .trim()
-                    .trim_start_matches('/')
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if name == "script" || name == "style" || name == "noscript" {
-                    in_script = !tag.trim().starts_with('/');
-                }
-                if matches!(
-                    name.as_str(),
-                    "p" | "br" | "h1" | "h2" | "h3" | "li" | "div"
-                ) && !tag.trim().starts_with('/')
-                {
-                    text.push('\n');
-                }
-                tag.clear();
-            }
-            c if in_tag => tag.push(c),
-            c if !in_script => text.push(c),
-            _ => {}
+    let slice = &html[region..];
+    const SKIP: &[&str] = &[
+        "script", "style", "noscript", "nav", "header", "footer", "aside", "form", "button", "svg",
+        "iframe", "select", "template", "menu", "dialog",
+    ];
+    const BLOCK: &[&str] = &[
+        "p",
+        "div",
+        "section",
+        "article",
+        "main",
+        "blockquote",
+        "li",
+        "ul",
+        "ol",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "br",
+        "tr",
+        "table",
+        "figure",
+        "figcaption",
+        "pre",
+        "hr",
+        "dd",
+        "dt",
+    ];
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut skip_depth: Vec<String> = Vec::new();
+    let flush = |current: &mut String, blocks: &mut Vec<String>| {
+        let t = current.split_whitespace().collect::<Vec<_>>().join(" ");
+        let bare = t.trim_start_matches(['#', '-', ' ']);
+        if !bare.is_empty() {
+            blocks.push(t);
         }
-    }
-    // Decode a few common entities.
-    let text = text
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"");
-    let mut lines = Vec::new();
-    for line in text.lines() {
-        let t = line.split_whitespace().collect::<Vec<_>>().join(" ");
-        if t.is_empty() {
+        current.clear();
+    };
+    let mut rest = slice;
+    while let Some(lt) = rest.find('<') {
+        let text = &rest[..lt];
+        if skip_depth.is_empty() {
+            current.push_str(&decode_entities(text));
+        }
+        let Some(gt) = rest[lt..].find('>') else {
+            break;
+        };
+        let raw_tag = &rest[lt + 1..lt + gt];
+        rest = &rest[lt + gt + 1..];
+        if raw_tag.starts_with('!') {
+            continue; // comment/doctype
+        }
+        let closing = raw_tag.starts_with('/');
+        let self_closing = raw_tag.ends_with('/');
+        let name = raw_tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if let Some(open) = skip_depth.last() {
+            if closing && *open == name {
+                skip_depth.pop();
+            } else if !closing && !self_closing && SKIP.contains(&name.as_str()) {
+                skip_depth.push(name);
+            }
             continue;
         }
-        lines.push(t);
+        if !closing && !self_closing && SKIP.contains(&name.as_str()) {
+            skip_depth.push(name);
+            continue;
+        }
+        if BLOCK.contains(&name.as_str()) {
+            flush(&mut current, &mut blocks);
+            if !closing {
+                match name.as_str() {
+                    "li" => current.push_str("- "),
+                    h if h.len() == 2 && h.starts_with('h') && h != "hr" => {
+                        let level = h[1..].parse::<usize>().unwrap_or(2).min(6);
+                        current.push_str(&"#".repeat(level));
+                        current.push(' ');
+                    }
+                    _ => {}
+                }
+            }
+        } else if matches!(name.as_str(), "td" | "th" | "img" | "input" | "label") {
+            // Cell/media boundaries separate words; other inline tags do not.
+            current.push(' ');
+        }
     }
-    lines.join("\n\n")
+    if skip_depth.is_empty() {
+        current.push_str(&decode_entities(rest));
+    }
+    flush(&mut current, &mut blocks);
+    blocks.join("\n\n")
+}
+
+/// Decode named and numeric HTML entities used in article text.
+fn decode_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let tail = &rest[amp..];
+        let Some(semi) = tail[..tail.len().min(12)].find(';') else {
+            out.push('&');
+            rest = &tail[1..];
+            continue;
+        };
+        let entity = &tail[1..semi];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            "rsquo" => Some('’'),
+            "lsquo" => Some('‘'),
+            "rdquo" => Some('”'),
+            "ldquo" => Some('“'),
+            "mdash" => Some('—'),
+            "ndash" => Some('–'),
+            "hellip" => Some('…'),
+            e if e.starts_with("#x") || e.starts_with("#X") => u32::from_str_radix(&e[2..], 16)
+                .ok()
+                .and_then(char::from_u32),
+            e if e.starts_with('#') => e[1..].parse::<u32>().ok().and_then(char::from_u32),
+            _ => None,
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &tail[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -964,6 +1074,31 @@ mod tests {
         assert!(is_private_host("127.0.0.1"));
         assert!(is_private_host("localhost"));
         assert!(!is_private_host("example.com"));
+    }
+
+    #[test]
+    fn html_extract_is_structural() {
+        let html = r#"<html><head><title>T</title></head><body>
+<header><nav><a href="/">Home</a> <a href="/world">World</a></nav></header>
+<article><h1>Ferry route suspended</h1>
+<p>The operator said on <b>Tuesday</b> that it had
+   suspended the route &mdash; a decision it called &ldquo;temporary&rdquo;.</p>
+<aside><h3>Related stories</h3><ul><li><a href="/a">A</a></li></ul></aside>
+<p>Unions denied the claim.&nbsp;Zo&#235; M&#xFC;ller reported.</p>
+<script>var x = "<p>not text</p>";</script>
+<ul><li>First point</li><li>Second point</li></ul>
+<footer>© 2026 Example</footer></article></body></html>"#;
+        let md = html_main_content(html);
+        assert!(md.starts_with("# Ferry route suspended"), "{md}");
+        assert!(md.contains("The operator said on Tuesday that it had suspended the route — a decision it called “temporary”."), "{md}");
+        assert!(
+            md.contains("Unions denied the claim. Zoë Müller reported."),
+            "{md}"
+        );
+        assert!(md.contains("- First point\n\n- Second point"), "{md}");
+        for gone in ["Home", "Related stories", "not text", "© 2026"] {
+            assert!(!md.contains(gone), "{gone} leaked: {md}");
+        }
     }
 
     #[test]

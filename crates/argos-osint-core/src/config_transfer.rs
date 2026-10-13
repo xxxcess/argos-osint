@@ -152,6 +152,7 @@ const ROLE_FIELDS: &[&str] = &[
     "investigation_controller",
     "decision_model",
     "decision_fallback",
+    "operation_overrides",
 ];
 
 /// One validation problem: a JSON pointer and a message that never carries a
@@ -401,6 +402,10 @@ pub struct RoleDocument {
     pub decision_model: RoleAssignment,
     #[serde(default)]
     pub decision_fallback: Option<RoleAssignment>,
+    /// Per-operation overrides (Brief operations); absent keys inherit their
+    /// role. Keys are `provider::BRIEF_OPERATIONS`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub operation_overrides: std::collections::BTreeMap<String, RoleAssignment>,
 }
 
 impl RoleDocument {
@@ -1275,6 +1280,31 @@ fn validate_roles(value: Option<&Value>, provider_ids: &[String], issues: &mut V
             _ => issues.push(issue(&pointer, "must be a role assignment object or null")),
         }
     }
+    if let Some(value) = obj.get("operation_overrides") {
+        let base = child("/model_roles", "operation_overrides");
+        match value {
+            Value::Object(ops) => {
+                for (key, value) in ops {
+                    let pointer = child(&base, key);
+                    let Some(role) = provider::operation_role(key) else {
+                        issues.push(issue(&pointer, "is not a known operation"));
+                        continue;
+                    };
+                    match value {
+                        Value::Object(assignment) => {
+                            let routes = validate_role_assignment(assignment, &pointer, issues);
+                            check_role_compatibility(role, &routes, &pointer, issues);
+                            for route in &routes {
+                                check_route_reference(route, provider_ids, &pointer, issues);
+                            }
+                        }
+                        _ => issues.push(issue(&pointer, "must be a role assignment object")),
+                    }
+                }
+            }
+            _ => issues.push(issue(&base, "must be an object of operation overrides")),
+        }
+    }
 }
 
 /// Validates a parsed document. Returns the blocking issues; `warnings` receives
@@ -1592,6 +1622,12 @@ pub fn export_document(
                 .decision_fallback
                 .as_ref()
                 .map(role_assignment),
+            operation_overrides: settings
+                .defaults
+                .operation_overrides
+                .iter()
+                .map(|(k, a)| (k.clone(), role_assignment(a)))
+                .collect(),
         },
         rate_limits,
     }
@@ -1834,6 +1870,18 @@ pub fn apply_import(
         // An absent or null decision fallback means none configured.
         None => settings.defaults.decision_fallback = None,
     }
+    // Overrides are replaced as a whole: an absent key inherits its role.
+    settings.defaults.operation_overrides.clear();
+    for (key, assignment) in &plan.config.model_roles.operation_overrides {
+        let mut target = ModelAssignment::default();
+        apply_role(assignment, Some(&mut target));
+        if !target.provider.is_empty() || !target.model.is_empty() {
+            settings
+                .defaults
+                .operation_overrides
+                .insert(key.clone(), target);
+        }
+    }
     for setting in &plan.config.rate_limits {
         quotas.upsert(setting.clone());
     }
@@ -1973,6 +2021,16 @@ fn describe_changes(
             area: "role".to_string(),
             id: "decision_fallback".to_string(),
             summary,
+        });
+    }
+    if before.settings.defaults.operation_overrides != after.settings.defaults.operation_overrides {
+        changes.push(ConfigChange {
+            area: "role".to_string(),
+            id: "operation_overrides".to_string(),
+            summary: format!(
+                "{} operation override(s)",
+                after.settings.defaults.operation_overrides.len()
+            ),
         });
     }
     for setting in &after.quotas.settings {

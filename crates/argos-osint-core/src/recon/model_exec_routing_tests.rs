@@ -293,3 +293,47 @@ async fn brief_fidelity_falls_back_to_chat_with_the_stage_budget() {
     assert!(body.contains("nemotron"), "{body}");
     assert!(!body.contains("typesafe/jev"));
 }
+
+// §7: an operation override routes only that operation; others inherit.
+#[test]
+fn operation_override_routes_only_its_operation() {
+    let mut settings = assessor(("local", "fixture"), &[]);
+    settings.defaults.synthesis = ModelAssignment {
+        provider: "local".into(),
+        model: "synth-model".into(),
+        ..Default::default()
+    };
+    settings.defaults.operation_overrides.insert(
+        provider::OP_LINKS_GENERATE.into(),
+        ModelAssignment {
+            provider: "openrouter".into(),
+            model: "openai/gpt-4o-mini".into(),
+            fallbacks: vec![route("local", "fixture")],
+            ..Default::default()
+        },
+    );
+    let a = auth("http://127.0.0.1:9", Some("fixture-only"));
+    let models = |settings: &SettingsFile, op: Option<&str>| -> Vec<String> {
+        resolve_operation_routes(&a, settings, "synthesis", op)
+            .0
+            .into_iter()
+            .map(|r| format!("{}:{}", r.provider, r.model))
+            .collect()
+    };
+    assert_eq!(
+        models(&settings, Some(provider::OP_LINKS_GENERATE)),
+        ["openrouter:openai/gpt-4o-mini", "local:fixture"]
+    );
+    assert_eq!(
+        models(&settings, Some(provider::OP_INFERENCES_GENERATE)),
+        ["local:synth-model"]
+    );
+    assert_eq!(models(&settings, None), ["local:synth-model"]);
+    settings
+        .defaults
+        .reset_operation(provider::OP_LINKS_GENERATE);
+    assert_eq!(
+        models(&settings, Some(provider::OP_LINKS_GENERATE)),
+        ["local:synth-model"]
+    );
+}

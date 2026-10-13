@@ -7,7 +7,7 @@ use std::sync::{
 use tokio::sync::{mpsc, oneshot};
 pub mod cache;
 mod engine;
-mod select;
+pub(crate) mod select;
 pub mod spans;
 pub use select::{select, Selection, SelectionError};
 pub use spans::Span;

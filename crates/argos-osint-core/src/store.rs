@@ -172,6 +172,17 @@ impl Store {
         })
     }
 
+    /// Lightweight connection for lease heartbeats: no migration or vector
+    /// initialization, bounded busy wait.
+    pub fn open_light(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(2))?;
+        Ok(Self {
+            conn,
+            vectors: None,
+        })
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

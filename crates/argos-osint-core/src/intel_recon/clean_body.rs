@@ -52,6 +52,10 @@ pub struct CleanArtifact {
     /// Ambiguous blocks reviewed / Classifier batches sent.
     pub reviewed: usize,
     pub batches: usize,
+    /// Set from the retained acquisition receipt: complete story, no known
+    /// truncation, receipt hash matching this acquisition.
+    #[serde(default)]
+    pub acquisition_complete: bool,
 }
 
 /// Decides keep/remove over a batch of supplied blocks (Classifier route or a
@@ -283,6 +287,7 @@ pub async fn clean_article(
         diagnostics,
         reviewed: ambiguous.len(),
         batches,
+        acquisition_complete: false,
     }
 }
 

@@ -533,7 +533,7 @@ async fn commit_refined_body(
                 brief: brief.into(),
                 url: url.into(),
             });
-    let refined = super::clean_body::clean_article(
+    let mut refined = super::clean_body::clean_article(
         scraped_markdown,
         title,
         brief,
@@ -579,6 +579,15 @@ async fn commit_refined_body(
         Some(scraped_markdown),
         super::clean_body::TRANSFORM,
     )?;
+    refined.acquisition_complete = store
+        .app_state_get(&format!("article-acquisition:{attempt_id}"))?
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .is_some_and(|c| {
+            c["complete_story"] == true
+                && c["known_truncation"] == false
+                && c["artifact_hash"].as_str()
+                    == Some(crate::nlp::cache::hash(scraped_markdown).as_str())
+        });
     store.app_state_set(
         &format!("intel-clean-body:{article_id}:{generation}"),
         &serde_json::to_string(&refined)?,
@@ -593,7 +602,8 @@ async fn commit_refined_body(
     let settings = runtime
         .map(|r| r.settings.clone())
         .unwrap_or_else(|| crate::provider::SettingsFile::load().unwrap_or_default());
-    if let Some(body) = store.article_body_by_id(body_id)? {
+    let brief_owned = runtime.is_some_and(|r| r.job_id.starts_with("intel-brief:"));
+    if let Some(body) = store.article_body_by_id(body_id)?.filter(|_| !brief_owned) {
         if let Some(article) = store.atlas_article(&body.run_id, article_id)? {
             if crate::investigation::insight_persist::schedule_article_refresh(
                 &store, &article, &settings, false,

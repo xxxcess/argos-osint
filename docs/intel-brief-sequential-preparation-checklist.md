@@ -28,8 +28,26 @@ Legend: **done** / **partial** / **deferred** / pending. Phases follow §7's ord
 | 3 | Spec cleanup prompt used for Classifier block decisions | done (`BLOCK_SYSTEM`, `CLEANUP_PROMPT`) | 2 |
 | 3 | No Synthesis rewrite; display and extraction consume one `intel-clean-body-v1` artifact | done (`commit_refined_body`, `article_input`) | 2 |
 | 3 | NLP mentions as keep-anchors | partial: title anchors used; NLP annotation still runs/caches but its mentions are not yet fed to the ambiguity heuristic | 2 |
-| 3 | Stage 1 fails on missing/truncated/unvalidated story | partial: `stage_one_admissible` added + tested; enforced by the stage worker in phase 3 | 2–3 |
-| 2,4 | Stage contracts, prompts/wire, budgets, routing | pending | 3 |
+| 3 | Stage 1 fails on missing/truncated/unvalidated story | done: executor enforces `stage_one_admissible` with the acquisition receipt (`acquisition_complete`) | 2–3 |
+| 4 | Spec prompts for Claims / Inferences / Links, strict JSON, short IDs, Rust-resolved UTF-8 spans | done (`intel_recon/brief_stages.rs`) | 3 |
+| 4 | Local field/count limits (6 claims ≤35w; 5 inferences ≤35w/why ≤45w/≤2 limitations ≤20w; 5 leads ≤40w), unknown-ID / duplicate / fence / links-in-inference rejection | done | 3 |
+| 4 | Budgets 2048/3072/1536 through `OperationScope::with_completion_tokens` → `attempt_insight` (replaces fixed 8,192 in this lane) | done; cleanup batches still use the decisions path's own budget (512 not yet wired) | 3 |
+| 4 | Role routing: Claims → claim_assessor, Inferences/Links → synthesis; Jev skip / all-Jev failure via existing `execute_chat` | done (reused) | 3 |
+| 4 | Long bodies: ordered windows within Stage 3 carrying ≤5 proposals, later windows revise, five total | done | 3 |
+| 4 | Stage 4 local shortlist (self excluded, canonical URL + syndicated-title dedupe, cap 12); no-inference / no-candidate finishes locally | done | 3 |
+| 4 | Batched Claim-assessor fidelity decisions inside Stages 2/3 | deferred | 4–5 |
+| 4 | `intel_inference_article_leads` persistence + "Potential corroboration" rendering | deferred (leads are in the Stage-4 output) | 4 |
+| 5 | Heartbeat from claim through commit/ack on a light connection with bounded busy retry; renewal failures + heartbeat age recorded | done (`Store::open_light`, `intel-brief-heartbeat:*`) | 3 |
+| 5 | Cancellation / deletion / lost lease drop the in-flight request; nothing is written | done | 3 |
+| 5 | Stage failure fails only that stage (model chain is the single retry owner); Retry resumes it | done | 3 |
+| 5 | Brief-owned body retrieval does not schedule a competing article refresh | done (`commit_refined_body`) | 3 |
+| 5 | Final Stage-4 publication of the combined canonical snapshot + index outbox | deferred | 4 |
+| 2 | `ensure_intel_brief_pipeline` wired into `open_intel_briefing` / runtime drainer | deferred (TUI wiring) | 4 |
+| 3 | Synthesis body-rewrite functions removed | done | 3 |
+| 8.1 | One chain, 1→2→3→4 order, scoped inputs, zero requests on unchanged reopen | done (`brief_stages_tests.rs`) | 3 |
+| 8.2 | Validator rejections + UTF-8 spans + shortlist dedupe | done | 3 |
+| 8.4 | Stage-3 failure isolation, Retry runs Stage 3 only, empty arrays complete, no-inference Stage 4 uses no model | done | 3 |
+| 8.5 | Heartbeat beyond lease with concurrent reapers, stale output fenced after epoch change, cancellation/parent cancel drop in-flight request, attempts preserved | done; SQLite contention / publication delay / overlapping drainers partially (reaper thread only) | 3 |
 | 8.3 | Cleanup regressions (byline/quote/negation/correction/Unicode verbatim, span maps, classifier missing/failing keeps all, ≤12 sequential batches, degrading removals rejected, incomplete story fails) | done (`clean_body_tests.rs`, 6 tests) | 2 |
 | 4 | Related leads (`intel_inference_article_leads`) | pending | 4 |
 | 6 | Shared stage-progress UI (brief Jobs, section headers, global Jobs, Logs); `artifact_steps` no longer copies parent terminal state | pending | 4 |

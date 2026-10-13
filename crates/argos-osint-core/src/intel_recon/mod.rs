@@ -5,6 +5,7 @@ mod body;
 pub(crate) mod body_filter;
 mod brain;
 pub mod brief_pipeline;
+pub mod brief_stages;
 mod briefing_view;
 mod classify_mode;
 pub mod clean_body;
@@ -61,8 +62,7 @@ pub use persist::{
 };
 pub use replace_insights::{replace_article_insights_from_body, ReplaceOutcome};
 pub use synthesize::{
-    refine_retrieved_article_body, save_section, synthesize_section, RefinedArticleBody,
-    SectionJudgment, SectionSynthInput, SectionSynthOutput,
+    save_section, synthesize_section, SectionJudgment, SectionSynthInput, SectionSynthOutput,
 };
 pub use validate::{validate_article_body, BodyQuality, BodyValidation};
 pub use worker::{run_job_slice, run_job_to_completion, JobRuntime};

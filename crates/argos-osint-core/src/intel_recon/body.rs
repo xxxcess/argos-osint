@@ -10,7 +10,6 @@ use crate::osint::{self, ProviderKeys};
 use crate::secrets::ProviderSecret;
 use crate::store::{AtlasArticleRow, Store};
 
-use super::replace_insights::replace_article_insights_with_runtime;
 use super::synthesize::refine_retrieved_article_body_with_runtime;
 use super::validate::{validate_article_body, BodyQuality};
 
@@ -539,6 +538,10 @@ async fn commit_refined_body(
         .article_body_by_id(body_id)?
         .ok_or_else(|| anyhow!("body removed during refinement"))?;
     anyhow::ensure!(
+        store.atlas_article(&current.run_id, article_id)?.is_some(),
+        "article owner removed during refinement"
+    );
+    anyhow::ensure!(
         current.body_version == generation - i64::from(force_refresh),
         "body revision changed during refinement"
     );
@@ -571,62 +574,26 @@ async fn commit_refined_body(
         quality: refined.quality.as_str().into(),
         generation,
     });
-    let usable_body = matches!(
-        refined.quality.as_str(),
-        "complete" | "partial" | "uncertain"
-    ) && !refined.markdown.trim().is_empty();
-    if usable_body {
-        if let Some(synthesis) = synthesis {
-            let article = {
-                let body_row = store
-                    .article_body_by_id(body_id)?
-                    .ok_or_else(|| anyhow!("article body {body_id} missing after commit"))?;
-                store.atlas_article(&body_row.run_id, article_id)?
-            };
-            drop(store);
-            if let Some(article) = article {
+    let settings = runtime
+        .map(|r| r.settings.clone())
+        .unwrap_or_else(|| crate::provider::SettingsFile::load().unwrap_or_default());
+    if let Some(body) = store.article_body_by_id(body_id)? {
+        if let Some(article) = store.atlas_article(&body.run_id, article_id)? {
+            if crate::investigation::insight_persist::schedule_article_refresh(
+                &store, &article, &settings, false,
+            )?
+            .is_some()
+            {
                 on_event(BodyFetchEvent::InsightsRefreshing {
                     article_id: article_id.into(),
                     body_id: body_id.into(),
                     generation,
                 });
-                on_event(BodyFetchEvent::Progress {
-                    article_id: article_id.into(),
-                    body_id: body_id.into(),
-                    message: "Re-extracting insights from full article…".into(),
-                    generation,
-                });
-                match replace_article_insights_with_runtime(
-                    db_path,
-                    &article,
-                    &refined.markdown,
-                    synthesis,
-                    classifier,
-                    cancel,
-                    runtime,
-                )
-                .await
-                {
-                    Ok(outcome) => {
-                        on_event(BodyFetchEvent::InsightsReplaced {
-                            article_id: article_id.into(),
-                            body_id: body_id.into(),
-                            claim_count: outcome.claims,
-                            generation,
-                        });
-                    }
-                    Err(err) => {
-                        on_event(BodyFetchEvent::InsightsFailed {
-                            article_id: article_id.into(),
-                            body_id: body_id.into(),
-                            reason: err.to_string(),
-                            generation,
-                        });
-                    }
-                }
             }
         }
     }
+    let _ = classifier;
+
     Ok(())
 }
 

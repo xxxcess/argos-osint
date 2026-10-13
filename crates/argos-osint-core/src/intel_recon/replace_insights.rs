@@ -79,55 +79,24 @@ pub(crate) async fn replace_article_insights_with_runtime(
         return Err(anyhow!("empty article body"));
     }
 
-    use rusqlite::params;
     let store = Store::open(db_path)?;
-    let protected = store.article_insight_user_edit_count(&article.run_id, &article.id)?;
-    let active_recon:bool=store.conn.query_row("SELECT EXISTS(SELECT 1 FROM intel_report_jobs WHERE article_id=?1 AND state IN ('queued','running','pending','paused'))",[&article.id],|r|r.get(0))?;
-    if active_recon {
-        store.conn.execute("UPDATE insight_owner_state SET lifecycle='pending',updated_at=?2 WHERE owner_kind='article' AND owner_id=?1",params![article.id,chrono::Utc::now().to_rfc3339()])?;
-        let prior = store
-            .atlas_claims_for_article(&article.run_id, &article.id)?
-            .len();
-        return Ok(ReplaceOutcome {
-            claims: prior,
-            zero_claim_success: false,
-            preserved_user_edits: protected,
-        });
-    }
-    let generation = crate::investigation::insight_persist::advance_generation(
-        &store.conn,
-        "article",
-        &article.id,
-        &chrono::Utc::now().to_rfc3339(),
-    )?;
-    let mut settings = runtime
+    let settings = runtime
         .map(|r| r.settings.clone())
         .unwrap_or_else(|| crate::provider::SettingsFile::load().unwrap_or_default());
     let mut auth = runtime
         .map(|r| r.auth.clone())
         .unwrap_or_else(|| crate::secrets::AuthFile::load().unwrap_or_default());
     auth.set_account(synthesis.clone());
-    if runtime.is_none() && settings.defaults.resolve_role("claim_assessor").1.is_some() {
-        settings.defaults.synthesis = crate::provider::ModelAssignment {
-            provider: synthesis.kind.clone(),
-            model: synthesis.model.clone(),
-            ..Default::default()
-        };
-    }
     let _ = classifier;
-    let mut input = crate::investigation::insight_persist::article_input(
-        &store,
-        article,
-        generation,
-        &article.title,
-        false,
-    )?;
-    let task = crate::investigation::insight_persist::enqueue_refresh(
-        &store.conn,
-        &mut input,
-        &settings,
-        &chrono::Utc::now().to_rfc3339(),
-    )?;
+    let Some(task) = crate::investigation::insight_persist::schedule_article_refresh(
+        &store, article, &settings, false,
+    )?
+    else {
+        return Err(anyhow!(
+            "Waiting for complete retained article details or Focus Brief intent"
+        ));
+    };
+    let protected = 0;
     drop(store);
     let output = crate::investigation::insight_persist::run_refresh_slice(
         db_path, &task, &auth, &settings, cancel,
@@ -135,8 +104,14 @@ pub(crate) async fn replace_article_insights_with_runtime(
     .await?
     .ok_or_else(|| anyhow!("insight refresh is already owned by another worker"))?;
     Ok(ReplaceOutcome {
-        claims: output.claims.len() + output.inferences.len(),
-        zero_claim_success: output.claims.is_empty() && output.inferences.is_empty(),
+        claims: output
+            .claims
+            .iter()
+            .filter(|c| c.assessment.faithful())
+            .count()
+            + output.inferences.len(),
+        zero_claim_success: !output.claims.iter().any(|c| c.assessment.faithful())
+            && output.inferences.is_empty(),
         preserved_user_edits: protected,
     })
 }

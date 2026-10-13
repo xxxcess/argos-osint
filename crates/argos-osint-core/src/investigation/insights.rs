@@ -8,8 +8,8 @@ use serde_json::Value;
 pub use crate::nlp::EntityCandidate;
 use crate::nlp::{cache::hash, spans::paragraphs, Span};
 
-pub const CONTRACT: &str = "insights-v1";
-pub const READINESS_POLICY: &str = "readiness-v1";
+pub const CONTRACT: &str = "insights-v3";
+pub const READINESS_POLICY: &str = "readiness-v2";
 pub const ARTICLE_CLAIM_LIMIT: usize = 8;
 pub const RECON_CLAIM_LIMIT: usize = 5;
 pub const INFERENCE_LIMIT: usize = 5;
@@ -31,6 +31,10 @@ pub struct PipelineOutput {
     pub readiness: Readiness,
     pub limit_reached: bool,
     pub partial_enumeration: bool,
+    #[serde(default)]
+    pub item_gaps: Vec<String>,
+    #[serde(default)]
+    pub withheld_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -233,8 +237,15 @@ pub fn evidence_from_tools(
 pub fn input_key(input: &PipelineInput, settings: &crate::provider::SettingsFile) -> String {
     let mut snapshot = input.snapshot.clone();
     snapshot.key.clear();
+    let mut roles = vec![
+        settings.defaults.resolve_role("claim_assessor").0,
+        settings.defaults.resolve_role("synthesis").0,
+    ];
+    if input.surface != "recon_report" || input.recall_enabled {
+        roles.push(settings.defaults.resolve_role("entity_resolver").0);
+    }
     crate::nlp::cache::key(
-        &serde_json::json!({"snapshot":snapshot,"evidence":input.evidence,"objective":input.objective,"surface":input.surface,"required":input.required_tasks_complete,"save_insights":input.save_insights,"recall_enabled":input.recall_enabled,"roles":settings.defaults,"nlp":settings.nlp,"contract":CONTRACT,"policy":READINESS_POLICY,"claim_prompt":hash(CLAIM_PROMPT),"inference_prompt":hash(INFERENCE_PROMPT)}),
+        &serde_json::json!({"snapshot":snapshot,"evidence":input.evidence,"objective":input.objective,"surface":input.surface,"required":input.required_tasks_complete,"save_insights":input.save_insights,"recall_enabled":input.recall_enabled,"roles":roles,"nlp":settings.nlp,"contract":CONTRACT,"policy":READINESS_POLICY,"claim_prompt":hash(CLAIM_PROMPT),"inference_prompt":hash(INFERENCE_PROMPT)}),
     )
 }
 
@@ -271,27 +282,55 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     window_id: &str,
     role: &str,
     system: &str,
-    user: Value,
+    mut user: Value,
     auth: &crate::secrets::AuthFile,
     settings: &crate::provider::SettingsFile,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     db_path: &std::path::Path,
     validate: impl Fn(&T) -> Result<()> + Send + Sync,
 ) -> Result<T> {
-    use crate::recon::model_exec::{execute_chat, OperationScope};
+    use crate::recon::model_exec::execute_chat;
     use rusqlite::{params, OptionalExtension};
+    let mut dictionary = std::collections::BTreeMap::new();
+    super::insight_wire::compact(&mut user, &mut dictionary)?;
+    if let Some(contract) = user.get_mut("output_contract") {
+        for name in ["claims", "inferences", "links"] {
+            if let Some(items) = contract[name].as_array_mut() {
+                for item in items {
+                    if let Some(object) = item.as_object_mut() {
+                        object.remove("assessment");
+                        object.remove("snapshot_key");
+                    }
+                }
+            }
+        }
+    }
+    let mut evidence_ids = Vec::new();
+    for (id, reference) in &dictionary {
+        let source = input
+            .evidence
+            .iter()
+            .find(|e| e.validate_ref(reference))
+            .ok_or_else(|| anyhow::anyhow!("unknown/stale model evidence"))?;
+        evidence_ids.push(serde_json::json!({"id":id,"source_id":reference.source_id,"location":reference.location,"source_span":super::insight_wire::source_span(source,reference)?}));
+    }
+    user["evidence_ids"] = serde_json::json!(evidence_ids);
+    user["offset_contract"]=serde_json::json!("All half-open UTF-8 byte spans are source-absolute, including entity mentions. Use only supplied evidence_id and precise location. Rust supplies provenance and assessments.");
     let op_key = crate::nlp::cache::key(&serde_json::json!([
-        input.snapshot.key,
-        input.snapshot.generation,
+        input.snapshot.owner_kind,
+        input.snapshot.owner_id,
         stage,
         window_id,
         role,
         hash(system),
         user,
-        settings.defaults
+        settings.defaults.resolve_role(role).0,
+        settings.nlp,
+        CONTRACT
     ]));
     {
         let store = crate::store::Store::open(db_path)?;
+        super::insight_persist::validate_dispatch(&store.conn, input)?;
         let saved: Option<(String, String)> = store
             .conn
             .query_row(
@@ -304,13 +343,16 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
             if state == "completed" {
                 let value = serde_json::from_str(&output)?;
                 validate(&value)?;
+                super::insight_execution::record_reuse(&store.conn, &op_key, input)?;
                 return Ok(value);
             }
             ensure!(
-                state != "exhausted",
-                "stage model chain previously exhausted; change inputs/routes before retry"
+                !matches!(state.as_str(),"exhausted"|"terminal"),
+                "{stage} checkpoint is {state}; use Retry extraction for recoverable unfinished work"
             );
         }
+        super::insight_execution::consume()?;
+        super::insight_execution::progress(&store.conn, input, stage, None, None)?;
         store.conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'running',?7) ON CONFLICT(operation_key) DO UPDATE SET state='running',updated_at=excluded.updated_at", params![op_key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,stage,window_id,chrono::Utc::now().to_rfc3339()])?;
     }
     let messages = [
@@ -328,10 +370,20 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         },
     ];
     ensure!(
-        crate::nlp::message_bytes(&messages, &Value::Null) <= REQUEST_BYTES,
+        crate::nlp::message_bytes(&messages, &Value::Null) + 4096 <= REQUEST_BYTES,
         "mandatory fields exceed request budget"
     );
-    let scope = OperationScope::new(&op_key, role).with_generation(input.snapshot.generation);
+    let store = crate::store::Store::open(db_path)?;
+    let task_id = super::insight_assessment::task_id(&store.conn, input)?;
+    let execution_id = super::insight_execution::operation_id(&store.conn, &task_id, &op_key)?;
+    drop(store);
+    let mut scope =
+        super::insight_assessment::operation_scope(&execution_id, role, input, &task_id);
+    if input.snapshot.owner_kind == "recon" {
+        scope = scope.with_run(&input.snapshot.owner_id);
+    }
+    let started = std::time::Instant::now();
+    let compiled_bytes = crate::nlp::message_bytes(&messages, &Value::Null);
     let result = execute_chat(
         auth,
         settings,
@@ -339,6 +391,7 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         &messages,
         |raw| {
             parse_model_json(raw)
+                .and_then(|value| super::insight_wire::hydrate(value, &dictionary, input))
                 .and_then(|value| serde_json::from_value::<T>(value).map_err(Into::into))
                 .and_then(|value| validate(&value))
                 .map_err(|e| e.to_string())
@@ -353,18 +406,46 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     let store = crate::store::Store::open(db_path)?;
     match result {
         Ok((raw, report)) => {
-            let value: T = serde_json::from_value(parse_model_json(&raw)?)?;
-            store.conn.execute("UPDATE insight_stage_checkpoints SET state='completed',output_json=?2,route_json=?3,updated_at=?4 WHERE operation_key=?1",params![op_key,serde_json::to_string(&value)?,serde_json::json!({"route":report.effective_route,"model":report.effective_model}).to_string(),chrono::Utc::now().to_rfc3339()])?;
+            let value: T = serde_json::from_value(super::insight_wire::hydrate(
+                parse_model_json(&raw)?,
+                &dictionary,
+                input,
+            )?)?;
+            let route = serde_json::json!({"route":report.effective_route,"model":report.effective_model,"requests":report.requests,"compiled_bytes":compiled_bytes,"elapsed_ms":started.elapsed().as_millis() as u64});
+            store.conn.execute("UPDATE insight_stage_checkpoints SET state='completed',output_json=?2,route_json=?3,updated_at=?4 WHERE operation_key=?1",params![op_key,serde_json::to_string(&value)?,route.to_string(),chrono::Utc::now().to_rfc3339()])?;
+            super::insight_execution::stage_event(
+                &store.conn,
+                input,
+                &task_id,
+                stage,
+                "completed",
+                "validated source window",
+                serde_json::json!({"window":window_id,"operation":execution_id,"execution":route}),
+            )?;
             Ok(value)
         }
         Err(error) => {
             let state = if cancel.load(std::sync::atomic::Ordering::Acquire) {
                 "cancelled"
-            } else {
+            } else if error
+                .downcast_ref::<crate::recon::model_exec::ModelOperationError>()
+                .is_some_and(|e| e.can_withhold())
+            {
                 "exhausted"
+            } else {
+                "terminal"
             };
-            store.conn.execute("UPDATE insight_stage_checkpoints SET state=?2,error=?3,updated_at=?4 WHERE operation_key=?1",params![op_key,state,error.to_string(),chrono::Utc::now().to_rfc3339()])?;
-            Err(error)
+            store.conn.execute("UPDATE insight_stage_checkpoints SET state=?2,error=?3,updated_at=?4 WHERE operation_key=?1",params![op_key,state,format!("{stage}/{window_id}: {error}"),chrono::Utc::now().to_rfc3339()])?;
+            super::insight_execution::stage_event(
+                &store.conn,
+                input,
+                &task_id,
+                stage,
+                "failed",
+                &error.to_string(),
+                serde_json::json!({"window":window_id,"operation":execution_id,"compiled_bytes":compiled_bytes}),
+            )?;
+            Err(error.context(format!("insight {stage}/{window_id}")))
         }
     }
 }
@@ -382,13 +463,18 @@ pub async fn run_pipeline(
         "atlas" => Surface::Atlas,
         "article" => Surface::Article,
         "recon" => Surface::Recon,
+        "recon_report" => Surface::Report,
         _ => anyhow::bail!("unknown insight surface"),
     };
     let cap = match surface {
         Surface::Atlas => 1,
         Surface::Recon => RECON_CLAIM_LIMIT,
-        Surface::Article => ARTICLE_CLAIM_LIMIT,
+        Surface::Article | Surface::Report => ARTICLE_CLAIM_LIMIT,
     };
+    ensure!(
+        input.surface != "article" || super::insight_persist::article_details_eligible(input),
+        "waiting for complete article details"
+    );
     let mut output = PipelineOutput::default();
     // Preparation never discards evidence for full-coverage stages, even with NLP off.
     for evidence in &input.evidence {
@@ -431,20 +517,29 @@ pub async fn run_pipeline(
                 windows.push((window, None));
             }
         } else {
-            for span in evidence_windows(&evidence.text, WINDOW_BYTES / 2)? {
+            for span in evidence_windows(&evidence.text, WINDOW_BYTES / 4)? {
                 let mut window = evidence.clone();
                 window.reference.location = EvidenceLocation::Range(span);
                 windows.push((window, Some(span)));
             }
         }
     }
+    let store = crate::store::Store::open(db_path)?;
+    super::insight_execution::progress(
+        &store.conn,
+        input,
+        "extraction",
+        Some(windows.len()),
+        None,
+    )?;
+    drop(store);
     for (index, (evidence, span)) in windows.iter().enumerate() {
         ensure!(
             !cancel.load(std::sync::atomic::Ordering::Acquire),
             "cancelled"
         );
         let text = span.and_then(|s| s.slice(&evidence.text));
-        let user = serde_json::json!({"objective":input.objective,"candidates":input.snapshot.entities,"evidence_ref":evidence.reference,"source_text":text,"native":native_window(evidence),"cap":cap,"output_contract":{"entities":[{"id":format!("{}:entity:unique",evidence.reference.source_id),"type_hint":"person|org|place|unknown","comparison_key":"lowercase normalized name","original_forms":["exact source name"],"mention_refs":[{"start_byte":0,"end_byte":1}]}],"claims":[{"id":"unique within window","subject_ref":"candidate ID","predicate":"asserted relationship","object":"asserted object","text":"attributed assertion with qualifications","polarity":"positive|negative","modality":"asserted|alleged|possible","attributed_to":"speaker or source","temporal_scope":"time as stated or unknown","evidence_refs":[evidence.reference],"extraction_scope":"this source window; nonexhaustive","assessment":{"fidelity":"unassessed","relation":"insufficient","threshold_passed":false,"rationale":"","gaps":[]}}],"limit_reached":"bool","partial_enumeration":"bool"}});
+        let user = serde_json::json!({"objective":input.objective,"candidates":model_entities(input),"evidence_ref":evidence.reference,"source_text":text,"native":native_window(evidence),"cap":cap,"output_contract":{"entities":[{"id":format!("{}:entity:unique",evidence.reference.source_id),"type_hint":"person|org|place|unknown","comparison_key":"lowercase normalized name","original_forms":["exact source name"],"mention_refs":[{"start_byte":0,"end_byte":1}]}],"claims":[{"id":"unique within window","subject_ref":"candidate ID","predicate":"asserted relationship","object":"asserted object","text":"concise attributed assertion with qualifications (max 1024 UTF-8 bytes)","polarity":"positive|negative","modality":"asserted|alleged|possible","attributed_to":"speaker or source","temporal_scope":"time as stated or unknown","evidence_refs":[evidence.reference],"extraction_scope":"this source window; nonexhaustive","assessment":{"fidelity":"unassessed","relation":"insufficient","threshold_passed":false,"rationale":"","gaps":[]}}],"limit_reached":false,"partial_enumeration":false}});
         let result: ClaimWindow = execute_stage(
             input,
             "extraction",
@@ -458,7 +553,9 @@ pub async fn run_pipeline(
             db_path,
             |result: &ClaimWindow| {
                 let mut entities = input.snapshot.entities.clone();
+                let mut entity_ids=BTreeSet::new();
                 for entity in &result.entities {
+                    ensure!(entity_ids.insert(&entity.id),"duplicate entity ID");
                     ensure!(
                         valid_entity(entity, evidence),
                         "entity lacks exact source mentions"
@@ -473,6 +570,7 @@ pub async fn run_pipeline(
                 let mut ids = BTreeSet::new();
                 for claim in &result.claims {
                     ensure!(ids.insert(&claim.id), "duplicate claim ID");
+                    ensure!(claim.text.len()<=1024 && claim.predicate.len()<=512 && claim.object.len()<=512,"claim must use concise fields (text 1024 bytes, predicate/object 512 bytes)");
                     validate_claim(claim, &entities, std::slice::from_ref(evidence))?;
                 }
                 Ok(())
@@ -493,25 +591,15 @@ pub async fn run_pipeline(
                 &input.snapshot.entities,
                 std::slice::from_ref(evidence),
             )?;
-            // Textual fidelity is independent from world corroboration. A semantic
-            // decision must explicitly return faithful + Pass before premise use.
-            claim.assessment = assess_fidelity(
-                input,
-                "claim",
-                &claim.id,
-                &claim.text,
-                &claim.evidence_refs,
-                auth,
-                settings,
-                cancel,
-                db_path,
-            )
-            .await?;
-            if !output
-                .claims
-                .iter()
-                .any(|c| claim_fingerprint(c) == claim_fingerprint(&claim))
-            {
+            claim.assessment = Assessment::default();
+            claim.support_receipts.clear();
+            if let Some(existing) = output.claims.iter_mut().find(|c| c.id == claim.id) {
+                for reference in claim.evidence_refs {
+                    if !existing.evidence_refs.contains(&reference) {
+                        existing.evidence_refs.push(reference);
+                    }
+                }
+            } else {
                 output.claims.push(claim);
             }
         }
@@ -526,10 +614,68 @@ pub async fn run_pipeline(
         });
     }
     consolidate_coverage(&mut input.snapshot.coverage_by_stage);
+    if output.claims.len() > cap {
+        output.limit_reached = true;
+        output.partial_enumeration = true;
+        // Favor late assertions and explicit denials/corrections. Every original
+        // window still reaches Synthesis, including omitted claims' counterevidence.
+        output.claims.reverse();
+        output.claims.sort_by_key(|c| c.polarity != "negative");
+        output.claims.truncate(cap);
+        output.claims.reverse();
+    }
+    let claim_items: Vec<_> = output
+        .claims
+        .iter()
+        .map(|c| {
+            super::insight_assessment::Item::new(
+                &c.id,
+                "claim",
+                &claim_proposition(c),
+                &c.evidence_refs,
+            )
+        })
+        .collect();
+    let mut claim_assessments =
+        super::insight_assessment::assess(input, &claim_items, auth, settings, cancel, db_path)
+            .await?;
+    for claim in &mut output.claims {
+        claim.assessment = claim_assessments
+            .remove(&claim.id)
+            .expect("claim assessment");
+        if claim.assessment.faithful() && surface == Surface::Report {
+            let store = crate::store::Store::open(db_path)?;
+            let details: String = store.conn.query_row(
+                "SELECT details_json FROM intel_report_results WHERE source_hash=?1",
+                [&claim.evidence_refs[0].acquisition_id],
+                |r| r.get(0),
+            )?;
+            let bundle: Value = serde_json::from_str(&details)?;
+            if let Some(entries) = bundle["support_receipts"].as_array() {
+                for entry in entries {
+                    if entry[0]
+                        .as_str()
+                        .is_some_and(|s| normalized(s) == normalized(&claim.text))
+                    {
+                        if let Some(json) = entry[1].as_str() {
+                            let receipts: Vec<SupportReceipt> = serde_json::from_str(json)?;
+                            for receipt in receipts {
+                                if receipt.threshold_passed && !receipt.lineage.is_empty() {
+                                    claim.support_receipts.push(receipt);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if surface != Surface::Atlas {
         // Resolve consequential same-name candidates before interpreting another
         // source as corroboration. Candidates retain their source-local IDs.
         let entities = input.snapshot.entities.clone();
+        let mut identity_items = Vec::new();
+        let mut identity_pairs = Vec::new();
         for (i, a) in entities.iter().enumerate() {
             for b in &entities[i + 1..] {
                 if a.comparison_key != b.comparison_key
@@ -553,90 +699,86 @@ pub async fn run_pipeline(
                 {
                     continue;
                 }
-                let identity = assess_fidelity(input,"identity",&format!("{}:{}",a.id,b.id),
-                    &format!("Do {} ({}) and {} ({}) identify the same entity? Matching spelling alone is insufficient.",a.original_forms.join(" / "),a.id,b.original_forms.join(" / "),b.id),
-                    &refs,auth,settings,cancel,db_path).await?;
-                input.snapshot.identity_bindings.push((
-                    a.id.clone(),
-                    b.id.clone(),
-                    identity.fidelity == "same_entity" && identity.threshold_passed,
-                ));
+                let id = format!(
+                    "identity:{}",
+                    crate::nlp::cache::key(&serde_json::json!([a.id, b.id]))
+                );
+                identity_items.push(super::insight_assessment::Item::new(&id,"identity",&format!("Do {} ({}) and {} ({}) identify the same entity? Matching spelling alone is insufficient.",a.original_forms.join(" / "),a.id,b.original_forms.join(" / "),b.id),&refs));
+                identity_pairs.push((id, a.id.clone(), b.id.clone()));
             }
         }
-        for claim in &mut output.claims {
-            let own_roots: BTreeSet<_> = claim
-                .evidence_refs
+        let identities = super::insight_assessment::assess(
+            input,
+            &identity_items,
+            auth,
+            settings,
+            cancel,
+            db_path,
+        )
+        .await?;
+        for (id, a, b) in identity_pairs {
+            let identity = &identities[&id];
+            input.snapshot.identity_bindings.push((
+                a,
+                b,
+                identity.fidelity == "same_entity" && identity.threshold_passed,
+            ));
+        }
+        for (counter, _) in &windows {
+            if !counter.relevant || !counter.substantive || counter.reference.origin_root.is_empty()
+            {
+                continue;
+            }
+            let items: Vec<_> = output
+                .claims
                 .iter()
-                .map(|r| r.origin_root.clone())
-                .collect();
-            for counter in input.evidence.iter().filter(|e| {
-                e.relevant
-                    && e.substantive
-                    && !e.reference.origin_root.is_empty()
-                    && !own_roots.contains(&e.reference.origin_root)
-            }) {
-                let ambiguous = input.snapshot.identity_bindings.iter().any(|(a, b, same)| {
-                    !same
-                        && ((a == &claim.subject_ref
-                            && output_claim_subject_source(b, &entities, counter))
-                            || (b == &claim.subject_ref
-                                && output_claim_subject_source(a, &entities, counter)))
-                });
-                if ambiguous {
-                    continue;
-                }
-                let refs = if let Some(native) = &counter.native {
-                    native_windows(native, WINDOW_BYTES / 2)?
-                        .into_iter()
-                        .map(|pointer| EvidenceRef {
-                            location: EvidenceLocation::JsonPointer(pointer),
-                            ..counter.reference.clone()
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    evidence_windows(&counter.text, WINDOW_BYTES / 2)?
-                        .into_iter()
-                        .map(|span| EvidenceRef {
-                            location: EvidenceLocation::Range(span),
-                            ..counter.reference.clone()
-                        })
-                        .collect()
-                };
-                for reference in refs {
-                    let relation = assess_fidelity(
-                        input,
+                .filter(|claim| {
+                    claim.assessment.faithful()
+                        && !claim
+                            .evidence_refs
+                            .iter()
+                            .any(|r| r.origin_root == counter.reference.origin_root)
+                    // Unknown identity/time relevance stays eligible: uncertainty cannot
+                    // silently erase a plausible contradiction.
+                })
+                .map(|c| {
+                    let ambiguous=input.snapshot.identity_bindings.iter().any(|(a,b,same)| !same && ((a==&c.subject_ref && output_claim_subject_source(b,&entities,counter)) || (b==&c.subject_ref && output_claim_subject_source(a,&entities,counter))));
+                    super::insight_assessment::Item::new(
+                        &c.id,
                         "corroboration",
-                        &claim.id,
-                        &claim.text,
-                        std::slice::from_ref(&reference),
-                        auth,
-                        settings,
-                        cancel,
-                        db_path,
+                        &if ambiguous {format!("{} Same-name identity is unresolved/different; matching spelling alone cannot establish support or contradiction. Use insufficient unless this passage establishes the subject identity.",claim_proposition(c))} else {claim_proposition(c)},
+                        std::slice::from_ref(&counter.reference),
                     )
+                })
+                .collect();
+            let assessed =
+                super::insight_assessment::assess(input, &items, auth, settings, cancel, db_path)
                     .await?;
+            for claim in &mut output.claims {
+                if let Some(relation) = assessed.get(&claim.id) {
                     if relation.threshold_passed
                         && matches!(relation.relation.as_str(), "supports" | "contradicts")
                     {
+                        claim.support_receipts.push(SupportReceipt {
+                            source: counter.reference.clone(),
+                            relation: relation.relation.clone(),
+                            threshold_passed: true,
+                            lineage: input.snapshot.key.clone(),
+                        });
                         if relation.relation == "contradicts"
                             || claim.assessment.relation != "contradicts"
                         {
-                            claim.assessment.relation = relation.relation;
+                            claim.assessment.relation = relation.relation.clone();
                         }
-                        if !claim.evidence_refs.contains(&reference) {
-                            claim.evidence_refs.push(reference);
+                        if !claim.evidence_refs.contains(&counter.reference) {
+                            claim.evidence_refs.push(counter.reference.clone());
                         }
+                    } else {
+                        claim.assessment.gaps.extend(relation.gaps.clone());
                     }
                 }
             }
         }
-    }
-    if output.claims.len() > cap {
-        output.limit_reached = true;
-        output.partial_enumeration = true;
-        // Later windows can qualify or correct earlier assertions. Do not stop
-        // examining evidence when the display cap is reached.
-        output.claims.drain(..output.claims.len() - cap);
     }
     input.snapshot.assessed_claim_refs = output.claims.iter().map(|c| c.id.clone()).collect();
     output.entities = input.snapshot.entities.clone();
@@ -666,7 +808,7 @@ pub async fn run_pipeline(
     let mut proposed = Vec::new();
     let mut links = Vec::new();
     for (index, (evidence, span)) in windows.iter().enumerate() {
-        let user = serde_json::json!({"objective":input.objective,"snapshot_key":input.snapshot.key,"entities":input.snapshot.entities,"claims":output.claims,"evidence_ref":evidence.reference,"source_text":span.and_then(|s|s.slice(&evidence.text)),"native":native_window(evidence),"memory_claims":input.snapshot.memory_claims,"identity_bindings":input.snapshot.identity_bindings,"admitted_memories":input.evidence.iter().filter(|e| !windows.iter().any(|(w,_)|w.reference.source_id==e.reference.source_id)).map(memory_passage).collect::<Vec<_>>(),"output_contract":{"inferences":[{"id":"unique","text":"qualified conclusion","entity_refs":["known entity ID"],"premise_claim_ids":["faithful claim ID"],"evidence_refs":[evidence.reference],"rationale":"reasoning against original evidence, including corrections in this window","limitations":[],"assessment":{"fidelity":"unassessed","relation":"insufficient","threshold_passed":false,"rationale":"","gaps":[]},"snapshot_key":input.snapshot.key}],"links":[{"id":"unique","typed_endpoints":[{"kind":"entity|claim|inference","id":"known ID"},{"kind":"entity|claim|inference","id":"known ID"}],"relation":"supports|contradicts|revises|entity_connection","evidence_refs":[evidence.reference],"rationale":"specific grounded proposition","assessment":{"fidelity":"unassessed","relation":"insufficient","threshold_passed":false,"rationale":"","gaps":[]},"snapshot_key":input.snapshot.key}]}});
+        let user = serde_json::json!({"objective":input.objective,"snapshot_key":input.snapshot.key,"entities":model_entities(input),"claims":compact_claims(&output.claims),"evidence_ref":evidence.reference,"source_text":span.and_then(|s|s.slice(&evidence.text)),"native":native_window(evidence),"memory_claims":input.snapshot.memory_claims,"identity_bindings":input.snapshot.identity_bindings,"admitted_memories":input.evidence.iter().filter(|e| !windows.iter().any(|(w,_)|w.reference.source_id==e.reference.source_id)).map(memory_passage).collect::<Vec<_>>(),"output_contract":{"inferences":[{"id":"unique","text":"qualified conclusion","entity_refs":["known entity ID"],"premise_claim_ids":["faithful claim ID"],"evidence_refs":[evidence.reference],"rationale":"concise reasoning against original evidence, including corrections (max 1024 bytes)","limitations":[],"assessment":{"fidelity":"unassessed","relation":"insufficient","threshold_passed":false,"rationale":"","gaps":[]},"snapshot_key":input.snapshot.key}],"links":[{"id":"unique","typed_endpoints":[{"kind":"entity|claim|inference","id":"known ID"},{"kind":"entity|claim|inference","id":"known ID"}],"relation":"supports|contradicts|revises|entity_connection","evidence_refs":[evidence.reference],"rationale":"specific grounded proposition","assessment":{"fidelity":"unassessed","relation":"insufficient","threshold_passed":false,"rationale":"","gaps":[]},"snapshot_key":input.snapshot.key}]}});
         let mut result: InferenceWindow = execute_stage(
             input,
             "inference",
@@ -678,49 +820,7 @@ pub async fn run_pipeline(
             settings,
             cancel,
             db_path,
-            |result: &InferenceWindow| {
-                for inference in &result.inferences {
-                    ensure!(
-                        inference.snapshot_key == input.snapshot.key,
-                        "wrong inference snapshot"
-                    );
-                    ensure!(
-                        !inference.premise_claim_ids.is_empty()
-                            && inference.premise_claim_ids.iter().all(|id| output
-                                .claims
-                                .iter()
-                                .any(|c| &c.id == id && c.assessment.faithful())),
-                        "unassessed inference premise"
-                    );
-                    ensure!(
-                        !inference.evidence_refs.is_empty()
-                            && inference
-                                .evidence_refs
-                                .iter()
-                                .all(|r| input.evidence.iter().any(|e| e.validate_ref(r))),
-                        "invalid inference source"
-                    );
-                }
-                for link in &result.links {
-                    ensure!(
-                        matches!(
-                            link.relation.as_str(),
-                            "supports" | "contradicts" | "revises" | "entity_connection"
-                        ),
-                        "invalid link relation"
-                    );
-                    ensure!(
-                        link.typed_endpoints.len() == 2
-                            && !link.evidence_refs.is_empty()
-                            && link
-                                .evidence_refs
-                                .iter()
-                                .all(|r| input.evidence.iter().any(|e| e.validate_ref(r))),
-                        "invalid link evidence"
-                    );
-                }
-                Ok(())
-            },
+            |result: &InferenceWindow| validate_proposals(result, input, &output.claims),
         )
         .await?;
         let mut inference_ids = std::collections::BTreeMap::new();
@@ -765,109 +865,77 @@ pub async fn run_pipeline(
         &output.claims,
     );
     if windows.len() > 1 && (!proposed.is_empty() || !links.is_empty()) {
-        let original_passages: Vec<_> = output
-            .claims
-            .iter()
-            .flat_map(|claim| claim.evidence_refs.iter())
-            .filter_map(|reference| {
-                input
-                    .evidence
-                    .iter()
-                    .find(|e| e.validate_ref(reference))
-                    .map(|source| {
-                        let passage = match &reference.location {
-                            EvidenceLocation::Range(span) => {
-                                span.slice(&source.text).map(str::to_owned)
-                            }
-                            EvidenceLocation::JsonPointer(pointer) => source
-                                .native
-                                .as_ref()
-                                .and_then(|v| v.pointer(pointer))
-                                .map(Value::to_string),
-                        };
-                        serde_json::json!({"reference":reference,"passage":passage})
-                    })
-            })
-            .collect();
-        let user = serde_json::json!({"objective":input.objective,"snapshot_key":input.snapshot.key,"entities":input.snapshot.entities,"claims":output.claims,"proposals":proposed,"link_proposals":links,"original_premise_passages":original_passages,"coverage":input.snapshot.coverage_by_stage,"instruction":"Merge across every analyzed window. Preserve late corrections, denials, contradictions, speakers and dates; no inference may ignore a conflicting premise. Return the same InferenceWindow schema as proposals, at most five inferences and eight links. Evidence must be original supplied references. Explicit arrays required, including valid empty."});
-        if serde_json::to_vec(&user)?.len() + INFERENCE_PROMPT.len() + 1024 > REQUEST_BYTES {
-            output.readiness.publication_eligible = false;
-            output.readiness.gaps.push(
-                "cross-window merge mandatory evidence exceeds request budget; inferences withheld"
-                    .into(),
-            );
-            return Ok(output);
+        let mut seen = BTreeSet::new();
+        proposed.retain(|i| seen.insert(inference_fingerprint(i)));
+        let mut seen = BTreeSet::new();
+        links.retain(|l| seen.insert(l.id.clone()));
+        output.limit_reached |= proposed.len() > INFERENCE_LIMIT || links.len() > LINK_LIMIT;
+        // Bound candidate sets before reconciliation. Source coverage is unchanged;
+        // every window, including late corrections, is revisited below.
+        proposed.reverse();
+        proposed.truncate(INFERENCE_LIMIT);
+        proposed.reverse();
+        links.reverse();
+        links.truncate(LINK_LIMIT);
+        links.reverse();
+        for (index, (evidence, span)) in windows.iter().enumerate() {
+            let user = serde_json::json!({"objective":input.objective,"snapshot_key":input.snapshot.key,"entities":model_entities(input),"claims":compact_claims(&output.claims),"proposals":proposed,"link_proposals":links,"original_evidence":{"reference":evidence.reference,"passage":span.and_then(|s|s.slice(&evidence.text)),"native":native_window(evidence)},"instruction":"Reconcile the retained proposals against this original window, preserving prior limitations and premise references. Revise or reject conclusions contradicted here; preserve corrections, denials, speakers and dates. Proposals are derivations, never independent evidence. Return the same InferenceWindow schema, at most five inferences and eight links, with explicit arrays including valid empty. Retain original supplied evidence references for every premise."});
+            let merged: InferenceWindow = execute_stage(
+                input,
+                "merge",
+                &index.to_string(),
+                "synthesis",
+                INFERENCE_PROMPT,
+                user,
+                auth,
+                settings,
+                cancel,
+                db_path,
+                |result: &InferenceWindow| {
+                    ensure!(
+                        result.inferences.len() <= INFERENCE_LIMIT
+                            && result.links.len() <= LINK_LIMIT,
+                        "owner derivation cap exceeded"
+                    );
+                    validate_proposals(result, input, &output.claims)
+                },
+            )
+            .await?;
+            proposed = merged.inferences;
+            links = merged.links;
         }
-        let merged: InferenceWindow = execute_stage(
-            input,
-            "merge",
-            "all",
-            "synthesis",
-            INFERENCE_PROMPT,
-            user,
-            auth,
-            settings,
-            cancel,
-            db_path,
-            |result: &InferenceWindow| {
-                ensure!(
-                    result.inferences.len() <= INFERENCE_LIMIT && result.links.len() <= LINK_LIMIT,
-                    "owner derivation cap exceeded"
-                );
-                for inference in &result.inferences {
-                    ensure!(
-                        inference.snapshot_key == input.snapshot.key
-                            && !inference.premise_claim_ids.is_empty()
-                            && inference.premise_claim_ids.iter().all(|id| output
-                                .claims
-                                .iter()
-                                .any(|c| &c.id == id && c.assessment.faithful())),
-                        "invalid merged premise"
-                    );
-                    ensure!(
-                        !inference.evidence_refs.is_empty()
-                            && inference
-                                .evidence_refs
-                                .iter()
-                                .all(|r| input.evidence.iter().any(|e| e.validate_ref(r))),
-                        "invalid merged original source"
-                    );
-                }
-                for link in &result.links {
-                    ensure!(
-                        link.typed_endpoints.len() == 2
-                            && matches!(
-                                link.relation.as_str(),
-                                "supports" | "contradicts" | "revises" | "entity_connection"
-                            )
-                            && !link.rationale.trim().is_empty(),
-                        "invalid merged link"
-                    );
-                }
-                Ok(())
-            },
-        )
-        .await?;
-        proposed = merged.inferences;
-        links = merged.links;
     }
+    let mut seen = BTreeSet::new();
+    proposed.retain(|i| seen.insert(inference_fingerprint(i)));
+    let mut seen = BTreeSet::new();
+    links.retain(|l| seen.insert(l.id.clone()));
+    output.limit_reached |= proposed.len() > INFERENCE_LIMIT || links.len() > LINK_LIMIT;
+    output.partial_enumeration |= output.limit_reached;
+    proposed.truncate(INFERENCE_LIMIT);
+    links.truncate(LINK_LIMIT);
+    let final_items: Vec<_> = proposed
+        .iter()
+        .map(|i| {
+            super::insight_assessment::Item::new(&i.id, "inference", &serde_json::json!({"text":i.text,"rationale":i.rationale,"limitations":i.limitations,"premises":output.claims.iter().filter(|c|i.premise_claim_ids.contains(&c.id)).map(claim_proposition).collect::<Vec<_>>(),"entity_refs":i.entity_refs}).to_string(), &i.evidence_refs)
+        })
+        .chain(links.iter().map(|l| {
+            super::insight_assessment::Item::new(
+                &l.id,
+                "link",
+                &serde_json::json!({"relation":l.relation,"rationale":l.rationale,"endpoints":l.typed_endpoints.iter().map(|e|endpoint_proposition(e,&input.snapshot.entities,&output.claims,&proposed)).collect::<Vec<_>>()}).to_string(),
+                &l.evidence_refs,
+            )
+        }))
+        .collect();
+    let final_assessments =
+        super::insight_assessment::assess(input, &final_items, auth, settings, cancel, db_path)
+            .await?;
     let mut final_inference_ids = std::collections::BTreeMap::new();
     for mut inference in proposed {
         let canonical_id = format!("inference:{}", inference_fingerprint(&inference));
         final_inference_ids.insert(inference.id.clone(), canonical_id.clone());
+        inference.assessment = final_assessments[&inference.id].clone();
         inference.id = canonical_id;
-        inference.assessment = assess_fidelity(
-            input,
-            "inference",
-            &inference.id,
-            &inference.text,
-            &inference.evidence_refs,
-            auth,
-            settings,
-            cancel,
-            db_path,
-        )
-        .await?;
         if validate_inference(
             &inference,
             &input.snapshot,
@@ -934,18 +1002,7 @@ pub async fn run_pipeline(
         }) {
             continue;
         }
-        link.assessment = assess_fidelity(
-            input,
-            "link",
-            &link.id,
-            &format!("{}: {}", link.relation, link.rationale),
-            &link.evidence_refs,
-            auth,
-            settings,
-            cancel,
-            db_path,
-        )
-        .await?;
+        link.assessment = final_assessments[&link.id].clone();
         if link.assessment.faithful()
             && output.links.len() < LINK_LIMIT
             && !output.links.iter().any(|l| l.id == link.id)
@@ -953,7 +1010,154 @@ pub async fn run_pipeline(
             output.links.push(link);
         }
     }
+    for (id, assessment) in &final_assessments {
+        for gap in &assessment.gaps {
+            output.item_gaps.push(format!("{id}: {gap}"));
+        }
+    }
+    for claim in &output.claims {
+        for gap in &claim.assessment.gaps {
+            output.item_gaps.push(format!("{}: {gap}", claim.id));
+        }
+    }
+    output.withheld_count = output
+        .claims
+        .iter()
+        .filter(|c| c.assessment.gaps.iter().any(|g| g.starts_with("withheld:")))
+        .count()
+        + final_assessments
+            .values()
+            .filter(|a| a.gaps.iter().any(|g| g.starts_with("withheld:")))
+            .count();
+    if output.withheld_count > 0
+        && !output.claims.iter().any(|c| c.assessment.faithful())
+        && output.inferences.is_empty()
+        && output.links.is_empty()
+    {
+        output.readiness.publication_eligible = false;
+        output.readiness.gaps.push(
+            "all candidates withheld by unavailable model work; previous snapshot retained".into(),
+        );
+    }
+    let store = crate::store::Store::open(db_path)?;
+    super::insight_execution::progress(
+        &store.conn,
+        input,
+        "settled",
+        None,
+        Some(output.withheld_count),
+    )?;
     Ok(output)
+}
+
+fn compact_claims(claims: &[SourceClaim]) -> Vec<Value> {
+    claims.iter().map(|c|serde_json::json!({"id":c.id,"subject_ref":c.subject_ref,"text":c.text,"evidence_refs":c.evidence_refs,"faithful":c.assessment.faithful(),"relation":c.assessment.relation})).collect()
+}
+
+fn claim_proposition(claim: &SourceClaim) -> String {
+    serde_json::json!({"subject_ref":claim.subject_ref,"predicate":claim.predicate,"object":claim.object,"text":claim.text,"polarity":claim.polarity,"modality":claim.modality,"attributed_to":claim.attributed_to,"temporal_scope":claim.temporal_scope}).to_string()
+}
+
+fn endpoint_proposition(
+    endpoint: &TypedEndpoint,
+    entities: &[EntityCandidate],
+    claims: &[SourceClaim],
+    inferences: &[Inference],
+) -> Value {
+    let proposition=match endpoint.kind.as_str() {
+        "entity"=>entities.iter().find(|e|e.id==endpoint.id).map(|e|serde_json::json!({"forms":e.original_forms,"type_hint":e.type_hint})),
+        "claim"=>claims.iter().find(|c|c.id==endpoint.id).map(|c|serde_json::json!({"assertion":claim_proposition(c)})),
+        "inference"=>inferences.iter().find(|i|i.id==endpoint.id).map(|i|serde_json::json!({"text":i.text,"premise_claim_ids":i.premise_claim_ids,"limitations":i.limitations})),_=>None,
+    };
+    serde_json::json!({"endpoint":endpoint,"proposition":proposition})
+}
+
+fn model_entities(input: &PipelineInput) -> Vec<Value> {
+    input.snapshot.entities.iter().map(|e|serde_json::json!({"id":e.id,"type_hint":e.type_hint,"original_forms":e.original_forms})).collect()
+}
+
+fn validate_proposals(
+    result: &InferenceWindow,
+    input: &PipelineInput,
+    claims: &[SourceClaim],
+) -> Result<()> {
+    let mut ids = BTreeSet::new();
+    for inference in &result.inferences {
+        ensure!(
+            inference.text.len() <= 1024
+                && inference.rationale.len() <= 1024
+                && inference.limitations.iter().map(String::len).sum::<usize>() <= 1024,
+            "inference must use concise text (1024 bytes per field)"
+        );
+        ensure!(ids.insert(&inference.id), "duplicate inference ID");
+        ensure!(
+            inference.snapshot_key == input.snapshot.key && !inference.text.trim().is_empty(),
+            "invalid inference snapshot/text"
+        );
+        ensure!(
+            !inference.premise_claim_ids.is_empty()
+                && inference.premise_claim_ids.iter().all(|id| claims
+                    .iter()
+                    .any(|c| &c.id == id && c.assessment.faithful())),
+            "unassessed inference premise"
+        );
+        ensure!(
+            !inference.entity_refs.is_empty()
+                && inference.entity_refs.iter().all(|id| input
+                    .snapshot
+                    .entities
+                    .iter()
+                    .any(|e| &e.id == id)),
+            "unknown inference entity"
+        );
+        ensure!(
+            !inference.evidence_refs.is_empty()
+                && inference
+                    .evidence_refs
+                    .iter()
+                    .all(|r| input.evidence.iter().any(|e| e.validate_ref(r))),
+            "invalid inference source"
+        );
+    }
+    for link in &result.links {
+        ensure!(
+            link.rationale.len() <= 1024,
+            "link rationale must be concise (1024 bytes)"
+        );
+        ensure!(ids.insert(&link.id), "duplicate link ID");
+        ensure!(
+            link.snapshot_key == input.snapshot.key
+                && link.typed_endpoints.len() == 2
+                && !link.rationale.trim().is_empty()
+                && matches!(
+                    link.relation.as_str(),
+                    "supports" | "contradicts" | "revises" | "entity_connection"
+                ),
+            "invalid link relation/endpoints"
+        );
+        ensure!(
+            link.typed_endpoints
+                .iter()
+                .all(|endpoint| match endpoint.kind.as_str() {
+                    "entity" => input.snapshot.entities.iter().any(|e| e.id == endpoint.id),
+                    "claim" => claims
+                        .iter()
+                        .any(|c| c.id == endpoint.id && c.assessment.faithful()),
+                    "inference" => result.inferences.iter().any(|i| i.id == endpoint.id),
+                    _ => false,
+                }),
+            "unknown link endpoint"
+        );
+        ensure!(
+            !link.evidence_refs.is_empty()
+                && link
+                    .evidence_refs
+                    .iter()
+                    .all(|r| input.evidence.iter().any(|e| e.validate_ref(r))),
+            "invalid link evidence"
+        );
+    }
+    Ok(())
 }
 
 fn consolidate_coverage(coverage: &mut Vec<StageCoverage>) {
@@ -1095,8 +1299,6 @@ async fn admit_brain_evidence(
             state,
             settings.defaults
         ]));
-        let scope = crate::recon::model_exec::OperationScope::new(&id, "entity_resolver")
-            .with_generation(input.snapshot.generation);
         use rusqlite::OptionalExtension;
         let cached = {
             let store = crate::store::Store::open(db_path)?;
@@ -1107,6 +1309,21 @@ async fn admit_brain_evidence(
         {
             status == "completed" && serde_json::from_str::<bool>(&json).unwrap_or(false)
         } else {
+            let store = crate::store::Store::open(db_path)?;
+            super::insight_persist::validate_dispatch(&store.conn, input)?;
+            super::insight_execution::consume()?;
+            let task_id = super::insight_assessment::task_id(&store.conn, input)?;
+            let execution_id = super::insight_execution::operation_id(&store.conn, &task_id, &id)?;
+            drop(store);
+            let mut scope = super::insight_assessment::operation_scope(
+                &execution_id,
+                "entity_resolver",
+                input,
+                &task_id,
+            );
+            if input.snapshot.owner_kind == "recon" {
+                scope = scope.with_run(&input.snapshot.owner_id);
+            }
             let result = DecisionService::new()
                 .evaluate_shared(
                     auth,
@@ -1119,6 +1336,15 @@ async fn admit_brain_evidence(
                     Some(db_path),
                 )
                 .await;
+            if let Err(error) = &result {
+                if cancel.load(std::sync::atomic::Ordering::Acquire)
+                    || !error
+                        .downcast_ref::<crate::recon::model_exec::ModelOperationError>()
+                        .is_some_and(|e| e.can_withhold())
+                {
+                    return Err(result.unwrap_err());
+                }
+            }
             let admitted = result.as_ref().is_ok_and(|(result, outcomes)| {
                 result
                     .answers
@@ -1157,9 +1383,11 @@ async fn admit_brain_evidence(
             .iter()
             .map(|e| e.reference.clone())
             .collect::<Vec<_>>();
-        let relevance=assess_fidelity(input,"memory_relevance",&metadata.memory_id,
+        let mut assessment_input = input.clone();
+        assessment_input.evidence.extend(qualified.iter().cloned());
+        let relevance=assess_fidelity(&assessment_input,"memory_relevance",&metadata.memory_id,
             &format!("Objective: {}. Requested predicates: {}. Candidate memory: {}. Reject irrelevant predicate or temporal scope, and ambiguous identities.",input.objective,claims.iter().map(|c|c.predicate.as_str()).collect::<Vec<_>>().join(", "),hit.memory.text),
-            &refs,auth,settings,cancel,db_path).await.unwrap_or_default();
+            &refs,auth,settings,cancel,db_path).await?;
         if relevance.fidelity != "relevant" || !relevance.threshold_passed {
             continue;
         }
@@ -1218,144 +1446,10 @@ async fn assess_fidelity(
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     db_path: &std::path::Path,
 ) -> Result<Assessment> {
-    let mut cited = Vec::new();
-    for reference in refs {
-        let evidence = input
-            .evidence
-            .iter()
-            .find(|e| e.validate_ref(reference))
-            .ok_or_else(|| anyhow::anyhow!("invalid fidelity evidence"))?;
-        let passage = match &reference.location {
-            EvidenceLocation::Range(span) => span.slice(&evidence.text).unwrap_or("").to_string(),
-            EvidenceLocation::JsonPointer(pointer) => evidence
-                .native
-                .as_ref()
-                .and_then(|v| v.pointer(pointer))
-                .map(Value::to_string)
-                .unwrap_or_default(),
-        };
-        cited.push(serde_json::json!({"reference":reference,"passage":passage}));
-    }
-    use super::decisions::{
-        templates::{
-            template_claim_relation, template_entity_binding, template_evidence_relevance,
-            template_publication,
-        },
-        DecisionPolicy, DecisionService, DecisionState,
-    };
-    use rusqlite::{params, OptionalExtension};
-    let mut state =
-        DecisionState::new().with_candidate(serde_json::json!({"kind":kind,"text":text}));
-    if kind == "identity" || kind == "memory_relevance" {
-        state = state.with_subject([("target".into(), text.into())], Vec::<String>::new());
-    }
-    for item in &cited {
-        state = state.with_evidence_passage(
-            item["reference"]["source_id"].as_str().unwrap_or(""),
-            item["reference"]["url"].as_str().unwrap_or(""),
-            "",
-            item["passage"].as_str().unwrap_or(""),
-            Some(
-                "Original source assertion; fidelity does not mean independent corroboration"
-                    .into(),
-            ),
-        );
-    }
-    let question = if kind == "memory_relevance" {
-        "evidence_relevance"
-    } else if kind == "identity" {
-        "entity_binding"
-    } else if kind == "corroboration" {
-        "claim_relation"
-    } else {
-        "publication"
-    };
-    if serde_json::to_vec(&state)?.len() > REQUEST_BYTES.saturating_sub(8192) {
-        return Ok(Assessment {
-            gaps: vec!["mandatory semantic evidence exceeds request budget".into()],
-            ..Default::default()
-        });
-    }
-    let contract = if kind == "memory_relevance" {
-        template_evidence_relevance()
-    } else if kind == "identity" {
-        template_entity_binding()
-    } else if kind == "corroboration" {
-        template_claim_relation()
-    } else {
-        template_publication()
-    };
-    let key = crate::nlp::cache::key(&serde_json::json!([
-        input.snapshot.key,
-        kind,
-        id,
-        state,
-        contract,
-        settings.defaults
-    ]));
-    {
-        let store = crate::store::Store::open(db_path)?;
-        let saved: Option<(String, String)> = store
-            .conn
-            .query_row(
-                "SELECT state,output_json FROM insight_stage_checkpoints WHERE operation_key=?1",
-                [&key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((status, json)) = saved {
-            if status == "completed" {
-                return Ok(serde_json::from_str(&json)?);
-            }
-            ensure!(status != "exhausted", "assessment chain already exhausted");
-        }
-    }
-    let scope = crate::recon::model_exec::OperationScope::new(
-        &key,
-        if kind == "identity" {
-            "entity_resolver"
-        } else {
-            "claim_assessor"
-        },
-    )
-    .with_generation(input.snapshot.generation);
-    let evaluated = DecisionService::new()
-        .evaluate_shared(
-            auth,
-            settings,
-            &scope,
-            &contract,
-            &state,
-            &DecisionPolicy::default(),
-            cancel,
-            Some(db_path),
-        )
-        .await;
-    let (assessment, status, route, error) = match evaluated {
-        Ok((result, outcomes)) => {
-            let label = result
-                .answers
-                .get(question)
-                .map(|a| a.label.clone())
-                .unwrap_or_else(|| "insufficient".into());
-            let passed = outcomes.get(question).is_some_and(|o| o.is_approved());
-            (Assessment { fidelity:if kind == "corroboration" {"unassessed".into()} else {label.clone()},relation:if kind == "corroboration" {label.clone()} else {"insufficient".into()},threshold_passed:passed,rationale:format!("Semantic textual fidelity: {label}; independent corroboration assessed separately"),gaps:if passed { vec![] } else { vec!["semantic assessment uncertain/unavailable".into()] } },"completed",serde_json::to_string(&result)?,String::new())
-        }
-        Err(error) => (
-            Assessment::default(),
-            if cancel.load(std::sync::atomic::Ordering::Acquire) {
-                "cancelled"
-            } else {
-                "exhausted"
-            },
-            "{}".into(),
-            error.to_string(),
-        ),
-    };
-    let store = crate::store::Store::open(db_path)?;
-    store.conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,output_json,route_json,error,updated_at) VALUES(?1,?2,?3,?4,'assessment',?5,?6,?7,?8,?9,?10) ON CONFLICT(operation_key) DO UPDATE SET state=excluded.state,output_json=excluded.output_json,route_json=excluded.route_json,error=excluded.error,updated_at=excluded.updated_at",params![key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,format!("{kind}:{id}"),status,serde_json::to_string(&assessment)?,route,error,chrono::Utc::now().to_rfc3339()])?;
-    ensure!(error.is_empty(), "assessment blocked: {error}");
-    Ok(assessment)
+    let item = super::insight_assessment::Item::new(id, kind, text, refs);
+    let mut result =
+        super::insight_assessment::assess(input, &[item], auth, settings, cancel, db_path).await?;
+    Ok(result.remove(id).expect("submitted assessment item"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1463,7 +1557,20 @@ pub struct SourceClaim {
     pub temporal_scope: String,
     pub evidence_refs: Vec<EvidenceRef>,
     pub extraction_scope: String,
+    #[serde(default)]
     pub assessment: Assessment,
+    #[serde(default)]
+    pub support_receipts: Vec<SupportReceipt>,
+}
+
+/// A passed relation decision against a particular retained passage. Neither
+/// a pooled citation nor a textual-fidelity decision creates this receipt.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SupportReceipt {
+    pub source: EvidenceRef,
+    pub relation: String,
+    pub threshold_passed: bool,
+    pub lineage: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1475,6 +1582,7 @@ pub struct Inference {
     pub evidence_refs: Vec<EvidenceRef>,
     pub rationale: String,
     pub limitations: Vec<String>,
+    #[serde(default)]
     pub assessment: Assessment,
     pub snapshot_key: String,
 }
@@ -1490,6 +1598,7 @@ pub struct AssessedLink {
     pub relation: String,
     pub evidence_refs: Vec<EvidenceRef>,
     pub rationale: String,
+    #[serde(default)]
     pub assessment: Assessment,
     pub snapshot_key: String,
 }
@@ -1551,6 +1660,7 @@ pub enum Surface {
     Atlas,
     Article,
     Recon,
+    Report,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Readiness {
@@ -1581,7 +1691,7 @@ pub fn readiness(
         .filter(|e| {
             e.relevant
                 && e.substantive
-                && (surface == Surface::Article
+                && (matches!(surface, Surface::Article | Surface::Report)
                     || claims.iter().any(|c| {
                         c.assessment.faithful() && c.evidence_refs.iter().any(|r| e.validate_ref(r))
                     }))
@@ -1590,7 +1700,7 @@ pub fn readiness(
                     || e.reference.source_id.starts_with("body:"))
         })
         .collect();
-    if surface == Surface::Article {
+    if matches!(surface, Surface::Article | Surface::Report) {
         if !relevant
             .iter()
             .any(|e| e.complete_story && !e.known_truncation)
@@ -1621,17 +1731,19 @@ pub fn readiness(
                 .push("fewer than two relevant substantive acquisition roots".into());
         }
     }
-    if !claims.iter().any(|c| {
-        c.assessment.faithful()
-            && !c.evidence_refs.is_empty()
-            && c.evidence_refs
-                .iter()
-                .all(|r| evidence.iter().any(|e| e.validate_ref(r)))
-    }) {
+    if !matches!(surface, Surface::Article | Surface::Report)
+        && !claims.iter().any(|c| {
+            c.assessment.faithful()
+                && !c.evidence_refs.is_empty()
+                && c.evidence_refs
+                    .iter()
+                    .all(|r| evidence.iter().any(|e| e.validate_ref(r)))
+        })
+    {
         out.gaps.push("no faithfully assessed cited premise".into());
     }
     out.input_eligible = out.gaps.is_empty();
-    if surface == Surface::Article
+    if matches!(surface, Surface::Article | Surface::Report)
         && !relevant.iter().all(|e| {
             coverage
                 .iter()
@@ -1693,7 +1805,7 @@ fn native_window(evidence: &RetainedEvidence) -> Option<&Value> {
     evidence.native.as_ref()?.pointer(pointer)
 }
 
-fn native_windows(value: &Value, budget: usize) -> Result<Vec<String>> {
+pub(super) fn native_windows(value: &Value, budget: usize) -> Result<Vec<String>> {
     fn visit(
         value: &Value,
         pointer: String,
@@ -1807,12 +1919,24 @@ fn valid_entity(entity: &EntityCandidate, evidence: &RetainedEvidence) -> bool {
                 EvidenceLocation::Range(range) => {
                     span.start_byte >= range.start_byte && span.end_byte <= range.end_byte
                 }
-                EvidenceLocation::JsonPointer(_) => true,
+                EvidenceLocation::JsonPointer(_) => {
+                    super::insight_wire::source_span(evidence, &evidence.reference).is_ok_and(
+                        |range| {
+                            span.start_byte >= range.start_byte && span.end_byte <= range.end_byte
+                        },
+                    )
+                }
             };
             supplied
                 && span.slice(&evidence.text).is_some_and(|text| {
-                    entity.original_forms.iter().any(|form| form == text)
-                        && normalized(text) == normalized(&entity.comparison_key)
+                    let decoded = if evidence.native.is_some() {
+                        serde_json::from_str::<String>(&format!("\"{text}\""))
+                            .unwrap_or_else(|_| text.into())
+                    } else {
+                        text.into()
+                    };
+                    entity.original_forms.iter().any(|form| form == &decoded)
+                        && normalized(&decoded) == normalized(&entity.comparison_key)
                 })
         })
 }
@@ -1991,6 +2115,42 @@ mod tests {
             "native identifiers cannot be prefix-cut"
         );
     }
+
+    #[test]
+    fn native_entity_mentions_have_exact_global_coordinates_and_decode_json_escapes() {
+        let mut evidence = source("call:native", "revision");
+        let value =
+            serde_json::json!({"before":"unseen preceding sibling","z":[{"a/b":"Acme\" café"}]});
+        evidence.text = value.to_string();
+        evidence.reference.artifact_hash = hash(&evidence.text);
+        evidence.native = Some(value.clone());
+        evidence.reference.location = EvidenceLocation::JsonPointer("/z/0/a~1b".into());
+        let span = super::super::insight_wire::source_span(&evidence, &evidence.reference).unwrap();
+        assert_eq!(
+            span.slice(&evidence.text),
+            Some(value["z"][0]["a/b"].to_string().as_str())
+        );
+        let entity = EntityCandidate {
+            id: "call:native:entity:acme".into(),
+            type_hint: "org".into(),
+            comparison_key: "acme\" café".into(),
+            original_forms: vec!["Acme\" café".into()],
+            mention_refs: vec![Span {
+                start_byte: span.start_byte + 1,
+                end_byte: span.end_byte - 1,
+            }],
+        };
+        assert!(valid_entity(&entity, &evidence));
+        let mut outside = entity.clone();
+        outside.mention_refs[0] = Span {
+            start_byte: 0,
+            end_byte: 4,
+        };
+        assert!(!valid_entity(&outside, &evidence));
+        let mut stale = evidence;
+        stale.text.push(' ');
+        assert!(super::super::insight_wire::source_span(&stale, &stale.reference).is_err());
+    }
     #[tokio::test]
     async fn atlas_shared_pipeline_is_claims_only_and_identical_replay_makes_no_requests() {
         use crate::provider_attempt::mock;
@@ -2016,7 +2176,7 @@ mod tests {
         let server = mock::serve(vec![
             mock::ok_json(&extraction, "stop"),
             mock::ok_json(
-                r#"{"answers":{"publication":{"label":"faithful"}}}"#,
+                r#"{"answers":{"q0:publication":{"label":"faithful"},"q0:claim_relation":{"label":"mentions_only"}}}"#,
                 "stop",
             ),
         ])
@@ -2098,6 +2258,7 @@ mod tests {
     }
     fn premise(e: &RetainedEvidence) -> SourceClaim {
         SourceClaim {
+            support_receipts: Vec::new(),
             id: "c".into(),
             subject_ref: "body:a:entity:acme".into(),
             predicate: "opened".into(),
@@ -2304,6 +2465,7 @@ mod tests {
     #[test]
     fn qualified_assertions_do_not_merge() {
         let mut claim = SourceClaim {
+            support_receipts: Vec::new(),
             id: "c".into(),
             subject_ref: "source:actor".into(),
             predicate: "said".into(),

@@ -224,6 +224,11 @@ impl JobHandle {
         } else {
             spec.id.clone()
         };
+        crate::job_cleanup::register_reference(&conn, &id, &spec.resource_ref, &spec.operation)?;
+        if let Err(error) = crate::job_cleanup::ensure_admissible(&conn, &id, &ts) {
+            cancel.store(true, Ordering::Release);
+            return Err(error);
+        }
         let existing: Option<Option<i64>> = conn
             .query_row("SELECT active_ms FROM argos_jobs WHERE id=?1", [&id], |r| {
                 r.get(0)
@@ -518,6 +523,11 @@ pub fn beat(conn: &Connection, owner: &str) -> Result<()> {
         .query_map([owner], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let live = live().lock().unwrap_or_else(|e| e.into_inner());
+    for (id, flag) in live.iter() {
+        if crate::job_cleanup::retired(conn, id)? {
+            flag.store(true, Ordering::Release);
+        }
+    }
     for id in ids {
         if let Some(flag) = live.get(&id) {
             flag.store(true, Ordering::Relaxed);
@@ -529,6 +539,7 @@ pub fn beat(conn: &Connection, owner: &str) -> Result<()> {
 /// Mark open jobs owned by processes that are gone (registry jobs and
 /// owned task-less jobs such as the repair pass) as interrupted failures. Their active time ends at the last heartbeat seen.
 pub fn recover_orphans(conn: &Connection, me: &str) -> Result<usize> {
+    crate::job_cleanup::cleanup_batch(conn, chrono::Utc::now())?;
     let now_dt = chrono::Utc::now();
     let stale = (now_dt - chrono::Duration::seconds(PROCESS_STALE_SECS)).to_rfc3339();
     let mut stmt = conn.prepare(
@@ -642,6 +653,9 @@ fn ensure_beat(db: &Path) -> Result<Arc<AtomicBool>> {
                     if ticks.is_multiple_of(12) {
                         let _ = recover_orphans(&conn, &owner);
                     }
+                    if ticks.is_multiple_of(60) {
+                        let _ = crate::job_cleanup::cleanup_batch(&conn, chrono::Utc::now());
+                    }
                 }
             }
         })?;
@@ -655,6 +669,12 @@ pub fn start_process_beat(db: &Path) -> Result<ProcessBeat> {
     let stop = ensure_beat(db)?;
     recover_orphans(&open(db)?, &crate::scheduler::process_owner())?;
     Ok(ProcessBeat { stop })
+}
+
+pub(crate) fn signal_retirement(id: &str) {
+    if let Some(flag) = live().lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+        flag.store(true, Ordering::Release);
+    }
 }
 
 /// Canonical job for a legacy run/job id (Atlas run, Intel Recon job): the

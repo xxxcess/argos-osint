@@ -19,13 +19,13 @@ pub fn article_input(
     if let Some(body) = store.article_body_for_article(&article.id)? {
         // Only the retained acquisition can establish story coverage. A refined
         // display body and a legacy bounded body cannot certify completeness.
-        let acquisition:Option<(String,String,String)>=store.conn.query_row("SELECT raw_hash,attempt_id,revision FROM nlp_source_refs WHERE owner_kind='article' AND owner_id=?1 AND source_id=?2 AND transform_version='validated-baseline-v1' AND revision=?3 AND raw_hash IS NOT NULL ORDER BY rowid DESC LIMIT 1",params![article.id,body.id,body.body_version.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        if let Some((raw_hash, attempt, revision)) = acquisition {
+        let acquisition:Option<(String,String,String,String)>=store.conn.query_row("SELECT raw_hash,prose_hash,attempt_id,revision FROM nlp_source_refs WHERE owner_kind='article' AND owner_id=?1 AND source_id=?2 AND transform_version='validated-baseline-v1' AND revision=?3 AND raw_hash IS NOT NULL ORDER BY rowid DESC LIMIT 1",params![article.id,body.id,body.body_version.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        if let Some((raw_hash, prose_hash, attempt, revision)) = acquisition {
             let text: Option<String> = store
                 .conn
                 .query_row(
                     "SELECT text FROM nlp_artifacts WHERE hash=?1",
-                    [&raw_hash],
+                    [&prose_hash],
                     |r| r.get(0),
                 )
                 .optional()?;
@@ -53,7 +53,7 @@ pub fn article_input(
                 let reference = EvidenceRef {
                     source_id: format!("body:{}", body.id),
                     revision,
-                    artifact_hash: raw_hash.clone(),
+                    artifact_hash: prose_hash,
                     acquisition_id: attempt,
                     origin_root: format!("acquisition:{raw_hash}"),
                     url: article.url.clone(),
@@ -76,7 +76,8 @@ pub fn article_input(
             }
         }
     }
-    if evidence.is_empty() {
+    // Metadata is an independent retained passage, with its own byte offsets.
+    {
         let text = format!("{}\n{}", article.title, article.description);
         let artifact = crate::nlp::cache::artifact(&store.conn, &text)?;
         evidence.push(RetainedEvidence {
@@ -115,15 +116,234 @@ pub fn article_input(
             .collect::<Vec<_>>();
         evidence.extend(super::insights::evidence_from_tools(&store.conn, &results)?);
     }
-    Ok(PipelineInput {
+    let mut input = PipelineInput {
         snapshot: super::insights::snapshot("article", &article.id, generation, &evidence),
         evidence,
         objective: objective.into(),
         surface: "article".into(),
         required_tasks_complete: true,
         save_insights: true,
-        recall_enabled: true,
-    })
+        recall_enabled: false,
+    };
+    if let Some(metadata) = store.atlas_metadata(&article.run_id, &article.id)? {
+        for actor in crate::atlas_metadata::article_actors(article, &metadata) {
+            input.snapshot.entities.push(crate::nlp::EntityCandidate {
+                id: actor.id,
+                type_hint: actor.type_hint,
+                comparison_key: actor.display_name.to_lowercase(),
+                original_forms: actor.spellings,
+                mention_refs: actor
+                    .mentions
+                    .iter()
+                    .map(|mention| {
+                        let offset = if mention.field == "description" {
+                            article.title.len() + 1
+                        } else {
+                            0
+                        };
+                        crate::nlp::Span {
+                            start_byte: offset + mention.start_byte,
+                            end_byte: offset + mention.end_byte,
+                        }
+                    })
+                    .collect(),
+            });
+        }
+    }
+    input.required_tasks_complete =
+        !article.title.trim().is_empty() && !article.description.trim().is_empty();
+    Ok(input)
+}
+
+/// Only a retained complete report is supplied to this builder. Article fields,
+/// tools, old snapshots and recall are deliberately absent from the payload.
+pub fn report_input(
+    conn: &Connection,
+    article_id: &str,
+    generation: u32,
+) -> Result<Option<PipelineInput>> {
+    use super::insights::{EvidenceLocation, EvidenceRef, RetainedEvidence};
+    let result: Option<(String, String, String, i64)> = conn.query_row(
+        "SELECT job_id,source_hash,details_json,completion_sequence FROM intel_report_results WHERE article_id=?1 AND completion_sequence>0 ORDER BY completion_sequence DESC LIMIT 1",
+        [article_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let Some((job, source_hash, details, sequence)) = result else {
+        return Ok(None);
+    };
+    let bundle: serde_json::Value = serde_json::from_str(&details)?;
+    ensure!(
+        crate::nlp::cache::hash(&details) == source_hash,
+        "report bundle hash mismatch"
+    );
+    let text = bundle["text"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("report text missing"))?
+        .to_owned();
+    ensure!(!text.trim().is_empty(), "empty report details");
+    let mut retained = crate::nlp::Source::derived(
+        &format!("report:{job}"),
+        &format!("{sequence}:{source_hash}"),
+        &text,
+    );
+    retained.attempt_id = source_hash.clone();
+    crate::nlp::cache::register(
+        conn,
+        "report_result",
+        &job,
+        &retained,
+        None,
+        "report-details-v1",
+    )?;
+    let artifact = crate::nlp::cache::artifact(conn, &text)?;
+    let evidence = vec![RetainedEvidence {
+        reference: EvidenceRef {
+            source_id: format!("report:{job}"),
+            revision: format!("{sequence}:{source_hash}"),
+            artifact_hash: artifact,
+            acquisition_id: source_hash,
+            origin_root: String::new(),
+            url: String::new(),
+            published_at: None,
+            retrieved_at: bundle["completed_at"].as_str().unwrap_or_default().into(),
+            location: EvidenceLocation::Range(crate::nlp::Span {
+                start_byte: 0,
+                end_byte: text.len(),
+            }),
+        },
+        text,
+        native: None,
+        substantive: true,
+        relevant: true,
+        complete_story: true,
+        known_truncation: false,
+    }];
+    Ok(Some(PipelineInput {
+        snapshot: super::insights::snapshot("article", article_id, generation, &evidence), evidence,
+        objective: "Extract attributed assertions and justified conclusions exclusively from this completed Recon report. Report prose is not independent corroboration.".into(),
+        surface: "recon_report".into(), required_tasks_complete: true, save_insights: true, recall_enabled: false,
+    }))
+}
+
+pub fn article_details_eligible(input: &PipelineInput) -> bool {
+    input.required_tasks_complete
+        && input.evidence.iter().any(|e| {
+            e.reference.source_id.starts_with("body:")
+                && e.substantive
+                && e.complete_story
+                && !e.known_truncation
+        })
+}
+
+pub fn article_refresh_status(conn: &Connection, article_id: &str) -> Result<String> {
+    let state: Option<(String, String, String)> = conn.query_row("SELECT h.lifecycle,h.last_error,COALESCE((SELECT t.state FROM argos_tasks t WHERE t.job_id=h.refresh_job_id ORDER BY t.created_at DESC LIMIT 1),'') FROM insight_owner_state h WHERE h.owner_kind='article' AND h.owner_id=?1",[article_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let Some((lifecycle, error, task)) = state else {
+        return Ok("Waiting · complete article details required".into());
+    };
+    if !error.is_empty() {
+        return Ok(format!("Previous · {error}"));
+    }
+    if task == "running" {
+        return Ok("Extracting".into());
+    }
+    if matches!(task.as_str(), "queued" | "retry_scheduled") {
+        return Ok("Queued".into());
+    }
+    if lifecycle == "active" {
+        let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM argos_index_changes WHERE state<>'completed' AND record_id IN (SELECT d.memory_id FROM insight_derivations d JOIN insight_owner_state h ON h.active_snapshot_id=d.snapshot_id WHERE h.owner_kind='article' AND h.owner_id=?1))",[article_id],|r|r.get(0))?;
+        return Ok(if pending { "Published" } else { "Indexed" }.into());
+    }
+    Ok(format!("Waiting · {lifecycle}"))
+}
+
+/// Shared admission for visits, complete body commits, durable report commits
+/// and recovery. Deduplicate before changing the desired generation.
+pub fn schedule_article_refresh(
+    store: &crate::store::Store,
+    article: &crate::store::AtlasArticleRow,
+    settings: &crate::provider::SettingsFile,
+    visit: bool,
+) -> Result<Option<String>> {
+    let own = store.conn.is_autocommit();
+    if own {
+        store.conn.execute_batch("BEGIN IMMEDIATE")?;
+    }
+    let result = schedule_article_refresh_on(store, article, settings, visit);
+    if own {
+        if result.is_ok() {
+            store.conn.execute_batch("COMMIT")?;
+        } else {
+            store.conn.execute_batch("ROLLBACK")?;
+        }
+    }
+    result
+}
+
+fn schedule_article_refresh_on(
+    store: &crate::store::Store,
+    article: &crate::store::AtlasArticleRow,
+    settings: &crate::provider::SettingsFile,
+    visit: bool,
+) -> Result<Option<String>> {
+    let now = chrono::Utc::now().to_rfc3339();
+    if visit {
+        store.conn.execute(
+            "INSERT OR IGNORE INTO article_refresh_intents(article_id,requested_at) VALUES(?1,?2)",
+            params![article.id, now],
+        )?;
+    }
+    let report = report_input(&store.conn, &article.id, 0)?;
+    if report.is_none()
+        && store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM intel_report_results WHERE article_id=?1)",
+            [&article.id],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Ok(None);
+    }
+
+    let mut input = if let Some(input) = report {
+        input
+    } else {
+        let intent: bool = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM article_refresh_intents WHERE article_id=?1)",
+            [&article.id],
+            |r| r.get(0),
+        )?;
+        if !intent {
+            return Ok(None);
+        }
+        let input = article_input(store, article, 0, "Extract attributed assertions from the complete article title, description and retained cleaned story.", false)?;
+        if !article_details_eligible(&input) {
+            return Ok(None);
+        }
+        input
+    };
+    // The generation is excluded only for admission identity, never publication.
+    let identity = super::insights::input_key(&input, settings);
+    let expired: bool = store.conn.query_row("SELECT EXISTS(SELECT 1 FROM article_refresh_retirements WHERE article_id=?1 AND input_key=?2)",params![article.id,identity],|r|r.get(0))?;
+    if expired {
+        return Ok(None);
+    }
+    let prior: Option<(String, String,String,String)> = store.conn.query_row(
+        "SELECT id,input_ref,role_snapshot,input_hash FROM argos_tasks WHERE operation='insight_refresh' AND job_id IN (SELECT id FROM argos_jobs WHERE owner_scope=?1) ORDER BY created_at DESC,rowid DESC LIMIT 1",
+        [format!("article:{}",article.id)], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    if let Some((id, json, captured, stored_hash)) = prior {
+        if let Ok(mut prior) = serde_json::from_str::<PipelineInput>(&json) {
+            let captured = serde_json::from_str::<crate::provider::SettingsFile>(&captured)?;
+            let compatible = super::insights::input_key(&prior, &captured) == stored_hash;
+            prior.snapshot.generation = 0;
+            if compatible && super::insights::input_key(&prior, &captured) == identity {
+                return Ok(Some(id));
+            }
+        }
+    }
+    input.snapshot.generation = advance_generation(&store.conn, "article", &article.id, &now)?;
+    Ok(Some(enqueue_refresh(
+        &store.conn,
+        &mut input,
+        settings,
+        &now,
+    )?))
 }
 
 pub fn active_output(conn: &Connection, kind: &str, owner: &str) -> Result<Option<PipelineOutput>> {
@@ -146,6 +366,8 @@ pub fn active_output(conn: &Connection, kind: &str, owner: &str) -> Result<Optio
     let stored: serde_json::Value = serde_json::from_str(&readiness)?;
     output.limit_reached = stored["limit_reached"].as_bool().unwrap_or(false);
     output.partial_enumeration = stored["partial_enumeration"].as_bool().unwrap_or(false);
+    output.item_gaps = serde_json::from_value(stored["item_gaps"].clone()).unwrap_or_default();
+    output.withheld_count = stored["withheld_count"].as_u64().unwrap_or(0) as usize;
     if let Some(value) = stored.get("readiness") {
         output.readiness = serde_json::from_value(value.clone())?;
     }
@@ -242,6 +464,9 @@ fn owner_claim_rows(
                     refs: &[super::insights::EvidenceRef],
                     assessment: &super::insights::Assessment|
      -> Result<()> {
+        if !assessment.faithful() {
+            return Ok(());
+        }
         let memory:Option<(String,String)>=conn.query_row("SELECT m.id,m.text FROM insight_claims c JOIN memories m ON m.id=c.memory_id WHERE c.fingerprint=?1",[&fp],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         if memory.is_none() && crate::store::tombstone_runs(conn, &fp)?.is_some() {
             return Ok(());
@@ -340,7 +565,11 @@ pub fn enqueue_refresh(
             deadline_at: String::new(),
         },
         &crate::tasks::JobMeta {
-            app: input.snapshot.owner_kind.clone(),
+            app: if input.snapshot.owner_kind == "article" {
+                "intel".into()
+            } else {
+                input.snapshot.owner_kind.clone()
+            },
             operation: "insight_refresh".into(),
             resource_ref: input.snapshot.owner_id.clone(),
             title: "Assess and refresh investigative insights".into(),
@@ -359,7 +588,12 @@ pub fn enqueue_refresh(
             input_ref: serde_json::to_string(input)?,
             input_hash: input.snapshot.key.clone(),
             source_revision: input.snapshot.generation.to_string(),
-            role_snapshot: serde_json::to_string(&settings.defaults)?,
+            // Capture analytical routes/preparation, never provider/tool keys.
+            role_snapshot: serde_json::to_string(&crate::provider::SettingsFile {
+                defaults: settings.defaults.clone(),
+                nlp: settings.nlp.clone(),
+                ..Default::default()
+            })?,
             max_attempts: 1,
         },
         now,
@@ -405,12 +639,34 @@ pub async fn run_refresh_slice(
         input.surface != "atlas" && input.snapshot.owner_kind != "atlas",
         "Atlas insight refresh retired"
     );
-    let result = if super::insights::input_key(&input, settings) != claimed.input_hash {
+    let admission = {
+        let store = crate::store::Store::open(db_path)?;
+        validate_live_evidence(&store.conn, &input.snapshot).and_then(|()| {
+            ensure!(
+                desired_generation(
+                    &store.conn,
+                    &input.snapshot.owner_kind,
+                    &input.snapshot.owner_id
+                )? == input.snapshot.generation,
+                "refresh superseded"
+            );
+            ensure!(
+                input.surface != "article" || article_details_eligible(&input),
+                "waiting for complete article details"
+            );
+            Ok(())
+        })
+    };
+    let result = if let Err(error) = admission {
+        Err(error)
+    } else if super::insights::input_key(&input, settings) != claimed.input_hash {
         Err(anyhow::anyhow!(
             "captured route/preparation contract changed"
         ))
     } else {
-        let refresh = super::insights::run_pipeline(&mut input, auth, settings, cancel, db_path);
+        let refresh = super::insight_execution::slice(super::insights::run_pipeline(
+            &mut input, auth, settings, cancel, db_path,
+        ));
         tokio::pin!(refresh);
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
         let result = loop {
@@ -426,9 +682,16 @@ pub async fn run_refresh_slice(
     };
     let now = chrono::Utc::now().to_rfc3339();
     let mut store = crate::store::Store::open(db_path)?;
-    let output = match result {
+    let mut output = match result {
         Ok(output) => output,
         Err(error) => {
+            if error.is::<super::insight_execution::SliceYield>() {
+                let n=store.conn.execute("UPDATE argos_tasks SET state='queued',max_attempts=attempts+1,lease_owner='',lease_until='',updated_at=?4 WHERE id=?1 AND state='running' AND lease_owner=?2 AND lease_epoch=?3 AND julianday(lease_until)>julianday(?4)",params![claimed.id,claimed.owner,claimed.epoch,now])?;
+                ensure!(n == 1, "refresh lease lost before continuation");
+                store.conn.execute("UPDATE argos_attempts SET finished_at=?2,outcome='slice_complete' WHERE task_id=?1 AND finished_at=''",params![claimed.id,now])?;
+                crate::tasks::refresh_job_state(&store.conn, &claimed.job_id, &now)?;
+                return Ok(None);
+            }
             record_terminal_failure(
                 &store.conn,
                 &input.snapshot.owner_kind,
@@ -452,7 +715,11 @@ pub async fn run_refresh_slice(
                 &claimed,
                 crate::tasks::OperationKind::OtherLlm,
                 &crate::tasks::TaskError::new(
-                    crate::tasks::ErrorCategory::Unknown,
+                    error
+                        .downcast_ref::<crate::recon::model_exec::ModelOperationError>()
+                        .and_then(|e| e.category)
+                        .map(|c| c.task_category())
+                        .unwrap_or(crate::tasks::ErrorCategory::Unknown),
                     error.to_string(),
                 ),
                 &now,
@@ -460,6 +727,15 @@ pub async fn run_refresh_slice(
             return Err(error);
         }
     };
+    // Reduced and later repaired snapshots have distinct publication identities,
+    // while stage checkpoint identity remains independent of execution epoch.
+    input.snapshot.key = crate::nlp::cache::key(&serde_json::json!([input.snapshot.key, output]));
+    for inference in &mut output.inferences {
+        inference.snapshot_key = input.snapshot.key.clone();
+    }
+    for link in &mut output.links {
+        link.snapshot_key = input.snapshot.key.clone();
+    }
     if cancel.load(std::sync::atomic::Ordering::Acquire) {
         store.conn.execute("UPDATE insight_owner_state SET lifecycle='pending',last_error='cancelled; evidence dirty' WHERE owner_kind=?1 AND owner_id=?2 AND desired_generation=?3", params![input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation])?;
         crate::tasks::block_claimed(&store.conn, &claimed, "cancelled; evidence dirty", &now)?;
@@ -470,6 +746,25 @@ pub async fn run_refresh_slice(
     } else {
         "insufficient_evidence"
     };
+    if !output.readiness.publication_eligible {
+        let reason = output.readiness.gaps.join("; ");
+        record_terminal_failure(
+            &store.conn,
+            &input.snapshot.owner_kind,
+            &input.snapshot.owner_id,
+            input.snapshot.generation,
+            &reason,
+            &now,
+        )?;
+        crate::tasks::fail_claimed(
+            &store.conn,
+            &claimed,
+            crate::tasks::OperationKind::OtherLlm,
+            &crate::tasks::TaskError::new(crate::tasks::ErrorCategory::Unknown, &reason),
+            &now,
+        )?;
+        anyhow::bail!("replacement coverage incomplete: {reason}");
+    }
     let activated = publish_snapshot(
         &mut store.conn,
         &input.snapshot,
@@ -482,6 +777,13 @@ pub async fn run_refresh_slice(
         |tx, snapshot_id| {
             validate_live_evidence(tx, &input.snapshot)?;
             write_derivations(tx, snapshot_id, &input, &output, &now)?;
+            super::insight_execution::progress(
+                tx,
+                &input,
+                "published",
+                None,
+                Some(output.withheld_count),
+            )?;
             Ok(())
         },
     );
@@ -507,7 +809,11 @@ pub async fn run_refresh_slice(
                     &claimed,
                     crate::tasks::OperationKind::OtherLlm,
                     &crate::tasks::TaskError::new(
-                        crate::tasks::ErrorCategory::Unknown,
+                        error
+                            .downcast_ref::<crate::recon::model_exec::ModelOperationError>()
+                            .and_then(|e| e.category)
+                            .map(|c| c.task_category())
+                            .unwrap_or(crate::tasks::ErrorCategory::Unknown),
                         error.to_string(),
                     ),
                     &now,
@@ -529,6 +835,28 @@ pub async fn recover_refreshes(
     let ids = {
         let store = crate::store::Store::open(db_path)?;
         let now = chrono::Utc::now().to_rfc3339();
+        // Recover a visit whose body commit became durable before scheduling,
+        // and completion receipts even when no TUI listener survived.
+        let owners=store.conn.prepare("SELECT article_id FROM article_refresh_intents UNION SELECT article_id FROM intel_report_results WHERE completion_sequence>0")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for owner in owners {
+            let run:Option<String>=store.conn.query_row("SELECT run_id FROM atlas_articles WHERE article_id=?1 ORDER BY seen_at DESC LIMIT 1",[&owner],|r|r.get(0)).optional()?;
+            if let Some(article) =
+                run.and_then(|run| store.atlas_article(&run, &owner).ok().flatten())
+            {
+                if let Err(error) = schedule_article_refresh(&store, &article, settings, false) {
+                    let _ = crate::events::record_event(
+                        &store.conn,
+                        &crate::events::NewEvent {
+                            app: "intel".into(),
+                            event_type: "insight.recovery_error".into(),
+                            message: error.to_string(),
+                            resource_ref: owner,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
         crate::tasks::retire_atlas_insight_work(&store.conn, &now)?;
         store.conn.execute("UPDATE argos_attempts SET finished_at=?1,outcome='lease_expired',error_category='lease_expired' WHERE finished_at='' AND task_id IN (SELECT id FROM argos_tasks WHERE operation='insight_refresh' AND state='running' AND julianday(lease_until)<=julianday(?1))", [&now])?;
         store.conn.execute("UPDATE argos_tasks SET state='queued',lease_owner='',lease_until='',max_attempts=attempts+1,updated_at=?1 WHERE operation='insight_refresh' AND state='running' AND julianday(lease_until)<=julianday(?1)", [&now])?;
@@ -543,14 +871,65 @@ pub async fn recover_refreshes(
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
             break;
         }
-        if run_refresh_slice(db_path, &id, auth, settings, cancel)
-            .await?
-            .is_some()
-        {
-            completed += 1;
+        let captured = {
+            let store = crate::store::Store::open(db_path)?;
+            let json: String = store.conn.query_row(
+                "SELECT role_snapshot FROM argos_tasks WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )?;
+            serde_json::from_str::<crate::provider::SettingsFile>(&json)
+                .unwrap_or_else(|_| settings.clone())
+        };
+        match run_refresh_slice(db_path, &id, auth, &captured, cancel).await {
+            Ok(Some(_)) => completed += 1,
+            Ok(None) => {}
+            Err(error) => {
+                let store = crate::store::Store::open(db_path)?;
+                let _ = crate::events::record_event(
+                    &store.conn,
+                    &crate::events::NewEvent {
+                        app: "intel".into(),
+                        event_type: "insight.recovery_error".into(),
+                        message: error.to_string(),
+                        task_id: id,
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
     Ok(completed)
+}
+
+pub(super) fn validate_retry(conn: &Connection, input: &PipelineInput) -> Result<()> {
+    validate_live_evidence(conn, &input.snapshot)?;
+    ensure!(
+        desired_generation(conn, &input.snapshot.owner_kind, &input.snapshot.owner_id)?
+            == input.snapshot.generation,
+        "refresh superseded; cannot retry"
+    );
+    Ok(())
+}
+
+pub(super) fn validate_dispatch(conn: &Connection, input: &PipelineInput) -> Result<()> {
+    if input.snapshot.owner_kind != "article" {
+        return Ok(());
+    }
+    validate_live_evidence(conn, &input.snapshot)?;
+    ensure!(
+        desired_generation(conn, "article", &input.snapshot.owner_id)? == input.snapshot.generation,
+        "article refresh superseded before dispatch"
+    );
+    let job: String = conn.query_row(
+        "SELECT refresh_job_id FROM insight_owner_state WHERE owner_kind='article' AND owner_id=?1",
+        [&input.snapshot.owner_id],
+        |r| r.get(0),
+    )?;
+    crate::job_cleanup::ensure_admissible(conn, &job, &chrono::Utc::now().to_rfc3339())?;
+    let leased:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM argos_tasks WHERE job_id=?1 AND operation='insight_refresh' AND state='running' AND julianday(lease_until)>julianday('now'))",[job],|r|r.get(0))?;
+    ensure!(leased, "article refresh lease lost before dispatch");
+    Ok(())
 }
 
 fn validate_live_evidence(conn: &Connection, snapshot: &EvidenceSnapshot) -> Result<()> {
@@ -570,7 +949,15 @@ fn validate_live_evidence(conn: &Connection, snapshot: &EvidenceSnapshot) -> Res
         _ => anyhow::bail!("unsupported publication owner"),
     }
     for reference in &snapshot.source_refs {
-        if let Some(id) = reference.source_id.strip_prefix("call:") {
+        if let Some(id) = reference.source_id.strip_prefix("report:") {
+            let live: Option<(String,i64)> = conn.query_row("SELECT source_hash,completion_sequence FROM intel_report_results WHERE article_id=?1 AND job_id=?2 AND completion_sequence=(SELECT MAX(completion_sequence) FROM intel_report_results WHERE article_id=?1)",params![snapshot.owner_id,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            ensure!(
+                live.is_some_and(
+                    |(hash, sequence)| reference.revision == format!("{sequence}:{hash}")
+                ),
+                "report authority changed"
+            );
+        } else if let Some(id) = reference.source_id.strip_prefix("call:") {
             let id = id.split("#page").next().unwrap_or(id);
             let json: Option<String> = conn
                 .query_row(
@@ -596,6 +983,12 @@ fn validate_live_evidence(conn: &Connection, snapshot: &EvidenceSnapshot) -> Res
                 "article metadata revision changed"
             );
         } else if let Some(id) = reference.source_id.strip_prefix("body:") {
+            let report: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM intel_report_results WHERE article_id=?1)",
+                [&snapshot.owner_id],
+                |r| r.get(0),
+            )?;
+            ensure!(!report, "completed report supersedes article details");
             let version: Option<i64> = conn
                 .query_row(
                     "SELECT body_version FROM article_bodies WHERE id=?1",
@@ -639,6 +1032,9 @@ fn write_derivations(
     output: &PipelineOutput,
     now: &str,
 ) -> Result<()> {
+    if input.snapshot.owner_kind == "article" {
+        retire_article_associations(tx, &input.snapshot.owner_id, output)?;
+    }
     let mut items = Vec::new();
     for claim in &output.claims {
         items.push((
@@ -690,7 +1086,9 @@ fn write_derivations(
         items
     {
         let mut memory_id = None;
-        if input.save_insights {
+        let faithful = serde_json::from_str::<super::insights::Assessment>(&assessment)?.faithful()
+            && !refs.is_empty();
+        if input.save_insights && faithful {
             let owned_tombstone = |owners: Vec<String>| {
                 owners.is_empty()
                     || owners.contains(&input.snapshot.owner_id)
@@ -727,6 +1125,12 @@ fn write_derivations(
                     .optional()?;
                 let mid = existing.unwrap_or_else(|| format!("mem:{}", fingerprint));
                 tx.execute("INSERT OR IGNORE INTO memories(id,text,category,pinned,created_at,source_json) VALUES(?1,?2,'investigation',0,?3,?4)",params![mid,text,now,serde_json::to_string(&source)?])?;
+                if input.snapshot.owner_kind == "article" {
+                    let updated=tx.execute("UPDATE memories SET text=?2,source_json=?3 WHERE id=?1 AND json_extract(source_json,'$.app') IN ('article','atlas') AND NOT EXISTS(SELECT 1 FROM insight_sources WHERE fingerprint=?4)",params![mid,text,serde_json::to_string(&source)?,fingerprint])?;
+                    if updated > 0 {
+                        tx.execute("DELETE FROM insight_user_edits WHERE memory_id=?1", [&mid])?;
+                    }
+                }
                 if let Some(entity) = output.entities.iter().find(|e| e.id == subject) {
                     tx.execute("INSERT OR IGNORE INTO recon_entities(id,kind,namespace,canonical,label) VALUES(?1,?2,?1,?3,?4)",params![entity.id,entity.type_hint,entity.comparison_key,entity.original_forms.first().cloned().unwrap_or_default()])?;
                 }
@@ -749,7 +1153,7 @@ fn write_derivations(
             }
         }
         let derivation_id = format!("{snapshot_id}:{id}");
-        tx.execute("INSERT INTO insight_derivations(id,snapshot_id,memory_id,insight_kind,fingerprint,item_json,assessment_json,status,revision) VALUES(?1,?2,?3,?4,?5,?6,?7,'assessed',?8)",params![derivation_id,snapshot_id,memory_id,kind,fingerprint,item_json,assessment,crate::nlp::cache::hash(&text)])?;
+        tx.execute("INSERT INTO insight_derivations(id,snapshot_id,memory_id,insight_kind,fingerprint,item_json,assessment_json,status,revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?9,?8)",params![derivation_id,snapshot_id,memory_id,kind,fingerprint,item_json,assessment,crate::nlp::cache::hash(&text),if faithful {"assessed"} else {"rejected"}])?;
         for reference in refs {
             tx.execute("INSERT INTO insight_derivation_evidence(derivation_id,source_id,source_revision,evidence_json) VALUES(?1,?2,?3,?4)",params![derivation_id,reference.source_id,reference.revision,serde_json::to_string(&reference)?])?;
         }
@@ -771,13 +1175,86 @@ fn write_derivations(
             }
         }
     }
-    tx.execute("UPDATE insight_snapshots SET readiness_json=?2,model_versions_json=(SELECT json_group_array(json(route_json)) FROM insight_stage_checkpoints WHERE owner_kind=?3 AND owner_id=?4 AND generation=?5 AND state='completed') WHERE id=?1",params![snapshot_id,serde_json::json!({"readiness":output.readiness,"limit_reached":output.limit_reached,"partial_enumeration":output.partial_enumeration}).to_string(),input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation])?;
+    let publisher = tx.query_row("SELECT metadata_json FROM atlas_article_metadata WHERE article_id=?1 ORDER BY rowid DESC LIMIT 1",[&input.snapshot.owner_id],|r|r.get::<_,String>(0)).optional()?.and_then(|json|serde_json::from_str::<crate::atlas_metadata::ArticleMetadata>(&json).ok()).and_then(|m|m.publisher_prior).and_then(|p|crate::osint::SourceReliability::parse(&p.observation.reliability)).unwrap_or(crate::osint::SourceReliability::F);
+    let report = input.surface == "recon_report";
+    let rating = crate::intel_recon::EvidenceConfidence::estimate_for_source(
+        output,
+        output.readiness.publication_eligible,
+        publisher,
+        report,
+    );
+    tx.execute("UPDATE insight_snapshots SET readiness_json=?2,model_versions_json=(SELECT json_group_array(json(route_json)) FROM insight_stage_checkpoints WHERE owner_kind=?3 AND owner_id=?4 AND generation=?5 AND state='completed') WHERE id=?1",params![snapshot_id,serde_json::json!({"readiness":output.readiness,"limit_reached":output.limit_reached,"partial_enumeration":output.partial_enumeration,"item_gaps":output.item_gaps,"withheld_count":output.withheld_count,"rating":{"policy":"brief-rating-v2","input_mode":input.surface,"source_hash":crate::nlp::cache::key(&serde_json::json!(input.snapshot.source_refs)),"estimate":rating}}).to_string(),input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation])?;
     for link in &output.links {
         let left = &link.typed_endpoints[0];
         let right = &link.typed_endpoints[1];
         tx.execute("INSERT INTO insight_derivation_links(id,snapshot_id,left_kind,left_id,right_kind,right_id,relation,rationale,assessment_json,evidence_json,status,revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'assessed',?11)",params![format!("{snapshot_id}:{}",link.id),snapshot_id,left.kind,left.id,right.kind,right.id,link.relation,link.rationale,serde_json::to_string(&link.assessment)?,serde_json::to_string(&link.evidence_refs)?,crate::nlp::cache::hash(&serde_json::to_string(link)?)])?;
     }
+    if input.snapshot.owner_kind == "article" {
+        crate::job_cleanup::cleanup_batch(tx, chrono::Utc::now())?;
+    }
     crate::store::bump_memories_changed(tx)?;
+    Ok(())
+}
+
+/// Retire associations, not the historical snapshot. Only exclusively owned
+/// canonical memories are removed; other articles, Recon and manual rows live.
+fn retire_article_associations(
+    conn: &Connection,
+    article: &str,
+    output: &PipelineOutput,
+) -> Result<()> {
+    let retained: std::collections::HashSet<String> = output
+        .claims
+        .iter()
+        .filter(|claim| claim.assessment.faithful())
+        .map(super::insights::claim_fingerprint)
+        .chain(
+            output
+                .inferences
+                .iter()
+                .map(super::insights::inference_fingerprint),
+        )
+        .collect();
+    let rows = conn.prepare("SELECT DISTINCT c.fingerprint,c.memory_id FROM insight_claims c WHERE c.fingerprint IN (SELECT d.fingerprint FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id WHERE s.owner_kind IN ('article','atlas') AND s.owner_id=?1) OR c.fingerprint IN (SELECT fingerprint FROM insight_sources WHERE call_id=?1)")?
+        .query_map([article],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    conn.execute("DELETE FROM insight_sources WHERE answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind IN ('article','atlas') AND owner_id=?1) OR call_id=?1",[article])?;
+    conn.execute("UPDATE insight_derivation_links SET status='retired' WHERE snapshot_id IN (SELECT id FROM insight_snapshots WHERE owner_kind IN ('article','atlas') AND owner_id=?1)",[article])?;
+    conn.execute("UPDATE insight_derivations SET status='retired' WHERE snapshot_id IN (SELECT id FROM insight_snapshots WHERE owner_kind IN ('article','atlas') AND owner_id=?1)",[article])?;
+    for (fp, memory) in rows {
+        let shared: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM insight_sources WHERE fingerprint=?1) OR EXISTS(SELECT 1 FROM insight_derivations d JOIN insight_owner_state h ON h.active_snapshot_id=d.snapshot_id WHERE d.memory_id=?2 AND d.status='assessed' AND h.owner_id<>?3)",params![fp,memory,article],|r|r.get(0))?;
+        if shared {
+            continue;
+        }
+        conn.execute(
+            "DELETE FROM insight_relations WHERE left_fingerprint=?1 OR right_fingerprint=?1",
+            [&fp],
+        )?;
+        if retained.contains(&fp) {
+            continue;
+        }
+        let edited: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM insight_user_edits WHERE memory_id=?1)",
+            [&memory],
+            |r| r.get(0),
+        )?;
+        if edited {
+            continue;
+        }
+        let owned: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1 AND json_extract(source_json,'$.app') IN ('article','atlas'))",[&memory],|r|r.get(0))?;
+        if owned {
+            conn.execute(
+                "DELETE FROM insight_user_edits WHERE memory_id=?1",
+                [&memory],
+            )?;
+            conn.execute("DELETE FROM insight_claims WHERE fingerprint=?1", [&fp])?;
+            conn.execute(
+                "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
+                [&memory],
+            )?;
+            conn.execute("DELETE FROM memories WHERE id=?1", [&memory])?;
+            crate::store::enqueue_memory_index_on(conn, &[memory], None)?;
+        }
+    }
     Ok(())
 }
 
@@ -858,6 +1335,7 @@ where
         "Atlas insight publication retired"
     );
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    crate::job_cleanup::ensure_admissible(&tx, &fence.task.job_id, fence.now)?;
     if desired_generation(&tx, &snapshot.owner_kind, &snapshot.owner_id)? != snapshot.generation
         || snapshot.key != fence.live_input_key
     {
@@ -1037,6 +1515,7 @@ mod tests {
             }],
         };
         let claim = SourceClaim {
+            support_receipts: Vec::new(),
             id: "claim:fixture".into(),
             subject_ref: entity.id.clone(),
             predicate: "opened".into(),
@@ -1111,6 +1590,38 @@ mod tests {
         assert!(
             store.get_memory(&mid).unwrap().is_some(),
             "an independent owner was globally suppressed"
+        );
+    }
+
+    #[test]
+    fn report_replacement_retires_associations_but_preserves_removed_user_edits() {
+        let store = crate::store::Store::memory().unwrap();
+        store.conn.execute_batch("INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES('edited','User correction','investigation',0,'fixture','{\"app\":\"article\",\"conversation_id\":\"owner\",\"message_id\":null,\"reference\":null}'); INSERT INTO insight_user_edits(memory_id) VALUES('edited'); INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES('edit-fp','edited','Acme','announced','project','investigation','claim',0,'fixture','fixture');").unwrap();
+        store.conn.execute("INSERT INTO insight_snapshots(id,owner_kind,owner_id,generation,input_key,inputs_json,entities_json,coverage_json,readiness_json,contract_version,policy_version,created_at) VALUES('previous','article','owner',1,'key','{}','[]','[]','{}','fixture','fixture','fixture')",[]).unwrap();
+        store.conn.execute("INSERT INTO insight_derivations(id,snapshot_id,fingerprint,memory_id,insight_kind,status,revision,item_json,assessment_json) VALUES('derivation','previous','edit-fp','edited','claim','assessed','revision','{}','{}')",[]).unwrap();
+        retire_article_associations(&store.conn, "owner", &PipelineOutput::default()).unwrap();
+        assert_eq!(
+            store.get_memory("edited").unwrap().unwrap().text,
+            "User correction"
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT status FROM insight_derivations WHERE id='derivation'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "retired"
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM insight_user_edits", [], |r| r
+                    .get::<_, usize>(0))
+                .unwrap(),
+            1
         );
     }
 

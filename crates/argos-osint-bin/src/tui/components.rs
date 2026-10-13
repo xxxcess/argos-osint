@@ -207,6 +207,29 @@ pub fn action_rects(area: Rect, labels: &[&str]) -> Vec<Rect> {
         .collect()
 }
 
+/// Measured bordered ActionBar buttons wrap as a unit. Paint, focus and pointer
+/// registration consume these same rectangles, including compact layouts.
+pub fn wrapped_action_rects(area: Rect, labels: &[&str], row_height: u16) -> Vec<Rect> {
+    let row_height = row_height.max(1);
+    let mut x = area.x;
+    let mut y = area.y;
+    labels
+        .iter()
+        .map(|label| {
+            let width = (Line::raw(*label).width() as u16)
+                .saturating_add(4)
+                .min(area.width);
+            if x > area.x && x.saturating_add(width) > area.right() {
+                x = area.x;
+                y = y.saturating_add(row_height);
+            }
+            let rect = Rect::new(x, y, width, row_height.min(area.bottom().saturating_sub(y)));
+            x = x.saturating_add(width);
+            rect
+        })
+        .collect()
+}
+
 /// DetailTable fallback preserves every value in measured labelled records.
 /// Ratatui's text wrapper operates on graphemes and display cells.
 pub fn detail_records(value: &serde_json::Value, width: u16) -> Vec<Line<'static>> {

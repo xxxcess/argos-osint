@@ -4,8 +4,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use rusqlite::OptionalExtension;
-
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
@@ -100,9 +98,8 @@ pub async fn run_job_slice(
                 .any(|t| matches!(t.status.as_str(), "pending" | "running" | "interrupted"))
         };
         if terminal {
-            terminal_refresh(&runtime, &job, on_event).await?;
             let store = Store::open(&runtime.db_path)?;
-            finalize_job_state(&store, &job.id, on_event)?;
+            finalize_job_state(&store, &job.id, &runtime.settings, on_event)?;
         }
         return Ok(false);
     };
@@ -138,12 +135,11 @@ pub async fn run_job_slice(
         "inventory" => run_inventory(&runtime, &job).await,
         "collect" => run_collect(&runtime, &job, &task.id).await,
         "assess" => run_assess(&runtime, &job).await,
-        "refresh_insights" => run_refresh(&runtime, &job, on_event).await,
+        "refresh_insights" => Ok("retired pre-report refresh".into()),
         "synthesize" => run_synthesize(&runtime, &job, &task.section_key, on_event).await,
         "finalize" => {
-            terminal_refresh(&runtime, &job, on_event).await?;
             let store = Store::open(&runtime.db_path)?;
-            run_finalize(&store, &job, on_event)
+            run_finalize(&store, &job, &runtime.settings, &task, on_event)
         }
         other => Err(anyhow!("unknown task type {other}")),
     };
@@ -171,15 +167,17 @@ pub async fn run_job_slice(
                     )
                 })
                 .count() as i64;
-            store.update_report_job(
-                &job.id,
-                "running",
-                &format!("done {}", task.task_type),
-                done,
-                el_done,
-                &job.warning,
-                "",
-            )?;
+            if task.task_type != "finalize" {
+                store.update_report_job(
+                    &job.id,
+                    "running",
+                    &format!("done {}", task.task_type),
+                    done,
+                    el_done,
+                    &job.warning,
+                    "",
+                )?;
+            }
             Ok(true)
         }
         Err(err) => {
@@ -496,6 +494,113 @@ async fn run_assess(
     };
     for element in &elements {
         let matching = claim_relevant_evidence(&element.id, &element.original_text, &evidence);
+        let mut receipts = Vec::new();
+        for item in &matching {
+            let state = DecisionState::new()
+                .with_candidate(json!({"claim":element.original_text}))
+                .with_evidence_passage(
+                    &item.id,
+                    &item.source_url,
+                    &item.source_domain,
+                    &item.excerpt,
+                    Some("Assess only this retained passage; a mention is not support.".into()),
+                );
+            let operation_id = format!(
+                "{}:{}:receipt:{}:{}",
+                job.id, job.generation, element.id, item.id
+            );
+            let scope =
+                crate::recon::model_exec::OperationScope::new(&operation_id, "claim_assessor")
+                    .with_generation(job.generation as u32);
+            if let Ok((decision, outcomes)) = DecisionService::new()
+                .evaluate_shared(
+                    &runtime.auth,
+                    &runtime.settings,
+                    &scope,
+                    &template_claim_relation(),
+                    &state,
+                    &DecisionPolicy::default(),
+                    &runtime.cancel,
+                    Some(&runtime.db_path),
+                )
+                .await
+            {
+                if outcomes
+                    .get("claim_relation")
+                    .is_some_and(|outcome| outcome.is_approved())
+                {
+                    if let Some(answer) = decision
+                        .answers
+                        .get("claim_relation")
+                        .filter(|a| matches!(a.label.as_str(), "supports" | "contradicts"))
+                    {
+                        use crate::investigation::insights::{
+                            EvidenceLocation, EvidenceRef, SupportReceipt,
+                        };
+                        use rusqlite::OptionalExtension;
+                        let store = Store::open(&runtime.db_path)?;
+                        let hash = crate::nlp::cache::artifact(&store.conn, &item.excerpt)?;
+                        let root = url::Url::parse(&item.source_url)
+                            .ok()
+                            .map(|mut u| {
+                                u.set_fragment(None);
+                                u.to_string()
+                            })
+                            .unwrap_or_default();
+                        let mut reference = EvidenceRef {
+                            source_id: format!("evidence:{}", item.id),
+                            revision: hash.clone(),
+                            artifact_hash: hash,
+                            acquisition_id: item.call_id.clone(),
+                            origin_root: root,
+                            url: item.source_url.clone(),
+                            published_at: Some(item.source_date.clone()),
+                            retrieved_at: item.retrieved_at.clone(),
+                            location: EvidenceLocation::Range(crate::nlp::Span {
+                                start_byte: 0,
+                                end_byte: item.excerpt.len(),
+                            }),
+                        };
+                        // Preserve known origin/full-artifact lineage, rather
+                        // than treating different excerpts/routes as roots.
+                        let call:Option<String>=store.conn.query_row("SELECT result_json FROM osint_calls WHERE id=?1 AND status='completed'",[&item.call_id],|r|r.get(0)).optional()?;
+                        if let Some(result) = call.and_then(|json| {
+                            serde_json::from_str::<crate::osint::ToolResult>(&json).ok()
+                        }) {
+                            for retained in crate::investigation::insights::evidence_from_tools(
+                                &store.conn,
+                                &[(item.call_id.clone(), result)],
+                            )? {
+                                if let Some(start) = retained
+                                    .text
+                                    .find(&item.excerpt)
+                                    .filter(|_| !item.excerpt.is_empty())
+                                {
+                                    reference = crate::investigation::insights::EvidenceRef {
+                                        location: EvidenceLocation::Range(crate::nlp::Span {
+                                            start_byte: start,
+                                            end_byte: start + item.excerpt.len(),
+                                        }),
+                                        ..retained.reference
+                                    };
+                                    break;
+                                }
+                            }
+                        }
+                        receipts.push(SupportReceipt {
+                            source: reference,
+                            relation: answer.label.clone(),
+                            threshold_passed: true,
+                            lineage: operation_id.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        {
+            let store = Store::open(&runtime.db_path)?;
+            store.conn.execute("INSERT OR REPLACE INTO intel_report_support_receipts(job_id,generation,element_id,assertion,receipts_json) VALUES(?1,?2,?3,?4,?5)",rusqlite::params![job.id,job.generation,element.id,element.original_text,serde_json::to_string(&receipts)?])?;
+        }
         let mut state = DecisionState::new().with_candidate(json!({"claim":element.original_text}));
         for item in &matching {
             state = state.with_evidence_passage(
@@ -548,169 +653,6 @@ async fn run_assess(
     let store = Store::open(&runtime.db_path)?;
     store.update_shared_assessment(&job.investigation_id,&json!({"elements_assessed":elements.len(),"evidence":evidence.len(),"readiness":"refresh_pending"}).to_string())?;
     Ok(format!("assessed:{}", elements.len()))
-}
-
-async fn terminal_refresh(
-    runtime: &JobRuntime,
-    job: &super::persist::IntelReportJobRow,
-    on_event: &mut impl FnMut(IntelReportEvent),
-) -> Result<()> {
-    let changed = {
-        let store = Store::open(&runtime.db_path)?;
-        let article = store
-            .atlas_article(&runtime.run_id, &job.article_id)?
-            .ok_or_else(|| anyhow!("article missing"))?;
-        let generation = crate::investigation::insight_persist::desired_generation(
-            &store.conn,
-            "article",
-            &job.article_id,
-        )?;
-        let current = crate::investigation::insight_persist::article_input(
-            &store,
-            &article,
-            generation,
-            &runtime.article_title,
-            true,
-        )?;
-        let old:Option<String>=store.conn.query_row("SELECT s.inputs_json FROM insight_owner_state h JOIN insight_snapshots s ON s.id=h.active_snapshot_id WHERE h.owner_kind='article' AND h.owner_id=?1",[&job.article_id],|r|r.get(0)).optional()?;
-        match old {
-            Some(old) => {
-                let previous: crate::investigation::insights::EvidenceSnapshot =
-                    serde_json::from_str(&old)?;
-                current
-                    .snapshot
-                    .source_refs
-                    .iter()
-                    .any(|source| !previous.source_refs.contains(source))
-            }
-            None => !current.evidence.is_empty(),
-        }
-    };
-    if changed && !runtime.cancel.load(Ordering::Acquire) {
-        run_refresh(runtime, job, on_event).await?;
-    } else {
-        let store = Store::open(&runtime.db_path)?;
-        let failed = store
-            .intel_report_tasks(&job.id)?
-            .iter()
-            .any(|t| t.status == "failed");
-        if failed {
-            let generation = serde_json::from_str::<serde_json::Value>(&job.budget_json)?
-                .get("insight_generation")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
-            crate::investigation::insight_persist::record_terminal_failure(
-                &store.conn,
-                "article",
-                &job.article_id,
-                generation,
-                "investigation finished with unchanged evidence and failed tasks",
-                &chrono::Utc::now().to_rfc3339(),
-            )?;
-        }
-    }
-    Ok(())
-}
-
-async fn run_refresh(
-    runtime: &JobRuntime,
-    job: &super::persist::IntelReportJobRow,
-    on_event: &mut impl FnMut(IntelReportEvent),
-) -> Result<String> {
-    let task = {
-        let store = Store::open(&runtime.db_path)?;
-        let article = store
-            .atlas_article(&runtime.run_id, &job.article_id)?
-            .ok_or_else(|| anyhow!("article missing"))?;
-        let generation = crate::investigation::insight_persist::desired_generation(
-            &store.conn,
-            "article",
-            &job.article_id,
-        )?;
-        let captured = serde_json::from_str::<serde_json::Value>(&job.budget_json)?
-            .get("insight_generation")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(generation as u64) as u32;
-        if captured != generation {
-            return Ok("superseded insight generation".into());
-        }
-        let mut input = crate::investigation::insight_persist::article_input(
-            &store,
-            &article,
-            generation,
-            &runtime.article_title,
-            true,
-        )?;
-        let collections_complete = store
-            .intel_report_tasks(&job.id)?
-            .iter()
-            .filter(|t| t.task_type == "collect")
-            .all(|t| t.status == "completed");
-        input.required_tasks_complete = collections_complete
-            && store
-                .intel_elements(&job.investigation_id)?
-                .iter()
-                .all(|e| {
-                    matches!(
-                        e.status.as_str(),
-                        "assessed" | "unresolved" | "superseded" | "excluded"
-                    )
-                });
-        crate::investigation::insight_persist::enqueue_refresh(
-            &store.conn,
-            &mut input,
-            &runtime.settings,
-            &chrono::Utc::now().to_rfc3339(),
-        )?
-    };
-    let result = crate::investigation::insight_persist::run_refresh_slice(
-        &runtime.db_path,
-        &task,
-        &runtime.auth,
-        &runtime.settings,
-        &runtime.cancel,
-    )
-    .await;
-    let result = match result {
-        Ok(result) => result,
-        Err(error) => {
-            if runtime.cancel.load(Ordering::Acquire) {
-                return Err(error);
-            }
-            let store = Store::open(&runtime.db_path)?;
-            let mut withheld = crate::investigation::insights::PipelineOutput::default();
-            withheld
-                .readiness
-                .gaps
-                .push(format!("Insight refresh blocked: {error}"));
-            store.update_shared_assessment(
-                &job.investigation_id,
-                &serde_json::to_string(&withheld)?,
-            )?;
-            return Ok("insights_blocked; prior snapshot retained".into());
-        }
-    };
-    if result.is_some() {
-        on_event(IntelReportEvent::InsightsUpdated {
-            article_id: job.article_id.clone(),
-            job_id: job.id.clone(),
-            generation: job.generation,
-        });
-    }
-    let store = Store::open(&runtime.db_path)?;
-    let output = crate::investigation::insight_persist::active_output(
-        &store.conn,
-        "article",
-        &job.article_id,
-    )?
-    .unwrap_or_default();
-    store.update_shared_assessment(&job.investigation_id, &serde_json::to_string(&output)?)?;
-    Ok(if output.readiness.publication_eligible {
-        "insights_updated"
-    } else {
-        "insufficient_evidence"
-    }
-    .into())
 }
 
 async fn run_synthesize(
@@ -819,15 +761,34 @@ The writing targets are recommendations—soft limits that should expand when ne
 fn run_finalize(
     store: &Store,
     job: &super::persist::IntelReportJobRow,
+    settings: &SettingsFile,
+    task: &super::persist::IntelReportTaskRow,
     on_event: &mut impl FnMut(IntelReportEvent),
 ) -> Result<String> {
-    finalize_job_state(store, &job.id, on_event)?;
+    finalize_job_state_fenced(
+        store,
+        &job.id,
+        settings,
+        Some((&task.id, task.lease_epoch)),
+        on_event,
+    )?;
     Ok("finalized".into())
 }
 
-fn finalize_job_state(
+pub(super) fn finalize_job_state(
     store: &Store,
     job_id: &str,
+    settings: &SettingsFile,
+    on_event: &mut impl FnMut(IntelReportEvent),
+) -> Result<()> {
+    finalize_job_state_fenced(store, job_id, settings, None, on_event)
+}
+
+fn finalize_job_state_fenced(
+    store: &Store,
+    job_id: &str,
+    settings: &SettingsFile,
+    lease: Option<(&str, i64)>,
     on_event: &mut impl FnMut(IntelReportEvent),
 ) -> Result<()> {
     let job = store
@@ -853,22 +814,66 @@ fn finalize_job_state(
         .iter()
         .filter(|s| s.status == "draft" && !s.markdown.is_empty())
         .count() as i64;
-    let state = if sections_done == job.sections_total && coverage_complete(&elements) {
+    let state = if sections_done == job.sections_total
+        && !failed_tasks
+        && (elements.is_empty() || coverage_complete(&elements))
+    {
         "completed"
     } else if failed_tasks || sections_done > 0 || drafts_done > 0 {
         "partial"
     } else {
         "failed"
     };
-    store.update_report_job(
-        job_id,
-        state,
-        "finished",
-        sections_done,
-        el_done,
-        &job.warning,
-        &job.error,
-    )?;
+    store.conn.execute_batch("BEGIN IMMEDIATE")?;
+    let commit = (|| -> Result<()> {
+        if let Some((id, epoch)) = lease {
+            let valid:bool=store.conn.query_row("SELECT EXISTS(SELECT 1 FROM intel_report_tasks WHERE id=?1 AND lease_epoch=?2 AND status='running' AND julianday(lease_until)>julianday('now'))",rusqlite::params![id,epoch],|r|r.get(0))?;
+            anyhow::ensure!(valid, "report finalization lease lost");
+        }
+        anyhow::ensure!(
+            !runtime_job_retired(store, &job.id)?,
+            "report retired before finalization"
+        );
+        store.update_report_job(
+            job_id,
+            state,
+            "finished",
+            sections_done,
+            el_done,
+            &job.warning,
+            &job.error,
+        )?;
+        if state == "completed" {
+            let exists: bool = store.conn.query_row("SELECT EXISTS(SELECT 1 FROM intel_report_results WHERE job_id=?1 AND generation=?2)", rusqlite::params![job.id,job.generation], |r|r.get(0))?;
+            if !exists {
+                let sequence: i64 = store.conn.query_row("SELECT COALESCE(MAX(completion_sequence),0)+1 FROM intel_report_results WHERE article_id=?1",[&job.article_id],|r|r.get(0))?;
+                let completed_at = chrono::Utc::now().to_rfc3339();
+                let text = sections
+                    .iter()
+                    .map(|s| format!("## {}\n\n{}", s.title, s.markdown))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let receipts=store.conn.prepare("SELECT assertion,receipts_json FROM intel_report_support_receipts WHERE job_id=?1 AND generation=?2 ORDER BY element_id")?.query_map(rusqlite::params![job.id,job.generation],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                let details = json!({"contract":"report-details-v1","job_id":job.id,"article_id":job.article_id,"mode":job.mode,"scope":job.settings_json,"revision":job.revision,"generation":job.generation,"completion_sequence":sequence,"completed_at":completed_at,"job":job,"sections":sections,"text":text,"support_receipts":receipts,"assessment":store.intel_investigation_by_id(&job.investigation_id)?.map(|i|i.shared_assessment_json)}).to_string();
+                store.conn.execute("INSERT INTO intel_report_results(job_id,generation,article_id,completion_sequence,source_hash,details_json,completed_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![job.id,job.generation,job.article_id,sequence,crate::nlp::cache::hash(&details),details,completed_at])?;
+            }
+            if let Some(article) =
+                store.atlas_article(&runtime_run_id(store, &job.article_id)?, &job.article_id)?
+            {
+                crate::investigation::insight_persist::schedule_article_refresh(
+                    store, &article, settings, false,
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    match commit {
+        Ok(()) => store.conn.execute_batch("COMMIT")?,
+        Err(error) => {
+            store.conn.execute_batch("ROLLBACK")?;
+            return Err(error);
+        }
+    }
     on_event(IntelReportEvent::JobDone {
         article_id: job.article_id,
         job_id: job.id,
@@ -876,6 +881,18 @@ fn finalize_job_state(
         generation: job.generation,
     });
     Ok(())
+}
+
+fn runtime_run_id(store: &Store, article_id: &str) -> Result<String> {
+    Ok(store.conn.query_row(
+        "SELECT run_id FROM atlas_articles WHERE article_id=?1 ORDER BY seen_at DESC LIMIT 1",
+        [article_id],
+        |r| r.get(0),
+    )?)
+}
+
+fn runtime_job_retired(store: &Store, job: &str) -> Result<bool> {
+    Ok(store.conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM intel_report_jobs WHERE id=?1 AND state NOT IN ('cancelled','paused','failed') AND julianday(started_at)>=julianday('now')-3 AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=?1))",[job],|r|r.get(0))?)
 }
 
 fn cancel_if_needed(store: &Store, job_id: &str) -> Result<()> {

@@ -2903,6 +2903,14 @@ pub fn page(app: &mut App, direction: i32) {
             if app.focus == Target::IntelLeftColumn {
                 let max = intel_extracted_scroll_max(app);
                 nudge(&mut app.scrolls.intel_extracted, direction * 6, max);
+            } else if app.focus == Target::IntelFullArticle {
+                let max = intel_full_scroll_max(app);
+                let before = app.scrolls.intel_full;
+                nudge(&mut app.scrolls.intel_full, direction * 6, max);
+                if before == app.scrolls.intel_full {
+                    let max = intel_brief_scroll_max(app);
+                    nudge(&mut app.scrolls.intel_brief, direction * 6, max);
+                }
             } else {
                 let max = intel_brief_scroll_max(app);
                 nudge(&mut app.scrolls.intel_brief, direction * 6, max);
@@ -7343,7 +7351,6 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             &["Extracted", "Reader / BLUF", "Context / jobs"],
         );
     }
-    let insights_loading = intel_insights_loading(app);
     app.layout
         .borrow_mut()
         .register(Target::IntelLeftColumn, left);
@@ -7399,31 +7406,15 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 0,
             );
         }
-        // 3. actors
-        if layout.actors_loading {
-            let phase = if intel_insights_loading(app) {
-                "Extracting actors"
-            } else {
-                "Reviewing actors"
-            };
-            draw_clipped_intel_loading(
-                frame,
-                left,
-                layout.actors,
-                " actors ",
-                phase,
-                detail.as_deref(),
-            );
-        } else {
-            draw_clipped_md_pane(
-                frame,
-                left,
-                layout.actors,
-                " actors ",
-                &layout.actors_lines,
-                0,
-            );
-        }
+        // Metadata Actors remain visible throughout analytical refresh.
+        draw_clipped_md_pane(
+            frame,
+            left,
+            layout.actors,
+            &format!(" actors · {} ", layout.actor_count),
+            &layout.actors_lines,
+            0,
+        );
         // 4. links
         if layout.links_loading {
             let phase = if intel_insights_loading(app) {
@@ -7517,9 +7508,33 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 frame,
                 center,
                 layout.full,
-                " full article ",
-                &layout.full_lines,
+                if matches!(
+                    app.focus,
+                    Target::IntelFullArticle | Target::Button(ButtonId::IntelBodyMore)
+                ) {
+                    " full article • focused "
+                } else {
+                    " full article "
+                },
+                &layout.full_lines[..layout.full_lines.len().min(
+                    app.scrolls.intel_full.min(layout.full_scroll_max) as usize + layout.full_room,
+                )],
                 app.scrolls.intel_full.min(layout.full_scroll_max),
+            );
+        }
+        if let Some((rect, _)) = intersect_abs(center, layout.full) {
+            app.layout
+                .borrow_mut()
+                .register(Target::IntelFullArticle, rect);
+        }
+        if let Some(more) = layout.full_more {
+            draw_clipped_button(
+                frame,
+                app,
+                center,
+                more,
+                ButtonId::IntelBodyMore,
+                "See more",
             );
         }
         draw_clipped_button(
@@ -7553,26 +7568,15 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let right_rows = intel_briefing_right_rows(app, right);
-    if insights_loading {
-        draw_intel_section_loading(
-            frame,
-            right_rows[0],
-            " assessment ",
-            "Updating assessment",
-            app,
-        );
-    } else {
-        draw_intel_assessment(frame, app, right_rows[0]);
-    }
-    draw_intel_tags(frame, article, right_rows[1]);
+    draw_intel_tags(frame, article, right_rows[0]);
     super::map::draw_country_mini_map(
         frame,
-        right_rows[2],
+        right_rows[1],
         &article.country,
         article.temperature,
         "Country",
     );
-    draw_intel_jobs_pane(frame, app, right_rows[3]);
+    draw_intel_jobs_pane(frame, app, right_rows[2]);
 }
 
 /// Brief article section: the image occupies a left column beside the brief
@@ -7625,6 +7629,8 @@ struct IntelCenterLayout {
     brief_text: AbsRect,
     reload: AbsRect,
     full: AbsRect,
+    full_more: Option<AbsRect>,
+    full_room: usize,
     reports_btn: AbsRect,
     reports: AbsRect,
     full_report_btn: AbsRect,
@@ -7741,7 +7747,15 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
 
     let full_lines = intel_brief_full_lines(app, inner_w);
     let full_inner = full_h.saturating_sub(2).max(1);
-    let full_scroll_max = full_lines.len().saturating_sub(full_inner as usize) as u16;
+    let has_more = !intel_body_loading(app)
+        && full_lines
+            .len()
+            .saturating_sub(app.scrolls.intel_full as usize)
+            > full_inner as usize;
+    let full_room = full_inner
+        .saturating_sub(if has_more { ACTION_H } else { 0 })
+        .max(1);
+    let full_scroll_max = full_lines.len().saturating_sub(full_room as usize) as u16;
 
     let reports_lines = intel_brief_reports_lines(app, inner_w);
     let reports_h = (reports_lines.len() as u16)
@@ -7788,6 +7802,14 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     let reload = abs_rect(viewport.x, y, viewport.width, ACTION_H);
     y += i32::from(ACTION_H);
     let full = abs_rect(viewport.x, y, viewport.width, full_h);
+    let full_more = has_more.then(|| {
+        abs_rect(
+            viewport.x + 1,
+            y + i32::from(full_h.saturating_sub(ACTION_H + 1)),
+            viewport.width.saturating_sub(2),
+            ACTION_H,
+        )
+    });
     y += i32::from(full_h);
     let reports_btn = abs_rect(viewport.x, y, viewport.width, recon_h);
     y += i32::from(recon_h);
@@ -7801,6 +7823,8 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
         brief_text,
         reload,
         full,
+        full_more,
+        full_room: full_room as usize,
         reports_btn,
         reports,
         full_report_btn,
@@ -7820,7 +7844,7 @@ pub fn intel_brief_scroll_max(app: &App) -> u16 {
         .unwrap_or(0)
 }
 
-fn intel_full_scroll_max(app: &App) -> u16 {
+pub(super) fn intel_full_scroll_max(app: &App) -> u16 {
     let body = chrome(app.screen, app).body;
     let (_left, center, _right) = intel_briefing_areas(app, body);
     intel_center_layout(app, center)
@@ -7840,14 +7864,7 @@ fn draw_clipped_md_pane(
         return;
     };
     frame.render_widget(Block::default().style(theme::text()), vis);
-    if title.trim() == "full article" {
-        frame.render_widget(
-            Paragraph::new(title).style(theme::dim()),
-            Rect::new(vis.x, vis.y, vis.width, 1),
-        );
-    } else {
-        stroke_clipped_box(frame, viewport, area, title);
-    }
+    stroke_clipped_box(frame, viewport, area, title);
 
     let inner = AbsRect {
         x: area.x.saturating_add(1),
@@ -7876,8 +7893,18 @@ fn stroke_clipped_box(frame: &mut Frame, viewport: Rect, area: AbsRect, title: &
     if area.width < 2 || area.height < 2 {
         return;
     }
-    let border = Style::default().fg(theme::BORDER).bg(theme::BG);
-    let title_style = theme::dim();
+    let border = Style::default()
+        .fg(if title.contains("• focused") {
+            theme::ACCENT
+        } else {
+            theme::BORDER
+        })
+        .bg(theme::BG);
+    let title_style = if title.contains("• focused") {
+        theme::accent()
+    } else {
+        theme::dim()
+    };
     let buf = frame.buffer_mut();
     let left = area.x;
     let right = area.x.saturating_add(area.width.saturating_sub(1));
@@ -7974,12 +8001,11 @@ fn draw_clipped_button(
 fn intel_briefing_right_rows(app: &App, right: Rect) -> Vec<Rect> {
     // Map must be at least 30% of total terminal height.
     let map_floor = term_pct_height(app, 0.30, 8);
-    let reserved = 8u16.saturating_add(3).saturating_add(4);
+    let reserved = 3u16.saturating_add(4);
     let map_h = map_floor.min(right.height.saturating_sub(reserved)).max(8);
     split_vertical(
         right,
         [
-            Constraint::Length(8),
             Constraint::Length(3),
             Constraint::Length(map_h),
             Constraint::Min(4),
@@ -8059,7 +8085,7 @@ struct IntelExtractedLayout {
     links_lines: Vec<Line<'static>>,
     claims_loading: bool,
     inferences_loading: bool,
-    actors_loading: bool,
+    actor_count: usize,
     links_loading: bool,
     stack_scroll_max: u16,
 }
@@ -8071,14 +8097,42 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     }
     let inner_w = viewport.width.saturating_sub(2).max(1) as usize;
     let confidence_lines = intel_confidence_lines(app, inner_w);
-    let buckets = intel_recon::bucket_extracted_with_explanations(
+    let mut buckets = intel_recon::bucket_extracted_with_explanations(
         &app.intel_claims,
         &app.intel_relations,
         &app.intel_link_explanations,
     );
 
+    let grounded = std::mem::take(&mut buckets.actors);
+    buckets.actors = app
+        .intel_actors
+        .iter()
+        .map(|actor| {
+            format!(
+                "{} · {} · {}",
+                actor.display_name,
+                actor.type_hint,
+                if actor.mentions.is_empty() {
+                    "Grounded in current source"
+                } else {
+                    "Mentioned in title/description"
+                }
+            )
+        })
+        .collect();
+    for actor in grounded {
+        if !app
+            .intel_actors
+            .iter()
+            .any(|candidate| candidate.display_name.eq_ignore_ascii_case(&actor))
+        {
+            buckets
+                .actors
+                .push(format!("{actor} · grounded in current source"));
+        }
+    }
     let claims_md = extracted_claims_markdown(&buckets.facts);
-    let inferences_md = if buckets.inferences.is_empty() {
+    let mut inferences_md = if buckets.inferences.is_empty() {
         format!(
             "_{} · inferences withheld until evidence is ready_",
             app.intel_insight_lifecycle.replace('_', " ")
@@ -8086,7 +8140,14 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     } else {
         extracted_inferences_markdown(&buckets.inferences)
     };
-    let actors_md = extracted_actors_markdown(&buckets.actors);
+    if let Some(progress) = &app.intel_extraction_progress {
+        inferences_md = format!("{}\n\n{inferences_md}", progress.lines().join("\n"));
+    }
+    let actors_md = if buckets.actors.is_empty() {
+        format!("_NLP {}_", app.intel_actor_state)
+    } else {
+        extracted_actors_markdown(&buckets.actors)
+    };
     let mut links_md = extracted_links_markdown(&buckets.links);
     if !buckets.links.is_empty()
         && app
@@ -8113,7 +8174,6 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let insights_loading = intel_insights_loading(app);
     let claims_loading = insights_loading && buckets.facts.is_empty();
     let inferences_loading = insights_loading && buckets.inferences.is_empty();
-    let actors_loading = insights_loading || app.intel_actors_reviewing.contains(&article.id);
     let links_loading = insights_loading || app.intel_links_reviewing.contains(&article.id);
 
     let section_h = |lines_count: usize, loading: bool| -> u16 {
@@ -8127,7 +8187,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
 
     let claims_h = section_h(claims_lines.len(), claims_loading);
     let inferences_h = section_h(inferences_lines.len(), inferences_loading);
-    let actors_h = section_h(actors_lines.len(), actors_loading);
+    let actors_h = section_h(actors_lines.len(), false);
     let links_h = section_h(links_lines.len(), links_loading);
     let related_h = section_h(related_lines.len(), false)
         .saturating_add(u16::from(app.intel_related.page.has_more));
@@ -8170,7 +8230,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         links_lines,
         claims_loading,
         inferences_loading,
-        actors_loading,
+        actor_count: buckets.actors.len(),
         links_loading,
         stack_scroll_max,
     })
@@ -8393,17 +8453,19 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
         )));
     }
 
-    // Insight re-extract from cleaned body.
-    let (insights_title, insights_detail) = if insights_running {
-        (
-            format!("{} Extracting insights", super::anim::spinner()),
-            intel_insights_progress_detail(app),
-        )
-    } else if message.to_ascii_lowercase().contains("insight") {
-        (message.to_string(), None)
-    } else {
-        ("Insights · idle".into(), None)
-    };
+    // Persisted refresh and index state, loaded outside rendering.
+    let (insights_title, insights_detail) = (
+        if insights_running {
+            format!(
+                "{} Insights · {}",
+                super::anim::spinner(),
+                app.intel_refresh_status
+            )
+        } else {
+            format!("Insights · {}", app.intel_refresh_status)
+        },
+        None::<String>,
+    );
     let insights_style = if insights_running {
         theme::accent()
     } else {
@@ -8439,157 +8501,69 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-fn draw_intel_assessment(frame: &mut Frame, app: &App, area: Rect) {
-    let block = pane(" assessment ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let lifecycle = app.intel_insight_lifecycle.replace('_', " ");
-    let text = format!("{lifecycle}\nClaims describe what the source reports. Source faithfulness and corroboration are assessed separately.\nInference rationale is stored with the assertions and links.");
-    frame.render_widget(
-        Paragraph::new(text)
-            .style(theme::text())
-            .wrap(Wrap { trim: true }),
-        inner,
-    );
-}
-
 fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let eval = intel_source_evaluation(app);
-    let new_policy = app.intel_metadata_present
-        || app.intel_publisher_prior.is_some()
-        || app.intel_insight_lifecycle != "legacy/unassessed"
-        || app.intel_claims.is_empty()
-        || app
-            .intel_claims
-            .iter()
-            .any(|c| c.fingerprint.starts_with("v2:"));
-    let mut lines = Vec::new();
-    let mut add = |text: String, style: Style| {
-        for row in wrap_text(&text, width.max(1)) {
-            lines.push(Line::from(Span::styled(row, style)));
-        }
+    use argos_osint_core::osint::source_eval::{InformationCredibility, SourceReliability};
+    let source = SourceReliability::parse(&eval.reliability_letter).unwrap_or(SourceReliability::F);
+    let estimate = app.intel_evidence_confidence.as_ref();
+    let info = InformationCredibility::from_u8(estimate.map_or(6, |e| e.information_grade))
+        .unwrap_or(InformationCredibility::CannotBeJudged);
+    let (initial, provisional) = intel_recon::initial_rating(source, info);
+    let score = if estimate.is_none()
+        && matches!(app.intel_insight_lifecycle.as_str(), "pending" | "previous")
+    {
+        None
+    } else {
+        estimate.map_or(initial, |e| e.score)
     };
-    let initial = app
-        .intel_publisher_prior
-        .as_ref()
-        .and_then(|prior| prior.score);
-    add(
-        format!(
-            "Initial confidence · publisher-based: {}{}",
-            initial
-                .map(|score| format!("{score:.0}/100"))
-                .unwrap_or_else(|| "N/A · unrated".into()),
-            if app
-                .intel_publisher_prior
-                .as_ref()
-                .is_some_and(|prior| prior.stale)
-            {
-                " · stale"
-            } else {
-                ""
-            }
-        ),
-        theme::text(),
-    );
-    add(
-        "Information credibility: unassessed (6)".into(),
-        theme::dim(),
-    );
-    if new_policy {
-        let estimate = app.intel_evidence_confidence.as_ref();
-        let score = estimate.and_then(|e| e.score);
-        let status = if app.intel_insight_lifecycle == "pending" {
-            "previous · refresh pending".to_owned()
-        } else if app.intel_insight_lifecycle == "previous" {
-            "previous".to_owned()
-        } else if score.is_none() {
-            "unavailable".to_owned()
-        } else if estimate.is_none_or(|e| e.provisional) {
-            "provisional".to_owned()
-        } else {
-            "assessed".to_owned()
-        };
-        add(
-            format!(
-                "Evidence confidence: {} · {status}",
-                score
-                    .map(|s| format!("{s}/100"))
-                    .unwrap_or_else(|| "N/A · no claims".into())
-            ),
-            theme::accent().add_modifier(Modifier::BOLD),
-        );
-        if let Some(e) = estimate {
-            add(
-                format!("Claims {} · faithful {}", e.claims, e.faithful),
-                theme::text(),
-            );
-            add(
-                format!("Corroborated {} · disputed {}", e.corroborated, e.disputed),
-                theme::text(),
-            );
-            add(
-                format!(
-                    "Coverage: {}",
-                    if e.complete_coverage {
-                        "complete"
-                    } else {
-                        "partial / unknown"
-                    }
-                ),
-                theme::dim(),
-            );
-        } else {
-            add("Evidence assessment pending".into(), theme::dim());
-        }
-        add(
+    let status = if matches!(app.intel_insight_lifecycle.as_str(), "pending" | "previous")
+        && estimate.is_some()
+    {
+        "previous/pending"
+    } else if estimate.is_none() && app.intel_insight_lifecycle == "previous" {
+        "failed"
+    } else if estimate.is_none() && app.intel_insight_lifecycle == "pending" {
+        "pending"
+    } else if estimate.map_or(provisional, |e| e.provisional) {
+        "provisional"
+    } else {
+        "assessed"
+    };
+    let count = estimate
+        .map(|e| format!(" · {}C+{}I", e.faithful, e.inferences))
+        .unwrap_or_default();
+    let lines = vec![
+        Line::from(Span::styled(
             format!(
                 "Source {} · {}",
-                eval.reliability_letter, eval.reliability_label
-            ),
-            theme::dim(),
-        );
-        add(eval.footnote.clone(), theme::dim());
-        add("Information 6 · CANNOT BE JUDGED".into(), theme::dim());
-        add("Evidence score · not a probability".into(), theme::dim());
-    } else {
-        let (_, mean) = intel_confidence_scores(app);
-        add(
-            format!("Legacy confidence: {:.0}/100", mean * 100.0),
-            theme::accent().add_modifier(Modifier::BOLD),
-        );
-        add(
-            format!(
-                "{}{} · {} · {}",
-                eval.reliability_letter,
-                eval.credibility_digit,
-                eval.reliability_label,
-                eval.credibility_label
+                source.as_str(),
+                sentence_label(source.label())
             ),
             theme::text(),
-        );
-        add(eval.footnote, theme::dim());
-    }
-    // Keep the original ANSI Shadow Admiralty badge beside the score. The
-    // evidence rubric does not assign an information-credibility grade: v2
-    // assertions must not inherit a legacy CONFIRMED digit.
-    let digit = if new_policy {
-        "6"
-    } else {
-        &eval.credibility_digit
-    };
-    let credibility_meter = if new_policy {
-        0.0
-    } else {
-        eval.credibility_meter
-    };
+        )),
+        Line::from(Span::styled(
+            format!(
+                "Information {} · {}",
+                info.as_u8(),
+                sentence_label(info.label())
+            ),
+            theme::text(),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "Brief rating {} · {status}{count}",
+                score
+                    .map(|s| format!("{s}/100"))
+                    .unwrap_or_else(|| "N/A".into())
+            ),
+            theme::accent().add_modifier(Modifier::BOLD),
+        )),
+    ];
+    let digit = info.as_u8().to_string();
     let art = grade_ascii_lines(&format!("{}{digit}", eval.reliability_letter));
     let art_width = art.iter().map(|row| row.chars().count()).max().unwrap_or(0);
     let style = Style::default()
-        .fg(grade_score_color(if new_policy {
-            eval.reliability_meter
-        } else {
-            (eval.reliability_meter + credibility_meter) * 0.5
-        }))
+        .fg(grade_score_color(source.meter()))
         .add_modifier(Modifier::BOLD);
     if width >= art_width + 16 {
         let mut details = Vec::new();
@@ -8629,6 +8603,14 @@ fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         badge.extend(lines);
         badge
     }
+}
+
+fn sentence_label(label: &str) -> String {
+    let mut chars = label.to_lowercase().chars().collect::<Vec<_>>();
+    if let Some(first) = chars.first_mut() {
+        first.make_ascii_uppercase();
+    }
+    chars.into_iter().collect()
 }
 
 /// Bright green (best) → bright red (worst) by combined Admiralty meter.
@@ -8780,112 +8762,17 @@ fn ansi_shadow_glyph(ch: char) -> Option<[&'static str; 6]> {
 
 struct IntelSourceEval {
     reliability_letter: String,
-    reliability_label: String,
-    reliability_meter: f64,
-    credibility_digit: String,
-    credibility_label: String,
-    credibility_meter: f64,
-    footnote: String,
 }
 
 fn intel_source_evaluation(app: &App) -> IntelSourceEval {
-    use argos_osint_core::osint::{
-        best_credibility, wikipedia_rsp, InformationCredibility, SourceReliability,
-    };
-    if let Some(prior) = &app.intel_publisher_prior {
-        let observation = &prior.observation;
-        let reliability =
-            SourceReliability::parse(&observation.reliability).unwrap_or(SourceReliability::F);
-        return IntelSourceEval {
-            reliability_letter: reliability.as_str().into(),
-            reliability_label: observation.reliability_label.clone(),
-            reliability_meter: reliability.meter(),
-            credibility_digit: "6".into(),
-            credibility_label: InformationCredibility::CannotBeJudged.label().into(),
-            credibility_meter: 0.0,
-            footnote: format!(
-                "{}6 · {} · {}{} · {}",
-                reliability.as_str(),
-                observation.domain,
-                observation.rsp_status_label,
-                if prior.stale { " · stale" } else { "" },
-                observation.rsp_url
-            ),
-        };
-    }
-    if app.intel_metadata_present {
-        return IntelSourceEval {
-            reliability_letter: "F".into(),
-            reliability_label: SourceReliability::F.label().into(),
-            reliability_meter: 0.0,
-            credibility_digit: "6".into(),
-            credibility_label: InformationCredibility::CannotBeJudged.label().into(),
-            credibility_meter: 0.0,
-            footnote: "F6 · publisher prior unavailable".into(),
-        };
-    }
-    let article = app.intel_articles.get(app.intel_sel);
-    let domain = article.map(|row| row.source_domain.as_str()).unwrap_or("");
-    let (reliability, entry) = match wikipedia_rsp::cached_index() {
-        Some(index) => match index.lookup_domain(domain) {
-            Some(entry) => (entry.status.reliability(), Some(entry.clone())),
-            None => (SourceReliability::F, None),
-        },
-        None => {
-            // Prefer a persisted letter from claims when the process cache is cold.
-            let from_claim = app
-                .intel_claims
-                .iter()
-                .find_map(|claim| SourceReliability::parse(&claim.reliability));
-            (from_claim.unwrap_or(SourceReliability::F), None)
-        }
-    };
-    let cred_values: Vec<InformationCredibility> = app
-        .intel_claims
-        .iter()
-        .filter_map(|claim| InformationCredibility::from_u8(claim.info_credibility))
-        .collect();
-    let credibility = if cred_values.is_empty() {
-        InformationCredibility::CannotBeJudged
-    } else {
-        best_credibility(&cred_values)
-    };
-    let code = format!("{}{}", reliability.as_str(), credibility.as_u8());
-    let rsp = entry
+    use argos_osint_core::osint::SourceReliability;
+    let reliability = app
+        .intel_publisher_prior
         .as_ref()
-        .map(|item| item.status.label())
-        .or_else(|| {
-            app.intel_claims
-                .iter()
-                .find(|claim| !claim.rsp_status.is_empty())
-                .map(|claim| match claim.rsp_status.as_str() {
-                    "gr" => "generally reliable",
-                    "nc" | "m" => "no consensus",
-                    "gu" => "generally unreliable",
-                    "d" => "deprecated",
-                    "b" => "blacklisted",
-                    _ => "not in RSP",
-                })
-        })
-        .unwrap_or("not in RSP");
-    let year = entry
-        .as_ref()
-        .map(|item| item.last_year.as_str())
-        .filter(|year| !year.is_empty())
-        .unwrap_or("");
-    let footnote = if year.is_empty() {
-        format!("{code} · {domain} · {rsp}")
-    } else {
-        format!("{code} · {domain} · {rsp} · {year}")
-    };
+        .and_then(|p| SourceReliability::parse(&p.observation.reliability))
+        .unwrap_or(SourceReliability::F);
     IntelSourceEval {
         reliability_letter: reliability.as_str().into(),
-        reliability_label: reliability.label().into(),
-        reliability_meter: reliability.meter(),
-        credibility_digit: credibility.as_u8().to_string(),
-        credibility_label: credibility.label().into(),
-        credibility_meter: credibility.meter(),
-        footnote,
     }
 }
 
@@ -8903,24 +8790,6 @@ fn draw_intel_tags(
         theme::accent(),
     ))];
     frame.render_widget(Paragraph::new(lines), inner);
-}
-
-fn intel_confidence_scores(app: &App) -> (f64, f64) {
-    if app.intel_claims.is_empty() {
-        return (0.0, 0.0);
-    }
-    let high = app
-        .intel_claims
-        .iter()
-        .map(|claim| claim.confidence)
-        .fold(0.0_f64, f64::max);
-    let mean = app
-        .intel_claims
-        .iter()
-        .map(|claim| claim.confidence)
-        .sum::<f64>()
-        / app.intel_claims.len() as f64;
-    (high, mean)
 }
 
 fn intel_brief_preview_lines(
@@ -9123,9 +8992,15 @@ fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app
         return;
     };
     frame.render_widget(Block::default().style(theme::text()), vis);
-    frame.render_widget(
-        Paragraph::new(" full article ").style(theme::dim()),
-        Rect::new(vis.x, vis.y, vis.width, 1),
+    stroke_clipped_box(
+        frame,
+        viewport,
+        area,
+        if app.focus == Target::IntelFullArticle {
+            " full article • focused "
+        } else {
+            " full article "
+        },
     );
 
     let inner = AbsRect {
@@ -9142,18 +9017,6 @@ fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app
 }
 
 /// Centered loading card over a briefing side pane (extracted / confidence).
-fn draw_intel_section_loading(frame: &mut Frame, area: Rect, title: &str, phase: &str, app: &App) {
-    let block = pane(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let label = format!("{} {phase}", super::anim::spinner());
-    let detail = intel_insights_progress_detail(app);
-    draw_centered_loading_card(frame, inner, &label, detail.as_deref());
-}
-
 fn intel_insights_progress_detail(app: &App) -> Option<String> {
     let message = app.intel_body_message.trim();
     if message.is_empty() {
@@ -9305,7 +9168,7 @@ fn intel_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             }
         }
         let rows = intel_briefing_right_rows(app, right);
-        if contains(rows[3], x, y) {
+        if contains(rows[2], x, y) {
             // Clicking the jobs pane focuses job controls.
             return Some(Target::Button(ButtonId::IntelJobOpen));
         }

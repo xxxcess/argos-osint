@@ -45,6 +45,8 @@ The general `components::detail_table` and `detail_records` helpers remain avail
 
 ## ScrollPane
 
+Intel Focus Brief keeps its center stack borderless and uses the shared clipped border, padding, independent scroll limits and See more geometry for the **Full article** card in all states. Confidence keeps its ANSI Shadow badge with three fields: Source, Information, Brief rating. Actors from immutable metadata remain visible without claims and during refresh. The context column contains Tags, Country and Jobs; internal assessments and Full Assessment Recon remain available without a standalone Assessment card. Jobs action geometry includes global **Clear old jobs** with matching keyboard and pointer routes.
+
 `components::ScrollPane` owns a `usize` offset. `scroll(delta, extent, viewport)` clamps it; `reveal(start, height, viewport)` brings focused content into view; `visible(lines, height)` slices before rendering, avoiding u16 Paragraph offsets. Dashboard, each panel and expanded detail keep independent state.
 
 ```rust,ignore
@@ -106,7 +108,7 @@ Bulletin preview text is vertically centered when shorter than its viewport and 
 normally when overflowing. Native graphics preserve photographic detail; half-block
 fallback is inherently limited to two color samples per terminal cell.
 
-Home shrinks its logo and uses two launcher columns on short screens. Recon uses a transcript and 30% context column at 110 cells; compact screens expose Transcript/Investigation pages. Intel uses three columns at 132 cells, two at 100–131, and Extracted/Reader/Context pages on smaller or short screens. Its article reader is borderless. Atlas exposes compact Origins/Coverage/Headlines pages. Brain supports Split/Graph/Related/Summary expansion. Tools and Models expose list/editor pages; the model role list registers its rows. System exposes Host/Paths pages on short screens.
+Home shrinks its logo and uses two launcher columns on short screens. Recon uses a transcript and 30% context column at 110 cells; compact screens expose Transcript/Investigation pages. Intel uses three columns at 132 cells, two at 100–131, and Extracted/Reader/Context pages on smaller or short screens. Its center stack is borderless, with a bordered Full article card in every state. Atlas exposes compact Origins/Coverage/Headlines pages. Brain supports Split/Graph/Related/Summary expansion. Tools and Models expose list/editor pages; the model role list registers its rows. System exposes Host/Paths pages on short screens.
 
 
 ## Shared navigation and portable configuration

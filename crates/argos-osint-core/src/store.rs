@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// activity-history tables plus additive timing columns on the model attempt
 /// and tool call records. 28 adds immutable NLP artifacts/references/features and
 /// complete summary-result envelopes; existing facts are preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 30;
+pub const SCHEMA_VERSION: i64 = 32;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -739,6 +739,17 @@ impl Store {
                 self.conn
                     .execute_batch(include_str!("schema_atlas_metadata.sql"))?;
                 self.conn.pragma_update(None, "user_version", 30)?;
+            }
+
+            if version < 31 {
+                self.conn
+                    .execute_batch(include_str!("schema_article_refresh.sql"))?;
+                self.conn.pragma_update(None, "user_version", 31)?;
+            }
+            if version < 32 {
+                self.conn
+                    .execute_batch(include_str!("schema_insight_execution.sql"))?;
+                self.conn.pragma_update(None, "user_version", 32)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
@@ -1549,6 +1560,7 @@ impl Store {
                 .execute("DELETE FROM memories WHERE id=?1", [id])?
                 > 0;
             if deleted {
+                crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
                 queued = self.enqueue_memory_index(&[id.to_string()], None)?.0;
                 publication::bump_memories_changed(&self.conn)?;
             }
@@ -1771,10 +1783,12 @@ impl Store {
             self.conn
                 .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
             crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
-            Ok(self
+            let deleted = self
                 .conn
                 .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?
-                > 0)
+                > 0;
+            crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
+            Ok(deleted)
         })();
         match result {
             Ok(deleted) => {
@@ -1986,12 +2000,24 @@ impl Store {
     }
 
     pub fn atlas_delete_article(&self, run_id: &str, article_id: &str) -> Result<()> {
-        crate::nlp::cache::remove_owner(&self.conn, "article", article_id)?;
-        self.conn.execute(
-            "DELETE FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
-            params![run_id, article_id],
-        )?;
-        crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            crate::nlp::cache::remove_owner(&self.conn, "article", article_id)?;
+            self.conn.execute(
+                "DELETE FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
+                params![run_id, article_id],
+            )?;
+            crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
+            crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(error) => {
+                self.conn.execute_batch("ROLLBACK")?;
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
@@ -2361,6 +2387,7 @@ impl Store {
                 }
             }
             crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
+            crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
             Ok(ids)
         })();
         match result {

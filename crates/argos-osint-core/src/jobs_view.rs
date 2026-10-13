@@ -48,14 +48,7 @@ impl JobStatusFilter {
     fn states(self) -> &'static [&'static str] {
         match self {
             Self::All => &[],
-            Self::Active => &[
-                "running",
-                "queued",
-                "retry_scheduled",
-                "paused",
-                "waiting",
-                "blocked",
-            ],
+            Self::Active => &["running", "queued", "retry_scheduled"],
             Self::Retrying => &["retry_scheduled"],
             Self::Failed => &["failed", "partial", "cancelled"],
             Self::Completed => &["completed"],
@@ -126,7 +119,7 @@ impl JobRow {
     pub fn is_active(&self) -> bool {
         matches!(
             self.state.as_str(),
-            "running" | "queued" | "retry_scheduled" | "paused" | "waiting" | "blocked"
+            "running" | "queued" | "retry_scheduled"
         )
     }
 
@@ -277,6 +270,8 @@ pub struct JobDetail {
     pub retryable: i64,
     /// The job finished more than the event retention ago and no events remain.
     pub events_expired: bool,
+    #[serde(default)]
+    pub insight_progress: Vec<crate::investigation::insight_execution::Progress>,
 }
 
 const JOB_COLUMNS: &str =
@@ -340,6 +335,7 @@ fn job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
 /// Top-level jobs, active work first, then most recent. Bounded by `limit`.
 pub fn list_jobs(conn: &Connection, filter: &JobFilter, limit: usize) -> Result<Vec<JobRow>> {
     let mut sql = format!("SELECT {JOB_COLUMNS} FROM argos_jobs j WHERE j.parent_id = ''");
+    sql.push_str(&format!(" AND ({})", crate::job_cleanup::eligible("j")));
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let states = filter.status.states();
     if !states.is_empty() {
@@ -371,7 +367,7 @@ pub fn list_jobs(conn: &Connection, filter: &JobFilter, limit: usize) -> Result<
         args.push(Box::new(filter.since.clone()));
     }
     sql.push_str(
-        " ORDER BY CASE WHEN j.state IN ('running','queued','retry_scheduled','paused','waiting','blocked') AND j.kind <> 'service' THEN 0
+        " ORDER BY CASE WHEN j.state IN ('running','queued','retry_scheduled') AND j.kind <> 'service' THEN 0
                         WHEN j.kind = 'service' THEN 2 ELSE 1 END,
                    j.updated_at DESC, j.id
           LIMIT ?",
@@ -389,13 +385,16 @@ pub fn list_jobs(conn: &Connection, filter: &JobFilter, limit: usize) -> Result<
 pub fn job_counts(conn: &Connection) -> Result<JobCounts> {
     let since = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
     Ok(conn.query_row(
-        "SELECT
-            IFNULL(SUM(state IN ('running','paused','waiting','blocked')),0),
+        &format!(
+            "SELECT
+            IFNULL(SUM(state='running'),0),
             IFNULL(SUM(state='queued'),0),
             IFNULL(SUM(state='retry_scheduled'),0),
             IFNULL(SUM(state IN ('failed','partial')),0),
             IFNULL(SUM(state='completed' AND finished_at >= ?1),0)
-         FROM argos_jobs WHERE parent_id='' AND kind<>'service'",
+         FROM argos_jobs j WHERE parent_id='' AND kind<>'service' AND ({})",
+            crate::job_cleanup::eligible("j")
+        ),
         [since],
         |r| {
             Ok(JobCounts {
@@ -413,7 +412,10 @@ pub fn job_counts(conn: &Connection) -> Result<JobCounts> {
 pub fn get_job(conn: &Connection, id: &str) -> Result<Option<JobRow>> {
     Ok(conn
         .query_row(
-            &format!("SELECT {JOB_COLUMNS} FROM argos_jobs j WHERE j.id = ?1"),
+            &format!(
+                "SELECT {JOB_COLUMNS} FROM argos_jobs j WHERE j.id = ?1 AND ({})",
+                crate::job_cleanup::eligible("j")
+            ),
             [id],
             job_row,
         )
@@ -505,7 +507,7 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
-    let retryable: i64 = conn.query_row(
+    let mut retryable: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1 AND {}",
             retryable_sql()
@@ -513,6 +515,15 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
         [id],
         |r| r.get(0),
     )?;
+    let mut insight_progress = Vec::new();
+    for task in &tasks {
+        if let Some(progress) =
+            crate::investigation::insight_execution::task_progress(conn, &task.id)?
+        {
+            retryable += i64::from(progress.retryable);
+            insight_progress.push(progress);
+        }
+    }
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(events::DEFAULT_RETENTION_HOURS);
     let events_expired = job.events == 0
         && parse(&job.finished_at)
@@ -526,6 +537,7 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
         attempts,
         retryable,
         events_expired,
+        insight_progress,
     }))
 }
 
@@ -534,7 +546,7 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
 /// repeated. Returns how many tasks were requeued.
 pub fn retry_failed_tasks(conn: &Connection, id: &str) -> Result<usize> {
     let now = chrono::Utc::now().to_rfc3339();
-    let n = conn.execute(
+    let mut n = conn.execute(
         &format!(
             "UPDATE argos_tasks SET state='queued', attempts=0, next_eligible_at='', lease_owner='',
                 lease_until='', error_category='', error_message='', finished_at='', updated_at=?2
@@ -543,6 +555,15 @@ pub fn retry_failed_tasks(conn: &Connection, id: &str) -> Result<usize> {
         ),
         params![id, now],
     )?;
+    let ids = conn
+        .prepare("SELECT id FROM argos_tasks WHERE job_id=?1 AND operation='insight_refresh'")?
+        .query_map([id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for task in ids {
+        if crate::investigation::insight_execution::retry_extraction(conn, &task)? {
+            n += 1;
+        }
+    }
     if n > 0 {
         conn.execute(
             "UPDATE OR IGNORE argos_index_changes SET state='pending', error_category='', error_message='', updated_at=?2
@@ -567,7 +588,7 @@ pub fn retry_failed_tasks(conn: &Connection, id: &str) -> Result<usize> {
 /// Bounded `(app, count)` list of apps that own jobs, for the app filter.
 pub fn job_apps(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT app FROM argos_jobs WHERE app<>'' AND parent_id='' ORDER BY app LIMIT 32",
+        &format!("SELECT DISTINCT app FROM argos_jobs j WHERE app<>'' AND parent_id='' AND ({}) ORDER BY app LIMIT 32",crate::job_cleanup::eligible("j")),
     )?;
     let rows = stmt
         .query_map([], |r| r.get(0))?
@@ -988,7 +1009,7 @@ mod tests {
     fn timing_is_unavailable_not_zero_and_expired_event_detail_is_explained() {
         let store = Store::memory().unwrap();
         let conn = &store.conn;
-        let old = (chrono::Utc::now() - chrono::Duration::hours(72)).to_rfc3339();
+        let old = (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
         tasks::enqueue_job_with(
             conn,
             &NewJob {

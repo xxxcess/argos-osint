@@ -1464,6 +1464,7 @@ impl Store {
             return Ok(false);
         }
         crate::nlp::cache::remove_owner(&tx, "thread", tid)?;
+        crate::job_cleanup::cleanup_batch(&tx, chrono::Utc::now())?;
         tx.execute("UPDATE insight_owner_state SET desired_generation=desired_generation+1,lifecycle='previous',last_error='origin investigation deleted' WHERE owner_kind='recon' AND owner_id IN (SELECT id FROM recon_runs WHERE thread_id=?1)",[tid])?;
         tx.execute("UPDATE insight_derivation_links SET status='origin_deleted' WHERE snapshot_id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='recon' AND last_error='origin investigation deleted')",[])?;
         tx.execute("UPDATE recon_runs SET state='deleted',stage='deleted' WHERE thread_id=?1 AND state='running'",[tid])?;
@@ -4937,10 +4938,12 @@ mod tests {
     fn investigation_jobs_finish_truthfully_and_link_their_run() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("argos.db");
-        drop(Store::open(&db).unwrap());
+        let store = Store::open(&db).unwrap();
+        let thread = store.new_thread("Job owner fixture").unwrap();
+        drop(store);
         let spec = || {
             crate::job_registry::JobSpec::new("recon", "recon_investigation", "Recon · q")
-                .resource("thread:t1")
+                .resource(format!("thread:{}", thread.id))
                 .cancellable()
         };
         // Cancelled through the shared flag: the job reads cancelled, not failed.

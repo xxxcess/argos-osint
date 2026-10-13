@@ -64,6 +64,8 @@ pub struct ChainReport<T> {
     pub history: Vec<AttemptRecord>,
     pub effective_route: Option<u32>,
     pub effective_model: String,
+    pub terminal_failure: Option<crate::provider_diag::ProviderFailure>,
+    pub stopped: bool,
 }
 
 impl<T> ChainReport<T> {
@@ -174,6 +176,8 @@ pub struct ExecuteOptions {
     pub recorded_waits: Option<Arc<Mutex<Vec<Duration>>>>,
     /// Admission key; empty skips the shared slot.
     pub admission_account: String,
+    /// Operation-specific bound. Ordinary callers retain the 4/3 policy.
+    pub attempt_limit: Option<u32>,
 }
 
 impl ExecuteOptions {
@@ -284,6 +288,8 @@ where
         history: Vec::new(),
         effective_route: None,
         effective_model: String::new(),
+        terminal_failure: None,
+        stopped: false,
     };
     if routes.is_empty() {
         report.blocked = true;
@@ -318,7 +324,9 @@ where
             continue;
         }
         any_dispatchable = true;
-        let limit = route_attempt_limit(route_index as u32);
+        let limit = opts
+            .attempt_limit
+            .unwrap_or_else(|| route_attempt_limit(route_index as u32));
         let mut attempt = 0u32;
         let admission_key = route
             .admission_key
@@ -367,6 +375,7 @@ where
             drop(guard);
             match result {
                 Ok(value) => {
+                    report.terminal_failure = None;
                     report.history.push(AttemptRecord {
                         at: stamp(),
                         route_index: route_index as u32,
@@ -382,6 +391,8 @@ where
                     return report;
                 }
                 Err(err) if err.cancelled || err.disposition == RetryDisposition::Stop => {
+                    report.terminal_failure = err.failure.clone();
+                    report.stopped = true;
                     let is_cancel = err.cancelled;
                     report.history.push(AttemptRecord {
                         at: stamp(),
@@ -402,6 +413,7 @@ where
                     return report;
                 }
                 Err(err) if err.disposition == RetryDisposition::NextRoute => {
+                    report.terminal_failure = err.failure.clone();
                     report.history.push(AttemptRecord {
                         at: stamp(),
                         route_index: route_index as u32,
@@ -414,6 +426,7 @@ where
                     break;
                 }
                 Err(err) => {
+                    report.terminal_failure = err.failure.clone();
                     report.history.push(AttemptRecord {
                         at: stamp(),
                         route_index: route_index as u32,
@@ -423,6 +436,9 @@ where
                         outcome: "fail".into(),
                         reason: err.message,
                     });
+                    if attempt >= limit {
+                        break;
+                    }
                     let Some(base) = wait_before_retry(route_index as u32, attempt) else {
                         break;
                     };

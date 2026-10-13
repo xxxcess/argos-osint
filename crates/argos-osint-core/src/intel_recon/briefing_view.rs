@@ -22,7 +22,6 @@ pub struct ExtractedBuckets {
 const MAX_FACTS: usize = 8;
 const MAX_INFERENCES: usize = 8;
 const MAX_CONTEXT: usize = 6;
-const MAX_ACTORS: usize = 8;
 const MAX_LINKS: usize = 8;
 
 /// Deterministic meaningful explanation for a relation link between two claims.
@@ -103,9 +102,6 @@ pub fn bucket_extracted_with_explanations(
             continue;
         }
         actors.push(entity.to_string());
-        if actors.len() >= MAX_ACTORS {
-            break;
-        }
     }
 
     let mut links = Vec::new();

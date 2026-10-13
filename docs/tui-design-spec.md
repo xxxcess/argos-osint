@@ -44,7 +44,7 @@ The shared data/render separation, geometry, scrolling and measured input apply 
 | --- | --- | --- |
 | Home | Measured launcher; shrink logo by height; nine apps and composer reachable | `ui.rs::home_layout_metrics`, `draw_home` |
 | Recon | Transcript + 30% context at ≥110 columns; compact context page; measured composer | `ui.rs::draw_recon_chat`, `draw_recon_context`, `composer_height`; `recon_parts.rs` |
-| Intel | Three columns ≥132, two at 100–131, tabbed below 100 or short height; borderless reader and selected BLUF | `ui.rs::intel_briefing_areas`, `draw_intel_briefing`, `draw_clipped_md_pane`; `summary_card.rs` |
+| Intel | Three columns ≥132, two at 100–131, tabbed below 100 or short height; borderless center stack with bordered Full article card and selected BLUF | `ui.rs::intel_briefing_areas`, `draw_intel_briefing`, `draw_clipped_md_pane`; `summary_card.rs` |
 | Atlas | Dashboard/table presets; compact Origins/Coverage/Headlines pages; preserve map | Atlas layout/draw functions; `atlas_table.rs`, `map.rs` |
 | Brain | Graph above Related/Summary; side-by-side ≥68, otherwise stacked; pane expansion | `brain_detail.rs`, `graph.rs`, `ui.rs::draw_brain` |
 | Tools / Models | List + editor; compact pages; registered role list | `ui.rs::draw_osint`, `draw_providers`; `model_roles.rs` |

@@ -2029,7 +2029,7 @@ pub fn validate_inference(
 /// Typed progress observer for insight stages: maps execution events to a
 /// short durable activity label, deduplicated and throttled so SQLite is never
 /// written per token.
-fn activity_sink(
+pub(super) fn activity_sink(
     db_path: &std::path::Path,
     task_id: &str,
 ) -> std::sync::Arc<dyn Fn(crate::recon::model_exec::ModelExecEvent) + Send + Sync> {
@@ -2057,6 +2057,9 @@ fn activity_sink(
         }
         if let Ok(store) = crate::store::Store::open(&db_path) {
             let _ = super::insight_execution::record_activity(&store.conn, &task_id, &label);
+            if let Some(message) = super::insight_execution::activity_log_message(&event) {
+                let _ = super::insight_execution::activity_event(&store.conn, &task_id, &message);
+            }
         }
     })
 }

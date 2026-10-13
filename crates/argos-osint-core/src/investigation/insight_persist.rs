@@ -242,7 +242,18 @@ pub fn article_refresh_status(conn: &Connection, article_id: &str) -> Result<Str
         return Ok(format!("Previous · {error}"));
     }
     if task == "running" {
-        return Ok("Extracting".into());
+        let progress = super::insight_execution::owner_progress(conn, "article", article_id)?;
+        return Ok(progress
+            .map(|p| {
+                super::insight_execution::status_step(
+                    &p.state,
+                    &p.stage,
+                    &p.activity,
+                    p.activity_age_secs,
+                    p.index_status.starts_with("Indexed"),
+                )
+            })
+            .unwrap_or_else(|| "Waiting for output".into()));
     }
     if matches!(task.as_str(), "queued" | "retry_scheduled") {
         return Ok("Queued".into());

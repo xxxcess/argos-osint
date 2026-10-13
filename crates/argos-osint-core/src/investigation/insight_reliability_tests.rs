@@ -754,3 +754,174 @@ fn entity_resolver_routes_are_relevant_to_article_and_recon_but_not_report_only_
     input.surface = "recon_report".into();
     assert_eq!(report, input_key(&input, &settings));
 }
+
+#[test]
+fn status_steps_follow_the_streamed_sequence_and_never_claim_activity_from_headers() {
+    use insight_execution::status_step;
+    assert_eq!(status_step("queued", "queued", "", None, false), "Queued");
+    assert_eq!(
+        status_step("running", "extraction", "", Some(5), false),
+        "Waiting for output"
+    );
+    assert_eq!(
+        status_step(
+            "running",
+            "extraction",
+            "Waiting for output · attempt 1 · super",
+            Some(3),
+            false
+        ),
+        "Waiting for output"
+    );
+    assert_eq!(
+        status_step(
+            "running",
+            "extraction",
+            "Receiving output · attempt 1 · 812 chars",
+            Some(1),
+            false
+        ),
+        "Receiving output"
+    );
+    assert_eq!(
+        status_step("running", "extraction", "Validating", Some(400), false),
+        "Validating"
+    );
+    assert_eq!(
+        status_step("running", "assessment", "", None, false),
+        "Waiting for decision"
+    );
+    assert!(status_step(
+        "running",
+        "extraction",
+        "Retry wait 12s · next attempt 2",
+        Some(2),
+        false
+    )
+    .starts_with("Retry wait 12s"));
+    assert_eq!(
+        status_step(
+            "running",
+            "extraction",
+            "Receiving output · attempt 1",
+            Some(95),
+            false
+        ),
+        "Stalled · no model activity for 95s"
+    );
+    assert_eq!(
+        status_step("running", "extraction", "", Some(150), false),
+        "Waiting for output",
+        "first output may take up to 180s"
+    );
+    assert_eq!(status_step("completed", "published", "", None, false), "Published");
+    assert_eq!(status_step("completed", "published", "", None, true), "Indexed");
+    assert_eq!(status_step("failed", "assessment", "", None, false), "Failed");
+
+    // Headers alone are "Waiting for output", never activity.
+    use crate::provider_attempt::AttemptProgress as P;
+    use crate::recon::model_exec::ModelExecEvent as E;
+    let headers = E::Progress {
+        operation_id: "op".into(),
+        attempt: 1,
+        route_index: 0,
+        model: "super".into(),
+        progress: P::HeadersReceived { status: 200 },
+    };
+    assert!(insight_execution::activity_label(&headers)
+        .unwrap()
+        .starts_with("Waiting for output"));
+    assert!(insight_execution::activity_label(&E::Progress {
+        operation_id: "op".into(),
+        attempt: 1,
+        route_index: 0,
+        model: "super".into(),
+        progress: P::Heartbeat,
+    })
+    .is_none());
+}
+
+#[test]
+fn progress_reaches_jobs_and_logs_throttled_and_resets_per_attempt_and_stage() {
+    use crate::provider_attempt::AttemptProgress as P;
+    use crate::recon::model_exec::ModelExecEvent as E;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("progress.db");
+    let store = Store::open(&path).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    store.conn.execute("INSERT INTO argos_jobs(id,kind,owner_scope,state,created_at,updated_at) VALUES('job-p','insight_refresh','article:a1','running',?1,?1)",[&now]).unwrap();
+    store.conn.execute("INSERT INTO argos_tasks(id,job_id,operation,state,created_at,updated_at) VALUES('task-p','job-p','insight_refresh','running',?1,?1)",[&now]).unwrap();
+    store.conn.execute("INSERT INTO insight_refresh_execution(task_id,stage,updated_at) VALUES('task-p','extraction',?1)",[&now]).unwrap();
+    let sink = activity_sink(&path, "task-p");
+    let progress = |attempt, progress| E::Progress {
+        operation_id: "op".into(),
+        attempt,
+        route_index: 2,
+        model: "super".into(),
+        progress,
+    };
+    let activity = || insight_execution::activity(&store.conn, "task-p");
+    sink(E::AttemptStart {
+        operation_id: "op".into(),
+        generation: 1,
+        route_index: 2,
+        attempt: 1,
+        provider: "local".into(),
+        account: "local".into(),
+        model: "super".into(),
+        transport: "stream".into(),
+    });
+    assert!(activity().starts_with("Waiting for output · attempt 1"));
+    sink(progress(1, P::HeadersReceived { status: 200 }));
+    assert!(activity().starts_with("Waiting for output"));
+    sink(progress(1, P::FirstModelOutput));
+    sink(progress(
+        1,
+        P::Receiving {
+            answer_chars: 40,
+            reasoning_chars: 0,
+        },
+    ));
+    // Within the 1s throttle the durable label is not rewritten per update.
+    sink(progress(
+        1,
+        P::Receiving {
+            answer_chars: 41,
+            reasoning_chars: 0,
+        },
+    ));
+    assert_eq!(activity(), "Receiving output · attempt 1 · super");
+    sink(progress(1, P::Heartbeat));
+    assert_eq!(activity(), "Receiving output · attempt 1 · super");
+    // A new attempt resets provisional counters.
+    sink(E::AttemptReset {
+        operation_id: "op".into(),
+        attempt: 2,
+    });
+    assert_eq!(activity(), "Waiting for output · attempt 2");
+    sink(progress(2, P::StreamComplete { finish_reason: Some("stop".into()) }));
+    assert_eq!(activity(), "Validating");
+
+    let events = crate::events::list_events(
+        &store.conn,
+        &crate::events::EventFilter {
+            job_id: "job-p".into(),
+            ..Default::default()
+        },
+        50,
+    )
+    .unwrap();
+    let messages: Vec<_> = events.iter().map(|e| e.message.clone()).collect();
+    assert!(messages.iter().any(|m| m.contains("attempt 1 dispatched")), "{messages:?}");
+    assert!(messages.iter().any(|m| m.contains("receiving model output")));
+    assert!(messages.iter().any(|m| m.contains("stream complete")));
+    assert!(messages.len() <= 4, "no per-delta log rows: {messages:?}");
+
+    // Jobs detail picks up the live step through task progress; a stage
+    // change resets activity ("Waiting for decision" for assessment).
+    store.conn.execute("UPDATE insight_refresh_execution SET stage='assessment',activity='Waiting for decision' WHERE task_id='task-p'",[]).unwrap();
+    assert_eq!(
+        insight_execution::status_step("running", "assessment", &activity(), Some(1), false),
+        "Waiting for decision"
+    );
+}

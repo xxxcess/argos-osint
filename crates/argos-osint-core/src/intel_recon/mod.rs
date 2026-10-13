@@ -37,9 +37,8 @@ pub use briefing_view::{
 };
 pub use classify_mode::{
     classifiable_modes, classify_prompt_mode, classify_prompt_mode_for_role, classify_recon_mode,
-    classify_recon_mode_for_role, default_recon_mode,
-    heuristic_prompt_mode, parse_mode_choice, parse_mode_from_chat, ModeClassifyInput,
-    PromptModeClassifyInput,
+    classify_recon_mode_for_role, default_recon_mode, heuristic_prompt_mode, parse_mode_choice,
+    parse_mode_from_chat, ModeClassifyInput, PromptModeClassifyInput,
 };
 pub(crate) use confidence::persist_article_rating;
 pub use confidence::{article_confidence, initial_rating, EvidenceConfidence};

@@ -814,9 +814,18 @@ fn status_steps_follow_the_streamed_sequence_and_never_claim_activity_from_heade
         "Waiting for output",
         "first output may take up to 180s"
     );
-    assert_eq!(status_step("completed", "published", "", None, false), "Published");
-    assert_eq!(status_step("completed", "published", "", None, true), "Indexed");
-    assert_eq!(status_step("failed", "assessment", "", None, false), "Failed");
+    assert_eq!(
+        status_step("completed", "published", "", None, false),
+        "Published"
+    );
+    assert_eq!(
+        status_step("completed", "published", "", None, true),
+        "Indexed"
+    );
+    assert_eq!(
+        status_step("failed", "assessment", "", None, false),
+        "Failed"
+    );
 
     // Headers alone are "Waiting for output", never activity.
     use crate::provider_attempt::AttemptProgress as P;
@@ -899,7 +908,12 @@ fn progress_reaches_jobs_and_logs_throttled_and_resets_per_attempt_and_stage() {
         attempt: 2,
     });
     assert_eq!(activity(), "Waiting for output · attempt 2");
-    sink(progress(2, P::StreamComplete { finish_reason: Some("stop".into()) }));
+    sink(progress(
+        2,
+        P::StreamComplete {
+            finish_reason: Some("stop".into()),
+        },
+    ));
     assert_eq!(activity(), "Validating");
 
     let events = crate::events::list_events(
@@ -912,8 +926,13 @@ fn progress_reaches_jobs_and_logs_throttled_and_resets_per_attempt_and_stage() {
     )
     .unwrap();
     let messages: Vec<_> = events.iter().map(|e| e.message.clone()).collect();
-    assert!(messages.iter().any(|m| m.contains("attempt 1 dispatched")), "{messages:?}");
-    assert!(messages.iter().any(|m| m.contains("receiving model output")));
+    assert!(
+        messages.iter().any(|m| m.contains("attempt 1 dispatched")),
+        "{messages:?}"
+    );
+    assert!(messages
+        .iter()
+        .any(|m| m.contains("receiving model output")));
     assert!(messages.iter().any(|m| m.contains("stream complete")));
     assert!(messages.len() <= 4, "no per-delta log rows: {messages:?}");
 
@@ -938,7 +957,10 @@ fn source_and_route_changes_retire_old_task_with_linked_reason_and_polling_never
         &chrono::Utc::now().to_rfc3339(),
     )
     .unwrap();
-    let article = store.atlas_article("fixture", "supersede").unwrap().unwrap();
+    let article = store
+        .atlas_article("fixture", "supersede")
+        .unwrap()
+        .unwrap();
     // Repeated unchanged visits/polling: same task, no new generation.
     let generation =
         insight_persist::desired_generation(&store.conn, "article", "supersede").unwrap();
@@ -970,7 +992,11 @@ fn source_and_route_changes_retire_old_task_with_linked_reason_and_polling_never
     assert_eq!(state, "superseded");
     let second_job: String = store
         .conn
-        .query_row("SELECT job_id FROM argos_tasks WHERE id=?1", [&second], |r| r.get(0))
+        .query_row(
+            "SELECT job_id FROM argos_tasks WHERE id=?1",
+            [&second],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(
         message,
@@ -985,7 +1011,11 @@ fn source_and_route_changes_retire_old_task_with_linked_reason_and_polling_never
     // The latest live generation stays queued (actionable), never failed.
     let live: String = store
         .conn
-        .query_row("SELECT state FROM argos_tasks WHERE id=?1", [&second], |r| r.get(0))
+        .query_row(
+            "SELECT state FROM argos_tasks WHERE id=?1",
+            [&second],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(live, "queued");
     // Superseded progress reads as retirement, not Unknown/Timeout/exhaustion.
@@ -1082,5 +1112,91 @@ async fn generation_advanced_mid_flight_retires_task_as_superseded_with_zero_req
             |r| r.get(0),
         )
         .unwrap();
-    assert!(lifecycle_error.is_empty(), "retirement is not an owner error");
+    assert!(
+        lifecycle_error.is_empty(),
+        "retirement is not an owner error"
+    );
+}
+
+#[tokio::test]
+async fn index_only_repair_after_insight_publication_makes_zero_model_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("fixture.db");
+    let store = Store::open(&path).unwrap();
+    let text = (0..8)
+        .map(|i| format!("Acme announced project {i}. "))
+        .collect::<String>();
+    let mut input = seed_report(&store, "owner", &text);
+    let (entity, claims) = claims(&input, 8);
+    let premise_ids: Vec<_> = claims
+        .iter()
+        .map(|c| format!("claim:{}", claim_fingerprint(c)))
+        .collect();
+    let inferences:Vec<_>=(0..5).map(|i|json!({"id":format!("i{i}"),"text":format!("Project {i} was announced, not completed."),"entity_refs":[entity.id],"premise_claim_ids":[premise_ids[i]],"evidence_refs":[input.evidence[0].reference],"rationale":"An announcement establishes stated intent only.","limitations":["Completion is unknown."]})).collect();
+    let links:Vec<_>=(0..8).map(|i|json!({"id":format!("l{i}"),"typed_endpoints":[{"kind":"entity","id":entity.id},{"kind":"claim","id":premise_ids[i]}],"relation":"entity_connection","evidence_refs":[input.evidence[0].reference],"rationale":format!("Acme is the attributed speaker for project {i}.")})).collect();
+    let server=mock::serve(vec![mock::ok_json(&json!({"entities":[entity],"claims":claims,"limit_reached":false,"partial_enumeration":false}).to_string(),"stop"),mock::ok_json(&answers(8,true,"faithful"),"stop"),mock::ok_json(&json!({"inferences":inferences,"links":links}).to_string(),"stop"),mock::ok_json(&answers(8,false,"faithful"),"stop"),mock::ok_json(&answers(5,false,"faithful"),"stop")]).await;
+    let (auth, settings) = routes(&server.base_url);
+    let id = insight_persist::enqueue_refresh(
+        &store.conn,
+        &mut input,
+        &settings,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    finish(&path, &id, &auth, &settings).await;
+    assert_eq!(server.hits(), 5);
+    let count = |sql: &str| {
+        store
+            .conn
+            .query_row(sql, [], |r| r.get::<_, usize>(0))
+            .unwrap()
+    };
+    let memories = count("SELECT COUNT(*) FROM memories");
+    let generation = insight_persist::desired_generation(&store.conn, "article", "owner").unwrap();
+    // Crash after publication: the index outbox is the only unfinished work.
+    // Disabled vector index (ARGOS_EMBED=0 store) blocks honestly.
+    let drained = crate::scheduler::drain_index_once(&store.conn, &store, "w", 64).unwrap();
+    assert!(drained > 0);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM argos_index_changes WHERE record_kind='memory' AND state<>'blocked'"),
+        0
+    );
+    // Index-only repair: requeue the outbox and drain again; recovery and
+    // revisits must not re-run extraction/assessment/synthesis.
+    store
+        .conn
+        .execute(
+            "UPDATE argos_index_changes SET state='pending' WHERE record_kind='memory'",
+            [],
+        )
+        .unwrap();
+    crate::scheduler::drain_index_once(&store.conn, &store, "w", 64).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    insight_persist::recover_refreshes(&path, &auth, &settings, &cancel)
+        .await
+        .unwrap();
+    let article = store.atlas_article("fixture", "owner").unwrap().unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            insight_persist::schedule_article_refresh(&store, &article, &settings, true).unwrap(),
+            Some(id.clone())
+        );
+    }
+    assert_eq!(server.hits(), 5, "index-only repair sent model requests");
+    assert_eq!(count("SELECT COUNT(*) FROM memories"), memories);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM insight_snapshots WHERE owner_id='owner'"),
+        1
+    );
+    assert_eq!(
+        insight_persist::desired_generation(&store.conn, "article", "owner").unwrap(),
+        generation
+    );
+    let state: String = store
+        .conn
+        .query_row("SELECT state FROM argos_tasks WHERE id=?1", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(state, "completed");
 }

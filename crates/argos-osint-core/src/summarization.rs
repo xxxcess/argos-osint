@@ -339,7 +339,7 @@ pub fn resolved_summary_route() -> (String, String) {
     )
     .map(|s| (s.kind, s.model))
     .ok_or(())
-        .unwrap_or_else(|_| ("local".into(), "deterministic".into()))
+    .unwrap_or_else(|_| ("local".into(), "deterministic".into()))
 }
 
 /// Persist a derived summary for later cache hits.

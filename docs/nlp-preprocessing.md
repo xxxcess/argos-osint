@@ -125,3 +125,7 @@ All 160 preparation checks retained the original assertions, attribution, denial
 The claims-only Atlas fixture independently verifies one extraction request and one fidelity request, zero inference/context/link-generation requests, and zero additional requests on identical replay. The scripted summarization fixture verifies one request per mode and retention of late denial and attribution. Provider tokens and production model latency were not measured. These fixtures establish coverage and request behavior; they do not establish a stack-wide speedup percentage or a throughput target.
 
 For the 53,711-byte scripted summary source, serialized request bodies were 12,878 bytes in off and annotate, and 709 bytes in select and auto. Each mode made one request, a zero request delta from off. This optional selection fixture is separate from the complete-coverage preparation workloads above.
+
+## Classifier-owned cleanup and mode decisions (2026-10-13)
+
+Article/prompt mode classification and page cleanup run through the complete Classifier chain. With a native Jev route they are bounded decisions (questions keyed by stable mode / block IDs, strict labels); otherwise the first chat-capable fallback receives the equivalent JSON contract. Cleanup answers keep/remove per known block ID and Rust computes the irrelevant ranges, so retained text stays verbatim. Memory predicate/time relevance runs on Evidence Curator; identity checks on Entity Resolver; assessment batches are partitioned by owning role (≤8). Figure: [recon-turn](diagrams/recon-turn.html).

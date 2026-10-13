@@ -71,7 +71,7 @@ Defaults live under **Models → Defaults**. Empty derived roles inherit. Explic
 
 ## Persistence
 
-SQLite (current schema version 32; harness tables from v20+):
+SQLite (current schema version 34; harness tables from v20+; v33 adds `insight_refresh_execution.activity`/`activity_at`, v34 adds `insight_supersessions`):
 
 | Table | Contents |
 | --- | --- |
@@ -99,3 +99,7 @@ Recon stages insights from retained tools before the analytical answer. Its new 
 See [NLP coverage](nlp-preprocessing.md) and the [shared harness](diagrams/investigation-harness.html). Schema 29 stores generation, lease-fenced activation, immutable original evidence and stage receipts alongside canonical Brain records.
 
 Atlas uses [classification-only collection and Related articles](atlas-classification-and-related-articles.md). Its local shared mentions are tentative browsing leads, separate from investigative claims, assessed Links and evidence confidence. Current Atlas stages count article metadata; historical memory units retain legacy labels.
+
+## Progress, supersession and publication
+
+Intel and Jobs show one status sequence: Queued → Waiting for output (or Waiting for decision) → Receiving output → Validating → Published → Indexed, with explicit Stalled, Retry wait and failure states; header receipt is never shown as model activity and no fake percentages or token counts are shown. Notable activity transitions are logged as `insight.activity` events (never per delta). When a source body, completed report, captured role route or preparation contract changes, the owner's generation advances: older queued tasks become `superseded` immediately and running tasks are retired at admission, pre-send, the 30s heartbeat (dropping the in-flight request) or the publication fence. Supersession is intentional retirement — no error category, refunded attempt, no owner error — with reason and replacement link in `insight_supersessions` and an `insight.superseded` event; Jobs detail reads `Superseded · replaced by <job> · <reason>`. Visits, polling, heartbeats and progress never create generations. Index-only repair after publication drains the canonical outbox without new model calls. Figures: [intel-report](diagrams/intel-report.html), [persistence](diagrams/persistence.html).

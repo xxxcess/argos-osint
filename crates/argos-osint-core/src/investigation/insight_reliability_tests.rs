@@ -1200,3 +1200,67 @@ async fn index_only_repair_after_insight_publication_makes_zero_model_calls() {
         .unwrap();
     assert_eq!(state, "completed");
 }
+
+#[test]
+fn claims_insights_and_links_track_their_own_stages_from_checkpoints() {
+    let store = Store::memory().unwrap();
+    let mut input = seed_report(&store, "artifacts", "Acme announced project 0.");
+    let (_, settings) = routes("http://127.0.0.1:1");
+    let id = insight_persist::enqueue_refresh(
+        &store.conn,
+        &mut input,
+        &settings,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    store
+        .conn
+        .execute("UPDATE argos_tasks SET state='running' WHERE id=?1", [&id])
+        .unwrap();
+    let checkpoint = |key: &str, stage: &str, window: &str, state: &str| {
+        store.conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(operation_key) DO UPDATE SET state=excluded.state",
+            params![key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,stage,window,state,chrono::Utc::now().to_rfc3339()]).unwrap();
+    };
+    let steps = |store: &Store| {
+        insight_execution::task_progress(&store.conn, &id)
+            .unwrap()
+            .unwrap()
+            .artifacts
+            .into_iter()
+            .map(|a| (a.artifact, a.step, a.live))
+            .collect::<Vec<_>>()
+    };
+    // Extraction: Claims own the request.
+    insight_execution::progress(&store.conn, &input, "extraction", None, None).unwrap();
+    checkpoint("x0", "extraction", "0", "running");
+    let s = steps(&store);
+    assert_eq!((s[0].0.as_str(), s[0].2), ("Claims", true));
+    assert_eq!(s[1].1, "Queued · after claims");
+    assert_eq!(s[2].1, "Queued · after claims");
+    // Claim assessment batch (claim:* IDs) still belongs to Claims.
+    checkpoint("x0", "extraction", "0", "completed");
+    insight_execution::progress(&store.conn, &input, "assessment", None, None).unwrap();
+    checkpoint("a0", "assessment", "claim:c1,claim:c2", "running");
+    let s = steps(&store);
+    assert!(s[0].2 && s[0].1 == "Waiting for decision", "{s:?}");
+    assert!(!s[1].2 && !s[2].2);
+    // One synthesis call produces both Insights and Links.
+    checkpoint("a0", "assessment", "claim:c1,claim:c2", "completed");
+    insight_execution::progress(&store.conn, &input, "inference", None, None).unwrap();
+    checkpoint("s0", "inference", "0", "running");
+    let s = steps(&store);
+    assert_eq!(s[0].1, "Validated · awaiting publication");
+    assert!(s[1].2 && s[2].2, "{s:?}");
+    // Role-partitioned derivation assessment: inference batch, then link batch.
+    checkpoint("s0", "inference", "0", "completed");
+    insight_execution::progress(&store.conn, &input, "assessment", None, None).unwrap();
+    checkpoint("a1", "assessment", "inference:i1", "running");
+    let s = steps(&store);
+    assert!(s[1].2 && !s[2].2, "{s:?}");
+    assert_eq!(s[2].1, "Queued · awaiting assessment");
+    checkpoint("a1", "assessment", "inference:i1", "completed");
+    checkpoint("a2", "assessment", "link:l1", "running");
+    let s = steps(&store);
+    assert_eq!(s[1].1, "Validated · awaiting publication");
+    assert!(s[2].2, "{s:?}");
+}

@@ -12827,7 +12827,12 @@ mod tests {
             let mut app = app();
             let (_, article) = related_ui_fixture(&mut app);
             for state in ["failed", "published"] {
-                let progress=Progress {task_id:"insight-fixture-task".into(),job_id:"insight-fixture-job".into(),retry_epoch:1,stage:if state=="failed" {"assessment"} else {"published"}.into(),state:if state=="failed" {"failed"} else {"completed"}.into(),windows_done:2,windows_total:2,batches_done:1,batches_total:2,withheld_count:3,route:"Route: local/fixture · attempt 2 · fail".into(),error:if state=="failed" {"assessment: invalid_result; missing question q1:publication after bounded repair"} else {"optional link batch unavailable; qualified claims published"}.into(),retryable:true,index_status:"Index pending: 5/5".into(),activity:String::new(),activity_age_secs:None};
+                let mut progress=Progress {artifacts:Vec::new(),task_id:"insight-fixture-task".into(),job_id:"insight-fixture-job".into(),retry_epoch:1,stage:if state=="failed" {"assessment"} else {"published"}.into(),state:if state=="failed" {"failed"} else {"completed"}.into(),windows_done:2,windows_total:2,batches_done:1,batches_total:2,withheld_count:3,route:"Route: local/fixture · attempt 2 · fail".into(),error:if state=="failed" {"assessment: invalid_result; missing question q1:publication after bounded repair"} else {"optional link batch unavailable; qualified claims published"}.into(),retryable:true,index_status:"Index pending: 5/5".into(),activity:String::new(),activity_age_secs:None};
+                progress.artifacts =
+                    argos_osint_core::investigation::insight_execution::artifact_steps(
+                        &progress,
+                        &Default::default(),
+                    );
                 app.select(ModuleId::Intel.index());
                 app.intel_articles = vec![article.clone()];
                 app.intel_sel = 0;
@@ -12848,7 +12853,10 @@ mod tests {
                         || width < 100
                 );
                 if width == 160 {
-                    assert!(buffer_text(&buffer).contains("Withheld"));
+                    // Progression details live in Background jobs, not panes.
+                    let text = buffer_text(&buffer);
+                    assert!(!text.contains("Withheld"));
+                    assert!(text.contains("Claims · "), "{text}");
                 }
                 if let Some(dir) = &dir {
                     dump_cells(
@@ -12920,6 +12928,299 @@ mod tests {
         }
     }
 
+    /// Render text of every compact Intel page (narrow layouts page the
+    /// Extracted / Reader / Context columns); a single page when wide.
+    fn intel_all_pages_text(app: &mut App, width: u16, height: u16) -> String {
+        let mut text = String::new();
+        for page in 0..3 {
+            app.compact_pages[ModuleId::Intel.index()] = page;
+            text.push_str(&buffer_text(&render(app, width, height)));
+        }
+        app.compact_pages[ModuleId::Intel.index()] = 0;
+        text
+    }
+
+    /// Claims, Insights and Links each get their own Background jobs entry
+    /// with their own streamed steps; content panes show only the shared
+    /// centered loading animation until their content arrives.
+    #[test]
+    fn intel_artifact_progress_in_background_jobs_screens() {
+        use argos_osint_core::investigation::insight_execution::{
+            artifact_steps, ArtifactFacts, Progress,
+        };
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        if let Some(dir) = &dir {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let synth = |assess: &[(&'static str, &str)]| ArtifactFacts {
+            synthesis_started: true,
+            assessments: assess.iter().map(|(a, s)| (*a, s.to_string())).collect(),
+        };
+        let pre = |assess: &[(&'static str, &str)]| ArtifactFacts {
+            synthesis_started: false,
+            assessments: assess.iter().map(|(a, s)| (*a, s.to_string())).collect(),
+        };
+        // (name, state, stage, activity, age, facts, expected [claims, insights, links])
+        let frames: Vec<(
+            &str,
+            &str,
+            &str,
+            &str,
+            Option<u64>,
+            ArtifactFacts,
+            [&str; 3],
+        )> = vec![
+            (
+                "1-queued",
+                "queued",
+                "queued",
+                "",
+                None,
+                pre(&[]),
+                ["Queued", "Queued", "Queued"],
+            ),
+            (
+                "2-claims-waiting",
+                "running",
+                "extraction",
+                "Waiting for output · attempt 1",
+                Some(6),
+                pre(&[]),
+                [
+                    "Waiting for output",
+                    "Queued · after claims",
+                    "Queued · after claims",
+                ],
+            ),
+            (
+                "3-claims-receiving",
+                "running",
+                "extraction",
+                "Receiving output · attempt 1 · 1840 chars",
+                Some(1),
+                pre(&[]),
+                [
+                    "Receiving output",
+                    "Queued · after claims",
+                    "Queued · after claims",
+                ],
+            ),
+            (
+                "4-claims-stalled",
+                "running",
+                "extraction",
+                "Receiving output · attempt 1 · 1840 chars",
+                Some(97),
+                pre(&[]),
+                [
+                    "Stalled · no model activity for 97s",
+                    "Queued · after claims",
+                    "Queued · after claims",
+                ],
+            ),
+            (
+                "5-claims-validating",
+                "running",
+                "assessment",
+                "Validating",
+                Some(0),
+                pre(&[("Claims", "running")]),
+                [
+                    "Validating",
+                    "Queued · after claims",
+                    "Queued · after claims",
+                ],
+            ),
+            (
+                "6-synthesis-receiving",
+                "running",
+                "inference",
+                "Receiving output · attempt 1 · 3120 chars",
+                Some(1),
+                synth(&[("Claims", "completed")]),
+                [
+                    "Validated · awaiting publication",
+                    "Receiving output",
+                    "Receiving output",
+                ],
+            ),
+            (
+                "7-insights-decision",
+                "running",
+                "assessment",
+                "",
+                Some(3),
+                synth(&[("Claims", "completed"), ("Insights", "running")]),
+                [
+                    "Validated · awaiting publication",
+                    "Waiting for decision",
+                    "Queued · awaiting assessment",
+                ],
+            ),
+            (
+                "8-links-stalled",
+                "running",
+                "assessment",
+                "Waiting for decision · attempt 1",
+                Some(200),
+                synth(&[
+                    ("Claims", "completed"),
+                    ("Insights", "completed"),
+                    ("Links", "running"),
+                ]),
+                [
+                    "Validated · awaiting publication",
+                    "Validated · awaiting publication",
+                    "Stalled · no model activity for 200s",
+                ],
+            ),
+            (
+                "9-published",
+                "completed",
+                "published",
+                "",
+                None,
+                synth(&[]),
+                ["Published", "Published", "Published"],
+            ),
+        ];
+        for (width, height) in [(160, 50), (120, 40)] {
+            for (name, state, stage, activity, age, facts, expected) in &frames {
+                let mut app = app();
+                let (_, article) = related_ui_fixture(&mut app);
+                let mut progress = Progress {
+                    task_id: "insight-stream-task".into(),
+                    job_id: "insight-stream-job".into(),
+                    stage: (*stage).into(),
+                    state: (*state).into(),
+                    windows_total: 1,
+                    route:
+                        "Route: local/nvidia/nemotron-3-super-120b-a12b:free · attempt 1 · running"
+                            .into(),
+                    index_status: "Index pending: 0/0".into(),
+                    activity: (*activity).into(),
+                    activity_age_secs: *age,
+                    ..Default::default()
+                };
+                progress.artifacts = artifact_steps(&progress, facts);
+                let got: Vec<&str> = progress.artifacts.iter().map(|a| a.step.as_str()).collect();
+                assert_eq!(got, expected.to_vec(), "{name}");
+                let published = *state == "completed";
+                app.select(ModuleId::Intel.index());
+                app.intel_articles = vec![article.clone()];
+                app.intel_sel = 0;
+                app.intel_page = IntelPage::Briefing;
+                app.intel_insight_lifecycle =
+                    if published { "active" } else { "refreshing" }.into();
+                app.intel_refresh_status = expected[0].into();
+                if published {
+                    let claim = |fp: &str, class: &str, text: &str| AtlasArticleClaim {
+                        fingerprint: fp.into(),
+                        entity: "Baltic board".into(),
+                        predicate: "said".into(),
+                        object: "ferry".into(),
+                        topic: "investigation".into(),
+                        classification: class.into(),
+                        confidence: 0.0,
+                        claim: text.into(),
+                        source_url: article.url.clone(),
+                        published_at: String::new(),
+                        article_id: article.id.clone(),
+                        reliability: String::new(),
+                        info_credibility: 0,
+                        admiralty: String::new(),
+                        rsp_status: String::new(),
+                    };
+                    app.intel_claims = vec![
+                        claim(
+                            "v2:c1",
+                            "claim",
+                            "[claim · faithful] Baltic board suspended the ferry service.",
+                        ),
+                        claim(
+                            "v2:i1",
+                            "inference",
+                            "[inference · supported] The suspension is temporary pending review.",
+                        ),
+                    ];
+                    app.intel_relations = vec![("v2:i1".into(), "v2:c1".into(), "supports".into())];
+                } else {
+                    app.intel_claims.clear();
+                    app.intel_relations.clear();
+                    app.intel_link_explanations.clear();
+                }
+                app.intel_extraction_progress = Some(progress.clone());
+                app.compact_pages[ModuleId::Intel.index()] = 0;
+                app.scrolls.intel_extracted = 0;
+                let text = intel_all_pages_text(&mut app, width, height);
+                // Background jobs: each artifact has its own entry and step.
+                for (artifact, step) in ["Claims", "Insights", "Links"].iter().zip(expected) {
+                    let short = step.split(" · no model activity").next().unwrap();
+                    let short = short.split(" · awaiting").next().unwrap();
+                    let short = short.split(" · after").next().unwrap();
+                    let entry = format!("{artifact} · {short}");
+                    let shown = text.contains(&entry);
+                    assert!(shown, "{name} {width}x{height}: missing {entry}\n{text}");
+                }
+                if expected.iter().any(|s| s.starts_with("Stalled")) {
+                    assert!(
+                        text.contains("⚠ no model activity for"),
+                        "{name}: stall warning"
+                    );
+                }
+                // Content panes never carry the streamed details.
+                for leaked in ["Stage: ", "Withheld: ", "Route: "] {
+                    assert!(
+                        !text.contains(leaked),
+                        "{name}: '{leaked}' leaked into a pane"
+                    );
+                }
+                // Centered spinner until content arrives; content replaces it.
+                for label in [
+                    "Extracting claims",
+                    "Extracting inferences",
+                    "Extracting links",
+                ] {
+                    assert_eq!(
+                        text.contains(label),
+                        !published,
+                        "{name} {width}x{height}: {label}\n{text}"
+                    );
+                }
+                if published {
+                    assert!(
+                        text.contains("suspended the ferry"),
+                        "{name}: claims content"
+                    );
+                    assert!(
+                        text.contains("temporary pending"),
+                        "{name}: inference content"
+                    );
+                }
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("artifacts-{name}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                    if width < 160 {
+                        app.compact_pages[ModuleId::Intel.index()] = 2;
+                        dump_cells(
+                            &mut app,
+                            dir,
+                            &format!("artifacts-{name}-{width}x{height}-jobs"),
+                            width,
+                            height,
+                        );
+                        app.compact_pages[ModuleId::Intel.index()] = 0;
+                    }
+                }
+            }
+        }
+    }
+
     /// Spec §6: streamed insight status steps on Intel (Focus Brief), Jobs
     /// and Logs. Dumps PNG-able cells when ARGOS_SCREEN_DIR is set.
     #[test]
@@ -12976,7 +13277,7 @@ mod tests {
             for (name, state, stage, activity, age) in steps {
                 let mut app = app();
                 let (_, article) = related_ui_fixture(&mut app);
-                let progress = Progress {
+                let mut progress = Progress {
                     task_id: "insight-stream-task".into(),
                     job_id: "insight-stream-job".into(),
                     retry_epoch: 0,
@@ -12995,7 +13296,13 @@ mod tests {
                     index_status: "Index pending: 0/0".into(),
                     activity: activity.into(),
                     activity_age_secs: age,
+                    artifacts: Vec::new(),
                 };
+                progress.artifacts =
+                    argos_osint_core::investigation::insight_execution::artifact_steps(
+                        &progress,
+                        &Default::default(),
+                    );
                 let step = status_step(state, stage, activity, age, false);
                 app.select(ModuleId::Intel.index());
                 app.intel_articles = vec![article.clone()];
@@ -13005,11 +13312,11 @@ mod tests {
                 app.intel_refresh_status = step.clone();
                 app.intel_extraction_progress = Some(progress.clone());
                 app.compact_pages[ModuleId::Intel.index()] = 0;
-                let buffer = render(&mut app, width, height);
-                let text = buffer_text(&buffer);
+                let text = intel_all_pages_text(&mut app, width, height);
+                let short = step.split(" · no model activity").next().unwrap();
                 assert!(
-                    text.contains(&format!("Insights · {step}")) || text.contains(&step),
-                    "{name}: {step}"
+                    text.contains(&format!("Claims · {short}")),
+                    "{name}: {step}\n{text}"
                 );
                 assert!(!text.contains("Extracting ·"), "old label gone");
                 assert!(!text.contains("model activated"));
@@ -13080,6 +13387,7 @@ mod tests {
                     index_status: "Index: no published memories".into(),
                     activity: String::new(),
                     activity_age_secs: None,
+                    artifacts: Vec::new(),
                 };
                 let job = JobRow {
                     id: progress.job_id.clone(),

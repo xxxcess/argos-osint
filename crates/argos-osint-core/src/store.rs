@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// activity-history tables plus additive timing columns on the model attempt
 /// and tool call records. 28 adds immutable NLP artifacts/references/features and
 /// complete summary-result envelopes; existing facts are preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 34;
+pub const SCHEMA_VERSION: i64 = 35;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -800,6 +800,35 @@ impl Store {
                         ON insight_supersessions(owner_kind, owner_id);",
                 )?;
                 self.conn.pragma_update(None, "user_version", 34)?;
+            }
+            if version < 35 {
+                // Additive: Intel brief preparation manifest and stage outputs
+                // (task dependencies/recoveries live in tasks::migrate_additive).
+                self.conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS intel_brief_runs (
+                        job_id TEXT PRIMARY KEY,
+                        article_id TEXT NOT NULL,
+                        generation INTEGER NOT NULL,
+                        contract TEXT NOT NULL,
+                        input_revision TEXT NOT NULL,
+                        state TEXT NOT NULL DEFAULT 'active',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS intel_brief_one_active
+                        ON intel_brief_runs(article_id) WHERE state='active';
+                    CREATE TABLE IF NOT EXISTS intel_brief_stage_outputs (
+                        task_id TEXT PRIMARY KEY,
+                        job_id TEXT NOT NULL,
+                        stage TEXT NOT NULL,
+                        output_hash TEXT NOT NULL,
+                        output_json TEXT NOT NULL,
+                        item_count INTEGER NOT NULL DEFAULT 0,
+                        empty_reason TEXT NOT NULL DEFAULT '',
+                        committed_at TEXT NOT NULL
+                    );",
+                )?;
+                self.conn.pragma_update(None, "user_version", 35)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final

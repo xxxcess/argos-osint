@@ -1051,8 +1051,9 @@ pub async fn recover_refreshes(
             }
         }
         crate::tasks::retire_atlas_insight_work(&store.conn, &now)?;
-        store.conn.execute("UPDATE argos_attempts SET finished_at=?1,outcome='lease_expired',error_category='lease_expired' WHERE finished_at='' AND task_id IN (SELECT id FROM argos_tasks WHERE operation='insight_refresh' AND state='running' AND julianday(lease_until)<=julianday(?1))", [&now])?;
-        store.conn.execute("UPDATE argos_tasks SET state='queued',lease_owner='',lease_until='',max_attempts=attempts+1,updated_at=?1 WHERE operation='insight_refresh' AND state='running' AND julianday(lease_until)<=julianday(?1)", [&now])?;
+        // One recovery path for every operation: atomic CAS, epoch fencing,
+        // worker recoveries counted separately from provider attempts.
+        crate::tasks::interrupt_expired_leases(&store.conn, &now)?;
         let mut stmt=store.conn.prepare("SELECT id FROM argos_tasks WHERE operation='insight_refresh' AND state IN ('queued','retry_scheduled') ORDER BY created_at,id")?;
         let ids = stmt
             .query_map([], |r| r.get::<_, String>(0))?

@@ -331,6 +331,7 @@ Extract and join ONLY the text strictly pertaining to the actual article title a
     // complete captured role chain (native Jev or constrained chat JSON).
     if let (true, Some(rt)) = (select_mode, runtime) {
         let adapter = super::body_filter::BlockDecisions {
+            context: &[],
             title,
             brief: &brief,
             url,

@@ -185,6 +185,7 @@ fn block_cleanup_decisions_compute_ranges_in_rust_and_validate_ids() {
         },
     ];
     let adapter = BlockDecisions {
+        context: &[],
         title: "Talks",
         brief: "Talks resume",
         url: "",

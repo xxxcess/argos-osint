@@ -20,7 +20,11 @@ pub fn article_input(
         // Only the retained acquisition can establish story coverage. A refined
         // display body and a legacy bounded body cannot certify completeness.
         let acquisition:Option<(String,String,String,String)>=store.conn.query_row("SELECT raw_hash,prose_hash,attempt_id,revision FROM nlp_source_refs WHERE owner_kind='article' AND owner_id=?1 AND source_id=?2 AND transform_version='validated-baseline-v1' AND revision=?3 AND raw_hash IS NOT NULL ORDER BY rowid DESC LIMIT 1",params![article.id,body.id,body.body_version.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-        if let Some((raw_hash, prose_hash, attempt, revision)) = acquisition {
+        if let Some((raw_hash, baseline_hash, attempt, revision)) = acquisition {
+            // Display and extraction share the Stage-1 clean artifact derived
+            // from this same acquisition; fall back to the validated baseline.
+            let clean: Option<String> = store.conn.query_row("SELECT prose_hash FROM nlp_source_refs WHERE owner_kind='article' AND owner_id=?1 AND source_id=?2 AND transform_version=?3 AND revision=?4 AND attempt_id=?5 AND raw_hash=?6 ORDER BY rowid DESC LIMIT 1",params![article.id,body.id,crate::intel_recon::clean_body::TRANSFORM,revision,attempt,raw_hash],|r|r.get(0)).optional()?;
+            let prose_hash = clean.unwrap_or(baseline_hash);
             let text: Option<String> = store
                 .conn
                 .query_row(

@@ -7,6 +7,7 @@ mod brain;
 pub mod brief_pipeline;
 mod briefing_view;
 mod classify_mode;
+pub mod clean_body;
 mod confidence;
 mod jobs;
 mod ledger;

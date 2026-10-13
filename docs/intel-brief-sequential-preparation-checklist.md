@@ -24,7 +24,13 @@ Legend: **done** / **partial** / **deferred** / pending. Phases follow §7's ord
 | 5 | Lease renewal from claim through publication/ack; lightweight SQLite conn + bounded busy retry; blocking DB work off current-thread loop; renewal-failure/heartbeat-age logging | pending | 3 (stage executors) |
 | 5 | Visits/body-ready/recovery attach to the chain; remove duplicate `tracked::begin` body jobs | pending | 2–4 (`open_intel_briefing` wiring) |
 | 5 | Final Stage-4 atomic publication + index outbox; index failure separate | pending | 3 |
-| 2–4 | Four-stage contracts, cleanup order, prompts/wire, budgets, routing | pending | 2–3 |
+| 3 | Cleanup order: local baseline → NLP annotation → conditional Classifier (ambiguous blocks only, ≤12/batch, neighbour context, default keep) → local verbatim removals → revalidation + span maps + content hash | done (`intel_recon/clean_body.rs`) | 2 |
+| 3 | Spec cleanup prompt used for Classifier block decisions | done (`BLOCK_SYSTEM`, `CLEANUP_PROMPT`) | 2 |
+| 3 | No Synthesis rewrite; display and extraction consume one `intel-clean-body-v1` artifact | done (`commit_refined_body`, `article_input`) | 2 |
+| 3 | NLP mentions as keep-anchors | partial: title anchors used; NLP annotation still runs/caches but its mentions are not yet fed to the ambiguity heuristic | 2 |
+| 3 | Stage 1 fails on missing/truncated/unvalidated story | partial: `stage_one_admissible` added + tested; enforced by the stage worker in phase 3 | 2–3 |
+| 2,4 | Stage contracts, prompts/wire, budgets, routing | pending | 3 |
+| 8.3 | Cleanup regressions (byline/quote/negation/correction/Unicode verbatim, span maps, classifier missing/failing keeps all, ≤12 sequential batches, degrading removals rejected, incomplete story fails) | done (`clean_body_tests.rs`, 6 tests) | 2 |
 | 4 | Related leads (`intel_inference_article_leads`) | pending | 4 |
 | 6 | Shared stage-progress UI (brief Jobs, section headers, global Jobs, Logs); `artifact_steps` no longer copies parent terminal state | pending | 4 |
 | 7 | Docs/diagrams | pending | 5 |

@@ -953,7 +953,12 @@ async fn atlas_command(command: AtlasCommand) -> Result<()> {
                 newsapi_fallback: settings.provider_fallback_key("newsapi"),
                 ..Default::default()
             };
-            let classifier = provider::role_secret(&auth, &settings, "classifier").ok();
+            let classifier = argos_osint_core::recon::model_exec::select_role_secret(
+                &auth,
+                &settings,
+                "classifier",
+                argos_osint_core::recon::model_exec::OperationFormat::BoundedDecision,
+            );
             let pause = Arc::new(AtomicBool::new(false));
             let signal_pause = pause.clone();
             let signal = tokio::spawn(async move {

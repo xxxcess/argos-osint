@@ -594,7 +594,7 @@ fn schema_32_upgrade_preserves_legacy_checkpoints_and_unrelated_tables() {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        32
+        crate::store::SCHEMA_VERSION
     );
     assert_eq!(
         store
@@ -753,4 +753,450 @@ fn entity_resolver_routes_are_relevant_to_article_and_recon_but_not_report_only_
     assert_ne!(article, input_key(&input, &settings));
     input.surface = "recon_report".into();
     assert_eq!(report, input_key(&input, &settings));
+}
+
+#[test]
+fn status_steps_follow_the_streamed_sequence_and_never_claim_activity_from_headers() {
+    use insight_execution::status_step;
+    assert_eq!(status_step("queued", "queued", "", None, false), "Queued");
+    assert_eq!(
+        status_step("running", "extraction", "", Some(5), false),
+        "Waiting for output"
+    );
+    assert_eq!(
+        status_step(
+            "running",
+            "extraction",
+            "Waiting for output · attempt 1 · super",
+            Some(3),
+            false
+        ),
+        "Waiting for output"
+    );
+    assert_eq!(
+        status_step(
+            "running",
+            "extraction",
+            "Receiving output · attempt 1 · 812 chars",
+            Some(1),
+            false
+        ),
+        "Receiving output"
+    );
+    assert_eq!(
+        status_step("running", "extraction", "Validating", Some(400), false),
+        "Validating"
+    );
+    assert_eq!(
+        status_step("running", "assessment", "", None, false),
+        "Waiting for decision"
+    );
+    assert!(status_step(
+        "running",
+        "extraction",
+        "Retry wait 12s · next attempt 2",
+        Some(2),
+        false
+    )
+    .starts_with("Retry wait 12s"));
+    assert_eq!(
+        status_step(
+            "running",
+            "extraction",
+            "Receiving output · attempt 1",
+            Some(95),
+            false
+        ),
+        "Stalled · no model activity for 95s"
+    );
+    assert_eq!(
+        status_step("running", "extraction", "", Some(150), false),
+        "Waiting for output",
+        "first output may take up to 180s"
+    );
+    assert_eq!(
+        status_step("completed", "published", "", None, false),
+        "Published"
+    );
+    assert_eq!(
+        status_step("completed", "published", "", None, true),
+        "Indexed"
+    );
+    assert_eq!(
+        status_step("failed", "assessment", "", None, false),
+        "Failed"
+    );
+
+    // Headers alone are "Waiting for output", never activity.
+    use crate::provider_attempt::AttemptProgress as P;
+    use crate::recon::model_exec::ModelExecEvent as E;
+    let headers = E::Progress {
+        operation_id: "op".into(),
+        attempt: 1,
+        route_index: 0,
+        model: "super".into(),
+        progress: P::HeadersReceived { status: 200 },
+    };
+    assert!(insight_execution::activity_label(&headers)
+        .unwrap()
+        .starts_with("Waiting for output"));
+    assert!(insight_execution::activity_label(&E::Progress {
+        operation_id: "op".into(),
+        attempt: 1,
+        route_index: 0,
+        model: "super".into(),
+        progress: P::Heartbeat,
+    })
+    .is_none());
+}
+
+#[test]
+fn progress_reaches_jobs_and_logs_throttled_and_resets_per_attempt_and_stage() {
+    use crate::provider_attempt::AttemptProgress as P;
+    use crate::recon::model_exec::ModelExecEvent as E;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("progress.db");
+    let store = Store::open(&path).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    store.conn.execute("INSERT INTO argos_jobs(id,kind,owner_scope,state,created_at,updated_at) VALUES('job-p','insight_refresh','article:a1','running',?1,?1)",[&now]).unwrap();
+    store.conn.execute("INSERT INTO argos_tasks(id,job_id,operation,state,created_at,updated_at) VALUES('task-p','job-p','insight_refresh','running',?1,?1)",[&now]).unwrap();
+    store.conn.execute("INSERT INTO insight_refresh_execution(task_id,stage,updated_at) VALUES('task-p','extraction',?1)",[&now]).unwrap();
+    let sink = activity_sink(&path, "task-p");
+    let progress = |attempt, progress| E::Progress {
+        operation_id: "op".into(),
+        attempt,
+        route_index: 2,
+        model: "super".into(),
+        progress,
+    };
+    let activity = || insight_execution::activity(&store.conn, "task-p");
+    sink(E::AttemptStart {
+        operation_id: "op".into(),
+        generation: 1,
+        route_index: 2,
+        attempt: 1,
+        provider: "local".into(),
+        account: "local".into(),
+        model: "super".into(),
+        transport: "stream".into(),
+    });
+    assert!(activity().starts_with("Waiting for output · attempt 1"));
+    sink(progress(1, P::HeadersReceived { status: 200 }));
+    assert!(activity().starts_with("Waiting for output"));
+    sink(progress(1, P::FirstModelOutput));
+    sink(progress(
+        1,
+        P::Receiving {
+            answer_chars: 40,
+            reasoning_chars: 0,
+        },
+    ));
+    // Within the 1s throttle the durable label is not rewritten per update.
+    sink(progress(
+        1,
+        P::Receiving {
+            answer_chars: 41,
+            reasoning_chars: 0,
+        },
+    ));
+    assert_eq!(activity(), "Receiving output · attempt 1 · super");
+    sink(progress(1, P::Heartbeat));
+    assert_eq!(activity(), "Receiving output · attempt 1 · super");
+    // A new attempt resets provisional counters.
+    sink(E::AttemptReset {
+        operation_id: "op".into(),
+        attempt: 2,
+    });
+    assert_eq!(activity(), "Waiting for output · attempt 2");
+    sink(progress(
+        2,
+        P::StreamComplete {
+            finish_reason: Some("stop".into()),
+        },
+    ));
+    assert_eq!(activity(), "Validating");
+
+    let events = crate::events::list_events(
+        &store.conn,
+        &crate::events::EventFilter {
+            job_id: "job-p".into(),
+            ..Default::default()
+        },
+        50,
+    )
+    .unwrap();
+    let messages: Vec<_> = events.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("attempt 1 dispatched")),
+        "{messages:?}"
+    );
+    assert!(messages
+        .iter()
+        .any(|m| m.contains("receiving model output")));
+    assert!(messages.iter().any(|m| m.contains("stream complete")));
+    assert!(messages.len() <= 4, "no per-delta log rows: {messages:?}");
+
+    // Jobs detail picks up the live step through task progress; a stage
+    // change resets activity ("Waiting for decision" for assessment).
+    store.conn.execute("UPDATE insight_refresh_execution SET stage='assessment',activity='Waiting for decision' WHERE task_id='task-p'",[]).unwrap();
+    assert_eq!(
+        insight_execution::status_step("running", "assessment", &activity(), Some(1), false),
+        "Waiting for decision"
+    );
+}
+
+#[test]
+fn source_and_route_changes_retire_old_task_with_linked_reason_and_polling_never_duplicates() {
+    let store = Store::memory().unwrap();
+    let mut input = seed_report(&store, "supersede", "Acme announced project 0.");
+    let (_, mut settings) = routes("http://127.0.0.1:1");
+    let first = insight_persist::enqueue_refresh(
+        &store.conn,
+        &mut input,
+        &settings,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    let article = store
+        .atlas_article("fixture", "supersede")
+        .unwrap()
+        .unwrap();
+    // Repeated unchanged visits/polling: same task, no new generation.
+    let generation =
+        insight_persist::desired_generation(&store.conn, "article", "supersede").unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            insight_persist::schedule_article_refresh(&store, &article, &settings, true).unwrap(),
+            Some(first.clone())
+        );
+    }
+    assert_eq!(
+        insight_persist::desired_generation(&store.conn, "article", "supersede").unwrap(),
+        generation
+    );
+    // Report body changes while the first task is still queued.
+    let bundle = json!({"text":"Acme announced project 1 and later denied project 0.","completed_at":chrono::Utc::now().to_rfc3339(),"support_receipts":[]}).to_string();
+    store.conn.execute("INSERT INTO intel_report_results(job_id,generation,article_id,completion_sequence,source_hash,details_json,completed_at) VALUES('report-supersede-2',1,'supersede',2,?1,?2,?3)",params![crate::nlp::cache::hash(&bundle),bundle,chrono::Utc::now().to_rfc3339()]).unwrap();
+    let second = insight_persist::schedule_article_refresh(&store, &article, &settings, true)
+        .unwrap()
+        .unwrap();
+    assert_ne!(second, first);
+    let (state, message): (String, String) = store
+        .conn
+        .query_row(
+            "SELECT state,error_message FROM argos_tasks WHERE id=?1",
+            [&first],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "superseded");
+    let second_job: String = store
+        .conn
+        .query_row(
+            "SELECT job_id FROM argos_tasks WHERE id=?1",
+            [&second],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        message,
+        format!("Superseded · replaced by {second_job} · source changed")
+    );
+    assert_eq!(
+        insight_persist::supersession(&store.conn, &first),
+        Some((second_job.clone(), "source changed".into()))
+    );
+    // Only the current generation may publish; the old one is fenced.
+    assert!(insight_persist::is_superseded(&store.conn, &input));
+    // The latest live generation stays queued (actionable), never failed.
+    let live: String = store
+        .conn
+        .query_row(
+            "SELECT state FROM argos_tasks WHERE id=?1",
+            [&second],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(live, "queued");
+    // Superseded progress reads as retirement, not Unknown/Timeout/exhaustion.
+    let progress = insight_execution::task_progress(&store.conn, &first)
+        .unwrap()
+        .unwrap();
+    let lines = progress.lines().join("\n");
+    assert!(lines.starts_with("Superseded · replaced by"), "{lines}");
+    assert!(!lines.contains("Extraction error"));
+    // Route change: reason names the changed role.
+    settings.defaults.synthesis.model = "replacement-model".into();
+    let third = insight_persist::schedule_article_refresh(&store, &article, &settings, true)
+        .unwrap()
+        .unwrap();
+    assert_ne!(third, second);
+    assert_eq!(
+        insight_persist::supersession(&store.conn, &second).map(|(_, r)| r),
+        Some("model routes changed".into())
+    );
+    let events = crate::events::list_events(
+        &store.conn,
+        &crate::events::EventFilter {
+            text: "Superseded".into(),
+            ..Default::default()
+        },
+        10,
+    )
+    .unwrap();
+    assert_eq!(events.len(), 2);
+}
+
+#[test]
+fn completed_report_replacement_is_named_as_such() {
+    let store = Store::memory().unwrap();
+    let report = seed_report(&store, "rep", "Acme announced project 0.");
+    let (_, settings) = routes("http://127.0.0.1:1");
+    let mut article = report.clone();
+    article.surface = "article".into();
+    assert_eq!(
+        insight_persist::supersession_reason(&article, &settings, &report, &settings).0,
+        "completed report replaces article details"
+    );
+    assert_eq!(
+        insight_persist::supersession_reason(&report, &settings, &report, &settings).0,
+        "preparation contract changed"
+    );
+}
+
+#[tokio::test]
+async fn generation_advanced_mid_flight_retires_task_as_superseded_with_zero_requests() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("race.db");
+    let store = Store::open(&path).unwrap();
+    let mut input = seed_report(&store, "race", "Acme announced project 0.");
+    let server = mock::serve(vec![]).await;
+    let (auth, settings) = routes(&server.base_url);
+    let id = insight_persist::enqueue_refresh(
+        &store.conn,
+        &mut input,
+        &settings,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    // A replacement generation lands between enqueue and dispatch.
+    insight_persist::advance_generation(
+        &store.conn,
+        "article",
+        "race",
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let out = insight_persist::run_refresh_slice(&path, &id, &auth, &settings, &cancel)
+        .await
+        .unwrap();
+    assert!(out.is_none(), "late work never publishes");
+    assert_eq!(server.hits(), 0, "obsolete work sends no requests");
+    let (state, category, message): (String, String, String) = store
+        .conn
+        .query_row(
+            "SELECT state,error_category,error_message FROM argos_tasks WHERE id=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "superseded");
+    assert_eq!(category, "", "not Unknown/Timeout");
+    assert!(message.starts_with("Superseded"), "{message}");
+    let lifecycle_error: String = store
+        .conn
+        .query_row(
+            "SELECT last_error FROM insight_owner_state WHERE owner_kind='article' AND owner_id='race'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        lifecycle_error.is_empty(),
+        "retirement is not an owner error"
+    );
+}
+
+#[tokio::test]
+async fn index_only_repair_after_insight_publication_makes_zero_model_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("fixture.db");
+    let store = Store::open(&path).unwrap();
+    let text = (0..8)
+        .map(|i| format!("Acme announced project {i}. "))
+        .collect::<String>();
+    let mut input = seed_report(&store, "owner", &text);
+    let (entity, claims) = claims(&input, 8);
+    let premise_ids: Vec<_> = claims
+        .iter()
+        .map(|c| format!("claim:{}", claim_fingerprint(c)))
+        .collect();
+    let inferences:Vec<_>=(0..5).map(|i|json!({"id":format!("i{i}"),"text":format!("Project {i} was announced, not completed."),"entity_refs":[entity.id],"premise_claim_ids":[premise_ids[i]],"evidence_refs":[input.evidence[0].reference],"rationale":"An announcement establishes stated intent only.","limitations":["Completion is unknown."]})).collect();
+    let links:Vec<_>=(0..8).map(|i|json!({"id":format!("l{i}"),"typed_endpoints":[{"kind":"entity","id":entity.id},{"kind":"claim","id":premise_ids[i]}],"relation":"entity_connection","evidence_refs":[input.evidence[0].reference],"rationale":format!("Acme is the attributed speaker for project {i}.")})).collect();
+    let server=mock::serve(vec![mock::ok_json(&json!({"entities":[entity],"claims":claims,"limit_reached":false,"partial_enumeration":false}).to_string(),"stop"),mock::ok_json(&answers(8,true,"faithful"),"stop"),mock::ok_json(&json!({"inferences":inferences,"links":links}).to_string(),"stop"),mock::ok_json(&answers(8,false,"faithful"),"stop"),mock::ok_json(&answers(5,false,"faithful"),"stop")]).await;
+    let (auth, settings) = routes(&server.base_url);
+    let id = insight_persist::enqueue_refresh(
+        &store.conn,
+        &mut input,
+        &settings,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    finish(&path, &id, &auth, &settings).await;
+    assert_eq!(server.hits(), 5);
+    let count = |sql: &str| {
+        store
+            .conn
+            .query_row(sql, [], |r| r.get::<_, usize>(0))
+            .unwrap()
+    };
+    let memories = count("SELECT COUNT(*) FROM memories");
+    let generation = insight_persist::desired_generation(&store.conn, "article", "owner").unwrap();
+    // Crash after publication: the index outbox is the only unfinished work.
+    // Disabled vector index (ARGOS_EMBED=0 store) blocks honestly.
+    let drained = crate::scheduler::drain_index_once(&store.conn, &store, "w", 64).unwrap();
+    assert!(drained > 0);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM argos_index_changes WHERE record_kind='memory' AND state<>'blocked'"),
+        0
+    );
+    // Index-only repair: requeue the outbox and drain again; recovery and
+    // revisits must not re-run extraction/assessment/synthesis.
+    store
+        .conn
+        .execute(
+            "UPDATE argos_index_changes SET state='pending' WHERE record_kind='memory'",
+            [],
+        )
+        .unwrap();
+    crate::scheduler::drain_index_once(&store.conn, &store, "w", 64).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    insight_persist::recover_refreshes(&path, &auth, &settings, &cancel)
+        .await
+        .unwrap();
+    let article = store.atlas_article("fixture", "owner").unwrap().unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            insight_persist::schedule_article_refresh(&store, &article, &settings, true).unwrap(),
+            Some(id.clone())
+        );
+    }
+    assert_eq!(server.hits(), 5, "index-only repair sent model requests");
+    assert_eq!(count("SELECT COUNT(*) FROM memories"), memories);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM insight_snapshots WHERE owner_id='owner'"),
+        1
+    );
+    assert_eq!(
+        insight_persist::desired_generation(&store.conn, "article", "owner").unwrap(),
+        generation
+    );
+    let state: String = store
+        .conn
+        .query_row("SELECT state FROM argos_tasks WHERE id=?1", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(state, "completed");
 }

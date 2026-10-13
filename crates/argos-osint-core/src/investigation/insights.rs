@@ -234,6 +234,15 @@ pub fn evidence_from_tools(
 
 /// Input identity includes routes (without credentials), every immutable source,
 /// all bindings/premises/admitted memory revisions and captured preparation settings.
+/// Roles whose captured routes can affect insight work (fingerprints and
+/// supersession diagnostics).
+pub const INSIGHT_ROLES: [&str; 4] = [
+    "claim_assessor",
+    "synthesis",
+    "entity_resolver",
+    "evidence_curator",
+];
+
 pub fn input_key(input: &PipelineInput, settings: &crate::provider::SettingsFile) -> String {
     let mut snapshot = input.snapshot.clone();
     snapshot.key.clear();
@@ -243,6 +252,10 @@ pub fn input_key(input: &PipelineInput, settings: &crate::provider::SettingsFile
     ];
     if input.surface != "recon_report" || input.recall_enabled {
         roles.push(settings.defaults.resolve_role("entity_resolver").0);
+    }
+    // Memory predicate/time relevance now runs on Evidence Curator.
+    if input.recall_enabled {
+        roles.push(settings.defaults.resolve_role("evidence_curator").0);
     }
     crate::nlp::cache::key(
         &serde_json::json!({"snapshot":snapshot,"evidence":input.evidence,"objective":input.objective,"surface":input.surface,"required":input.required_tasks_complete,"save_insights":input.save_insights,"recall_enabled":input.recall_enabled,"roles":roles,"nlp":settings.nlp,"contract":CONTRACT,"policy":READINESS_POLICY,"claim_prompt":hash(CLAIM_PROMPT),"inference_prompt":hash(INFERENCE_PROMPT)}),
@@ -397,10 +410,12 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
                 .map_err(|e| e.to_string())
         },
         cancel,
-        None,
+        Some(activity_sink(db_path, &task_id)),
         None,
         Some(db_path),
-        false,
+        // Stream generated-JSON stages where supported; the executor falls
+        // back to non-streaming for transports that cannot stream.
+        true,
     )
     .await;
     let store = crate::store::Store::open(db_path)?;
@@ -2022,6 +2037,44 @@ pub fn validate_inference(
         "invalid inference evidence"
     );
     Ok(())
+}
+
+/// Typed progress observer for insight stages: maps execution events to a
+/// short durable activity label, deduplicated and throttled so SQLite is never
+/// written per token.
+pub(super) fn activity_sink(
+    db_path: &std::path::Path,
+    task_id: &str,
+) -> std::sync::Arc<dyn Fn(crate::recon::model_exec::ModelExecEvent) + Send + Sync> {
+    let db_path = db_path.to_path_buf();
+    let task_id = task_id.to_string();
+    let last = std::sync::Mutex::new((String::new(), None::<std::time::Instant>));
+    std::sync::Arc::new(move |event| {
+        let Some(label) = super::insight_execution::activity_label(&event) else {
+            return;
+        };
+        let receiving = label.starts_with("Receiving output");
+        if let Ok(mut slot) = last.lock() {
+            let now = std::time::Instant::now();
+            let same_kind = slot.0.split(" · ").next() == label.split(" · ").next();
+            if slot.0 == label
+                || (receiving
+                    && same_kind
+                    && slot
+                        .1
+                        .is_some_and(|t| now - t < crate::provider_attempt::PROGRESS_THROTTLE))
+            {
+                return;
+            }
+            *slot = (label.clone(), Some(now));
+        }
+        if let Ok(store) = crate::store::Store::open(&db_path) {
+            let _ = super::insight_execution::record_activity(&store.conn, &task_id, &label);
+            if let Some(message) = super::insight_execution::activity_log_message(&event) {
+                let _ = super::insight_execution::activity_event(&store.conn, &task_id, &message);
+            }
+        }
+    })
 }
 
 #[cfg(test)]

@@ -327,6 +327,32 @@ Extract and join ONLY the text strictly pertaining to the actual article title a
             "BudgetExceeded: section/cleanup message exceeds byte budget"
         );
     }
+    // Known-block cleanup is a bounded Classifier decision through the
+    // complete captured role chain (native Jev or constrained chat JSON).
+    if let (true, Some(rt)) = (select_mode, runtime) {
+        let adapter = super::body_filter::BlockDecisions {
+            title,
+            brief: &brief,
+            url,
+            blocks: &reviewed,
+        };
+        let operation_id = format!("{}:body-cleanup:{url}", rt.job_id);
+        let scope = crate::recon::model_exec::OperationScope::new(&operation_id, "classifier");
+        let (ranges, _) = crate::recon::model_exec::execute_decisions_or_chat(
+            &rt.auth,
+            &rt.settings,
+            &scope,
+            &adapter,
+            &rt.cancel,
+            None,
+            Some(rt.db_path.as_path()),
+        )
+        .await?;
+        return Ok(super::body_filter::remove_char_ranges_verbatim(
+            retrieved_markdown,
+            &ranges,
+        ));
+    }
     let mut settings = runtime.map(|r| r.settings.clone()).unwrap_or_default();
     if runtime.is_none() {
         settings.defaults.synthesis = crate::provider::ModelAssignment {

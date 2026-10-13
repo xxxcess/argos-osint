@@ -268,6 +268,22 @@ async fn classify_chunk_batch(
     full_article: &str,
     batch: &[BodyChunk],
 ) -> Result<Vec<IrrelevantRange>> {
+    // A Jev classifier gets native keep/remove decisions over known block IDs
+    // (never a chat request); without a native connection it is a capability
+    // skip and the batch keeps its text.
+    if provider::is_jev_family(&classifier.model) {
+        provider::native_decision_capability(classifier).map_err(|reason| anyhow!(reason))?;
+        use crate::recon::model_exec::DecisionsAdapter;
+        let adapter = BlockDecisions {
+            title,
+            brief,
+            url: "",
+            blocks: batch,
+        };
+        let (state, questions) = adapter.compile_native();
+        let resp = provider::decide(classifier, &state, &questions).await?;
+        return adapter.parse_native(&resp).map_err(|e| anyhow!(e));
+    }
     let full_len = full_article.chars().count();
     let mut chunk_block = String::new();
     for chunk in batch {
@@ -506,6 +522,111 @@ pub(crate) fn parse_block_decisions(
     }
     Ok(ranges)
 }
+/// Page cleanup as bounded decisions over known block IDs (spec §4). Native
+/// Jev gets one keep/remove Choice per block; chat gets the compact block
+/// schema. Rust computes removal ranges, so retained text stays verbatim and
+/// character offsets never pass through the model.
+pub(crate) struct BlockDecisions<'a> {
+    pub title: &'a str,
+    pub brief: &'a str,
+    pub url: &'a str,
+    pub blocks: &'a [BodyChunk],
+}
+
+impl BlockDecisions<'_> {
+    fn qid(id: usize) -> String {
+        format!("block_{id}")
+    }
+}
+
+impl crate::recon::model_exec::DecisionsAdapter<Vec<IrrelevantRange>> for BlockDecisions<'_> {
+    fn compile_native(&self) -> (Value, Value) {
+        let state = serde_json::json!({
+            "title": self.title,
+            "brief": self.brief,
+            "url": self.url,
+            "blocks": self.blocks.iter().map(|b| serde_json::json!({"id": b.id, "text": b.text})).collect::<Vec<_>>(),
+        });
+        let mut questions = serde_json::Map::new();
+        for block in self.blocks {
+            questions.insert(
+                Self::qid(block.id),
+                serde_json::json!({
+                    "type": "choice",
+                    "question": format!("Does block {} belong to the story identified by the title and brief?", block.id),
+                    "options": {
+                        "keep": "Story text, byline, attribution, quotations, uncertainty, denials, corrections or story context",
+                        "remove": "Unrelated page chrome, advertisement, navigation or unrelated link dump"
+                    }
+                }),
+            );
+        }
+        (state, Value::Object(questions))
+    }
+
+    fn parse_native(
+        &self,
+        resp: &crate::provider::DecisionsResponse,
+    ) -> std::result::Result<Vec<IrrelevantRange>, String> {
+        let expected: std::collections::HashSet<String> =
+            self.blocks.iter().map(|b| Self::qid(b.id)).collect();
+        if let Some(extra) = resp.answers.keys().find(|k| !expected.contains(*k)) {
+            return Err(format!("unexpected answer ID `{extra}`"));
+        }
+        let mut ranges = Vec::new();
+        for block in self.blocks {
+            let qid = Self::qid(block.id);
+            let choice = resp
+                .answers
+                .get(&qid)
+                .and_then(|a| a.choice.as_deref())
+                .ok_or_else(|| format!("missing typed answer for `{qid}`"))?;
+            match choice {
+                "keep" => {}
+                "remove" => ranges.push(IrrelevantRange {
+                    start: block.start,
+                    end: block.end,
+                    reason: "classifier: unrelated block".into(),
+                }),
+                other => return Err(format!("`{qid}` label `{other}` is not keep/remove")),
+            }
+        }
+        Ok(ranges)
+    }
+
+    fn compile_chat(&self) -> Vec<ChatMessage> {
+        let blocks: Vec<_> = self
+            .blocks
+            .iter()
+            .map(|b| serde_json::json!({"id": b.id, "text": b.text}))
+            .collect();
+        vec![
+            ChatMessage {
+                role: "system".into(),
+                content: BLOCK_SYSTEM.into(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: format!(
+                    "Title: {}\nBrief: {}\nURL: {}\nBlocks: {}",
+                    self.title,
+                    self.brief,
+                    self.url,
+                    Value::Array(blocks)
+                ),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            },
+        ]
+    }
+
+    fn parse_chat(&self, raw: &str) -> std::result::Result<Vec<IrrelevantRange>, String> {
+        parse_block_decisions(raw, self.blocks).map_err(|e| e.to_string())
+    }
+}
+
 pub(crate) fn remove_char_ranges_verbatim(text: &str, ranges: &[IrrelevantRange]) -> String {
     let mut out = String::new();
     for (i, ch) in text.chars().enumerate() {

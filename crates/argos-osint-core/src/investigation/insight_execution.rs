@@ -30,21 +30,69 @@ pub struct Progress {
     pub error: String,
     pub retryable: bool,
     pub index_status: String,
+    /// Live throttled activity label for the current attempt (no model text).
+    pub activity: String,
+    /// Seconds since the last activity update, when known.
+    pub activity_age_secs: Option<u64>,
+}
+
+/// Canonical Intel/Jobs status step for insight work:
+/// Queued → Waiting for output → Receiving output → Validating → Published → Indexed.
+/// Decision work shows "Waiting for decision"; stalls, retry waits and failures
+/// are explicit. Headers alone never count as model activity.
+pub fn status_step(
+    task_state: &str,
+    stage: &str,
+    activity: &str,
+    activity_age_secs: Option<u64>,
+    indexed: bool,
+) -> String {
+    match task_state {
+        "queued" | "retry_scheduled" => return "Queued".into(),
+        "failed" => return "Failed".into(),
+        "cancelled" => return "Cancelled".into(),
+        "superseded" => return "Superseded".into(),
+        _ => {}
+    }
+    if stage == "published" || task_state == "completed" {
+        return if indexed { "Indexed" } else { "Published" }.into();
+    }
+    let head = activity.split(" · ").next().unwrap_or("").trim();
+    let base = match head {
+        "" if stage == "assessment" => "Waiting for decision".to_string(),
+        "" => "Waiting for output".to_string(),
+        "Attempt failed" => activity.to_string(),
+        h if h.starts_with("Retry wait") => activity.to_string(),
+        h => h.to_string(),
+    };
+    // Explicit stall: no activity update for longer than the streamed
+    // first-output (180s) / inactivity (90s) policy allows.
+    let limit = if base == "Receiving output" { 90 } else { 180 };
+    match activity_age_secs {
+        Some(age) if age > limit && base != "Validating" && !base.starts_with("Retry") => {
+            format!("Stalled · no model activity for {age}s")
+        }
+        _ => base,
+    }
 }
 
 impl Progress {
     pub fn lines(&self) -> Vec<String> {
+        let step = status_step(
+            &self.state,
+            &self.stage,
+            &self.activity,
+            self.activity_age_secs,
+            self.index_status.starts_with("Indexed"),
+        );
+        // Intentional retirement reads as such, never as an extraction error.
+        let step = if self.state == "superseded" && self.error.starts_with("Superseded") {
+            self.error.clone()
+        } else {
+            step
+        };
         let mut lines = vec![
-            format!(
-                "{} · {} · epoch {}",
-                if self.stage == "published" {
-                    "Published"
-                } else {
-                    "Extracting"
-                },
-                self.state,
-                self.retry_epoch
-            ),
+            format!("{step} · {} · epoch {}", self.state, self.retry_epoch),
             format!(
                 "Stage: {} · windows {}/{} · batches {}/{}",
                 self.stage,
@@ -55,10 +103,16 @@ impl Progress {
             ),
             format!("Withheld: {} · {}", self.withheld_count, self.index_status),
         ];
+        if !self.activity.is_empty() && self.state == "running" {
+            lines.push(match self.activity_age_secs {
+                Some(age) => format!("Activity: {} · {age}s ago", self.activity),
+                None => format!("Activity: {}", self.activity),
+            });
+        }
         if !self.route.is_empty() {
             lines.push(self.route.clone());
         }
-        if !self.error.is_empty() {
+        if !self.error.is_empty() && self.state != "superseded" {
             lines.push(format!("Extraction error: {}", self.error));
         }
         lines
@@ -66,8 +120,8 @@ impl Progress {
 }
 
 pub fn task_progress(conn: &Connection, task_id: &str) -> Result<Option<Progress>> {
-    let row:Option<(String,String,String,String,u32,usize,usize)>=conn.query_row("SELECT t.job_id,t.state,t.input_ref,COALESCE(e.stage,'queued'),COALESCE(e.retry_epoch,0),COALESCE(e.windows_total,0),COALESCE(e.withheld_count,0) FROM argos_tasks t LEFT JOIN insight_refresh_execution e ON e.task_id=t.id WHERE t.id=?1 AND t.operation='insight_refresh'",[task_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
-    let Some((job, state, json, stage, epoch, total, withheld)) = row else {
+    let row:Option<(String,String,String,String,u32,usize,usize,String,String)>=conn.query_row("SELECT t.job_id,t.state,t.input_ref,COALESCE(e.stage,'queued'),COALESCE(e.retry_epoch,0),COALESCE(e.windows_total,0),COALESCE(e.withheld_count,0),COALESCE(e.activity,''),COALESCE(e.activity_at,'') FROM argos_tasks t LEFT JOIN insight_refresh_execution e ON e.task_id=t.id WHERE t.id=?1 AND t.operation='insight_refresh'",[task_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).optional()?;
+    let Some((job, state, json, stage, epoch, total, withheld, activity, activity_at)) = row else {
         return Ok(None);
     };
     let input: PipelineInput = serde_json::from_str(&json)?;
@@ -119,6 +173,14 @@ pub fn task_progress(conn: &Connection, task_id: &str) -> Result<Option<Progress
             && exhausted > 0
             && validate_retry_admission(conn, &input, task_id).is_ok(),
         index_status,
+        activity_age_secs: chrono::DateTime::parse_from_rfc3339(&activity_at)
+            .ok()
+            .map(|at| {
+                (chrono::Utc::now() - at.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0) as u64
+            }),
+        activity,
     }))
 }
 
@@ -181,9 +243,178 @@ pub(super) fn progress(
     if id.is_empty() {
         return Ok(());
     }
-    conn.execute("INSERT INTO insight_refresh_execution(task_id,stage,windows_total,withheld_count,updated_at) VALUES(?1,?2,COALESCE(?3,0),COALESCE(?4,0),?5) ON CONFLICT(task_id) DO UPDATE SET stage=excluded.stage,windows_total=COALESCE(?3,windows_total),withheld_count=COALESCE(?4,withheld_count),updated_at=excluded.updated_at",
-        params![id,stage,windows.map(|n|n as i64),withheld.map(|n|n as i64),chrono::Utc::now().to_rfc3339()])?;
+    // A new stage resets the provisional activity (counters never carry over).
+    let activity = if stage == "assessment" {
+        "Waiting for decision"
+    } else {
+        ""
+    };
+    conn.execute("INSERT INTO insight_refresh_execution(task_id,stage,windows_total,withheld_count,updated_at,activity,activity_at) VALUES(?1,?2,COALESCE(?3,0),COALESCE(?4,0),?5,?6,?5) ON CONFLICT(task_id) DO UPDATE SET stage=excluded.stage,windows_total=COALESCE(?3,windows_total),withheld_count=COALESCE(?4,withheld_count),updated_at=excluded.updated_at,activity=excluded.activity,activity_at=excluded.activity_at",
+        params![id,stage,windows.map(|n|n as i64),withheld.map(|n|n as i64),chrono::Utc::now().to_rfc3339(),activity])?;
     Ok(())
+}
+
+/// Status label for one typed model-execution event, or `None` when the event
+/// must not touch durable state (heartbeats, provisional text).
+pub fn activity_label(event: &crate::recon::model_exec::ModelExecEvent) -> Option<String> {
+    use crate::provider_attempt::AttemptProgress as P;
+    use crate::recon::model_exec::ModelExecEvent as E;
+    Some(match event {
+        E::AttemptStart { attempt, model, .. } => {
+            format!("Waiting for output · attempt {attempt} · {model}")
+        }
+        E::AttemptReset { attempt, .. } => format!("Waiting for output · attempt {attempt}"),
+        E::Progress {
+            progress,
+            attempt,
+            model,
+            ..
+        } => {
+            match progress {
+                P::Dispatched | P::HeadersReceived { .. } => {
+                    format!("Waiting for output · attempt {attempt} · {model}")
+                }
+                P::FirstModelOutput => format!("Receiving output · attempt {attempt} · {model}"),
+                P::Receiving {
+                    answer_chars,
+                    reasoning_chars,
+                } => {
+                    if *answer_chars == 0 {
+                        format!("Receiving output · attempt {attempt} · thinking ({reasoning_chars} chars)")
+                    } else {
+                        format!("Receiving output · attempt {attempt} · {answer_chars} chars")
+                    }
+                }
+                P::StreamComplete { .. } => "Validating".into(),
+                P::Heartbeat => return None,
+            }
+        }
+        E::AttemptFinish {
+            outcome, category, ..
+        } => {
+            if outcome == "ok" {
+                "Validating".into()
+            } else {
+                format!(
+                    "Attempt failed · {}",
+                    category.as_deref().unwrap_or(outcome)
+                )
+            }
+        }
+        E::RetryStatus {
+            wait, next_attempt, ..
+        } => {
+            format!(
+                "Retry wait {}s · next attempt {next_attempt}",
+                wait.as_secs()
+            )
+        }
+        E::ProvisionalDelta { .. } | E::FinalReplacement { .. } => return None,
+    })
+}
+
+/// Logs message for activity transitions worth a durable event (attempt
+/// start, first model output, completion, failure, retry). Never per delta.
+pub fn activity_log_message(event: &crate::recon::model_exec::ModelExecEvent) -> Option<String> {
+    use crate::provider_attempt::AttemptProgress as P;
+    use crate::recon::model_exec::ModelExecEvent as E;
+    match event {
+        E::AttemptStart {
+            attempt,
+            provider,
+            model,
+            transport,
+            ..
+        } => Some(format!(
+            "attempt {attempt} dispatched · {provider}/{model} · {transport} · waiting for output"
+        )),
+        E::Progress {
+            progress: P::FirstModelOutput,
+            attempt,
+            ..
+        } => Some(format!("attempt {attempt} receiving model output")),
+        E::Progress {
+            progress: P::StreamComplete { finish_reason },
+            attempt,
+            ..
+        } => Some(format!(
+            "attempt {attempt} stream complete ({}) · validating",
+            finish_reason.as_deref().unwrap_or("done")
+        )),
+        E::AttemptFinish {
+            attempt,
+            outcome,
+            category,
+            chars,
+            ..
+        } => Some(format!(
+            "attempt {attempt} {outcome}{} · {chars} chars",
+            category
+                .as_deref()
+                .map(|c| format!(" ({c})"))
+                .unwrap_or_default()
+        )),
+        E::RetryStatus {
+            wait, next_attempt, ..
+        } => Some(format!(
+            "retry wait {}s before attempt {next_attempt}",
+            wait.as_secs()
+        )),
+        _ => None,
+    }
+}
+
+/// Durable Logs event for one activity transition of an insight task.
+pub fn activity_event(conn: &Connection, task_id: &str, message: &str) -> Result<()> {
+    if task_id.is_empty() {
+        return Ok(());
+    }
+    let (job, owner): (String, String) = conn.query_row(
+        "SELECT t.job_id,COALESCE(j.owner_scope,'') FROM argos_tasks t LEFT JOIN argos_jobs j ON j.id=t.job_id WHERE t.id=?1",
+        [task_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let app = if owner.starts_with("recon:") {
+        "recon"
+    } else {
+        "intel"
+    };
+    crate::events::record_event(
+        conn,
+        &crate::events::NewEvent {
+            severity: Some(crate::events::Severity::Info),
+            app: app.into(),
+            event_type: "insight.activity".into(),
+            message: message.into(),
+            job_id: job,
+            task_id: task_id.into(),
+            resource_ref: owner,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Durable, throttled activity write (one row update, never per token).
+pub fn record_activity(conn: &Connection, task_id: &str, label: &str) -> Result<()> {
+    if task_id.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE insight_refresh_execution SET activity=?2,activity_at=?3 WHERE task_id=?1",
+        params![task_id, label, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Current activity label for a task, empty when idle/unknown.
+pub fn activity(conn: &Connection, task_id: &str) -> String {
+    conn.query_row(
+        "SELECT activity FROM insight_refresh_execution WHERE task_id=?1",
+        [task_id],
+        |r| r.get(0),
+    )
+    .unwrap_or_default()
 }
 
 /// Admits exactly one bounded epoch for failed/partially published recoverable work.

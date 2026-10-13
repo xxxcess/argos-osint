@@ -199,8 +199,7 @@ pub fn mode_decisions_request(input: &ModeClassifyInput) -> (Value, Value) {
         "admiralty": input.admiralty_sample,
         "guidance": mode_catalog_text(),
     });
-    let questions = json!([{
-        "id": "mode",
+    let questions = json!({"mode": {
         "type": "choice",
         "question": "Which Intel Recon report mode best fits this article?",
         "options": {
@@ -208,7 +207,7 @@ pub fn mode_decisions_request(input: &ModeClassifyInput) -> (Value, Value) {
             "explain": "Explain — actors, timeline, relationships",
             "assess_outlook": "Assess Outlook — scenarios and indicators",
         }
-    }]);
+    }});
     (state, questions)
 }
 
@@ -226,8 +225,7 @@ pub fn prompt_mode_decisions_request(input: &PromptModeClassifyInput) -> (Value,
         "known_facts": facts,
         "guidance": mode_catalog_text(),
     });
-    let questions = json!([{
-        "id": "mode",
+    let questions = json!({"mode": {
         "type": "choice",
         "question": "Which Recon report mode best fits this user investigation prompt?",
         "options": {
@@ -235,10 +233,13 @@ pub fn prompt_mode_decisions_request(input: &PromptModeClassifyInput) -> (Value,
             "explain": "Explain — actors, timeline, relationships",
             "assess_outlook": "Assess Outlook — scenarios and indicators",
         }
-    }]);
+    }});
     (state, questions)
 }
 
+/// Legacy single-secret helper (inactive in the app; kept for API compatibility).
+/// Applies the same capability rule: a Jev ID without a native OpenRouter
+/// connection is never sent to chat. Prefer [`classify_recon_mode_for_role`].
 /// Ask the classifier which recon mode to default to for an article. Falls back to Verify.
 pub async fn classify_recon_mode(
     classifier: Option<&ProviderSecret>,
@@ -248,6 +249,9 @@ pub async fn classify_recon_mode(
         return default_recon_mode();
     };
     let result = if provider::is_decisions_model(&classifier.model) {
+        if provider::native_decision_capability(classifier).is_err() {
+            return default_recon_mode();
+        }
         classify_mode_decisions(classifier, input).await
     } else {
         classify_mode_chat(classifier, input).await
@@ -266,6 +270,9 @@ pub async fn classify_prompt_mode(
         return fallback;
     };
     let result = if provider::is_decisions_model(&classifier.model) {
+        if provider::native_decision_capability(classifier).is_err() {
+            return fallback;
+        }
         classify_prompt_mode_decisions(classifier, input).await
     } else {
         classify_prompt_mode_chat(classifier, input).await
@@ -405,6 +412,152 @@ pub fn parse_mode_from_chat(content: &str) -> ReportMode {
         }
     }
     default_recon_mode()
+}
+
+/// Bounded mode decision compiled for both lanes: native Jev
+/// (`state` + `questions` keyed by the stable `mode` ID) and constrained chat
+/// JSON. Chat answers outside the offered labels are invalid output, so the
+/// shared executor repairs once and then tries the next compatible route.
+struct ModeDecision {
+    state: Value,
+    questions: Value,
+    chat: Vec<ChatMessage>,
+}
+
+impl crate::recon::model_exec::DecisionsAdapter<ReportMode> for ModeDecision {
+    fn compile_native(&self) -> (Value, Value) {
+        (self.state.clone(), self.questions.clone())
+    }
+    fn parse_native(&self, resp: &provider::DecisionsResponse) -> Result<ReportMode, String> {
+        let choice = resp
+            .answers
+            .get("mode")
+            .and_then(|answer| answer.choice.as_deref())
+            .ok_or("missing typed answer for question `mode`")?;
+        strict_mode(choice)
+    }
+    fn compile_chat(&self) -> Vec<ChatMessage> {
+        self.chat.clone()
+    }
+    fn parse_chat(&self, raw: &str) -> Result<ReportMode, String> {
+        let raw = raw.trim();
+        let body = raw
+            .strip_prefix("```json")
+            .or_else(|| raw.strip_prefix("```"))
+            .unwrap_or(raw);
+        let body = body
+            .trim()
+            .strip_suffix("```")
+            .unwrap_or(body.trim())
+            .trim();
+        let value: Value =
+            serde_json::from_str(body).map_err(|e| format!("expected one JSON object: {e}"))?;
+        let label = value
+            .pointer("/answers/mode/label")
+            .or_else(|| value.get("mode"))
+            .and_then(Value::as_str)
+            .ok_or("missing answers.mode.label")?;
+        strict_mode(label)
+    }
+}
+
+fn strict_mode(label: &str) -> Result<ReportMode, String> {
+    match label.trim() {
+        "verify" => Ok(ReportMode::Verify),
+        "explain" => Ok(ReportMode::Explain),
+        "assess_outlook" => Ok(ReportMode::AssessOutlook),
+        other => Err(format!(
+            "label `{other}` is not one of verify, explain, assess_outlook"
+        )),
+    }
+}
+
+fn mode_chat_messages(task: &str, user: String) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage {
+            role: "system".into(),
+            content: format!(
+                "{task} Do not choose full_assessment. Answer with JSON only, no other text: \
+{{\"answers\":{{\"mode\":{{\"label\":\"verify\"|\"explain\"|\"assess_outlook\"}}}}}}\n\n{}",
+                mode_catalog_text()
+            ),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+        ChatMessage {
+            role: "user".into(),
+            content: user,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        },
+    ]
+}
+
+async fn classify_with_role(
+    auth: &crate::secrets::AuthFile,
+    settings: &provider::SettingsFile,
+    operation: &str,
+    decision: ModeDecision,
+) -> Option<ReportMode> {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let scope = crate::recon::model_exec::OperationScope::new(operation, "classifier");
+    crate::recon::model_exec::execute_decisions_or_chat(
+        auth, settings, &scope, &decision, &cancel, None, None,
+    )
+    .await
+    .ok()
+    .map(|(mode, _)| mode)
+}
+
+/// Article mode recommendation through the complete Classifier role chain
+/// (primary plus ordered fallbacks, capability-aware). Falls back to Verify.
+pub async fn classify_recon_mode_for_role(
+    auth: &crate::secrets::AuthFile,
+    settings: &provider::SettingsFile,
+    input: &ModeClassifyInput,
+) -> ReportMode {
+    let (state, questions) = mode_decisions_request(input);
+    let mut user = state.clone();
+    if let Some(map) = user.as_object_mut() {
+        map.remove("guidance");
+    }
+    let decision = ModeDecision {
+        state,
+        questions,
+        chat: mode_chat_messages(
+            "Choose the single best Intel Recon report mode for this article.",
+            user.to_string(),
+        ),
+    };
+    classify_with_role(auth, settings, "intel-recon-mode", decision)
+        .await
+        .unwrap_or_else(default_recon_mode)
+}
+
+/// Prompt mode recommendation through the complete Classifier role chain.
+/// Falls back to [`heuristic_prompt_mode`].
+pub async fn classify_prompt_mode_for_role(
+    auth: &crate::secrets::AuthFile,
+    settings: &provider::SettingsFile,
+    input: &PromptModeClassifyInput,
+) -> ReportMode {
+    let fallback = heuristic_prompt_mode(&input.question);
+    let (state, questions) = prompt_mode_decisions_request(input);
+    let mut user = state.clone();
+    if let Some(map) = user.as_object_mut() {
+        map.remove("guidance");
+    }
+    let decision = ModeDecision {
+        state,
+        questions,
+        chat: mode_chat_messages(
+            "Choose the single best Recon report mode for this user investigation prompt.",
+            user.to_string(),
+        ),
+    };
+    classify_with_role(auth, settings, "recon-prompt-mode", decision)
+        .await
+        .unwrap_or(fallback)
 }
 
 #[cfg(test)]

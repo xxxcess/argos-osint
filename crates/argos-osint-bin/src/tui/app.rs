@@ -11,6 +11,7 @@ use argos_osint_core::intel_recon::{
 use argos_osint_core::job_registry::{CancelRequest, JobSpec};
 use argos_osint_core::paths;
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
+use argos_osint_core::recon::model_exec;
 use argos_osint_core::related_memories::{RelatedLimits, RelatedMemory};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
@@ -4168,18 +4169,26 @@ impl App {
                 }
                 let db = paths::db_path();
                 let keys = self.osint_provider_keys();
-                let evidence_curator =
-                    provider::role_secret(&self.auth, &self.settings, "evidence_curator")
-                        .ok()
-                        .filter(|secret| provider::resolved_key(secret).is_some());
+                let evidence_curator = model_exec::select_role_secret(
+                    &self.auth,
+                    &self.settings,
+                    "evidence_curator",
+                    model_exec::OperationFormat::Prose,
+                );
                 let synthesis = evidence_curator.or_else(|| {
-                    provider::role_secret(&self.auth, &self.settings, "synthesis")
-                        .ok()
-                        .filter(|secret| provider::resolved_key(secret).is_some())
+                    model_exec::select_role_secret(
+                        &self.auth,
+                        &self.settings,
+                        "synthesis",
+                        model_exec::OperationFormat::Prose,
+                    )
                 });
-                let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
-                    .ok()
-                    .filter(|secret| provider::resolved_key(secret).is_some());
+                let classifier = model_exec::select_role_secret(
+                    &self.auth,
+                    &self.settings,
+                    "classifier",
+                    model_exec::OperationFormat::BoundedDecision,
+                );
                 let ua = self.settings.osint_user_agent.clone();
                 let title = article.title.clone();
                 let brief = article.description.clone();
@@ -4258,9 +4267,7 @@ impl App {
             return;
         }
         let input = intel_recon::ModeClassifyInput::from_article(&article, &self.intel_claims);
-        let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
-            .ok()
-            .filter(|secret| provider::resolved_key(secret).is_some());
+        let (auth, settings) = (self.auth.clone(), self.settings.clone());
         let article_id = article.id.clone();
         let tx = self.work_tx.clone();
         let job = tracked::begin(
@@ -4268,7 +4275,7 @@ impl App {
                 .resource(format!("article:{article_id}")),
         );
         tokio::spawn(async move {
-            let mode = intel_recon::classify_recon_mode(classifier.as_ref(), &input).await;
+            let mode = intel_recon::classify_recon_mode_for_role(&auth, &settings, &input).await;
             // Falls back to the default mode on its own; never an error.
             tracked::finish(job, "classifier", &Ok::<(), String>(()), None);
             let _ = tx.send(WorkEvent::IntelReconMode { article_id, mode });
@@ -4415,12 +4422,18 @@ impl App {
                 .insert(job.id.clone(), cancel.clone());
             let db = paths::db_path();
             let keys = self.osint_provider_keys();
-            let synthesis = provider::role_secret(&self.auth, &self.settings, "synthesis")
-                .ok()
-                .filter(|secret| provider::resolved_key(secret).is_some());
-            let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
-                .ok()
-                .filter(|secret| provider::resolved_key(secret).is_some());
+            let synthesis = model_exec::select_role_secret(
+                &self.auth,
+                &self.settings,
+                "synthesis",
+                model_exec::OperationFormat::Prose,
+            );
+            let classifier = model_exec::select_role_secret(
+                &self.auth,
+                &self.settings,
+                "classifier",
+                model_exec::OperationFormat::BoundedDecision,
+            );
             let settings = self.settings.clone();
             let tx = self.work_tx.clone();
             let job_id = job.id.clone();
@@ -6140,6 +6153,15 @@ impl App {
 
     /// Claim mode follows the open detail memory's own provenance and graph.
     pub(crate) fn detail_claim(&self) -> bool {
+        // Typed source-claim/inference semantics win over placement heuristics.
+        if let Some(kind) = self
+            .brain_detail
+            .memory
+            .as_ref()
+            .and_then(|memory| self.store.memory_insight_kind(&memory.id))
+        {
+            return kind == "claim";
+        }
         self.brain_graph.is_claim_path()
             || self
                 .brain_detail
@@ -12805,7 +12827,7 @@ mod tests {
             let mut app = app();
             let (_, article) = related_ui_fixture(&mut app);
             for state in ["failed", "published"] {
-                let progress=Progress {task_id:"insight-fixture-task".into(),job_id:"insight-fixture-job".into(),retry_epoch:1,stage:if state=="failed" {"assessment"} else {"published"}.into(),state:if state=="failed" {"failed"} else {"completed"}.into(),windows_done:2,windows_total:2,batches_done:1,batches_total:2,withheld_count:3,route:"Route: local/fixture · attempt 2 · fail".into(),error:if state=="failed" {"assessment: invalid_result; missing question q1:publication after bounded repair"} else {"optional link batch unavailable; qualified claims published"}.into(),retryable:true,index_status:"Index pending: 5/5".into()};
+                let progress=Progress {task_id:"insight-fixture-task".into(),job_id:"insight-fixture-job".into(),retry_epoch:1,stage:if state=="failed" {"assessment"} else {"published"}.into(),state:if state=="failed" {"failed"} else {"completed"}.into(),windows_done:2,windows_total:2,batches_done:1,batches_total:2,withheld_count:3,route:"Route: local/fixture · attempt 2 · fail".into(),error:if state=="failed" {"assessment: invalid_result; missing question q1:publication after bounded repair"} else {"optional link batch unavailable; qualified claims published"}.into(),retryable:true,index_status:"Index pending: 5/5".into(),activity:String::new(),activity_age_secs:None};
                 app.select(ModuleId::Intel.index());
                 app.intel_articles = vec![article.clone()];
                 app.intel_sel = 0;
@@ -12891,6 +12913,242 @@ mod tests {
                     &mut app,
                     dir,
                     &format!("insight-palette-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+    }
+
+    /// Spec §6: streamed insight status steps on Intel (Focus Brief), Jobs
+    /// and Logs. Dumps PNG-able cells when ARGOS_SCREEN_DIR is set.
+    #[test]
+    fn streamed_insight_progress_screens() {
+        use argos_osint_core::{
+            investigation::insight_execution::{status_step, Progress},
+            jobs_view::{JobDetail, JobRow, TaskRow},
+        };
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        if let Some(dir) = &dir {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        // (name, task state, stage, activity, age)
+        let steps: [(&str, &str, &str, &str, Option<u64>); 7] = [
+            ("1-queued", "queued", "queued", "", None),
+            (
+                "2-waiting",
+                "running",
+                "extraction",
+                "Waiting for output · attempt 1 · nvidia/nemotron-3-super-120b-a12b:free",
+                Some(12),
+            ),
+            (
+                "3-receiving",
+                "running",
+                "extraction",
+                "Receiving output · attempt 1 · 2814 chars",
+                Some(1),
+            ),
+            (
+                "4-validating",
+                "running",
+                "extraction",
+                "Validating",
+                Some(0),
+            ),
+            (
+                "5-decision",
+                "running",
+                "assessment",
+                "Waiting for decision",
+                Some(4),
+            ),
+            (
+                "6-stalled",
+                "running",
+                "extraction",
+                "Receiving output · attempt 2 · 912 chars",
+                Some(97),
+            ),
+            ("7-published", "completed", "published", "", None),
+        ];
+        for (width, height) in [(160, 50), (120, 40)] {
+            for (name, state, stage, activity, age) in steps {
+                let mut app = app();
+                let (_, article) = related_ui_fixture(&mut app);
+                let progress = Progress {
+                    task_id: "insight-stream-task".into(),
+                    job_id: "insight-stream-job".into(),
+                    retry_epoch: 0,
+                    stage: stage.into(),
+                    state: state.into(),
+                    windows_done: if stage == "extraction" { 0 } else { 1 },
+                    windows_total: 1,
+                    batches_done: 0,
+                    batches_total: if stage == "assessment" { 2 } else { 0 },
+                    withheld_count: 0,
+                    route:
+                        "Route: local/nvidia/nemotron-3-super-120b-a12b:free · attempt 1 · running"
+                            .into(),
+                    error: String::new(),
+                    retryable: false,
+                    index_status: "Index pending: 0/0".into(),
+                    activity: activity.into(),
+                    activity_age_secs: age,
+                };
+                let step = status_step(state, stage, activity, age, false);
+                app.select(ModuleId::Intel.index());
+                app.intel_articles = vec![article.clone()];
+                app.intel_sel = 0;
+                app.intel_page = IntelPage::Briefing;
+                app.intel_insight_lifecycle = "refreshing".into();
+                app.intel_refresh_status = step.clone();
+                app.intel_extraction_progress = Some(progress.clone());
+                app.compact_pages[ModuleId::Intel.index()] = 0;
+                let buffer = render(&mut app, width, height);
+                let text = buffer_text(&buffer);
+                assert!(
+                    text.contains(&format!("Insights · {step}")) || text.contains(&step),
+                    "{name}: {step}"
+                );
+                assert!(!text.contains("Extracting ·"), "old label gone");
+                assert!(!text.contains("model activated"));
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("stream-intel-{name}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+                let job = JobRow {
+                    id: progress.job_id.clone(),
+                    app: "intel".into(),
+                    operation: "insight_refresh".into(),
+                    title: "Assess and refresh investigative insights".into(),
+                    state: state.into(),
+                    ..Default::default()
+                };
+                app.select(ModuleId::Jobs.index());
+                app.jobs.rows = vec![job.clone()];
+                app.jobs.sel = 0;
+                app.jobs.detail = Some(JobDetail {
+                    job,
+                    tasks: vec![TaskRow {
+                        id: progress.task_id.clone(),
+                        operation: "insight_refresh".into(),
+                        state: state.into(),
+                        ..Default::default()
+                    }],
+                    insight_progress: vec![progress],
+                    ..Default::default()
+                });
+                app.jobs.detail_open = true;
+                app.jobs.detail_scroll = 0;
+                let buffer = render(&mut app, width, height);
+                assert!(buffer_text(&buffer).contains(&step), "jobs {name}: {step}");
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("stream-jobs-{name}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+            }
+            // Supersession: intentional retirement in Jobs detail.
+            {
+                let mut app = app();
+                let progress = Progress {
+                    task_id: "insight-stream-task".into(),
+                    job_id: "insight-refresh:article:a2:3".into(),
+                    retry_epoch: 0,
+                    stage: "extraction".into(),
+                    state: "superseded".into(),
+                    windows_done: 0,
+                    windows_total: 1,
+                    batches_done: 0,
+                    batches_total: 0,
+                    withheld_count: 0,
+                    route: "Route: local/nvidia/nemotron-3-super-120b-a12b:free · attempt 1 · ok"
+                        .into(),
+                    error: "Superseded · replaced by insight-refresh:article:a2:4 · source changed"
+                        .into(),
+                    retryable: false,
+                    index_status: "Index: no published memories".into(),
+                    activity: String::new(),
+                    activity_age_secs: None,
+                };
+                let job = JobRow {
+                    id: progress.job_id.clone(),
+                    app: "intel".into(),
+                    operation: "insight_refresh".into(),
+                    title: "Assess and refresh investigative insights".into(),
+                    state: "cancelled".into(),
+                    ..Default::default()
+                };
+                app.select(ModuleId::Jobs.index());
+                app.jobs.rows = vec![job.clone()];
+                app.jobs.sel = 0;
+                app.jobs.detail = Some(JobDetail {
+                    job,
+                    tasks: vec![TaskRow {
+                        id: progress.task_id.clone(),
+                        operation: "insight_refresh".into(),
+                        state: "superseded".into(),
+                        ..Default::default()
+                    }],
+                    insight_progress: vec![progress],
+                    ..Default::default()
+                });
+                app.jobs.detail_open = true;
+                app.jobs.detail_scroll = 0;
+                let text = buffer_text(&render(&mut app, width, height));
+                assert!(text.contains("Superseded · replaced by"));
+                assert!(!text.contains("Extraction error"));
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("stream-jobs-8-superseded-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+            }
+            // Logs: activity transitions recorded by the insight observer.
+            let mut app = app();
+            for message in [
+                "attempt 1 dispatched · local/nvidia/nemotron-3-super-120b-a12b:free · stream · waiting for output",
+                "attempt 1 receiving model output",
+                "attempt 1 stream complete (stop) · validating",
+                "attempt 1 ok · 2814 chars",
+            ] {
+                argos_osint_core::events::record_event(
+                    app.store.connection(),
+                    &argos_osint_core::events::NewEvent {
+                        severity: Some(argos_osint_core::events::Severity::Info),
+                        app: "intel".into(),
+                        event_type: "insight.activity".into(),
+                        message: message.into(),
+                        job_id: "insight-stream-job".into(),
+                        task_id: "insight-stream-task".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            app.select(ModuleId::Logs.index());
+            app.reload_logs();
+            let buffer = render(&mut app, width, height);
+            assert!(buffer_text(&buffer).contains("receiving model output"));
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("stream-logs-{width}x{height}"),
                     width,
                     height,
                 );

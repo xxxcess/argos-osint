@@ -1077,6 +1077,28 @@ pub fn fail_claimed(
 /// Park a claimed task because required configuration is missing (e.g.
 /// embeddings disabled). The attempt is refunded: nothing was tried.
 /// [`resume_blocked`] requeues it once the configuration is available.
+/// Retire a claimed task whose owner generation was replaced. Intentional
+/// retirement, not failure: no error category, no retry, attempt refunded.
+pub fn supersede_claimed(
+    conn: &Connection,
+    claimed: &ClaimedTask,
+    reason: &str,
+    now: &str,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE argos_tasks SET state='superseded', error_message=?1, error_category='',
+            attempts=MAX(attempts-1,0), lease_owner='', lease_until='', updated_at=?2
+         WHERE id=?3 AND lease_owner=?4 AND lease_epoch=?5 AND state='running'",
+        params![reason, now, claimed.id, claimed.owner, claimed.epoch],
+    )?;
+    if n == 0 {
+        return Ok(false);
+    }
+    finish_attempt(conn, claimed, "superseded", "", reason, now)?;
+    let _ = refresh_job_state(conn, &claimed.job_id, now);
+    Ok(true)
+}
+
 pub fn block_claimed(
     conn: &Connection,
     claimed: &ClaimedTask,

@@ -38,4 +38,5 @@
         </g>
         <text x="440" y="196" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#4f5d75">ORIGINAL WINDOWS → DEDUPED BATCHES → READINESS → SYNTHESIS → ATOMIC BRAIN</text>
         <text x="440" y="244" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Two substantive roots; optional gaps settle, missing coverage retains the previous snapshot.</text>
-      </svg>
+      <text x="440" y="214" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">Classifier mode + page cleanup: native Jev decisions, else first chat-capable fallback (Rust computes ranges)</text>
+</svg>

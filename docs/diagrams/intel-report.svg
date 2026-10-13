@@ -23,4 +23,5 @@
 <rect x="560" y="375" width="210" height="60" rx="6" fill="#fff4ee" stroke="#eb6c36"/><text x="665" y="400">Canonical index / graph</text><text x="665" y="420" font-size="10" fill="#7a8399">exact revision acknowledgment; own retry</text>
 <rect x="20" y="375" width="210" height="60" rx="6" fill="#fff" stroke="#2d3142"/><text x="125" y="398">Failure: retain previous</text><text x="125" y="419" font-size="10" fill="#7a8399">explicit Retry extraction epoch</text>
 <text x="395" y="484" font-family="Instrument Serif,serif" font-size="14" font-style="italic">Mandatory coverage or all-withheld failure preserves history; optional gaps can publish.</text>
-</g></svg>
+</g><text x="395" y="458" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#eb6c36">Newer source/report/routes → queued/running refresh Superseded with reason + replacement; only latest publishes</text>
+</svg>

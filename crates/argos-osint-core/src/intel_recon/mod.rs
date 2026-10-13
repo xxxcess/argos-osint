@@ -2,14 +2,14 @@
 
 mod actor_review;
 mod body;
-mod body_filter;
+pub(crate) mod body_filter;
 mod brain;
 mod briefing_view;
 mod classify_mode;
 mod confidence;
 mod jobs;
 mod ledger;
-mod modes;
+pub(crate) mod modes;
 mod persist;
 mod replace_insights;
 mod synthesize;
@@ -36,9 +36,9 @@ pub use briefing_view::{
     explain_relation_link, ExtractedBuckets, ExtractedLine,
 };
 pub use classify_mode::{
-    classifiable_modes, classify_prompt_mode, classify_recon_mode, default_recon_mode,
-    heuristic_prompt_mode, parse_mode_choice, parse_mode_from_chat, ModeClassifyInput,
-    PromptModeClassifyInput,
+    classifiable_modes, classify_prompt_mode, classify_prompt_mode_for_role, classify_recon_mode,
+    classify_recon_mode_for_role, default_recon_mode, heuristic_prompt_mode, parse_mode_choice,
+    parse_mode_from_chat, ModeClassifyInput, PromptModeClassifyInput,
 };
 pub(crate) use confidence::persist_article_rating;
 pub use confidence::{article_confidence, initial_rating, EvidenceConfidence};

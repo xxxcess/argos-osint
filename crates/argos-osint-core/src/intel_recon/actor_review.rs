@@ -18,44 +18,14 @@ pub fn resolve_actor_reviewer_secret(
     auth: &AuthFile,
     settings: &SettingsFile,
 ) -> Option<ProviderSecret> {
-    let (assignment, inherited) = settings.defaults.resolve_role("entity_resolver");
-    let mut secret = provider::role_secret(auth, settings, "entity_resolver")
-        .ok()
-        .filter(|s| provider::resolved_key(s).is_some());
-
-    if let Some(res) = &secret {
-        if provider::is_decisions_model(&res.model) {
-            let mut fallback_secret = None;
-            for route in &assignment.fallbacks {
-                let sec = provider::route_secret(auth, route);
-                if provider::resolved_key(&sec).is_some()
-                    && !provider::is_decisions_model(&sec.model)
-                {
-                    fallback_secret = Some(sec);
-                    break;
-                }
-            }
-            if fallback_secret.is_none() {
-                if let Some(inh) = inherited {
-                    if let Some(inh_assign) = settings.defaults.role(inh) {
-                        for route in &inh_assign.fallbacks {
-                            let sec = provider::route_secret(auth, route);
-                            if provider::resolved_key(&sec).is_some()
-                                && !provider::is_decisions_model(&sec.model)
-                            {
-                                fallback_secret = Some(sec);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(fb) = fallback_secret {
-                secret = Some(fb);
-            }
-        }
-    }
-    secret
+    // Legacy actor normalization generates JSON: first non-Jev chat route in
+    // the Entity Resolver's complete chain (declared inheritance included).
+    crate::recon::model_exec::select_role_secret(
+        auth,
+        settings,
+        "entity_resolver",
+        crate::recon::model_exec::OperationFormat::GeneratedJson,
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

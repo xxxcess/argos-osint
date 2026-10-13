@@ -124,6 +124,10 @@ The redacted change summary lists what moves before you commit. Primary IDs, fil
 
 Module ids vs labels: [concepts.md](concepts.md). TUI contracts: [conventions.md](conventions.md). Surface audit: [ui-interaction-audit.md](ui-interaction-audit.md).
 
+### Insight progress
+
+Intel's Focus Brief and Jobs detail show the streamed insight status (`Insights · Receiving output`, `Stalled`, `Retry wait`, `Published`, `Indexed`) plus an `Activity:` line with its age. Replaced work shows `Superseded · replaced by <job> · <reason>` rather than an error; the Logs view lists `insight.activity` and `insight.superseded` events.
+
 ## CLI
 
 From source: prefix `cargo run -p argos-osint-bin --`. Same store, registry, and executor as the TUI. JSON where practical.

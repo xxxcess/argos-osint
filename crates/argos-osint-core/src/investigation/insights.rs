@@ -2026,6 +2026,41 @@ pub fn validate_inference(
     Ok(())
 }
 
+/// Typed progress observer for insight stages: maps execution events to a
+/// short durable activity label, deduplicated and throttled so SQLite is never
+/// written per token.
+fn activity_sink(
+    db_path: &std::path::Path,
+    task_id: &str,
+) -> std::sync::Arc<dyn Fn(crate::recon::model_exec::ModelExecEvent) + Send + Sync> {
+    let db_path = db_path.to_path_buf();
+    let task_id = task_id.to_string();
+    let last = std::sync::Mutex::new((String::new(), None::<std::time::Instant>));
+    std::sync::Arc::new(move |event| {
+        let Some(label) = super::insight_execution::activity_label(&event) else {
+            return;
+        };
+        let receiving = label.starts_with("Receiving output");
+        if let Ok(mut slot) = last.lock() {
+            let now = std::time::Instant::now();
+            let same_kind = slot.0.split(" · ").next() == label.split(" · ").next();
+            if slot.0 == label
+                || (receiving
+                    && same_kind
+                    && slot
+                        .1
+                        .is_some_and(|t| now - t < crate::provider_attempt::PROGRESS_THROTTLE))
+            {
+                return;
+            }
+            *slot = (label.clone(), Some(now));
+        }
+        if let Ok(store) = crate::store::Store::open(&db_path) {
+            let _ = super::insight_execution::record_activity(&store.conn, &task_id, &label);
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2493,39 +2528,4 @@ mod tests {
         assert!(!readiness(Surface::Atlas, &[], &[], true, &[]).input_eligible);
         assert!(!readiness(Surface::Recon, &[], &[], true, &[]).publication_eligible);
     }
-}
-
-/// Typed progress observer for insight stages: maps execution events to a
-/// short durable activity label, deduplicated and throttled so SQLite is never
-/// written per token.
-fn activity_sink(
-    db_path: &std::path::Path,
-    task_id: &str,
-) -> std::sync::Arc<dyn Fn(crate::recon::model_exec::ModelExecEvent) + Send + Sync> {
-    let db_path = db_path.to_path_buf();
-    let task_id = task_id.to_string();
-    let last = std::sync::Mutex::new((String::new(), None::<std::time::Instant>));
-    std::sync::Arc::new(move |event| {
-        let Some(label) = super::insight_execution::activity_label(&event) else {
-            return;
-        };
-        let receiving = label.starts_with("Receiving output");
-        if let Ok(mut slot) = last.lock() {
-            let now = std::time::Instant::now();
-            let same_kind = slot.0.split(" · ").next() == label.split(" · ").next();
-            if slot.0 == label
-                || (receiving
-                    && same_kind
-                    && slot
-                        .1
-                        .is_some_and(|t| now - t < crate::provider_attempt::PROGRESS_THROTTLE))
-            {
-                return;
-            }
-            *slot = (label.clone(), Some(now));
-        }
-        if let Ok(store) = crate::store::Store::open(&db_path) {
-            let _ = super::insight_execution::record_activity(&store.conn, &task_id, &label);
-        }
-    })
 }

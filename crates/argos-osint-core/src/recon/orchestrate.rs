@@ -2745,11 +2745,10 @@ async fn classify_turn_mode(
     prior: &str,
     known: &[String],
 ) -> ReportMode {
-    let classifier = provider::role_secret(&service.auth, &service.settings, "classifier")
-        .ok()
-        .filter(|secret| provider::resolved_key(secret).is_some());
-    intel_recon::classify_prompt_mode(
-        classifier.as_ref(),
+    // Complete Classifier role chain: ordered fallbacks and capability skips survive.
+    intel_recon::classify_prompt_mode_for_role(
+        &service.auth,
+        &service.settings,
         &intel_recon::PromptModeClassifyInput {
             question: question.into(),
             prior: prior.into(),

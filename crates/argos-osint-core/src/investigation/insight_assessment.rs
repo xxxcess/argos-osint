@@ -185,6 +185,29 @@ fn partition_item(input: &PipelineInput, item: &Item) -> Result<Vec<Item>> {
     Ok(partitions)
 }
 
+/// Configured role that owns each bounded assessment kind: identity binding and
+/// recalled-memory identity admission → Entity Resolver; memory
+/// predicate/time relevance → Evidence Curator; source claim fidelity,
+/// relation and publication checks → Claim Assessor.
+pub(crate) fn role_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "identity" | "memory_identity" => "entity_resolver",
+        "memory_relevance" => "evidence_curator",
+        _ => "claim_assessor",
+    }
+}
+
+/// End of the bounded batch starting at `offset`: at most [`BATCH_LIMIT`]
+/// items, all requiring the same role.
+pub(super) fn role_batch_end(items: &[Item], offset: usize) -> usize {
+    let role = role_for_kind(&items[offset].kind);
+    offset
+        + items[offset..(offset + BATCH_LIMIT).min(items.len())]
+            .iter()
+            .take_while(|item| role_for_kind(&item.kind) == role)
+            .count()
+}
+
 pub(super) fn operation_scope<'a>(
     key: &'a str,
     role: &'a str,
@@ -219,7 +242,10 @@ pub(super) async fn assess(
     let mut offset = 0;
     while offset < items.len() {
         ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-        let mut end = (offset + BATCH_LIMIT).min(items.len());
+        // Partition batches by the role each item requires so a mixed batch
+        // never resolves Claim Assessor for identity/relevance items.
+        let role = role_for_kind(&items[offset].kind);
+        let mut end = role_batch_end(items, offset);
         let (contract, state, policy) = loop {
             let compiled = compile(input, &items[offset..end])?;
             if fits(&compiled.0, &compiled.1) {
@@ -258,14 +284,6 @@ pub(super) async fn assess(
             offset = end;
             continue;
         }
-        let role = if items[offset..end]
-            .iter()
-            .all(|item| item.kind == "identity")
-        {
-            "entity_resolver"
-        } else {
-            "claim_assessor"
-        };
         let key = crate::nlp::cache::key(&json!([
             input.snapshot.owner_kind,
             input.snapshot.owner_id,
@@ -428,4 +446,57 @@ pub(super) async fn assess(
         tokio::task::yield_now().await;
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod role_partition_tests {
+    use super::*;
+
+    #[test]
+    fn assessment_kinds_route_to_their_owning_roles() {
+        assert_eq!(role_for_kind("identity"), "entity_resolver");
+        assert_eq!(role_for_kind("memory_identity"), "entity_resolver");
+        assert_eq!(role_for_kind("memory_relevance"), "evidence_curator");
+        for kind in ["claim", "inference", "link", "corroboration", "publication"] {
+            assert_eq!(role_for_kind(kind), "claim_assessor", "{kind}");
+        }
+    }
+
+    #[test]
+    fn mixed_batches_split_by_role_and_stay_within_eight() {
+        let kinds = [
+            "claim",
+            "claim",
+            "identity",
+            "identity",
+            "memory_relevance",
+            "claim",
+        ];
+        let items: Vec<Item> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, k)| Item::new(&format!("i{i}"), k, "t", &[]))
+            .collect();
+        let mut offset = 0;
+        let mut batches = vec![];
+        while offset < items.len() {
+            let end = role_batch_end(&items, offset);
+            batches.push((role_for_kind(&items[offset].kind), end - offset));
+            offset = end;
+        }
+        assert_eq!(
+            batches,
+            vec![
+                ("claim_assessor", 2),
+                ("entity_resolver", 2),
+                ("evidence_curator", 1),
+                ("claim_assessor", 1)
+            ]
+        );
+        let many: Vec<Item> = (0..19)
+            .map(|i| Item::new(&format!("c{i}"), "claim", "t", &[]))
+            .collect();
+        assert_eq!(role_batch_end(&many, 0), BATCH_LIMIT);
+        assert_eq!(role_batch_end(&many, 16), 19);
+    }
 }

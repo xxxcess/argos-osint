@@ -303,6 +303,63 @@ pub struct ReconModelAttempt {
     pub finished_at: String,
 }
 
+/// Output contract an operation requires, declared independently of the role
+/// that executes it (spec §2). Capability selection runs against the actual
+/// route on every attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationFormat {
+    /// Finite typed judgments: native Jev decisions or constrained chat JSON.
+    BoundedDecision,
+    /// New structured content (claims, entities, proposals) via chat JSON.
+    GeneratedJson,
+    /// Text/Markdown via chat.
+    Prose,
+}
+
+impl OperationFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BoundedDecision => "bounded_decision",
+            Self::GeneratedJson => "generated_json",
+            Self::Prose => "prose",
+        }
+    }
+
+    /// Can this route serve the format? `Err` is an explicit capability skip.
+    pub fn supports(self, secret: &ProviderSecret) -> std::result::Result<(), String> {
+        let jev = provider::is_jev_family(&secret.model);
+        match self {
+            Self::BoundedDecision if jev => provider::native_decision_capability(secret),
+            Self::BoundedDecision => Ok(()),
+            _ if jev => Err(format!(
+                "{} cannot generate {}; Jev returns typed decisions only",
+                secret.model.trim(),
+                self.as_str()
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// First usable route in the role's complete effective chain (primary,
+/// inheritance and ordered fallbacks) that supports `format`. Used by legacy
+/// single-secret callers so a Jev primary never receives chat and a later
+/// compatible fallback is not lost. Returns `None` when nothing qualifies.
+pub fn select_role_secret(
+    auth: &AuthFile,
+    settings: &SettingsFile,
+    role: &str,
+    format: OperationFormat,
+) -> Option<ProviderSecret> {
+    let (routes, secrets) = resolve_role_routes(auth, settings, role);
+    routes
+        .iter()
+        .zip(secrets)
+        .find(|(route, secret)| route.skip_reason.is_none() && format.supports(secret).is_ok())
+        .map(|(_, secret)| secret)
+}
+
 /// Resolve the effective role assignment and fallbacks into Routes and Secrets.
 pub fn resolve_role_routes(
     auth: &AuthFile,
@@ -1936,3 +1993,7 @@ mod tests {
 #[cfg(test)]
 #[path = "model_exec_routing_tests.rs"]
 mod routing_tests;
+
+#[cfg(test)]
+#[path = "model_exec_format_tests.rs"]
+mod format_tests;

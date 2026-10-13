@@ -149,6 +149,18 @@ fn boost_with_passage_hybrid(
 }
 
 impl Store {
+    /// Typed Brain insight kind (`claim` = source claim, `inference`) from the
+    /// canonical derivation row, newest first; `None` for untyped memories.
+    pub fn memory_insight_kind(&self, memory_id: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT d.insight_kind FROM insight_derivations d WHERE d.memory_id=?1 ORDER BY d.rowid DESC LIMIT 1",
+                [memory_id],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+
     /// Analytics worker connection: no migrations, vector index, or writes.
     pub fn open_profile_reader(path: &Path) -> Result<Self> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)

@@ -229,7 +229,13 @@ pub fn drain_summary_flush_cached(conn: &Connection, owner: &str) -> Result<usiz
 fn load_summarization_secret() -> Option<crate::secrets::ProviderSecret> {
     let auth = crate::secrets::AuthFile::load().ok()?;
     let settings = crate::provider::SettingsFile::load().ok()?;
-    crate::provider::role_secret(&auth, &settings, "summarization").ok()
+    // First prose-capable route in the complete Summarization chain.
+    crate::recon::model_exec::select_role_secret(
+        &auth,
+        &settings,
+        "summarization",
+        crate::recon::model_exec::OperationFormat::Prose,
+    )
 }
 
 /// Service-health job for the summary flush pool.

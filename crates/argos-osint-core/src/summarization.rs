@@ -331,8 +331,14 @@ pub fn cache_get(conn: &Connection, req: &SummaryRequest) -> anyhow::Result<Opti
 pub fn resolved_summary_route() -> (String, String) {
     let auth = crate::secrets::AuthFile::load().unwrap_or_default();
     let settings = crate::provider::SettingsFile::load().unwrap_or_default();
-    crate::provider::role_secret(&auth, &settings, "summarization")
-        .map(|s| (s.kind, s.model))
+    crate::recon::model_exec::select_role_secret(
+        &auth,
+        &settings,
+        "summarization",
+        crate::recon::model_exec::OperationFormat::Prose,
+    )
+    .map(|s| (s.kind, s.model))
+    .ok_or(())
         .unwrap_or_else(|_| ("local".into(), "deterministic".into()))
 }
 

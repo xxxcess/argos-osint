@@ -11,6 +11,7 @@ use argos_osint_core::intel_recon::{
 use argos_osint_core::job_registry::{CancelRequest, JobSpec};
 use argos_osint_core::paths;
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
+use argos_osint_core::recon::model_exec;
 use argos_osint_core::related_memories::{RelatedLimits, RelatedMemory};
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
@@ -4168,18 +4169,26 @@ impl App {
                 }
                 let db = paths::db_path();
                 let keys = self.osint_provider_keys();
-                let evidence_curator =
-                    provider::role_secret(&self.auth, &self.settings, "evidence_curator")
-                        .ok()
-                        .filter(|secret| provider::resolved_key(secret).is_some());
+                let evidence_curator = model_exec::select_role_secret(
+                    &self.auth,
+                    &self.settings,
+                    "evidence_curator",
+                    model_exec::OperationFormat::Prose,
+                );
                 let synthesis = evidence_curator.or_else(|| {
-                    provider::role_secret(&self.auth, &self.settings, "synthesis")
-                        .ok()
-                        .filter(|secret| provider::resolved_key(secret).is_some())
+                    model_exec::select_role_secret(
+                        &self.auth,
+                        &self.settings,
+                        "synthesis",
+                        model_exec::OperationFormat::Prose,
+                    )
                 });
-                let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
-                    .ok()
-                    .filter(|secret| provider::resolved_key(secret).is_some());
+                let classifier = model_exec::select_role_secret(
+                    &self.auth,
+                    &self.settings,
+                    "classifier",
+                    model_exec::OperationFormat::BoundedDecision,
+                );
                 let ua = self.settings.osint_user_agent.clone();
                 let title = article.title.clone();
                 let brief = article.description.clone();
@@ -4258,9 +4267,7 @@ impl App {
             return;
         }
         let input = intel_recon::ModeClassifyInput::from_article(&article, &self.intel_claims);
-        let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
-            .ok()
-            .filter(|secret| provider::resolved_key(secret).is_some());
+        let (auth, settings) = (self.auth.clone(), self.settings.clone());
         let article_id = article.id.clone();
         let tx = self.work_tx.clone();
         let job = tracked::begin(
@@ -4268,7 +4275,7 @@ impl App {
                 .resource(format!("article:{article_id}")),
         );
         tokio::spawn(async move {
-            let mode = intel_recon::classify_recon_mode(classifier.as_ref(), &input).await;
+            let mode = intel_recon::classify_recon_mode_for_role(&auth, &settings, &input).await;
             // Falls back to the default mode on its own; never an error.
             tracked::finish(job, "classifier", &Ok::<(), String>(()), None);
             let _ = tx.send(WorkEvent::IntelReconMode { article_id, mode });
@@ -4415,12 +4422,18 @@ impl App {
                 .insert(job.id.clone(), cancel.clone());
             let db = paths::db_path();
             let keys = self.osint_provider_keys();
-            let synthesis = provider::role_secret(&self.auth, &self.settings, "synthesis")
-                .ok()
-                .filter(|secret| provider::resolved_key(secret).is_some());
-            let classifier = provider::role_secret(&self.auth, &self.settings, "classifier")
-                .ok()
-                .filter(|secret| provider::resolved_key(secret).is_some());
+            let synthesis = model_exec::select_role_secret(
+                &self.auth,
+                &self.settings,
+                "synthesis",
+                model_exec::OperationFormat::Prose,
+            );
+            let classifier = model_exec::select_role_secret(
+                &self.auth,
+                &self.settings,
+                "classifier",
+                model_exec::OperationFormat::BoundedDecision,
+            );
             let settings = self.settings.clone();
             let tx = self.work_tx.clone();
             let job_id = job.id.clone();
@@ -6140,6 +6153,15 @@ impl App {
 
     /// Claim mode follows the open detail memory's own provenance and graph.
     pub(crate) fn detail_claim(&self) -> bool {
+        // Typed source-claim/inference semantics win over placement heuristics.
+        if let Some(kind) = self
+            .brain_detail
+            .memory
+            .as_ref()
+            .and_then(|memory| self.store.memory_insight_kind(&memory.id))
+        {
+            return kind == "claim";
+        }
         self.brain_graph.is_claim_path()
             || self
                 .brain_detail

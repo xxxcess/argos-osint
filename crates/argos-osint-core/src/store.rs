@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// activity-history tables plus additive timing columns on the model attempt
 /// and tool call records. 28 adds immutable NLP artifacts/references/features and
 /// complete summary-result envelopes; existing facts are preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 32;
+pub const SCHEMA_VERSION: i64 = 33;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -750,6 +750,23 @@ impl Store {
                 self.conn
                     .execute_batch(include_str!("schema_insight_execution.sql"))?;
                 self.conn.pragma_update(None, "user_version", 32)?;
+            }
+            if version < 33 {
+                // Additive, idempotent: live throttled insight activity label
+                // (counts/status only, never model text).
+                for column in ["activity", "activity_at"] {
+                    let exists: bool = self.conn.query_row(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('insight_refresh_execution') WHERE name=?1",
+                        [column],
+                        |r| r.get(0),
+                    )?;
+                    if !exists {
+                        self.conn.execute_batch(&format!(
+                            "ALTER TABLE insight_refresh_execution ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                        ))?;
+                    }
+                }
+                self.conn.pragma_update(None, "user_version", 33)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final

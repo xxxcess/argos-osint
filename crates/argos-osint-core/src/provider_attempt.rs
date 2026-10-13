@@ -47,24 +47,99 @@ impl Transport {
 }
 
 /// Per-attempt deadlines.
-#[derive(Clone, Copy, Debug)]
+///
+/// `connect`/`first_response` bound the transport up to response headers.
+/// `idle` bounds silence on the wire (any bytes, including heartbeats).
+/// `first_output`/`model_inactivity`, when set, bound *meaningful model
+/// output* (answer or reasoning deltas): heartbeat-only traffic never extends
+/// them. `total` caps the whole attempt; receiving data does not extend it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Deadlines {
     pub connect: Duration,
     pub first_response: Duration,
     pub idle: Duration,
     pub total: Duration,
+    pub first_output: Option<Duration>,
+    pub model_inactivity: Option<Duration>,
 }
 
 impl Default for Deadlines {
     fn default() -> Self {
+        Self::ordinary()
+    }
+}
+
+impl Deadlines {
+    /// Ordinary/small operations: unchanged historical policy.
+    pub const fn ordinary() -> Self {
         Self {
             connect: Duration::from_secs(10),
             first_response: Duration::from_secs(60),
             idle: Duration::from_secs(30),
             total: Duration::from_secs(120),
+            first_output: None,
+            model_inactivity: None,
         }
     }
+
+    /// Streamed generated-JSON insight operations (extraction, proposal,
+    /// reconciliation). Initial settings to validate with timings, not
+    /// measured optima: connect 10s, headers 60s, first model output 180s,
+    /// model inactivity 90s, total 600s.
+    pub const fn insight_stream() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            first_response: Duration::from_secs(60),
+            idle: Duration::from_secs(90),
+            total: Duration::from_secs(600),
+            first_output: Some(Duration::from_secs(180)),
+            model_inactivity: Some(Duration::from_secs(90)),
+        }
+    }
+
+    /// Insight operations that cannot stream: one bounded wait for the whole body.
+    pub const fn insight_non_stream() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            first_response: Duration::from_secs(240),
+            idle: Duration::from_secs(90),
+            total: Duration::from_secs(300),
+            first_output: None,
+            model_inactivity: None,
+        }
+    }
+
+    /// Native bounded decisions keep their own short policy.
+    pub const fn native_decision() -> Self {
+        Self::ordinary()
+    }
 }
+
+/// Typed per-attempt progress. Never carries answer or reasoning text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttemptProgress {
+    /// Request handed to the transport.
+    Dispatched,
+    /// Response headers arrived (not proof of model activity).
+    HeadersReceived { status: u16 },
+    /// First meaningful answer/reasoning delta.
+    FirstModelOutput,
+    /// Throttled (~1/s) receiving update with character counts.
+    Receiving {
+        answer_chars: u64,
+        reasoning_chars: u64,
+    },
+    /// Transport heartbeat/comment with no model content.
+    Heartbeat,
+    /// Terminal marker received; the caller validates next.
+    StreamComplete { finish_reason: Option<String> },
+}
+
+/// Progress sink threaded through `attempt_insight → attempt_options → read_stream`.
+pub type ProgressFn = dyn Fn(AttemptProgress) + Send + Sync;
+
+/// Minimum interval between `Receiving` updates.
+pub const PROGRESS_THROTTLE: Duration = Duration::from_secs(1);
 
 /// Outcome and timing of one request.
 #[derive(Clone, Debug)]
@@ -98,23 +173,54 @@ pub async fn attempt_with_observer(
     deadlines: Deadlines,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> AttemptReport {
-    attempt_options(secret, messages, transport, deadlines, observer, None).await
+    attempt_options(secret, messages, transport, deadlines, observer, None, None).await
 }
 
 /// Only the insight contract lane requests structured JSON and completion bounds.
+/// The observer and typed progress sink are preserved (they used to be dropped).
 pub async fn attempt_insight(
     secret: &ProviderSecret,
     messages: &[ChatMessage],
     transport: Transport,
     completion_tokens: u32,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+    progress: Option<&ProgressFn>,
+) -> AttemptReport {
+    let deadlines = if transport == Transport::Stream {
+        Deadlines::insight_stream()
+    } else {
+        Deadlines::insight_non_stream()
+    };
+    attempt_full(
+        secret,
+        messages,
+        transport,
+        deadlines,
+        observer,
+        progress,
+        Some(completion_tokens),
+    )
+    .await
+}
+
+/// Fully parameterized single attempt.
+pub async fn attempt_full(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    transport: Transport,
+    deadlines: Deadlines,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+    progress: Option<&ProgressFn>,
+    completion_tokens: Option<u32>,
 ) -> AttemptReport {
     attempt_options(
         secret,
         messages,
         transport,
-        Deadlines::default(),
-        None,
-        Some(completion_tokens),
+        deadlines,
+        observer,
+        progress,
+        completion_tokens,
     )
     .await
 }
@@ -125,6 +231,7 @@ async fn attempt_options(
     transport: Transport,
     deadlines: Deadlines,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+    progress: Option<&ProgressFn>,
     completion_tokens: Option<u32>,
 ) -> AttemptReport {
     let started = Instant::now();
@@ -178,6 +285,7 @@ async fn attempt_options(
         &mut first_ms,
         &mut stream_state,
         observer,
+        progress,
         completion_tokens,
     )
     .await;
@@ -209,6 +317,7 @@ async fn run(
     first_ms: &mut Option<u64>,
     state: &mut StreamState,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+    progress: Option<&ProgressFn>,
     completion_tokens: Option<u32>,
 ) -> Result<Completion, ProviderFailure> {
     let client = reqwest::Client::builder()
@@ -232,6 +341,9 @@ async fn run(
             f
         })?;
     let first_deadline = deadlines.first_response.min(deadlines.total);
+    if let Some(p) = progress {
+        p(AttemptProgress::Dispatched);
+    }
     let resp = match tokio::time::timeout(first_deadline, req.send()).await {
         Err(_) => {
             return Err(ProviderFailure::new(
@@ -252,6 +364,11 @@ async fn run(
     };
     *first_ms = Some(started.elapsed().as_millis() as u64);
     let status = resp.status();
+    if let Some(p) = progress {
+        p(AttemptProgress::HeadersReceived {
+            status: status.as_u16(),
+        });
+    }
     let req_id = request_id(resp.headers());
     let wait = retry_after_uncapped(resp.headers());
     let remaining = |started: Instant| deadlines.total.saturating_sub(started.elapsed());
@@ -291,9 +408,16 @@ async fn run(
         .unwrap_or(transport == Transport::Stream);
 
     if is_event_stream {
-        read_stream(resp, deadlines, started, state, observer)
-            .await
-            .map_err(attach)
+        read_stream(
+            resp.bytes_stream(),
+            deadlines,
+            started.elapsed(),
+            state,
+            observer,
+            progress,
+        )
+        .await
+        .map_err(attach)
     } else {
         let text = match tokio::time::timeout(remaining(started), resp.text()).await {
             Err(_) => {
@@ -416,18 +540,36 @@ struct Acc {
     event: String,
 }
 
-async fn read_stream(
-    resp: reqwest::Response,
+/// Read an SSE chat stream.
+///
+/// Generic over the byte stream so tests can drive it with a mock stream and a
+/// paused tokio clock. Bytes are buffered until a full line arrives, so UTF-8
+/// sequences split across network chunks decode intact. Clocks use
+/// `tokio::time::Instant`; `already` is time spent before the body.
+pub(crate) async fn read_stream<S, B, E>(
+    stream: S,
     deadlines: Deadlines,
-    started: Instant,
+    already: Duration,
     state: &mut StreamState,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
-) -> Result<Completion, ProviderFailure> {
-    let mut stream = resp.bytes_stream();
+    progress: Option<&ProgressFn>,
+) -> Result<Completion, ProviderFailure>
+where
+    S: futures_util::Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::error::Error + 'static,
+{
+    use tokio::time::Instant as TInstant;
+    let mut stream = std::pin::pin!(stream);
     let mut acc = Acc::default();
-    let mut buf = String::new();
+    let mut buf: Vec<u8> = Vec::new();
+    let body_start = TInstant::now();
+    let total_left = deadlines.total.saturating_sub(already);
+    let mut last_model: Option<TInstant> = None;
+    let mut last_progress: Option<TInstant> = None;
     loop {
-        let remaining = deadlines.total.saturating_sub(started.elapsed());
+        let now = TInstant::now();
+        let remaining = total_left.saturating_sub(now - body_start);
         if remaining.is_zero() {
             return Err(stream_fail(
                 state,
@@ -436,17 +578,47 @@ async fn read_stream(
                 "stream exceeded the total deadline",
             ));
         }
-        let next = match tokio::time::timeout(deadlines.idle.min(remaining), stream.next()).await {
+        // Model-output clock: first output, then inactivity since the last delta.
+        let model_left = match (
+            last_model,
+            deadlines.first_output,
+            deadlines.model_inactivity,
+        ) {
+            (None, Some(first), _) => Some((first.saturating_sub(now - body_start), true)),
+            (Some(at), _, Some(idle)) => Some((idle.saturating_sub(now - at), false)),
+            _ => None,
+        };
+        if let Some((left, first)) = model_left {
+            if left.is_zero() {
+                return Err(model_timeout(state, &acc, first, deadlines));
+            }
+        }
+        let mut wait = deadlines.idle.min(remaining);
+        if let Some((left, _)) = model_left {
+            wait = wait.min(left);
+        }
+        let next = match tokio::time::timeout(wait, stream.next()).await {
             Err(_) => {
+                let now = TInstant::now();
+                if total_left.saturating_sub(now - body_start).is_zero() {
+                    return Err(stream_fail(
+                        state,
+                        &acc,
+                        Category::Timeout,
+                        "stream exceeded the total deadline",
+                    ));
+                }
+                if let Some((left, first)) = model_left {
+                    if left <= wait {
+                        return Err(model_timeout(state, &acc, first, deadlines));
+                    }
+                }
                 return Err(stream_fail(
                     state,
                     &acc,
                     Category::Timeout,
-                    &format!(
-                        "no stream data for {}s",
-                        deadlines.idle.min(remaining).as_secs()
-                    ),
-                ))
+                    &format!("no stream data for {}s", wait.as_secs()),
+                ));
             }
             Ok(next) => next,
         };
@@ -472,17 +644,63 @@ async fn read_stream(
             }
         };
         state.chunks += 1;
+        let chunk = chunk.as_ref();
         state.bytes += chunk.len() as u64;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(idx) = buf.find('\n') {
-            let line = buf[..idx].trim().to_string();
-            buf.drain(..=idx);
+        buf.extend_from_slice(chunk);
+        let before = (acc.content.len(), acc.reasoning.len());
+        let mut heartbeat = false;
+        while let Some(idx) = buf.iter().position(|b| *b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=idx).collect();
+            let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
+            if line.starts_with(':') {
+                heartbeat = true;
+            }
+            line_event(&line, state, &mut acc, observer)?;
+            if state.done_marker {
+                break;
+            }
+        }
+        let grew = (acc.content.len(), acc.reasoning.len()) != before;
+        let now = TInstant::now();
+        if grew {
+            if last_model.is_none() {
+                if let Some(p) = progress {
+                    p(AttemptProgress::FirstModelOutput);
+                }
+            }
+            last_model = Some(now);
+            if let Some(p) = progress {
+                if last_progress.is_none_or(|t| now - t >= PROGRESS_THROTTLE) {
+                    last_progress = Some(now);
+                    p(AttemptProgress::Receiving {
+                        answer_chars: acc.content.chars().count() as u64,
+                        reasoning_chars: acc.reasoning.chars().count() as u64,
+                    });
+                }
+            }
+        } else if heartbeat {
+            if let Some(p) = progress {
+                p(AttemptProgress::Heartbeat);
+            }
+        }
+        // Honor the explicit terminal marker promptly instead of waiting for EOF.
+        if state.done_marker {
+            buf.clear();
+            break;
+        }
+    }
+    if !buf.is_empty() {
+        let line = String::from_utf8_lossy(&buf).trim().to_string();
+        if !line.is_empty() {
             line_event(&line, state, &mut acc, observer)?;
         }
     }
-    if !buf.trim().is_empty() {
-        let line = buf.trim().to_string();
-        line_event(&line, state, &mut acc, observer)?;
+    if let Some(p) = progress {
+        if state.done_marker || state.finish_reason.is_some() {
+            p(AttemptProgress::StreamComplete {
+                finish_reason: state.finish_reason.clone(),
+            });
+        }
     }
     fill(state, &acc);
     if !state.done_marker && state.finish_reason.is_none() {
@@ -512,6 +730,26 @@ async fn read_stream(
         f.stream = state.clone();
         f
     })
+}
+
+fn model_timeout(
+    state: &mut StreamState,
+    acc: &Acc,
+    first: bool,
+    deadlines: Deadlines,
+) -> ProviderFailure {
+    let msg = if first {
+        format!(
+            "no model output within {}s of response headers",
+            deadlines.first_output.unwrap_or_default().as_secs()
+        )
+    } else {
+        format!(
+            "model output inactive for {}s",
+            deadlines.model_inactivity.unwrap_or_default().as_secs()
+        )
+    };
+    stream_fail(state, acc, Category::Timeout, &msg)
 }
 
 fn fill(state: &mut StreamState, acc: &Acc) {
@@ -975,3 +1213,7 @@ mod tests {
         assert_eq!(server.hits(), 1, "no new retries for existing callers");
     }
 }
+
+#[cfg(test)]
+#[path = "provider_attempt_stream_tests.rs"]
+mod stream_tests;

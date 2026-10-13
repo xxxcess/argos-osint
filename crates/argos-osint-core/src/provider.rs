@@ -479,9 +479,58 @@ pub const TOOL_PICKER_MODEL: &str = "typesafe/jev-1.13";
 pub const DECISIONS_MODELS: &[(&str, &str)] = &[(TOOL_PICKER_MODEL, "Jev 1.13 (decisions)")];
 
 /// Jev returns typed decisions, not completions.
+///
+/// Recognizes only the TypeSafe Jev family: `typesafe/jev`, versioned
+/// `typesafe/jev-<version>` (e.g. `typesafe/jev-1.13`) and the documented
+/// `~typesafe/jev-latest` alias, after trimming and case-normalizing for the
+/// comparison only (the configured wire ID is never rewritten). Unrelated IDs
+/// that merely contain "jev" are not Jev.
 pub fn is_decisions_model(model: &str) -> bool {
-    let model = model.trim().to_ascii_lowercase();
-    model == TOOL_PICKER_MODEL || model == "~typesafe/jev-latest" || model.contains("/jev")
+    is_jev_family(model)
+}
+
+/// Centralized TypeSafe Jev family detection; see [`is_decisions_model`].
+pub fn is_jev_family(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    let m = m.strip_prefix('~').unwrap_or(&m);
+    let Some(rest) = m.strip_prefix("typesafe/jev") else {
+        return false;
+    };
+    if rest.is_empty() || rest == "-latest" {
+        return true;
+    }
+    // Versioned: `-<digits>(.<digits>)*`, optionally a `:variant` suffix.
+    let rest = rest.split(':').next().unwrap_or(rest);
+    let Some(ver) = rest.strip_prefix('-') else {
+        return false;
+    };
+    !ver.is_empty()
+        && ver
+            .split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Native-decision capability for a resolved route, independent of whether
+/// the model is Jev. `Ok(())` means the route can serve native decisions;
+/// `Err(reason)` is an explicit configuration/capability skip. A Jev route that
+/// fails this check must be skipped, never sent to chat.
+pub fn native_decision_capability(secret: &ProviderSecret) -> Result<(), String> {
+    if !is_jev_family(&secret.model) {
+        return Err(format!(
+            "{} is not a native decision model",
+            secret.model.trim()
+        ));
+    }
+    let kind = effective_kind(secret);
+    if kind != "openrouter" {
+        return Err(format!(
+            "Jev native decisions require an OpenRouter connection (route provider is {kind})"
+        ));
+    }
+    if resolved_key(secret).is_none() {
+        return Err("Jev native decisions: OpenRouter credentials are missing".into());
+    }
+    Ok(())
 }
 
 /// `decisions` for Jev models, `chat` for any other tool-picker model.

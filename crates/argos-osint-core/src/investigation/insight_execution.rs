@@ -186,6 +186,87 @@ pub(super) fn progress(
     Ok(())
 }
 
+/// Status label for one typed model-execution event, or `None` when the event
+/// must not touch durable state (heartbeats, provisional text).
+pub fn activity_label(event: &crate::recon::model_exec::ModelExecEvent) -> Option<String> {
+    use crate::provider_attempt::AttemptProgress as P;
+    use crate::recon::model_exec::ModelExecEvent as E;
+    Some(match event {
+        E::AttemptStart { attempt, model, .. } => {
+            format!("Waiting for output · attempt {attempt} · {model}")
+        }
+        E::AttemptReset { attempt, .. } => format!("Waiting for output · attempt {attempt}"),
+        E::Progress {
+            progress,
+            attempt,
+            model,
+            ..
+        } => {
+            match progress {
+                P::Dispatched | P::HeadersReceived { .. } => {
+                    format!("Waiting for output · attempt {attempt} · {model}")
+                }
+                P::FirstModelOutput => format!("Receiving output · attempt {attempt} · {model}"),
+                P::Receiving {
+                    answer_chars,
+                    reasoning_chars,
+                } => {
+                    if *answer_chars == 0 {
+                        format!("Receiving output · attempt {attempt} · thinking ({reasoning_chars} chars)")
+                    } else {
+                        format!("Receiving output · attempt {attempt} · {answer_chars} chars")
+                    }
+                }
+                P::StreamComplete { .. } => "Validating".into(),
+                P::Heartbeat => return None,
+            }
+        }
+        E::AttemptFinish {
+            outcome, category, ..
+        } => {
+            if outcome == "ok" {
+                "Validating".into()
+            } else {
+                format!(
+                    "Attempt failed · {}",
+                    category.as_deref().unwrap_or(outcome)
+                )
+            }
+        }
+        E::RetryStatus {
+            wait, next_attempt, ..
+        } => {
+            format!(
+                "Retry wait {}s · next attempt {next_attempt}",
+                wait.as_secs()
+            )
+        }
+        E::ProvisionalDelta { .. } | E::FinalReplacement { .. } => return None,
+    })
+}
+
+/// Durable, throttled activity write (one row update, never per token).
+pub fn record_activity(conn: &Connection, task_id: &str, label: &str) -> Result<()> {
+    if task_id.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE insight_refresh_execution SET activity=?2,activity_at=?3 WHERE task_id=?1",
+        params![task_id, label, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Current activity label for a task, empty when idle/unknown.
+pub fn activity(conn: &Connection, task_id: &str) -> String {
+    conn.query_row(
+        "SELECT activity FROM insight_refresh_execution WHERE task_id=?1",
+        [task_id],
+        |r| r.get(0),
+    )
+    .unwrap_or_default()
+}
+
 /// Admits exactly one bounded epoch for failed/partially published recoverable work.
 pub(super) fn stage_event(
     conn: &Connection,

@@ -252,6 +252,15 @@ pub enum ModelExecEvent {
         operation_id: String,
         text: String,
     },
+    /// Typed transport/model activity for the current attempt. Carries counts
+    /// only; answer and reasoning text are never included.
+    Progress {
+        operation_id: String,
+        attempt: u32,
+        route_index: u32,
+        model: String,
+        progress: provider_attempt::AttemptProgress,
+    },
 }
 
 /// Durable operation record in SQLite.
@@ -898,6 +907,22 @@ fn record_attempt_finish(
     Ok(())
 }
 
+/// Operation label for the all-Jev generative-chain configuration error.
+pub fn all_jev_operation_label(role: &str) -> String {
+    match role {
+        "claim_assessor" => "Claim Assessor extraction".into(),
+        "entity_resolver" => "Entity Resolver generation".into(),
+        other => {
+            let name = provider::role_name(other).unwrap_or(other);
+            let mut chars = name.replace('_', " ").chars().collect::<Vec<_>>();
+            if let Some(c) = chars.first_mut() {
+                *c = c.to_ascii_uppercase();
+            }
+            format!("{} generation", chars.into_iter().collect::<String>())
+        }
+    }
+}
+
 /// Execute a chat-based model role request across the configured route chain.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_chat<V>(
@@ -927,6 +952,16 @@ where
         if provider::is_decisions_model(&secret.model) {
             route.skip_reason = Some("Decisions-only route does not support free chat".into());
         }
+    }
+    if !routes.is_empty()
+        && secrets
+            .iter()
+            .all(|secret| provider::is_decisions_model(&secret.model))
+    {
+        anyhow::bail!(
+            "{} requires a non-Jev chat fallback",
+            all_jev_operation_label(scope.role)
+        );
     }
 
     let repairs = Arc::new(OutputRepairs::default());
@@ -1069,8 +1104,29 @@ where
             };
 
             timings.sent();
+            let progress_sink = on_event_step.clone().map(|sink| {
+                let op_id = op_id.clone();
+                let model = route_cloned.model.clone();
+                Arc::new(move |progress: provider_attempt::AttemptProgress| {
+                    sink(ModelExecEvent::Progress {
+                        operation_id: op_id.clone(),
+                        attempt: attempt_num,
+                        route_index: route_idx as u32,
+                        model: model.clone(),
+                        progress,
+                    })
+                }) as Arc<provider_attempt::ProgressFn>
+            });
             let rep = if insight_contract {
-                provider_attempt::attempt_insight(&secret, &messages_vec, transport, 8192).await
+                provider_attempt::attempt_insight(
+                    &secret,
+                    &messages_vec,
+                    transport,
+                    8192,
+                    Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
+                    progress_sink.as_deref(),
+                )
+                .await
             } else {
                 provider_attempt::attempt_with_observer(
                     &secret,
@@ -1342,7 +1398,17 @@ where
     } else {
         let _ = ensure_operation(db_path, scope, "");
     }
-    let (routes, secrets) = resolve_role_routes(auth, settings, scope.role);
+    let (mut routes, secrets) = resolve_role_routes(auth, settings, scope.role);
+    // Capability is resolved separately from endpoint availability: a Jev
+    // route without a supported native connection is skipped (zero requests,
+    // no attempt/RPM/retry consumed); it is never sent to chat.
+    for (route, secret) in routes.iter_mut().zip(&secrets) {
+        if route.skip_reason.is_none() && provider::is_jev_family(&secret.model) {
+            if let Err(reason) = provider::native_decision_capability(secret) {
+                route.skip_reason = Some(reason);
+            }
+        }
+    }
 
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
@@ -1360,9 +1426,9 @@ where
         attempt_counter += 1;
         let attempt_num = attempt_counter;
         let secret = secrets[route_idx].clone();
-        let is_native = provider::is_decisions_model(&secret.model)
-            && provider::effective_kind(&secret) == "openrouter"
-            && provider::resolved_key(&secret).is_some();
+        // Skipped incompatible Jev routes never reach dispatch, so a Jev ID here
+        // always has a native connection.
+        let is_native = provider::native_decision_capability(&secret).is_ok();
         let transport = if is_native { "decisions" } else { "chat" };
         let on_event_step = on_event_shared.clone();
         let route_cloned = route.clone();
@@ -1589,11 +1655,15 @@ where
                     )));
                 }
                 let rep = if insight_contract {
-                    provider_attempt::attempt_insight(
+                    // Bounded decision fallback keeps the ordinary policy.
+                    provider_attempt::attempt_full(
                         &secret,
                         &chat_messages,
                         Transport::NonStream,
-                        2048,
+                        Deadlines::native_decision(),
+                        None,
+                        None,
+                        Some(2048),
                     )
                     .await
                 } else {
@@ -1862,3 +1932,7 @@ mod tests {
         assert!(AttemptOutcome::default().category.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "model_exec_routing_tests.rs"]
+mod routing_tests;

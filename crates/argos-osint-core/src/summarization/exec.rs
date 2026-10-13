@@ -50,6 +50,8 @@ impl ExecOptions {
                 first_response: Duration::from_secs(p.first_response),
                 idle: Duration::from_secs(p.stream_inactivity),
                 total: Duration::from_secs(p.attempt_execution),
+                first_output: None,
+                model_inactivity: None,
             },
             first_transport: Transport::NonStream,
             admission_account: admission_account(secret),

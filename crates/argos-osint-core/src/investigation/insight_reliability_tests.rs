@@ -594,7 +594,7 @@ fn schema_32_upgrade_preserves_legacy_checkpoints_and_unrelated_tables() {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        32
+        crate::store::SCHEMA_VERSION
     );
     assert_eq!(
         store

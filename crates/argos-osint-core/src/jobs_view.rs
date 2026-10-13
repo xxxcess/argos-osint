@@ -140,6 +140,7 @@ impl JobRow {
             "partial" => "partial",
             "failed" => "failed",
             "cancelled" => "cancelled",
+            "superseded" => "superseded",
             "blocked" => "blocked",
             _ => "unknown",
         }

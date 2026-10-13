@@ -925,3 +925,162 @@ fn progress_reaches_jobs_and_logs_throttled_and_resets_per_attempt_and_stage() {
         "Waiting for decision"
     );
 }
+
+#[test]
+fn source_and_route_changes_retire_old_task_with_linked_reason_and_polling_never_duplicates() {
+    let store = Store::memory().unwrap();
+    let mut input = seed_report(&store, "supersede", "Acme announced project 0.");
+    let (_, mut settings) = routes("http://127.0.0.1:1");
+    let first = insight_persist::enqueue_refresh(
+        &store.conn,
+        &mut input,
+        &settings,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    let article = store.atlas_article("fixture", "supersede").unwrap().unwrap();
+    // Repeated unchanged visits/polling: same task, no new generation.
+    let generation =
+        insight_persist::desired_generation(&store.conn, "article", "supersede").unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            insight_persist::schedule_article_refresh(&store, &article, &settings, true).unwrap(),
+            Some(first.clone())
+        );
+    }
+    assert_eq!(
+        insight_persist::desired_generation(&store.conn, "article", "supersede").unwrap(),
+        generation
+    );
+    // Report body changes while the first task is still queued.
+    let bundle = json!({"text":"Acme announced project 1 and later denied project 0.","completed_at":chrono::Utc::now().to_rfc3339(),"support_receipts":[]}).to_string();
+    store.conn.execute("INSERT INTO intel_report_results(job_id,generation,article_id,completion_sequence,source_hash,details_json,completed_at) VALUES('report-supersede-2',1,'supersede',2,?1,?2,?3)",params![crate::nlp::cache::hash(&bundle),bundle,chrono::Utc::now().to_rfc3339()]).unwrap();
+    let second = insight_persist::schedule_article_refresh(&store, &article, &settings, true)
+        .unwrap()
+        .unwrap();
+    assert_ne!(second, first);
+    let (state, message): (String, String) = store
+        .conn
+        .query_row(
+            "SELECT state,error_message FROM argos_tasks WHERE id=?1",
+            [&first],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "superseded");
+    let second_job: String = store
+        .conn
+        .query_row("SELECT job_id FROM argos_tasks WHERE id=?1", [&second], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        message,
+        format!("Superseded · replaced by {second_job} · source changed")
+    );
+    assert_eq!(
+        insight_persist::supersession(&store.conn, &first),
+        Some((second_job.clone(), "source changed".into()))
+    );
+    // Only the current generation may publish; the old one is fenced.
+    assert!(insight_persist::is_superseded(&store.conn, &input));
+    // The latest live generation stays queued (actionable), never failed.
+    let live: String = store
+        .conn
+        .query_row("SELECT state FROM argos_tasks WHERE id=?1", [&second], |r| r.get(0))
+        .unwrap();
+    assert_eq!(live, "queued");
+    // Superseded progress reads as retirement, not Unknown/Timeout/exhaustion.
+    let progress = insight_execution::task_progress(&store.conn, &first)
+        .unwrap()
+        .unwrap();
+    let lines = progress.lines().join("\n");
+    assert!(lines.starts_with("Superseded · replaced by"), "{lines}");
+    assert!(!lines.contains("Extraction error"));
+    // Route change: reason names the changed role.
+    settings.defaults.synthesis.model = "replacement-model".into();
+    let third = insight_persist::schedule_article_refresh(&store, &article, &settings, true)
+        .unwrap()
+        .unwrap();
+    assert_ne!(third, second);
+    assert_eq!(
+        insight_persist::supersession(&store.conn, &second).map(|(_, r)| r),
+        Some("model routes changed".into())
+    );
+    let events = crate::events::list_events(
+        &store.conn,
+        &crate::events::EventFilter {
+            text: "Superseded".into(),
+            ..Default::default()
+        },
+        10,
+    )
+    .unwrap();
+    assert_eq!(events.len(), 2);
+}
+
+#[test]
+fn completed_report_replacement_is_named_as_such() {
+    let store = Store::memory().unwrap();
+    let report = seed_report(&store, "rep", "Acme announced project 0.");
+    let (_, settings) = routes("http://127.0.0.1:1");
+    let mut article = report.clone();
+    article.surface = "article".into();
+    assert_eq!(
+        insight_persist::supersession_reason(&article, &settings, &report, &settings).0,
+        "completed report replaces article details"
+    );
+    assert_eq!(
+        insight_persist::supersession_reason(&report, &settings, &report, &settings).0,
+        "preparation contract changed"
+    );
+}
+
+#[tokio::test]
+async fn generation_advanced_mid_flight_retires_task_as_superseded_with_zero_requests() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("race.db");
+    let store = Store::open(&path).unwrap();
+    let mut input = seed_report(&store, "race", "Acme announced project 0.");
+    let server = mock::serve(vec![]).await;
+    let (auth, settings) = routes(&server.base_url);
+    let id = insight_persist::enqueue_refresh(
+        &store.conn,
+        &mut input,
+        &settings,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    // A replacement generation lands between enqueue and dispatch.
+    insight_persist::advance_generation(
+        &store.conn,
+        "article",
+        "race",
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let out = insight_persist::run_refresh_slice(&path, &id, &auth, &settings, &cancel)
+        .await
+        .unwrap();
+    assert!(out.is_none(), "late work never publishes");
+    assert_eq!(server.hits(), 0, "obsolete work sends no requests");
+    let (state, category, message): (String, String, String) = store
+        .conn
+        .query_row(
+            "SELECT state,error_category,error_message FROM argos_tasks WHERE id=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "superseded");
+    assert_eq!(category, "", "not Unknown/Timeout");
+    assert!(message.starts_with("Superseded"), "{message}");
+    let lifecycle_error: String = store
+        .conn
+        .query_row(
+            "SELECT last_error FROM insight_owner_state WHERE owner_kind='article' AND owner_id='race'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(lifecycle_error.is_empty(), "retirement is not an owner error");
+}

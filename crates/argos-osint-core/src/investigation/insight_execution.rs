@@ -85,6 +85,12 @@ impl Progress {
             self.activity_age_secs,
             self.index_status.starts_with("Indexed"),
         );
+        // Intentional retirement reads as such, never as an extraction error.
+        let step = if self.state == "superseded" && self.error.starts_with("Superseded") {
+            self.error.clone()
+        } else {
+            step
+        };
         let mut lines = vec![
             format!("{step} · {} · epoch {}", self.state, self.retry_epoch),
             format!(
@@ -106,7 +112,7 @@ impl Progress {
         if !self.route.is_empty() {
             lines.push(self.route.clone());
         }
-        if !self.error.is_empty() {
+        if !self.error.is_empty() && self.state != "superseded" {
             lines.push(format!("Extraction error: {}", self.error));
         }
         lines

@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// activity-history tables plus additive timing columns on the model attempt
 /// and tool call records. 28 adds immutable NLP artifacts/references/features and
 /// complete summary-result envelopes; existing facts are preserved unchanged.
-pub const SCHEMA_VERSION: i64 = 33;
+pub const SCHEMA_VERSION: i64 = 34;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -779,6 +779,27 @@ impl Store {
                     }
                 }
                 self.conn.pragma_update(None, "user_version", 33)?;
+            }
+            if version < 34 {
+                // Additive: why an insight task was retired and what replaced it.
+                self.conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS insight_supersessions (
+                        task_id TEXT PRIMARY KEY,
+                        job_id TEXT NOT NULL,
+                        owner_kind TEXT NOT NULL,
+                        owner_id TEXT NOT NULL,
+                        generation INTEGER NOT NULL,
+                        replaced_by_job TEXT NOT NULL,
+                        replaced_by_task TEXT NOT NULL,
+                        replaced_by_generation INTEGER NOT NULL,
+                        reason TEXT NOT NULL,
+                        detail_json TEXT NOT NULL DEFAULT '{}',
+                        at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS insight_supersession_owner
+                        ON insight_supersessions(owner_kind, owner_id);",
+                )?;
+                self.conn.pragma_update(None, "user_version", 34)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final

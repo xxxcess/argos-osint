@@ -13058,6 +13058,66 @@ mod tests {
                     );
                 }
             }
+            // Supersession: intentional retirement in Jobs detail.
+            {
+                let mut app = app();
+                let progress = Progress {
+                    task_id: "insight-stream-task".into(),
+                    job_id: "insight-refresh:article:a2:3".into(),
+                    retry_epoch: 0,
+                    stage: "extraction".into(),
+                    state: "superseded".into(),
+                    windows_done: 0,
+                    windows_total: 1,
+                    batches_done: 0,
+                    batches_total: 0,
+                    withheld_count: 0,
+                    route: "Route: local/nvidia/nemotron-3-super-120b-a12b:free · attempt 1 · ok"
+                        .into(),
+                    error: "Superseded · replaced by insight-refresh:article:a2:4 · source changed"
+                        .into(),
+                    retryable: false,
+                    index_status: "Index: no published memories".into(),
+                    activity: String::new(),
+                    activity_age_secs: None,
+                };
+                let job = JobRow {
+                    id: progress.job_id.clone(),
+                    app: "intel".into(),
+                    operation: "insight_refresh".into(),
+                    title: "Assess and refresh investigative insights".into(),
+                    state: "cancelled".into(),
+                    ..Default::default()
+                };
+                app.select(ModuleId::Jobs.index());
+                app.jobs.rows = vec![job.clone()];
+                app.jobs.sel = 0;
+                app.jobs.detail = Some(JobDetail {
+                    job,
+                    tasks: vec![TaskRow {
+                        id: progress.task_id.clone(),
+                        operation: "insight_refresh".into(),
+                        state: "superseded".into(),
+                        ..Default::default()
+                    }],
+                    insight_progress: vec![progress],
+                    ..Default::default()
+                });
+                app.jobs.detail_open = true;
+                app.jobs.detail_scroll = 0;
+                let text = buffer_text(&render(&mut app, width, height));
+                assert!(text.contains("Superseded · replaced by"));
+                assert!(!text.contains("Extraction error"));
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("stream-jobs-8-superseded-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+            }
             // Logs: activity transitions recorded by the insight observer.
             let mut app = app();
             for message in [

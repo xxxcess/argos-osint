@@ -234,6 +234,15 @@ pub fn evidence_from_tools(
 
 /// Input identity includes routes (without credentials), every immutable source,
 /// all bindings/premises/admitted memory revisions and captured preparation settings.
+/// Roles whose captured routes can affect insight work (fingerprints and
+/// supersession diagnostics).
+pub const INSIGHT_ROLES: [&str; 4] = [
+    "claim_assessor",
+    "synthesis",
+    "entity_resolver",
+    "evidence_curator",
+];
+
 pub fn input_key(input: &PipelineInput, settings: &crate::provider::SettingsFile) -> String {
     let mut snapshot = input.snapshot.clone();
     snapshot.key.clear();
@@ -243,6 +252,10 @@ pub fn input_key(input: &PipelineInput, settings: &crate::provider::SettingsFile
     ];
     if input.surface != "recon_report" || input.recall_enabled {
         roles.push(settings.defaults.resolve_role("entity_resolver").0);
+    }
+    // Memory predicate/time relevance now runs on Evidence Curator.
+    if input.recall_enabled {
+        roles.push(settings.defaults.resolve_role("evidence_curator").0);
     }
     crate::nlp::cache::key(
         &serde_json::json!({"snapshot":snapshot,"evidence":input.evidence,"objective":input.objective,"surface":input.surface,"required":input.required_tasks_complete,"save_insights":input.save_insights,"recall_enabled":input.recall_enabled,"roles":roles,"nlp":settings.nlp,"contract":CONTRACT,"policy":READINESS_POLICY,"claim_prompt":hash(CLAIM_PROMPT),"inference_prompt":hash(INFERENCE_PROMPT)}),

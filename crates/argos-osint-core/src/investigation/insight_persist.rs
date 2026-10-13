@@ -338,23 +338,187 @@ fn schedule_article_refresh_on(
     let prior: Option<(String, String,String,String)> = store.conn.query_row(
         "SELECT id,input_ref,role_snapshot,input_hash FROM argos_tasks WHERE operation='insight_refresh' AND job_id IN (SELECT id FROM argos_jobs WHERE owner_scope=?1) ORDER BY created_at DESC,rowid DESC LIMIT 1",
         [format!("article:{}",article.id)], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    if let Some((id, json, captured, stored_hash)) = prior {
-        if let Ok(mut prior) = serde_json::from_str::<PipelineInput>(&json) {
-            let captured = serde_json::from_str::<crate::provider::SettingsFile>(&captured)?;
-            let compatible = super::insights::input_key(&prior, &captured) == stored_hash;
+    let mut reason = ("initial refresh".to_string(), serde_json::json!({}));
+    if let Some((id, json, captured, stored_hash)) = &prior {
+        if let Ok(mut prior) = serde_json::from_str::<PipelineInput>(json) {
+            let captured = serde_json::from_str::<crate::provider::SettingsFile>(captured)?;
+            let compatible = super::insights::input_key(&prior, &captured) == *stored_hash;
             prior.snapshot.generation = 0;
             if compatible && super::insights::input_key(&prior, &captured) == identity {
-                return Ok(Some(id));
+                return Ok(Some(id.clone()));
             }
+            reason = if compatible {
+                supersession_reason(&prior, &captured, &input, settings)
+            } else {
+                (
+                    "preparation contract changed".into(),
+                    serde_json::json!({"contract":"stored fingerprint is from an older contract"}),
+                )
+            };
+        } else {
+            reason = ("preparation contract changed".into(), serde_json::json!({}));
         }
     }
     input.snapshot.generation = advance_generation(&store.conn, "article", &article.id, &now)?;
-    Ok(Some(enqueue_refresh(
+    let task = enqueue_refresh(&store.conn, &mut input, settings, &now)?;
+    retire_replaced(
         &store.conn,
-        &mut input,
-        settings,
+        "article",
+        &article.id,
+        &input,
+        &task,
+        &reason.0,
+        &reason.1,
         &now,
-    )?))
+    )?;
+    Ok(Some(task))
+}
+
+/// Why a new generation was needed, comparing the prior task's input with its
+/// own captured settings against the new input with current settings.
+pub fn supersession_reason(
+    prior: &PipelineInput,
+    prior_settings: &crate::provider::SettingsFile,
+    next: &PipelineInput,
+    settings: &crate::provider::SettingsFile,
+) -> (String, serde_json::Value) {
+    if prior.surface != next.surface && next.surface == "recon_report" {
+        return (
+            "completed report replaces article details".into(),
+            serde_json::json!({"from":prior.surface,"to":next.surface}),
+        );
+    }
+    let mut a = prior.snapshot.clone();
+    let mut b = next.snapshot.clone();
+    a.key.clear();
+    b.key.clear();
+    a.generation = 0;
+    b.generation = 0;
+    let sa = serde_json::to_value(&a).unwrap_or_default();
+    let sb = serde_json::to_value(&b).unwrap_or_default();
+    let (ea, eb) = (
+        serde_json::to_value(&prior.evidence).unwrap_or_default(),
+        serde_json::to_value(&next.evidence).unwrap_or_default(),
+    );
+    if sa != sb || ea != eb {
+        let changed: Vec<String> = sb
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter(|(k, v)| sa.get(k.as_str()) != Some(v))
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        return (
+            "source changed".into(),
+            serde_json::json!({"fields":changed,"evidence_changed":ea!=eb}),
+        );
+    }
+    let roles = |s: &crate::provider::SettingsFile| {
+        serde_json::to_value(
+            super::insights::INSIGHT_ROLES
+                .iter()
+                .map(|r| (r.to_string(), s.defaults.resolve_role(r).0))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .unwrap_or_default()
+    };
+    let (ra, rb) = (roles(prior_settings), roles(settings));
+    if ra != rb {
+        let changed: Vec<String> = rb
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter(|(k, v)| ra.get(k.as_str()) != Some(v))
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        return (
+            "model routes changed".into(),
+            serde_json::json!({"roles":changed}),
+        );
+    }
+    ("preparation contract changed".into(), serde_json::json!({}))
+}
+
+/// Retire every older live task for this owner: queued work is superseded
+/// immediately; running work is recorded here and retired at its next fence
+/// (admission, pre-send dispatch check, heartbeat or publication).
+#[allow(clippy::too_many_arguments)]
+fn retire_replaced(
+    conn: &Connection,
+    kind: &str,
+    owner: &str,
+    next: &PipelineInput,
+    next_task: &str,
+    reason: &str,
+    detail: &serde_json::Value,
+    now: &str,
+) -> Result<()> {
+    let next_job: String = conn.query_row(
+        "SELECT job_id FROM argos_tasks WHERE id=?1",
+        [next_task],
+        |r| r.get(0),
+    )?;
+    let mut stmt = conn.prepare("SELECT t.id,t.job_id,t.state,t.source_revision FROM argos_tasks t JOIN argos_jobs j ON j.id=t.job_id WHERE j.owner_scope=?1 AND t.operation='insight_refresh' AND t.id<>?2 AND t.state IN ('queued','retry_scheduled','running','paused')")?;
+    let rows = stmt
+        .query_map(params![format!("{kind}:{owner}"), next_task], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (task, job, state, revision) in rows {
+        conn.execute("INSERT OR REPLACE INTO insight_supersessions(task_id,job_id,owner_kind,owner_id,generation,replaced_by_job,replaced_by_task,replaced_by_generation,reason,detail_json,at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![task,job,kind,owner,revision.parse::<i64>().unwrap_or(0),next_job,next_task,next.snapshot.generation,reason,detail.to_string(),now])?;
+        if state != "running" {
+            conn.execute("UPDATE argos_tasks SET state='superseded',error_message=?2,error_category='',updated_at=?3 WHERE id=?1",
+                params![task, format!("Superseded · replaced by {next_job} · {reason}"), now])?;
+            crate::tasks::refresh_job_state(conn, &job, now)?;
+        }
+        let _ = crate::events::record_event(
+            conn,
+            &crate::events::NewEvent {
+                severity: Some(crate::events::Severity::Info),
+                app: if kind == "article" {
+                    "intel".into()
+                } else {
+                    kind.into()
+                },
+                event_type: "insight.superseded".into(),
+                message: format!("Superseded · replaced by {next_job} · {reason}"),
+                details: detail.to_string(),
+                job_id: job,
+                task_id: task,
+                resource_ref: owner.into(),
+                ..Default::default()
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Supersession record for a task: (replacement job, reason).
+pub fn supersession(conn: &Connection, task_id: &str) -> Option<(String, String)> {
+    conn.query_row(
+        "SELECT replaced_by_job,reason FROM insight_supersessions WHERE task_id=?1",
+        [task_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// True when the owner's desired generation moved past `generation`.
+pub fn is_superseded(conn: &Connection, input: &PipelineInput) -> bool {
+    desired_generation(conn, &input.snapshot.owner_kind, &input.snapshot.owner_id)
+        .is_ok_and(|g| g != input.snapshot.generation)
 }
 
 pub fn active_output(conn: &Connection, kind: &str, owner: &str) -> Result<Option<PipelineOutput>> {
@@ -675,6 +839,11 @@ pub async fn run_refresh_slice(
             "captured route/preparation contract changed"
         ))
     } else {
+        let fence_owner = (
+            input.snapshot.owner_kind.clone(),
+            input.snapshot.owner_id.clone(),
+            input.snapshot.generation,
+        );
         let refresh = super::insight_execution::slice(super::insights::run_pipeline(
             &mut input, auth, settings, cancel, db_path,
         ));
@@ -686,6 +855,10 @@ pub async fn run_refresh_slice(
                 _=heartbeat.tick() => {
                     let store=crate::store::Store::open(db_path)?;
                     ensure!(crate::tasks::renew_lease(&store.conn,&claimed.id,&claimed.owner,claimed.epoch,120,&chrono::Utc::now().to_rfc3339())?,"refresh lease lost");
+                    // Genuine replacement: drop the in-flight request now.
+                    if desired_generation(&store.conn, &fence_owner.0, &fence_owner.1)? != fence_owner.2 {
+                        break Err(anyhow::anyhow!("refresh superseded"));
+                    }
                 }
             }
         };
@@ -701,6 +874,15 @@ pub async fn run_refresh_slice(
                 ensure!(n == 1, "refresh lease lost before continuation");
                 store.conn.execute("UPDATE argos_attempts SET finished_at=?2,outcome='slice_complete' WHERE task_id=?1 AND finished_at=''",params![claimed.id,now])?;
                 crate::tasks::refresh_job_state(&store.conn, &claimed.job_id, &now)?;
+                return Ok(None);
+            }
+            // Supersession is intentional retirement, not Unknown/Timeout.
+            if is_superseded(&store.conn, &input) {
+                let message = match supersession(&store.conn, &claimed.id) {
+                    Some((job, reason)) => format!("Superseded · replaced by {job} · {reason}"),
+                    None => "Superseded · replaced by a newer generation".into(),
+                };
+                crate::tasks::supersede_claimed(&store.conn, &claimed, &message, &now)?;
                 return Ok(None);
             }
             record_terminal_failure(

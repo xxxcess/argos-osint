@@ -482,10 +482,12 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect) {
             theme::error(),
         )));
     }
-    if view.rows.is_empty() {
-        let text = if !view.loaded && view.error.is_none() {
-            "Loading events…".to_string()
-        } else if view.filter().min_severity.is_some()
+    if view.rows.is_empty() && !view.loaded && view.error.is_none() {
+        let inner = inset(a.list);
+        lines =
+            super::anim::centered_lines("Loading events", theme::dim(), inner.width, inner.height);
+    } else if view.rows.is_empty() {
+        let text = if view.filter().min_severity.is_some()
             || !view.app.is_empty()
             || !view.job.is_empty()
             || !view.search.trim().is_empty()

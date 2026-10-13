@@ -31,7 +31,7 @@ pub enum SystemTab {
     /// Activity: the 20 primary analytics views.
     #[default]
     Overview,
-    /// Host, Paths, Logs.
+    /// Host and Paths.
     System,
     Configs,
 }
@@ -1361,7 +1361,7 @@ pub fn draw_profile(frame: &mut Frame, app: &App, area: Rect) {
             draw_filter_strip(frame, app, layout.controls);
             if !layout.too_small {
                 for (metric, rect) in kpis(app).iter().zip(&layout.kpis) {
-                    panels::kpi(frame, *rect, metric);
+                    panels::kpi_with(frame, *rect, metric, &kpi_visual(app, metric));
                 }
             }
             if layout.too_small {
@@ -1598,9 +1598,12 @@ fn draw_status_strip(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.profile.loading {
         Line::from(Span::styled(
             if app.profile.snapshot.is_some() {
-                "Refreshing · showing previous snapshot"
+                format!(
+                    "{} Refreshing · showing previous snapshot",
+                    super::anim::spinner()
+                )
             } else {
-                "Loading statistics"
+                super::anim::loading("Loading statistics")
             },
             theme::warn(),
         ))
@@ -2101,6 +2104,67 @@ fn draw_section_body(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
 }
+/// Pick the glanceable shape for one KPI tile from the same snapshot the value
+/// came from. Percentages become direction-coloured gauges; counts and
+/// latencies become sparklines of the section's bucketed history.
+fn kpi_visual(app: &App, metric: &Kpi) -> panels::KpiVisual {
+    let Some(snapshot) = app.profile.snapshot.as_ref() else {
+        return panels::KpiVisual::None;
+    };
+    if let Some(value) = metric
+        .value
+        .strip_suffix('%')
+        .and_then(|v| v.trim().parse::<f64>().ok())
+    {
+        let lower = metric.label.to_ascii_lowercase();
+        let higher_is_better = !(lower.contains("error")
+            || lower.contains("failure")
+            || lower.contains("share") && lower.contains("publisher"));
+        return panels::KpiVisual::Ratio {
+            value: value / 100.0,
+            higher_is_better,
+        };
+    }
+    let counts = |id: &str| -> panels::KpiVisual {
+        let Some(widget) = view_spec(id) else {
+            return panels::KpiVisual::None;
+        };
+        panels::KpiVisual::Trend(
+            count_buckets(widget, snapshot)
+                .iter()
+                .map(|b| b.available.then(|| b.total()))
+                .collect(),
+        )
+    };
+    let percentile = |id: &str, key: &str| -> panels::KpiVisual {
+        let Some(widget) = view_spec(id) else {
+            return panels::KpiVisual::None;
+        };
+        panels::KpiVisual::Trend(
+            series_points(widget, snapshot)
+                .iter()
+                .map(|p| {
+                    p.series
+                        .iter()
+                        .find(|(k, _)| k == key)
+                        .and_then(|(_, v)| *v)
+                        .map(|v| v.max(0.0) as u64)
+                })
+                .collect(),
+        )
+    };
+    match metric.label {
+        "Distinct new articles" => counts("intel.volume"),
+        "Terminal runs" => counts("recon.outcomes"),
+        "Terminal cycles" => counts("atlas.cycles"),
+        "Sends" => counts("models.by_role"),
+        "Final operation failures" => counts("models.failures"),
+        "Logical calls" => counts("tools.outcomes"),
+        "Successful model p95" => percentile("models.latency", "p95_ms"),
+        "Queue p95" => percentile("models.queue", "p95_ms"),
+        _ => panels::KpiVisual::None,
+    }
+}
 fn rate_kpi(label: &'static str, numerator: u64, denominator: u64, note: &str) -> Kpi {
     Kpi {
         label,
@@ -2167,7 +2231,7 @@ fn kpis(app: &App) -> Vec<Kpi> {
             .map(|label| Kpi {
                 label,
                 value: "N/A".into(),
-                coverage: "Loading statistics".into(),
+                coverage: super::anim::loading("Loading statistics"),
             })
             .collect();
     };
@@ -2453,7 +2517,7 @@ fn kpis(app: &App) -> Vec<Kpi> {
 }
 fn attention_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let Some(s) = &app.profile.snapshot else {
-        return vec![Line::raw("Loading statistics")];
+        return vec![Line::raw(super::anim::loading("Loading statistics"))];
     };
     if s.attention.is_empty() {
         return vec![
@@ -2506,11 +2570,15 @@ fn attention_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 }
 fn dashboard_lines(app: &App, w: &WidgetSpec, width: usize, height: usize) -> Vec<Line<'static>> {
     let Some(s) = app.profile.snapshot.as_ref() else {
-        return vec![Line::raw(if app.profile.error.is_some() {
-            "Unavailable statistics"
-        } else {
-            "Loading statistics"
-        })];
+        if app.profile.error.is_some() {
+            return vec![Line::raw("Unavailable statistics")];
+        }
+        return super::anim::centered_lines(
+            "Loading statistics",
+            ratatui::style::Style::default(),
+            width.min(usize::from(u16::MAX)) as u16,
+            height.min(usize::from(u16::MAX)) as u16,
+        );
     };
     let mut lines = Vec::new();
     if w.applicable_filters.is_empty() {
@@ -3324,6 +3392,10 @@ fn categorical_plot(
     lines
 }
 fn report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
+    if app.profile.snapshot.is_none() {
+        // Animated: never cache a spinner frame.
+        return build_report_detail_lines(app, widget, width);
+    }
     let key = (
         widget.id,
         width,
@@ -3427,7 +3499,7 @@ fn report_datasets(app: &App, widget: &WidgetSpec) -> Vec<(&'static str, serde_j
 
 fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
     let Some(snapshot) = &app.profile.snapshot else {
-        return vec![Line::raw("Loading statistics")];
+        return vec![Line::raw(super::anim::loading("Loading statistics"))];
     };
     let rows = sorted_rows(app, widget, snapshot);
     let mut lines = Vec::new();
@@ -3512,7 +3584,7 @@ fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<
 }
 fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
     let Some(snapshot) = &app.profile.snapshot else {
-        return vec![Line::raw("Loading statistics")];
+        return vec![Line::raw(super::anim::loading("Loading statistics"))];
     };
     let buckets = count_buckets(widget, snapshot);
     let selected = app
@@ -3744,7 +3816,16 @@ fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
     );
     for section in &sections.sections {
         if section.index == datasets.len() {
-            let lines = report_detail_lines(app, widget, section.rect.width);
+            let lines = if app.profile.snapshot.is_none() {
+                super::anim::centered_lines(
+                    "Loading statistics",
+                    ratatui::style::Style::default(),
+                    section.rect.width,
+                    section.rect.height,
+                )
+            } else {
+                report_detail_lines(app, widget, section.rect.width)
+            };
             let viewport = section.rect.height as usize;
             let offset = app
                 .profile

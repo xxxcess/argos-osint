@@ -194,9 +194,11 @@ impl ArticleImages {
                 return;
             }
         }
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new("Loading image…").style(super::theme::muted()),
+        super::anim::draw_centered(
+            frame.buffer_mut(),
             area,
+            "Loading image",
+            super::theme::muted(),
         );
     }
 }

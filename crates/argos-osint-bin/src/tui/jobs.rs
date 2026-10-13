@@ -445,8 +445,9 @@ pub fn table_lines(
         } else {
             job.attempts_used.to_string()
         };
+        let state = super::anim::job_state_label(&job.state, job.state_label());
         let text = cols.row(
-            job.state_label(),
+            &state,
             &title(job),
             &job.app,
             &progress(job),
@@ -653,16 +654,22 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect, can_open_source: bool) {
                 theme::error(),
             )));
         }
-        if view.rows.is_empty() {
-            let text = if !view.loaded && view.error.is_none() {
-                "Loading jobs…"
-            } else if view.status != JobStatusFilter::All
+        let inner = inset(a.table);
+        if view.rows.is_empty() && !view.loaded && view.error.is_none() {
+            lines = super::anim::centered_lines(
+                "Loading jobs",
+                theme::dim(),
+                inner.width,
+                inner.height,
+            );
+        } else if view.rows.is_empty() {
+            let text = if view.status != JobStatusFilter::All
                 || !view.app.is_empty()
                 || !view.search.trim().is_empty()
             {
-                "No jobs match these filters."
+                "No jobs match these filters.".to_string()
             } else {
-                "No background work recorded yet."
+                "No background work recorded yet.".to_string()
             };
             lines.push(Line::from(Span::styled(text, theme::dim())));
         } else {

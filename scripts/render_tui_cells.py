@@ -43,6 +43,18 @@ def render(src, dst):
 H = "─━═"; V = "│┃║"
 def box(dr, s, px, py, cw, ch, fg):
     cx, cy = px + cw//2, py + ch//2
+    # Braille (spinners, maps): draw the 2x4 dot grid; most monospace fonts lack it.
+    if len(s) == 1 and 0x2800 <= ord(s) <= 0x28FF:
+        bits = ord(s) - 0x2800
+        dots = [(0, 0, 0x01), (0, 1, 0x02), (0, 2, 0x04), (1, 0, 0x08),
+                (1, 1, 0x10), (1, 2, 0x20), (0, 3, 0x40), (1, 3, 0x80)]
+        r = max(1, cw // 6)
+        for col, row, bit in dots:
+            if bits & bit:
+                dx = px + cw * (1 + 2 * col) // 4
+                dy = py + ch * (1 + 2 * row) // 8
+                dr.ellipse([dx - r, dy - r, dx + r, dy + r], fill=fg)
+        return True
     # Terminal block/diagonal glyphs may be absent from platform fonts.
     if s in "█▉▊▋▌▍▎▏":
         fraction = (8 - "█▉▊▋▌▍▎▏".index(s)) / 8

@@ -165,6 +165,12 @@ pub const POOL_INDEX: &str = "index";
 pub const POOL_LLM: &str = "llm";
 pub const POOL_NETWORK: &str = "network";
 pub const POOL_ATLAS: &str = "atlas";
+/// Dedicated pool for dependent Intel brief preparation stages; never
+/// claimed by generic/legacy drainers.
+pub const POOL_INTEL_BRIEF: &str = "intel_brief";
+/// Worker crash/lease-expiry recoveries allowed per task before it fails as an
+/// infrastructure fault. Independent of provider attempts.
+pub const MAX_WORKER_RECOVERIES: i64 = 3;
 
 /// Summarization operation names (one per summary mode, plus the generic flush).
 pub const SUMMARY_OPERATIONS: &[&str] = &[
@@ -201,6 +207,8 @@ pub fn pool_for_operation(operation: &str) -> &'static str {
         POOL_NETWORK
     } else if operation.starts_with("atlas_") {
         POOL_ATLAS
+    } else if operation.starts_with("intel_brief_") {
+        POOL_INTEL_BRIEF
     } else {
         POOL_LLM
     }
@@ -540,7 +548,19 @@ pub fn migrate_additive(conn: &Connection) -> Result<()> {
             ("tool", "TEXT NOT NULL DEFAULT ''"),
             ("blocked_reason", "TEXT NOT NULL DEFAULT ''"),
             ("correlation_id", "TEXT NOT NULL DEFAULT ''"),
+            // Worker crash/lease recoveries, separate from provider attempts.
+            ("recoveries", "INTEGER NOT NULL DEFAULT 0"),
         ],
+    )?;
+    // Dependent task chains (claim SQL requires every predecessor completed).
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS argos_task_dependencies (
+            task_id TEXT NOT NULL,
+            depends_on TEXT NOT NULL,
+            PRIMARY KEY (task_id, depends_on)
+        );
+        CREATE INDEX IF NOT EXISTS argos_task_dependencies_on
+            ON argos_task_dependencies(depends_on);",
     )?;
     add_missing_columns(
         conn,
@@ -831,7 +851,8 @@ pub fn claim_next_in(
     now: &str,
 ) -> Result<Option<ClaimedTask>> {
     let pool_filter = if pools.is_empty() {
-        String::new()
+        // Legacy "any pool" claims never take dedicated dependent stages.
+        format!("AND pool<>'{POOL_INTEL_BRIEF}'")
     } else {
         let list = pools
             .iter()
@@ -843,7 +864,7 @@ pub fn claim_next_in(
     let selector = format!(
         "(SELECT id FROM argos_tasks
             WHERE state IN ('queued','retry_scheduled')
-              AND (next_eligible_at='' OR next_eligible_at<=?3)
+              AND (next_eligible_at='' OR julianday(next_eligible_at)<=julianday(?3))
               {pool_filter}
             ORDER BY priority ASC, created_at ASC LIMIT 1)"
     );
@@ -882,6 +903,12 @@ fn claim_with(
            AND state IN ('queued','retry_scheduled')
            AND EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=argos_tasks.job_id AND julianday(j.created_at)>=julianday(?3)-3 AND j.cancel_requested=0)
            AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=argos_tasks.job_id)
+           -- Dependencies: every predecessor must have committed.
+           AND NOT EXISTS(SELECT 1 FROM argos_task_dependencies d JOIN argos_tasks p ON p.id=d.depends_on
+                          WHERE d.task_id=argos_tasks.id AND p.state<>'completed')
+           -- At most one active stage per dependent chain (job generation).
+           AND NOT (pool='{POOL_INTEL_BRIEF}' AND EXISTS(SELECT 1 FROM argos_tasks o
+                    WHERE o.job_id=argos_tasks.job_id AND o.id<>argos_tasks.id AND o.state='running'))
          RETURNING id, job_id, operation, lease_epoch, attempts, max_attempts,
                    input_ref, input_hash, source_revision, created_at, retry_since, queue_ms"
     );
@@ -1237,6 +1264,7 @@ pub fn renew_lease(
     let n = conn.execute(
         "UPDATE argos_tasks SET lease_until=?1, updated_at=?2, heartbeat_at=?2
          WHERE id=?3 AND lease_owner=?4 AND lease_epoch=?5 AND state='running'
+           AND lease_until<>'' AND julianday(lease_until)>julianday(?2)
            AND EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=argos_tasks.job_id AND julianday(j.created_at)>=julianday(?2)-3 AND j.cancel_requested=0)
            AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=argos_tasks.job_id)",
         params![lease_until, now, id, owner, epoch],
@@ -1244,14 +1272,31 @@ pub fn renew_lease(
     Ok(n > 0)
 }
 
-/// Recover running tasks (general and index) whose lease expired: the open
-/// attempt is closed as `lease_expired`; the task requeues while attempts remain
-/// and fails otherwise, so nothing stays "running" forever after a crash.
+/// Recover running tasks (general and index) whose lease expired.
+///
+/// Selection and mutation run in one immediate transaction, and every update
+/// is a compare-and-swap on (owner, epoch, running, still expired), so a lease
+/// renewed between selection and update is never reaped. Recovery advances the
+/// epoch (fencing the stale worker), closes its attempt as `lease_expired`,
+/// refunds the provider attempt and counts a worker recovery instead; a task
+/// fails only after [`MAX_WORKER_RECOVERIES`] infrastructure recoveries.
 pub fn interrupt_expired_leases(conn: &Connection, now: &str) -> Result<usize> {
-    let expired: Vec<(String, String, i64, i64, i64, String)> = {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let recovered = interrupt_expired_leases_in(&tx, now, &mut || {})?;
+    tx.commit()?;
+    Ok(recovered)
+}
+
+/// Reaper body; `between` runs after selection (test hook for interleavings).
+pub(crate) fn interrupt_expired_leases_in(
+    conn: &Connection,
+    now: &str,
+    between: &mut dyn FnMut(),
+) -> Result<usize> {
+    let expired: Vec<(String, String, i64, String, i64)> = {
         let mut stmt = conn.prepare(
-            "SELECT id, job_id, lease_epoch, attempts, max_attempts, operation FROM argos_tasks
-             WHERE state='running' AND lease_until<>'' AND lease_until<?1",
+            "SELECT id, job_id, lease_epoch, lease_owner, recoveries FROM argos_tasks
+             WHERE state='running' AND lease_until<>'' AND julianday(lease_until)<=julianday(?1)",
         )?;
         let rows = stmt
             .query_map([now], |row| {
@@ -1261,24 +1306,29 @@ pub fn interrupt_expired_leases(conn: &Connection, now: &str) -> Result<usize> {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
-                    row.get(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
+    between();
     let mut recovered = 0usize;
-    for (id, job_id, epoch, attempts, max_attempts, operation) in expired {
-        let cap = operation_kind(&operation)
-            .attempt_cap()
-            .min(max_attempts.max(1) as u32) as i64;
-        let next_state = if attempts >= cap { "failed" } else { "queued" };
+    for (id, job_id, epoch, owner, recoveries) in expired {
+        let next_state = if recoveries + 1 >= MAX_WORKER_RECOVERIES {
+            "failed"
+        } else {
+            "queued"
+        };
         let n = conn.execute(
             "UPDATE argos_tasks SET state=?1, lease_owner='', lease_until='', updated_at=?2,
-                error_category='lease_expired', error_message='worker lease expired before acknowledgement',
+                lease_epoch=lease_epoch+1, recoveries=recoveries+1,
+                attempts=MAX(attempts-1,0),
+                error_category=CASE WHEN ?1='failed' THEN 'worker_recovery_exhausted' ELSE 'lease_expired' END,
+                error_message=CASE WHEN ?1='failed' THEN 'worker recovery limit reached after repeated lease expiry' ELSE 'worker lease expired before acknowledgement; recovered' END,
                 finished_at=CASE WHEN ?1='failed' THEN ?2 ELSE finished_at END
-             WHERE id=?3 AND lease_epoch=?4 AND state='running'",
-            params![next_state, now, id, epoch],
+             WHERE id=?3 AND lease_epoch=?4 AND lease_owner=?5 AND state='running'
+               AND lease_until<>'' AND julianday(lease_until)<=julianday(?2)",
+            params![next_state, now, id, epoch, owner],
         )?;
         if n == 0 {
             continue;
@@ -2296,7 +2346,8 @@ mod tests {
             let (claimed, _work) = claim_index_work(&conn, "w", 30, &ts)
                 .unwrap()
                 .expect("claimable");
-            assert_eq!(claimed.attempt, round + 1);
+            // Lease expiry is a worker recovery, not a spent attempt.
+            assert_eq!(claimed.attempt, 1, "round {round}");
             t += chrono::Duration::seconds(120);
             assert_eq!(interrupt_expired_leases(&conn, &t.to_rfc3339()).unwrap(), 1);
         }

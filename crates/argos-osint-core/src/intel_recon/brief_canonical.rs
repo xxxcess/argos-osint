@@ -1,0 +1,394 @@
+//! Canonical Brain/index publication from a completed intel brief.
+//!
+//! The brief lane reuses the shared canonical publisher
+//! ([`insight_persist::publish_snapshot_on`] + [`insight_persist::write_derivations`]);
+//! only its fence (the fenced Stage-4 commit) and its readiness differ from the
+//! insight-refresh lane. Only items the Claim assessor judged faithful to their
+//! own cited passages are published; citations alone never make an item
+//! faithful. A completed Recon report keeps precedence. Canonical failure never
+//! fails a completed stage: it rolls back to a savepoint and is reported as the
+//! separate Index footer state.
+
+use anyhow::Result;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::investigation::insight_persist;
+use crate::investigation::insights::{
+    Assessment, EvidenceLocation, EvidenceRef, Inference, PipelineInput, PipelineOutput, Readiness,
+    RetainedEvidence, SourceClaim, StageCoverage,
+};
+use crate::store::{AtlasArticleRow, Store};
+
+/// Prepared canonical inputs for one brief, built before the Stage-4 commit.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CanonicalBrief {
+    pub input: PipelineInput,
+    pub output: PipelineOutput,
+}
+
+/// Footer state of canonical publication, stored per article.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexState {
+    /// `indexed` | `not_indexed` | `report_precedence` | `failed`
+    pub state: String,
+    pub snapshot_id: String,
+    pub reason: String,
+    pub job_id: String,
+}
+
+pub fn state_key(article_id: &str) -> String {
+    format!("intel-brief-canonical:{article_id}")
+}
+
+pub fn index_state(conn: &Connection, article_id: &str) -> Result<Option<IndexState>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM app_state WHERE key=?1",
+            [state_key(article_id)],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|json| serde_json::from_str(&json).ok()))
+}
+
+fn faithful() -> Assessment {
+    Assessment {
+        fidelity: "faithful".into(),
+        relation: "supports".into(),
+        threshold_passed: true,
+        rationale: "Claim assessor fidelity batch over the cited passages".into(),
+        gaps: vec![],
+    }
+}
+
+fn with_range(base: &EvidenceRef, start: usize, end: usize) -> EvidenceRef {
+    let mut r = base.clone();
+    r.location = EvidenceLocation::Range(crate::nlp::Span {
+        start_byte: start,
+        end_byte: end,
+    });
+    r
+}
+
+fn span_refs(
+    item: &Value,
+    key: &str,
+    base: &EvidenceRef,
+    offset_for: impl Fn(&str) -> usize,
+) -> Vec<EvidenceRef> {
+    item[key]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            let id = s["id"].as_str()?;
+            let off = offset_for(id);
+            Some(with_range(
+                base,
+                off + s["start_byte"].as_u64()? as usize,
+                off + s["end_byte"].as_u64()? as usize,
+            ))
+        })
+        .collect()
+}
+
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.as_str().map(str::to_string))
+        .filter(|s| !s.trim().is_empty())
+        .collect()
+}
+
+/// Brief readiness: a complete retained acquisition story, Synthesis over every
+/// body window, and every published item faithful with resolvable citations.
+/// The Claim assessor is scoped to the cited passages (spec §4), so story-range
+/// coverage is required of Synthesis, not of the assessor.
+pub fn readiness(
+    evidence: &[RetainedEvidence],
+    coverage: &[StageCoverage],
+    output: &PipelineOutput,
+) -> Readiness {
+    let mut out = Readiness::default();
+    let body: Vec<_> = evidence
+        .iter()
+        .filter(|e| e.reference.source_id.starts_with("body:"))
+        .collect();
+    if !body.iter().any(|e| e.complete_story && !e.known_truncation) {
+        out.gaps
+            .push("complete retained acquisition story is unavailable".into());
+    }
+    if !body.iter().all(|e| {
+        coverage
+            .iter()
+            .any(|c| c.stage == "synthesis" && c.covers(e))
+    }) {
+        out.gaps
+            .push("Synthesis has not analyzed every retained story range".into());
+    }
+    let resolvable = |refs: &[EvidenceRef]| {
+        !refs.is_empty()
+            && refs
+                .iter()
+                .all(|r| evidence.iter().any(|e| e.validate_ref(r)))
+    };
+    if !output
+        .claims
+        .iter()
+        .all(|c| c.assessment.faithful() && resolvable(&c.evidence_refs))
+        || !output
+            .inferences
+            .iter()
+            .all(|i| i.assessment.faithful() && resolvable(&i.evidence_refs))
+    {
+        out.gaps
+            .push("a published item lacks a faithful cited passage".into());
+    }
+    if output.claims.is_empty() && output.inferences.is_empty() {
+        out.gaps.push("no faithful claims or inferences".into());
+    }
+    out.input_eligible = out.gaps.is_empty();
+    out.publication_eligible = out.input_eligible;
+    out
+}
+
+/// Build canonical inputs from the retained evidence and the committed stage
+/// outputs. Returns Err(reason) as `Ok(Err)` when the brief cannot map onto
+/// retained evidence (the Index footer then names it).
+pub fn prepare(
+    store: &Store,
+    article: &AtlasArticleRow,
+    body: &Value,
+    claims: &Value,
+    inferences: &Value,
+) -> Result<std::result::Result<CanonicalBrief, String>> {
+    let generation = insight_persist::desired_generation(&store.conn, "article", &article.id)?;
+    let mut input =
+        insight_persist::article_input(store, article, generation, "intel brief", false)?;
+    input.surface = "article".into();
+    input.required_tasks_complete = true;
+    let markdown = body["markdown"].as_str().unwrap_or("");
+    let Some(body_ev) = input
+        .evidence
+        .iter()
+        .find(|e| e.reference.source_id.starts_with("body:"))
+        .cloned()
+    else {
+        return Ok(Err("retained article body unavailable".into()));
+    };
+    if body_ev.text != markdown {
+        return Ok(Err(
+            "displayed body differs from the retained clean artifact".into(),
+        ));
+    }
+    let meta_ev = input
+        .evidence
+        .iter()
+        .find(|e| e.reference.source_id.starts_with("article:"))
+        .cloned()
+        .expect("article_input always retains metadata");
+    let title_offset = article.title.len() + 1;
+    let meta_offset = |id: &str| if id.starts_with('d') { title_offset } else { 0 };
+    let mut output = PipelineOutput::default();
+    for c in claims["claims"].as_array().into_iter().flatten() {
+        if c["fidelity"] != "faithful" {
+            continue;
+        }
+        output.claims.push(SourceClaim {
+            id: c["id"].as_str().unwrap_or("").into(),
+            subject_ref: c["subject_id"].as_str().unwrap_or("").into(),
+            predicate: c["predicate"].as_str().unwrap_or("").into(),
+            object: c["object"].as_str().unwrap_or("").into(),
+            text: c["text"].as_str().unwrap_or("").into(),
+            polarity: c["polarity"].as_str().unwrap_or("positive").into(),
+            modality: c["modality"].as_str().unwrap_or("asserted").into(),
+            attributed_to: c["attributed_to"].as_str().unwrap_or("").into(),
+            temporal_scope: c["time"].as_str().unwrap_or("").into(),
+            evidence_refs: span_refs(c, "evidence", &meta_ev.reference, meta_offset),
+            extraction_scope: format!("{}:metadata", super::brief_pipeline::CONTRACT),
+            assessment: faithful(),
+            support_receipts: vec![],
+        });
+    }
+    for i in inferences["inferences"].as_array().into_iter().flatten() {
+        if i["fidelity"] != "faithful" {
+            continue;
+        }
+        output.inferences.push(Inference {
+            id: i["id"].as_str().unwrap_or("").into(),
+            text: i["text"].as_str().unwrap_or("").into(),
+            entity_refs: vec![],
+            premise_claim_ids: strings(&i["premise_claim_ids"]),
+            evidence_refs: span_refs(i, "evidence", &body_ev.reference, |_| 0),
+            rationale: i["why"].as_str().unwrap_or("").into(),
+            limitations: strings(&i["limitations"]),
+            assessment: faithful(),
+            snapshot_key: String::new(),
+        });
+    }
+    output.withheld_count = claims["withheld"].as_u64().unwrap_or(0) as usize
+        + inferences["withheld"].as_u64().unwrap_or(0) as usize;
+    let full = |stage: &str, e: &RetainedEvidence| StageCoverage {
+        stage: stage.into(),
+        source_id: e.reference.source_id.clone(),
+        artifact_hash: e.reference.artifact_hash.clone(),
+        ranges: vec![crate::nlp::Span {
+            start_byte: 0,
+            end_byte: e.text.len(),
+        }],
+        native_complete: true,
+    };
+    // Stage 3 sends every ordered body window; Stage 2 reads all metadata.
+    input.snapshot.coverage_by_stage = vec![
+        full("synthesis", &body_ev),
+        full("claim_assessor", &meta_ev),
+    ];
+    output.readiness = readiness(&input.evidence, &input.snapshot.coverage_by_stage, &output);
+    input.snapshot.assessed_claim_refs = output.claims.iter().map(|c| c.id.clone()).collect();
+    Ok(Ok(CanonicalBrief { input, output }))
+}
+
+fn record(conn: &Connection, article_id: &str, state: &IndexState) -> Result<()> {
+    conn.execute(
+        "INSERT INTO app_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![state_key(article_id), serde_json::to_string(state)?],
+    )?;
+    Ok(())
+}
+
+/// Inside the fenced Stage-4 commit transaction. Never returns an error for a
+/// canonical failure: the savepoint is rolled back and the footer records it.
+pub fn publish_on(
+    tx: &Connection,
+    article_id: &str,
+    job_id: &str,
+    prepared: Option<&std::result::Result<CanonicalBrief, String>>,
+    snapshot_hash: &str,
+    now: &str,
+) -> Result<IndexState> {
+    let mut state = IndexState {
+        job_id: job_id.into(),
+        ..Default::default()
+    };
+    let report: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM intel_report_results WHERE article_id=?1)",
+        [article_id],
+        |r| r.get(0),
+    )?;
+    match prepared {
+        _ if report => {
+            state.state = "report_precedence".into();
+            state.reason = "completed Recon report keeps precedence".into();
+        }
+        None => {
+            state.state = "not_indexed".into();
+            state.reason = "canonical inputs not prepared".into();
+        }
+        Some(Err(reason)) => {
+            state.state = "not_indexed".into();
+            state.reason = reason.clone();
+        }
+        Some(Ok(brief)) if !brief.output.readiness.publication_eligible => {
+            state.state = "not_indexed".into();
+            state.reason = brief.output.readiness.gaps.join("; ");
+        }
+        Some(Ok(brief)) => {
+            tx.execute_batch("SAVEPOINT brief_canonical")?;
+            let attempt = (|| -> Result<Option<String>> {
+                let mut input = brief.input.clone();
+                let mut output = brief.output.clone();
+                input.snapshot.generation =
+                    insight_persist::advance_generation(tx, "article", article_id, now)?;
+                input.snapshot.key = crate::nlp::cache::key(&serde_json::json!([
+                    super::brief_pipeline::CONTRACT,
+                    input.snapshot.source_refs,
+                    snapshot_hash
+                ]));
+                for inference in &mut output.inferences {
+                    inference.snapshot_key = input.snapshot.key.clone();
+                }
+                let key = input.snapshot.key.clone();
+                insight_persist::publish_snapshot_on(
+                    tx,
+                    &input.snapshot,
+                    &key,
+                    "active",
+                    now,
+                    |tx, snapshot_id| {
+                        insight_persist::write_derivations(tx, snapshot_id, &input, &output, now)
+                    },
+                )
+            })();
+            match attempt {
+                Ok(Some(id)) => {
+                    tx.execute_batch("RELEASE brief_canonical")?;
+                    state.state = "indexed".into();
+                    state.snapshot_id = id;
+                }
+                Ok(None) => {
+                    tx.execute_batch("ROLLBACK TO brief_canonical; RELEASE brief_canonical")?;
+                    state.state = "not_indexed".into();
+                    state.reason = "stale canonical generation".into();
+                }
+                Err(error) => {
+                    tx.execute_batch("ROLLBACK TO brief_canonical; RELEASE brief_canonical")?;
+                    state.state = "failed".into();
+                    state.reason = error.to_string();
+                }
+            }
+        }
+    }
+    record(tx, article_id, &state)?;
+    Ok(state)
+}
+
+/// Publication / Index footer text for one chain. The index part is separate
+/// from the stage rows: an index failure never fails a completed stage.
+pub fn footer(
+    conn: &Connection,
+    article_id: &str,
+    job_id: &str,
+    any_failed: bool,
+) -> Result<String> {
+    let published: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM intel_brief_publications WHERE article_id=?1 AND job_id=?2)",
+        params![article_id, job_id],
+        |r| r.get(0),
+    )?;
+    if !published {
+        return Ok(if any_failed {
+            "Not published · previous snapshot kept".into()
+        } else {
+            "Pending · after Links".into()
+        });
+    }
+    let state = index_state(conn, article_id)?.filter(|s| s.job_id == job_id);
+    let index = match state {
+        None => "Index pending".to_string(),
+        Some(s) => match s.state.as_str() {
+            "indexed" => {
+                let pending: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM argos_index_changes WHERE state<>'completed' AND record_id IN (SELECT memory_id FROM insight_derivations WHERE snapshot_id=?1))",
+                    [&s.snapshot_id],
+                    |r| r.get(0),
+                )?;
+                if pending {
+                    "Index pending".into()
+                } else {
+                    "Indexed".into()
+                }
+            }
+            "report_precedence" => "Index · Recon report takes precedence".into(),
+            "failed" => format!("Index failed · {}", s.reason),
+            _ => format!("Not indexed · {}", s.reason),
+        },
+    };
+    Ok(format!("Published · {index}"))
+}
+
+#[cfg(test)]
+#[path = "brief_canonical_tests.rs"]
+mod tests;

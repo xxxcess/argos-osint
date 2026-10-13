@@ -10,7 +10,6 @@ use crate::osint::{self, ProviderKeys};
 use crate::secrets::ProviderSecret;
 use crate::store::{AtlasArticleRow, Store};
 
-use super::synthesize::refine_retrieved_article_body_with_runtime;
 use super::validate::{validate_article_body, BodyQuality};
 
 /// Default cooldown after a terminal retrieval failure.
@@ -468,7 +467,7 @@ async fn commit_refined_body(
         on_event(BodyFetchEvent::Progress {
             article_id: article_id.into(),
             body_id: body_id.into(),
-            message: "Extracting brief-relevant article body…".into(),
+            message: "Preparing clean article body…".into(),
             generation,
         });
     } else {
@@ -508,28 +507,51 @@ async fn commit_refined_body(
             .ok()
             .flatten()
     };
+    let mut annotation = cached.filter(|a| a.status == crate::nlp::Status::Complete);
     if runtime
         .map(|r| r.settings.nlp.mode)
         .unwrap_or_else(crate::nlp::configured_mode)
         != crate::nlp::Mode::Off
-        && cached.is_none()
+        && annotation.is_none()
     {
-        let annotation = crate::nlp::Service::shared()
+        let fresh = crate::nlp::Service::shared()
             .annotate(source.clone(), context.clone(), cancel.clone())
             .await;
-        if annotation.status == crate::nlp::Status::Complete {
+        if fresh.status == crate::nlp::Status::Complete {
             let store = Store::open(db_path)?;
-            crate::nlp::cache::put(&store.conn, &source, &context, &annotation)?;
+            crate::nlp::cache::put(&store.conn, &source, &context, &fresh)?;
+            annotation = Some(fresh);
         }
     }
-    let refined = refine_retrieved_article_body_with_runtime(
-        synthesis,
-        classifier,
+    // Stage 1: local baseline + NLP keep-anchors + conditional Classifier
+    // block decisions, applied locally. No model rewrite: display and
+    // extraction share this. Without NLP, title/description tokens remain.
+    let anchors = super::clean_body::nlp_anchors(
+        &baseline.cleaned_markdown,
+        annotation
+            .as_ref()
+            .map_or(&[][..], |a| a.mentions.as_slice()),
+        title,
+        brief,
+    );
+    let mut decider =
+        runtime
+            .filter(|_| classifier.is_some())
+            .map(|rt| super::clean_body::RuntimeDecider {
+                runtime: rt,
+                title: title.into(),
+                brief: brief.into(),
+                url: url.into(),
+            });
+    let mut refined = super::clean_body::clean_article(
+        scraped_markdown,
         title,
         brief,
         url,
-        scraped_markdown,
-        runtime,
+        &anchors,
+        decider
+            .as_mut()
+            .map(|d| d as &mut dyn super::clean_body::BlockDecider),
     )
     .await;
     let store = Store::open(db_path)?;
@@ -549,7 +571,7 @@ async fn commit_refined_body(
         body_id,
         &refined.markdown,
         &refined.content_hash,
-        refined.quality.as_str(),
+        &refined.quality,
         &refined.rationale,
         resolved_url,
         tool,
@@ -565,19 +587,33 @@ async fn commit_refined_body(
         article_id,
         &derived,
         Some(scraped_markdown),
-        "body-refinement-v1",
+        super::clean_body::TRANSFORM,
+    )?;
+    refined.acquisition_complete = store
+        .app_state_get(&format!("article-acquisition:{attempt_id}"))?
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .is_some_and(|c| {
+            c["complete_story"] == true
+                && c["known_truncation"] == false
+                && c["artifact_hash"].as_str()
+                    == Some(crate::nlp::cache::hash(scraped_markdown).as_str())
+        });
+    store.app_state_set(
+        &format!("intel-clean-body:{article_id}:{generation}"),
+        &serde_json::to_string(&refined)?,
     )?;
     // Emit Ready first so the cleaned body can paint while insights re-extract.
     on_event(BodyFetchEvent::Ready {
         article_id: article_id.into(),
         body_id: body_id.into(),
-        quality: refined.quality.as_str().into(),
+        quality: refined.quality.clone(),
         generation,
     });
     let settings = runtime
         .map(|r| r.settings.clone())
         .unwrap_or_else(|| crate::provider::SettingsFile::load().unwrap_or_default());
-    if let Some(body) = store.article_body_by_id(body_id)? {
+    let brief_owned = runtime.is_some_and(|r| r.job_id.starts_with("intel-brief:"));
+    if let Some(body) = store.article_body_by_id(body_id)?.filter(|_| !brief_owned) {
         if let Some(article) = store.atlas_article(&body.run_id, article_id)? {
             if crate::investigation::insight_persist::schedule_article_refresh(
                 &store, &article, &settings, false,

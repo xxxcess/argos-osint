@@ -579,10 +579,17 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
             detail.task_total
         ));
         for task in &detail.tasks {
-            let mut line = format!(
-                "  {} {} · {}/{} attempts",
-                task.state, task.operation, task.attempts, task.max_attempts
-            );
+            let mut line = if task.stage_label.is_empty() {
+                format!(
+                    "  {} {} · {}/{} attempts",
+                    task.state, task.operation, task.attempts, task.max_attempts
+                )
+            } else {
+                format!(
+                    "  {} · {}/{} attempts",
+                    task.stage_label, task.attempts, task.max_attempts
+                )
+            };
             if task.state == "retry_scheduled" && !task.next_eligible_at.is_empty() {
                 line.push_str(&format!(
                     " · retry at {}",

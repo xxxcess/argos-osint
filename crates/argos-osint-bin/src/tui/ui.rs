@@ -7373,7 +7373,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 left,
                 layout.claims,
                 " claims ",
-                "Extracting claims",
+                &layout.phases[0],
                 detail.as_deref(),
             );
         } else {
@@ -7393,7 +7393,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 left,
                 layout.inferences,
                 " inferences ",
-                "Extracting inferences",
+                &layout.phases[1],
                 detail.as_deref(),
             );
         } else {
@@ -7417,7 +7417,9 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
         );
         // 4. links
         if layout.links_loading {
-            let phase = if intel_insights_loading(app) || intel_artifact_pending(app, "Links") {
+            let phase = if !layout.phases[2].is_empty() {
+                layout.phases[2].as_str()
+            } else if intel_insights_loading(app) || intel_artifact_pending(app, "Links") {
                 "Extracting links"
             } else {
                 "Explaining links"
@@ -8087,6 +8089,8 @@ struct IntelExtractedLayout {
     inferences_loading: bool,
     actor_count: usize,
     links_loading: bool,
+    /// Loading labels (stage rows while a brief stage runs).
+    phases: [String; 3],
     stack_scroll_max: u16,
 }
 
@@ -8160,6 +8164,44 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         );
     }
 
+    let mut claims_md = claims_md;
+    let mut inferences_md = inferences_md;
+    let mut phases = [
+        "Extracting claims".to_string(),
+        "Extracting inferences".to_string(),
+        String::new(),
+    ];
+    let brief = !app.intel_brief_stages.is_empty();
+    let mut brief_loading = [false; 3];
+    if brief {
+        for (n, (op, md)) in [
+            ("intel_brief_claims", &mut claims_md),
+            ("intel_brief_inferences", &mut inferences_md),
+            ("intel_brief_links", &mut links_md),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let Some(stage) = app.intel_brief_stages.iter().find(|s| s.operation == op) else {
+                continue;
+            };
+            if stage.state == "completed" {
+                *md = brief_stage_markdown(app, op);
+            } else if stage.active {
+                brief_loading[n] = true;
+                phases[n] = stage.row.clone();
+            } else {
+                // A section shows its own stage state; history is Previous.
+                let previous =
+                    !md.trim().is_empty() && !md.contains("_none_") && !md.starts_with('_');
+                *md = if previous {
+                    format!("_{}_\n\n_Previous_\n\n{md}", stage.row)
+                } else {
+                    format!("_{}_", stage.row)
+                };
+            }
+        }
+    }
     let claims_lines = parse_extracted_md(&claims_md, inner_w);
     let inferences_lines = parse_extracted_md(&inferences_md, inner_w);
     let actors_lines = parse_extracted_md(&actors_md, inner_w);
@@ -8170,13 +8212,18 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         .collect::<Vec<_>>();
 
     let insights_loading = intel_insights_loading(app);
-    let claims_loading =
-        (insights_loading || intel_artifact_pending(app, "Claims")) && buckets.facts.is_empty();
-    let inferences_loading = (insights_loading || intel_artifact_pending(app, "Insights"))
-        && buckets.inferences.is_empty();
-    let links_loading = insights_loading
-        || (intel_artifact_pending(app, "Links") && buckets.links.is_empty())
-        || app.intel_links_reviewing.contains(&article.id);
+    let (claims_loading, inferences_loading, links_loading) = if brief {
+        (brief_loading[0], brief_loading[1], brief_loading[2])
+    } else {
+        (
+            (insights_loading || intel_artifact_pending(app, "Claims")) && buckets.facts.is_empty(),
+            (insights_loading || intel_artifact_pending(app, "Insights"))
+                && buckets.inferences.is_empty(),
+            insights_loading
+                || (intel_artifact_pending(app, "Links") && buckets.links.is_empty())
+                || app.intel_links_reviewing.contains(&article.id),
+        )
+    };
 
     let section_h = |lines_count: usize, loading: bool| -> u16 {
         let natural = (lines_count as u16).saturating_add(2);
@@ -8234,6 +8281,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         inferences_loading,
         actor_count: buckets.actors.len(),
         links_loading,
+        phases,
         stack_scroll_max,
     })
 }
@@ -8432,14 +8480,47 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
         return lines;
     };
 
-    let body_running = intel_body_loading(app);
-    let insights_running = intel_insights_loading(app);
-    let message = app.intel_body_message.trim();
-
     lines.push(Line::from(Span::styled(
         "BACKGROUND",
         theme::accent().add_modifier(Modifier::BOLD),
     )));
+
+    if !app.intel_brief_stages.is_empty() {
+        brief_stage_lines(app, &mut lines);
+    } else {
+        legacy_brief_task_lines(app, article, &mut lines);
+    }
+
+    // Classifier-recommended recon mode.
+    let mode_pending = app.intel_mode_classifying && app.intel_recon_recommended_for == article.id;
+    let mode_label = if mode_pending {
+        format!("{} Classifying recon mode", super::anim::spinner())
+    } else {
+        format!("Mode · {}", app.intel_recon_recommended.title())
+    };
+    lines.push(Line::from(Span::styled(
+        mode_label,
+        if mode_pending {
+            theme::accent().add_modifier(Modifier::BOLD)
+        } else {
+            theme::text().add_modifier(Modifier::BOLD)
+        },
+    )));
+
+    lines
+}
+
+/// Pre-chain rows (legacy refresh/body tracking) for articles without a
+/// brief preparation chain.
+fn legacy_brief_task_lines(
+    app: &App,
+    article: &argos_osint_core::store::AtlasArticleRow,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let _ = article;
+    let body_running = intel_body_loading(app);
+    let insights_running = intel_insights_loading(app);
+    let message = app.intel_body_message.trim();
 
     // Full article retrieval / refine.
     let (body_title, body_detail) = if body_running {
@@ -8585,22 +8666,154 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
     }
 
     // Classifier-recommended recon mode.
-    let mode_pending = app.intel_mode_classifying && app.intel_recon_recommended_for == article.id;
-    let mode_label = if mode_pending {
-        format!("{} Classifying recon mode", super::anim::spinner())
-    } else {
-        format!("Mode · {}", app.intel_recon_recommended.title())
-    };
-    lines.push(Line::from(Span::styled(
-        mode_label,
-        if mode_pending {
-            theme::accent().add_modifier(Modifier::BOLD)
-        } else {
-            theme::text().add_modifier(Modifier::BOLD)
-        },
-    )));
+}
 
-    lines
+/// Shared §6 stage rows: one immutable view for this panel, the section
+/// headers, global Jobs and Logs. Only the active row spins.
+fn brief_stage_lines(app: &App, lines: &mut Vec<Line<'static>>) {
+    let stages = &app.intel_brief_stages;
+    let current = stages
+        .iter()
+        .position(|s| s.state != "completed")
+        .map(|i| format!("Step {}/{} · {}", i + 1, stages.len(), stages[i].label))
+        .unwrap_or_else(|| format!("Step {0}/{0} · Complete", stages.len()));
+    lines.push(Line::from(Span::styled(
+        current,
+        theme::text().add_modifier(Modifier::BOLD),
+    )));
+    for stage in stages {
+        let spin = if stage.active {
+            format!("{} ", super::anim::spinner())
+        } else {
+            String::new()
+        };
+        let style = if stage.active {
+            theme::accent()
+        } else if stage.state == "failed" {
+            theme::warn()
+        } else {
+            theme::text()
+        };
+        let (head, note) = match stage.row.split_once(" · ") {
+            Some((head, rest)) if head == "Queued" || head == "Failed" => {
+                (head.to_string(), Some(rest.to_string()))
+            }
+            _ => (stage.row.clone(), None),
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{spin}{} · {head}", stage.label),
+            style.add_modifier(Modifier::BOLD),
+        )));
+        if let Some(note) = note {
+            lines.push(Line::from(Span::styled(format!("  {note}"), theme::dim())));
+        }
+    }
+    if !app.intel_brief_publication.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("Publication / Index · {}", app.intel_brief_publication),
+            theme::dim(),
+        )));
+    }
+}
+
+/// Markdown for a completed brief stage, from its committed output.
+fn brief_stage_markdown(app: &App, op: &str) -> String {
+    let Some(out) = app.intel_brief_outputs.get(op) else {
+        return "_Completed_".into();
+    };
+    let str_of = |v: &serde_json::Value, k: &str| v[k].as_str().unwrap_or("").trim().to_string();
+    let empty = || format!("_Completed · {}_", str_of(out, "empty_reason"));
+    let withheld = out["withheld"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .map(|n| format!("\n\n_{n} withheld · not supported by cited text_"))
+        .unwrap_or_default();
+    match op {
+        "intel_brief_claims" => {
+            let items = out["claims"].as_array().cloned().unwrap_or_default();
+            if items.is_empty() {
+                return empty() + &withheld;
+            }
+            items
+                .iter()
+                .map(|c| {
+                    let who = str_of(c, "attributed_to");
+                    let modality = str_of(c, "modality");
+                    let head = match (who.is_empty(), modality.is_empty()) {
+                        (false, false) => format!("**{who}** · {modality}: "),
+                        (false, true) => format!("**{who}**: "),
+                        (true, false) => format!("_{modality}_: "),
+                        _ => String::new(),
+                    };
+                    format!("- {head}{}", str_of(c, "text"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + &withheld
+        }
+        "intel_brief_inferences" => {
+            let items = out["inferences"].as_array().cloned().unwrap_or_default();
+            if items.is_empty() {
+                return empty() + &withheld;
+            }
+            items
+                .iter()
+                .map(|i| {
+                    let limits: Vec<String> = i["limitations"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|l| l.as_str().map(str::to_string))
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    let mut text = format!(
+                        "- **{}** · {}\n  Why: {}",
+                        str_of(i, "support"),
+                        str_of(i, "text"),
+                        str_of(i, "why")
+                    );
+                    if !limits.is_empty() {
+                        text.push_str(&format!("\n  Limits: {}", limits.join("; ")));
+                    }
+                    text
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + &withheld
+        }
+        _ => {
+            let leads = out["leads"].as_array().cloned().unwrap_or_default();
+            if leads.is_empty() {
+                return empty();
+            }
+            let inferences = app
+                .intel_brief_outputs
+                .get("intel_brief_inferences")
+                .and_then(|v| v["inferences"].as_array().cloned())
+                .unwrap_or_default();
+            let mut md = String::from(
+                "**Potential corroboration** · metadata leads, not confirmed support\n",
+            );
+            for lead in leads {
+                let id = str_of(&lead, "article_id");
+                let title = app.intel_brief_lead_titles.get(&id).cloned().unwrap_or(id);
+                let inference = inferences
+                    .iter()
+                    .find(|i| i["id"] == lead["inference_id"])
+                    .map(|i| str_of(i, "text"))
+                    .unwrap_or_default();
+                md.push_str(&format!(
+                    "\n- **{title}** ↔ {inference}\n  {}",
+                    str_of(&lead, "why")
+                ));
+                let verify = str_of(&lead, "verification_needed");
+                if !verify.is_empty() {
+                    md.push_str(&format!("\n  Verify: {verify}"));
+                }
+            }
+            md
+        }
+    }
 }
 
 fn intel_confidence_lines(app: &App, width: usize) -> Vec<Line<'static>> {
@@ -8932,6 +9145,24 @@ fn intel_brief_full_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     // Loading is drawn as a centered Atlas-style spinner overlay, not as text lines.
     if intel_body_loading(app) {
+        return lines;
+    }
+    // The sequential chain's validated clean body supersedes the legacy store row.
+    if let Some(md) = app
+        .intel_brief_outputs
+        .get("intel_brief_body")
+        .and_then(|v| v["markdown"].as_str())
+        .filter(|m| !m.trim().is_empty())
+    {
+        for para in md.lines() {
+            if para.trim().is_empty() {
+                lines.push(Line::from(""));
+                continue;
+            }
+            for chunk in wrap_text(para, width.max(1)) {
+                lines.push(Line::from(Span::styled(chunk, theme::text())));
+            }
+        }
         return lines;
     }
     match &app.intel_body {

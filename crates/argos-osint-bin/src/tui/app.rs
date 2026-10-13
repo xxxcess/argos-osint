@@ -831,7 +831,6 @@ enum WorkEvent {
     AtlasDone {
         outcome: std::result::Result<atlas::Stop, String>,
     },
-    IntelBody(intel_recon::BodyFetchEvent),
     IntelReport(intel_recon::IntelReportEvent),
     IntelReconMode {
         article_id: String,
@@ -1151,6 +1150,16 @@ pub struct App {
     /// Keyboard/mouse focus inside the Recon configuration popup.
     pub intel_recon_focus: IntelReconFocus,
     pub(crate) intel_body_running: HashSet<String>,
+    /// Active Intel brief preparation chain for the open article.
+    pub(crate) intel_brief_job: Option<String>,
+    /// Shared stage views (Full article → Claims → Inferences → Links).
+    pub(crate) intel_brief_stages: Vec<intel_recon::brief_pipeline::StageView>,
+    /// Committed stage outputs of the current chain (by operation).
+    pub(crate) intel_brief_outputs: HashMap<String, serde_json::Value>,
+    /// Candidate article titles for published leads (by article id).
+    pub(crate) intel_brief_lead_titles: HashMap<String, String>,
+    /// Publication footer ("Published · …" / "Pending · after Links").
+    pub(crate) intel_brief_publication: String,
     /// Article ids whose cleaned-body insight re-extract is still in flight.
     pub(crate) intel_insights_running: HashSet<String>,
     pub(crate) intel_links_reviewing: HashSet<String>,
@@ -1589,6 +1598,11 @@ impl App {
             intel_recon_enabled: HashMap::new(),
             intel_recon_focus: IntelReconFocus::Tab(0),
             intel_body_running: HashSet::new(),
+            intel_brief_job: None,
+            intel_brief_stages: Vec::new(),
+            intel_brief_outputs: HashMap::new(),
+            intel_brief_lead_titles: HashMap::new(),
+            intel_brief_publication: String::new(),
             intel_insights_running: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
             intel_insight_lifecycle: "legacy/unassessed".into(),
@@ -1703,6 +1717,9 @@ impl App {
         self.dashboards_at = Some(Instant::now());
         if first {
             let _ = self.store.prune_events(super::logs::RETENTION_HOURS);
+        }
+        if self.module == Some(ModuleId::Intel) && self.intel_page == IntelPage::Briefing {
+            self.refresh_intel_brief_stages();
         }
         match self.module {
             Some(ModuleId::Logs) => self.reload_logs(),
@@ -3790,17 +3807,21 @@ impl App {
         self.scrolls.intel_extracted = 0;
         self.refresh_intel_briefing();
         self.sync_intel_brief_task_ui();
-        let _ = argos_osint_core::investigation::insight_persist::schedule_article_refresh(
+        // One idempotent preparation chain owns retrieval, cleanup, Claims,
+        // Inferences and Links; the background brief runner executes it.
+        // Mode classification is lazy (Recon configuration).
+        match intel_recon::brief_stages::ensure_intel_brief_pipeline(
             &self.store,
             &article,
             &self.settings,
-            true,
-        );
-        self.ensure_article_body_fetch(false);
-        // Keep an in-flight classifier result; only re-queue when idle for this article.
-        if !(self.intel_mode_classifying && self.intel_recon_recommended_for == article.id) {
-            self.queue_intel_recon_mode_classify();
+        ) {
+            Ok(job) => self.intel_brief_job = Some(job),
+            Err(error) => {
+                self.intel_brief_job = None;
+                self.intel_body_message = format!("Brief preparation unavailable: {error}");
+            }
         }
+        self.refresh_intel_brief_stages();
         self.queue_intel_links_explanation();
         self.set_focus(Target::Button(ButtonId::IntelReports));
         self.status = format!("Brief · {}", article.title);
@@ -3845,6 +3866,57 @@ impl App {
             return Ok("No extraction job".into());
         };
         self.open_job(&progress.job_id)
+    }
+
+    /// Reload the shared stage views of the current brief chain; when a
+    /// stage committed since the last poll, reload the briefing content.
+    pub(crate) fn refresh_intel_brief_stages(&mut self) -> bool {
+        let Some(job) = self.intel_brief_job.clone() else {
+            self.intel_brief_stages.clear();
+            return false;
+        };
+        let views = intel_recon::brief_pipeline::stage_views(self.store.connection(), &job)
+            .unwrap_or_default();
+        let changed = views != self.intel_brief_stages;
+        self.intel_brief_stages = views;
+        if changed {
+            let conn = self.store.connection();
+            self.intel_brief_outputs =
+                intel_recon::brief_pipeline::stage_outputs(conn, &job).unwrap_or_default();
+            self.intel_brief_lead_titles.clear();
+            let leads = self
+                .intel_brief_outputs
+                .get("intel_brief_links")
+                .and_then(|v| v["leads"].as_array().cloned())
+                .unwrap_or_default();
+            for lead in leads {
+                let (Some(id), Some(run)) =
+                    (lead["article_id"].as_str(), lead["article_run_id"].as_str())
+                else {
+                    continue;
+                };
+                if let Ok(Some(row)) = self.store.atlas_article(run, id) {
+                    self.intel_brief_lead_titles
+                        .insert(id.to_string(), row.title);
+                }
+            }
+            self.refresh_intel_briefing();
+        }
+        // Polled every tick: the index outbox drains after the stages commit.
+        let article_id = self
+            .intel_articles
+            .get(self.intel_sel)
+            .map(|a| a.id.clone())
+            .unwrap_or_default();
+        let failed = self.intel_brief_stages.iter().any(|s| s.state == "failed");
+        self.intel_brief_publication = intel_recon::brief_canonical::footer(
+            self.store.connection(),
+            &article_id,
+            &job,
+            failed,
+        )
+        .unwrap_or_default();
+        changed
     }
 
     fn refresh_intel_briefing(&mut self) {
@@ -4079,157 +4151,7 @@ impl App {
     }
 
     fn osint_provider_keys(&self) -> osint::ProviderKeys {
-        osint::ProviderKeys {
-            firecrawl: self.settings.provider_key("firecrawl"),
-            firecrawl_fallback: self.settings.provider_fallback_key("firecrawl"),
-            hunter: self.settings.provider_key("hunter"),
-            hunter_fallback: self.settings.provider_fallback_key("hunter"),
-            sociavault: self.settings.provider_key("sociavault"),
-            sociavault_fallback: self.settings.provider_fallback_key("sociavault"),
-            newsapi: self.settings.provider_key("newsapi"),
-            newsapi_fallback: self.settings.provider_fallback_key("newsapi"),
-            courtlistener: self.settings.provider_key("courtlistener"),
-            courtlistener_fallback: self.settings.provider_fallback_key("courtlistener"),
-            gnews: self.settings.provider_key("gnews"),
-            gnews_fallback: self.settings.provider_fallback_key("gnews"),
-            newsdata: self.settings.provider_key("newsdata"),
-            newsdata_fallback: self.settings.provider_fallback_key("newsdata"),
-            currents: self.settings.provider_key("currents"),
-            currents_fallback: self.settings.provider_fallback_key("currents"),
-            whoxy: self.settings.provider_key("whoxy"),
-            whoxy_fallback: self.settings.provider_fallback_key("whoxy"),
-        }
-    }
-
-    fn ensure_article_body_fetch(&mut self, force_refresh: bool) {
-        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
-            return;
-        };
-        if self.intel_body_running.contains(&article.id) && !force_refresh {
-            if self.intel_body_message.trim().is_empty() {
-                self.intel_body_message = "Retrieving full article…".into();
-            }
-            return;
-        }
-        let outcome = match intel_recon::enqueue_article_body(&self.store, &article, force_refresh)
-        {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                self.intel_body_message = err.to_string();
-                return;
-            }
-        };
-        match outcome {
-            intel_recon::EnqueueOutcome::Cached(_) => {
-                self.intel_body = self
-                    .store
-                    .article_body_for_article(&article.id)
-                    .ok()
-                    .flatten();
-                self.intel_body_message.clear();
-            }
-            intel_recon::EnqueueOutcome::AlreadyRunning { .. } => {
-                self.intel_body_message = "Retrieving full article…".into();
-            }
-            intel_recon::EnqueueOutcome::Cooldown {
-                retry_after,
-                reason,
-                ..
-            } => {
-                self.intel_body_message =
-                    format!("Unavailable · retry after {retry_after}. {reason}");
-                self.intel_body = self
-                    .store
-                    .article_body_for_article(&article.id)
-                    .ok()
-                    .flatten();
-            }
-            intel_recon::EnqueueOutcome::Start {
-                body_id,
-                force_refresh,
-                ..
-            } => {
-                if tokio::runtime::Handle::try_current().is_err() {
-                    self.intel_body_message = "Full article fetch queued (no runtime)".into();
-                    return;
-                }
-                self.intel_body_running.insert(article.id.clone());
-                self.intel_body_message = "Retrieving full article…".into();
-                self.scrolls.intel_full = 0;
-                // Clear the full-article pane immediately so Reload never leaves stale prose.
-                if force_refresh {
-                    if let Some(body) = self.intel_body.as_mut() {
-                        body.body_markdown.clear();
-                        body.quality = "unavailable".into();
-                        body.quality_rationale.clear();
-                        body.state = "running".into();
-                    } else {
-                        self.intel_body = None;
-                    }
-                }
-                let db = paths::db_path();
-                let keys = self.osint_provider_keys();
-                let evidence_curator = model_exec::select_role_secret(
-                    &self.auth,
-                    &self.settings,
-                    "evidence_curator",
-                    model_exec::OperationFormat::Prose,
-                );
-                let synthesis = evidence_curator.or_else(|| {
-                    model_exec::select_role_secret(
-                        &self.auth,
-                        &self.settings,
-                        "synthesis",
-                        model_exec::OperationFormat::Prose,
-                    )
-                });
-                let classifier = model_exec::select_role_secret(
-                    &self.auth,
-                    &self.settings,
-                    "classifier",
-                    model_exec::OperationFormat::BoundedDecision,
-                );
-                let ua = self.settings.osint_user_agent.clone();
-                let title = article.title.clone();
-                let brief = article.description.clone();
-                let article_id = article.id.clone();
-                let tx = self.work_tx.clone();
-                let cancel = Arc::new(AtomicBool::new(false));
-                let job = tracked::begin_cancellable(
-                    JobSpec::new(
-                        "intel",
-                        "article_body",
-                        format!(
-                            "Article body · {}",
-                            title.chars().take(60).collect::<String>()
-                        ),
-                    )
-                    .resource(format!("article:{article_id}")),
-                    cancel.clone(),
-                );
-                let stop = cancel.clone();
-                tokio::spawn(async move {
-                    let outcome = intel_recon::fetch_article_body(
-                        &db,
-                        &body_id,
-                        &title,
-                        &brief,
-                        keys,
-                        synthesis,
-                        classifier,
-                        if ua.trim().is_empty() { None } else { Some(ua) },
-                        force_refresh,
-                        cancel,
-                        |event| {
-                            let _ = tx.send(WorkEvent::IntelBody(event));
-                        },
-                    )
-                    .await;
-                    tracked::finish(job, "intel", &outcome, Some(&stop));
-                    let _ = article_id;
-                });
-            }
-        }
+        osint::ProviderKeys::from_settings(&self.settings)
     }
 
     fn open_intel_recon_popup(&mut self) {
@@ -4249,6 +4171,12 @@ impl App {
                 .insert(mode.as_str().to_string(), keys);
         }
         self.scrolls.popup = 0;
+        // Lazy: classify the mode only when the Recon configuration opens.
+        if let Some(article) = self.intel_articles.get(self.intel_sel) {
+            if !(self.intel_mode_classifying && self.intel_recon_recommended_for == article.id) {
+                self.queue_intel_recon_mode_classify();
+            }
+        }
         self.overlay = Overlay::IntelRecon;
         self.set_focus(Target::IntelReconTab(tab));
         let mode = self.intel_recon_mode();
@@ -5372,87 +5300,6 @@ impl App {
                     self.select_latest_atlas_run();
                 }
                 true
-            }
-            WorkEvent::IntelBody(event) => {
-                let article_id = match &event {
-                    intel_recon::BodyFetchEvent::Started { article_id, .. }
-                    | intel_recon::BodyFetchEvent::Attempt { article_id, .. }
-                    | intel_recon::BodyFetchEvent::Progress { article_id, .. }
-                    | intel_recon::BodyFetchEvent::Ready { article_id, .. }
-                    | intel_recon::BodyFetchEvent::InsightsRefreshing { article_id, .. }
-                    | intel_recon::BodyFetchEvent::InsightsReplaced { article_id, .. }
-                    | intel_recon::BodyFetchEvent::InsightsFailed { article_id, .. }
-                    | intel_recon::BodyFetchEvent::Failed { article_id, .. } => article_id.clone(),
-                };
-                let focused = self
-                    .intel_articles
-                    .get(self.intel_sel)
-                    .is_some_and(|a| a.id == article_id);
-                let prior_message = self.intel_body_message.clone();
-                let mut insights_done = false;
-                let mut is_retrieval_ready = false;
-                match event {
-                    intel_recon::BodyFetchEvent::Progress { message, .. } => {
-                        self.intel_body_message = message;
-                    }
-                    intel_recon::BodyFetchEvent::Attempt {
-                        tool_id,
-                        state,
-                        reason,
-                        ..
-                    } => {
-                        self.intel_body_message = if reason.is_empty() {
-                            format!("{tool_id} · {state}")
-                        } else {
-                            format!("{tool_id} · {state} · {reason}")
-                        };
-                    }
-                    intel_recon::BodyFetchEvent::Ready { quality, .. } => {
-                        self.intel_body_running.remove(&article_id);
-                        self.intel_body_message = format!("Full article · {quality}");
-                        is_retrieval_ready = true;
-                    }
-                    intel_recon::BodyFetchEvent::InsightsRefreshing { .. } => {
-                        self.intel_insights_running.insert(article_id.clone());
-                        self.intel_body_message =
-                            "Re-extracting insights from full article…".into();
-                    }
-                    intel_recon::BodyFetchEvent::InsightsReplaced { claim_count, .. } => {
-                        self.intel_insights_running.remove(&article_id);
-                        self.intel_body_message =
-                            format!("Insights replaced · {claim_count} claims");
-                        insights_done = true;
-                    }
-                    intel_recon::BodyFetchEvent::InsightsFailed { reason, .. } => {
-                        self.intel_insights_running.remove(&article_id);
-                        self.intel_body_message = format!("Insight re-extract failed: {reason}");
-                        insights_done = true;
-                    }
-                    intel_recon::BodyFetchEvent::Failed { reason, .. } => {
-                        self.intel_body_running.remove(&article_id);
-                        self.intel_insights_running.remove(&article_id);
-                        self.intel_body_message = reason;
-                    }
-                    intel_recon::BodyFetchEvent::Started { .. } => {
-                        self.intel_body_message = "Retrieving full article…".into();
-                    }
-                }
-                if !focused {
-                    self.intel_body_message = prior_message;
-                }
-                if focused && self.intel_page == IntelPage::Briefing {
-                    self.intel_body = self
-                        .store
-                        .article_body_for_article(&article_id)
-                        .ok()
-                        .flatten();
-                    if insights_done || is_retrieval_ready {
-                        self.refresh_intel_briefing();
-                        self.queue_intel_recon_mode_classify();
-                        self.queue_intel_links_explanation();
-                    }
-                }
-                focused && self.module == Some(ModuleId::Intel)
             }
             WorkEvent::IntelReconMode { article_id, mode } => {
                 let selected = self
@@ -7519,7 +7366,31 @@ impl App {
                 return;
             }
             ButtonId::IntelBodyRetry | ButtonId::IntelBodyRefresh => {
-                self.ensure_article_body_fetch(true);
+                if let Some(job) = self.intel_brief_job.clone() {
+                    if let Ok(Some(_)) = intel_recon::brief_pipeline::retry_stage(
+                        self.store.connection(),
+                        &job,
+                        &chrono::Utc::now().to_rfc3339(),
+                    ) {
+                        self.refresh_intel_brief_stages();
+                        self.status = "Retrying failed brief stage; completed stages kept".into();
+                        return;
+                    }
+                }
+                if let Some(article) = self.intel_articles.get(self.intel_sel).cloned() {
+                    match intel_recon::brief_stages::reload_intel_brief_pipeline(
+                        &self.store,
+                        &article,
+                        &self.settings,
+                    ) {
+                        Ok(job) => {
+                            self.intel_brief_job = Some(job);
+                            self.refresh_intel_brief_stages();
+                            self.status = "Reloading full article through brief preparation".into();
+                        }
+                        Err(error) => self.status = error.to_string(),
+                    }
+                }
                 return;
             }
             ButtonId::IntelJobOpen => {
@@ -10057,6 +9928,11 @@ mod tests {
             intel_recon_enabled: HashMap::new(),
             intel_recon_focus: IntelReconFocus::Tab(0),
             intel_body_running: HashSet::new(),
+            intel_brief_job: None,
+            intel_brief_stages: Vec::new(),
+            intel_brief_outputs: HashMap::new(),
+            intel_brief_lead_titles: HashMap::new(),
+            intel_brief_publication: String::new(),
             intel_insights_running: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
             intel_insight_lifecycle: "legacy/unassessed".into(),
@@ -12940,6 +12816,245 @@ mod tests {
         text
     }
 
+    /// Spec §6/§8.8: shared stage progress for the sequential brief chain on
+    /// the brief Jobs panel, section headers and global Jobs. Dumps cells
+    /// when ARGOS_SCREEN_DIR is set.
+    #[test]
+    fn intel_sequential_stage_screens() {
+        use argos_osint_core::intel_recon::brief_pipeline as bp;
+        use argos_osint_core::tasks;
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        if let Some(dir) = &dir {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let now = || chrono::Utc::now().to_rfc3339();
+        let body = serde_json::json!({"markdown":"Officials said the crossing would stay closed.","content_hash":"h","quality":"complete","diagnostics":[]});
+        let claims = serde_json::json!({"claims":[{"id":"c1","text":"Baltic board suspended the ferry service.","attributed_to":"Baltic board","modality":"asserted","evidence_ids":["t1"],"fidelity":"faithful"}],"withheld":0});
+        let inferences = serde_json::json!({"inferences":[{"id":"i1","text":"The suspension may reflect an insurance lapse, not only weather.","support":"conditional","why":"The harbour master confirmed the certificate expired.","limitations":["Whether the lapse stopped sailings is unconfirmed"],"body_evidence_ids":["b1"]}]});
+        let empty_inf =
+            serde_json::json!({"inferences":[],"empty_reason":"no supported inferences"});
+        // (name, steps completed, running activity, fail stage, empty inferences)
+        let frames: Vec<(&str, usize, Option<&str>, bool, bool)> = vec![
+            ("1-queued", 0, None, false, false),
+            (
+                "2-body-running",
+                0,
+                Some("retrieving / cleaning"),
+                false,
+                false,
+            ),
+            (
+                "3-inferences-running",
+                2,
+                Some("waiting for model"),
+                false,
+                false,
+            ),
+            ("4-inferences-failed", 2, None, true, false),
+            ("5-completed", 4, None, false, false),
+            ("6-empty", 4, None, false, true),
+            ("7-cached", 4, None, false, false),
+        ];
+        // §8.8 widths; narrow and too-small sizes render the failed and
+        // completed frames (geometry changes there), wider ones every state.
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 32),
+            (80, 24),
+            (60, 18),
+            (40, 12),
+        ] {
+            for (name, done, running, fail, empty) in &frames {
+                if width <= 80 && !(name.starts_with('4') || name.starts_with('5')) {
+                    continue;
+                }
+                let mut app = app();
+                let (_, article) = related_ui_fixture(&mut app);
+                let lead_target = app
+                    .store
+                    .atlas_list_articles(&article.run_id)
+                    .unwrap()
+                    .into_iter()
+                    .find(|a| a.id != article.id)
+                    .unwrap();
+                let links = serde_json::json!({"leads":[{"article_id":lead_target.id,"article_run_id":lead_target.run_id,"inference_id":"i1","why":"Its title reports the same ferry's insurance lapse; the causal link to the suspension still needs verification.","verification_needed":"Confirm the lapse date with the regulator.","metadata_evidence":[]}]});
+                app.select(ModuleId::Intel.index());
+                app.intel_articles = vec![article.clone()];
+                app.intel_sel = 0;
+                app.open_intel_briefing();
+                let job = app.intel_brief_job.clone().unwrap();
+                let conn = app.store.connection();
+                let outputs = [
+                    body.clone(),
+                    claims.clone(),
+                    if *empty {
+                        empty_inf.clone()
+                    } else {
+                        inferences.clone()
+                    },
+                    if *empty {
+                        serde_json::json!({"leads":[],"empty_reason":"no supported inferences"})
+                    } else {
+                        links.clone()
+                    },
+                ];
+                for (n, out) in outputs.iter().enumerate().take(*done) {
+                    let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
+                    let items = out
+                        .as_object()
+                        .and_then(|o| o.values().find_map(|v| v.as_array().map(Vec::len)))
+                        .unwrap_or(0);
+                    let reason = if n == 0 {
+                        "validated clean body"
+                    } else {
+                        out["empty_reason"].as_str().unwrap_or("")
+                    };
+                    let items = if n == 0 { 0 } else { items };
+                    assert!(
+                        bp::commit_stage(conn, &c, &out.to_string(), items, reason, &now())
+                            .unwrap()
+                    );
+                }
+                if let Some(activity) = running {
+                    let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
+                    bp::set_activity(conn, &c.id, activity).unwrap();
+                }
+                if *fail {
+                    let mut c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
+                    c.max_attempts = 1;
+                    tasks::fail_claimed(
+                        conn,
+                        &c,
+                        tasks::OperationKind::OtherLlm,
+                        &tasks::TaskError::new(
+                            tasks::ErrorCategory::InvalidResult,
+                            "provider chain exhausted",
+                        ),
+                        &now(),
+                    )
+                    .unwrap();
+                }
+                if *name == "7-cached" {
+                    // Reopen a completed brief: attaches, schedules nothing.
+                    app.open_intel_briefing();
+                    assert_eq!(app.intel_brief_job.as_deref(), Some(job.as_str()));
+                    let active: i64 = app
+                        .store
+                        .connection()
+                        .query_row(
+                            "SELECT COUNT(*) FROM argos_tasks WHERE job_id LIKE 'intel-brief:%' AND state NOT IN ('completed','superseded')",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(active, 0, "cached reopen enqueues no work");
+                }
+                app.intel_brief_stages.clear();
+                app.refresh_intel_brief_stages();
+                app.compact_pages[ModuleId::Intel.index()] = 0;
+                app.scrolls.intel_extracted = 0;
+                let text = intel_all_pages_text(&mut app, width, height);
+                let rows: Vec<String> = app
+                    .intel_brief_stages
+                    .iter()
+                    .map(|v| format!("{} · {}", v.label, v.row))
+                    .collect();
+                // Content asserts where the panes fit without scrolling.
+                let roomy = width >= 120 || (width == 80 && name.starts_with('4'));
+                match *name {
+                    _ if !roomy => {
+                        // Narrow / too-small: rows stay correct and render never panics.
+                        assert!(!rows.is_empty());
+                    }
+                    "1-queued" => {
+                        assert_eq!(rows[1], "Claims · Queued · after Full article");
+                        assert!(text.contains("Step 1/4 · Full article"), "{text}");
+                    }
+                    "2-body-running" => {
+                        assert_eq!(rows[0], "Full article · Running · retrieving / cleaning")
+                    }
+                    "3-inferences-running" => {
+                        assert_eq!(rows[2], "Inferences · Running · waiting for model");
+                        assert!(text.contains("Step 3/4 · Inferences"));
+                        assert!(
+                            text.contains("suspended the ferry"),
+                            "claims checkpoint surfaces immediately"
+                        );
+                    }
+                    "4-inferences-failed" => {
+                        assert!(rows[1].starts_with("Claims · Completed"));
+                        assert!(rows[2].starts_with("Inferences · Failed"));
+                        assert_eq!(rows[3], "Links · Queued · blocked by Inferences");
+                        assert!(
+                            text.contains("suspended the ferry"),
+                            "completed Claims kept"
+                        );
+                        assert!(text.contains("blocked by Inferences"));
+                        // Global Jobs shows identical stage states.
+                        let detail = argos_osint_core::jobs_view::job_detail(
+                            app.store.connection(),
+                            &job,
+                            10,
+                        )
+                        .unwrap()
+                        .unwrap();
+                        let labels: Vec<&str> = detail
+                            .tasks
+                            .iter()
+                            .map(|t| t.stage_label.as_str())
+                            .collect();
+                        assert_eq!(labels, rows.iter().map(String::as_str).collect::<Vec<_>>());
+                    }
+                    "5-completed" => {
+                        assert!(text.contains("Potential corroboration"), "{text}");
+                        assert!(text.contains("insurance lapse"));
+                        assert!(
+                            app.intel_brief_publication.starts_with("Published"),
+                            "{}",
+                            app.intel_brief_publication
+                        );
+                        assert!(text.contains("Publication / Index"));
+                        assert_eq!(
+                            bp::published_leads(app.store.connection(), &article.id)
+                                .unwrap()
+                                .len(),
+                            1
+                        );
+                    }
+                    "7-cached" => {
+                        assert!(rows.iter().all(|r| r.contains("Completed")), "{rows:?}");
+                        assert!(text.contains("Potential corroboration"));
+                    }
+                    _ => {
+                        assert_eq!(rows[2], "Inferences · Completed · no supported inferences");
+                        assert_eq!(rows[3], "Links · Completed · no supported inferences");
+                    }
+                }
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("seq-{name}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                    if width < 160 {
+                        app.compact_pages[ModuleId::Intel.index()] = 2;
+                        dump_cells(
+                            &mut app,
+                            dir,
+                            &format!("seq-{name}-{width}x{height}-jobs"),
+                            width,
+                            height,
+                        );
+                        app.compact_pages[ModuleId::Intel.index()] = 0;
+                    }
+                }
+            }
+        }
+    }
+
     /// Claims, Insights and Links each get their own Background jobs entry
     /// with their own streamed steps; content panes show only the shared
     /// centered loading animation until their content arrives.
@@ -13462,6 +13577,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn opening_a_brief_admits_one_preparation_chain_without_competing_work() {
+        let mut app = app();
+        let (_, article) = related_ui_fixture(&mut app);
+        app.select(ModuleId::Intel.index());
+        app.intel_articles = vec![article.clone()];
+        app.intel_sel = 0;
+        app.open_intel_briefing();
+        let job = app.intel_brief_job.clone().expect("chain admitted");
+        let labels: Vec<_> = app.intel_brief_stages.iter().map(|v| v.label).collect();
+        assert_eq!(labels, ["Full article", "Claims", "Inferences", "Links"]);
+        assert_eq!(app.intel_brief_stages[1].row, "Queued · after Full article");
+        // Reopen attaches to the same chain.
+        app.open_intel_briefing();
+        assert_eq!(app.intel_brief_job.as_deref(), Some(job.as_str()));
+        // Mode classification is lazy and no separate refresh/body job exists.
+        assert!(!app.intel_mode_classifying);
+        let competing: i64 = app
+            .store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM argos_tasks WHERE operation IN ('insight_refresh','article_body')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(competing, 0);
+        assert!(!app.intel_body_running.contains(&article.id));
     }
 
     #[test]

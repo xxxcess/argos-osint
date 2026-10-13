@@ -240,6 +240,10 @@ pub struct TaskRow {
     pub error_message: String,
     pub result_ref: String,
     pub updated_at: String,
+    /// Shared Intel brief stage row ("Inferences · Failed · …"); empty for
+    /// other tasks.
+    #[serde(default)]
+    pub stage_label: String,
 }
 
 /// One attempt (detail attempt history).
@@ -478,9 +482,28 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
                     error_message: r.get(11)?,
                     result_ref: r.get(12)?,
                     updated_at: r.get(13)?,
+                    stage_label: String::new(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = rows;
+        if rows.iter().any(|t| t.operation.starts_with("intel_brief_")) {
+            // One immutable stage view across the brief panel, Jobs and Logs.
+            let views =
+                crate::intel_recon::brief_pipeline::stage_views(conn, id).unwrap_or_default();
+            for task in &mut rows {
+                if let Some(view) = views.iter().find(|v| v.operation == task.operation) {
+                    task.stage_label = format!("{} · {}", view.label, view.row);
+                }
+            }
+            let order = |op: &str| {
+                crate::intel_recon::brief_pipeline::STAGES
+                    .iter()
+                    .position(|(o, _)| *o == op)
+                    .unwrap_or(usize::MAX)
+            };
+            rows.sort_by_key(|t| order(&t.operation));
+        }
         rows
     };
     let attempts = {

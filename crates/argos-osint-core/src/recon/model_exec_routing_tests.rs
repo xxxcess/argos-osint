@@ -246,3 +246,50 @@ async fn jev_with_missing_key_is_a_capability_skip_not_a_chat_request() {
     let body = server.requests.lock().unwrap()[0].clone();
     assert!(body.contains("\"model\":\"super\""), "{body}");
 }
+
+// §8.6 (brief fidelity): Jev primary without a native connection is a
+// capability skip; the compatible chat fallback carries the stage's 1024-token
+// ceiling on JSON-mode transports (unknown endpoints get no unsupported
+// options), and one successful call is never repeated.
+#[tokio::test]
+async fn brief_fidelity_falls_back_to_chat_with_the_stage_budget() {
+    use crate::intel_recon::brief_fidelity::{FidelityDecisions, FidelityItem, FIDELITY_TOKENS};
+    let server = mock::serve(vec![mock::ok_json(
+        r#"{"items":[{"id":"c1","fidelity":"faithful"}]}"#,
+        "stop",
+    )])
+    .await;
+    let auth = auth(&server.base_url, Some("or-fixture"));
+    let settings = assessor(
+        ("local", "typesafe/jev-1.13"),
+        &[("openrouter", "nvidia/nemotron-3-super-120b-a12b:free")],
+    );
+    let items = vec![FidelityItem {
+        id: "c1".into(),
+        kind: "claim",
+        text: "The board suspended the ferry.".into(),
+        passages: vec!["The board suspended the ferry service.".into()],
+    }];
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (labels, _) = execute_decisions_or_chat(
+        &auth,
+        &settings,
+        &OperationScope::new("brief-fidelity", "claim_assessor")
+            .with_completion_tokens(FIDELITY_TOKENS),
+        &FidelityDecisions { items: &items },
+        &cancel,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(labels.get("c1").map(String::as_str), Some("faithful"));
+    assert_eq!(server.hits(), 1, "one chat request, zero Jev");
+    let body = server.requests.lock().unwrap()[0].clone();
+    assert!(
+        body.contains(&format!("\"max_tokens\":{FIDELITY_TOKENS}")),
+        "{body}"
+    );
+    assert!(body.contains("nemotron"), "{body}");
+    assert!(!body.contains("typesafe/jev"));
+}

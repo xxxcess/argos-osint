@@ -61,6 +61,8 @@ pub struct OperationScope<'a> {
     pub generation: u32,
     /// Insight-only bounded repair/fallback policy; other operations retain their policy.
     pub insight_contract: bool,
+    /// Per-stage completion ceiling for the insight lane (defaults to 8,192).
+    pub completion_tokens: Option<u32>,
 }
 
 impl<'a> OperationScope<'a> {
@@ -72,6 +74,7 @@ impl<'a> OperationScope<'a> {
             task_id: None,
             generation: 1,
             insight_contract: false,
+            completion_tokens: None,
         }
     }
 
@@ -87,6 +90,11 @@ impl<'a> OperationScope<'a> {
 
     pub fn with_generation(mut self, generation: u32) -> Self {
         self.generation = generation;
+        self
+    }
+
+    pub fn with_completion_tokens(mut self, tokens: u32) -> Self {
+        self.completion_tokens = Some(tokens);
         self
     }
 
@@ -1023,6 +1031,7 @@ where
 
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
+    let completion_tokens = scope.completion_tokens.unwrap_or(8192);
     let mut attempt_counter = 0u32;
     let mut last_route_idx = 0usize;
     let on_event_shared = on_event.clone();
@@ -1179,7 +1188,7 @@ where
                     &secret,
                     &messages_vec,
                     transport,
-                    8192,
+                    completion_tokens,
                     Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
                     progress_sink.as_deref(),
                 )
@@ -1469,6 +1478,7 @@ where
 
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
+    let stage_tokens = scope.completion_tokens;
     let mut attempt_counter = 0u32;
     let on_event_shared = on_event.clone();
     let op_id = scope.operation_id.to_string();
@@ -1711,8 +1721,9 @@ where
                         "compiled assessment exceeds byte budget",
                     )));
                 }
-                let rep = if insight_contract {
-                    // Bounded decision fallback keeps the ordinary policy.
+                let rep = if insight_contract || stage_tokens.is_some() {
+                    // Bounded decision fallback keeps the ordinary policy; a
+                    // stage policy (e.g. 512-token cleanup batches) overrides it.
                     provider_attempt::attempt_full(
                         &secret,
                         &chat_messages,
@@ -1720,7 +1731,7 @@ where
                         Deadlines::native_decision(),
                         None,
                         None,
-                        Some(2048),
+                        Some(stage_tokens.unwrap_or(2048)),
                     )
                     .await
                 } else {

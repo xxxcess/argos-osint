@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Intel brief preparation</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    html,body { margin:0; background:#f5f5f5; color:#2d3142; font-family:Geist,system-ui,sans-serif; }
+    main { max-width:880px; margin:0 auto; padding:40px 24px 64px; }
+    .eyebrow { font-family:"Geist Mono",ui-monospace,monospace; font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:#4f5d75; }
+    h1 { font-family:"Instrument Serif",serif; font-weight:400; font-size:1.75rem; margin:.4rem 0 1.25rem; }
+    .frame { overflow-x:auto; }
+    svg { min-width:800px; display:block; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Process</div>
+    <h1>Intel brief preparation</h1>
+    <div class="frame">
+      <svg role="img" aria-labelledby="intel-brief-chain-title intel-brief-chain-desc" viewBox="0 0 800 420" xmlns="http://www.w3.org/2000/svg">
+<title id="intel-brief-chain-title">Sequential Intel brief preparation</title>
+<desc id="intel-brief-chain-desc">A visit or Reload attaches to one durable chain per article generation. Stages run strictly in order on the intel_brief pool: Full article (local baseline, NLP keep-anchors, conditional Classifier batches), Claims from title and description with Claim-assessor fidelity, Inferences over the clean body windows with fidelity, and Links from a local shortlist with an overlap gate. The fenced Stage-4 commit publishes the brief snapshot and leads, then calls the shared canonical publisher that the insight-refresh lease lane also uses, which writes Brain derivations and enqueues the index outbox. A canonical failure rolls back to a savepoint and is shown only in the Index footer.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
+<rect width="800" height="420" fill="#f5f5f5"/>
+<g fill="none" stroke="#4f5d75" marker-end="url(#arrow)">
+<path d="M160 76 H172"/><path d="M315 76 H328"/><path d="M470 76 H484"/><path d="M625 76 H640"/>
+<path d="M712 112 V160 H572 V196"/>
+<path d="M484 236 H452"/>
+<path d="M196 236 H248"/>
+<path d="M352 276 V344 H556"/>
+</g>
+<g font-family="Geist,system-ui,sans-serif" font-size="12" text-anchor="middle" fill="#2d3142">
+<rect x="20" y="40" width="140" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="90" y="70">Visit / Reload</text><text x="90" y="90" font-size="10" fill="#7a8399">ensure_chain · attach</text>
+<rect x="175" y="40" width="140" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="245" y="70">1 · Full article</text><text x="245" y="90" font-size="10" fill="#7a8399">NLP anchors · Classifier ≤12</text>
+<rect x="330" y="40" width="140" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="400" y="70">2 · Claims</text><text x="400" y="90" font-size="10" fill="#7a8399">metadata only · fidelity</text>
+<rect x="485" y="40" width="140" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="555" y="70">3 · Inferences</text><text x="555" y="90" font-size="10" fill="#7a8399">body windows · fidelity</text>
+<rect x="640" y="40" width="140" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="710" y="70">4 · Links</text><text x="710" y="90" font-size="10" fill="#7a8399">shortlist ≤12 · overlap gate</text>
+<rect x="485" y="196" width="175" height="80" rx="6" fill="#fff" stroke="#2d3142"/><text x="572" y="228">Fenced Stage-4 commit</text><text x="572" y="248" font-size="10" fill="#7a8399">brief snapshot + leads</text>
+<rect x="248" y="196" width="204" height="80" rx="6" fill="#fff4ee" stroke="#eb6c36"/><text x="350" y="228">Shared canonical publisher</text><text x="350" y="248" font-size="10" fill="#7a8399">generation · key · live evidence</text>
+<rect x="20" y="196" width="176" height="80" rx="6" fill="#fff" stroke="#2d3142"/><text x="108" y="228">Insight-refresh lane</text><text x="108" y="248" font-size="10" fill="#7a8399">lease fence + acknowledgement</text>
+<rect x="556" y="314" width="204" height="60" rx="6" fill="#fff4ee" stroke="#eb6c36"/><text x="658" y="340">Brain + index outbox</text><text x="658" y="358" font-size="10" fill="#7a8399">Index footer state</text>
+<text x="230" y="392" font-family="Instrument Serif,serif" font-size="14" font-style="italic">Report precedence or canonical failure: savepoint rollback;</text>
+<text x="230" y="410" font-family="Instrument Serif,serif" font-size="14" font-style="italic">completed stages never turn failed.</text>
+</g>
+<text x="400" y="150" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#eb6c36">one active stage · heartbeat lease · failure blocks successors · Retry resumes that stage only</text>
+</svg>
+    </div>
+  </main>
+</body>
+</html>

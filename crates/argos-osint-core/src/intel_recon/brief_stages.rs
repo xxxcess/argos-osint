@@ -66,8 +66,16 @@ pub trait StageBackend: Send {
         &'a mut self,
         job_id: &'a str,
         article: &'a AtlasArticleRow,
+        force: bool,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<CleanArtifact>>;
+    /// Batched Claim-assessor fidelity decisions (native Jev or constrained chat).
+    fn assess<'a>(
+        &'a mut self,
+        task_id: &'a str,
+        items: Vec<super::brief_fidelity::FidelityItem>,
+        cancel: &'a Arc<AtomicBool>,
+    ) -> BoxFut<'a, Result<HashMap<String, String>>>;
     /// Existing related articles for Stage 4 (metadata only).
     fn related(&mut self, article: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>>;
     /// Generated JSON request; must honour `cancel`.
@@ -571,13 +579,23 @@ async fn cancelled(flag: Arc<AtomicBool>) {
     }
 }
 
+fn activity(db_path: &Path, task: &str, label: &str) {
+    if let Ok(store) = Store::open_light(db_path) {
+        let _ = brief_pipeline::set_activity(&store.conn, task, label);
+    }
+}
+
 async fn generate(
+    db_path: &Path,
     backend: &mut dyn StageBackend,
     cancel: &Arc<AtomicBool>,
     request: StageRequest,
 ) -> Result<Value> {
     let validator = request.validator.clone();
+    let task = request.task_id.clone();
+    activity(db_path, &task, "waiting for model");
     let raw = backend.generate(request, cancel).await?;
+    activity(db_path, &task, "validating");
     validator(&raw).map_err(|e| anyhow!("invalid stage output: {e}"))?;
     strict_json(&raw)
 }
@@ -598,15 +616,20 @@ async fn execute(
     };
     match claimed.operation.as_str() {
         "intel_brief_body" => {
-            let artifact = backend.prepare_body(&job, &article, cancel).await?;
+            let force = serde_json::from_str::<Value>(&claimed.input_ref)
+                .ok()
+                .and_then(|v| v["force_body"].as_bool())
+                .unwrap_or(false);
+            activity(db_path, &claimed.id, "retrieving / cleaning");
+            let artifact = backend.prepare_body(&job, &article, force, cancel).await?;
+            activity(db_path, &claimed.id, "validating");
             stage_one_admissible(&artifact, artifact.acquisition_complete)?;
-            let words = artifact.markdown.split_whitespace().count();
-            let reason = if artifact.diagnostics.is_empty() {
-                String::new()
-            } else {
-                artifact.diagnostics.join("; ")
-            };
-            Ok((serde_json::to_value(&artifact)?, words, reason))
+            // Row: "Completed · validated clean body" (plus any diagnostics).
+            let mut reason = String::from("validated clean body");
+            if !artifact.diagnostics.is_empty() {
+                reason.push_str(&format!(" · {}", artifact.diagnostics.join("; ")));
+            }
+            Ok((serde_json::to_value(&artifact)?, 0, reason))
         }
         "intel_brief_claims" => {
             let meta = metadata_sentences(&article);
@@ -624,6 +647,7 @@ async fn execute(
                     .map_err(|e| e.to_string())
             });
             let raw = generate(
+                db_path,
                 backend,
                 cancel,
                 StageRequest {
@@ -637,7 +661,21 @@ async fn execute(
                 },
             )
             .await?;
-            let out = validate_claims(&raw.to_string(), &meta)?;
+            let mut out = validate_claims(&raw.to_string(), &meta)?;
+            let index: HashMap<&str, &Sentence> = meta.iter().map(|s| (s.id.as_str(), s)).collect();
+            apply_fidelity(
+                db_path,
+                backend,
+                &claimed.id,
+                cancel,
+                &mut out,
+                "claims",
+                "claim",
+                "evidence_ids",
+                &index,
+                "no faithful claims in title or description",
+            )
+            .await?;
             let n = out["claims"].as_array().map_or(0, Vec::len);
             let reason = if n == 0 {
                 out["empty_reason"].as_str().unwrap_or("").to_string()
@@ -674,6 +712,7 @@ async fn execute(
                         .map_err(|e| e.to_string())
                 });
                 let raw = generate(
+                    db_path,
                     backend,
                     cancel,
                     StageRequest {
@@ -691,6 +730,20 @@ async fn execute(
                 covered.extend(window.iter().cloned());
                 carried = json!(last["inferences"].as_array().into_iter().flatten().map(|i| json!({"id":i["id"],"text":i["text"],"body_evidence_ids":i["body_evidence_ids"],"support":i["support"]})).collect::<Vec<_>>());
             }
+            let index: HashMap<&str, &Sentence> = all.iter().map(|s| (s.id.as_str(), s)).collect();
+            apply_fidelity(
+                db_path,
+                backend,
+                &claimed.id,
+                cancel,
+                &mut last,
+                "inferences",
+                "inference",
+                "body_evidence_ids",
+                &index,
+                "no supported inferences",
+            )
+            .await?;
             last["windows"] = json!(windows.len());
             last["body_hash"] = body["content_hash"].clone();
             let n = last["inferences"].as_array().map_or(0, Vec::len);
@@ -735,6 +788,7 @@ async fn execute(
                     .map_err(|e| e.to_string())
             });
             let raw = generate(
+                db_path,
                 backend,
                 cancel,
                 StageRequest {
@@ -759,6 +813,97 @@ async fn execute(
         }
         other => bail!("unknown brief stage {other}"),
     }
+}
+
+/// Fidelity decisions with cached receipts; uncached items go to the
+/// Claim assessor in batches of at most [`super::brief_fidelity::BATCH`].
+pub async fn assess_cached(
+    db_path: &Path,
+    backend: &mut dyn StageBackend,
+    task_id: &str,
+    items: Vec<super::brief_fidelity::FidelityItem>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<HashMap<String, String>> {
+    let mut labels = HashMap::new();
+    let mut pending = Vec::new();
+    {
+        let store = Store::open(db_path)?;
+        for item in items {
+            match store.app_state_get(&format!("intel-fidelity:{}", item.receipt_key()))? {
+                Some(label) => {
+                    labels.insert(item.id.clone(), label);
+                }
+                None => pending.push(item),
+            }
+        }
+    }
+    for batch in pending.chunks(super::brief_fidelity::BATCH) {
+        let decided = backend.assess(task_id, batch.to_vec(), cancel).await?;
+        let store = Store::open(db_path)?;
+        for item in batch {
+            let label = decided
+                .get(&item.id)
+                .cloned()
+                .ok_or_else(|| anyhow!("fidelity decision missing for {}", item.id))?;
+            store.app_state_set(&format!("intel-fidelity:{}", item.receipt_key()), &label)?;
+            labels.insert(item.id.clone(), label);
+        }
+    }
+    Ok(labels)
+}
+
+/// Keep only items the Claim assessor judged faithful to their own passages.
+#[allow(clippy::too_many_arguments)]
+async fn apply_fidelity(
+    db_path: &Path,
+    backend: &mut dyn StageBackend,
+    task_id: &str,
+    cancel: &Arc<AtomicBool>,
+    out: &mut Value,
+    key: &str,
+    kind: &'static str,
+    ids_key: &str,
+    index: &HashMap<&str, &Sentence>,
+    empty: &str,
+) -> Result<()> {
+    let list = out[key].as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        return Ok(());
+    }
+    let items: Vec<super::brief_fidelity::FidelityItem> = list
+        .iter()
+        .map(|item| super::brief_fidelity::FidelityItem {
+            id: item["id"].as_str().unwrap_or("").to_string(),
+            kind,
+            text: item["text"].as_str().unwrap_or("").to_string(),
+            passages: item[ids_key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|id| index.get(id.as_str()?).map(|s| s.text.clone()))
+                .collect(),
+        })
+        .collect();
+    activity(db_path, task_id, "checking fidelity");
+    let labels = assess_cached(db_path, backend, task_id, items, cancel).await?;
+    let mut kept = Vec::new();
+    for mut item in list {
+        let label = labels
+            .get(item["id"].as_str().unwrap_or(""))
+            .cloned()
+            .unwrap_or_default();
+        if label == "faithful" {
+            item["fidelity"] = json!(label);
+            kept.push(item);
+        }
+    }
+    let withheld = out[key].as_array().map_or(0, Vec::len) - kept.len();
+    if kept.is_empty() {
+        out["empty_reason"] = json!(empty);
+    }
+    out[key] = Value::Array(kept);
+    out["withheld"] = json!(withheld);
+    Ok(())
 }
 
 /// Claim and run the next eligible brief stage. Returns None when idle.
@@ -882,6 +1027,27 @@ pub async fn run_next_stage(
     };
     done.store(true, Ordering::Release);
     let _ = heartbeat.await;
+    // Logs carry the same stage row as the brief panel and Jobs.
+    if let Ok(store) = Store::open_light(db_path) {
+        let _ = brief_pipeline::set_activity(&store.conn, &claimed.id, "");
+        if let Some(view) = brief_pipeline::stage_views(&store.conn, &claimed.job_id)
+            .ok()
+            .and_then(|v| v.into_iter().find(|v| v.operation == operation))
+        {
+            let _ = crate::events::record_event(
+                &store.conn,
+                &crate::events::NewEvent {
+                    severity: None,
+                    app: "intel".into(),
+                    event_type: "intel_brief.stage".into(),
+                    message: format!("{} · {}", view.label, view.row),
+                    job_id: claimed.job_id.clone(),
+                    task_id: claimed.id.clone(),
+                    ..Default::default()
+                },
+            );
+        }
+    }
     Ok(Some(outcome))
 }
 
@@ -1006,12 +1172,13 @@ impl StageBackend for RuntimeBackend {
         &'a mut self,
         job_id: &'a str,
         article: &'a AtlasArticleRow,
+        force_reload: bool,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<CleanArtifact>> {
         Box::pin(async move {
             let outcome = {
                 let store = Store::open(&self.db_path)?;
-                super::body::enqueue_article_body(&store, article, false)?
+                super::body::enqueue_article_body(&store, article, force_reload)?
             };
             let (body_id, generation, force) = match outcome {
                 super::body::EnqueueOutcome::Cached(body_id) => {
@@ -1062,6 +1229,36 @@ impl StageBackend for RuntimeBackend {
             let store = Store::open(&self.db_path)?;
             load_clean_artifact(&store, &article.id, generation)?
                 .ok_or_else(|| anyhow!("story missing: retrieval produced no validated body"))
+        })
+    }
+
+    fn assess<'a>(
+        &'a mut self,
+        task_id: &'a str,
+        items: Vec<super::brief_fidelity::FidelityItem>,
+        cancel: &'a Arc<AtomicBool>,
+    ) -> BoxFut<'a, Result<HashMap<String, String>>> {
+        Box::pin(async move {
+            let operation_id = format!(
+                "{task_id}:fidelity:{}",
+                crate::nlp::cache::hash(&items.iter().map(|i| i.receipt_key()).collect::<String>())
+            );
+            let scope =
+                crate::recon::model_exec::OperationScope::new(&operation_id, "claim_assessor")
+                    .with_task(task_id)
+                    .with_completion_tokens(super::brief_fidelity::FIDELITY_TOKENS);
+            let adapter = super::brief_fidelity::FidelityDecisions { items: &items };
+            let (labels, _) = crate::recon::model_exec::execute_decisions_or_chat(
+                &self.auth,
+                &self.settings,
+                &scope,
+                &adapter,
+                cancel,
+                None,
+                Some(self.db_path.as_path()),
+            )
+            .await?;
+            Ok(labels)
         })
     }
 
@@ -1153,6 +1350,25 @@ pub fn input_revision(
             "roles": serde_json::to_value(&settings.defaults).unwrap_or(Value::Null),
         })
         .to_string(),
+    )
+}
+
+/// Reload: supersede the chain with a forced re-acquisition of the body.
+/// Later visits attach to this chain (same base inputs).
+pub fn reload_intel_brief_pipeline(
+    store: &Store,
+    article: &AtlasArticleRow,
+    settings: &crate::provider::SettingsFile,
+) -> Result<String> {
+    brief_pipeline::ensure_chain(
+        &store.conn,
+        &brief_pipeline::BriefInputs {
+            article_id: article.id.clone(),
+            input_revision: format!("{}:reload:{}", input_revision(article, settings), now()),
+            role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
+            title: article.title.clone(),
+        },
+        &now(),
     )
 }
 

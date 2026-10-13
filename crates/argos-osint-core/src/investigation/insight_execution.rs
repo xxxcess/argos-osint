@@ -90,6 +90,32 @@ pub fn artifact_steps(p: &Progress, facts: &ArtifactFacts) -> Vec<ArtifactProgre
         p.state.as_str(),
         "queued" | "retry_scheduled" | "failed" | "cancelled" | "superseded" | "completed"
     ) || p.stage == "published";
+    // An artifact whose own checkpoints all completed keeps that state when
+    // the parent refresh later fails or is cancelled; only the artifacts that
+    // did not finish inherit the parent terminal state.
+    let validated = |name: &str| {
+        let mine: Vec<&String> = facts
+            .assessments
+            .iter()
+            .filter(|(a, _)| *a == name)
+            .map(|(_, s)| s)
+            .collect();
+        !mine.is_empty() && mine.iter().all(|s| *s == "completed")
+    };
+    if matches!(p.state.as_str(), "failed" | "cancelled") && p.stage != "published" {
+        return names
+            .iter()
+            .map(|n| ArtifactProgress {
+                artifact: (*n).into(),
+                step: if validated(n) {
+                    format!("Validated · not published ({})", p.state)
+                } else {
+                    shared.clone()
+                },
+                ..Default::default()
+            })
+            .collect();
+    }
     if terminal || p.stage == "queued" {
         return names
             .iter()
@@ -669,4 +695,29 @@ pub fn retry_extraction(conn: &Connection, task_id: &str) -> Result<bool> {
     );
     tx.commit()?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod artifact_step_tests {
+    use super::*;
+
+    #[test]
+    fn parent_failure_is_not_copied_to_validated_artifacts() {
+        let p = Progress {
+            state: "failed".into(),
+            stage: "assessment".into(),
+            ..Default::default()
+        };
+        let facts = ArtifactFacts {
+            synthesis_started: true,
+            assessments: vec![
+                ("Claims", "completed".into()),
+                ("Insights", "failed".into()),
+            ],
+        };
+        let steps = artifact_steps(&p, &facts);
+        assert_eq!(steps[0].step, "Validated · not published (failed)");
+        assert!(steps[1].step.starts_with("Failed"), "{:?}", steps[1]);
+        assert!(steps[2].step.starts_with("Failed"), "{:?}", steps[2]);
+    }
 }

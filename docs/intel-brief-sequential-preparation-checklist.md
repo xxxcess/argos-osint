@@ -31,31 +31,31 @@ Legend: **done** / **partial** / **deferred** / pending. Phases follow §7's ord
 | 3 | Stage 1 fails on missing/truncated/unvalidated story | done: executor enforces `stage_one_admissible` with the acquisition receipt (`acquisition_complete`) | 2–3 |
 | 4 | Spec prompts for Claims / Inferences / Links, strict JSON, short IDs, Rust-resolved UTF-8 spans | done (`intel_recon/brief_stages.rs`) | 3 |
 | 4 | Local field/count limits (6 claims ≤35w; 5 inferences ≤35w/why ≤45w/≤2 limitations ≤20w; 5 leads ≤40w), unknown-ID / duplicate / fence / links-in-inference rejection | done | 3 |
-| 4 | Budgets 2048/3072/1536 through `OperationScope::with_completion_tokens` → `attempt_insight` (replaces fixed 8,192 in this lane) | done; cleanup batches still use the decisions path's own budget (512 not yet wired) | 3 |
+| 4 | Budgets 2048/3072/1536 through `OperationScope::with_completion_tokens` → `attempt_insight` (replaces fixed 8,192 in this lane) | done; cleanup batches 512 (`CLEANUP_TOKENS`, 4b) | 3 |
 | 4 | Role routing: Claims → claim_assessor, Inferences/Links → synthesis; Jev skip / all-Jev failure via existing `execute_chat` | done (reused) | 3 |
 | 4 | Long bodies: ordered windows within Stage 3 carrying ≤5 proposals, later windows revise, five total | done | 3 |
 | 4 | Stage 4 local shortlist (self excluded, canonical URL + syndicated-title dedupe, cap 12); no-inference / no-candidate finishes locally | done | 3 |
-| 4 | Batched Claim-assessor fidelity decisions inside Stages 2/3 | deferred | 4–5 |
+| 4 | Batched Claim-assessor fidelity decisions inside Stages 2/3 | done (`brief_fidelity.rs`: ≤12/batch, 1024 tokens, strict label check, receipts cached `intel-fidelity:{hash}`, unfaithful items withheld) | 4b |
 | 4 | `intel_inference_article_leads` persistence | done (schema 36, written in the Stage-4 publication) | 4a |
-| 4 | "Potential corroboration" rendering in Links | deferred | 4b |
+| 4 | "Potential corroboration" rendering in Links | done (metadata leads, not confirmed support) | 4b |
 | 5 | Heartbeat from claim through commit/ack on a light connection with bounded busy retry; renewal failures + heartbeat age recorded | done (`Store::open_light`, `intel-brief-heartbeat:*`) | 3 |
 | 5 | Cancellation / deletion / lost lease drop the in-flight request; nothing is written | done | 3 |
 | 5 | Stage failure fails only that stage (model chain is the single retry owner); Retry resumes it | done | 3 |
 | 5 | Brief-owned body retrieval does not schedule a competing article refresh | done (`commit_refined_body`) | 3 |
 | 5 | Final Stage-4 publication: combined snapshot (`intel_brief_publications`) + leads in the fenced Stage-4 commit; previous kept until success; older generation never overwrites newer; separate from report snapshots | done | 4a |
-| 5 | Canonical Brain derivations + index outbox from the brief snapshot | deferred: needs the Claim-assessor fidelity batches (canonical publication requires assessed items) | 4b |
+| 5 | Canonical Brain derivations + index outbox from the brief snapshot | deferred: fidelity now available; canonical `publish_snapshot` is bound to insight-refresh leases/PipelineOutput types | 5 |
 | 2 | `ensure_intel_brief_pipeline` wired into `open_intel_briefing`; no separate refresh/body job on visit; dedicated `argos-intel-brief` runner (multi-thread runtime) in `WorkerPool::spawn_default`; UI polls stage views each tick and reloads on change; Retry resumes the failed stage | done | 4a |
 | 2 | Mode classification lazy (Recon configuration) | done | 4a |
-| 2 | Reload (force refresh) through the chain instead of the legacy body job | deferred | 4b |
+| 2 | Reload (force refresh) through the chain instead of the legacy body job | done (`reload_intel_brief_pipeline`, `force_body`; legacy `ensure_article_body_fetch` + `WorkEvent::IntelBody` removed) | 4b |
 | 3 | Synthesis body-rewrite functions removed | done | 3 |
 | 8.1 | One chain, 1→2→3→4 order, scoped inputs, zero requests on unchanged reopen | done (`brief_stages_tests.rs`) | 3 |
 | 8.2 | Validator rejections + UTF-8 spans + shortlist dedupe | done | 3 |
 | 8.4 | Stage-3 failure isolation, Retry runs Stage 3 only, empty arrays complete, no-inference Stage 4 uses no model | done | 3 |
 | 8.5 | Heartbeat beyond lease with concurrent reapers, stale output fenced after epoch change, cancellation/parent cancel drop in-flight request, attempts preserved | done; SQLite contention / publication delay / overlapping drainers partially (reaper thread only) | 3 |
 | 8.3 | Cleanup regressions (byline/quote/negation/correction/Unicode verbatim, span maps, classifier missing/failing keeps all, ≤12 sequential batches, degrading removals rejected, incomplete story fails) | done (`clean_body_tests.rs`, 6 tests) | 2 |
-| 4 | Related leads (`intel_inference_article_leads`) | pending | 4 |
-| 6 | Shared stage-progress UI (brief Jobs, section headers, global Jobs, Logs); `artifact_steps` no longer copies parent terminal state | pending | 4 |
+| 4 | Related leads (`intel_inference_article_leads`) | done | 4a |
+| 6 | Shared stage-progress UI (brief Jobs, section headers, global Jobs, Logs); `artifact_steps` no longer copies parent terminal state | done (Step k/4, per-stage rows, one spinner, activity labels, global Jobs `stage_label`, `intel_brief.stage` log events; screens in `docs/screens/intel-sequential/`) | 4b |
 | 7 | Docs/diagrams | pending | 5 |
 | 8.1 | One chain under repeated visits/reopen/recovery; one active stage; order 1→2→3→4; zero work on unchanged completed | partial | 1 · admission/claim level (`repeated_admission_*`, `overlapping_drainers_*`); model-request counts in phase 3 |
-| 8.4 | Stage-3 failure keeps 1/2 completed, 3 failed, 4 blocked; Retry runs 3 only | partial | 1 · task/state level; all-surfaces UI in phase 4 |
+| 8.4 | Stage-3 failure keeps 1/2 completed, 3 failed, 4 blocked; Retry runs 3 only | done | 1 + 4b (`intel_sequential_stage_screens` asserts brief Jobs, panes, global Jobs) |
 | 8.5 | Expiry-selection→renewal→reaper interleaving; crash/reclaim; stale late output; cancellation; overlapping drainers | partial | 1 · done for those; >120s live processing, SQLite contention, publication delay, heartbeat-through-ack: phase 3 |

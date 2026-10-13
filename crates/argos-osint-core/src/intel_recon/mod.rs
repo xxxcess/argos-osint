@@ -4,6 +4,7 @@ mod actor_review;
 mod body;
 pub(crate) mod body_filter;
 mod brain;
+pub mod brief_fidelity;
 pub mod brief_pipeline;
 pub mod brief_stages;
 mod briefing_view;

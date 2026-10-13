@@ -85,6 +85,8 @@ struct Mock {
     hang: HashSet<String>,
     delay: Option<Duration>,
     related: Vec<AtlasArticleRow>,
+    assessed: Arc<Mutex<usize>>,
+    forced: bool,
 }
 
 fn claims_ok() -> String {
@@ -159,15 +161,39 @@ impl StageBackend for Mock {
         &'a mut self,
         _job: &'a str,
         _a: &'a AtlasArticleRow,
+        force: bool,
         _c: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<CleanArtifact>> {
         Box::pin(async move {
             self.prepared += 1;
+            self.forced |= force;
             let raw = self.body.clone().ok_or_else(|| anyhow!("story missing"))?;
             let mut artifact =
                 clean_article(&raw, TITLE, DESC, "https://example.test/a1", &[], None).await;
             artifact.acquisition_complete = self.complete;
             Ok(artifact)
+        })
+    }
+    fn assess<'a>(
+        &'a mut self,
+        _task: &'a str,
+        items: Vec<crate::intel_recon::brief_fidelity::FidelityItem>,
+        _c: &'a Arc<AtomicBool>,
+    ) -> BoxFut<'a, Result<HashMap<String, String>>> {
+        Box::pin(async move {
+            *self.assessed.lock().unwrap() += items.len();
+            assert!(items.len() <= crate::intel_recon::brief_fidelity::BATCH);
+            Ok(items
+                .into_iter()
+                .map(|i| {
+                    let label = if i.passages.is_empty() || i.text.contains("UNFAITHFUL") {
+                        "insufficient"
+                    } else {
+                        "faithful"
+                    };
+                    (i.id, label.to_string())
+                })
+                .collect())
         })
     }
     fn related(&mut self, _a: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>> {
@@ -758,4 +784,86 @@ fn input_revision_tracks_metadata_and_roles() {
     let mut b = a.clone();
     b.description.push_str(" Update.");
     assert_ne!(base, input_revision(&b, &s));
+}
+
+// Fidelity: batched, scoped, cached; non-faithful items are withheld.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fidelity_batches_withhold_unfaithful_items_and_reuse_receipts() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.responses.insert("intel_brief_claims".into(), vec![r#"{"claims":[{"id":"c1","text":"The operator said storms forced the suspension.","evidence_ids":["d1"]},{"id":"c2","text":"UNFAITHFUL unions admitted staffing caused it.","evidence_ids":["d2"]}]}"#.into()]);
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let store = Store::open(&db.path).unwrap();
+    let claims = stage_output(&store, &job, "intel_brief_claims").unwrap();
+    assert_eq!(claims["claims"].as_array().unwrap().len(), 1);
+    assert_eq!(claims["withheld"], 1);
+    assert_eq!(claims["claims"][0]["fidelity"], "faithful");
+    let first = *mock.assessed.lock().unwrap();
+    assert_eq!(first, 3, "2 claims + 1 inference");
+    // Same items again: cached receipts, no new decisions.
+    let items = vec![crate::intel_recon::brief_fidelity::FidelityItem {
+        id: "c1".into(),
+        kind: "claim",
+        text: "The operator said storms forced the suspension.".into(),
+        passages: vec!["The operator said storms forced the suspension.".into()],
+    }];
+    drop(store);
+    let labels = assess_cached(&db.path, &mut mock, "t", items, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(labels["c1"], "faithful");
+    assert_eq!(*mock.assessed.lock().unwrap(), first);
+}
+
+#[test]
+fn fidelity_adapter_rejects_missing_extra_and_invalid_labels() {
+    use crate::intel_recon::brief_fidelity::{FidelityDecisions, FidelityItem};
+    use crate::recon::model_exec::DecisionsAdapter;
+    let items = vec![FidelityItem {
+        id: "c1".into(),
+        kind: "claim",
+        text: "x".into(),
+        passages: vec!["x".into()],
+    }];
+    let a = FidelityDecisions { items: &items };
+    assert!(a
+        .parse_chat(r#"{"items":[{"id":"c1","fidelity":"faithful"}]}"#)
+        .is_ok());
+    assert!(a.parse_chat(r#"{"items":[]}"#).is_err());
+    assert!(a
+        .parse_chat(
+            r#"{"items":[{"id":"c1","fidelity":"faithful"},{"id":"c9","fidelity":"faithful"}]}"#
+        )
+        .is_err());
+    assert!(a
+        .parse_chat(r#"{"items":[{"id":"c1","fidelity":"probably"}]}"#)
+        .is_err());
+}
+
+// Reload goes through the chain: forced re-acquisition, later visits attach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reload_supersedes_with_forced_body_and_visits_attach() {
+    let db = db();
+    let settings = crate::provider::SettingsFile::default();
+    let store = Store::open(&db.path).unwrap();
+    let a = store.atlas_article("fixture", "a1").unwrap().unwrap();
+    let first = ensure_intel_brief_pipeline(&store, &a, &settings).unwrap();
+    let reload = reload_intel_brief_pipeline(&store, &a, &settings).unwrap();
+    assert_ne!(first, reload);
+    assert_eq!(
+        ensure_intel_brief_pipeline(&store, &a, &settings).unwrap(),
+        reload
+    );
+    drop(store);
+    let mut mock = Mock::happy();
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    assert!(mock.forced);
+    assert_eq!(mock.prepared, 1, "superseded chain never ran");
 }

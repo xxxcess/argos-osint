@@ -64,7 +64,11 @@ pub fn ensure_chain(conn: &Connection, inputs: &BriefInputs, now: &str) -> Resul
     )?;
     if let Some((job, revision, state)) = &active {
         // Unchanged inputs: attach (completed chains issue no new requests).
-        if *revision == inputs.input_revision {
+        // A Reload revision (`<base>:reload:<at>`) is the same inputs plus a
+        // forced re-acquisition; ordinary visits attach to it.
+        if *revision == inputs.input_revision
+            || revision.starts_with(&format!("{}:reload:", inputs.input_revision))
+        {
             tx.commit()?;
             return Ok(job.clone());
         }
@@ -108,7 +112,7 @@ pub fn ensure_chain(conn: &Connection, inputs: &BriefInputs, now: &str) -> Resul
                 dedupe_key: String::new(),
                 priority: index as i64,
                 input_ref: if index == 0 {
-                    serde_json::json!({"article_id":inputs.article_id}).to_string()
+                    serde_json::json!({"article_id":inputs.article_id,"force_body":inputs.input_revision.contains(":reload:")}).to_string()
                 } else {
                     String::new()
                 },
@@ -421,7 +425,23 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
                 Some((n, _)) => format!("Completed · {n} item{}", if n == 1 { "" } else { "s" }),
                 None => "Completed".into(),
             },
-            "running" => "Running".into(),
+            "running" => {
+                let activity: Option<String> = conn
+                    .query_row(
+                        "SELECT value FROM app_state WHERE key=?1",
+                        [format!(
+                            "intel-brief-activity:{}",
+                            task_id(job_id, operation)
+                        )],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .unwrap_or(None);
+                match activity.filter(|a| !a.is_empty()) {
+                    Some(a) => format!("Running · {a}"),
+                    None => "Running".into(),
+                }
+            }
             "retry_scheduled" => "Running · retry scheduled".into(),
             "failed" => format!("Failed · {}", short(&error)),
             "cancelled" => "Cancelled".into(),
@@ -444,6 +464,33 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
         });
     }
     Ok(out)
+}
+
+/// Committed stage outputs of a chain, keyed by operation.
+pub fn stage_outputs(
+    conn: &Connection,
+    job_id: &str,
+) -> Result<std::collections::HashMap<String, serde_json::Value>> {
+    let mut stmt =
+        conn.prepare("SELECT stage,output_json FROM intel_brief_stage_outputs WHERE job_id=?1")?;
+    let rows = stmt
+        .query_map([job_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(stage, json)| Some((stage, serde_json::from_str(&json).ok()?)))
+        .collect())
+}
+
+/// Record the running stage's current activity for every surface.
+pub fn set_activity(conn: &Connection, task: &str, activity: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO app_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![format!("intel-brief-activity:{task}"), activity],
+    )?;
+    Ok(())
 }
 
 /// Active chain job for an article, if any (completed chains count as current).

@@ -22,6 +22,8 @@ use super::validate::{validate_article_body, BodyQuality};
 pub const TRANSFORM: &str = "intel-clean-body-v1";
 /// Maximum Classifier blocks per sequential batch.
 pub const BATCH: usize = 12;
+/// Spec §4 completion ceiling per cleanup batch (chat fallback).
+pub const CLEANUP_TOKENS: u32 = 512;
 /// Neighbouring context characters supplied (not decided) per side.
 const CONTEXT_CHARS: usize = 200;
 
@@ -343,7 +345,8 @@ impl BlockDecider for RuntimeDecider<'_> {
                 self.url,
                 batch.first().map(|b| b.id).unwrap_or(0)
             );
-            let scope = crate::recon::model_exec::OperationScope::new(&operation_id, "classifier");
+            let scope = crate::recon::model_exec::OperationScope::new(&operation_id, "classifier")
+                .with_completion_tokens(CLEANUP_TOKENS);
             let (ranges, _) = crate::recon::model_exec::execute_decisions_or_chat(
                 &self.runtime.auth,
                 &self.runtime.settings,

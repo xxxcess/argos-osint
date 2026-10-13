@@ -1478,6 +1478,7 @@ where
 
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
+    let stage_tokens = scope.completion_tokens;
     let mut attempt_counter = 0u32;
     let on_event_shared = on_event.clone();
     let op_id = scope.operation_id.to_string();
@@ -1720,8 +1721,9 @@ where
                         "compiled assessment exceeds byte budget",
                     )));
                 }
-                let rep = if insight_contract {
-                    // Bounded decision fallback keeps the ordinary policy.
+                let rep = if insight_contract || stage_tokens.is_some() {
+                    // Bounded decision fallback keeps the ordinary policy; a
+                    // stage policy (e.g. 512-token cleanup batches) overrides it.
                     provider_attempt::attempt_full(
                         &secret,
                         &chat_messages,
@@ -1729,7 +1731,7 @@ where
                         Deadlines::native_decision(),
                         None,
                         None,
-                        Some(2048),
+                        Some(stage_tokens.unwrap_or(2048)),
                     )
                     .await
                 } else {

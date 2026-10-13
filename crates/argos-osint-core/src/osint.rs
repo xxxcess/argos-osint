@@ -2287,6 +2287,29 @@ pub struct ProviderKeys {
 }
 
 impl ProviderKeys {
+    /// Keys from the configured provider settings (primary + fallback).
+    pub fn from_settings(settings: &crate::provider::SettingsFile) -> Self {
+        Self {
+            firecrawl: settings.provider_key("firecrawl"),
+            firecrawl_fallback: settings.provider_fallback_key("firecrawl"),
+            hunter: settings.provider_key("hunter"),
+            hunter_fallback: settings.provider_fallback_key("hunter"),
+            sociavault: settings.provider_key("sociavault"),
+            sociavault_fallback: settings.provider_fallback_key("sociavault"),
+            newsapi: settings.provider_key("newsapi"),
+            newsapi_fallback: settings.provider_fallback_key("newsapi"),
+            courtlistener: settings.provider_key("courtlistener"),
+            courtlistener_fallback: settings.provider_fallback_key("courtlistener"),
+            gnews: settings.provider_key("gnews"),
+            gnews_fallback: settings.provider_fallback_key("gnews"),
+            newsdata: settings.provider_key("newsdata"),
+            newsdata_fallback: settings.provider_fallback_key("newsdata"),
+            currents: settings.provider_key("currents"),
+            currents_fallback: settings.provider_fallback_key("currents"),
+            whoxy: settings.provider_key("whoxy"),
+            whoxy_fallback: settings.provider_fallback_key("whoxy"),
+        }
+    }
     /// Primary key and second-account key for a keyed provider.
     pub fn pair(&self, provider: &str) -> (&str, &str) {
         match provider {

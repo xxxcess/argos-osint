@@ -64,6 +64,7 @@ pub trait StageBackend: Send {
     /// Stage 1: retrieve (or reuse) and clean the article body.
     fn prepare_body<'a>(
         &'a mut self,
+        job_id: &'a str,
         article: &'a AtlasArticleRow,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<CleanArtifact>>;
@@ -597,7 +598,7 @@ async fn execute(
     };
     match claimed.operation.as_str() {
         "intel_brief_body" => {
-            let artifact = backend.prepare_body(&article, cancel).await?;
+            let artifact = backend.prepare_body(&job, &article, cancel).await?;
             stage_one_admissible(&artifact, artifact.acquisition_complete)?;
             let words = artifact.markdown.split_whitespace().count();
             let reason = if artifact.diagnostics.is_empty() {
@@ -953,7 +954,6 @@ pub async fn drain(
 /// per-stage completion ceiling.
 pub struct RuntimeBackend {
     pub db_path: PathBuf,
-    pub job_id: String,
     pub keys: crate::osint::ProviderKeys,
     pub auth: crate::secrets::AuthFile,
     pub settings: crate::provider::SettingsFile,
@@ -963,12 +963,13 @@ pub struct RuntimeBackend {
 impl RuntimeBackend {
     fn job_runtime(
         &self,
+        job_id: &str,
         article: &AtlasArticleRow,
         cancel: &Arc<AtomicBool>,
     ) -> super::worker::JobRuntime {
         super::worker::JobRuntime {
             db_path: self.db_path.clone(),
-            job_id: self.job_id.clone(),
+            job_id: job_id.to_string(),
             article_title: article.title.clone(),
             article_url: article.url.clone(),
             article_preview: article.description.clone(),
@@ -1003,6 +1004,7 @@ pub fn load_clean_artifact(
 impl StageBackend for RuntimeBackend {
     fn prepare_body<'a>(
         &'a mut self,
+        job_id: &'a str,
         article: &'a AtlasArticleRow,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<CleanArtifact>> {
@@ -1041,7 +1043,7 @@ impl StageBackend for RuntimeBackend {
                 let store = Store::open(&self.db_path)?;
                 store.clear_article_body_content(&body_id)?;
             }
-            let runtime = self.job_runtime(article, cancel);
+            let runtime = self.job_runtime(job_id, article, cancel);
             super::body::fetch_article_body_with_runtime(
                 &self.db_path,
                 &body_id,
@@ -1119,6 +1121,58 @@ impl StageBackend for RuntimeBackend {
             Ok(text)
         })
     }
+}
+
+/// Production construction from the configured settings.
+impl RuntimeBackend {
+    pub fn load(db_path: &Path) -> Self {
+        let settings = crate::provider::SettingsFile::load().unwrap_or_default();
+        Self {
+            db_path: db_path.to_path_buf(),
+            keys: crate::osint::ProviderKeys::from_settings(&settings),
+            auth: crate::secrets::AuthFile::load().unwrap_or_default(),
+            user_agent: Some(settings.osint_user_agent.clone()).filter(|ua| !ua.trim().is_empty()),
+            settings,
+        }
+    }
+}
+
+/// Input identity: article metadata, captured role chain and contract.
+/// Changing any of them supersedes the active chain.
+pub fn input_revision(
+    article: &AtlasArticleRow,
+    settings: &crate::provider::SettingsFile,
+) -> String {
+    crate::nlp::cache::hash(
+        &json!({
+            "contract": brief_pipeline::CONTRACT,
+            "title": article.title,
+            "description": article.description,
+            "url": article.url,
+            "published_at": article.published_at,
+            "roles": serde_json::to_value(&settings.defaults).unwrap_or(Value::Null),
+        })
+        .to_string(),
+    )
+}
+
+/// The single idempotent entry point for opening a brief, body-ready events
+/// and recovery: attach to (or admit) this article's preparation chain.
+pub fn ensure_intel_brief_pipeline(
+    store: &Store,
+    article: &AtlasArticleRow,
+    settings: &crate::provider::SettingsFile,
+) -> Result<String> {
+    brief_pipeline::ensure_chain(
+        &store.conn,
+        &brief_pipeline::BriefInputs {
+            article_id: article.id.clone(),
+            input_revision: input_revision(article, settings),
+            role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
+            title: article.title.clone(),
+        },
+        &now(),
+    )
 }
 
 #[cfg(test)]

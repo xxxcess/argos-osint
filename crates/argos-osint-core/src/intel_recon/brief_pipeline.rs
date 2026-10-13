@@ -196,10 +196,136 @@ pub fn commit_stage(
             "UPDATE intel_brief_runs SET state='completed',updated_at=?2 WHERE job_id=?1",
             params![claimed.job_id, now],
         )?;
+        publish(&tx, &claimed.job_id, output_json, now)?;
     }
     tasks::refresh_job_state(&tx, &claimed.job_id, now)?;
     tx.commit()?;
     Ok(true)
+}
+
+/// Final Stage-4 publication, inside the fenced commit transaction: the
+/// combined validated snapshot (claims, inferences, leads) and its leads rows.
+/// The previous publication stays until this succeeds; an older generation
+/// never overwrites a newer one. Separate from canonical report snapshots, so
+/// a completed Recon report keeps precedence.
+fn publish(tx: &Connection, job_id: &str, links_json: &str, now: &str) -> Result<()> {
+    let (article_id, generation): (String, i64) = tx.query_row(
+        "SELECT article_id,generation FROM intel_brief_runs WHERE job_id=?1",
+        [job_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let output = |op: &str| -> Result<serde_json::Value> {
+        let raw: String = tx.query_row(
+            "SELECT output_json FROM intel_brief_stage_outputs WHERE task_id=?1",
+            [task_id(job_id, op)],
+            |r| r.get(0),
+        )?;
+        Ok(serde_json::from_str(&raw)?)
+    };
+    let body = output("intel_brief_body")?;
+    let claims = output("intel_brief_claims")?;
+    let inferences = output("intel_brief_inferences")?;
+    let links: serde_json::Value = serde_json::from_str(links_json)?;
+    let snapshot = serde_json::json!([body["content_hash"], claims, inferences, links]).to_string();
+    let written = tx.execute(
+        "INSERT INTO intel_brief_publications(article_id,job_id,generation,contract,body_hash,snapshot_hash,claims_json,inferences_json,leads_json,published_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+         ON CONFLICT(article_id) DO UPDATE SET job_id=excluded.job_id,generation=excluded.generation,contract=excluded.contract,body_hash=excluded.body_hash,snapshot_hash=excluded.snapshot_hash,claims_json=excluded.claims_json,inferences_json=excluded.inferences_json,leads_json=excluded.leads_json,published_at=excluded.published_at
+         WHERE excluded.generation>=intel_brief_publications.generation",
+        params![
+            article_id, job_id, generation, CONTRACT,
+            body["content_hash"].as_str().unwrap_or(""),
+            crate::nlp::cache::hash(&snapshot),
+            claims.to_string(), inferences.to_string(), links["leads"].to_string(), now
+        ],
+    )?;
+    if written == 0 {
+        return Ok(());
+    }
+    tx.execute(
+        "DELETE FROM intel_inference_article_leads WHERE article_id=?1 AND source_generation<=?2",
+        params![article_id, generation],
+    )?;
+    let texts: std::collections::HashMap<String, String> = inferences["inferences"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| {
+            Some((
+                i["id"].as_str()?.to_string(),
+                i["text"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    for lead in links["leads"].as_array().into_iter().flatten() {
+        let inference = lead["inference_id"].as_str().unwrap_or("");
+        let candidate = lead["article_id"].as_str().unwrap_or("");
+        tx.execute(
+            "INSERT OR REPLACE INTO intel_inference_article_leads(id,article_id,source_generation,job_id,inference_id,inference_text,candidate_article_id,candidate_run_id,candidate_metadata_revision,interpretation,verification_needed,citations_json,created_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                format!("{article_id}:{generation}:{inference}:{candidate}"),
+                article_id, generation, job_id, inference,
+                texts.get(inference).cloned().unwrap_or_default(),
+                candidate,
+                lead["article_run_id"].as_str().unwrap_or(""),
+                lead["metadata_revision"].as_str().unwrap_or(""),
+                lead["why"].as_str().unwrap_or(""),
+                lead["verification_needed"].as_str().unwrap_or(""),
+                lead["metadata_evidence"].to_string(),
+                now
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// One published lead row for presentation ("Potential corroboration").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishedLead {
+    pub inference_id: String,
+    pub inference_text: String,
+    pub candidate_article_id: String,
+    pub candidate_run_id: String,
+    pub interpretation: String,
+    pub verification_needed: String,
+}
+
+pub fn published_leads(conn: &Connection, article_id: &str) -> Result<Vec<PublishedLead>> {
+    let mut stmt = conn.prepare(
+        "SELECT inference_id,inference_text,candidate_article_id,candidate_run_id,interpretation,verification_needed FROM intel_inference_article_leads WHERE article_id=?1 ORDER BY source_generation DESC, rowid",
+    )?;
+    let rows = stmt
+        .query_map([article_id], |r| {
+            Ok(PublishedLead {
+                inference_id: r.get(0)?,
+                inference_text: r.get(1)?,
+                candidate_article_id: r.get(2)?,
+                candidate_run_id: r.get(3)?,
+                interpretation: r.get(4)?,
+                verification_needed: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Published brief (claims/inferences JSON) for an article, if any.
+pub fn published_brief(
+    conn: &Connection,
+    article_id: &str,
+) -> Result<Option<(i64, serde_json::Value, serde_json::Value)>> {
+    let row: Option<(i64, String, String)> = conn
+        .query_row(
+            "SELECT generation,claims_json,inferences_json FROM intel_brief_publications WHERE article_id=?1",
+            [article_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((g, c, i)) => Some((g, serde_json::from_str(&c)?, serde_json::from_str(&i)?)),
+        None => None,
+    })
 }
 
 /// Explicit Retry: resume the failed stage only, preserving completed

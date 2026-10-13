@@ -1151,6 +1151,10 @@ pub struct App {
     /// Keyboard/mouse focus inside the Recon configuration popup.
     pub intel_recon_focus: IntelReconFocus,
     pub(crate) intel_body_running: HashSet<String>,
+    /// Active Intel brief preparation chain for the open article.
+    pub(crate) intel_brief_job: Option<String>,
+    /// Shared stage views (Full article → Claims → Inferences → Links).
+    pub(crate) intel_brief_stages: Vec<intel_recon::brief_pipeline::StageView>,
     /// Article ids whose cleaned-body insight re-extract is still in flight.
     pub(crate) intel_insights_running: HashSet<String>,
     pub(crate) intel_links_reviewing: HashSet<String>,
@@ -1589,6 +1593,8 @@ impl App {
             intel_recon_enabled: HashMap::new(),
             intel_recon_focus: IntelReconFocus::Tab(0),
             intel_body_running: HashSet::new(),
+            intel_brief_job: None,
+            intel_brief_stages: Vec::new(),
             intel_insights_running: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
             intel_insight_lifecycle: "legacy/unassessed".into(),
@@ -1703,6 +1709,9 @@ impl App {
         self.dashboards_at = Some(Instant::now());
         if first {
             let _ = self.store.prune_events(super::logs::RETENTION_HOURS);
+        }
+        if self.module == Some(ModuleId::Intel) && self.intel_page == IntelPage::Briefing {
+            self.refresh_intel_brief_stages();
         }
         match self.module {
             Some(ModuleId::Logs) => self.reload_logs(),
@@ -3790,17 +3799,21 @@ impl App {
         self.scrolls.intel_extracted = 0;
         self.refresh_intel_briefing();
         self.sync_intel_brief_task_ui();
-        let _ = argos_osint_core::investigation::insight_persist::schedule_article_refresh(
+        // One idempotent preparation chain owns retrieval, cleanup, Claims,
+        // Inferences and Links; the background brief runner executes it.
+        // Mode classification is lazy (Recon configuration).
+        match intel_recon::brief_stages::ensure_intel_brief_pipeline(
             &self.store,
             &article,
             &self.settings,
-            true,
-        );
-        self.ensure_article_body_fetch(false);
-        // Keep an in-flight classifier result; only re-queue when idle for this article.
-        if !(self.intel_mode_classifying && self.intel_recon_recommended_for == article.id) {
-            self.queue_intel_recon_mode_classify();
+        ) {
+            Ok(job) => self.intel_brief_job = Some(job),
+            Err(error) => {
+                self.intel_brief_job = None;
+                self.intel_body_message = format!("Brief preparation unavailable: {error}");
+            }
         }
+        self.refresh_intel_brief_stages();
         self.queue_intel_links_explanation();
         self.set_focus(Target::Button(ButtonId::IntelReports));
         self.status = format!("Brief · {}", article.title);
@@ -3845,6 +3858,23 @@ impl App {
             return Ok("No extraction job".into());
         };
         self.open_job(&progress.job_id)
+    }
+
+    /// Reload the shared stage views of the current brief chain; when a
+    /// stage committed since the last poll, reload the briefing content.
+    pub(crate) fn refresh_intel_brief_stages(&mut self) -> bool {
+        let Some(job) = self.intel_brief_job.clone() else {
+            self.intel_brief_stages.clear();
+            return false;
+        };
+        let views = intel_recon::brief_pipeline::stage_views(self.store.connection(), &job)
+            .unwrap_or_default();
+        let changed = views != self.intel_brief_stages;
+        self.intel_brief_stages = views;
+        if changed {
+            self.refresh_intel_briefing();
+        }
+        changed
     }
 
     fn refresh_intel_briefing(&mut self) {
@@ -4079,26 +4109,7 @@ impl App {
     }
 
     fn osint_provider_keys(&self) -> osint::ProviderKeys {
-        osint::ProviderKeys {
-            firecrawl: self.settings.provider_key("firecrawl"),
-            firecrawl_fallback: self.settings.provider_fallback_key("firecrawl"),
-            hunter: self.settings.provider_key("hunter"),
-            hunter_fallback: self.settings.provider_fallback_key("hunter"),
-            sociavault: self.settings.provider_key("sociavault"),
-            sociavault_fallback: self.settings.provider_fallback_key("sociavault"),
-            newsapi: self.settings.provider_key("newsapi"),
-            newsapi_fallback: self.settings.provider_fallback_key("newsapi"),
-            courtlistener: self.settings.provider_key("courtlistener"),
-            courtlistener_fallback: self.settings.provider_fallback_key("courtlistener"),
-            gnews: self.settings.provider_key("gnews"),
-            gnews_fallback: self.settings.provider_fallback_key("gnews"),
-            newsdata: self.settings.provider_key("newsdata"),
-            newsdata_fallback: self.settings.provider_fallback_key("newsdata"),
-            currents: self.settings.provider_key("currents"),
-            currents_fallback: self.settings.provider_fallback_key("currents"),
-            whoxy: self.settings.provider_key("whoxy"),
-            whoxy_fallback: self.settings.provider_fallback_key("whoxy"),
-        }
+        osint::ProviderKeys::from_settings(&self.settings)
     }
 
     fn ensure_article_body_fetch(&mut self, force_refresh: bool) {
@@ -4249,6 +4260,12 @@ impl App {
                 .insert(mode.as_str().to_string(), keys);
         }
         self.scrolls.popup = 0;
+        // Lazy: classify the mode only when the Recon configuration opens.
+        if let Some(article) = self.intel_articles.get(self.intel_sel) {
+            if !(self.intel_mode_classifying && self.intel_recon_recommended_for == article.id) {
+                self.queue_intel_recon_mode_classify();
+            }
+        }
         self.overlay = Overlay::IntelRecon;
         self.set_focus(Target::IntelReconTab(tab));
         let mode = self.intel_recon_mode();
@@ -5448,7 +5465,6 @@ impl App {
                         .flatten();
                     if insights_done || is_retrieval_ready {
                         self.refresh_intel_briefing();
-                        self.queue_intel_recon_mode_classify();
                         self.queue_intel_links_explanation();
                     }
                 }
@@ -7519,6 +7535,17 @@ impl App {
                 return;
             }
             ButtonId::IntelBodyRetry | ButtonId::IntelBodyRefresh => {
+                if let Some(job) = self.intel_brief_job.clone() {
+                    if let Ok(Some(_)) = intel_recon::brief_pipeline::retry_stage(
+                        self.store.connection(),
+                        &job,
+                        &chrono::Utc::now().to_rfc3339(),
+                    ) {
+                        self.refresh_intel_brief_stages();
+                        self.status = "Retrying failed brief stage; completed stages kept".into();
+                        return;
+                    }
+                }
                 self.ensure_article_body_fetch(true);
                 return;
             }
@@ -10057,6 +10084,8 @@ mod tests {
             intel_recon_enabled: HashMap::new(),
             intel_recon_focus: IntelReconFocus::Tab(0),
             intel_body_running: HashSet::new(),
+            intel_brief_job: None,
+            intel_brief_stages: Vec::new(),
             intel_insights_running: HashSet::new(),
             intel_links_reviewing: HashSet::new(),
             intel_insight_lifecycle: "legacy/unassessed".into(),
@@ -13462,6 +13491,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn opening_a_brief_admits_one_preparation_chain_without_competing_work() {
+        let mut app = app();
+        let (_, article) = related_ui_fixture(&mut app);
+        app.select(ModuleId::Intel.index());
+        app.intel_articles = vec![article.clone()];
+        app.intel_sel = 0;
+        app.open_intel_briefing();
+        let job = app.intel_brief_job.clone().expect("chain admitted");
+        let labels: Vec<_> = app.intel_brief_stages.iter().map(|v| v.label).collect();
+        assert_eq!(labels, ["Full article", "Claims", "Inferences", "Links"]);
+        assert_eq!(app.intel_brief_stages[1].row, "Queued · after Full article");
+        // Reopen attaches to the same chain.
+        app.open_intel_briefing();
+        assert_eq!(app.intel_brief_job.as_deref(), Some(job.as_str()));
+        // Mode classification is lazy and no separate refresh/body job exists.
+        assert!(!app.intel_mode_classifying);
+        let competing: i64 = app
+            .store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM argos_tasks WHERE operation IN ('insight_refresh','article_body')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(competing, 0);
+        assert!(!app.intel_body_running.contains(&article.id));
     }
 
     #[test]

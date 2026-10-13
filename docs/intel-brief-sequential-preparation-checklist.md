@@ -36,13 +36,17 @@ Legend: **done** / **partial** / **deferred** / pending. Phases follow §7's ord
 | 4 | Long bodies: ordered windows within Stage 3 carrying ≤5 proposals, later windows revise, five total | done | 3 |
 | 4 | Stage 4 local shortlist (self excluded, canonical URL + syndicated-title dedupe, cap 12); no-inference / no-candidate finishes locally | done | 3 |
 | 4 | Batched Claim-assessor fidelity decisions inside Stages 2/3 | deferred | 4–5 |
-| 4 | `intel_inference_article_leads` persistence + "Potential corroboration" rendering | deferred (leads are in the Stage-4 output) | 4 |
+| 4 | `intel_inference_article_leads` persistence | done (schema 36, written in the Stage-4 publication) | 4a |
+| 4 | "Potential corroboration" rendering in Links | deferred | 4b |
 | 5 | Heartbeat from claim through commit/ack on a light connection with bounded busy retry; renewal failures + heartbeat age recorded | done (`Store::open_light`, `intel-brief-heartbeat:*`) | 3 |
 | 5 | Cancellation / deletion / lost lease drop the in-flight request; nothing is written | done | 3 |
 | 5 | Stage failure fails only that stage (model chain is the single retry owner); Retry resumes it | done | 3 |
 | 5 | Brief-owned body retrieval does not schedule a competing article refresh | done (`commit_refined_body`) | 3 |
-| 5 | Final Stage-4 publication of the combined canonical snapshot + index outbox | deferred | 4 |
-| 2 | `ensure_intel_brief_pipeline` wired into `open_intel_briefing` / runtime drainer | deferred (TUI wiring) | 4 |
+| 5 | Final Stage-4 publication: combined snapshot (`intel_brief_publications`) + leads in the fenced Stage-4 commit; previous kept until success; older generation never overwrites newer; separate from report snapshots | done | 4a |
+| 5 | Canonical Brain derivations + index outbox from the brief snapshot | deferred: needs the Claim-assessor fidelity batches (canonical publication requires assessed items) | 4b |
+| 2 | `ensure_intel_brief_pipeline` wired into `open_intel_briefing`; no separate refresh/body job on visit; dedicated `argos-intel-brief` runner (multi-thread runtime) in `WorkerPool::spawn_default`; UI polls stage views each tick and reloads on change; Retry resumes the failed stage | done | 4a |
+| 2 | Mode classification lazy (Recon configuration) | done | 4a |
+| 2 | Reload (force refresh) through the chain instead of the legacy body job | deferred | 4b |
 | 3 | Synthesis body-rewrite functions removed | done | 3 |
 | 8.1 | One chain, 1→2→3→4 order, scoped inputs, zero requests on unchanged reopen | done (`brief_stages_tests.rs`) | 3 |
 | 8.2 | Validator rejections + UTF-8 spans + shortlist dedupe | done | 3 |

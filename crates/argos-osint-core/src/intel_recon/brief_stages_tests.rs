@@ -157,6 +157,7 @@ fn validate_article_body_md(raw: &str) -> String {
 impl StageBackend for Mock {
     fn prepare_body<'a>(
         &'a mut self,
+        _job: &'a str,
         _a: &'a AtlasArticleRow,
         _c: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<CleanArtifact>> {
@@ -690,4 +691,71 @@ fn shortlist_excludes_source_dedupes_syndication_and_caps_at_twelve() {
     let list = shortlist(&source, related);
     assert_eq!(list.len(), MAX_CANDIDATES);
     assert!(list.iter().all(|c| c.article.id.starts_with('x')));
+}
+
+// Final Stage-4 publication: combined snapshot + leads, newer generation wins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stage_four_publishes_snapshot_and_leads_and_new_inputs_replace_them() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    // Nothing is published before Stage 4 commits.
+    let mut partial = Mock::happy();
+    partial.fail.insert("intel_brief_links".into());
+    drain(&db.path, "w1", &mut partial, &cancel, &cfg())
+        .await
+        .unwrap();
+    {
+        let store = Store::open(&db.path).unwrap();
+        assert!(brief_pipeline::published_brief(&store.conn, "a1")
+            .unwrap()
+            .is_none());
+        brief_pipeline::retry_stage(&store.conn, &job, &now()).unwrap();
+    }
+    let mut mock = Mock::happy();
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let store = Store::open(&db.path).unwrap();
+    let (generation, claims, inferences) = brief_pipeline::published_brief(&store.conn, "a1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(generation, 1);
+    assert_eq!(claims["claims"].as_array().unwrap().len(), 2);
+    assert_eq!(inferences["inferences"].as_array().unwrap().len(), 1);
+    let leads = brief_pipeline::published_leads(&store.conn, "a1").unwrap();
+    assert_eq!(leads.len(), 1);
+    assert_eq!(leads[0].candidate_article_id, "a2");
+    assert!(leads[0].interpretation.contains("still needs verification"));
+    assert!(leads[0].inference_text.contains("insurance lapse"));
+    // Changed inputs: a new generation replaces the publication and its leads.
+    ensure_chain(&store.conn, &inputs("r2"), &now()).unwrap();
+    drop(store);
+    let mut next = Mock::happy();
+    next.related.clear();
+    drain(&db.path, "w1", &mut next, &cancel, &cfg())
+        .await
+        .unwrap();
+    let store = Store::open(&db.path).unwrap();
+    assert_eq!(
+        brief_pipeline::published_brief(&store.conn, "a1")
+            .unwrap()
+            .unwrap()
+            .0,
+        2
+    );
+    assert!(brief_pipeline::published_leads(&store.conn, "a1")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn input_revision_tracks_metadata_and_roles() {
+    let a = article("r", "a1", TITLE, DESC, "u");
+    let s = crate::provider::SettingsFile::default();
+    let base = input_revision(&a, &s);
+    assert_eq!(base, input_revision(&a, &s));
+    let mut b = a.clone();
+    b.description.push_str(" Update.");
+    assert_ne!(base, input_revision(&b, &s));
 }

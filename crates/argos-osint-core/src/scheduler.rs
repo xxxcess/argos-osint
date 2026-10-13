@@ -360,8 +360,41 @@ impl WorkerPool {
         vec![
             Self::spawn_index_drainer(db_path.clone(), owner.clone()),
             Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),
-            Self::spawn_insight_refresh_drainer(db_path, owner),
+            Self::spawn_insight_refresh_drainer(db_path.clone(), owner.clone()),
+            Self::spawn_intel_brief_drainer(db_path, owner),
         ]
+    }
+
+    /// Dedicated Intel brief stage runner. A multi-thread runtime keeps the
+    /// lease heartbeat independent of blocking SQLite work in a stage.
+    pub fn spawn_intel_brief_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let _ = std::thread::Builder::new()
+            .name("argos-intel-brief".into())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                let config = crate::intel_recon::brief_stages::ExecConfig::default();
+                while !flag.load(Ordering::Acquire) {
+                    let mut backend =
+                        crate::intel_recon::brief_stages::RuntimeBackend::load(&db_path);
+                    let _ = runtime.block_on(crate::intel_recon::brief_stages::drain(
+                        &db_path,
+                        &format!("{owner}:intel-brief"),
+                        &mut backend,
+                        &flag,
+                        &config,
+                    ));
+                    std::thread::sleep(Duration::from_millis(750));
+                }
+            });
+        Self { stop }
     }
 
     pub fn spawn_insight_refresh_drainer(db_path: std::path::PathBuf, owner: String) -> Self {

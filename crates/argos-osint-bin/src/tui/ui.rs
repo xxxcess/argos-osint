@@ -7417,7 +7417,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
         );
         // 4. links
         if layout.links_loading {
-            let phase = if intel_insights_loading(app) {
+            let phase = if intel_insights_loading(app) || intel_artifact_pending(app, "Links") {
                 "Extracting links"
             } else {
                 "Explaining links"
@@ -8132,7 +8132,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         }
     }
     let claims_md = extracted_claims_markdown(&buckets.facts);
-    let mut inferences_md = if buckets.inferences.is_empty() {
+    let inferences_md = if buckets.inferences.is_empty() {
         format!(
             "_{} · inferences withheld until evidence is ready_",
             app.intel_insight_lifecycle.replace('_', " ")
@@ -8140,9 +8140,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     } else {
         extracted_inferences_markdown(&buckets.inferences)
     };
-    if let Some(progress) = &app.intel_extraction_progress {
-        inferences_md = format!("{}\n\n{inferences_md}", progress.lines().join("\n"));
-    }
+    // Streamed progression lives in Background jobs, not in content panes.
     let actors_md = if buckets.actors.is_empty() {
         format!("_NLP {}_", app.intel_actor_state)
     } else {
@@ -8172,9 +8170,13 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         .collect::<Vec<_>>();
 
     let insights_loading = intel_insights_loading(app);
-    let claims_loading = insights_loading && buckets.facts.is_empty();
-    let inferences_loading = insights_loading && buckets.inferences.is_empty();
-    let links_loading = insights_loading || app.intel_links_reviewing.contains(&article.id);
+    let claims_loading =
+        (insights_loading || intel_artifact_pending(app, "Claims")) && buckets.facts.is_empty();
+    let inferences_loading = (insights_loading || intel_artifact_pending(app, "Insights"))
+        && buckets.inferences.is_empty();
+    let links_loading = insights_loading
+        || (intel_artifact_pending(app, "Links") && buckets.links.is_empty())
+        || app.intel_links_reviewing.contains(&article.id);
 
     let section_h = |lines_count: usize, loading: bool| -> u16 {
         let natural = (lines_count as u16).saturating_add(2);
@@ -8289,8 +8291,35 @@ fn draw_clipped_intel_loading(
     let Some((inner_vis, _)) = intersect_abs(viewport, inner) else {
         return;
     };
-    let label = format!("{} {phase}", super::anim::spinner());
-    draw_centered_loading_card(frame, inner_vis, &label, detail);
+    // Shared centered loading animation; streamed progression is shown in
+    // Background jobs instead of inside content panes.
+    let _ = detail;
+    frame.render_widget(Block::default().style(theme::text()), inner_vis);
+    super::anim::draw_centered(frame.buffer_mut(), inner_vis, phase, theme::dim());
+}
+
+/// Streamed progress for one artifact (Claims / Insights / Links) of the
+/// focused article's insight refresh.
+pub(crate) fn intel_artifact_progress<'a>(
+    app: &'a App,
+    artifact: &str,
+) -> Option<&'a argos_osint_core::investigation::insight_execution::ArtifactProgress> {
+    app.intel_extraction_progress
+        .as_ref()?
+        .artifacts
+        .iter()
+        .find(|a| a.artifact == artifact)
+}
+
+/// True while the artifact's content has not been published yet.
+pub(crate) fn intel_artifact_pending(app: &App, artifact: &str) -> bool {
+    intel_artifact_progress(app, artifact).is_some_and(|a| {
+        !(a.step.starts_with("Published")
+            || a.step.starts_with("Indexed")
+            || a.step.starts_with("Failed")
+            || a.step.starts_with("Cancelled")
+            || a.step.starts_with("Superseded"))
+    })
 }
 
 fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
@@ -8453,7 +8482,78 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
         )));
     }
 
+    // Per-artifact streamed progression (Claims, Insights, Links).
+    if let Some(progress) = app
+        .intel_extraction_progress
+        .as_ref()
+        .filter(|p| !p.artifacts.is_empty())
+    {
+        for artifact in &progress.artifacts {
+            let style = if artifact.live {
+                theme::accent()
+            } else {
+                theme::text()
+            };
+            let spin = if artifact.live || intel_artifact_pending(app, &artifact.artifact) {
+                format!("{} ", super::anim::spinner())
+            } else {
+                String::new()
+            };
+            // Compact step; the stall detail gets its own warning line.
+            let (step, stall) = match artifact.step.split_once(" · no model activity") {
+                Some((head, rest)) => (head, Some(rest.trim_start_matches(" for "))),
+                None => (artifact.step.as_str(), None),
+            };
+            // Waiting notes ("awaiting publication", "after claims") go on
+            // their own dim line so narrow panes keep the step readable.
+            let (step, note) = match step.split_once(" · ") {
+                Some((head, rest)) if rest.starts_with("awaiting") || rest.starts_with("after") => {
+                    (head, Some(rest))
+                }
+                _ => (step, None),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{spin}{} · {step}", artifact.artifact),
+                if stall.is_some() {
+                    theme::warn()
+                } else {
+                    style
+                }
+                .add_modifier(Modifier::BOLD),
+            )));
+            if let Some(note) = note {
+                lines.push(Line::from(Span::styled(format!("  {note}"), theme::dim())));
+            }
+            if let Some(age) = stall {
+                lines.push(Line::from(Span::styled(
+                    format!("  ⚠ no model activity for {age}"),
+                    theme::warn(),
+                )));
+            }
+            if artifact.live && !artifact.activity.is_empty() {
+                let age = progress
+                    .activity_age_secs
+                    .map(|s| format!(" · {s}s ago"))
+                    .unwrap_or_default();
+                lines.push(Line::from(Span::styled(
+                    format!("  Activity: {}{age}", artifact.activity),
+                    theme::dim(),
+                )));
+            }
+        }
+        if !progress.error.is_empty() && progress.state != "superseded" {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", progress.error),
+                theme::dim(),
+            )));
+        }
+    }
+
     // Persisted refresh and index state, loaded outside rendering.
+    let show_insights_summary = app
+        .intel_extraction_progress
+        .as_ref()
+        .is_none_or(|p| p.artifacts.is_empty());
     let (insights_title, insights_detail) = (
         if insights_running {
             format!(
@@ -8471,10 +8571,12 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
     } else {
         theme::text()
     };
-    lines.push(Line::from(Span::styled(
-        insights_title,
-        insights_style.add_modifier(Modifier::BOLD),
-    )));
+    if show_insights_summary {
+        lines.push(Line::from(Span::styled(
+            insights_title,
+            insights_style.add_modifier(Modifier::BOLD),
+        )));
+    }
     if let Some(detail) = insights_detail {
         lines.push(Line::from(Span::styled(
             format!("  {detail}"),

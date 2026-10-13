@@ -34,6 +34,160 @@ pub struct Progress {
     pub activity: String,
     /// Seconds since the last activity update, when known.
     pub activity_age_secs: Option<u64>,
+    /// Per-artifact progression (Claims, Insights, Links) for this task.
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactProgress>,
+}
+
+/// One analytical artifact's own progression inside an insight refresh.
+///
+/// Claims come from the extraction stage plus claim-kind assessment batches.
+/// Insights (inferences) and Links are produced by the *same* synthesis model
+/// call (one `InferenceWindow` per evidence window), then assessed in separate
+/// role-partitioned batches. Publication is atomic for all three, so
+/// Published/Indexed are shared.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactProgress {
+    /// "Claims", "Insights" or "Links".
+    pub artifact: String,
+    /// Canonical step (see [`status_step`]) or a waiting/validated note.
+    pub step: String,
+    /// True while this artifact owns the in-flight model request.
+    pub live: bool,
+    /// Live activity label (empty unless `live`).
+    pub activity: String,
+}
+
+/// Checkpoint facts needed to attribute the current stage to an artifact.
+#[derive(Clone, Debug, Default)]
+pub struct ArtifactFacts {
+    /// Any synthesis (inference/reconciliation) checkpoint exists.
+    pub synthesis_started: bool,
+    /// Assessment checkpoints: (artifact, state).
+    pub assessments: Vec<(&'static str, String)>,
+}
+
+fn assessment_artifact(window_id: &str) -> Option<&'static str> {
+    match window_id.split(',').next()?.split(':').next()? {
+        "claim" => Some("Claims"),
+        "inference" => Some("Insights"),
+        "link" => Some("Links"),
+        _ => None,
+    }
+}
+
+/// Pure attribution of a task's progress to Claims / Insights / Links.
+pub fn artifact_steps(p: &Progress, facts: &ArtifactFacts) -> Vec<ArtifactProgress> {
+    let names = ["Claims", "Insights", "Links"];
+    let shared = status_step(
+        &p.state,
+        &p.stage,
+        &p.activity,
+        p.activity_age_secs,
+        p.index_status.starts_with("Indexed"),
+    );
+    let terminal = matches!(
+        p.state.as_str(),
+        "queued" | "retry_scheduled" | "failed" | "cancelled" | "superseded" | "completed"
+    ) || p.stage == "published";
+    if terminal || p.stage == "queued" {
+        return names
+            .iter()
+            .map(|n| ArtifactProgress {
+                artifact: (*n).into(),
+                step: shared.clone(),
+                ..Default::default()
+            })
+            .collect();
+    }
+    let running = facts
+        .assessments
+        .iter()
+        .rev()
+        .find(|(_, state)| state == "running")
+        .map(|(a, _)| *a);
+    let live: Vec<&str> = match p.stage.as_str() {
+        "extraction" => vec!["Claims"],
+        "assessment" => vec![running.unwrap_or(if facts.synthesis_started {
+            "Insights"
+        } else {
+            "Claims"
+        })],
+        // One synthesis call yields both Insights and Links.
+        _ => vec!["Insights", "Links"],
+    };
+    names
+        .iter()
+        .map(|name| {
+            if live.contains(name) {
+                return ArtifactProgress {
+                    artifact: (*name).into(),
+                    step: shared.clone(),
+                    live: true,
+                    activity: p.activity.clone(),
+                };
+            }
+            let mine: Vec<&String> = facts
+                .assessments
+                .iter()
+                .filter(|(a, _)| a == name)
+                .map(|(_, s)| s)
+                .collect();
+            let step = if *name == "Claims" {
+                if facts.synthesis_started
+                    || mine.iter().all(|s| *s == "completed") && !mine.is_empty()
+                {
+                    "Validated · awaiting publication"
+                } else {
+                    "Waiting for decision"
+                }
+            } else if !facts.synthesis_started {
+                "Queued · after claims"
+            } else if !mine.is_empty() && mine.iter().all(|s| *s == "completed") {
+                "Validated · awaiting publication"
+            } else if p.stage == "assessment" {
+                "Queued · awaiting assessment"
+            } else {
+                "Waiting for output"
+            };
+            ArtifactProgress {
+                artifact: (*name).into(),
+                step: step.into(),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+fn artifact_facts(conn: &Connection, input: &PipelineInput) -> Result<ArtifactFacts> {
+    let mut facts = ArtifactFacts::default();
+    let mut stmt = conn.prepare("SELECT stage,window_id,state FROM insight_stage_checkpoints WHERE owner_kind=?1 AND owner_id=?2 AND generation=?3 ORDER BY updated_at,rowid")?;
+    for row in stmt.query_map(
+        params![
+            input.snapshot.owner_kind,
+            input.snapshot.owner_id,
+            input.snapshot.generation
+        ],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    )? {
+        let (stage, window, state) = row?;
+        match stage.as_str() {
+            "extraction" => {}
+            "assessment" => {
+                if let Some(a) = assessment_artifact(&window) {
+                    facts.assessments.push((a, state));
+                }
+            }
+            _ => facts.synthesis_started = true,
+        }
+    }
+    Ok(facts)
 }
 
 /// Canonical Intel/Jobs status step for insight work:
@@ -181,6 +335,12 @@ pub fn task_progress(conn: &Connection, task_id: &str) -> Result<Option<Progress
                     .max(0) as u64
             }),
         activity,
+        artifacts: Vec::new(),
+    })
+    .map(|mut p| {
+        let facts = artifact_facts(conn, &input).unwrap_or_default();
+        p.artifacts = artifact_steps(&p, &facts);
+        p
     }))
 }
 

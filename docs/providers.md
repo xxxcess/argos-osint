@@ -147,3 +147,121 @@ Insight stages stream. Typed `AttemptProgress` events (dispatched, headers recei
 ## Brief operation overrides and the focused path
 
 `defaults.operation_overrides` routes one Intel brief operation (`intel_brief_claims.generate`, `…inferences.generate`, `…inferences.assess`, `…links.generate`, …) to a specific provider/model without changing its logical role; empty entries inherit. Models → Defaults shows the effective Brief operation routes. `defaults.focused_oversized_brief` (default false) enables the measured focused oversized-story Inferences path; changing it reruns Inferences and Links only.
+
+## Provider adapters and resolved capabilities
+
+Model IDs are data. Three provider adapters in `provider_adapters/` own the wire details: `openrouter`, `google` and `nvidia`. Any other OpenAI-compatible endpoint uses the generic compatible adapter. Each adapter owns its endpoint and auth, model ID normalization, parameter names, schema/tool compilation, stream and usage parsing, and its error dialect. `compile(contract, route, capabilities)` is pure. It returns the endpoint, dialect, JSON body, response channel and effective policy. `normalize_final` and `StreamDecoder` turn a response back into one `Completion`: the answer text or output-tool arguments, finish/refusal status, and usage, which stays null when the provider does not report it. Only the shared executor (`provider_attempt`, `provider_chain`) makes HTTP calls. The compatibility wrappers `provider::{complete, complete_one, decide}` compile through the same adapters.
+
+`provider_capabilities::resolve` builds `ResolvedCapabilities` from these sources, each overriding the one before:
+
+1. Conservative defaults: every optional feature is unknown.
+2. Documented profiles in `provider_profiles.json`, matched on the exact provider and model ID.
+3. Cached catalog evidence: OpenRouter endpoint `supported_parameters`, intersected over eligible free endpoints, and Google `supportedGenerationMethods` and limits.
+4. Scoped rejections observed on the wire, keyed by field **and** value.
+
+An unknown optional feature is never sent, and the answer is validated locally. A decision-only target such as Jev, or a non-text model, fails at compile time with zero requests sent (`capability skip`). `ResolvedCapabilities::digest` hashes only semantic support states, values and limits. Catalog entries are stored in `app_state` under `provider_caps:<hash>`, a hash of provider, base URL, dialect, model and upstream. They have a 24-hour freshness policy, background refreshes for the same key are coalesced into one, and a brief never waits for a refresh.
+
+Structured output follows the contract (BoundedDecision, GeneratedJson or Prose). For GeneratedJson the adapter tries these modes in order and uses the first the model supports:
+
+1. A confirmed strict schema.
+2. A forced inert `submit_result` output tool. Its arguments are the answer: there is no execution and no second round trip.
+3. JSON mode.
+4. Validated text.
+
+OpenRouter adds `provider.require_parameters=true` whenever it uses an optional capability. Google's own host uses native `models/{id}:generateContent` (`streamGenerateContent?alt=sse` when streaming) with `x-goog-api-key`. A custom base ending in `/openai` keeps compatibility chat with the bare model ID. Agent tool loops also use compatibility chat.
+
+Ceilings: `RequestPolicy.max_output_tokens` is the total ceiling when thinking is off. `thinking_ceiling` is the total ceiling when the model thinks; thinking and visible output share it, and no hidden reserve is added. `reasoning_budget` is sent only where a profile documents a budget field, and it is labelled advisory unless the endpoint enforces it. Reasoning intents (`off`, `efficient`, `low`, `medium`, `high`) map onto each model's own vocabulary:
+
+- Nemotron Super: `none`/`low`/`high`.
+- Nemotron Ultra: `none`/`medium`/`high` (`low` is invalid).
+- Lightning: `chat_template_kwargs.enable_thinking`.
+- Gemini Flash: `low`/`medium`/`high`; thinking cannot be turned off.
+- Gemma native: `minimal`/`high`.
+- DeepSeek: no reasoning field.
+
+Native Nvidia or Google fields are never sent through OpenRouter, and no temperature is sent unless a profile documents one.
+
+| Route | Initial adapter policy (profile) |
+| --- | --- |
+| `typesafe/jev-1.13` | Native decisions only |
+| `nvidia/nemotron-3-super-120b-a12b:free` | Strict JSON schema |
+| `nvidia/nemotron-3-ultra-550b-a55b:free`, `cohere/north-mini-code:free` | Forced output tool; never `response_format` |
+| `google/gemma-4-{26b-a4b,31b}-it:free` | JSON mode; schema only once confirmed |
+| `apodex/apodex-1.1-mini:free` | Validated JSON until endpoint metadata confirms more |
+| `models/gemini-3.8-flash` | Google native schema; thinking `low` minimum |
+| `models/gemma-4-26b-a4b-it` | Google native; local JSON validation; `minimal`/`high` thinking |
+| Nvidia Super / Ultra / Lightning / DeepSeek | Hosted chat; effort data as above; locally validated JSON |
+
+## Operation wire budget and bounded recovery
+
+One transport call sends exactly one HTTP request. When a provider rejects an optional `field=value` it names (for example `response_format=json_schema`), `provider_attempt` learns that value for the route and returns a typed recovery proposal. It never resends. The executor (`provider_chain::execute_with_context`) decides whether the operation's budget allows a recompiled dispatch. It applies no backoff, because the request itself changes. An unknown 400 gets no proposal and is not guessed to be transient.
+
+Interactive operations (an open Intel brief, brief-owned cleanup and fidelity) run under `WireBudget::INTERACTIVE`:
+
+- every eligible route keeps its reserved initial dispatch;
+- at most two dispatches go to any one route, and only the primary gets a transient retry (one);
+- output repair and unsupported-option recovery draw from a shared allowance of two extra dispatches.
+
+A four-route chain therefore sends at most six requests. Other callers keep the ordinary 4/3 retry policy. Each dispatch receives a `DispatchContext` that carries its admission queue time, the backoff it actually waited (shorter when cancelled) and its wire index. Admission polling counts as queue time and is never recorded as retry backoff. Attempt rows record the real backoff in `wait_ms`, along with prompt and completion tokens whenever the adapter reports usage. Reasoning tokens, visible tokens and cost go into the attempt telemetry.
+
+At stage admission, each route's capabilities are resolved once (`provider_capabilities::admit`). Admission also starts a coalesced 24-hour background catalog refresh when the cached entry is missing or stale. The snapshot's digest is stored in the attempt's `declaration_json` (`capability_digests`). A refresh that finishes mid-operation cannot change an in-flight request. Only observed rejections, which can only narrow what is sent, are merged in for a recovery recompile.
+
+## Stage budget table
+
+`request_policy::StageBudget` rows (spec §5). The answer target is the total ceiling when thinking is off. Thinking and visible output share the thinking ceiling, and no hidden reserve is added.
+
+| Operation | Answer target | Ceiling with thinking | Reasoning |
+| --- | --- | --- | --- |
+| Cleanup chat fallback | 512 | 2048 (mandatory thinking) | Off |
+| Claims | 2048 | 4096 | Off (Flash: `low`) |
+| Extraction fidelity | 1024 | 3072 | Off |
+| Inferences | 3072 | 4096 with an enforced 1024 reasoning budget, otherwise 6144 | Efficient (NU `medium`, Flash `low`) |
+| Inference support | 1024 | 3072 | Off |
+| Links | 1536 | 3584 | Off |
+
+Jev gets no chat parameters. Claims, Inferences and Links send their `brief_contracts` schema as the response contract: a strict schema where confirmed, otherwise the forced `submit_result` output tool, otherwise JSON mode or validated text. The compact limits sentence goes into the prompt. Output-tool arguments are validated exactly like content.
+
+## Canonical Jev decisions
+
+`BlockDecisions` (cleanup) and `FidelityDecisions` (brief fidelity) build a canonical `DecisionContract` and `DecisionState` and compile through `investigation::decisions::compile_native`. State stays minimal: empty sections are omitted, and each item is addressed by field path, for example ``items.item_0``. Contracts are validated before any network access. A malformed contract fails with zero requests.
+
+- Choice: an option map of 2–255 options. The winning probability is `probabilities[choice]` and confidence is kept separately. Confidence never stands in for probability.
+- Noul: optional `{true,false}` descriptions. `noul` is P(yes); a "no" answer carries 1 − p.
+- Score: an ordered array of 2–10 level descriptions, with no range or option object. The native probability-weighted level is zero-based. It maps linearly onto the application scale `min..=max` and is kept fractional (`score_value`). It is rounded only for the legacy display (`score`).
+- Answer types, distribution keys, bounds and sums are all validated. Chat fallbacks return validated labels with no fabricated probabilities, and `ContractAdapter::parse_chat_as` reports the structured mode that actually ran.
+
+## Operation overrides, the Brief fast preset and portable schema 2
+
+`defaults.operation_overrides` values are an `OperationOverride` union: an ordinary `ModelAssignment`, or a deny-unknown-fields reference `{route_role = "summarization"}`. A reference resolves the named role's *current* chain in `RoleDefaults::resolve_operation`, so a later Summarization model swap is followed without copied IDs. Only the nine canonical role keys are valid targets. Operation keys, `decision_model`, unknown roles and mixed objects (a `route_role` beside assignment fields) are rejected when the TOML is parsed. `reset_operation` removes the key and never edits the referenced role.
+
+The **Brief fast preset** (Defaults → *Apply fast preset* / *Reset fast preset*) points `intel_brief_claims.generate` and `intel_brief_links.generate` at Summarization. Their logical roles do not change, and Inference support and bounded gates keep their configured routes. The preset ships unset. It is not recommended until the held-out comparison in [benchmarks/brief-fast-preset-heldout.md](benchmarks/brief-fast-preset-heldout.md) has been measured with a valid key. Reset removes only the preset's own references and leaves any explicit assignment you set on those operations.
+
+**Editing one operation.** On Defaults, *Op ▸* selects a Brief operation (Claims, Inferences, Inference support, Links). *Save for op* stores the current Provider/Model fields as that operation's explicit override; *Reset op* removes it so the operation inherits its logical role again. The details panel lists every operation with its source (inherited / explicit override / linked by the fast preset), its response contract (`generated_json` for the generation steps, `bounded_decision` for Inference support) and its adapter with capability evidence (strict schema, JSON mode, tools, and the provenance chain such as `conservative → profile`). A changed route moves only that operation's node revision; the next visit re-runs that node and whatever depends on its output.
+
+Portable profile documents (`config_transfer`) gain **schema 2** (`docs/schemas/profile-config-v2.schema.json`). It adds two fields, both rejected under schema 1:
+- override role references;
+- an optional route `account_id`: the internal account-map key, validated against a `providers[]` entry of the same provider kind.
+
+Export writes schema 1 unless either feature is used. Import keeps the document's account-map key instead of collapsing it onto the provider kind. No secret travels in routing fields.
+
+`check_role_compatibility` is contract-based and makes no network request:
+- Bounded-decision chains (Tool Picker, the decision roles, `*.assess`) accept native decisions models and chat models whose labels are validated locally, so Tool Picker J→N→F→NL is valid.
+- Generation chains (Recon, Synthesis, Summarization, `*.generate`) are rejected only when every route, fallbacks included, is a decisions model.
+- Unknown text models stay valid with conservative capabilities.
+- The TUI fallback picker applies the same rule.
+
+## Schema 41: per-attempt usage, wire timings and task epochs
+
+`provider_execution_schema::migrate` runs inside `ensure_schema`'s transaction (`user_version` 41). Each column is added only if it is missing, so fresh and reopened databases go through the same path.
+
+| Table | New columns |
+| --- | --- |
+| `recon_model_attempts` | `reasoning_tokens`, `visible_tokens`, `reported_cost_usd`, `response_headers_ms`, `first_reasoning_ms`, `first_output_ms`, `stream_completion_ms` (all nullable), `policy_diagnostics_json` (`'[]'`) |
+| `recon_model_operations` | nullable `task_epoch`, index `(task_id, task_epoch)` |
+| `intel_brief_stage_timings` | nullable `task_epoch` |
+
+Rules for the new columns:
+- Counters are written only when the provider reported them. Cost is recorded only when it is reported in USD. Rows from before migration 41 stay NULL (unknown), never zero.
+- Timings are measured from `sent_at`, using `AttemptProgress` marks (headers, first reasoning, stream complete). The first answer delta comes from the stream observer.
+- Brief stages bind each model operation to the task's lease epoch (`OperationScope::with_task_epoch`). The epoch is also the attempt generation, so a retried task writes new attempt rows and the previous epoch's rows stay immutable.
+- The stage-timing row stays the latest execution per task. It records that execution's epoch and aggregates only that epoch's attempts.

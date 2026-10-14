@@ -3927,7 +3927,17 @@ fn provider_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
                 return Some(Target::Field(role.model_field()));
             }
             if contains(models[3], x, y) {
-                return Some(Target::Button(role.save_button()));
+                let save = button_areas(models[3], 4);
+                for (area, id) in save.into_iter().zip([
+                    role.save_button(),
+                    ButtonId::BriefOpCycle,
+                    ButtonId::BriefOpSave,
+                    ButtonId::BriefOpReset,
+                ]) {
+                    if contains(area, x, y) {
+                        return Some(Target::Button(id));
+                    }
+                }
             }
             if contains(models[4], x, y) {
                 let fallbacks = app
@@ -3951,9 +3961,12 @@ fn provider_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
                 }
             }
             if contains(models[5], x, y) {
-                let buttons = button_areas(models[5], 4);
+                let buttons = button_areas(models[5], 5);
                 if contains(buttons[0], x, y) {
                     return Some(Target::Button(ButtonId::AddFallback));
+                }
+                if contains(buttons[4], x, y) {
+                    return Some(Target::Button(ButtonId::BriefFastPreset));
                 }
                 if contains(buttons[1], x, y) {
                     return Some(Target::Button(ButtonId::DeleteFallback));
@@ -6724,9 +6737,27 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
             let save = role.save_button();
             draw_field(frame, app, provider, " Provider ", models[1]);
             draw_field(frame, app, model, " Model ", models[2]);
-            draw_button(frame, app, save, "Save default", models[3]);
+            // Save the role default, or edit one Brief operation's override
+            // with the same Provider/Model fields.
+            let save_row = button_areas(models[3], 4);
+            draw_button(frame, app, save, "Save default", save_row[0]);
+            draw_button(
+                frame,
+                app,
+                ButtonId::BriefOpCycle,
+                &format!("Op: {} ▸", app.selected_brief_op().1),
+                save_row[1],
+            );
+            draw_button(
+                frame,
+                app,
+                ButtonId::BriefOpSave,
+                "Save for op",
+                save_row[2],
+            );
+            draw_button(frame, app, ButtonId::BriefOpReset, "Reset op", save_row[3]);
             draw_fallbacks_list(frame, app, models[4]);
-            let actions = button_areas(models[5], 4);
+            let actions = button_areas(models[5], 5);
             draw_button(
                 frame,
                 app,
@@ -6749,9 +6780,30 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
                 "Move down",
                 actions[3],
             );
+            draw_button(
+                frame,
+                app,
+                ButtonId::BriefFastPreset,
+                if app.settings.defaults.fast_preset_applied() {
+                    "Reset fast preset"
+                } else {
+                    "Apply fast preset"
+                },
+                actions[4],
+            );
             let note = "Tried top to bottom after primary retries. Primary: 4 attempts (10s/20s/30s). Each fallback: 3 attempts (10s/20s).";
             if models[6].height >= 8 {
-                let split = split_vertical(models[6], [Constraint::Length(3), Constraint::Min(0)]);
+                // The note needs one row when it fits; give the rest to the
+                // role details (operation evidence must stay visible).
+                let note_rows = if (note.chars().count() as u16) <= models[6].width {
+                    1
+                } else {
+                    3
+                };
+                let split = split_vertical(
+                    models[6],
+                    [Constraint::Length(note_rows), Constraint::Min(0)],
+                );
                 frame.render_widget(
                     Paragraph::new(note)
                         .style(theme::dim())
@@ -8699,11 +8751,16 @@ fn legacy_brief_task_lines(
 /// headers, global Jobs and Logs. Only the active row spins.
 fn brief_stage_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     let stages = &app.intel_brief_stages;
-    let current = stages
-        .iter()
-        .position(|s| s.state != "completed")
-        .map(|i| format!("Step {}/{} · {}", i + 1, stages.len(), stages[i].label))
-        .unwrap_or_else(|| format!("Step {0}/{0} · Complete", stages.len()));
+    // Summarise from the real dependency rows: independent roots run
+    // together, so there is no single "current step".
+    let current = if stages.iter().all(|s| s.state == "completed") {
+        format!("Brief · Complete · {0}/{0} completed", stages.len())
+    } else {
+        format!(
+            "Brief · {}",
+            intel_recon::brief_pipeline::chain_summary(stages)
+        )
+    };
     lines.push(Line::from(Span::styled(
         current,
         theme::text().add_modifier(Modifier::BOLD),
@@ -8722,7 +8779,9 @@ fn brief_stage_lines(app: &App, lines: &mut Vec<Line<'static>>) {
             theme::text()
         };
         let (head, note) = match stage.row.split_once(" · ") {
-            Some((head, rest)) if head == "Queued" || head == "Failed" => {
+            Some((head, rest))
+                if head == "Queued" || head == "Failed" || head == "Completed with warnings" =>
+            {
                 (head.to_string(), Some(rest.to_string()))
             }
             _ => (stage.row.clone(), None),

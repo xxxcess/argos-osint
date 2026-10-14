@@ -64,8 +64,18 @@ impl DecisionsAdapter<NormalizedDecisionResult> for ContractAdapter<'_> {
         ]
     }
     fn parse_chat(&self, raw: &str) -> Result<NormalizedDecisionResult, String> {
-        parse_general_model_response(raw, self.contract, "", DecisionAdapterKind::ValidatedText)
-            .map_err(|e| e.to_string())
+        self.parse_chat_as(raw, DecisionAdapterKind::ValidatedText)
+    }
+    fn parse_chat_as(
+        &self,
+        raw: &str,
+        kind: DecisionAdapterKind,
+    ) -> Result<NormalizedDecisionResult, String> {
+        // Report the adapter that actually ran, never a hardcoded kind.
+        parse_general_model_response(raw, self.contract, "", kind).map_err(|e| e.to_string())
+    }
+    fn preflight(&self) -> Result<(), String> {
+        self.contract.validate()
     }
 }
 

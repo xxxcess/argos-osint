@@ -38,50 +38,80 @@ impl DecisionAdapterKind {
     }
 }
 
-/// Resolve the best execution adapter for a target model and provider.
+/// Resolve the execution adapter for a target model on a provider's
+/// canonical endpoint from resolved capabilities (documented profiles,
+/// cached catalog evidence and observed rejections), never from provider-name
+/// heuristics. Unknown capabilities fall back to validated text.
 pub fn resolve_adapter(model: &str, provider: &str) -> DecisionAdapterKind {
-    if is_decisions_model(model) {
-        return DecisionAdapterKind::NativeDecisions;
-    }
+    let kind = crate::provider::normalize_kind(provider);
+    let base = crate::provider::preset(&kind)
+        .map(|p| p.base_url)
+        .unwrap_or("");
+    let caps = crate::provider_capabilities::resolve(
+        crate::provider_capabilities::AdapterId::for_kind(&kind),
+        base,
+        model,
+    );
+    adapter_for_caps(&caps)
+}
 
-    let model_lower = model.to_ascii_lowercase();
-    let provider_lower = provider.to_ascii_lowercase();
-
-    if provider_lower == "openai"
-        || model_lower.starts_with("gpt-4o")
-        || model_lower.starts_with("gpt-4.5")
+/// Adapter kind implied by resolved capabilities.
+pub fn adapter_for_caps(
+    caps: &crate::provider_capabilities::ResolvedCapabilities,
+) -> DecisionAdapterKind {
+    if caps.decision_only
+        || is_decisions_model(&caps.model)
+            && caps.adapter == crate::provider_capabilities::AdapterId::OpenRouter
     {
+        DecisionAdapterKind::NativeDecisions
+    } else if caps.strict_schema.is_supported() || caps.native_schema.is_supported() {
         DecisionAdapterKind::StrictJsonSchema
-    } else if provider_lower == "openrouter" || provider_lower == "grok" {
+    } else if caps.output_tool_usable() {
+        DecisionAdapterKind::OutputTool
+    } else if caps.json_mode.is_supported() {
         DecisionAdapterKind::JsonMode
     } else {
         DecisionAdapterKind::ValidatedText
     }
 }
 
-/// Compile a canonical DecisionContract into Jev-native (state, questions) JSON values.
+/// Decision adapter kind for the structured mode a chat request compiled to.
+pub fn kind_for_structured(
+    mode: Option<crate::provider_adapters::StructuredMode>,
+) -> DecisionAdapterKind {
+    use crate::provider_adapters::StructuredMode as M;
+    match mode {
+        Some(M::StrictSchema | M::NativeSchema) => DecisionAdapterKind::StrictJsonSchema,
+        Some(M::OutputTool) => DecisionAdapterKind::OutputTool,
+        Some(M::JsonMode) => DecisionAdapterKind::JsonMode,
+        _ => DecisionAdapterKind::ValidatedText,
+    }
+}
+
+/// Compile a canonical DecisionContract into Jev-native (state, questions)
+/// JSON values (spec §4, R1–R2): Choice → option map; Noul → optional
+/// `{true,false}` descriptions; Score → ordered array of 2–10 level
+/// descriptions (no range, no option object).
 pub fn compile_native(contract: &DecisionContract, state_val: &Value) -> (Value, Value) {
     let mut questions_map = serde_json::Map::new();
 
     for (qid, q) in &contract.questions {
         let mut q_obj = serde_json::Map::new();
+        q_obj.insert("instructions".into(), json!(q.instructions));
         match &q.question_type {
             DecisionQuestionType::Choice => {
                 q_obj.insert("type".into(), json!("choice"));
-                q_obj.insert("instructions".into(), json!(q.instructions));
                 q_obj.insert("criteria".into(), json!(q.criteria));
             }
             DecisionQuestionType::Noul => {
                 q_obj.insert("type".into(), json!("noul"));
-                q_obj.insert("instructions".into(), json!(q.instructions));
-            }
-            DecisionQuestionType::Score { min, max } => {
-                q_obj.insert("type".into(), json!("score"));
-                q_obj.insert("instructions".into(), json!(q.instructions));
-                q_obj.insert("range".into(), json!([min, max]));
                 if !q.criteria.is_empty() {
                     q_obj.insert("criteria".into(), json!(q.criteria));
                 }
+            }
+            DecisionQuestionType::Score { .. } => {
+                q_obj.insert("type".into(), json!("score"));
+                q_obj.insert("criteria".into(), json!(q.levels));
             }
         }
         questions_map.insert(qid.clone(), Value::Object(q_obj));
@@ -106,7 +136,15 @@ Return exactly one JSON object matching OUTPUT_SCHEMA, with no Markdown or surro
 
     let mut schema_answers = serde_json::Map::new();
     for (qid, q) in &contract.questions {
-        let allowed_labels: Vec<&str> = q.criteria.keys().map(String::as_str).collect();
+        let allowed_labels: Vec<String> = match &q.question_type {
+            DecisionQuestionType::Choice => q.criteria.keys().cloned().collect(),
+            DecisionQuestionType::Noul => {
+                vec!["yes".into(), "no".into(), q.abstention_label.clone()]
+            }
+            DecisionQuestionType::Score { min, max } => {
+                (*min..=*max).map(|v| v.to_string()).collect()
+            }
+        };
         let schema_item = json!({
             "type": "string",
             "enum": allowed_labels,
@@ -160,7 +198,60 @@ pub fn parse_native_response(
             .get(qid)
             .ok_or_else(|| anyhow!("missing required answer for question '{}'", qid))?;
 
-        let label = match &qspec.question_type {
+        let expected_kind = match &qspec.question_type {
+            DecisionQuestionType::Choice => "choice",
+            DecisionQuestionType::Noul => "noul",
+            DecisionQuestionType::Score { .. } => "score",
+        };
+        ensure!(
+            answer.kind.is_empty() || answer.kind == expected_kind,
+            "answer '{}' has type '{}', expected '{}'",
+            qid,
+            answer.kind,
+            expected_kind
+        );
+        if let Some(c) = answer.confidence {
+            ensure!(
+                c.is_finite() && (0.0..=1.0).contains(&c),
+                "confidence for '{}' out of range",
+                qid
+            );
+        }
+        // Distribution keys must be the question's options/levels.
+        let allowed_keys: Vec<String> = match &qspec.question_type {
+            DecisionQuestionType::Choice => qspec.criteria.keys().cloned().collect(),
+            DecisionQuestionType::Noul => {
+                vec!["true".into(), "false".into(), "yes".into(), "no".into()]
+            }
+            DecisionQuestionType::Score { .. } => {
+                (0..qspec.levels.len()).map(|i| i.to_string()).collect()
+            }
+        };
+        for (opt, &prob) in &answer.probabilities {
+            ensure!(
+                allowed_keys.iter().any(|k| k == opt),
+                "unknown distribution key '{}' for '{}'",
+                opt,
+                qid
+            );
+            ensure!(
+                prob.is_finite() && (0.0..=1.0).contains(&prob),
+                "invalid probability value for '{}': {}",
+                opt,
+                prob
+            );
+        }
+        if answer.probabilities.len() > 1 {
+            let sum: f64 = answer.probabilities.values().sum();
+            ensure!(
+                (sum - 1.0).abs() <= 0.05,
+                "invalid probability distribution for '{}': sum={:.3} != 1.0",
+                qid,
+                sum
+            );
+        }
+
+        let normalized = match &qspec.question_type {
             DecisionQuestionType::Choice => {
                 let choice = answer
                     .choice
@@ -172,73 +263,58 @@ pub fn parse_native_response(
                     choice,
                     qid
                 );
-                choice.to_string()
-            }
-            DecisionQuestionType::Noul => {
-                if let Some(noul_val) = answer.noul {
-                    ensure!(
-                        (0.0..=1.0).contains(&noul_val),
-                        "noul value out of range 0.0..=1.0"
-                    );
-                    if noul_val >= 0.5 {
-                        "yes".to_string()
-                    } else {
-                        "no".to_string()
-                    }
-                } else if let Some(choice) = &answer.choice {
-                    choice.clone()
-                } else {
-                    return Err(anyhow!("noul question '{}' returned no value", qid));
+                NormalizedAnswer {
+                    label: choice.to_string(),
+                    probability: answer.probabilities.get(choice).copied(),
+                    confidence: answer.confidence,
+                    probabilities: answer.probabilities.clone(),
+                    ..Default::default()
                 }
             }
-            DecisionQuestionType::Score { min, max } => {
-                if let Some(score_val) = answer.score {
-                    let s_round = score_val.round() as i64;
-                    ensure!(
-                        s_round >= *min && s_round <= *max,
-                        "score {} outside range {}..={}",
-                        s_round,
-                        min,
-                        max
-                    );
-                    s_round.to_string()
-                } else {
-                    return Err(anyhow!("score question '{}' missing numeric score", qid));
+            DecisionQuestionType::Noul => {
+                let p = answer
+                    .noul
+                    .ok_or_else(|| anyhow!("noul question '{}' returned no value", qid))?;
+                ensure!(
+                    p.is_finite() && (0.0..=1.0).contains(&p),
+                    "noul value out of range 0.0..=1.0"
+                );
+                let yes = p >= 0.5;
+                NormalizedAnswer {
+                    label: if yes { "yes" } else { "no" }.into(),
+                    noul: Some(p),
+                    // P(yes) for yes; "no" carries 1 − p.
+                    probability: Some(if yes { p } else { 1.0 - p }),
+                    confidence: answer.confidence,
+                    probabilities: answer.probabilities.clone(),
+                    ..Default::default()
+                }
+            }
+            DecisionQuestionType::Score { .. } => {
+                let level = answer
+                    .score
+                    .ok_or_else(|| anyhow!("score question '{}' missing numeric score", qid))?;
+                let top = qspec.levels.len().saturating_sub(1) as f64;
+                ensure!(
+                    level.is_finite() && (0.0..=top).contains(&level),
+                    "score level {} outside 0..={}",
+                    level,
+                    top
+                );
+                let value = qspec.scale_value(level).unwrap_or(level);
+                let nearest = level.round() as usize;
+                NormalizedAnswer {
+                    label: (value.round() as i64).to_string(),
+                    score: Some(value.round() as i64),
+                    score_value: Some(value),
+                    probability: answer.probabilities.get(&nearest.to_string()).copied(),
+                    confidence: answer.confidence,
+                    probabilities: answer.probabilities.clone(),
+                    ..Default::default()
                 }
             }
         };
-
-        // Validate probability distribution sum if multi-option probabilities exist (tolerance = 0.05)
-        if answer.probabilities.len() > 1 {
-            let mut sum = 0.0;
-            for (opt, &prob) in &answer.probabilities {
-                ensure!(
-                    prob.is_finite() && prob >= 0.0,
-                    "invalid probability value for '{}': {}",
-                    opt,
-                    prob
-                );
-                sum += prob;
-            }
-            ensure!(
-                (sum - 1.0).abs() <= 0.05,
-                "invalid probability distribution for '{}': sum={:.3} != 1.0",
-                qid,
-                sum
-            );
-        }
-
-        answers.insert(
-            qid.clone(),
-            NormalizedAnswer {
-                label,
-                score: answer.score.map(|s| s.round() as i64),
-                noul: answer.noul,
-                probability: answer.choice_probability(),
-                confidence: answer.confidence,
-                probabilities: answer.probabilities.clone(),
-            },
-        );
+        answers.insert(qid.clone(), normalized);
     }
 
     Ok(NormalizedDecisionResult {
@@ -345,12 +421,13 @@ pub fn parse_general_model_response(
         answers.insert(
             qid.clone(),
             NormalizedAnswer {
+                score: match qspec.question_type {
+                    DecisionQuestionType::Score { .. } => label.parse().ok(),
+                    _ => None,
+                },
                 label,
-                score: None,
-                noul: None,
-                probability: None, // General model has no native calibrated probability
-                confidence: None,
-                probabilities: BTreeMap::new(),
+                // Chat fallbacks never fabricate native probabilities.
+                ..Default::default()
             },
         );
     }

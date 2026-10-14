@@ -363,7 +363,7 @@ mod tests {
         }
         settings.defaults.operation_overrides.insert(
             crate::provider::OP_INFERENCES_ASSESS.into(),
-            assignment("openrouter", "openai/gpt-4o-mini", &[]),
+            assignment("openrouter", "openai/gpt-4o-mini", &[]).into(),
         );
         let auth = inline_account("openrouter", "fake-key-1");
         let quotas = QuotaSettingsFile {
@@ -413,7 +413,8 @@ mod tests {
                 "openrouter",
                 "openai/gpt-4o-mini",
                 &[("google", "gemini-2.5-flash")],
-            ),
+            )
+            .into(),
         );
         let auth = inline_account("openrouter", "fake-key-1");
         let quotas = QuotaSettingsFile {
@@ -426,7 +427,7 @@ mod tests {
         let mut restored = SettingsFile::default();
         restored.defaults.operation_overrides.insert(
             crate::provider::OP_CLAIMS_GENERATE.into(),
-            assignment("openrouter", "stale/model", &[]),
+            assignment("openrouter", "stale/model", &[]).into(),
         );
         apply_import(
             &plan,
@@ -699,37 +700,295 @@ mod tests {
         );
     }
 
+    /// Contract-based compatibility (spec §5): a generation-only role with
+    /// only decisions routes is rejected and named; bounded-decision chains
+    /// accept chat models (validated labels) as well as native decisions.
     #[test]
-    fn rejects_a_decisions_model_on_a_general_role_and_a_general_model_on_a_decision_role() {
-        // A decisions (Jev) model on a general role is rejected, and the message
-        // names the offending role.
+    fn generative_role_with_only_decisions_routes_is_rejected() {
         let mut v = doc();
         v["model_roles"]["recon"]["primary"]["model"] = serde_json::json!(JEVE);
         let err = parse_document(&render(&v)).unwrap_err();
-        assert!(
-            err.to_string().contains("recon"),
-            "the error names the general role: {err}"
-        );
+        assert!(err.to_string().contains("recon"), "{err}");
 
-        // A general (non-Jev) model on each decision role is rejected.
-        for role in ["tool_picker", "decision_model"] {
-            let mut v = doc();
-            v["model_roles"][role]["primary"]["model"] = serde_json::json!("openai/gpt-4o-mini");
-            assert!(
-                parse_document(&render(&v)).is_err(),
-                "a general model on {role} is rejected"
-            );
-        }
-
+        // A Jev primary with a chat fallback serves generation: valid.
         let mut v = doc();
+        v["model_roles"]["synthesis"] = serde_json::json!({
+            "primary": {"provider_id": "openrouter", "model": JEVE},
+            "fallbacks": [{"provider_id": "openrouter", "model": "openai/gpt-4o-mini"}]
+        });
+        parse_document(&render(&v)).expect("a chat fallback serves generation");
+
+        // A generate operation override needs a chat route; assess does not.
+        let mut v = doc();
+        v["model_roles"]["operation_overrides"] = serde_json::json!({
+            provider::OP_CLAIMS_GENERATE: {"primary": {"provider_id": "openrouter", "model": JEVE}, "fallbacks": []}
+        });
+        assert!(parse_document(&render(&v)).is_err());
+        let mut v = doc();
+        v["model_roles"]["operation_overrides"] = serde_json::json!({
+            provider::OP_INFERENCES_ASSESS: {"primary": {"provider_id": "openrouter", "model": JEVE}, "fallbacks": []}
+        });
+        parse_document(&render(&v)).expect("support checks are bounded decisions");
+    }
+
+    #[test]
+    fn bounded_decision_roles_accept_chat_label_fallbacks_and_unknown_text_models() {
+        let mut v = doc();
+        // Tool Picker J → N → F → NL from the screenshot configuration.
+        v["model_roles"]["tool_picker"] = serde_json::json!({
+            "primary": {"provider_id": "openrouter", "model": JEVE},
+            "fallbacks": [
+                {"provider_id": "openrouter", "model": "cohere/north-mini-code:free"},
+                {"provider_id": "google", "model": "models/gemini-3.8-flash"},
+                {"provider_id": "nvidia", "model": "nvidia/nemotron-3.5-lightning-30b-a3b"}
+            ]
+        });
+        v["model_roles"]["decision_model"]["primary"]["model"] =
+            serde_json::json!("some/unseen-text-model");
         v["model_roles"]["decision_fallback"] = serde_json::json!({
             "primary": {"provider_id": "openrouter", "model": "openai/gpt-4o-mini"},
             "fallbacks": []
         });
+        parse_document(&render(&v)).expect("chat labels serve bounded decisions");
+    }
+
+    /// The exact nine screenshot chains (spec §2) import unchanged.
+    #[test]
+    fn the_nine_screenshot_chains_import_and_round_trip() {
+        const J: (&str, &str) = ("openrouter", "typesafe/jev-1.13");
+        const S: (&str, &str) = ("openrouter", "nvidia/nemotron-3-super-120b-a12b:free");
+        const U: (&str, &str) = ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free");
+        const N: (&str, &str) = ("openrouter", "cohere/north-mini-code:free");
+        const G26: (&str, &str) = ("openrouter", "google/gemma-4-26b-a4b-it:free");
+        const G31: (&str, &str) = ("openrouter", "google/gemma-4-31b-it:free");
+        const A: (&str, &str) = ("openrouter", "apodex/apodex-1.1-mini:free");
+        const F: (&str, &str) = ("google", "models/gemini-3.8-flash");
+        const D26: (&str, &str) = ("google", "models/gemma-4-26b-a4b-it");
+        const NS: (&str, &str) = ("nvidia", "nvidia/nemotron-3-super-120b-a12b");
+        const NU: (&str, &str) = ("nvidia", "nvidia/nemotron-3-ultra-550b-a55b");
+        const NL: (&str, &str) = ("nvidia", "nvidia/nemotron-3.5-lightning-30b-a3b");
+        const ND: (&str, &str) = ("nvidia", "deepseek-ai/deepseek-v4.1-flash");
+        let chains: [(&str, &[(&str, &str)]); 9] = [
+            ("recon", &[S, F, NS]),
+            ("tool_picker", &[J, N, F, NL]),
+            ("synthesis", &[U, F, NU]),
+            ("classifier", &[J, G26, D26, ND]),
+            ("summarization", &[S, F, NS]),
+            ("evidence_curator", &[J, G31, F, NS]),
+            ("entity_resolver", &[J, G31, D26, ND]),
+            ("claim_assessor", &[U, A, F, NU]),
+            ("investigation_controller", &[J, F, NS]),
+        ];
+        let route = |(p, m): (&str, &str)| serde_json::json!({"provider_id": p, "model": m});
+        let mut v = doc();
+        for (role, chain) in chains {
+            v["model_roles"][role] = serde_json::json!({
+                "primary": route(chain[0]),
+                "fallbacks": chain[1..].iter().map(|r| route(*r)).collect::<Vec<_>>()
+            });
+        }
+        let plan = parse_document(&render(&v)).expect("the operator's chains are valid");
+        let mut settings = SettingsFile::default();
+        let mut auth = AuthFile::default();
+        let mut quotas = QuotaSettingsFile::default();
+        apply_import(&plan, &mut settings, &mut auth, &mut quotas).unwrap();
+        for (role, chain) in chains {
+            let a = settings.defaults.role_mut(role).unwrap().clone();
+            let got: Vec<(String, String)> = a
+                .chain()
+                .into_iter()
+                .map(|r| (r.provider, r.model))
+                .collect();
+            let want: Vec<(String, String)> = chain
+                .iter()
+                .map(|(p, m)| (p.to_string(), m.to_string()))
+                .collect();
+            assert_eq!(got, want, "{role}");
+        }
+        let exported = export_document(&settings, &auth, &quotas);
+        assert_eq!(
+            exported.schema_version, SCHEMA_VERSION,
+            "no schema-2 feature in use"
+        );
+    }
+
+    #[test]
+    fn schema_2_role_references_and_accounts_round_trip() {
+        let mut settings = SettingsFile::default();
+        settings.defaults.summarization =
+            assignment("openrouter", "nvidia/nemotron-3-super-120b-a12b:free", &[]);
+        settings.defaults.apply_fast_preset();
+        settings.defaults.synthesis = ModelAssignment {
+            account: "openrouter-work".into(),
+            ..assignment("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free", &[])
+        };
+        let mut auth = AuthFile::default();
+        auth.set_account(ProviderSecret {
+            kind: "openrouter".into(),
+            base_url: String::new(),
+            model: String::new(),
+            api_key: Some("fake-key-1".into()),
+            stt_model: None,
+            device: None,
+        });
+        auth.set_account_keyed(
+            "openrouter-work",
+            ProviderSecret {
+                kind: "openrouter".into(),
+                base_url: String::new(),
+                model: String::new(),
+                api_key: Some("fake-key-2".into()),
+                stt_model: None,
+                device: None,
+            },
+        );
+        let quotas = QuotaSettingsFile::default();
+        let doc = export_document(&settings, &auth, &quotas);
+        assert_eq!(doc.schema_version, SCHEMA_VERSION_ROUTING);
+        let text = serialize_document(&doc).unwrap();
+        assert!(text.contains(r#""route_role": "summarization""#), "{text}");
+        assert!(text.contains(r#""account_id": "openrouter-work""#));
+        let raw: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for (key, o) in raw["model_roles"]["operation_overrides"]
+            .as_object()
+            .unwrap()
+        {
+            for internal in ["provider", "model", "account", "fallbacks"] {
+                assert!(
+                    o.get(internal).is_none(),
+                    "{key} carries internal {internal}"
+                );
+            }
+        }
+
+        let plan = parse_document(&text).unwrap();
+        let mut restored = SettingsFile::default();
+        let mut restored_auth = AuthFile::default();
+        let mut restored_quotas = QuotaSettingsFile::default();
+        apply_import(
+            &plan,
+            &mut restored,
+            &mut restored_auth,
+            &mut restored_quotas,
+        )
+        .unwrap();
+        assert!(restored.defaults.fast_preset_applied());
+        assert_eq!(restored.defaults.synthesis.account, "openrouter-work");
+        assert!(
+            restored_auth.accounts.contains_key("openrouter-work"),
+            "the account-map key is preserved, not collapsed onto its kind"
+        );
+        // A linked override follows the current Summarization chain.
+        restored.defaults.summarization.model = "google/gemma-4-31b-it:free".into();
+        let (a, overridden) = restored
+            .defaults
+            .resolve_operation(Some(provider::OP_CLAIMS_GENERATE), "claim_assessor");
+        assert!(overridden);
+        assert_eq!(a.model, "google/gemma-4-31b-it:free");
+        // Reset removes the key and never touches the referenced role.
+        assert!(restored
+            .defaults
+            .reset_operation(provider::OP_CLAIMS_GENERATE));
+        assert_eq!(
+            restored.defaults.summarization.model,
+            "google/gemma-4-31b-it:free"
+        );
+    }
+
+    #[test]
+    fn schema_1_rejects_new_fields_and_bad_references_are_rejected() {
+        let link =
+            serde_json::json!({provider::OP_LINKS_GENERATE: {"route_role": "summarization"}});
+        let mut v = doc();
+        v["model_roles"]["operation_overrides"] = link.clone();
+        assert!(parse_document(&render(&v))
+            .unwrap_err()
+            .to_string()
+            .contains("schema_version 2"));
+        let mut v = doc();
+        v["model_roles"]["recon"]["primary"]["account_id"] = serde_json::json!("openrouter");
         assert!(
             parse_document(&render(&v)).is_err(),
-            "a general model on decision_fallback is rejected"
+            "account_id needs schema 2"
         );
+
+        let v2 = |overrides: serde_json::Value| {
+            let mut v = doc();
+            v["schema_version"] = serde_json::json!(2);
+            v["model_roles"]["operation_overrides"] = overrides;
+            parse_document(&render(&v))
+        };
+        v2(link).expect("schema 2 accepts a role reference");
+        for (bad, why) in [
+            (
+                serde_json::json!({"route_role": "summarization", "primary": null}),
+                "mixed",
+            ),
+            (
+                serde_json::json!({"route_role": "decision_model"}),
+                "not canonical",
+            ),
+            (
+                serde_json::json!({"route_role": "nonsense"}),
+                "unknown role",
+            ),
+            (
+                serde_json::json!({"route_role": provider::OP_CLAIMS_GENERATE}),
+                "operation reference",
+            ),
+        ] {
+            assert!(
+                v2(serde_json::json!({provider::OP_LINKS_GENERATE: bad})).is_err(),
+                "{why} is rejected"
+            );
+        }
+        assert!(v2(
+            serde_json::json!({"intel_brief_nope.generate": {"route_role": "summarization"}})
+        )
+        .is_err());
+
+        // Account ids are validated against the document's provider kinds.
+        let mut v = doc();
+        v["schema_version"] = serde_json::json!(2);
+        v["model_roles"]["recon"]["primary"]["account_id"] = serde_json::json!("openrouter");
+        parse_document(&render(&v)).expect("matching account kind");
+        v["model_roles"]["recon"]["primary"]["account_id"] = serde_json::json!("missing");
+        assert!(parse_document(&render(&v)).is_err());
+    }
+
+    /// The internal TOML union: assignment or reference, never both.
+    #[test]
+    fn internal_override_union_parses_both_shapes_and_rejects_mixed() {
+        let ok: provider::RoleDefaults = toml::from_str(
+            "[operation_overrides.\"intel_brief_claims.generate\"]\nroute_role = \"summarization\"\n\
+             [operation_overrides.\"intel_brief_links.generate\"]\nprovider = \"openrouter\"\nmodel = \"m\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ok.operation_overrides[provider::OP_CLAIMS_GENERATE].route_role(),
+            Some("summarization")
+        );
+        assert_eq!(
+            ok.operation_overrides[provider::OP_LINKS_GENERATE]
+                .assignment()
+                .unwrap()
+                .model,
+            "m"
+        );
+        for bad in [
+            "route_role = \"summarization\"\nmodel = \"m\"\n",
+            "route_role = \"intel_brief_links.generate\"\n",
+            "route_role = \"decision_model\"\n",
+        ] {
+            let text = format!("[operation_overrides.\"intel_brief_claims.generate\"]\n{bad}");
+            assert!(
+                toml::from_str::<provider::RoleDefaults>(&text).is_err(),
+                "{bad}"
+            );
+        }
+        let round = toml::to_string(&ok).unwrap();
+        let back: provider::RoleDefaults = toml::from_str(&round).unwrap();
+        assert_eq!(back.operation_overrides, ok.operation_overrides);
     }
 
     #[test]

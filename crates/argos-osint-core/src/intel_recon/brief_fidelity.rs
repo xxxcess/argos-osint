@@ -177,42 +177,71 @@ impl FidelityDecisions<'_> {
     }
 }
 
+impl FidelityDecisions<'_> {
+    /// Canonical contract: one Choice per item, judged only against that
+    /// item's own passages (spec §4 example).
+    pub fn contract(&self) -> crate::investigation::decisions::DecisionContract {
+        use crate::investigation::decisions::{DecisionContract, QuestionSpec};
+        let mode = self.mode();
+        let labels = mode.labels();
+        DecisionContract::new(
+            mode.role(),
+            "brief_fidelity",
+            crate::investigation::decisions::templates::TEMPLATE_VERSION,
+            ["items"],
+            (0..self.items.len()).map(|n| {
+                let qid = Self::qid(n);
+                QuestionSpec::choice(
+                    qid.clone(),
+                    format!("Judge `items.{qid}` only against its own passages in `items.{qid}.passages`. A citation existing is not support."),
+                    labels.clone(),
+                    "insufficient",
+                )
+            }),
+        )
+    }
+
+    pub fn state(&self) -> crate::investigation::decisions::DecisionState {
+        let items: serde_json::Map<String, Value> = self
+            .items
+            .iter()
+            .enumerate()
+            .map(|(n, i)| {
+                (
+                    Self::qid(n),
+                    json!({"kind": i.kind, "text": i.text, "passages": i.passages}),
+                )
+            })
+            .collect();
+        crate::investigation::decisions::DecisionState::new()
+            .with_custom("items", Value::Object(items))
+    }
+}
+
 impl crate::recon::model_exec::DecisionsAdapter<HashMap<String, String>> for FidelityDecisions<'_> {
     fn compile_native(&self) -> (Value, Value) {
-        let state = json!({
-            "items": self.items.iter().map(|i| json!({"kind": i.kind, "text": i.text, "passages": i.passages})).collect::<Vec<_>>(),
-        });
-        let mut questions = serde_json::Map::new();
-        for (n, item) in self.items.iter().enumerate() {
-            questions.insert(
-                Self::qid(n),
-                json!({
-                    "type": "choice",
-                    "question": format!("Do item {n}'s own passages support the {} \"{}\"?", item.kind, item.text),
-                    "options": self.mode().labels().into_iter().map(|(k, v)| (k, Value::String(v))).collect::<serde_json::Map<String, Value>>()
-                }),
-            );
-        }
-        (state, Value::Object(questions))
+        crate::investigation::decisions::compile_native(&self.contract(), &self.state().to_value())
     }
 
     fn parse_native(
         &self,
         resp: &crate::provider::DecisionsResponse,
     ) -> Result<HashMap<String, String>, String> {
+        let result = crate::investigation::decisions::parse_native_response(resp, &self.contract())
+            .map_err(|e| e.to_string())?;
         let mut labels = HashMap::new();
-        for (key, answer) in &resp.answers {
-            let n: usize = key
-                .strip_prefix("item_")
-                .and_then(|n| n.parse().ok())
-                .ok_or_else(|| format!("unexpected answer ID `{key}`"))?;
-            let item = self
-                .items
-                .get(n)
-                .ok_or_else(|| format!("unexpected answer ID `{key}`"))?;
-            labels.insert(item.id.clone(), answer.choice.clone().unwrap_or_default());
+        for (n, item) in self.items.iter().enumerate() {
+            let answer = result
+                .answers
+                .get(&Self::qid(n))
+                .ok_or_else(|| format!("missing decision for `{}`", item.id))?;
+            labels.insert(item.id.clone(), answer.label.clone());
         }
         self.check(labels)
+    }
+
+    fn preflight(&self) -> Result<(), String> {
+        self.contract().validate()
     }
 
     fn compile_chat(&self) -> Vec<ChatMessage> {
@@ -245,5 +274,57 @@ impl crate::recon::model_exec::DecisionsAdapter<HashMap<String, String>> for Fid
             }
         }
         self.check(labels)
+    }
+}
+
+#[cfg(test)]
+mod canonical_tests {
+    use super::*;
+    use crate::recon::model_exec::DecisionsAdapter;
+
+    #[test]
+    fn fidelity_compiles_through_the_canonical_contract() {
+        let items = vec![FidelityItem {
+            id: "c1".into(),
+            kind: "claim",
+            text: "The board suspended the ferry.".into(),
+            passages: vec!["The board suspended the ferry service.".into()],
+        }];
+        let adapter = FidelityDecisions { items: &items };
+        adapter.preflight().unwrap();
+        let (state, questions) = adapter.compile_native();
+        assert_eq!(
+            state["items"]["item_0"]["passages"][0],
+            "The board suspended the ferry service."
+        );
+        assert!(state.get("evidence").is_none(), "minimal state");
+        let q = &questions["item_0"];
+        assert_eq!(q["type"], "choice");
+        assert!(q["instructions"].as_str().unwrap().contains("items.item_0"));
+        assert!(q["criteria"]["faithful"].is_string());
+        assert!(q.get("question").is_none() && q.get("options").is_none());
+        let labels = adapter.mode().labels();
+        let share = 1.0 / labels.len() as f64;
+        let dist: serde_json::Map<String, Value> = labels
+            .iter()
+            .map(|(k, _)| (k.clone(), json!(share)))
+            .collect();
+        let resp: crate::provider::DecisionsResponse = serde_json::from_value(json!({
+            "answers":{"item_0":{"type":"choice","choice":"faithful","probabilities":dist}}
+        }))
+        .unwrap();
+        assert_eq!(adapter.parse_native(&resp).unwrap()["c1"], "faithful");
+        let resp: crate::provider::DecisionsResponse = serde_json::from_value(json!({
+            "answers":{"item_0":{"type":"choice","choice":"faithful","probabilities":{"made_up":1.0}}}
+        }))
+        .unwrap();
+        assert!(
+            adapter.parse_native(&resp).is_err(),
+            "unknown distribution key"
+        );
+        let dup: Result<crate::provider::DecisionsResponse, _> = serde_json::from_str(
+            r#"{"answers":{"item_0":{"type":"choice","choice":"faithful"},"item_0":{"type":"choice","choice":"faithful"}}}"#,
+        );
+        assert!(dup.is_err(), "duplicate answer IDs are rejected");
     }
 }

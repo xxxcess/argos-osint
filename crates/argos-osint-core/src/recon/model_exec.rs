@@ -73,6 +73,12 @@ pub struct OperationScope<'a> {
     pub input_revision: Option<&'a str>,
     /// A user is waiting on this result (admission priority, no preemption).
     pub interactive: bool,
+    /// Stage budget-table row (spec §5); overrides `completion_tokens`/`reasoning`.
+    pub budget: Option<crate::request_policy::StageBudget>,
+    /// Authoritative response contract (schema for strict/native/output tool).
+    pub contract: Option<crate::provider_adapters::ResponseContract>,
+    /// Lease epoch of the owning task (schema 41); `None` outside tasks.
+    pub task_epoch: Option<i64>,
 }
 
 /// Declared response format (spec §3). `BoundedDecision` may use native Jev
@@ -97,6 +103,9 @@ pub struct DispatchDeclaration {
     pub request_policy: crate::request_policy::RequestPolicy,
     /// True when an operation override supplied the route chain.
     pub overridden: bool,
+    /// Capability digest per route, frozen at stage admission (spec §1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_digests: Vec<String>,
 }
 
 impl<'a> OperationScope<'a> {
@@ -114,7 +123,47 @@ impl<'a> OperationScope<'a> {
             response_format: ResponseFormat::GeneratedJson,
             input_revision: None,
             interactive: false,
+            budget: None,
+            contract: None,
+            task_epoch: None,
         }
+    }
+
+    /// Apply a stage budget-table row.
+    pub fn with_budget(mut self, budget: crate::request_policy::StageBudget) -> Self {
+        self.completion_tokens = Some(budget.answer);
+        self.reasoning = budget.reasoning;
+        self.budget = Some(budget);
+        self
+    }
+
+    pub fn with_contract(mut self, contract: crate::provider_adapters::ResponseContract) -> Self {
+        self.contract = Some(contract);
+        self
+    }
+
+    /// The request policy for this operation's dispatches.
+    pub fn request_policy(
+        &self,
+        json_object: bool,
+        default_tokens: u32,
+    ) -> crate::request_policy::RequestPolicy {
+        match self.budget {
+            Some(budget) => budget.policy(json_object),
+            None => crate::request_policy::RequestPolicy {
+                max_output_tokens: Some(self.completion_tokens.unwrap_or(default_tokens)),
+                json_object,
+                reasoning: self.reasoning,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Wire budget: interactive bounded operations use the §7 operation
+    /// budget; everyone else keeps the ordinary policy.
+    pub fn wire_budget(&self) -> Option<provider_chain::WireBudget> {
+        self.interactive
+            .then_some(provider_chain::WireBudget::INTERACTIVE)
     }
 
     pub fn with_interactive(mut self) -> Self {
@@ -154,6 +203,7 @@ impl<'a> OperationScope<'a> {
                 .defaults
                 .resolve_operation(self.operation_key, canonical)
                 .1,
+            capability_digests: Vec::new(),
         }
     }
 
@@ -169,6 +219,15 @@ impl<'a> OperationScope<'a> {
 
     pub fn with_task(mut self, task_id: &'a str) -> Self {
         self.task_id = Some(task_id);
+        self
+    }
+
+    /// Bind the operation to a task lease epoch (ownership/telemetry). The
+    /// caller also puts the epoch in the operation id
+    /// (`{task_id}:e{epoch}:...`), so a retried execution writes new attempt
+    /// rows and prior rows stay immutable.
+    pub fn with_task_epoch(mut self, epoch: i64) -> Self {
+        self.task_epoch = Some(epoch);
         self
     }
 
@@ -295,12 +354,13 @@ impl OutputRepairs {
             Category::InvalidResult,
             error,
         ));
-        failure.disposition = if repaired {
-            provider_chain::RetryDisposition::NextRoute
+        if repaired {
+            failure.disposition = provider_chain::RetryDisposition::NextRoute;
+            failure
         } else {
-            provider_chain::RetryDisposition::RetryRoute
-        };
-        failure
+            // One output repair per route: a recovery dispatch, no backoff.
+            failure.with_recovery("output repair")
+        }
     }
 }
 
@@ -589,6 +649,18 @@ pub struct AttemptTimings {
     pub completion_tokens: Option<i64>,
     /// Whether the streamed response ran to its end.
     pub stream_completed: i64,
+    /// Reported reasoning/visible tokens and USD cost (schema 41); `None`
+    /// means the provider did not report it, never zero.
+    pub reasoning_tokens: Option<i64>,
+    pub visible_tokens: Option<i64>,
+    pub reported_cost_usd: Option<f64>,
+    /// Wire marks relative to `sent_at` (schema 41); `None` when not observed.
+    pub response_headers_ms: Option<i64>,
+    pub first_reasoning_ms: Option<i64>,
+    pub first_output_ms: Option<i64>,
+    pub stream_completion_ms: Option<i64>,
+    /// Request-policy diagnostics (dropped/rewritten fields), JSON array.
+    pub policy_diagnostics: Vec<String>,
     queued_instant: Option<Instant>,
     sent_instant: Option<Instant>,
     first_response_instant: Option<Instant>,
@@ -641,6 +713,30 @@ impl AttemptTimings {
         }
     }
 
+    /// Reported reasoning/visible tokens and cost, never estimated.
+    pub fn extended_usage(&mut self, usage: Option<&crate::provider::Usage>) {
+        let Some(u) = usage else { return };
+        self.reasoning_tokens = u
+            .reasoning_tokens
+            .map(|v| v as i64)
+            .or(self.reasoning_tokens);
+        self.visible_tokens = u.visible_tokens.map(|v| v as i64).or(self.visible_tokens);
+        self.reported_cost_usd = u.cost_usd.or(self.reported_cost_usd);
+    }
+
+    /// Convert observed wire marks into offsets from the send instant.
+    pub fn wire_marks(&mut self, marks: &WireMarks) {
+        let Some(sent) = self.sent_instant else {
+            return;
+        };
+        let rel =
+            |at: Option<Instant>| at.map(|a| a.saturating_duration_since(sent).as_millis() as i64);
+        self.response_headers_ms = rel(marks.headers);
+        self.first_reasoning_ms = rel(marks.first_reasoning);
+        self.stream_completion_ms = rel(marks.stream_complete);
+        self.first_output_ms = rel(marks.first_output);
+    }
+
     /// Freeze the measured durations at the end of the attempt.
     pub fn finish(&mut self, elapsed_ms: u64, stream_completed: bool) {
         self.elapsed_ms = i64::try_from(elapsed_ms).unwrap_or(i64::MAX);
@@ -653,6 +749,41 @@ impl AttemptTimings {
             _ => self.reported_ttfb_ms.unwrap_or_default(),
         };
         self.stream_completed = i64::from(stream_completed);
+    }
+}
+
+/// Instants observed from `AttemptProgress` during one wire attempt.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WireMarks {
+    pub headers: Option<Instant>,
+    pub first_reasoning: Option<Instant>,
+    pub first_output: Option<Instant>,
+    pub stream_complete: Option<Instant>,
+}
+
+impl WireMarks {
+    pub fn observe(&mut self, progress: &provider_attempt::AttemptProgress, at: Instant) {
+        use provider_attempt::AttemptProgress as P;
+        match progress {
+            P::HeadersReceived { .. } => {
+                self.headers.get_or_insert(at);
+            }
+            P::Receiving {
+                answer_chars,
+                reasoning_chars,
+            } => {
+                if *reasoning_chars > 0 {
+                    self.first_reasoning.get_or_insert(at);
+                }
+                if *answer_chars > 0 {
+                    self.first_output.get_or_insert(at);
+                }
+            }
+            P::StreamComplete { .. } => {
+                self.stream_complete.get_or_insert(at);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -670,6 +801,8 @@ pub struct AttemptOutcome {
     /// Retry/backoff wait charged to this attempt (policy, not measured latency).
     pub wait_ms: u64,
     pub error_message: Option<String>,
+    /// Adapter-reported usage for this wire attempt, never estimated.
+    pub usage: Option<crate::provider::Usage>,
 }
 
 impl AttemptOutcome {
@@ -704,6 +837,7 @@ impl AttemptOutcome {
             char_count,
             wait_ms: elapsed_ms,
             error_message: Some(error_message.into()),
+            usage: None,
         }
     }
 }
@@ -723,6 +857,9 @@ struct AttemptFacts {
     route_index: u32,
     attempt: u32,
     strict_persistence: bool,
+    /// Retry backoff actually slept before this dispatch (from the chain
+    /// context); overrides the constructor's legacy elapsed value.
+    backoff_ms: Option<u64>,
 }
 
 impl AttemptFacts {
@@ -748,6 +885,7 @@ impl AttemptFacts {
             route_index,
             attempt,
             strict_persistence: false,
+            backoff_ms: None,
         }
     }
 }
@@ -798,6 +936,11 @@ fn note_attempt(
             "wait_ms": outcome.wait_ms,
             "http_status": outcome.http_status,
             "chars": outcome.char_count,
+            "prompt_tokens": outcome.usage.as_ref().and_then(|u| u.prompt_tokens),
+            "completion_tokens": outcome.usage.as_ref().and_then(|u| u.completion_tokens),
+            "reasoning_tokens": outcome.usage.as_ref().and_then(|u| u.reasoning_tokens),
+            "visible_tokens": outcome.usage.as_ref().and_then(|u| u.visible_tokens),
+            "cost_usd": outcome.usage.as_ref().and_then(|u| u.cost_usd),
         }));
     note(Some(db_path), &event);
 }
@@ -883,9 +1026,24 @@ fn finish_attempt(
     elapsed_ms: u64,
     stream_completed: bool,
 ) -> Result<(), DispatchError> {
-    // No adapter in this module reports token usage yet, so the columns stay at
-    // their defaults rather than being guessed.
-    timings.usage(None, None);
+    let owned;
+    let outcome = match facts.backoff_ms {
+        Some(ms) => {
+            let mut charged = outcome.clone();
+            charged.wait_ms = ms;
+            owned = charged;
+            &owned
+        }
+        None => outcome,
+    };
+    // Adapter-reported usage only; adapters that report nothing leave the
+    // columns at their defaults rather than being guessed.
+    let usage = outcome.usage.as_ref();
+    timings.usage(
+        usage.and_then(|u| u.prompt_tokens).map(|v| v as i64),
+        usage.and_then(|u| u.completion_tokens).map(|v| v as i64),
+    );
+    timings.extended_usage(usage);
     timings.finish(elapsed_ms, stream_completed);
     if let Err(error) = record_attempt_finish(db_path, attempt_id, outcome, timings) {
         if facts.strict_persistence {
@@ -912,10 +1070,11 @@ pub fn ensure_operation(
     let store = Store::open(db_path)?;
     let now = now_rfc3339();
     store.conn.execute(
-        "INSERT INTO recon_model_operations (id, run_id, task_id, role, generation, status, draft, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?7)
+        "INSERT INTO recon_model_operations (id, run_id, task_id, role, generation, status, draft, created_at, updated_at, task_epoch)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
            generation = excluded.generation,
+           task_epoch = COALESCE(excluded.task_epoch, recon_model_operations.task_epoch),
            status = 'running',
            draft = CASE WHEN excluded.draft != '' THEN excluded.draft ELSE recon_model_operations.draft END,
            updated_at = excluded.updated_at",
@@ -927,6 +1086,7 @@ pub fn ensure_operation(
             scope.generation,
             draft,
             now,
+            scope.task_epoch,
         ],
     )?;
     Ok(())
@@ -1041,7 +1201,15 @@ fn record_attempt_finish(
            ttfb_ms = ?16,
            prompt_tokens = ?17,
            completion_tokens = ?18,
-           stream_completed = ?19
+           stream_completed = ?19,
+           reasoning_tokens = ?21,
+           visible_tokens = ?22,
+           reported_cost_usd = ?23,
+           response_headers_ms = ?24,
+           first_reasoning_ms = ?25,
+           first_output_ms = ?26,
+           stream_completion_ms = ?27,
+           policy_diagnostics_json = ?28
          WHERE id = ?20",
         rusqlite::params![
             outcome.outcome,
@@ -1064,6 +1232,14 @@ fn record_attempt_finish(
             timings.completion_tokens,
             timings.stream_completed,
             attempt_id,
+            timings.reasoning_tokens,
+            timings.visible_tokens,
+            timings.reported_cost_usd,
+            timings.response_headers_ms,
+            timings.first_reasoning_ms,
+            timings.first_output_ms,
+            timings.stream_completion_ms,
+            serde_json::to_string(&timings.policy_diagnostics).unwrap_or_else(|_| "[]".into()),
         ],
     )?;
     Ok(())
@@ -1129,14 +1305,21 @@ where
 
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
-    let insight_policy = crate::request_policy::RequestPolicy {
-        max_output_tokens: Some(scope.completion_tokens.unwrap_or(8192)),
-        json_object: true,
-        reasoning: scope.reasoning,
-    };
-    let declaration = Arc::new(
-        serde_json::to_string(&scope.declaration(settings, insight_policy)).unwrap_or_default(),
+    let insight_policy = scope.request_policy(true, 8192);
+    // Stage admission: capture one capability snapshot per route (and kick a
+    // coalesced background catalog refresh) so nothing changes mid-operation.
+    let admitted: Arc<Vec<crate::provider_capabilities::ResolvedCapabilities>> = Arc::new(
+        secrets
+            .iter()
+            .map(|secret| crate::provider_capabilities::admit(secret, db_path))
+            .collect(),
     );
+    let contract = scope.contract.clone();
+    let declaration = {
+        let mut declaration = scope.declaration(settings, insight_policy);
+        declaration.capability_digests = admitted.iter().map(|c| c.digest()).collect();
+        Arc::new(serde_json::to_string(&declaration).unwrap_or_default())
+    };
     let mut attempt_counter = 0u32;
     let mut last_route_idx = 0usize;
     let on_event_shared = on_event.clone();
@@ -1146,13 +1329,18 @@ where
     let validator = Arc::new(validator);
     let role = scope.role.to_string();
     let run_id = scope.run_id.unwrap_or_default().to_string();
-    let queued_at = now_rfc3339();
-    let queued_instant = Instant::now();
-
-    let dispatch = |route_idx: usize, route: &Route| {
+    let dispatch = |ctx: provider_chain::DispatchContext, route: &Route| {
+        let route_idx = ctx.route_index;
         last_route_idx = route_idx;
         attempt_counter += 1;
         let attempt_num = attempt_counter;
+        let queued_at = ctx.queued_at.clone();
+        let queued_instant = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(ctx.queue_ms))
+            .unwrap_or_else(Instant::now);
+        let backoff_ms = ctx.backoff_ms;
+        let admitted = admitted.clone();
+        let contract = contract.clone();
         let secret = secrets[route_idx].clone();
         let transport = if stream && !provider_attempt::is_subscription(&secret) {
             Transport::Stream
@@ -1173,7 +1361,6 @@ where
         let db_path_buf = db_path_owned.clone();
         let role = role.clone();
         let run_id = run_id.clone();
-        let queued_at = queued_at.clone();
         let declaration = declaration.clone();
 
         async move {
@@ -1221,6 +1408,7 @@ where
                 attempt_num,
             );
             facts.strict_persistence = insight_contract;
+            facts.backoff_ms = Some(backoff_ms);
 
             // Notify attempt start
             if let Some(sink) = &on_event_step {
@@ -1277,27 +1465,47 @@ where
             };
 
             timings.sent();
-            let progress_sink = on_event_step.clone().map(|sink| {
+            let marks: Arc<std::sync::Mutex<WireMarks>> = Arc::default();
+            let progress_sink = {
+                let sink = on_event_step.clone();
+                let marks = marks.clone();
                 let op_id = op_id.clone();
                 let model = route_cloned.model.clone();
-                Arc::new(move |progress: provider_attempt::AttemptProgress| {
-                    sink(ModelExecEvent::Progress {
-                        operation_id: op_id.clone(),
-                        attempt: attempt_num,
-                        route_index: route_idx as u32,
-                        model: model.clone(),
-                        progress,
-                    })
-                }) as Arc<provider_attempt::ProgressFn>
-            });
+                Some(
+                    Arc::new(move |progress: provider_attempt::AttemptProgress| {
+                        if let Ok(mut m) = marks.lock() {
+                            m.observe(&progress, Instant::now());
+                        }
+                        if let Some(sink) = &sink {
+                            sink(ModelExecEvent::Progress {
+                                operation_id: op_id.clone(),
+                                attempt: attempt_num,
+                                route_index: route_idx as u32,
+                                model: model.clone(),
+                                progress,
+                            })
+                        }
+                    }) as Arc<provider_attempt::ProgressFn>,
+                )
+            };
             let rep = if insight_contract {
-                provider_attempt::attempt_insight(
+                let deadlines = if transport == Transport::Stream {
+                    Deadlines::insight_stream()
+                } else {
+                    Deadlines::insight_non_stream()
+                };
+                provider_attempt::attempt_spec(
                     &secret,
                     &messages_vec,
                     transport,
+                    deadlines,
                     &insight_policy,
-                    Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
-                    progress_sink.as_deref(),
+                    provider_attempt::AttemptSpec {
+                        observer: Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
+                        progress: progress_sink.as_deref(),
+                        contract: contract.as_ref(),
+                        caps: admitted.get(route_idx),
+                    },
                 )
                 .await
             } else {
@@ -1316,14 +1524,25 @@ where
                     timings.first_response(at, *instant);
                 }
             }
+            if let Ok(mut m) = marks.lock() {
+                // The observer sees the first answer delta exactly; the
+                // throttled `Receiving` mark is only a fallback.
+                if timings.first_response_instant.is_some() {
+                    m.first_output = timings.first_response_instant;
+                }
+                timings.wire_marks(&m);
+            }
+            timings.policy_diagnostics = rep.policy_diagnostics.clone();
             let elapsed_ms = start_t.elapsed().as_millis() as u64;
             let partial = streamed_acc.lock().map(|s| s.clone()).unwrap_or_default();
             if !partial.is_empty() {
                 let _ = save_operation_draft(db_path_buf.as_deref(), &op_id, &partial);
             }
 
+            let recovery = rep.recovery.clone();
             match rep.outcome {
                 Ok(completion) => {
+                    let usage = completion.usage.clone();
                     let text = completion.content;
                     let finish_reason = completion.finish_reason.clone();
                     let chars = text.chars().count() as u64;
@@ -1419,7 +1638,9 @@ where
                     }
 
                     // Success!
-                    let outcome = AttemptOutcome::ok(finish_reason.as_deref(), chars, elapsed_ms);
+                    let mut outcome =
+                        AttemptOutcome::ok(finish_reason.as_deref(), chars, elapsed_ms);
+                    outcome.usage = usage;
                     finish_attempt(
                         db_path_buf.as_deref(),
                         &attempt_db_id,
@@ -1450,7 +1671,10 @@ where
                     let finish_r = failure.stream.finish_reason.clone();
                     let chars = failure.stream.partial_chars;
                     let msg = failure.summary();
-                    let err = DispatchError::from_failure(failure.clone());
+                    let mut err = DispatchError::from_failure(failure.clone());
+                    if let Some(reason) = recovery {
+                        err = err.with_recovery(reason);
+                    }
                     timings.reported_ttfb_ms(failure.first_response_ms);
                     let outcome = AttemptOutcome::failed(
                         if err.cancelled { "cancel" } else { "fail" },
@@ -1504,9 +1728,10 @@ where
         admission_account: String::new(),
         attempt_limit: insight_contract.then_some(2),
         interactive: scope.interactive,
+        wire_budget: scope.wire_budget(),
     };
 
-    let report = provider_chain::execute(&routes, dispatch, opts).await;
+    let report = provider_chain::execute_with_context(&routes, dispatch, opts).await;
 
     // One terminal row per logical operation: its many wire attempts are
     // attempts, never extra jobs.
@@ -1551,6 +1776,18 @@ pub trait DecisionsAdapter<T>: Send + Sync {
     fn parse_native(&self, resp: &provider::DecisionsResponse) -> Result<T, String>;
     fn compile_chat(&self) -> Vec<ChatMessage>;
     fn parse_chat(&self, raw: &str) -> Result<T, String>;
+    /// Parse a chat answer knowing the structured mode actually compiled.
+    fn parse_chat_as(
+        &self,
+        raw: &str,
+        _kind: crate::investigation::decisions::DecisionAdapterKind,
+    ) -> Result<T, String> {
+        self.parse_chat(raw)
+    }
+    /// Contract validation before any network access.
+    fn preflight(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Execute a decision or tool picker request that supports native Decisions (Jev) with Chat fallback.
@@ -1572,6 +1809,9 @@ where
     } else {
         let _ = ensure_operation(db_path, scope, "");
     }
+    adapter
+        .preflight()
+        .map_err(|reason| anyhow::anyhow!("malformed decision contract: {reason}"))?;
     let (mut routes, secrets) =
         resolve_operation_routes(auth, settings, scope.role, scope.operation_key);
     // Capability is resolved separately from endpoint availability: a Jev
@@ -1588,18 +1828,18 @@ where
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
     let stage_tokens = scope.completion_tokens;
-    let stage_reasoning = scope.reasoning;
-    let declaration = Arc::new(
-        serde_json::to_string(&scope.declaration(
-            settings,
-            crate::request_policy::RequestPolicy {
-                max_output_tokens: stage_tokens,
-                json_object: false,
-                reasoning: stage_reasoning,
-            },
-        ))
-        .unwrap_or_default(),
+    let chat_policy = scope.request_policy(true, 2048);
+    let admitted: Arc<Vec<crate::provider_capabilities::ResolvedCapabilities>> = Arc::new(
+        secrets
+            .iter()
+            .map(|secret| crate::provider_capabilities::admit(secret, db_path))
+            .collect(),
     );
+    let declaration = {
+        let mut declaration = scope.declaration(settings, chat_policy);
+        declaration.capability_digests = admitted.iter().map(|c| c.digest()).collect();
+        Arc::new(serde_json::to_string(&declaration).unwrap_or_default())
+    };
     let mut attempt_counter = 0u32;
     let on_event_shared = on_event.clone();
     let op_id = scope.operation_id.to_string();
@@ -1607,12 +1847,16 @@ where
     let db_path_owned = db_path.map(Path::to_path_buf);
     let role = scope.role.to_string();
     let run_id = scope.run_id.unwrap_or_default().to_string();
-    let queued_at = now_rfc3339();
-    let queued_instant = Instant::now();
-
-    let dispatch = |route_idx: usize, route: &Route| {
+    let dispatch = |ctx: provider_chain::DispatchContext, route: &Route| {
+        let route_idx = ctx.route_index;
         attempt_counter += 1;
         let attempt_num = attempt_counter;
+        let queued_at = ctx.queued_at.clone();
+        let queued_instant = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(ctx.queue_ms))
+            .unwrap_or_else(Instant::now);
+        let backoff_ms = ctx.backoff_ms;
+        let admitted = admitted.clone();
         let secret = secrets[route_idx].clone();
         // Skipped incompatible Jev routes never reach dispatch, so a Jev ID here
         // always has a native connection.
@@ -1624,7 +1868,6 @@ where
         let db_path_buf = db_path_owned.clone();
         let role = role.clone();
         let run_id = run_id.clone();
-        let queued_at = queued_at.clone();
         let repairs = repairs.clone();
         let declaration = declaration.clone();
 
@@ -1663,6 +1906,7 @@ where
                 attempt_num,
             );
             facts.strict_persistence = insight_contract;
+            facts.backoff_ms = Some(backoff_ms);
 
             if let Some(sink) = &on_event_step {
                 sink(ModelExecEvent::AttemptStart {
@@ -1847,17 +2091,18 @@ where
                 let rep = if insight_contract || stage_tokens.is_some() {
                     // Bounded decision fallback keeps the ordinary policy; a
                     // stage policy (e.g. 512-token cleanup batches) overrides it.
-                    provider_attempt::attempt_full(
+                    provider_attempt::attempt_spec(
                         &secret,
                         &chat_messages,
                         Transport::NonStream,
                         Deadlines::native_decision(),
-                        None,
-                        None,
-                        &crate::request_policy::RequestPolicy {
-                            max_output_tokens: Some(stage_tokens.unwrap_or(2048)),
-                            json_object: true,
-                            reasoning: stage_reasoning,
+                        &chat_policy,
+                        provider_attempt::AttemptSpec {
+                            contract: Some(
+                                &crate::provider_adapters::ResponseContract::BoundedDecision,
+                            ),
+                            caps: admitted.get(route_idx),
+                            ..Default::default()
                         },
                     )
                     .await
@@ -1872,17 +2117,22 @@ where
                 };
 
                 let elapsed_ms = start_t.elapsed().as_millis() as u64;
+                let recovery = rep.recovery.clone();
+                let kind = crate::investigation::decisions::adapters::kind_for_structured(
+                    rep.effective.as_ref().map(|e| e.structured),
+                );
 
                 match rep.outcome {
                     Ok(completion) => {
                         let chars = completion.content.chars().count() as u64;
-                        match adapter.parse_chat(&completion.content) {
+                        match adapter.parse_chat_as(&completion.content, kind) {
                             Ok(val) => {
-                                let outcome = AttemptOutcome::ok(
+                                let mut outcome = AttemptOutcome::ok(
                                     completion.finish_reason.as_deref(),
                                     chars,
                                     elapsed_ms,
                                 );
+                                outcome.usage = completion.usage.clone();
                                 finish_attempt(
                                     db_path_buf.as_deref(),
                                     &attempt_db_id,
@@ -1956,7 +2206,10 @@ where
                         let finish_r = failure.stream.finish_reason.clone();
                         let chars = failure.stream.partial_chars;
                         let msg = failure.summary();
-                        let err = DispatchError::from_failure(failure.clone());
+                        let mut err = DispatchError::from_failure(failure.clone());
+                        if let Some(reason) = recovery {
+                            err = err.with_recovery(reason);
+                        }
                         timings.reported_ttfb_ms(failure.first_response_ms);
 
                         let outcome = AttemptOutcome::failed(
@@ -2011,9 +2264,10 @@ where
         admission_account: String::new(),
         attempt_limit: insight_contract.then_some(2),
         interactive: scope.interactive,
+        wire_budget: scope.wire_budget(),
     };
 
-    let report = provider_chain::execute(&routes, dispatch, opts).await;
+    let report = provider_chain::execute_with_context(&routes, dispatch, opts).await;
 
     // One terminal row per logical operation: its many wire attempts are
     // attempts, never extra jobs.

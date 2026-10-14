@@ -547,6 +547,14 @@ pub enum ButtonId {
     DeleteFallback,
     MoveFallbackUp,
     MoveFallbackDown,
+    /// Apply or reset the Brief fast preset (Claims/Links → Summarization).
+    BriefFastPreset,
+    /// Select the next Brief operation to edit.
+    BriefOpCycle,
+    /// Save the Provider/Model fields as the selected operation's override.
+    BriefOpSave,
+    /// Remove the selected operation's override (it inherits its role again).
+    BriefOpReset,
     FallbackItem(usize),
     FallbackPick(usize),
     FallbackTab(ProviderPage),
@@ -1051,6 +1059,8 @@ pub struct App {
     pub investigation_controller_model: String,
     pub show_thinking: bool,
     pub defaults_role: DefaultsRole,
+    /// Selected Brief operation in the Defaults per-operation editor.
+    pub brief_op_sel: usize,
     pub model_catalog: Vec<ListedModel>,
     pub catalog_cache: HashMap<String, Vec<ListedModel>>,
     pub catalog_for: String,
@@ -1519,6 +1529,7 @@ impl App {
             investigation_controller_model: controller_default.model,
             show_thinking: false,
             defaults_role: DefaultsRole::Recon,
+            brief_op_sel: 0,
             model_catalog: Vec::new(),
             catalog_cache: HashMap::new(),
             catalog_for: String::new(),
@@ -5605,9 +5616,12 @@ impl App {
     }
 
     pub fn fallback_incompatible(&self, model: &str) -> Option<&'static str> {
-        if matches!(
+        // Same contract rule as config import (spec §5): bounded-decision
+        // and mixed roles accept native decisions models; only the
+        // generation-only roles need every added route to complete chat.
+        if !matches!(
             self.defaults_role,
-            DefaultsRole::ToolPicker | DefaultsRole::Classifier
+            DefaultsRole::Recon | DefaultsRole::Synthesis | DefaultsRole::Summarization
         ) {
             return None;
         }
@@ -5627,6 +5641,72 @@ impl App {
         .inspect(|_| {
             self.fallback_sel = self.fallback_sel.saturating_sub(1);
         })
+    }
+
+    /// Apply the Brief fast preset, or reset it when applied. Reset removes
+    /// only the preset's references; Summarization itself is never changed.
+    pub fn toggle_fast_preset(&mut self) -> Result<String> {
+        let applied = self.settings.defaults.fast_preset_applied();
+        if applied {
+            self.settings.defaults.reset_fast_preset();
+        } else {
+            self.settings.defaults.apply_fast_preset();
+        }
+        self.save_settings()?;
+        Ok(if applied {
+            "Brief fast preset reset".into()
+        } else {
+            "Brief fast preset applied: Claims and Links follow Summarization".into()
+        })
+    }
+
+    /// Selected Brief operation `(key, label, role)`.
+    pub fn selected_brief_op(&self) -> (&'static str, &'static str, &'static str) {
+        provider::BRIEF_OPERATIONS[self.brief_op_sel % provider::BRIEF_OPERATIONS.len()]
+    }
+
+    pub fn cycle_brief_op(&mut self) -> String {
+        self.brief_op_sel = (self.brief_op_sel + 1) % provider::BRIEF_OPERATIONS.len();
+        format!("Editing Brief operation: {}", self.selected_brief_op().1)
+    }
+
+    /// Save the current Provider/Model fields as an explicit override for
+    /// the selected Brief operation. Role semantics and scope never change.
+    pub fn save_brief_op_override(&mut self) -> Result<String> {
+        let role = self.defaults_role;
+        let provider = provider::normalize_kind(self.field(role.provider_field()).trim());
+        let model = self.field(role.model_field()).trim().to_string();
+        if provider.is_empty() || model.is_empty() {
+            anyhow::bail!("Provider and model are required");
+        }
+        let (key, label, _) = self.selected_brief_op();
+        self.settings.defaults.operation_overrides.insert(
+            key.to_string(),
+            provider::ModelAssignment {
+                provider: provider.clone(),
+                model: model.clone(),
+                ..Default::default()
+            }
+            .into(),
+        );
+        self.save_settings()?;
+        Ok(format!("{label} override saved: {provider} / {model}"))
+    }
+
+    /// Reset the selected operation: it inherits its logical role again.
+    pub fn reset_brief_op_override(&mut self) -> Result<String> {
+        let (key, label, role) = self.selected_brief_op();
+        if self
+            .settings
+            .defaults
+            .operation_overrides
+            .remove(key)
+            .is_none()
+        {
+            return Ok(format!("{label} already inherits {role}"));
+        }
+        self.save_settings()?;
+        Ok(format!("{label} override reset: inherits {role}"))
     }
 
     fn move_selected_fallback(&mut self, delta: i32) -> Result<String> {
@@ -7340,6 +7420,10 @@ impl App {
             ButtonId::DeleteFallback => self.delete_selected_fallback(),
             ButtonId::MoveFallbackUp => self.move_selected_fallback(-1),
             ButtonId::MoveFallbackDown => self.move_selected_fallback(1),
+            ButtonId::BriefFastPreset => self.toggle_fast_preset(),
+            ButtonId::BriefOpCycle => Ok(self.cycle_brief_op()),
+            ButtonId::BriefOpSave => self.save_brief_op_override(),
+            ButtonId::BriefOpReset => self.reset_brief_op_override(),
             ButtonId::FallbackItem(index) => {
                 self.fallback_sel = index;
                 Ok(format!("Fallback {}", index + 1))
@@ -9980,6 +10064,7 @@ mod tests {
             investigation_controller_model: String::new(),
             show_thinking: false,
             defaults_role: DefaultsRole::Recon,
+            brief_op_sel: 0,
             model_catalog: Vec::new(),
             catalog_cache: HashMap::new(),
             catalog_for: String::new(),
@@ -12806,6 +12891,140 @@ mod tests {
         }
     }
 
+    /// Defaults page with the Brief fast preset applied (phase 3).
+    /// `python3 scripts/tui_review.py capture --test dump_role_routing_screens --ignored ...`
+    #[test]
+    #[ignore]
+    fn dump_role_routing_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (120, 40)] {
+            let mut app = app();
+            let d = &mut app.settings.defaults;
+            d.summarization.provider = "openrouter".into();
+            d.summarization.model = "nvidia/nemotron-3-super-120b-a12b:free".into();
+            d.claim_assessor.provider = "openrouter".into();
+            d.claim_assessor.model = "nvidia/nemotron-3-ultra-550b-a55b:free".into();
+            d.synthesis.provider = "openrouter".into();
+            d.synthesis.model = "nvidia/nemotron-3-ultra-550b-a55b:free".into();
+            d.apply_fast_preset();
+            app.select(ModuleId::Providers.index());
+            app.provider_page = ProviderPage::Defaults;
+            app.defaults_role = DefaultsRole::Summarization;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("defaults-fast-preset-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+    }
+
+    /// Phase 4: per-operation override editing reuses the Provider/Model
+    /// fields and Save controls; Reset restores inheritance.
+    #[test]
+    fn defaults_operation_override_editing_saves_resets_and_shows_evidence() {
+        let mut app = app();
+        let dir = tempfile::tempdir().unwrap();
+        app.settings_path = dir.path().join("config.toml");
+        app.settings.defaults.synthesis.provider = "openrouter".into();
+        app.settings.defaults.synthesis.model = "openai/gpt-4o".into();
+        app.select(ModuleId::Providers.index());
+        app.provider_page = ProviderPage::Defaults;
+        app.defaults_role = DefaultsRole::Summarization;
+        app.summarization_provider = "openrouter".into();
+        app.summarization_model = "google/gemma-4-31b-it:free".into();
+        // Claims → Inferences → Inference support → Links.
+        for _ in 0..3 {
+            app.activate_button(ButtonId::BriefOpCycle);
+        }
+        assert_eq!(app.selected_brief_op().0, provider::OP_LINKS_GENERATE);
+        app.activate_button(ButtonId::BriefOpSave);
+        assert!(
+            app.status.starts_with("Links override saved"),
+            "{}",
+            app.status
+        );
+        // Persisted, not just in memory.
+        let saved = std::fs::read_to_string(&app.settings_path).unwrap();
+        assert!(saved.contains("gemma-4-31b-it"), "{saved}");
+        let o = app
+            .settings
+            .defaults
+            .operation_overrides
+            .get(provider::OP_LINKS_GENERATE)
+            .expect("override saved");
+        let (a, overridden) = app
+            .settings
+            .defaults
+            .resolve_operation(Some(provider::OP_LINKS_GENERATE), "synthesis");
+        assert!(overridden, "{o:?}");
+        assert_eq!(a.model, "google/gemma-4-31b-it:free");
+        // Role defaults are untouched.
+        assert_eq!(app.settings.defaults.synthesis.model, "openai/gpt-4o");
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Op: Links"), "{text}");
+        assert!(
+            text.contains("Source: explicit operation override"),
+            "{text}"
+        );
+        assert!(text.contains("Contract: generated_json"), "{text}");
+        assert!(text.contains("Adapter: openrouter"), "{text}");
+        // The evidence line fits at 160x50 without scrolling.
+        assert!(text.contains("Evidence: conservative"), "{text}");
+        app.activate_button(ButtonId::BriefOpReset);
+        assert!(
+            app.status.starts_with("Links override reset"),
+            "{}",
+            app.status
+        );
+        assert!(app.settings.defaults.operation_overrides.is_empty());
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Source: inherited from synthesis"), "{text}");
+    }
+
+    /// Phase 4 screens: Defaults per-operation editor and a brief with both
+    /// roots running at once.
+    #[test]
+    #[ignore]
+    fn dump_role_routing_phase4_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (120, 40)] {
+            let mut app = app();
+            let d = &mut app.settings.defaults;
+            d.synthesis.provider = "openrouter".into();
+            d.synthesis.model = "nvidia/nemotron-3-ultra-550b-a55b:free".into();
+            d.claim_assessor.provider = "openrouter".into();
+            d.claim_assessor.model = "nvidia/nemotron-3-ultra-550b-a55b:free".into();
+            d.operation_overrides.insert(
+                provider::OP_LINKS_GENERATE.into(),
+                provider::ModelAssignment {
+                    provider: "openrouter".into(),
+                    model: "google/gemma-4-31b-it:free".into(),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            app.select(ModuleId::Providers.index());
+            app.provider_page = ProviderPage::Defaults;
+            app.defaults_role = DefaultsRole::Synthesis;
+            app.brief_op_sel = 3;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("phase4-defaults-operation-override-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+    }
+
     #[test]
     #[ignore]
     fn dump_brain_graph_screens() {
@@ -12823,7 +13042,8 @@ mod tests {
                     provider: "google".into(),
                     model: "gemini-2.5-flash".into(),
                     ..Default::default()
-                },
+                }
+                .into(),
             );
             app.select(ModuleId::Providers.index());
             app.provider_page = ProviderPage::Defaults;
@@ -13381,7 +13601,8 @@ mod tests {
         text
     }
 
-    /// Spec §6/§8.8: shared stage progress for the sequential brief chain on
+    /// Spec §6/§8.8: shared stage progress for the v2 brief graph (two
+    /// simultaneous roots, then the join) on
     /// the brief Jobs panel, section headers and global Jobs. Dumps cells
     /// when ARGOS_SCREEN_DIR is set.
     #[test]
@@ -13402,7 +13623,7 @@ mod tests {
         let frames: Vec<(&str, usize, Option<&str>, bool, bool)> = vec![
             ("1-queued", 0, None, false, false),
             (
-                "2-body-running",
+                "2-roots-running",
                 0,
                 Some("retrieving / cleaning"),
                 false,
@@ -13464,8 +13685,14 @@ mod tests {
                         links.clone()
                     },
                 ];
-                for (n, out) in outputs.iter().enumerate().take(*done) {
+                for _ in 0..*done {
                     let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
+                    // Roots may be claimed in either order: commit by stage.
+                    let n = bp::STAGES
+                        .iter()
+                        .position(|(op, _)| *op == c.operation)
+                        .unwrap();
+                    let out = &outputs[n];
                     let items = out
                         .as_object()
                         .and_then(|o| o.values().find_map(|v| v.as_array().map(Vec::len)))
@@ -13484,6 +13711,11 @@ mod tests {
                 if let Some(activity) = running {
                     let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
                     bp::set_activity(conn, &c.id, activity).unwrap();
+                    if *done == 0 {
+                        // Both independent roots run at once.
+                        let other = bp::claim_stage(conn, "w2", 120, &now()).unwrap().unwrap();
+                        bp::set_activity(conn, &other.id, "waiting for model").unwrap();
+                    }
                 }
                 if *fail {
                     let mut c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
@@ -13533,15 +13765,18 @@ mod tests {
                         assert!(!rows.is_empty());
                     }
                     "1-queued" => {
-                        assert_eq!(rows[1], "Claims · Queued · after Full article");
-                        assert!(text.contains("Step 1/4 · Full article"), "{text}");
+                        assert_eq!(rows[1], "Claims · Queued");
+                        assert_eq!(rows[2], "Inferences · Queued · after Full article, Claims");
+                        assert!(text.contains("Brief · 0/4 completed"), "{text}");
                     }
-                    "2-body-running" => {
-                        assert_eq!(rows[0], "Full article · Running · retrieving / cleaning")
+                    "2-roots-running" => {
+                        assert!(rows[0].starts_with("Full article · Running"), "{rows:?}");
+                        assert!(rows[1].starts_with("Claims · Running"), "{rows:?}");
+                        assert!(text.contains("Brief · 2 running · 0/4 completed"), "{text}");
                     }
                     "3-inferences-running" => {
                         assert_eq!(rows[2], "Inferences · Running · waiting for model");
-                        assert!(text.contains("Step 3/4 · Inferences"));
+                        assert!(text.contains("Brief · 1 running · 2/4 completed"));
                         assert!(
                             text.contains("suspended the ferry"),
                             "claims checkpoint surfaces immediately"
@@ -14156,7 +14391,12 @@ mod tests {
         let job = app.intel_brief_job.clone().expect("chain admitted");
         let labels: Vec<_> = app.intel_brief_stages.iter().map(|v| v.label).collect();
         assert_eq!(labels, ["Full article", "Claims", "Inferences", "Links"]);
-        assert_eq!(app.intel_brief_stages[1].row, "Queued · after Full article");
+        // Two independent roots; the join names both prerequisites.
+        assert_eq!(app.intel_brief_stages[1].row, "Queued");
+        assert_eq!(
+            app.intel_brief_stages[2].row,
+            "Queued · after Full article, Claims"
+        );
         // Reopen attaches to the same chain.
         app.open_intel_briefing();
         assert_eq!(app.intel_brief_job.as_deref(), Some(job.as_str()));

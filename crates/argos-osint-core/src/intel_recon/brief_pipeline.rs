@@ -1,12 +1,15 @@
-//! Intel brief preparation: one durable job per article generation with four
-//! dependent stages (Full article → Claims → Inferences → Links).
+//! Intel brief preparation (`intel-brief-v2`): one durable job per article
+//! generation with four operations and explicit dependencies
+//! (`body=[]; claims=[]; inferences=[body,claims]; links=[inferences]`).
 //!
 //! Admission is idempotent and atomic: one active chain per article, all four
-//! tasks persisted immediately, only the first claimable. Dependencies and the
-//! one-active-stage guard live in the claim SQL (`tasks::claim_with`); stages are
-//! routed to the dedicated [`tasks::POOL_INTEL_BRIEF`] pool so unrelated drainers
-//! never take them. A stage commit stores its immutable output/hash, binds the
-//! next stage's exact input, and acknowledges completion in one transaction.
+//! tasks persisted immediately. Full article and Claims are independent roots
+//! and may run together; dependencies live in the claim SQL
+//! (`tasks::claim_with`), and stages are routed to the dedicated
+//! [`tasks::POOL_INTEL_BRIEF`] pool so unrelated drainers never take them. A
+//! stage commit stores its immutable output/hash and, in the same fenced
+//! transaction, runs the durable join ([`bind_ready`]): a descendant is bound
+//! once, by compare-and-set, only when every prerequisite has committed.
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -15,7 +18,46 @@ use crate::tasks::{self, ClaimedTask};
 
 /// Article-preparation contract version (distinct from the Recon/report
 /// extraction contract).
-pub const CONTRACT: &str = "intel-brief-v1";
+pub const CONTRACT: &str = "intel-brief-v2";
+/// The legacy serial contract. Completed v1 history stays intact; active v1
+/// chains are fenced at cutover and replaced by a v2 generation.
+pub const CONTRACT_V1: &str = "intel-brief-v1";
+/// Brain canonical extraction scope. Unchanged by the v2 cutover so Brain
+/// Claim/Inference identities stay stable.
+pub const CANONICAL_CONTRACT: &str = "intel-brief-v1";
+
+/// Explicit v2 dependencies: (operation, prerequisites).
+pub const DEPENDENCIES: [(&str, &[&str]); 4] = [
+    ("intel_brief_body", &[]),
+    ("intel_brief_claims", &[]),
+    (
+        "intel_brief_inferences",
+        &["intel_brief_body", "intel_brief_claims"],
+    ),
+    ("intel_brief_links", &["intel_brief_inferences"]),
+];
+
+/// Declared prerequisites of an operation.
+pub fn prerequisites(operation: &str) -> &'static [&'static str] {
+    DEPENDENCIES
+        .iter()
+        .find(|(op, _)| *op == operation)
+        .map(|(_, deps)| *deps)
+        .unwrap_or(&[])
+}
+
+fn label_of(operation: &str) -> &'static str {
+    STAGES
+        .iter()
+        .find(|(op, _)| *op == operation)
+        .map(|(_, l)| *l)
+        .unwrap_or("stage")
+}
+
+/// Short key used in a bound join input (`{body:{..},claims:{..}}`).
+fn short_key(operation: &str) -> &str {
+    operation.strip_prefix("intel_brief_").unwrap_or(operation)
+}
 
 /// (operation, display label) in dependency order.
 pub const STAGES: [(&str, &str); 4] = [
@@ -35,10 +77,14 @@ pub struct BriefInputs {
     /// Captured role settings (JSON) for every stage.
     pub role_snapshot: String,
     pub title: String,
-    /// Per-stage dependency hashes in [`STAGES`] order (spec §3). A new
-    /// generation reuses a predecessor's committed output for each leading
-    /// stage whose hash is unchanged; empty disables reuse.
+    /// Per-node semantic revisions in [`STAGES`] order (spec §6). Each node
+    /// is keyed independently: its own source revision, contract/prompt
+    /// version and resolved route/policy. Empty disables reuse.
     pub stage_revisions: Vec<String>,
+    /// Immutable metadata snapshot (title/description/published/source
+    /// revision) persisted in the root task inputs, so both branches read
+    /// the same captured values instead of mutable article rows.
+    pub metadata: serde_json::Value,
 }
 
 /// Task id of one stage in a chain.
@@ -54,11 +100,11 @@ pub fn task_id(job_id: &str, operation: &str) -> String {
 /// unchanged work is returned as-is and waits for explicit [`retry_stage`].
 pub fn ensure_chain(conn: &Connection, inputs: &BriefInputs, now: &str) -> Result<String> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    let active: Option<(String, String, String)> = tx
+    let active: Option<(String, String, String, String)> = tx
         .query_row(
-            "SELECT job_id,input_revision,state FROM intel_brief_runs WHERE article_id=?1 AND state IN ('active','completed') ORDER BY generation DESC LIMIT 1",
+            "SELECT job_id,input_revision,state,contract FROM intel_brief_runs WHERE article_id=?1 AND state IN ('active','completed','failed') ORDER BY generation DESC LIMIT 1",
             [&inputs.article_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
     let mut generation = tx.query_row(
@@ -66,17 +112,19 @@ pub fn ensure_chain(conn: &Connection, inputs: &BriefInputs, now: &str) -> Resul
         [&inputs.article_id],
         |r| r.get::<_, i64>(0),
     )?;
-    if let Some((job, revision, state)) = &active {
-        // Unchanged inputs: attach (completed chains issue no new requests).
-        // A Reload revision (`<base>:reload:<at>`) is the same inputs plus a
-        // forced re-acquisition; ordinary visits attach to it.
-        if *revision == inputs.input_revision
-            || revision.starts_with(&format!("{}:reload:", inputs.input_revision))
-        {
+    if let Some((job, revision, state, contract)) = &active {
+        // Unchanged inputs: attach (completed chains issue no new requests;
+        // a failed chain is attached until explicit Retry). A Reload
+        // revision (`<base>:reload:<at>`) is the same inputs plus a forced
+        // re-acquisition; ordinary visits attach to it.
+        let same = *revision == inputs.input_revision
+            || revision.starts_with(&format!("{}:reload:", inputs.input_revision));
+        if same && contract == CONTRACT {
             tx.commit()?;
             return Ok(job.clone());
         }
         if state == "active" {
+            // v1 cutover and changed inputs both fence the active chain.
             supersede_run(&tx, job, now)?;
         }
     }
@@ -104,9 +152,30 @@ pub fn ensure_chain(conn: &Connection, inputs: &BriefInputs, now: &str) -> Resul
         },
         now,
     )?;
-    let mut previous: Option<String> = None;
+    let force_body = inputs.input_revision.contains(":reload:");
     for (index, (operation, _)) in STAGES.iter().enumerate() {
         let id = task_id(&job_id, operation);
+        let root = prerequisites(operation).is_empty();
+        let revision = inputs
+            .stage_revisions
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        // Roots are bound at admission with their own captured inputs;
+        // descendants stay unbound until the join.
+        let (input_ref, input_hash) = if !root {
+            (String::new(), String::new())
+        } else {
+            let input = serde_json::json!({
+                "article_id": inputs.article_id,
+                "force_body": *operation == "intel_brief_body" && force_body,
+                "metadata": inputs.metadata,
+                "node_revision": revision,
+            });
+            let hash =
+                crate::nlp::cache::hash(&serde_json::json!([operation, revision]).to_string());
+            (input.to_string(), hash)
+        };
         tasks::enqueue_task(
             &tx,
             &tasks::NewTask {
@@ -115,26 +184,18 @@ pub fn ensure_chain(conn: &Connection, inputs: &BriefInputs, now: &str) -> Resul
                 operation: (*operation).into(),
                 dedupe_key: String::new(),
                 priority: index as i64,
-                input_ref: if index == 0 {
-                    serde_json::json!({"article_id":inputs.article_id,"force_body":inputs.input_revision.contains(":reload:")}).to_string()
-                } else {
-                    String::new()
-                },
-                input_hash: if index == 0 {
-                    inputs.input_revision.clone()
-                } else {
-                    String::new()
-                },
+                input_ref,
+                input_hash,
                 source_revision: generation.to_string(),
                 role_snapshot: inputs.role_snapshot.clone(),
                 max_attempts: tasks::DEFAULT_LLM_ATTEMPTS,
             },
             now,
         )?;
-        if let Some(prev) = previous.replace(id.clone()) {
+        for dep in prerequisites(operation) {
             tx.execute(
                 "INSERT OR IGNORE INTO argos_task_dependencies(task_id,depends_on) VALUES(?1,?2)",
-                params![id, prev],
+                params![id, task_id(&job_id, dep)],
             )?;
         }
     }
@@ -142,28 +203,34 @@ pub fn ensure_chain(conn: &Connection, inputs: &BriefInputs, now: &str) -> Resul
         "INSERT INTO intel_brief_runs(job_id,article_id,generation,contract,input_revision,state,created_at,updated_at,stage_revisions_json) VALUES(?1,?2,?3,?4,?5,'active',?6,?6,?7)",
         params![job_id, inputs.article_id, generation, CONTRACT, inputs.input_revision, now, serde_json::to_string(&inputs.stage_revisions)?],
     )?;
-    if !inputs.input_revision.contains(":reload:") {
-        reuse_checkpoints(&tx, inputs, &job_id, generation, now)?;
-    }
+    reuse_checkpoints(&tx, inputs, &job_id, generation, force_body, now)?;
     tasks::refresh_job_state(&tx, &job_id, now)?;
     tx.commit()?;
     Ok(job_id)
 }
 
-/// Reuse leading stage checkpoints whose dependency hash is unchanged from
-/// an earlier generation. Links (the last stage) always runs in a new
-/// generation. Returns the number of reused stages.
+/// Per-node reuse (spec §6). Roots reuse a prior v2 output whose own node
+/// revision is unchanged (a forced body reload skips only the body). Reused
+/// roots then enter the same join as live commits, and a descendant reuses a
+/// prior output whose bound input hash (prerequisite output hashes + node
+/// revision) matches, repeating until no further node completes. Links is
+/// never reused: its candidate set is read live. Returns reused nodes.
 fn reuse_checkpoints(
     tx: &Connection,
     inputs: &BriefInputs,
     job_id: &str,
     generation: i64,
+    force_body: bool,
     now: &str,
 ) -> Result<usize> {
     let mut reused = 0;
-    for (index, (operation, _)) in STAGES.iter().enumerate().take(STAGES.len() - 1) {
+    for (index, (operation, _)) in STAGES.iter().enumerate() {
+        if !prerequisites(operation).is_empty() || (force_body && *operation == "intel_brief_body")
+        {
+            continue;
+        }
         let Some(revision) = inputs.stage_revisions.get(index).filter(|r| !r.is_empty()) else {
-            break;
+            continue;
         };
         let prior: Option<(String, String, i64, String)> = tx
             .query_row(
@@ -185,27 +252,142 @@ fn reuse_checkpoints(
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((output, hash, items, empty)) = prior else {
-            break;
-        };
-        let id = task_id(job_id, operation);
-        tx.execute(
-            "INSERT OR REPLACE INTO intel_brief_stage_outputs(task_id,job_id,stage,output_hash,output_json,item_count,empty_reason,committed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![id, job_id, operation, hash, output, items, empty, now],
-        )?;
-        tx.execute(
-            "UPDATE argos_tasks SET state='completed', result_ref=?2, error_message='Reused checkpoint · unchanged inputs', updated_at=?3, finished_at=?3 WHERE id=?1 AND state='queued'",
-            params![id, hash, now],
-        )?;
-        if let Some((next_op, _)) = STAGES.get(index + 1) {
-            tx.execute(
-                "UPDATE argos_tasks SET input_ref=?2,input_hash=?3,updated_at=?4 WHERE id=?1 AND state='queued'",
-                params![task_id(job_id, next_op), serde_json::json!({"predecessor":id,"output_hash":hash,"reused":true}).to_string(), hash, now],
-            )?;
+        if let Some(prior) = prior {
+            reused += adopt(tx, job_id, operation, prior, now)?;
         }
-        reused += 1;
+    }
+    loop {
+        bind_ready(tx, job_id, &inputs.stage_revisions, now)?;
+        let mut progressed = 0;
+        for (operation, _) in STAGES.iter() {
+            if prerequisites(operation).is_empty() || *operation == "intel_brief_links" {
+                continue;
+            }
+            let id = task_id(job_id, operation);
+            let bound: Option<String> = tx
+                .query_row(
+                    "SELECT input_hash FROM argos_tasks WHERE id=?1 AND state='queued' AND input_hash<>''",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(bound) = bound else { continue };
+            let prior: Option<(String, String, i64, String)> = tx
+                .query_row(
+                    "SELECT o.output_json,o.output_hash,o.item_count,o.empty_reason
+                     FROM argos_tasks t
+                     JOIN intel_brief_stage_outputs o ON o.task_id=t.id
+                     JOIN intel_brief_runs r ON r.job_id=t.job_id
+                     WHERE t.operation=?1 AND t.state='completed' AND t.input_hash=?2
+                       AND t.job_id<>?3 AND r.article_id=?4 AND r.contract=?5
+                     ORDER BY r.generation DESC LIMIT 1",
+                    params![operation, bound, job_id, inputs.article_id, CONTRACT],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            if let Some(prior) = prior {
+                progressed += adopt(tx, job_id, operation, prior, now)?;
+            }
+        }
+        reused += progressed;
+        if progressed == 0 {
+            break;
+        }
     }
     Ok(reused)
+}
+
+/// Mark a queued node completed from a prior committed output.
+fn adopt(
+    tx: &Connection,
+    job_id: &str,
+    operation: &str,
+    (output, hash, items, empty): (String, String, i64, String),
+    now: &str,
+) -> Result<usize> {
+    let id = task_id(job_id, operation);
+    let changed = tx.execute(
+        "UPDATE argos_tasks SET state='completed', result_ref=?2, error_message='Reused checkpoint · unchanged inputs', updated_at=?3, finished_at=?3 WHERE id=?1 AND state='queued'",
+        params![id, hash, now],
+    )?;
+    if changed == 0 {
+        return Ok(0);
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO intel_brief_stage_outputs(task_id,job_id,stage,output_hash,output_json,item_count,empty_reason,committed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![id, job_id, operation, hash, output, items, empty, now],
+    )?;
+    Ok(1)
+}
+
+/// The durable join: bind every unbound descendant whose prerequisites have
+/// all committed in this generation. The bound input carries each
+/// prerequisite's `{task_id, output_hash}`; the input hash covers only the
+/// prerequisite output hashes plus the node's semantic revision, so task
+/// ownership IDs never defeat reuse across generations. Compare-and-set on
+/// an empty `input_hash` makes the bind succeed exactly once, in either
+/// commit order. Returns the number of nodes bound.
+pub fn bind_ready(tx: &Connection, job_id: &str, revisions: &[String], now: &str) -> Result<usize> {
+    let mut bound = 0;
+    for (index, (operation, _)) in STAGES.iter().enumerate() {
+        let deps = prerequisites(operation);
+        if deps.is_empty() {
+            continue;
+        }
+        let mut input = serde_json::Map::new();
+        let mut hashes = Vec::new();
+        let mut ready = true;
+        for dep in deps {
+            let dep_id = task_id(job_id, dep);
+            let hash: Option<String> = tx
+                .query_row(
+                    "SELECT o.output_hash FROM intel_brief_stage_outputs o JOIN argos_tasks t ON t.id=o.task_id
+                     WHERE o.task_id=?1 AND t.state='completed'",
+                    [&dep_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(hash) = hash else {
+                ready = false;
+                break;
+            };
+            input.insert(
+                short_key(dep).to_string(),
+                serde_json::json!({"task_id": dep_id, "output_hash": hash}),
+            );
+            hashes.push(hash);
+        }
+        if !ready {
+            continue;
+        }
+        let revision = revisions.get(index).cloned().unwrap_or_default();
+        let key =
+            crate::nlp::cache::hash(&serde_json::json!([operation, revision, hashes]).to_string());
+        bound += tx.execute(
+            "UPDATE argos_tasks SET input_ref=?2,input_hash=?3,updated_at=?4
+             WHERE id=?1 AND input_hash='' AND state IN ('queued','retry_scheduled')",
+            params![
+                task_id(job_id, operation),
+                serde_json::Value::Object(input).to_string(),
+                key,
+                now
+            ],
+        )?;
+    }
+    Ok(bound)
+}
+
+fn run_revisions(conn: &Connection, job_id: &str) -> Result<Vec<String>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT stage_revisions_json FROM intel_brief_runs WHERE job_id=?1",
+            [job_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(raw
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default())
 }
 
 fn supersede_run(conn: &Connection, job_id: &str, now: &str) -> Result<()> {
@@ -275,15 +457,10 @@ pub fn commit_stage_with(
         "INSERT OR REPLACE INTO intel_brief_stage_outputs(task_id,job_id,stage,output_hash,output_json,item_count,empty_reason,committed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![claimed.id, claimed.job_id, claimed.operation, hash, output_json, item_count as i64, empty_reason, now],
     )?;
-    let next = STAGES
-        .iter()
-        .position(|(op, _)| *op == claimed.operation)
-        .and_then(|i| STAGES.get(i + 1));
-    if let Some((next_op, _)) = next {
-        tx.execute(
-            "UPDATE argos_tasks SET input_ref=?2,input_hash=?3,updated_at=?4 WHERE id=?1 AND state IN ('queued','retry_scheduled')",
-            params![task_id(&claimed.job_id, next_op), serde_json::json!({"predecessor":claimed.id,"output_hash":hash}).to_string(), hash, now],
-        )?;
+    let last = STAGES.last().map(|(op, _)| *op) == Some(claimed.operation.as_str());
+    if !last {
+        let revisions = run_revisions(&tx, &claimed.job_id)?;
+        bind_ready(&tx, &claimed.job_id, &revisions, now)?;
     } else {
         tx.execute(
             "UPDATE intel_brief_runs SET state='completed',updated_at=?2 WHERE job_id=?1",
@@ -437,25 +614,34 @@ pub fn published_brief(
     })
 }
 
-/// Explicit Retry: resume the failed stage only, preserving completed
-/// predecessors; dependents unblock as it commits.
+/// Explicit Retry: resume every failed branch only, preserving completed
+/// siblings and predecessors; blocked descendants unblock as they commit.
+/// Returns the first resumed task id.
 pub fn retry_stage(conn: &Connection, job_id: &str, now: &str) -> Result<Option<String>> {
-    let failed: Option<String> = conn
-        .query_row(
-            "SELECT id FROM argos_tasks WHERE job_id=?1 AND state='failed' ORDER BY priority LIMIT 1",
-            [job_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(id) = failed else {
-        return Ok(None);
+    let failed: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM argos_tasks WHERE job_id=?1 AND state='failed' ORDER BY priority",
+        )?;
+        let rows = stmt
+            .query_map([job_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        rows
     };
+    if failed.is_empty() {
+        return Ok(None);
+    }
+    for id in &failed {
+        conn.execute(
+            "UPDATE argos_tasks SET state='queued',attempts=0,recoveries=0,error_category='',error_message='',finished_at='',next_eligible_at='',updated_at=?2 WHERE id=?1 AND state='failed'",
+            params![id, now],
+        )?;
+    }
     conn.execute(
-        "UPDATE argos_tasks SET state='queued',attempts=0,recoveries=0,error_category='',error_message='',finished_at='',next_eligible_at='',updated_at=?2 WHERE id=?1 AND state='failed'",
-        params![id, now],
+        "UPDATE intel_brief_runs SET state='active',updated_at=?2 WHERE job_id=?1 AND state='failed'",
+        params![job_id, now],
     )?;
     tasks::refresh_job_state(conn, job_id, now)?;
-    Ok(Some(id))
+    Ok(failed.into_iter().next())
 }
 
 /// Cancellation/deletion: stop the owned chain and prevent publication.
@@ -501,32 +687,57 @@ fn short(reason: &str) -> String {
     }
 }
 
-/// Stage views for a chain, in order.
+/// Stage views for a chain, in order, computed from the actual dependency
+/// rows: a queued node names whichever prerequisites are still pending, or
+/// the failed prerequisite (transitively) that blocks it.
 pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
     let mut out: Vec<StageView> = Vec::new();
-    let mut blocked_by: Option<&'static str> = None;
+    let mut failed_by: std::collections::HashMap<String, &'static str> = Default::default();
     for (operation, label) in STAGES {
+        let id = task_id(job_id, operation);
         let row: Option<(String, String, String)> = conn
             .query_row(
                 "SELECT state,error_message,next_eligible_at FROM argos_tasks WHERE id=?1",
-                [task_id(job_id, operation)],
+                [&id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
         let Some((state, error, _eligible)) = row else {
             continue;
         };
+        let deps: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT p.operation,p.state FROM argos_task_dependencies d JOIN argos_tasks p ON p.id=d.depends_on
+                 WHERE d.task_id=?1 ORDER BY p.priority",
+            )?;
+            let rows = stmt
+                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
         let output: Option<(i64, String)> = conn
             .query_row(
                 "SELECT item_count,empty_reason FROM intel_brief_stage_outputs WHERE task_id=?1",
-                [task_id(job_id, operation)],
+                [&id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let prev = out.last();
+        let blocker = deps.iter().find_map(|(op, st)| {
+            if st == "failed" {
+                Some(label_of(op))
+            } else {
+                failed_by.get(op).copied()
+            }
+        });
         let text = match state.as_str() {
             "completed" => match output {
                 Some((0, reason)) if !reason.is_empty() => format!("Completed · {reason}"),
+                Some((n, reason)) if reason.contains("warning") => {
+                    format!(
+                        "Completed with warnings · {n} item{}",
+                        if n == 1 { "" } else { "s" }
+                    )
+                }
                 Some((n, _)) => format!("Completed · {n} item{}", if n == 1 { "" } else { "s" }),
                 None => "Completed".into(),
             },
@@ -534,10 +745,7 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
                 let activity: Option<String> = conn
                     .query_row(
                         "SELECT value FROM app_state WHERE key=?1",
-                        [format!(
-                            "intel-brief-activity:{}",
-                            task_id(job_id, operation)
-                        )],
+                        [format!("intel-brief-activity:{id}")],
                         |r| r.get(0),
                     )
                     .optional()
@@ -551,14 +759,28 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
             "failed" => format!("Failed · {}", short(&error)),
             "cancelled" => "Cancelled".into(),
             "superseded" => "Superseded".into(),
-            _ => match (blocked_by, prev) {
-                (Some(blocker), _) => format!("Queued · blocked by {blocker}"),
-                (None, Some(p)) if p.state != "completed" => format!("Queued · after {}", p.label),
-                _ => "Queued".into(),
+            _ => match blocker {
+                Some(b) => format!("Queued · blocked by {b}"),
+                None => {
+                    let pending: Vec<&str> = deps
+                        .iter()
+                        .filter(|(_, st)| st != "completed")
+                        .map(|(op, _)| label_of(op))
+                        .collect();
+                    if pending.is_empty() {
+                        "Queued".into()
+                    } else {
+                        format!("Queued · after {}", pending.join(", "))
+                    }
+                }
             },
         };
-        if state == "failed" && blocked_by.is_none() {
-            blocked_by = Some(label);
+        if state == "failed" {
+            failed_by.insert(operation.to_string(), label);
+        } else if state != "completed" {
+            if let Some(b) = blocker {
+                failed_by.insert(operation.to_string(), b);
+            }
         }
         out.push(StageView {
             operation: operation.into(),
@@ -569,6 +791,22 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
         });
     }
     Ok(out)
+}
+
+/// Truthful chain summary for headers and Jobs: `2 running · 0/4 completed`.
+pub fn chain_summary(views: &[StageView]) -> String {
+    let running = views.iter().filter(|v| v.state == "running").count();
+    let completed = views.iter().filter(|v| v.state == "completed").count();
+    let failed = views.iter().filter(|v| v.state == "failed").count();
+    let mut parts = Vec::new();
+    if running > 0 {
+        parts.push(format!("{running} running"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    parts.push(format!("{completed}/{} completed", views.len()));
+    parts.join(" · ")
 }
 
 /// Committed stage outputs of a chain, keyed by operation.

@@ -2,7 +2,7 @@
 //! validation, and the recoverable three-file commit that publishes it.
 //!
 //! The portable contract is [`ProfileConfig`]; the JSON Schema is
-//! `docs/schemas/profile-config-v1.schema.json`. `SettingsFile` is never exposed
+//! `docs/schemas/profile-config-v1.schema.json` (schema 2: `profile-config-v2.schema.json`). `SettingsFile` is never exposed
 //! wholesale: only the documented fields travel, so unrelated settings, recon
 //! limits and local state cannot be overwritten by a foreign document.
 //!
@@ -42,6 +42,13 @@ use crate::secrets::{AuthFile, ProviderSecret};
 
 /// Portable configuration schema version. Argos rejects any other value.
 pub const SCHEMA_VERSION: u32 = 1;
+/// Portable schema 2 adds operation-override role references and an optional
+/// route `account_id`. Export picks schema 1 unless either feature is used.
+pub const SCHEMA_VERSION_ROUTING: u32 = 2;
+
+fn supported_schema(version: u64) -> bool {
+    version == u64::from(SCHEMA_VERSION) || version == u64::from(SCHEMA_VERSION_ROUTING)
+}
 /// A document larger than this is refused before it is parsed.
 pub const MAX_DOCUMENT_BYTES: usize = 1 << 20;
 
@@ -114,7 +121,7 @@ const PROVIDER_FIELDS: &[&str] = &[
 const CREDENTIAL_FIELDS: &[&str] = &["source", "api_key", "name"];
 const TOOL_FIELDS: &[&str] = &["provider", "primary", "fallback"];
 const ROLE_ASSIGNMENT_FIELDS: &[&str] = &["primary", "fallbacks"];
-const ROUTE_FIELDS: &[&str] = &["provider_id", "model"];
+const ROUTE_FIELDS: &[&str] = &["provider_id", "model", "account_id"];
 const QUOTA_FIELDS: &[&str] = &[
     "quota_group_id",
     "scope",
@@ -373,6 +380,10 @@ pub struct ToolCredentialEntry {
 pub struct Route {
     pub provider_id: String,
     pub model: String,
+    /// Schema 2: the internal account-map key this route uses. Absent keeps
+    /// the legacy default-account behaviour. Never a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 /// One role assignment. `primary: null` preserves documented inheritance;
@@ -405,7 +416,40 @@ pub struct RoleDocument {
     /// Per-operation overrides (Brief operations); absent keys inherit their
     /// role. Keys are `provider::BRIEF_OPERATIONS`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub operation_overrides: std::collections::BTreeMap<String, RoleAssignment>,
+    pub operation_overrides: std::collections::BTreeMap<String, PortableOverride>,
+}
+
+/// A portable operation override: a portable assignment, or (schema 2) a
+/// `{"route_role": ...}` reference. Both arms deny unknown fields, so a mixed
+/// object matches neither. Internal provider/model fields never appear here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PortableOverride {
+    Route(provider::RouteRoleRef),
+    Assignment(RoleAssignment),
+}
+
+impl From<RoleAssignment> for PortableOverride {
+    fn from(a: RoleAssignment) -> Self {
+        Self::Assignment(a)
+    }
+}
+
+impl ProfileConfig {
+    /// Whether the document uses any schema-2 routing feature.
+    pub fn uses_routing_features(&self) -> bool {
+        let roles = &self.model_roles;
+        let has_account = |a: &RoleAssignment| {
+            a.primary.iter().any(|r| r.account_id.is_some())
+                || matches!(&a.fallbacks, Supplied::Value(v) if v.iter().any(|r| r.account_id.is_some()))
+        };
+        roles.entries().into_iter().any(|(_, a)| has_account(a))
+            || roles.decision_fallback.as_ref().is_some_and(has_account)
+            || roles.operation_overrides.values().any(|o| match o {
+                PortableOverride::Route(_) => true,
+                PortableOverride::Assignment(a) => has_account(a),
+            })
+    }
 }
 
 impl RoleDocument {
@@ -1125,9 +1169,18 @@ fn validate_tool_credentials(
     }
 }
 
+/// What raw route validation needs from the rest of the document.
+struct RoleCtx {
+    schema: u64,
+    provider_ids: Vec<String>,
+    /// (provider entry id, normalized kind) for account-id validation.
+    accounts: Vec<(String, String)>,
+}
+
 fn validate_route(
     route: &Map<String, Value>,
     pointer: &str,
+    ctx: &RoleCtx,
     issues: &mut Vec<ConfigIssue>,
 ) -> Route {
     check_known_fields(route, ROUTE_FIELDS, pointer, issues);
@@ -1146,14 +1199,51 @@ fn validate_route(
     )
     .unwrap_or_default()
     .to_string();
-    Route { provider_id, model }
+    let account_id = match route.get("account_id") {
+        None => None,
+        Some(_) if ctx.schema < u64::from(SCHEMA_VERSION_ROUTING) => {
+            issues.push(issue(
+                &child(pointer, "account_id"),
+                "account_id requires schema_version 2",
+            ));
+            None
+        }
+        Some(Value::String(id)) if !id.trim().is_empty() => {
+            let kind = provider::normalize_kind(&provider_id);
+            match ctx.accounts.iter().find(|(entry, _)| entry == id.trim()) {
+                Some((_, account_kind)) if *account_kind == kind => {}
+                Some(_) => issues.push(issue(
+                    &child(pointer, "account_id"),
+                    "names an account of a different provider kind",
+                )),
+                None => issues.push(issue(
+                    &child(pointer, "account_id"),
+                    "names an account that is not in providers",
+                )),
+            }
+            Some(id.trim().to_string())
+        }
+        Some(_) => {
+            issues.push(issue(
+                &child(pointer, "account_id"),
+                "must be a non-empty string",
+            ));
+            None
+        }
+    };
+    Route {
+        provider_id,
+        model,
+        account_id,
+    }
 }
 
-/// Validates one role assignment and returns its primary route, so the caller
+/// Validates one role assignment and returns its route chain, so the caller
 /// can check role compatibility and reference integrity.
 fn validate_role_assignment(
     assignment: &Map<String, Value>,
     pointer: &str,
+    ctx: &RoleCtx,
     issues: &mut Vec<ConfigIssue>,
 ) -> Vec<Route> {
     check_known_fields(assignment, ROLE_ASSIGNMENT_FIELDS, pointer, issues);
@@ -1162,7 +1252,12 @@ fn validate_role_assignment(
     match assignment.get("primary") {
         None | Some(Value::Null) => {}
         Some(Value::Object(route)) => {
-            routes.push(validate_route(route, &child(pointer, "primary"), issues));
+            routes.push(validate_route(
+                route,
+                &child(pointer, "primary"),
+                ctx,
+                issues,
+            ));
         }
         Some(_) => issues.push(issue(
             &child(pointer, "primary"),
@@ -1179,13 +1274,16 @@ fn validate_role_assignment(
             let here = entry(&child(pointer, "fallbacks"), index);
             match item {
                 Value::Object(route) => {
-                    let route = validate_route(route, &here, issues);
+                    let route = validate_route(route, &here, ctx, issues);
                     let label = format!("{}::{}", route.provider_id, route.model);
                     if labels.contains(&label) {
                         issues.push(issue(&here, "duplicate fallback route"));
                     } else {
                         labels.push(label);
                     }
+                    // Fallbacks join the chain the compatibility and
+                    // reference checks see, not just the primary.
+                    routes.push(route);
                 }
                 _ => issues.push(issue(&here, "must be a route object")),
             }
@@ -1194,29 +1292,49 @@ fn validate_role_assignment(
     routes
 }
 
+/// Response contract an assignment must be able to serve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChainContract {
+    /// Native decisions or validated chat labels both serve it.
+    BoundedDecision,
+    /// Needs at least one generation-capable (chat) route.
+    Generative,
+    /// Mixed roles: bounded decisions and generation both occur.
+    Mixed,
+}
+
+fn role_contract(role: &str) -> ChainContract {
+    if GENERATIVE_ONLY_ROLES.contains(&role) {
+        ChainContract::Generative
+    } else if DECISION_ROLES.contains(&role) {
+        ChainContract::BoundedDecision
+    } else {
+        ChainContract::Mixed
+    }
+}
+
+fn operation_contract(key: &str) -> ChainContract {
+    if key.ends_with(".generate") {
+        ChainContract::Generative
+    } else {
+        ChainContract::BoundedDecision
+    }
+}
+
+/// Contract-based compatibility (spec §5). A bounded-decision chain accepts
+/// native decisions models *and* chat models whose labels are validated
+/// locally (Tool Picker J→N→F→NL passes). A generative chain needs at least
+/// one generation-capable route; a decisions-only chain cannot serve it.
+/// Unknown text models stay valid with conservative capabilities. Purely
+/// local: no network request is made here.
 fn check_role_compatibility(
-    role: &str,
+    label: &str,
+    contract: ChainContract,
     routes: &[Route],
     pointer: &str,
     issues: &mut Vec<ConfigIssue>,
 ) {
-    for route in routes {
-        let decisions = provider::is_decisions_model(&route.model);
-        if DECISION_ROLES.contains(&role) && !decisions {
-            issues.push(issue(
-                &child(pointer, "primary"),
-                format!(
-                    "the {role} role needs a decisions model; {} is not one",
-                    route.model
-                ),
-            ));
-        }
-    }
-    // A Jev primary is valid on general roles: bounded decisions use it
-    // natively and generated JSON/prose skip it for the first chat-capable
-    // fallback (spec §3). Only roles that never take bounded decisions need
-    // at least one chat-capable route in the chain.
-    if GENERATIVE_ONLY_ROLES.contains(&role)
+    if contract == ChainContract::Generative
         && !routes.is_empty()
         && routes
             .iter()
@@ -1224,12 +1342,11 @@ fn check_role_compatibility(
     {
         issues.push(issue(
             &child(pointer, "primary"),
-            format!("the {role} role needs a chat-capable route; decisions models alone cannot serve it"),
+            format!("{label} generates output and needs a chat-capable route; decisions models alone cannot serve it"),
         ));
     }
 }
 
-/// General roles whose operations are all generated JSON/prose.
 const GENERATIVE_ONLY_ROLES: &[&str] = &["recon", "synthesis", "summarization"];
 
 fn check_route_reference(
@@ -1258,23 +1375,34 @@ fn check_route_reference(
     }
 }
 
-fn validate_roles(value: Option<&Value>, provider_ids: &[String], issues: &mut Vec<ConfigIssue>) {
+fn validate_roles(value: Option<&Value>, ctx: &RoleCtx, issues: &mut Vec<ConfigIssue>) {
     let Some(obj) = object_value(value, "/model_roles", issues) else {
         return;
     };
     check_known_fields(obj, ROLE_FIELDS, "/model_roles", issues);
     check_required(obj, ROLE_KEYS, "/model_roles", issues);
+    let check = |label: &str,
+                 contract: ChainContract,
+                 assignment: &Map<String, Value>,
+                 pointer: &str,
+                 issues: &mut Vec<ConfigIssue>| {
+        let routes = validate_role_assignment(assignment, pointer, ctx, issues);
+        check_role_compatibility(label, contract, &routes, pointer, issues);
+        for route in &routes {
+            check_route_reference(route, &ctx.provider_ids, pointer, issues);
+        }
+    };
     for key in ROLE_KEYS.iter().copied() {
         let pointer = child("/model_roles", key);
         match obj.get(key) {
             None | Some(Value::Null) => {}
-            Some(Value::Object(assignment)) => {
-                let routes = validate_role_assignment(assignment, &pointer, issues);
-                check_role_compatibility(key, &routes, &pointer, issues);
-                for route in &routes {
-                    check_route_reference(route, provider_ids, &pointer, issues);
-                }
-            }
+            Some(Value::Object(assignment)) => check(
+                &format!("the {key} role"),
+                role_contract(key),
+                assignment,
+                &pointer,
+                issues,
+            ),
             Some(_) => issues.push(issue(&pointer, "must be a role assignment object")),
         }
     }
@@ -1282,13 +1410,13 @@ fn validate_roles(value: Option<&Value>, provider_ids: &[String], issues: &mut V
         let pointer = child("/model_roles", "decision_fallback");
         match value {
             Value::Null => {}
-            Value::Object(assignment) => {
-                let routes = validate_role_assignment(assignment, &pointer, issues);
-                check_role_compatibility("decision_fallback", &routes, &pointer, issues);
-                for route in &routes {
-                    check_route_reference(route, provider_ids, &pointer, issues);
-                }
-            }
+            Value::Object(assignment) => check(
+                "the decision_fallback role",
+                ChainContract::BoundedDecision,
+                assignment,
+                &pointer,
+                issues,
+            ),
             _ => issues.push(issue(&pointer, "must be a role assignment object or null")),
         }
     }
@@ -1298,18 +1426,21 @@ fn validate_roles(value: Option<&Value>, provider_ids: &[String], issues: &mut V
             Value::Object(ops) => {
                 for (key, value) in ops {
                     let pointer = child(&base, key);
-                    let Some(role) = provider::operation_role(key) else {
+                    if provider::operation_role(key).is_none() {
                         issues.push(issue(&pointer, "is not a known operation"));
                         continue;
-                    };
+                    }
                     match value {
-                        Value::Object(assignment) => {
-                            let routes = validate_role_assignment(assignment, &pointer, issues);
-                            check_role_compatibility(role, &routes, &pointer, issues);
-                            for route in &routes {
-                                check_route_reference(route, provider_ids, &pointer, issues);
-                            }
+                        Value::Object(o) if o.contains_key("route_role") => {
+                            validate_role_reference(o, &pointer, ctx, issues);
                         }
+                        Value::Object(assignment) => check(
+                            &format!("the {key} operation"),
+                            operation_contract(key),
+                            assignment,
+                            &pointer,
+                            issues,
+                        ),
                         _ => issues.push(issue(&pointer, "must be a role assignment object")),
                     }
                 }
@@ -1317,6 +1448,54 @@ fn validate_roles(value: Option<&Value>, provider_ids: &[String], issues: &mut V
             _ => issues.push(issue(&base, "must be an object of operation overrides")),
         }
     }
+}
+
+/// `{"route_role": <canonical role>}` and nothing else, schema 2 only.
+fn validate_role_reference(
+    o: &Map<String, Value>,
+    pointer: &str,
+    ctx: &RoleCtx,
+    issues: &mut Vec<ConfigIssue>,
+) {
+    let here = child(pointer, "route_role");
+    if ctx.schema < u64::from(SCHEMA_VERSION_ROUTING) {
+        issues.push(issue(&here, "route_role requires schema_version 2"));
+        return;
+    }
+    if o.len() != 1 {
+        issues.push(issue(
+            pointer,
+            "an operation override is either an assignment or {route_role}, not both",
+        ));
+        return;
+    }
+    match o.get("route_role") {
+        Some(Value::String(role)) => {
+            if let Err(message) = provider::OperationOverride::role(role).check() {
+                issues.push(issue(&here, message));
+            }
+        }
+        _ => issues.push(issue(&here, "must be a canonical role key")),
+    }
+}
+
+/// (provider entry id, normalized kind) pairs for account-id checks.
+fn document_accounts(value: Option<&Value>) -> Vec<(String, String)> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let id = p.get("id")?.as_str()?.trim().to_string();
+            let kind = p.get("kind").and_then(Value::as_str).unwrap_or(&id);
+            let kind = stored_kind(
+                kind,
+                p.get("base_url").and_then(Value::as_str).unwrap_or(""),
+                None,
+            );
+            Some((id, provider::normalize_kind(&kind)))
+        })
+        .collect()
 }
 
 /// Validates a parsed document. Returns the blocking issues; `warnings` receives
@@ -1331,14 +1510,14 @@ fn validate_document(value: &Value, warnings: &mut Vec<ConfigIssue>) -> Vec<Conf
     check_required(root, ROOT_REQUIRED, "", &mut issues);
     if let Some(version) = root.get("schema_version") {
         match version.as_u64() {
-            Some(1) => {}
+            Some(v) if supported_schema(v) => {}
             Some(other) => issues.push(issue(
                 "/schema_version",
-                format!("expected {SCHEMA_VERSION}, found {other}"),
+                format!("expected {SCHEMA_VERSION} or {SCHEMA_VERSION_ROUTING}, found {other}"),
             )),
             None => issues.push(issue(
                 "/schema_version",
-                format!("must be the integer {SCHEMA_VERSION}"),
+                format!("must be the integer {SCHEMA_VERSION} or {SCHEMA_VERSION_ROUTING}"),
             )),
         }
     }
@@ -1351,7 +1530,15 @@ fn validate_document(value: &Value, warnings: &mut Vec<ConfigIssue>) -> Vec<Conf
     let provider_ids =
         validate_providers(root.get("providers"), &quota_keys, warnings, &mut issues);
     validate_tool_credentials(root.get("tool_credentials"), warnings, &mut issues);
-    validate_roles(root.get("model_roles"), &provider_ids, &mut issues);
+    let ctx = RoleCtx {
+        schema: root
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::from(SCHEMA_VERSION)),
+        provider_ids,
+        accounts: document_accounts(root.get("providers")),
+    };
+    validate_roles(root.get("model_roles"), &ctx, &mut issues);
     issues
 }
 
@@ -1362,11 +1549,30 @@ fn validate_document(value: &Value, warnings: &mut Vec<ConfigIssue>) -> Vec<Conf
 /// model, and import is where the contract is enforced.
 fn validate_config(config: &ProfileConfig, warnings: &mut Vec<ConfigIssue>) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
-    if config.schema_version != SCHEMA_VERSION {
+    if !supported_schema(u64::from(config.schema_version)) {
         issues.push(issue(
             "/schema_version",
-            format!("expected {SCHEMA_VERSION}, found {}", config.schema_version),
+            format!(
+                "expected {SCHEMA_VERSION} or {SCHEMA_VERSION_ROUTING}, found {}",
+                config.schema_version
+            ),
         ));
+    } else if config.schema_version < SCHEMA_VERSION_ROUTING && config.uses_routing_features() {
+        issues.push(issue(
+            "/schema_version",
+            "role references and route account_id require schema_version 2",
+        ));
+    }
+    for (key, o) in &config.model_roles.operation_overrides {
+        let pointer = child("/model_roles/operation_overrides", key);
+        if provider::operation_role(key).is_none() {
+            issues.push(issue(&pointer, "is not a known operation"));
+        }
+        if let PortableOverride::Route(r) = o {
+            if let Err(message) = provider::OperationOverride::Route(r.clone()).check() {
+                issues.push(issue(&child(&pointer, "route_role"), message));
+            }
+        }
     }
     let mut ids: Vec<String> = Vec::new();
     for (index, provider) in config.providers.iter().enumerate() {
@@ -1557,6 +1763,20 @@ fn tool_credential_entries(settings: &SettingsFile) -> Vec<ToolCredentialEntry> 
         .collect()
 }
 
+/// An explicit internal account label, exported as a schema-2 `account_id`.
+fn account_id(account: &str) -> Option<String> {
+    Some(account.trim().to_string()).filter(|a| !a.is_empty())
+}
+
+fn portable_override(o: &provider::OperationOverride) -> PortableOverride {
+    match o {
+        provider::OperationOverride::Route(r) => PortableOverride::Route(r.clone()),
+        provider::OperationOverride::Assignment(a) => {
+            PortableOverride::Assignment(role_assignment(a))
+        }
+    }
+}
+
 fn role_assignment(assignment: &ModelAssignment) -> RoleAssignment {
     let inherited = assignment.provider.trim().is_empty() && assignment.model.trim().is_empty();
     let primary = if inherited {
@@ -1565,6 +1785,7 @@ fn role_assignment(assignment: &ModelAssignment) -> RoleAssignment {
         Some(Route {
             provider_id: provider::normalize_kind(&assignment.provider),
             model: assignment.model.trim().to_string(),
+            account_id: account_id(&assignment.account),
         })
     };
     let fallbacks = assignment
@@ -1573,6 +1794,7 @@ fn role_assignment(assignment: &ModelAssignment) -> RoleAssignment {
         .map(|route| Route {
             provider_id: provider::normalize_kind(&route.provider),
             model: route.model.trim().to_string(),
+            account_id: account_id(&route.account),
         })
         .collect();
     RoleAssignment {
@@ -1613,7 +1835,7 @@ pub fn export_document(
             setting
         })
         .collect();
-    ProfileConfig {
+    let mut document = ProfileConfig {
         schema_version: SCHEMA_VERSION,
         exported_at: Some(chrono::Utc::now().to_rfc3339()),
         providers,
@@ -1638,11 +1860,17 @@ pub fn export_document(
                 .defaults
                 .operation_overrides
                 .iter()
-                .map(|(k, a)| (k.clone(), role_assignment(a)))
+                .map(|(k, o)| (k.clone(), portable_override(o)))
                 .collect(),
         },
         rate_limits,
+    };
+    // Schema 1 unless a routing feature is in use, so older readers keep
+    // importing ordinary exports.
+    if document.uses_routing_features() {
+        document.schema_version = SCHEMA_VERSION_ROUTING;
     }
+    document
 }
 
 /// Serialises a document deterministically: field order is fixed and every
@@ -1743,7 +1971,11 @@ fn stored_kind(document_kind: &str, base_url: &str, existing: Option<&ProviderSe
 }
 
 fn apply_provider(entry: &ProviderEntry, auth: &mut AuthFile) {
-    let existing = auth.account(&entry.id);
+    let existing = auth
+        .accounts
+        .get(entry.id.trim())
+        .cloned()
+        .or_else(|| auth.account(&entry.id));
     let kind = stored_kind(&entry.kind, &entry.base_url, existing.as_ref());
     let mut secret = existing.unwrap_or(ProviderSecret {
         kind: kind.clone(),
@@ -1768,7 +2000,9 @@ fn apply_provider(entry: &ProviderEntry, auth: &mut AuthFile) {
         }
         CredentialSource::Env | CredentialSource::None => None,
     };
-    auth.set_account(secret);
+    // Keep the document's account-map key (a named second account stays
+    // distinct instead of collapsing onto its provider kind).
+    auth.set_account_keyed(entry.id.trim(), secret);
 }
 
 /// One tool credential slot. `Absent` preserves the local value; `Removed` and
@@ -1822,8 +2056,9 @@ fn apply_role(assignment: &RoleAssignment, target: Option<&mut ModelAssignment>)
         Some(route) => {
             target.provider = provider::normalize_kind(&route.provider_id);
             target.model = route.model.trim().to_string();
-            // The portable route carries no account label.
-            target.account = String::new();
+            // Schema 2 carries the explicit account key; legacy routes keep
+            // the default-account behaviour.
+            target.account = route.account_id.clone().unwrap_or_default();
         }
         // An explicit null returns the role to documented inheritance.
         None => {
@@ -1840,7 +2075,7 @@ fn apply_role(assignment: &RoleAssignment, target: Option<&mut ModelAssignment>)
             .map(|route| ModelRoute {
                 provider: provider::normalize_kind(&route.provider_id),
                 model: route.model.trim().to_string(),
-                account: String::new(),
+                account: route.account_id.clone().unwrap_or_default(),
             })
             .collect();
     }
@@ -1884,14 +2119,25 @@ pub fn apply_import(
     }
     // Overrides are replaced as a whole: an absent key inherits its role.
     settings.defaults.operation_overrides.clear();
-    for (key, assignment) in &plan.config.model_roles.operation_overrides {
-        let mut target = ModelAssignment::default();
-        apply_role(assignment, Some(&mut target));
-        if !target.provider.is_empty() || !target.model.is_empty() {
-            settings
-                .defaults
-                .operation_overrides
-                .insert(key.clone(), target);
+    for (key, o) in &plan.config.model_roles.operation_overrides {
+        match o {
+            // A reference is stored as-is; the referenced role is untouched.
+            PortableOverride::Route(r) => {
+                settings
+                    .defaults
+                    .operation_overrides
+                    .insert(key.clone(), provider::OperationOverride::Route(r.clone()));
+            }
+            PortableOverride::Assignment(assignment) => {
+                let mut target = ModelAssignment::default();
+                apply_role(assignment, Some(&mut target));
+                if !target.provider.is_empty() || !target.model.is_empty() {
+                    settings
+                        .defaults
+                        .operation_overrides
+                        .insert(key.clone(), target.into());
+                }
+            }
         }
     }
     for setting in &plan.config.rate_limits {

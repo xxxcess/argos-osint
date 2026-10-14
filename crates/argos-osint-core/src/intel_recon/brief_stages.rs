@@ -53,8 +53,75 @@ pub const CARRIED_RESERVE_BYTES: usize = 6_000;
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type Validator = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
+/// Immutable execution context of one claimed stage (spec §6). Built once at
+/// claim time and passed to every backend call, so parallel branches never
+/// reload Defaults or mutable article metadata mid-stage.
+#[derive(Clone, Debug, Default)]
+pub struct StageContext {
+    pub job_id: String,
+    pub task_id: String,
+    /// Checked brief generation of the owning job.
+    pub job_generation: i64,
+    /// Lease epoch of this execution (ownership/telemetry, never a cache key).
+    pub lease_epoch: i64,
+    /// Captured title/description/published/source revision.
+    pub metadata_snapshot: Value,
+    /// Captured role defaults (JSON) used to route every dispatch.
+    pub route_snapshot: String,
+}
+
+impl StageContext {
+    /// Execution-scoped operation id: `{task_id}:e{epoch}:{key}:{payload_hash}`.
+    pub fn operation_id(&self, key: &str, payload: &str) -> String {
+        format!(
+            "{}:e{}:{key}:{}",
+            self.task_id,
+            self.lease_epoch,
+            crate::nlp::cache::hash(payload)
+        )
+    }
+
+    /// Bind a scope to this execution: task, epoch and job generation.
+    pub fn scope<'a>(
+        &'a self,
+        scope: crate::recon::model_exec::OperationScope<'a>,
+    ) -> crate::recon::model_exec::OperationScope<'a> {
+        scope
+            .with_task(&self.task_id)
+            .with_task_epoch(self.lease_epoch)
+            .with_generation(u32::try_from(self.job_generation.max(0)).unwrap_or(u32::MAX))
+    }
+
+    /// Captured defaults applied over `settings` (credentials stay in the
+    /// account store; only routing comes from the snapshot).
+    pub fn routed(
+        &self,
+        settings: &crate::provider::SettingsFile,
+    ) -> crate::provider::SettingsFile {
+        let mut routed = settings.clone();
+        if let Ok(defaults) =
+            serde_json::from_str::<crate::provider::RoleDefaults>(&self.route_snapshot)
+        {
+            routed.defaults = defaults;
+        }
+        routed
+    }
+
+    /// Resolved route of one operation in the captured snapshot, as a
+    /// receipt component (route only, never the whole Defaults).
+    pub fn route_key(&self, operation: Option<&str>, role: &str) -> String {
+        let defaults: crate::provider::RoleDefaults =
+            serde_json::from_str(&self.route_snapshot).unwrap_or_default();
+        crate::nlp::cache::hash(
+            &serde_json::to_string(&defaults.resolve_operation(operation, role).0)
+                .unwrap_or_default(),
+        )
+    }
+}
+
 /// One model request for a stage.
 pub struct StageRequest {
+    pub ctx: StageContext,
     pub task_id: String,
     pub stage: String,
     pub role: &'static str,
@@ -66,6 +133,10 @@ pub struct StageRequest {
     /// Operation key for `defaults.operation_overrides`.
     pub operation_key: &'static str,
     pub validator: Validator,
+    /// Stage budget-table row (spec §5).
+    pub budget: crate::request_policy::StageBudget,
+    /// Authoritative output schema (strict schema / output tool / JSON mode).
+    pub contract: Option<crate::provider_adapters::ResponseContract>,
 }
 
 /// Provider/retrieval boundary for stage execution (runtime or test double).
@@ -73,7 +144,7 @@ pub trait StageBackend: Send {
     /// Stage 1: retrieve (or reuse) and clean the article body.
     fn prepare_body<'a>(
         &'a mut self,
-        job_id: &'a str,
+        ctx: &'a StageContext,
         article: &'a AtlasArticleRow,
         force: bool,
         cancel: &'a Arc<AtomicBool>,
@@ -81,7 +152,7 @@ pub trait StageBackend: Send {
     /// Batched Claim-assessor fidelity decisions (native Jev or constrained chat).
     fn assess<'a>(
         &'a mut self,
-        task_id: &'a str,
+        ctx: &'a StageContext,
         items: Vec<super::brief_fidelity::FidelityItem>,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>>;
@@ -227,7 +298,10 @@ fn norm(text: &str) -> String {
 
 fn empty_reason(value: &Value) -> Result<String> {
     let reason = str_field(value, "empty_reason").trim().to_string();
-    ensure!(words(&reason) <= 25, "empty_reason exceeds 25 words");
+    ensure!(
+        words(&reason) <= super::brief_contracts::EMPTY_REASON_WORDS,
+        "empty_reason exceeds 25 words"
+    );
     Ok(reason)
 }
 
@@ -235,6 +309,13 @@ fn empty_reason(value: &Value) -> Result<String> {
 
 pub fn metadata_sentences(article: &AtlasArticleRow) -> Vec<Sentence> {
     super::sentence_index::metadata_wire(&article.title, &article.description)
+}
+
+/// Deterministic ID order for schema enums (stable request bodies).
+fn sorted_ids(ids: &HashSet<String>) -> Vec<&str> {
+    let mut out: Vec<&str> = ids.iter().map(String::as_str).collect();
+    out.sort_unstable();
+    out
 }
 
 pub fn claims_user(article: &AtlasArticleRow) -> String {
@@ -262,7 +343,10 @@ pub fn validate_claims(raw: &str, meta: &[Sentence]) -> Result<Value> {
     for (n, item) in items.iter().enumerate() {
         let text = str_field(item, "text").trim();
         ensure!(!text.is_empty(), "claim text missing");
-        ensure!(words(text) <= 35, "claim exceeds 35 words");
+        ensure!(
+            words(text) <= super::brief_contracts::CLAIM_TEXT_WORDS,
+            "claim exceeds 35 words"
+        );
         let evidence = ids(item, "evidence_ids")?;
         ensure!(
             !evidence.is_empty(),
@@ -343,12 +427,12 @@ pub fn validate_inferences(
     for (n, item) in items.iter().enumerate() {
         let text = str_field(item, "text").trim();
         ensure!(
-            !text.is_empty() && words(text) <= 35,
+            !text.is_empty() && words(text) <= super::brief_contracts::INFERENCE_TEXT_WORDS,
             "inference text missing or over 35 words"
         );
         let why = str_field(item, "why").trim();
         ensure!(
-            !why.is_empty() && words(why) <= 45,
+            !why.is_empty() && words(why) <= super::brief_contracts::INFERENCE_WHY_WORDS,
             "reasoning missing or over 45 words"
         );
         let support = str_field(item, "support");
@@ -357,9 +441,14 @@ pub fn validate_inferences(
             "support must be supported or conditional"
         );
         let limitations: Vec<String> = ids(item, "limitations")?;
-        ensure!(limitations.len() <= 2, "at most two limitations");
         ensure!(
-            limitations.iter().all(|l| words(l) <= 20),
+            limitations.len() <= super::brief_contracts::MAX_LIMITATIONS,
+            "at most two limitations"
+        );
+        ensure!(
+            limitations
+                .iter()
+                .all(|l| words(l) <= super::brief_contracts::LIMITATION_WORDS),
             "limitation over 20 words"
         );
         ensure!(
@@ -538,7 +627,7 @@ pub fn validate_leads(
         );
         let why = str_field(item, "why").trim();
         ensure!(
-            !why.is_empty() && words(why) <= 40,
+            !why.is_empty() && words(why) <= super::brief_contracts::LEAD_WHY_WORDS,
             "interpretation missing or over 40 words"
         );
         let evidence = ids(item, "metadata_evidence_ids")?;
@@ -718,17 +807,73 @@ async fn generate(
 }
 
 /// Run one stage: Ok(value, items, empty_reason).
+/// Build the immutable context for a claimed stage on its own connection.
+pub fn stage_context(store: &Store, claimed: &ClaimedTask) -> Result<StageContext> {
+    let (job_generation, route_snapshot): (i64, String) = store.conn.query_row(
+        "SELECT r.generation, t.role_snapshot FROM intel_brief_runs r JOIN argos_tasks t ON t.job_id=r.job_id
+         WHERE r.job_id=?1 AND t.id=?2",
+        [&claimed.job_id, &claimed.id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    // Roots carry the captured metadata; descendants read the Claims root's.
+    let own: Value = serde_json::from_str(&claimed.input_ref).unwrap_or(Value::Null);
+    let metadata_snapshot = if own["metadata"].is_object() {
+        own["metadata"].clone()
+    } else {
+        let raw: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT input_ref FROM argos_tasks WHERE id=?1",
+                [brief_pipeline::task_id(
+                    &claimed.job_id,
+                    "intel_brief_claims",
+                )],
+                |r| r.get(0),
+            )
+            .optional()?;
+        raw.and_then(|r| serde_json::from_str::<Value>(&r).ok())
+            .map(|v| v["metadata"].clone())
+            .unwrap_or(Value::Null)
+    };
+    Ok(StageContext {
+        job_id: claimed.job_id.clone(),
+        task_id: claimed.id.clone(),
+        job_generation,
+        lease_epoch: claimed.epoch,
+        metadata_snapshot,
+        route_snapshot,
+    })
+}
+
+/// The article row with its title/description replaced by the captured
+/// snapshot, so a mid-chain metadata edit never reaches a running branch.
+fn snapshot_article(mut article: AtlasArticleRow, ctx: &StageContext) -> AtlasArticleRow {
+    let m = &ctx.metadata_snapshot;
+    if let Some(t) = m["title"].as_str() {
+        article.title = t.to_string();
+    }
+    if let Some(d) = m["description"].as_str() {
+        article.description = d.to_string();
+    }
+    if let Some(p) = m["published_at"].as_str() {
+        article.published_at = p.to_string();
+    }
+    article
+}
+
 async fn execute(
     db_path: &Path,
     claimed: &ClaimedTask,
     backend: &mut dyn StageBackend,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(Value, usize, String)> {
-    let (article, job) = {
+    let (article, job, ctx) = {
         let store = Store::open(db_path)?;
+        let ctx = stage_context(&store, claimed)?;
         (
-            article_for(&store, &article_id_of(claimed, &store)?)?,
+            snapshot_article(article_for(&store, &article_id_of(claimed, &store)?)?, &ctx),
             claimed.job_id.clone(),
+            ctx,
         )
     };
     match claimed.operation.as_str() {
@@ -738,7 +883,7 @@ async fn execute(
                 .and_then(|v| v["force_body"].as_bool())
                 .unwrap_or(false);
             activity(db_path, &claimed.id, "retrieving / cleaning");
-            let artifact = backend.prepare_body(&job, &article, force, cancel).await?;
+            let artifact = backend.prepare_body(&ctx, &article, force, cancel).await?;
             activity(db_path, &claimed.id, "validating");
             stage_one_admissible(&artifact, artifact.acquisition_complete)?;
             // Row: "Completed · validated clean body" (plus any diagnostics).
@@ -768,15 +913,23 @@ async fn execute(
                 backend,
                 cancel,
                 StageRequest {
+                    ctx: ctx.clone(),
                     task_id: claimed.id.clone(),
                     stage: claimed.operation.clone(),
                     role: "claim_assessor",
-                    system: format!("{CLAIMS_PROMPT}{STRICT_JSON}{CLAIMS_SHAPE}"),
+                    system: format!(
+                        "{CLAIMS_PROMPT}{}{STRICT_JSON}{CLAIMS_SHAPE}",
+                        super::brief_contracts::claims_limits()
+                    ),
                     user: claims_user(&article),
                     completion_tokens: CLAIMS_TOKENS,
-                    reasoning: crate::request_policy::ReasoningEffort::Low,
+                    reasoning: crate::request_policy::CLAIMS_BUDGET.reasoning,
                     operation_key: crate::provider::OP_CLAIMS_GENERATE,
                     validator,
+                    budget: crate::request_policy::CLAIMS_BUDGET,
+                    contract: Some(super::brief_contracts::claims_contract(
+                        &meta.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                    )),
                 },
             )
             .await?;
@@ -785,7 +938,8 @@ async fn execute(
             apply_fidelity(
                 db_path,
                 backend,
-                &claimed.id,
+                &ctx,
+                &ctx.route_key(None, "evidence_curator"),
                 cancel,
                 &mut out,
                 "claims",
@@ -818,7 +972,10 @@ async fn execute(
                 .flatten()
                 .filter_map(|c| c["id"].as_str().map(str::to_string))
                 .collect();
-            let system = format!("{INFERENCES_PROMPT}{STRICT_JSON}{INFERENCES_SHAPE}");
+            let system = format!(
+                "{INFERENCES_PROMPT}{}{STRICT_JSON}{INFERENCES_SHAPE}",
+                super::brief_contracts::inferences_limits()
+            );
             let mut windows = request_windows(&all, &system, &claims, REQUEST_WINDOW_BYTES);
             // Oversized stories may read actor-focused packets (measured path,
             // opt-in). Fidelity below still reviews against the whole body.
@@ -864,15 +1021,21 @@ async fn execute(
                     backend,
                     cancel,
                     StageRequest {
+                        ctx: ctx.clone(),
                         task_id: claimed.id.clone(),
                         stage: claimed.operation.clone(),
                         role: "synthesis",
                         system: system.clone(),
                         user: inferences_user(&claims, window, &carried),
                         completion_tokens: INFERENCES_TOKENS,
-                        reasoning: crate::request_policy::ReasoningEffort::Default,
+                        reasoning: crate::request_policy::INFERENCES_BUDGET.reasoning,
                         operation_key: crate::provider::OP_INFERENCES_GENERATE,
                         validator,
+                        budget: crate::request_policy::INFERENCES_BUDGET,
+                        contract: Some(super::brief_contracts::inferences_contract(
+                            &sorted_ids(&claim_ids),
+                            &window.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                        )),
                     },
                 )
                 .await?;
@@ -884,7 +1047,11 @@ async fn execute(
             apply_fidelity(
                 db_path,
                 backend,
-                &claimed.id,
+                &ctx,
+                &ctx.route_key(
+                    Some(crate::provider::OP_INFERENCES_ASSESS),
+                    "claim_assessor",
+                ),
                 cancel,
                 &mut last,
                 "inferences",
@@ -948,15 +1115,28 @@ async fn execute(
                 backend,
                 cancel,
                 StageRequest {
+                    ctx: ctx.clone(),
                     task_id: claimed.id.clone(),
                     stage: claimed.operation.clone(),
                     role: "synthesis",
-                    system: format!("{LINKS_PROMPT}{STRICT_JSON}{LEADS_SHAPE}"),
+                    system: format!(
+                        "{LINKS_PROMPT}{}{STRICT_JSON}{LEADS_SHAPE}",
+                        super::brief_contracts::leads_limits()
+                    ),
                     user: links_user(&inferences, &candidates),
                     completion_tokens: LINKS_TOKENS,
-                    reasoning: crate::request_policy::ReasoningEffort::Low,
+                    reasoning: crate::request_policy::LINKS_BUDGET.reasoning,
                     operation_key: crate::provider::OP_LINKS_GENERATE,
                     validator,
+                    budget: crate::request_policy::LINKS_BUDGET,
+                    contract: Some(super::brief_contracts::leads_contract(
+                        &candidates.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+                        &sorted_ids(&inference_ids),
+                        &candidates
+                            .iter()
+                            .flat_map(|c| c.sentences.iter().map(|s| s.id.as_str()))
+                            .collect::<Vec<_>>(),
+                    )),
                 },
             )
             .await?;
@@ -1009,19 +1189,25 @@ fn prepare_canonical(
 
 /// Fidelity decisions with cached receipts; uncached items go to the
 /// Claim assessor in batches of at most [`super::brief_fidelity::BATCH`].
+/// Fidelity receipts are keyed by the item's source/contract receipt plus
+/// the actual resolved route, so a route change re-assesses.
 pub async fn assess_cached(
     db_path: &Path,
     backend: &mut dyn StageBackend,
-    task_id: &str,
+    ctx: &StageContext,
+    route_key: &str,
     items: Vec<super::brief_fidelity::FidelityItem>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<HashMap<String, String>> {
+    let receipt = |item: &super::brief_fidelity::FidelityItem| {
+        format!("intel-fidelity:{}:{route_key}", item.receipt_key())
+    };
     let mut labels = HashMap::new();
     let mut pending = Vec::new();
     {
         let store = Store::open(db_path)?;
         for item in items {
-            match store.app_state_get(&format!("intel-fidelity:{}", item.receipt_key()))? {
+            match store.app_state_get(&receipt(&item))? {
                 Some(label) => {
                     labels.insert(item.id.clone(), label);
                 }
@@ -1030,14 +1216,14 @@ pub async fn assess_cached(
         }
     }
     for batch in pending.chunks(super::brief_fidelity::BATCH) {
-        let decided = backend.assess(task_id, batch.to_vec(), cancel).await?;
+        let decided = backend.assess(ctx, batch.to_vec(), cancel).await?;
         let store = Store::open(db_path)?;
         for item in batch {
             let label = decided
                 .get(&item.id)
                 .cloned()
                 .ok_or_else(|| anyhow!("fidelity decision missing for {}", item.id))?;
-            store.app_state_set(&format!("intel-fidelity:{}", item.receipt_key()), &label)?;
+            store.app_state_set(&receipt(item), &label)?;
             labels.insert(item.id.clone(), label);
         }
     }
@@ -1049,7 +1235,8 @@ pub async fn assess_cached(
 async fn apply_fidelity(
     db_path: &Path,
     backend: &mut dyn StageBackend,
-    task_id: &str,
+    ctx: &StageContext,
+    route_key: &str,
     cancel: &Arc<AtomicBool>,
     out: &mut Value,
     key: &str,
@@ -1076,10 +1263,10 @@ async fn apply_fidelity(
                 .collect(),
         })
         .collect();
-    activity(db_path, task_id, "checking fidelity");
+    activity(db_path, &ctx.task_id, "checking fidelity");
     let labels = super::brief_timing::timed(
         super::brief_timing::Phase::Fidelity,
-        assess_cached(db_path, backend, task_id, items, cancel),
+        assess_cached(db_path, backend, ctx, route_key, items, cancel),
     )
     .await?;
     let mut kept = Vec::new();
@@ -1114,14 +1301,31 @@ pub async fn run_next_stage(
     parent_cancel: &Arc<AtomicBool>,
     config: &ExecConfig,
 ) -> Result<Option<StageOutcome>> {
-    let claimed = {
-        let store = Store::open(db_path)?;
-        tasks::interrupt_expired_leases(&store.conn, &now())?;
-        match brief_pipeline::claim_stage(&store.conn, owner, config.lease_secs, &now())? {
-            Some(c) => c,
-            None => return Ok(None),
-        }
+    let Some(claimed) = claim_next(db_path, owner, config)? else {
+        return Ok(None);
     };
+    run_claimed(db_path, claimed, backend, parent_cancel, config)
+        .await
+        .map(Some)
+}
+
+/// Reap expired leases and claim one ready stage on a fresh connection.
+pub fn claim_next(db_path: &Path, owner: &str, config: &ExecConfig) -> Result<Option<ClaimedTask>> {
+    let store = Store::open(db_path)?;
+    tasks::interrupt_expired_leases(&store.conn, &now())?;
+    brief_pipeline::claim_stage(&store.conn, owner, config.lease_secs, &now())
+}
+
+/// Execute one already-claimed stage through commit/acknowledgement. Every
+/// call opens its own connections, so concurrent stages never share a
+/// mutable SQLite handle.
+pub async fn run_claimed(
+    db_path: &Path,
+    claimed: ClaimedTask,
+    backend: &mut dyn StageBackend,
+    parent_cancel: &Arc<AtomicBool>,
+    config: &ExecConfig,
+) -> Result<StageOutcome> {
     let operation = claimed.operation.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let lost = Arc::new(AtomicBool::new(false));
@@ -1298,7 +1502,7 @@ pub async fn run_next_stage(
             );
         }
     }
-    Ok(Some(outcome))
+    Ok(outcome)
 }
 
 /// Durable heartbeat diagnostics (renewal failures and heartbeat age),
@@ -1344,7 +1548,9 @@ fn renew(db: &Path, claimed: &ClaimedTask, lease: i64) -> bool {
     false
 }
 
-/// Drain the chain until no stage is claimable.
+/// Serial drain with one backend: run ready stages until none is claimable.
+/// A failed branch no longer stops the drain: its independent sibling still
+/// runs (spec §6). Stops after a stale outcome (cancel/supersede/lost lease).
 pub async fn drain(
     db_path: &Path,
     owner: &str,
@@ -1353,11 +1559,58 @@ pub async fn drain(
     config: &ExecConfig,
 ) -> Result<Vec<StageOutcome>> {
     let mut outcomes = Vec::new();
-    while let Some(outcome) = run_next_stage(db_path, owner, backend, cancel, config).await? {
-        let stop = !matches!(outcome, StageOutcome::Committed { .. });
+    while !cancel.load(Ordering::Acquire) {
+        let Some(outcome) = run_next_stage(db_path, owner, backend, cancel, config).await? else {
+            break;
+        };
+        let stop = matches!(outcome, StageOutcome::Stale { .. });
         outcomes.push(outcome);
         if stop {
             break;
+        }
+    }
+    Ok(outcomes)
+}
+
+/// Stage slots of the dedicated drainer: the two independent v2 roots.
+pub const STAGE_SLOTS: usize = 2;
+
+/// Bounded parallel drain (spec §6). A slot is taken *before* a lease is
+/// claimed, each claimed stage runs on its own Tokio task with its own
+/// backend (from `make_backend`) and connections, and task-local timing and
+/// cancellation stay per stage. Returns when nothing is running and nothing
+/// is claimable.
+pub async fn drain_parallel<F>(
+    db_path: &Path,
+    owner: &str,
+    make_backend: F,
+    cancel: &Arc<AtomicBool>,
+    config: &ExecConfig,
+    slots: usize,
+) -> Result<Vec<StageOutcome>>
+where
+    F: Fn() -> Box<dyn StageBackend + Send + 'static>,
+{
+    let mut running: tokio::task::JoinSet<Result<StageOutcome>> = tokio::task::JoinSet::new();
+    let mut outcomes = Vec::new();
+    loop {
+        // Fill free slots; each slot is reserved before its claim.
+        while running.len() < slots.max(1) && !cancel.load(Ordering::Acquire) {
+            let Some(claimed) = claim_next(db_path, owner, config)? else {
+                break;
+            };
+            let (db, parent, cfg) = (db_path.to_path_buf(), cancel.clone(), config.clone());
+            let mut backend = make_backend();
+            running.spawn(async move {
+                run_claimed(&db, claimed, backend.as_mut(), &parent, &cfg).await
+            });
+        }
+        match running.join_next().await {
+            Some(joined) => {
+                let outcome = joined.map_err(|e| anyhow!("stage task panicked: {e}"))??;
+                outcomes.push(outcome);
+            }
+            None => break,
         }
     }
     Ok(outcomes)
@@ -1379,13 +1632,15 @@ pub struct RuntimeBackend {
 impl RuntimeBackend {
     fn job_runtime(
         &self,
-        job_id: &str,
+        ctx: &StageContext,
         article: &AtlasArticleRow,
         cancel: &Arc<AtomicBool>,
     ) -> super::worker::JobRuntime {
+        let settings = ctx.routed(&self.settings);
         super::worker::JobRuntime {
+            stage: Some(ctx.clone()),
             db_path: self.db_path.clone(),
-            job_id: job_id.to_string(),
+            job_id: ctx.job_id.clone(),
             article_title: article.title.clone(),
             article_url: article.url.clone(),
             article_preview: article.description.clone(),
@@ -1395,13 +1650,9 @@ impl RuntimeBackend {
             keys: self.keys.clone(),
             auth: self.auth.clone(),
             synthesis_secret: None,
-            classifier_secret: crate::provider::role_secret(
-                &self.auth,
-                &self.settings,
-                "classifier",
-            )
-            .ok(),
-            settings: self.settings.clone(),
+            classifier_secret: crate::provider::role_secret(&self.auth, &settings, "classifier")
+                .ok(),
+            settings,
             cancel: cancel.clone(),
         }
     }
@@ -1420,7 +1671,7 @@ pub fn load_clean_artifact(
 impl StageBackend for RuntimeBackend {
     fn prepare_body<'a>(
         &'a mut self,
-        job_id: &'a str,
+        ctx: &'a StageContext,
         article: &'a AtlasArticleRow,
         force_reload: bool,
         cancel: &'a Arc<AtomicBool>,
@@ -1460,7 +1711,7 @@ impl StageBackend for RuntimeBackend {
                 let store = Store::open(&self.db_path)?;
                 store.clear_article_body_content(&body_id)?;
             }
-            let runtime = self.job_runtime(job_id, article, cancel);
+            let runtime = self.job_runtime(ctx, article, cancel);
             super::body::fetch_article_body_with_runtime(
                 &self.db_path,
                 &body_id,
@@ -1484,30 +1735,40 @@ impl StageBackend for RuntimeBackend {
 
     fn assess<'a>(
         &'a mut self,
-        task_id: &'a str,
+        ctx: &'a StageContext,
         items: Vec<super::brief_fidelity::FidelityItem>,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
         Box::pin(async move {
-            let operation_id = format!(
-                "{task_id}:fidelity:{}",
-                crate::nlp::cache::hash(&items.iter().map(|i| i.receipt_key()).collect::<String>())
+            let task_id = ctx.task_id.as_str();
+            let operation_id = ctx.operation_id(
+                "fidelity",
+                &items.iter().map(|i| i.receipt_key()).collect::<String>(),
             );
+            let settings = ctx.routed(&self.settings);
             let adapter = super::brief_fidelity::FidelityDecisions { items: &items };
             let mode = adapter.mode();
-            let mut scope =
-                crate::recon::model_exec::OperationScope::new(&operation_id, mode.role())
-                    .with_task(task_id)
-                    .with_completion_tokens(super::brief_fidelity::FIDELITY_TOKENS)
-                    .with_reasoning(crate::request_policy::ReasoningEffort::Low)
-                    .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision)
-                    .with_interactive();
+            let mut scope = ctx
+                .scope(crate::recon::model_exec::OperationScope::new(
+                    &operation_id,
+                    mode.role(),
+                ))
+                .with_budget(match mode {
+                    super::brief_fidelity::FidelityMode::Extraction => {
+                        crate::request_policy::FIDELITY_BUDGET
+                    }
+                    super::brief_fidelity::FidelityMode::Support => {
+                        crate::request_policy::SUPPORT_BUDGET
+                    }
+                })
+                .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision)
+                .with_interactive();
             if let Some(key) = mode.operation_key() {
                 scope = scope.with_operation(key);
             }
             let (labels, _) = crate::recon::model_exec::execute_decisions_or_chat(
                 &self.auth,
-                &self.settings,
+                &settings,
                 &scope,
                 &adapter,
                 cancel,
@@ -1551,19 +1812,24 @@ impl StageBackend for RuntimeBackend {
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<String>> {
         Box::pin(async move {
-            let operation_id = format!(
-                "{}:{}",
-                request.task_id,
-                crate::nlp::cache::hash(&request.user)
-            );
-            let scope = crate::recon::model_exec::OperationScope::new(&operation_id, request.role)
-                .with_task(&request.task_id)
+            let operation_id = request
+                .ctx
+                .operation_id(request.operation_key, &request.user);
+            let settings = request.ctx.routed(&self.settings);
+            let mut scope = request
+                .ctx
+                .scope(crate::recon::model_exec::OperationScope::new(
+                    &operation_id,
+                    request.role,
+                ))
                 .with_insight_contract()
-                .with_completion_tokens(request.completion_tokens)
-                .with_reasoning(request.reasoning)
+                .with_budget(request.budget)
                 .with_operation(request.operation_key)
                 .with_format(crate::recon::model_exec::ResponseFormat::GeneratedJson)
                 .with_interactive();
+            if let Some(contract) = request.contract.clone() {
+                scope = scope.with_contract(contract);
+            }
             let messages = [
                 crate::provider::ChatMessage {
                     role: "system".into(),
@@ -1581,7 +1847,7 @@ impl StageBackend for RuntimeBackend {
             let validator = request.validator.clone();
             let (text, _) = crate::recon::model_exec::execute_chat(
                 &self.auth,
-                &self.settings,
+                &settings,
                 &scope,
                 &messages,
                 move |raw| validator(raw),
@@ -1616,13 +1882,12 @@ impl RuntimeBackend {
     }
 }
 
-/// Input identity: article metadata, captured role chain and contract.
-/// Changing any of them supersedes the active chain.
-/// Per-stage dependency hashes in stage order (spec §3). Each folds in its
-/// predecessor's hash plus the stage's own inputs: metadata, prompts/contract
-/// versions and the *effective* route chain of the operations it dispatches
-/// (operation override or inherited role). A Links route change therefore
-/// leaves body/Claims/Inferences hashes untouched.
+/// Per-node semantic revisions in stage order (spec §6). Each node is keyed
+/// independently by its own source revision, contract/prompt version and
+/// resolved route/policy; prerequisite outputs enter descendant keys through
+/// the join (bound output hashes), never through these revisions. Claims
+/// therefore carry title/description and their own routes but no body
+/// retrieval/cleanup hash: a body-only refresh reuses Claims.
 pub fn stage_revisions(
     article: &AtlasArticleRow,
     settings: &crate::provider::SettingsFile,
@@ -1638,12 +1903,15 @@ pub fn stage_revisions(
     let body = h(json!({
         "contract": brief_pipeline::CONTRACT,
         "url": article.url,
+        // Cleanup anchors on title/description.
+        "title": article.title,
+        "description": article.description,
         "transform": super::clean_body::TRANSFORM,
         "index": super::sentence_index::INDEX_VERSION,
         "classifier": route(None, "classifier"),
     }));
     let claims = h(json!({
-        "after": body,
+        "contract": brief_pipeline::CONTRACT,
         "title": article.title,
         "description": article.description,
         "published_at": article.published_at,
@@ -1653,7 +1921,7 @@ pub fn stage_revisions(
         "fidelity_contract": format!("extraction_fidelity:{}", crate::investigation::decisions::templates::TEMPLATE_VERSION),
     }));
     let inferences = h(json!({
-        "after": claims,
+        "contract": brief_pipeline::CONTRACT,
         "prompt": INFERENCES_PROMPT,
         "window": REQUEST_WINDOW_BYTES,
         "generate": route(Some(OP_INFERENCES_GENERATE), "synthesis"),
@@ -1663,7 +1931,7 @@ pub fn stage_revisions(
         "packet_policy": super::passage_packets::PACKET_POLICY,
     }));
     let links = h(json!({
-        "after": inferences,
+        "contract": brief_pipeline::CONTRACT,
         "prompt": LINKS_PROMPT,
         "generate": route(Some(OP_LINKS_GENERATE), "synthesis"),
         // Link candidates come from Brain actors and all-retained Related.
@@ -1674,12 +1942,23 @@ pub fn stage_revisions(
     vec![body, claims, inferences, links]
 }
 
-/// Chain input revision: the final cumulative stage hash.
+/// Captured metadata snapshot persisted in the root task inputs.
+pub fn metadata_snapshot(article: &AtlasArticleRow) -> Value {
+    json!({
+        "title": article.title,
+        "description": article.description,
+        "published_at": article.published_at,
+        "source_revision": crate::nlp::cache::hash(&json!([article.title, article.description, article.published_at, article.url]).to_string()),
+    })
+}
+
+/// Chain input revision: every node revision folded together, so any node
+/// change admits a new generation (unchanged nodes are then reused).
 pub fn input_revision(
     article: &AtlasArticleRow,
     settings: &crate::provider::SettingsFile,
 ) -> String {
-    stage_revisions(article, settings).pop().unwrap_or_default()
+    crate::nlp::cache::hash(&stage_revisions(article, settings).join(":"))
 }
 
 /// Reload: supersede the chain with a forced re-acquisition of the body.
@@ -1697,6 +1976,7 @@ pub fn reload_intel_brief_pipeline(
             role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
             title: article.title.clone(),
             stage_revisions: stage_revisions(article, settings),
+            metadata: metadata_snapshot(article),
         },
         &now(),
     )
@@ -1717,6 +1997,7 @@ pub fn ensure_intel_brief_pipeline(
             role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
             title: article.title.clone(),
             stage_revisions: stage_revisions(article, settings),
+            metadata: metadata_snapshot(article),
         },
         &now(),
     )

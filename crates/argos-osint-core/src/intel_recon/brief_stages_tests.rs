@@ -64,6 +64,7 @@ fn inputs(rev: &str) -> BriefInputs {
         role_snapshot: "{}".into(),
         title: TITLE.into(),
         stage_revisions: vec![],
+        metadata: Default::default(),
     }
 }
 
@@ -74,10 +75,14 @@ struct Seen {
     system: String,
     tokens: u32,
     reasoning: crate::request_policy::ReasoningEffort,
+    budget: crate::request_policy::StageBudget,
+    contract: Option<crate::provider_adapters::ResponseContract>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Mock {
+    /// Both roots wait here: only a truly parallel drainer gets past it.
+    barrier: Option<Arc<tokio::sync::Barrier>>,
     body: Option<String>,
     complete: bool,
     prepared: usize,
@@ -161,12 +166,15 @@ fn validate_article_body_md(raw: &str) -> String {
 impl StageBackend for Mock {
     fn prepare_body<'a>(
         &'a mut self,
-        _job: &'a str,
+        _ctx: &'a StageContext,
         _a: &'a AtlasArticleRow,
         force: bool,
         _c: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<CleanArtifact>> {
         Box::pin(async move {
+            if let Some(b) = &self.barrier {
+                b.wait().await;
+            }
             self.prepared += 1;
             self.forced |= force;
             let raw = self.body.clone().ok_or_else(|| anyhow!("story missing"))?;
@@ -178,7 +186,7 @@ impl StageBackend for Mock {
     }
     fn assess<'a>(
         &'a mut self,
-        _task: &'a str,
+        _ctx: &'a StageContext,
         items: Vec<crate::intel_recon::brief_fidelity::FidelityItem>,
         _c: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
@@ -213,7 +221,14 @@ impl StageBackend for Mock {
                 system: request.system.clone(),
                 tokens: request.completion_tokens,
                 reasoning: request.reasoning,
+                budget: request.budget,
+                contract: request.contract.clone(),
             });
+            if request.stage == "intel_brief_claims" {
+                if let Some(b) = &self.barrier {
+                    b.wait().await;
+                }
+            }
             if self.hang.contains(&request.stage) {
                 loop {
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -300,13 +315,36 @@ async fn one_chain_ordered_dispatch_scoped_inputs_and_no_repeat_requests() {
         seen.iter().map(|s| s.tokens).collect::<Vec<_>>(),
         [2048, 3072, 1536]
     );
-    // §2 request policy: extraction/linking low effort, inference default.
+    // §5 stage budget table: Claims/Links thinking off, Inferences efficient.
     {
-        use crate::request_policy::ReasoningEffort::{Default, Low};
+        use crate::request_policy::ReasoningEffort::{Efficient, Off};
         assert_eq!(
             seen.iter().map(|s| s.reasoning).collect::<Vec<_>>(),
-            [Low, Default, Low]
+            [Off, Efficient, Off]
         );
+        assert_eq!(
+            seen.iter()
+                .map(|s| (s.budget.answer, s.budget.thinking))
+                .collect::<Vec<_>>(),
+            [(2048, 4096), (3072, 6144), (1536, 3584)]
+        );
+        assert_eq!(seen[1].budget.reasoning_budget, Some(1024));
+        assert_eq!(seen[1].budget.budgeted_ceiling, Some(4096));
+    }
+    // Every generation stage carries its authoritative schema, and the
+    // compact limit text rides in the prompt.
+    for (s, name) in seen
+        .iter()
+        .zip(["brief_claims", "brief_inferences", "brief_leads"])
+    {
+        match &s.contract {
+            Some(crate::provider_adapters::ResponseContract::GeneratedJson {
+                name: n,
+                schema: Some(_),
+            }) => assert_eq!(n, name),
+            other => panic!("{name}: missing schema contract {other:?}"),
+        }
+        assert!(s.system.contains(" Limits: "), "{name} limits text");
     }
     // Claims: title/description only.
     assert!(seen[0].user.contains("Unions denied"));
@@ -424,7 +462,7 @@ async fn empty_inferences_complete_and_links_finish_locally() {
 
 // Stage 1 admission: incomplete acquisition fails and blocks dependents.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn incomplete_acquisition_fails_stage_one_and_blocks_downstream() {
+async fn incomplete_acquisition_fails_body_and_blocks_only_its_descendants() {
     let db = db();
     let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
     let mut mock = Mock::happy();
@@ -436,8 +474,16 @@ async fn incomplete_acquisition_fails_stage_one_and_blocks_downstream() {
     assert!(
         matches!(&out[0], StageOutcome::Failed { reason, .. } if reason.contains("acquisition"))
     );
-    assert!(mock.requests().is_empty());
-    assert_eq!(rows(&db.path, &job)[1], "Queued · blocked by Full article");
+    // A failed root blocks only its descendants: the Claims sibling still
+    // runs from the metadata snapshot, Inferences and Links never dispatch.
+    assert!(mock
+        .requests()
+        .iter()
+        .all(|r| r.stage == "intel_brief_claims"));
+    let r = rows(&db.path, &job);
+    assert!(r[1].starts_with("Completed"), "{r:?}");
+    assert_eq!(r[2], "Queued · blocked by Full article");
+    assert_eq!(r[3], "Queued · blocked by Full article");
 }
 
 // §8.5: cancellation drops the in-flight request and writes nothing.
@@ -496,8 +542,18 @@ async fn parent_cancel_drops_in_flight_request() {
     mock.hang.insert("intel_brief_claims".into());
     let cancel = Arc::new(AtomicBool::new(false));
     let c = cancel.clone();
+    // Cancel once the Claims request is actually in flight (not on a timer:
+    // with parallel roots the Body may finish first or second).
+    let seen = mock.seen.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
+        while !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.stage == "intel_brief_claims")
+        {
+            std::thread::yield_now();
+        }
         c.store(true, Ordering::Release);
     });
     let out = tokio::time::timeout(
@@ -840,11 +896,18 @@ async fn fidelity_batches_withhold_unfaithful_items_and_reuse_receipts() {
         passages: vec!["The operator said storms forced the suspension.".into()],
     }];
     drop(store);
-    let labels = assess_cached(&db.path, &mut mock, "t", items, &cancel)
+    let ctx = StageContext::default();
+    let route = ctx.route_key(None, "evidence_curator");
+    let labels = assess_cached(&db.path, &mut mock, &ctx, &route, items.clone(), &cancel)
         .await
         .unwrap();
     assert_eq!(labels["c1"], "faithful");
     assert_eq!(*mock.assessed.lock().unwrap(), first);
+    // The receipt names the resolved route: another assessor re-decides.
+    assess_cached(&db.path, &mut mock, &ctx, "other-route", items, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(*mock.assessed.lock().unwrap(), first + 1);
 }
 
 #[test]
@@ -1102,7 +1165,7 @@ async fn every_stage_records_timing_aggregates_without_text() {
 
 // §7: a Links-only route change reuses body, Claims and Inferences checkpoints.
 #[test]
-fn links_route_change_moves_only_the_links_revision() {
+fn route_changes_move_only_their_own_node_revision() {
     let a = article("r", "a1", TITLE, DESC, "u");
     let mut s = crate::provider::SettingsFile::default();
     let before = stage_revisions(&a, &s);
@@ -1112,7 +1175,8 @@ fn links_route_change_moves_only_the_links_revision() {
             provider: "openrouter".into(),
             model: "openai/gpt-4o-mini".into(),
             ..Default::default()
-        },
+        }
+        .into(),
     );
     let after = stage_revisions(&a, &s);
     assert_eq!(before[..3], after[..3]);
@@ -1124,11 +1188,15 @@ fn links_route_change_moves_only_the_links_revision() {
             provider: "openrouter".into(),
             model: "openai/gpt-4o".into(),
             ..Default::default()
-        },
+        }
+        .into(),
     );
     let claims = stage_revisions(&a, &s);
+    // Node revisions are independent: descendants pick up a Claims change
+    // through the prerequisite output hash bound at the join, not here.
     assert_eq!(claims[0], after[0]);
-    assert!(claims[1..].iter().zip(&after[1..]).all(|(x, y)| x != y));
+    assert_ne!(claims[1], after[1]);
+    assert_eq!(claims[2..], after[2..]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1215,4 +1283,256 @@ fn fidelity_modes_route_extraction_to_evidence_curator_and_support_to_assessor()
     let labels: Vec<String> = e.labels().into_iter().map(|(l, _)| l).collect();
     assert!(labels.iter().any(|l| l == "faithful"));
     assert_ne!(e.version(), s.version());
+}
+
+// Phase 4: the two-slot drainer runs both roots together. Each root parks on
+// a two-party barrier, so a serial drainer would time out here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_drainer_runs_both_roots_together_then_the_join() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.barrier = Some(Arc::new(tokio::sync::Barrier::new(2)));
+    let template = mock.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let out = tokio::time::timeout(
+        Duration::from_secs(30),
+        drain_parallel(
+            &db.path,
+            "w1",
+            move || Box::new(template.clone()) as Box<dyn StageBackend + Send>,
+            &cancel,
+            &cfg(),
+            STAGE_SLOTS,
+        ),
+    )
+    .await
+    .expect("roots must run concurrently")
+    .unwrap();
+    assert_eq!(out.len(), 4, "{out:?}");
+    let stages: Vec<String> = mock.requests().into_iter().map(|r| r.stage).collect();
+    let pos = |s: &str| stages.iter().position(|x| x == s).unwrap();
+    assert!(pos("intel_brief_claims") < pos("intel_brief_inferences"));
+    assert!(pos("intel_brief_inferences") < pos("intel_brief_links"));
+    assert!(rows(&db.path, &job)
+        .iter()
+        .all(|r| r.starts_with("Completed")));
+}
+
+// A claim whose lease epoch was superseded cannot publish anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_epoch_worker_is_fenced_and_writes_nothing() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let claimed = claim_next(&db.path, "w1", &cfg()).unwrap().unwrap();
+    let operation = claimed.operation.clone();
+    Store::open(&db.path)
+        .unwrap()
+        .conn
+        .execute(
+            "UPDATE argos_tasks SET lease_epoch=lease_epoch+1,lease_owner='w2' WHERE id=?1",
+            [&claimed.id],
+        )
+        .unwrap();
+    let mut mock = Mock::happy();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let out = run_claimed(&db.path, claimed, &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    assert!(matches!(out, StageOutcome::Stale { .. }), "{out:?}");
+    assert!(stage_output(&Store::open(&db.path).unwrap(), &job, &operation).is_err());
+}
+
+// Per-node reuse: a body-only reload re-runs the body and makes zero Claims
+// requests; an unchanged visit after completion makes zero requests at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn body_reload_reuses_claims_and_unchanged_visit_makes_no_requests() {
+    let db = db();
+    let settings = crate::provider::SettingsFile::default();
+    let a = article("fixture", "a1", TITLE, DESC, "https://example.test/a1");
+    let store = Store::open(&db.path).unwrap();
+    let first = ensure_intel_brief_pipeline(&store, &a, &settings).unwrap();
+    let mut mock = Mock::happy();
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let before = mock.requests().len();
+    assert!(before >= 3, "{:?}", rows(&db.path, &first));
+    // Unchanged visit: same chain, nothing to do.
+    assert_eq!(
+        ensure_intel_brief_pipeline(&store, &a, &settings).unwrap(),
+        first
+    );
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    assert_eq!(
+        mock.requests().len(),
+        before,
+        "unchanged visit: zero requests"
+    );
+    // Body-only reload: a new generation, Claims adopted from the prior run.
+    let reloaded = reload_intel_brief_pipeline(&store, &a, &settings).unwrap();
+    assert_ne!(reloaded, first);
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let after: Vec<String> = mock.requests()[before..]
+        .iter()
+        .map(|r| r.stage.clone())
+        .collect();
+    assert!(
+        !after.iter().any(|s| s == "intel_brief_claims"),
+        "{after:?}"
+    );
+    assert!(mock.forced, "the reload forces a fresh body");
+    assert!(rows(&db.path, &reloaded)
+        .iter()
+        .all(|r| r.starts_with("Completed")));
+}
+
+/// Spec §9 item 7: bounded live held-out comparison of the Claims stage under
+/// the shipped routing versus the Brief fast preset. Opt-in only:
+/// `ARGOS_HELDOUT_LIVE=1 OPENROUTER_API_KEY=… ARGOS_HELDOUT_OUT=…/results.json
+///  cargo test … heldout_fast_preset_comparison -- --ignored`.
+/// Both configurations use the same OpenRouter free models for fidelity, so
+/// only the Claims generation route differs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn heldout_fast_preset_comparison() {
+    if std::env::var("ARGOS_HELDOUT_LIVE").ok().as_deref() != Some("1") {
+        return;
+    }
+    let key = std::env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY");
+    let fixtures: Value =
+        serde_json::from_str(include_str!("fixtures/brief_heldout.json")).unwrap();
+    let mut auth = crate::secrets::AuthFile::default();
+    auth.set_account(crate::secrets::ProviderSecret {
+        kind: "openrouter".into(),
+        model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
+        base_url: "https://openrouter.ai/api/v1".into(),
+        api_key: Some(key),
+        stt_model: None,
+        device: None,
+    });
+    let assign = |model: &str| crate::provider::ModelAssignment {
+        provider: "openrouter".into(),
+        model: model.into(),
+        ..Default::default()
+    };
+    let base = || {
+        let mut s = crate::provider::SettingsFile::default();
+        // Free-model stand-ins for the screenshot chains (J is not free).
+        s.defaults.claim_assessor = assign("nvidia/nemotron-3-ultra-550b-a55b:free");
+        s.defaults.synthesis = assign("nvidia/nemotron-3-ultra-550b-a55b:free");
+        s.defaults.summarization = assign("nvidia/nemotron-3-super-120b-a12b:free");
+        s.defaults.evidence_curator = assign("google/gemma-4-31b-it:free");
+        s
+    };
+    let mut preset = base();
+    preset.defaults.apply_fast_preset();
+    let mut report = Vec::new();
+    for (name, settings) in [("shipped", base()), ("fast_preset", preset)] {
+        let mut rows = Vec::new();
+        for a in fixtures["articles"].as_array().unwrap() {
+            let id = a["id"].as_str().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("argos.db");
+            let store = Store::open(&path).unwrap();
+            store.conn.execute("INSERT OR IGNORE INTO atlas_runs(id,started_at,state) VALUES('fixture',?1,'completed')", [now()]).unwrap();
+            let row = article(
+                "fixture",
+                id,
+                a["title"].as_str().unwrap(),
+                a["description"].as_str().unwrap(),
+                &format!("https://heldout.test/{id}"),
+            );
+            store.atlas_upsert_article(&row).unwrap();
+            let job = ensure_intel_brief_pipeline(&store, &row, &settings).unwrap();
+            // Claim both roots; run Claims only (no body retrieval offline).
+            let mut claimed = Vec::new();
+            while let Some(c) = claim_next(&path, "heldout", &cfg()).unwrap() {
+                claimed.push(c);
+            }
+            let claims = claimed
+                .into_iter()
+                .find(|c| c.operation == "intel_brief_claims")
+                .expect("claims root claimable");
+            let mut backend = RuntimeBackend {
+                db_path: path.clone(),
+                keys: Default::default(),
+                auth: auth.clone(),
+                settings: settings.clone(),
+                user_agent: None,
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let started = std::time::Instant::now();
+            let outcome = run_claimed(&path, claims, &mut backend, &cancel, &cfg()).await;
+            let ms = started.elapsed().as_millis() as i64;
+            let (requests, prompt, completion): (i64, i64, i64) = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*),COALESCE(SUM(prompt_tokens),0),COALESCE(SUM(completion_tokens),0) FROM recon_model_attempts WHERE dispatched=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            let out = stage_output(&store, &job, "intel_brief_claims").ok();
+            let kept: Vec<String> = out
+                .as_ref()
+                .and_then(|o| o["claims"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .map(|c| c["text"].as_str().unwrap_or("").to_lowercase())
+                .collect();
+            let withheld = out
+                .as_ref()
+                .and_then(|o| o["withheld"].as_i64())
+                .unwrap_or(0);
+            let joined = kept.join(" | ");
+            let n = kept.len() as i64;
+            let pass = out.is_some()
+                && n >= a["min_claims"].as_i64().unwrap()
+                && n <= a["max_claims"].as_i64().unwrap()
+                && a["must_mention"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|m| joined.contains(m.as_str().unwrap()));
+            rows.push(json!({
+                "id": id, "kind": a["kind"], "ok": matches!(outcome, Ok(StageOutcome::Committed { .. })),
+                "error": match &outcome { Ok(StageOutcome::Failed { reason, .. }) => reason.clone(), Err(e) => e.to_string(), _ => String::new() },
+                "pass": pass, "kept": n, "withheld": withheld, "ms": ms,
+                "requests": requests, "prompt_tokens": prompt, "completion_tokens": completion,
+                "claims": kept,
+            }));
+            // Warm: the unchanged visit attaches and issues zero requests.
+            assert_eq!(
+                ensure_intel_brief_pipeline(&store, &row, &settings).unwrap(),
+                job
+            );
+        }
+        let mut ms: Vec<i64> = rows.iter().map(|r| r["ms"].as_i64().unwrap()).collect();
+        ms.sort();
+        let pct = |p: f64| ms[((ms.len() as f64 - 1.0) * p).round() as usize];
+        let sum = |k: &str| rows.iter().map(|r| r[k].as_i64().unwrap()).sum::<i64>();
+        report.push(json!({
+            "config": name,
+            "claims_route": settings.defaults.resolve_operation(Some(crate::provider::OP_CLAIMS_GENERATE), "claim_assessor").0.model,
+            "pass": rows.iter().filter(|r| r["pass"] == true).count(),
+            "committed": rows.iter().filter(|r| r["ok"] == true).count(),
+            "articles": rows.len(),
+            "p50_ms": pct(0.5), "p95_ms": pct(0.95),
+            "requests": sum("requests"), "prompt_tokens": sum("prompt_tokens"),
+            "completion_tokens": sum("completion_tokens"),
+            "kept": sum("kept"), "withheld": sum("withheld"),
+            "rows": rows,
+        }));
+    }
+    let text = serde_json::to_string_pretty(&report).unwrap();
+    if let Ok(out) = std::env::var("ARGOS_HELDOUT_OUT") {
+        std::fs::write(out, &text).unwrap();
+    }
+    println!("{text}");
 }

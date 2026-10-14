@@ -136,13 +136,18 @@ impl DecisionState {
             map.insert("candidate".into(), cand.clone());
         }
 
-        map.insert("evidence".into(), json!(self.evidence));
+        // Minimal state: empty sections are omitted (spec §4).
+        if !self.evidence.is_empty() {
+            map.insert("evidence".into(), json!(self.evidence));
+        }
 
         if !self.computed_checks.is_empty() {
             map.insert("computed_checks".into(), json!(self.computed_checks));
         }
 
-        map.insert("missing_context".into(), json!(self.missing_context));
+        if !self.missing_context.is_empty() {
+            map.insert("missing_context".into(), json!(self.missing_context));
+        }
 
         for (k, v) in &self.custom {
             map.insert(k.clone(), v.clone());

@@ -21,9 +21,9 @@
     <h1>Intel report states</h1>
     <p class="lede">A report job is queued, then running. Pause parks it. Terminal states are completed, partial, failed, or cancelled. Busy on this article hides Summary.</p>
     <div class="frame">
-      <svg role="img" aria-labelledby="intel-job-states-title intel-job-states-desc" viewBox="0 0 800 260" xmlns="http://www.w3.org/2000/svg">
+      <svg role="img" aria-labelledby="intel-job-states-title intel-job-states-desc" viewBox="0 0 800 380" xmlns="http://www.w3.org/2000/svg">
         <title id="intel-job-states-title">Intel report states</title>
-        <desc id="intel-job-states-desc">A report job is queued, then running. Pause parks it. Terminal states are completed, partial, failed, or cancelled. Busy on this article hides Summary.</desc>
+        <desc id="intel-job-states-desc">A report job is queued, then running. Pause parks it. Terminal states are completed, partial, failed, or cancelled. Busy on this article hides Summary. Brief stage tasks follow their dependency rows: roots are Queued, a join is Queued after its prerequisites or blocked by a failed one, up to two stages run at once, and a stage may complete with warnings.</desc>
 
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
@@ -31,7 +31,7 @@
           <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
         </defs>
 
-        <rect width="800" height="260" fill="#f5f5f5"/>
+        <rect width="800" height="380" fill="#f5f5f5"/>
 
         <circle cx="48" cy="80" r="6" fill="#2d3142"/>
         <path d="M54 80 H88" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
@@ -59,6 +59,23 @@
         <circle cx="768" cy="80" r="5" fill="#2d3142"/>
         <text x="400" y="220" text-anchor="middle" font-family="Instrument Serif,serif" font-size="14" font-style="italic" fill="#2d3142">Another article's job does not hide this article's Summary.</text>
 
+        <text x="24" y="262" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">INTEL BRIEF STAGE TASKS (intel-brief-v2)</text>
+        <rect x="24" y="274" width="170" height="60" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
+        <text x="109" y="298" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="12" font-weight="600" fill="#2d3142">Queued</text>
+        <text x="109" y="316" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399">· after Full article, Claims</text>
+        <rect x="214" y="274" width="170" height="60" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2"/>
+        <text x="299" y="298" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="12" font-weight="600" fill="#2d3142">Running</text>
+        <text x="299" y="316" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399">≤2 at once · 2 running · 0/4</text>
+        <rect x="404" y="274" width="170" height="60" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
+        <text x="489" y="298" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="12" font-weight="600" fill="#2d3142">Completed</text>
+        <text x="489" y="316" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399">· N items · or with warnings</text>
+        <rect x="594" y="274" width="180" height="60" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
+        <text x="684" y="298" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="12" font-weight="600" fill="#2d3142">Failed → blocks</text>
+        <text x="684" y="316" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399">descendants only · Retry branch</text>
+        <path d="M194 304 H212" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+        <path d="M384 304 H402" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+        <path d="M684 334 V356 H109 V336" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+        <text x="400" y="368" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="8" fill="#7a8399">retry: failed tasks re-queue; completed siblings keep their outputs</text>
       </svg>
     </div>
   </main>

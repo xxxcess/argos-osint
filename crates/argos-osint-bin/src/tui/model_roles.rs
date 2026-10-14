@@ -280,16 +280,32 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         "Brief operations",
         theme::accent().add_modifier(Modifier::BOLD),
     )));
-    for row in brief_operation_rows(&app.settings.defaults) {
-        let style = if row.role == sel_info.meta.role.settings_key() {
+    let (selected_key, _, _) = app.selected_brief_op();
+    let rows = brief_operation_rows(&app.settings.defaults);
+    for row in &rows {
+        let marker = if row.key == selected_key { "▸" } else { " " };
+        let style = if row.key == selected_key {
+            theme::accent()
+        } else if row.role == sel_info.meta.role.settings_key() {
             theme::text()
         } else {
             theme::dim()
         };
-        details_lines.push(Line::from(Span::styled(row.render(), style)));
+        details_lines.push(Line::from(Span::styled(
+            format!("{marker}{}", &row.render()[1..]),
+            style,
+        )));
+    }
+    if let Some(row) = rows.iter().find(|r| r.key == selected_key) {
+        for line in operation_evidence(row) {
+            details_lines.push(Line::from(Span::styled(
+                format!("    {line}"),
+                theme::dim(),
+            )));
+        }
     }
     details_lines.push(Line::from(Span::styled(
-        "Set via operation_overrides in config import; unset inherits.",
+        "Op ▸ select · Save/Reset op edit · preset: Claims, Links → Summarization",
         theme::dim(),
     )));
 
@@ -313,11 +329,15 @@ pub struct BriefOperationRow {
     pub provider: String,
     pub model: String,
     pub overridden: bool,
+    /// `route_role` of a linked (reference) override.
+    pub linked: Option<String>,
 }
 
 impl BriefOperationRow {
     pub fn render(&self) -> String {
-        let source = if self.overridden {
+        let source = if let Some(role) = &self.linked {
+            format!("→ {role} (linked)")
+        } else if self.overridden {
             "override".to_string()
         } else {
             format!("← {}", self.role)
@@ -329,6 +349,50 @@ impl BriefOperationRow {
         };
         format!("  {:<18} {target}  {source}", self.label)
     }
+}
+
+/// Response contract of a Brief operation (spec §3 compatibility basis).
+pub fn operation_contract(key: &str) -> &'static str {
+    if key == provider::OP_INFERENCES_ASSESS {
+        "bounded_decision (fidelity labels)"
+    } else {
+        "generated_json (intel-brief-v2 schema)"
+    }
+}
+
+/// Assignment source, response contract and adapter evidence for one row.
+pub fn operation_evidence(row: &BriefOperationRow) -> Vec<String> {
+    let source = if let Some(role) = &row.linked {
+        format!("Source: linked to {role} (fast preset)")
+    } else if row.overridden {
+        "Source: explicit operation override".to_string()
+    } else {
+        format!("Source: inherited from {}", row.role)
+    };
+    let mut out = vec![format!(
+        "{source} · Contract: {}",
+        operation_contract(row.key)
+    )];
+    if row.provider.is_empty() || row.model.is_empty() {
+        out.push("Adapter: unset — configure the role or an override".into());
+        return out;
+    }
+    use argos_osint_core::provider_capabilities as caps;
+    let adapter = caps::AdapterId::for_kind(&provider::normalize_kind(&row.provider));
+    let resolved = caps::resolve(adapter, "", &row.model);
+    out.push(format!(
+        "Adapter: {} · strict schema {} · JSON mode {} · tools {}",
+        adapter.as_str(),
+        resolved.strict_schema.as_str(),
+        resolved.json_mode.as_str(),
+        resolved.tools.as_str()
+    ));
+    let mut evidence = format!("Evidence: {}", resolved.provenance.sources.join(" → "));
+    if let Some(profile) = &resolved.provenance.profile {
+        evidence.push_str(&format!(" ({profile})"));
+    }
+    out.push(evidence);
+    out
 }
 
 pub fn brief_operation_rows(defaults: &provider::RoleDefaults) -> Vec<BriefOperationRow> {
@@ -343,6 +407,11 @@ pub fn brief_operation_rows(defaults: &provider::RoleDefaults) -> Vec<BriefOpera
                 provider: a.provider,
                 model: a.model,
                 overridden,
+                linked: defaults
+                    .operation_overrides
+                    .get(key)
+                    .and_then(provider::OperationOverride::route_role)
+                    .map(str::to_string),
             }
         })
         .collect()
@@ -363,7 +432,8 @@ mod brief_operation_tests {
                 provider: "google".into(),
                 model: "gemini-2.5-flash".into(),
                 ..Default::default()
-            },
+            }
+            .into(),
         );
         let rows = brief_operation_rows(&d);
         assert_eq!(rows.len(), provider::BRIEF_OPERATIONS.len());
@@ -379,5 +449,25 @@ mod brief_operation_tests {
             .unwrap();
         assert!(!inf.overridden);
         assert!(inf.render().contains("← synthesis"));
+    }
+
+    #[test]
+    fn fast_preset_rows_follow_summarization_and_reset_keeps_it() {
+        let mut d = provider::RoleDefaults::default();
+        d.summarization.provider = "openrouter".into();
+        d.summarization.model = "nvidia/nemotron-3-super-120b-a12b:free".into();
+        d.apply_fast_preset();
+        assert!(d.fast_preset_applied());
+        d.summarization.model = "google/gemma-4-31b-it:free".into();
+        let rows = brief_operation_rows(&d);
+        let claims = rows
+            .iter()
+            .find(|r| r.key == provider::OP_CLAIMS_GENERATE)
+            .unwrap();
+        assert_eq!(claims.model, "google/gemma-4-31b-it:free");
+        assert!(claims.render().contains("→ summarization (linked)"));
+        assert!(d.reset_fast_preset());
+        assert!(d.operation_overrides.is_empty());
+        assert_eq!(d.summarization.model, "google/gemma-4-31b-it:free");
     }
 }

@@ -555,60 +555,82 @@ impl BlockDecisions<'_> {
     }
 }
 
+impl BlockDecisions<'_> {
+    /// Canonical contract: one keep/remove Choice per block.
+    pub fn contract(&self) -> crate::investigation::decisions::DecisionContract {
+        use crate::investigation::decisions::{DecisionContract, QuestionSpec};
+        DecisionContract::new(
+            "evidence_curator",
+            "body_cleanup_blocks",
+            crate::investigation::decisions::templates::TEMPLATE_VERSION,
+            ["title", "brief", "blocks"],
+            self.blocks.iter().map(|block| {
+                let qid = Self::qid(block.id);
+                QuestionSpec::choice(
+                    qid.clone(),
+                    format!("Does `blocks.{qid}` belong to the story identified by `title` and `brief`?"),
+                    [
+                        ("keep", "Story text, byline, attribution, quotations, uncertainty, denials, corrections or story context"),
+                        ("remove", "Unrelated page chrome, advertisement, navigation or unrelated link dump"),
+                    ],
+                    "keep",
+                )
+            }),
+        )
+    }
+
+    pub fn state(&self) -> crate::investigation::decisions::DecisionState {
+        let blocks: serde_json::Map<String, Value> = self
+            .blocks
+            .iter()
+            .map(|b| (Self::qid(b.id), Value::String(b.text.clone())))
+            .collect();
+        let mut state = crate::investigation::decisions::DecisionState::new()
+            .with_custom("title", Value::String(self.title.into()))
+            .with_custom("brief", Value::String(self.brief.into()))
+            .with_custom("blocks", Value::Object(blocks));
+        if !self.url.is_empty() {
+            state = state.with_custom("url", Value::String(self.url.into()));
+        }
+        if !self.context.is_empty() {
+            state = state.with_custom("context", Value::Array(self.context.to_vec()));
+        }
+        state
+    }
+}
+
 impl crate::recon::model_exec::DecisionsAdapter<Vec<IrrelevantRange>> for BlockDecisions<'_> {
     fn compile_native(&self) -> (Value, Value) {
-        let state = serde_json::json!({
-            "title": self.title,
-            "brief": self.brief,
-            "url": self.url,
-            "blocks": self.blocks.iter().map(|b| serde_json::json!({"id": b.id, "text": b.text})).collect::<Vec<_>>(),
-            "context": self.context,
-        });
-        let mut questions = serde_json::Map::new();
-        for block in self.blocks {
-            questions.insert(
-                Self::qid(block.id),
-                serde_json::json!({
-                    "type": "choice",
-                    "question": format!("Does block {} belong to the story identified by the title and brief?", block.id),
-                    "options": {
-                        "keep": "Story text, byline, attribution, quotations, uncertainty, denials, corrections or story context",
-                        "remove": "Unrelated page chrome, advertisement, navigation or unrelated link dump"
-                    }
-                }),
-            );
-        }
-        (state, Value::Object(questions))
+        crate::investigation::decisions::compile_native(&self.contract(), &self.state().to_value())
     }
 
     fn parse_native(
         &self,
         resp: &crate::provider::DecisionsResponse,
     ) -> std::result::Result<Vec<IrrelevantRange>, String> {
-        let expected: std::collections::HashSet<String> =
-            self.blocks.iter().map(|b| Self::qid(b.id)).collect();
-        if let Some(extra) = resp.answers.keys().find(|k| !expected.contains(*k)) {
-            return Err(format!("unexpected answer ID `{extra}`"));
-        }
+        let result = crate::investigation::decisions::parse_native_response(resp, &self.contract())
+            .map_err(|e| e.to_string())?;
         let mut ranges = Vec::new();
         for block in self.blocks {
             let qid = Self::qid(block.id);
-            let choice = resp
+            let label = result
                 .answers
                 .get(&qid)
-                .and_then(|a| a.choice.as_deref())
+                .map(|a| a.label.as_str())
                 .ok_or_else(|| format!("missing typed answer for `{qid}`"))?;
-            match choice {
-                "keep" => {}
-                "remove" => ranges.push(IrrelevantRange {
+            if label == "remove" {
+                ranges.push(IrrelevantRange {
                     start: block.start,
                     end: block.end,
                     reason: "classifier: unrelated block".into(),
-                }),
-                other => return Err(format!("`{qid}` label `{other}` is not keep/remove")),
+                });
             }
         }
         Ok(ranges)
+    }
+
+    fn preflight(&self) -> std::result::Result<(), String> {
+        self.contract().validate()
     }
 
     fn compile_chat(&self) -> Vec<ChatMessage> {

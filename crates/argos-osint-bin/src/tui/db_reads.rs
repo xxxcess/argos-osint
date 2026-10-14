@@ -89,6 +89,8 @@ pub(super) struct IntelBriefSnapshot {
     pub relations: Vec<(String, String, String)>,
     pub explanations: HashMap<(String, String), String>,
     pub body: Option<intel_recon::ArticleBodyRow>,
+    /// A forced generation must not display the previous retrieval's legacy row.
+    pub body_requires_commit: bool,
     pub stages: Vec<intel_recon::brief_pipeline::StageView>,
     pub outputs: HashMap<String, serde_json::Value>,
     pub lead_titles: HashMap<String, String>,
@@ -189,6 +191,27 @@ impl IntelBriefSnapshot {
             }
         }
         if let Some(job) = job {
+            let mut statement = conn.prepare("SELECT input_revision,created_at FROM intel_brief_runs WHERE job_id=?1 AND article_id=?2")?;
+            let generation: Option<(String, String)> = statement
+                .query_map([job, &article.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .next()
+                .transpose()?;
+            let Some((revision, created)) = generation else {
+                // Navigation/retention can retire a job while its read is queued.
+                // Never attach another article's stage artifacts to this snapshot.
+                out.publication = "Brief job unavailable for this article · Reload".into();
+                return Ok(out);
+            };
+            out.body_requires_commit = {
+                revision.contains(":reload:")
+                    && !out.body.as_ref().is_some_and(|body| {
+                        body.state == "ready"
+                            && chrono::DateTime::parse_from_rfc3339(&body.updated_at)
+                                .ok()
+                                .zip(chrono::DateTime::parse_from_rfc3339(&created).ok())
+                                .is_some_and(|(updated, created)| updated >= created)
+                    })
+            };
             out.stages = intel_recon::brief_pipeline::stage_views(conn, job)?;
             out.outputs = intel_recon::brief_pipeline::stage_outputs(conn, job)?;
             if let Some(leads) = out

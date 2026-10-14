@@ -7,7 +7,7 @@ use argos_osint_core::jobs_view::{
 use argos_osint_core::store::Store;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::app::{App, ButtonId, FieldId, Target};
@@ -463,6 +463,9 @@ pub fn table_lines(
         theme::muted(),
     ))];
     for (index, job) in view.rows.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
         let attempts = if job.attempt_cap > 0 {
             format!("{}/{}", job.attempts_used, job.attempt_cap)
         } else {
@@ -585,7 +588,10 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
     if !detail.children.is_empty() {
         lines.push(String::new());
         lines.push(format!("Phases ({})", detail.children.len()));
-        for child in &detail.children {
+        for (index, child) in detail.children.iter().enumerate() {
+            if index > 0 {
+                lines.push(String::new());
+            }
             lines.push(format!(
                 "  {} {} {}",
                 child.state_label(),
@@ -601,7 +607,10 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
             detail.tasks.len(),
             detail.task_total
         ));
-        for task in &detail.tasks {
+        for (index, task) in detail.tasks.iter().enumerate() {
+            if index > 0 {
+                lines.push(String::new());
+            }
             let mut line = if task.stage_label.is_empty() {
                 format!(
                     "  {} {} · {}/{} attempts",
@@ -628,7 +637,10 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
     if !detail.attempts.is_empty() {
         lines.push(String::new());
         lines.push("Attempt history".into());
-        for attempt in &detail.attempts {
+        for (index, attempt) in detail.attempts.iter().enumerate() {
+            if index > 0 {
+                lines.push(String::new());
+            }
             let mut line = format!(
                 "  #{} {} {} {}",
                 attempt.attempt_number,
@@ -647,6 +659,26 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
         }
     }
     lines
+}
+
+fn measured_detail(
+    view: &JobsView,
+    width: u16,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Line<'static>> {
+    let lines = match &view.detail {
+        Some(detail) => detail_lines(detail, now),
+        None => vec!["Select a job to see its timing, tasks, and attempts.".into()],
+    };
+    super::components::measured_lines(lines.into_iter().map(Line::raw).collect(), width)
+}
+
+pub fn detail_scroll_max(app: &App) -> u16 {
+    let inner = inset(areas(super::ui::body_rect(app), &app.jobs).detail);
+    measured_detail(&app.jobs, inner.width, chrono::Utc::now())
+        .len()
+        .saturating_sub(inner.height as usize)
+        .min(u16::MAX as usize) as u16
 }
 
 pub fn draw(frame: &mut Frame, app: &App, body: Rect, can_open_source: bool) {
@@ -703,18 +735,19 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect, can_open_source: bool) {
             };
             lines.push(Line::from(Span::styled(text, theme::dim())));
         } else {
-            lines.extend(table_lines(view, width, now));
+            let mut table = table_lines(view, width, now);
+            let data = table.split_off(1);
+            lines.extend(table);
+            lines.extend(data.into_iter().skip(view.scroll as usize * 2));
         }
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(pane(" jobs "))
-                .scroll((view.scroll, 0)),
-            a.table,
-        );
+        frame.render_widget(Paragraph::new(lines).block(pane(" jobs ")), a.table);
         let inner = inset(a.table);
         if view.error.is_none() && !view.rows.is_empty() {
             let start = view.scroll as usize;
-            let count = (inner.height.saturating_sub(1)) as usize;
+            let count = super::components::ListGeometry::capacity(
+                inner.height.saturating_sub(1) as usize,
+                1,
+            );
             for i in 0..count {
                 let index = start + i;
                 if index < view.rows.len() {
@@ -722,7 +755,7 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect, can_open_source: bool) {
                         Target::JobRow(index),
                         Rect {
                             x: inner.x,
-                            y: inner.y + 1 + i as u16,
+                            y: inner.y + 1 + i as u16 * 2,
                             width: inner.width,
                             height: 1,
                         },
@@ -735,21 +768,23 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect, can_open_source: bool) {
         app.layout
             .borrow_mut()
             .register(Target::JobDetail, a.detail);
-        let text = match &view.detail {
-            Some(detail) => detail_lines(detail, now).join("\n"),
-            None => "Select a job to see its timing, tasks, and attempts.".into(),
-        };
+        let lines = measured_detail(view, inset(a.detail).width, now);
+        let offset = view.detail_scroll.min(
+            lines
+                .len()
+                .saturating_sub(inset(a.detail).height as usize)
+                .min(u16::MAX as usize) as u16,
+        );
         let focused = app.focus == Target::JobDetail;
         frame.render_widget(
-            Paragraph::new(text)
+            Paragraph::new(lines)
                 .style(theme::text())
                 .block(pane(if focused {
                     " detail · focused "
                 } else {
                     " detail "
                 }))
-                .wrap(Wrap { trim: false })
-                .scroll((view.detail_scroll, 0)),
+                .scroll((offset, 0)),
             a.detail,
         );
     }
@@ -761,7 +796,9 @@ pub fn row_at(view: &JobsView, table: Rect, x: u16, y: u16) -> Option<usize> {
     if view.error.is_some() || !contains(inner, x, y) || y == inner.y {
         return None;
     }
-    let index = (y - inner.y - 1) as usize + view.scroll as usize;
+    let row = (y - inner.y - 1) as usize;
+    let index = super::components::ListGeometry::fixed(view.rows.len(), 1).index_at(row)?
+        + view.scroll as usize;
     (index < view.rows.len()).then_some(index)
 }
 
@@ -787,10 +824,11 @@ pub fn hit(app: &App, body: Rect, x: u16, y: u16, can_open_source: bool) -> Opti
 
 /// Rows visible in the table (header excluded).
 pub fn table_room(body: Rect, view: &JobsView) -> usize {
-    inset(areas(body, view).table)
-        .height
-        .saturating_sub(1)
-        .max(1) as usize
+    super::components::ListGeometry::capacity(
+        inset(areas(body, view).table).height.saturating_sub(1) as usize,
+        1,
+    )
+    .max(1)
 }
 
 pub fn reveal(view: &mut JobsView, room: usize) {

@@ -167,16 +167,15 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         chunks[1]
     };
 
-    for (index, role) in DefaultsRole::ALL
-        .iter()
-        .enumerate()
-        .take(list_area.height.saturating_sub(2) as usize)
-    {
+    let start = app.scrolls.roles as usize;
+    for (index, role) in DefaultsRole::ALL.iter().enumerate().skip(start).take(
+        super::components::ListGeometry::capacity(list_area.height.saturating_sub(2) as usize, 1),
+    ) {
         app.layout.borrow_mut().register(
             Target::Button(ButtonId::DefaultRole(*role)),
             Rect::new(
                 list_area.x + 1,
-                list_area.y + 1 + index as u16,
+                list_area.y + 1 + (index - start) as u16 * 2,
                 list_area.width.saturating_sub(2),
                 1,
             ),
@@ -185,6 +184,11 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
     // Left pane: 9 roles scrollable list
     let items: Vec<ListItem> = DefaultsRole::ALL
         .iter()
+        .skip(start)
+        .take(super::components::ListGeometry::capacity(
+            list_area.height.saturating_sub(2) as usize,
+            1,
+        ))
         .map(|&role| {
             let info = role_presentation(app, role);
             let selected = role == app.defaults_role;
@@ -194,7 +198,9 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
 
             let role_span = Span::styled(
                 format!("{}{:<18}", prefix, info.meta.role.label()),
-                if selected {
+                if app.focus == Target::Button(ButtonId::DefaultRole(role)) {
+                    theme::selected()
+                } else if selected {
                     theme::accent().add_modifier(Modifier::BOLD)
                 } else {
                     theme::text()
@@ -225,7 +231,7 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items).block(
+    let list = List::new(super::components::spaced(items, || ListItem::new(""))).block(
         Block::default()
             .borders(Borders::ALL)
             .title(" Decision & Analytical Roles (9 Profiles) ")
@@ -282,7 +288,10 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
     )));
     let (selected_key, _, _) = app.selected_brief_op();
     let rows = brief_operation_rows(&app.settings.defaults);
-    for row in &rows {
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            details_lines.push(Line::raw(""));
+        }
         let marker = if row.key == selected_key { "▸" } else { " " };
         let style = if row.key == selected_key {
             theme::accent()

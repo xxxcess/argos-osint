@@ -96,3 +96,11 @@ Recorded results and retained screenshot examples are in [the implementation ses
 
 
 Navigation update: the upper TabBar has Overview / System / Configs, with three-row buttons on tall viewports and compact one-row buttons otherwise. The existing lower Overview inventory and metric contract remain authoritative. This adds two chrome rows on tall screens; fixed analytic panel heights are retained and the page scrolls to reveal overflow. Report supporting datasets use fixed-height sections with independent table offsets; Configs is a page containing Export above Import with separate Verify and Save and apply buttons.
+
+List spacing: Dashboard table panels retain their fixed sizes and render one blank
+row between logical data records. Report sections retain virtual capacity of 10
+logical records on tall screens and 3 on short screens. Their data extent is
+`2*N-1`, plus the existing title/header/footer/gutter. Viewports clip the virtual
+section; nested selection/offsets remain logical records. Spacer rows have no
+record targets, and overflow excludes trailing gaps. Plots, bars, scales, metric
+semantics, the 20-view inventory and Dashboard/Report restoration are unchanged.

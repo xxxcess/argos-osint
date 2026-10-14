@@ -1,6 +1,63 @@
 //! Shared cell-measured presentation primitives. Components never read storage.
 use ratatui::{layout::Rect, text::Line};
 
+pub const LIST_ITEM_GAP_ROWS: usize = 1;
+
+/// Display geometry of complete logical records. Gaps never own a pointer target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListGeometry {
+    pub items: Vec<std::ops::Range<usize>>,
+    pub extent: usize,
+}
+impl ListGeometry {
+    pub fn new(heights: impl IntoIterator<Item = usize>) -> Self {
+        let mut items = Vec::new();
+        let mut extent: usize = 0;
+        for height in heights {
+            if !items.is_empty() {
+                extent = extent.saturating_add(LIST_ITEM_GAP_ROWS);
+            }
+            let end = extent.saturating_add(height.max(1));
+            items.push(extent..end);
+            extent = end;
+        }
+        Self { items, extent }
+    }
+    pub fn fixed(count: usize, height: usize) -> Self {
+        Self::new(std::iter::repeat_n(height, count))
+    }
+    pub fn capacity(rows: usize, height: usize) -> usize {
+        rows.saturating_add(LIST_ITEM_GAP_ROWS) / height.max(1).saturating_add(LIST_ITEM_GAP_ROWS)
+    }
+    pub fn index_at(&self, row: usize) -> Option<usize> {
+        let index = self.items.partition_point(|item| item.end <= row);
+        self.items
+            .get(index)
+            .filter(|item| item.contains(&row))
+            .map(|_| index)
+    }
+    pub fn reveal(&self, index: usize, offset: usize, viewport: usize) -> usize {
+        let Some(item) = self.items.get(index) else {
+            return 0;
+        };
+        let mut pane = ScrollPane { offset };
+        pane.reveal(item.start, item.len(), viewport);
+        pane.offset.min(self.extent.saturating_sub(viewport))
+    }
+}
+
+/// Insert ordinary-background gaps between complete already-measured records.
+pub fn spaced<T>(items: impl IntoIterator<Item = T>, mut gap: impl FnMut() -> T) -> Vec<T> {
+    let mut out = Vec::new();
+    for item in items {
+        if !out.is_empty() {
+            out.push(gap());
+        }
+        out.push(item);
+    }
+    out
+}
+
 /// TabBar separates the selected page from keyboard focus at every height.
 pub fn tab_button(
     frame: &mut ratatui::Frame,
@@ -180,6 +237,10 @@ impl ScrollPane {
             .min(extent.saturating_sub(viewport));
     }
     pub fn reveal(&mut self, start: usize, height: usize, viewport: usize) {
+        if height >= viewport {
+            self.offset = start;
+            return;
+        }
         if start < self.offset {
             self.offset = start;
         }
@@ -248,6 +309,9 @@ pub fn detail_records(value: &serde_json::Value, width: u16) -> Vec<Line<'static
             }
             serde_json::Value::Array(rows) => {
                 for (index, row) in rows.iter().enumerate() {
+                    if index > 0 {
+                        out.push(Line::raw(""));
+                    }
                     if let Some(tuple) = row.as_array().filter(|tuple| {
                         tuple.len() == 2
                             && tuple[0].is_string()
@@ -262,7 +326,6 @@ pub fn detail_records(value: &serde_json::Value, width: u16) -> Vec<Line<'static
                     } else if row.is_object() {
                         out.push(Line::raw(format!("{prefix} record {}", index + 1)));
                         append(row, prefix, out);
-                        out.push(Line::raw(""));
                     } else {
                         append(row, &format!("{prefix}[{}]", index + 1), out);
                     }
@@ -332,6 +395,9 @@ pub fn detail_table(value: &serde_json::Value, columns: &[&str], width: u16) -> 
             .join("  "),
     )];
     for row in rows {
+        if out.len() > 1 {
+            out.push(Line::raw(""));
+        }
         let spans = columns
             .iter()
             .zip(&widths)
@@ -399,6 +465,21 @@ pub fn measured_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn list_geometry_maps_only_content_and_reveals_titles() {
+        let geometry = ListGeometry::new([1, 2, 8]);
+        assert_eq!(geometry.items, vec![0..1, 2..4, 5..13]);
+        assert_eq!(geometry.extent, 13);
+        assert_eq!(geometry.index_at(1), None);
+        assert_eq!(geometry.index_at(4), None);
+        assert_eq!(geometry.index_at(12), Some(2));
+        assert_eq!(geometry.index_at(13), None);
+        assert_eq!(geometry.reveal(2, 0, 3), 5);
+        assert_eq!(geometry.reveal(1, 5, 3), 2);
+        assert_eq!(ListGeometry::fixed(0, 1).extent, 0);
+        assert_eq!(ListGeometry::capacity(5, 2), 2);
+        assert_eq!(spaced([1, 2], || 0), vec![1, 0, 2]);
+    }
     #[test]
     fn scrolls_beyond_u16_and_reveals_whole_items() {
         let mut pane = ScrollPane::default();

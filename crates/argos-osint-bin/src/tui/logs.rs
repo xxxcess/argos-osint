@@ -225,32 +225,17 @@ impl LogsView {
         }
     }
 
+    fn geometry(&self, width: usize) -> super::components::ListGeometry {
+        super::components::ListGeometry::new(
+            self.rows.iter().map(|row| 1 + self.extra_rows(row, width)),
+        )
+    }
     pub fn line_count(&self, width: usize) -> usize {
-        self.rows
-            .iter()
-            .map(|row| 1 + self.extra_rows(row, width))
-            .sum()
+        self.geometry(width).extent
     }
-
-    pub fn entry_start(&self, index: usize, width: usize) -> usize {
-        self.rows
-            .iter()
-            .take(index)
-            .map(|row| 1 + self.extra_rows(row, width))
-            .sum()
-    }
-
-    /// The entry painted at visual line `line` (after scroll).
+    /// Spacer rows have no event target.
     pub fn index_at_line(&self, line: usize, width: usize) -> Option<usize> {
-        let mut cursor = 0usize;
-        for (index, row) in self.rows.iter().enumerate() {
-            let height = 1 + self.extra_rows(row, width);
-            if line < cursor + height {
-                return Some(index);
-            }
-            cursor += height;
-        }
-        None
+        self.geometry(width).index_at(line)
     }
 
     /// Keep the selected entry (and its open detail) inside `room` lines.
@@ -259,15 +244,10 @@ impl LogsView {
             self.scroll = 0;
             return;
         }
-        let start = self.entry_start(self.sel, width);
-        let height = 1 + self.extra_rows(&self.rows[self.sel], width);
-        let room = room.max(1);
-        let top = self.scroll as usize;
-        if start < top {
-            self.scroll = start as u16;
-        } else if start + height > top + room {
-            self.scroll = (start + height).saturating_sub(room).min(start) as u16;
-        }
+        self.scroll = self
+            .geometry(width)
+            .reveal(self.sel, self.scroll as usize, room.max(1))
+            .min(u16::MAX as usize) as u16;
     }
 
     pub fn scroll_max(&self, room: usize, width: usize) -> u16 {
@@ -426,6 +406,9 @@ pub fn row_lines(view: &LogsView, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut lines = Vec::new();
     for (index, row) in view.rows.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
         let style = if index == view.sel {
             theme::selected()
         } else {

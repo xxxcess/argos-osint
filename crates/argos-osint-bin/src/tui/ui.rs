@@ -207,7 +207,7 @@ fn provider_areas(area: Rect) -> Vec<Rect> {
 }
 
 fn list_room(height: u16) -> usize {
-    height.saturating_sub(2) as usize
+    super::components::ListGeometry::capacity(height.saturating_sub(2) as usize, 1)
 }
 
 fn in_pane(rect: Rect, x: u16, y: u16) -> bool {
@@ -263,7 +263,7 @@ fn model_areas(app: &App, area: Rect) -> Vec<Rect> {
 }
 
 /// Height of the role list/details pane (note + bordered details content).
-const MODEL_ROLES_H: u16 = 18;
+const MODEL_ROLES_H: u16 = 23;
 
 fn dashboard_areas(area: Rect) -> (Rect, Rect, Rect) {
     let rows = split_vertical(
@@ -614,17 +614,6 @@ pub(crate) enum HomeKind {
     Gap,
 }
 
-fn home_line(app: &App, x: u16, y: u16) -> Option<usize> {
-    let body = chrome(app.screen, app).body;
-    if !contains(body, x, y) {
-        return None;
-    }
-    home_rows(body, 0)
-        .into_iter()
-        .find(|row| row.y == y)
-        .and_then(|row| row.target)
-}
-
 pub(crate) struct HomeLayoutMetrics {
     pub(crate) top_pad: u16,
     pub(crate) box_y: u16,
@@ -648,7 +637,7 @@ pub(crate) fn home_layout_metrics(area: Rect) -> HomeLayoutMetrics {
             composer_x: area.x,
         };
     }
-    let is_wide = area.width as usize >= logo_width() && area.height >= 26;
+    let is_wide = area.width as usize >= logo_width() && area.height >= 38;
     let title_count = if is_wide { 6 } else { 1 };
     let composer_width = if is_wide {
         (logo_width() as u16).min(area.width.saturating_sub(4))
@@ -659,7 +648,7 @@ pub(crate) fn home_layout_metrics(area: Rect) -> HomeLayoutMetrics {
 
     let box_h = if area.height >= 26 { 3 } else { 2 };
     let composer_total_h = box_h + 1; // box_h + 1 guidance (label removed)
-    let apps_h = if area.height < 20 { 9 } else { 12 }; // 1 heading + 4 apps + 1 gap + 1 heading + 5 apps
+    let apps_h = if area.height < 32 { 9 } else { 19 }; // 1 heading + 4 apps + 1 gap + 1 heading + 5 apps
 
     let (gap_title_to_composer, gap_composer_to_apps) =
         if area.height >= 34 { (2, 2) } else { (1, 1) };
@@ -689,7 +678,7 @@ pub(crate) fn home_layout_metrics(area: Rect) -> HomeLayoutMetrics {
 
 pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
     let metrics = home_layout_metrics(area);
-    let is_wide = area.width as usize >= logo_width() && area.height >= 26;
+    let is_wide = area.width as usize >= logo_width() && area.height >= 38;
 
     let mut rows = Vec::new();
     for _ in 0..metrics.top_pad {
@@ -732,11 +721,15 @@ pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
         row.y = area.y.saturating_add(index as u16);
     }
 
-    if area.height < 20 {
+    if area.height < 32 {
         app_rows.retain(|row| row.target.is_some());
     }
     for (index, row) in app_rows.iter_mut().enumerate() {
-        row.y = metrics.apps_y.saturating_add(index as u16);
+        row.y = metrics.apps_y.saturating_add(if area.height < 32 {
+            (index / 2) as u16 * 2
+        } else {
+            index as u16
+        });
     }
 
     rows.extend(app_rows);
@@ -753,7 +746,10 @@ fn home_group(rows: &mut Vec<HomeRow>, title: &'static str, modules: &[ModuleId]
         center: false,
         kind: HomeKind::Heading(title),
     });
-    for module in modules {
+    for (index, module) in modules.iter().enumerate() {
+        if index > 0 {
+            rows.push(gap_row());
+        }
         rows.push(HomeRow {
             y: 0,
             target: Some(module.index()),
@@ -868,20 +864,6 @@ fn paint_logo(pattern: &str, split: usize, bottom: bool) -> Vec<Span<'static>> {
             } else {
                 Span::styled(ch.to_string(), Style::default().fg(face).bg(theme::BG))
             }
-        })
-        .collect()
-}
-
-fn visible_tools(app: &App) -> Vec<(usize, &'static osint::ToolDefinition)> {
-    let q = app.osint_search.trim().to_ascii_lowercase();
-    osint::registry()
-        .iter()
-        .enumerate()
-        .filter(|(_, tool)| {
-            q.is_empty()
-                || tool.name.to_ascii_lowercase().contains(&q)
-                || tool.category.to_ascii_lowercase().contains(&q)
-                || tool.id.contains(&q)
         })
         .collect()
 }
@@ -1291,6 +1273,9 @@ fn plan_summary_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> V
     let mut lines = Vec::new();
     lines.push("Directives · evidence assessment pending".into());
     for directive in &plan.directives {
+        if lines.last().is_some_and(|line: &String| !line.is_empty()) {
+            lines.push(String::new());
+        }
         lines.push(format!(
             "  {}  {}  ○ unassessed",
             directive.id.to_uppercase(),
@@ -1302,6 +1287,9 @@ fn plan_summary_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> V
         lines.push("Collection strategy".into());
     }
     for (index, step) in plan.calls.iter().enumerate() {
+        if index > 0 {
+            lines.push(String::new());
+        }
         let name = osint::definition(&step.tool_id)
             .map(|tool| tool.name)
             .unwrap_or(step.tool_id.as_str());
@@ -1328,6 +1316,9 @@ fn plan_summary_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> V
         lines.push(String::new());
         lines.push("Fallbacks".into());
         for fallback in &plan.fallback_requests {
+            if lines.last().is_some_and(|line: &String| !line.is_empty()) {
+                lines.push(String::new());
+            }
             lines.push(format!("  · {}", clip_chars(fallback, 100)));
         }
     }
@@ -1357,6 +1348,9 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> 
         },
     );
     for directive in &plan.directives {
+        if lines.last().is_some_and(|line: &String| !line.is_empty()) {
+            lines.push(String::new());
+        }
         let mut row = format!("   {}: {}", directive.id, directive.goal);
         if !directive.entities.is_empty() {
             row.push_str(&format!(" · entities {}", directive.entities.join(", ")));
@@ -1397,6 +1391,9 @@ fn question_plan_lines(run: &recon::Run, plan: &Plan, calls: &[recon::Call]) -> 
         lines.push("Order:".into());
     }
     for call in &plan.calls {
+        if lines.last().is_some_and(|line: &String| !line.is_empty()) {
+            lines.push(String::new());
+        }
         let mut row = format!("{}. {}", call.step_id, call.tool_id);
         if !call.reason.is_empty() {
             row.push_str(&format!(" — {}", call.reason));
@@ -2175,10 +2172,14 @@ fn rows_for(
     let width = width.max(1);
     let mut rows = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
+        if index > 0
+            && rows
+                .last()
+                .is_some_and(|row: &ChatRow| !row.pieces.is_empty())
+        {
+            rows.push(row(index, false, false, false, RowFace::Plain, Vec::new()));
+        }
         if block.part == InvestigationPart::UserQuery {
-            if index > 0 {
-                rows.push(row(index, false, false, false, RowFace::Plain, Vec::new()));
-            }
             for (line_index, pieces) in markdown::user_lines(&block.body, width.saturating_sub(3))
                 .into_iter()
                 .enumerate()
@@ -2195,9 +2196,6 @@ fn rows_for(
             continue;
         }
         if block.part == InvestigationPart::Synthesis {
-            if index > 0 {
-                rows.push(row(index, false, false, false, RowFace::Plain, Vec::new()));
-            }
             let revision = text_revision(&block.body);
             let cached = frozen.entry(block.key.clone()).or_insert_with(|| {
                 super::components::TranscriptBlock {
@@ -2298,9 +2296,6 @@ fn rows_for(
             continue;
         }
         if block.part == InvestigationPart::StreamingSynthesis {
-            if index > 0 {
-                rows.push(row(index, false, false, false, RowFace::Plain, Vec::new()));
-            }
             let mut pieces = vec![Piece {
                 text: block.title.clone(),
                 tone: Tone::Accent,
@@ -2452,7 +2447,7 @@ fn chat_spots(app: &App) -> Vec<Spot> {
                 rect,
                 target: Target::ChatHeader(row.block),
             });
-        } else {
+        } else if !row.pieces.is_empty() {
             spots.push(Spot {
                 rect,
                 target: Target::ChatBody(row.block),
@@ -2462,7 +2457,50 @@ fn chat_spots(app: &App) -> Vec<Spot> {
     spots
 }
 
+pub(crate) fn reveal_spaced_lists(app: &mut App) {
+    let body = chrome(app.screen, app).body;
+    if app.module.is_none() && body.height < 32 {
+        let metrics = home_layout_metrics(body);
+        let room = super::components::ListGeometry::capacity(
+            body.bottom().saturating_sub(metrics.apps_y) as usize,
+            1,
+        )
+        .max(1);
+        reveal_index(&mut app.scrolls.home, app.launcher_sel / 2, room);
+    }
+    if app.module == Some(ModuleId::Providers)
+        && app.provider_page == ProviderPage::Defaults
+        && app.overlay == Overlay::None
+    {
+        let models = model_areas(app, provider_areas(body)[1]);
+        let room = super::components::ListGeometry::capacity(
+            models[6].height.saturating_sub(2) as usize,
+            1,
+        )
+        .max(1);
+        let reveal_role = match app.focus {
+            Target::Button(ButtonId::DefaultRole(role)) => role,
+            _ => app.defaults_role,
+        };
+        let selected = DefaultsRole::ALL
+            .iter()
+            .position(|role| *role == reveal_role)
+            .unwrap_or(0);
+        reveal_index(&mut app.scrolls.roles, selected, room);
+        let room =
+            super::components::ListGeometry::capacity(inset(models[4]).height as usize, 1).max(1);
+        reveal_index(&mut app.scrolls.fallbacks, app.fallback_sel, room);
+    }
+    if app.overlay == Overlay::AddFallback {
+        let rows = add_fallback_layout(active_popup_area(app, app.screen));
+        let room =
+            super::components::ListGeometry::capacity(inset(rows[3]).height as usize, 1).max(1);
+        reveal_index(&mut app.scrolls.popup, app.fallback_popup_sel, room);
+    }
+}
+
 pub fn normalize(app: &mut App) {
+    reveal_spaced_lists(app);
     let anchor = if !app.chat_follow {
         let old = app.frame.borrow();
         if old.stamp.thread == app.selected_thread {
@@ -2650,12 +2688,62 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         app.move_choice(delta);
         return;
     }
+    if app.overlay == Overlay::AddFallback {
+        let last = app.filtered_fallback_models().len().saturating_sub(1);
+        app.fallback_popup_sel = app
+            .fallback_popup_sel
+            .saturating_add_signed(delta as isize)
+            .min(last);
+        reveal_spaced_lists(app);
+        return;
+    }
     if app.overlay != Overlay::None {
         let max = popup_max(app);
         nudge(&mut app.scrolls.popup, delta * 3, max);
         return;
     }
     let body = chrome(app.screen, app).body;
+    if app.module.is_none() {
+        let index = app
+            .launcher_sel
+            .saturating_add_signed(delta as isize * 2)
+            .min(ModuleId::ALL.len() - 1);
+        app.set_focus(Target::App(index));
+        return;
+    }
+    if app.module == Some(ModuleId::Providers) && app.provider_page == ProviderPage::Defaults {
+        let models = model_areas(app, provider_areas(body)[1]);
+        if contains(models[4], x, y) {
+            let count = app
+                .settings
+                .defaults
+                .role(app.defaults_role.role_key())
+                .map_or(0, |role| role.fallbacks.len());
+            let index = app
+                .fallback_sel
+                .saturating_add_signed(delta as isize)
+                .min(count.saturating_sub(1));
+            app.set_focus(Target::Button(ButtonId::FallbackItem(index)));
+            return;
+        }
+        if contains(models[6], x, y) {
+            let focused_role = match app.focus {
+                Target::Button(ButtonId::DefaultRole(role)) => role,
+                _ => app.defaults_role,
+            };
+            let index = DefaultsRole::ALL
+                .iter()
+                .position(|role| *role == focused_role)
+                .unwrap_or(0);
+            let next = index
+                .saturating_add_signed(delta as isize)
+                .min(DefaultsRole::ALL.len() - 1);
+            app.set_focus(Target::Button(ButtonId::DefaultRole(
+                DefaultsRole::ALL[next],
+            )));
+            return;
+        }
+    }
     if app.module == Some(ModuleId::System) {
         if app.profile.filter_popup.is_none() && !app.profile.period_popup {
             if let Some(
@@ -2703,7 +2791,8 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
     if app.module == Some(ModuleId::Jobs) {
         let areas = super::jobs::areas(body, &app.jobs);
         if contains(areas.detail, x, y) {
-            nudge(&mut app.jobs.detail_scroll, delta * 3, 10_000);
+            let max = super::jobs::detail_scroll_max(app);
+            nudge(&mut app.jobs.detail_scroll, delta * 3, max);
         } else if contains(areas.table, x, y) {
             let room = super::jobs::table_room(body, &app.jobs);
             let max = app.jobs.rows.len().saturating_sub(room) as u16;
@@ -2724,7 +2813,14 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
             let max = tool_max(app);
             nudge_list(&mut app.scrolls.tools, delta, max);
         }
-        Region::Detail => nudge(&mut app.scrolls.detail, delta * 3, 10_000),
+        Region::Detail => {
+            let max = if app.module == Some(ModuleId::Providers) {
+                provider_catalog_scroll_max(app)
+            } else {
+                10_000
+            };
+            nudge(&mut app.scrolls.detail, delta * 3, max);
+        }
         Region::Recall => nudge(&mut app.scrolls.recall, delta * 3, 10_000),
         Region::Path => nudge(&mut app.scrolls.path, delta, 10_000),
         Region::Related => {
@@ -2785,12 +2881,41 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
             let max = intel_brief_scroll_max(app);
             nudge(&mut app.scrolls.intel_brief, delta * 3, max);
         }
-        Region::ReconContext => nudge(&mut app.scrolls.recon_context, delta * 3, 10_000),
+        Region::ReconContext => shift_recon_context(app, delta * 3),
         Region::None => {}
     }
 }
 
 pub fn page(app: &mut App, direction: i32) {
+    if app.overlay == Overlay::AddFallback {
+        let rows = add_fallback_layout(active_popup_area(app, app.screen));
+        let room =
+            super::components::ListGeometry::capacity(inset(rows[3]).height as usize, 1).max(1);
+        let last = app.filtered_fallback_models().len().saturating_sub(1);
+        app.fallback_popup_sel = app
+            .fallback_popup_sel
+            .saturating_add_signed(direction as isize * room as isize)
+            .min(last);
+        reveal_spaced_lists(app);
+        return;
+    }
+
+    if app.module.is_none() && app.overlay == Overlay::None {
+        let body = chrome(app.screen, app).body;
+        let room = super::components::ListGeometry::capacity(
+            body.bottom()
+                .saturating_sub(home_layout_metrics(body).apps_y) as usize,
+            1,
+        )
+        .max(1);
+        let index = app
+            .launcher_sel
+            .saturating_add_signed(direction as isize * room as isize * 2)
+            .min(ModuleId::ALL.len() - 1);
+        app.set_focus(Target::App(index));
+        return;
+    }
+
     if let Overlay::Choice(_) = app.overlay {
         let room = choice_list_room(app).max(1) as i32;
         app.move_choice(direction * room);
@@ -2807,6 +2932,12 @@ pub fn page(app: &mut App, direction: i32) {
             let room = (thread_room(app) / 2).max(1) as i32;
             let max = thread_max(app);
             nudge_list(&mut app.scrolls.threads, direction * room, max);
+        }
+        Some(ModuleId::Recon) if app.focus == Target::ReconContext => {
+            shift_recon_context(
+                app,
+                direction * chrome(app.screen, app).body.height.max(1) as i32,
+            );
         }
         Some(ModuleId::Recon) => {
             let room = inset(transcript_rect(app)).height.max(1) as i32;
@@ -2846,6 +2977,56 @@ pub fn page(app: &mut App, direction: i32) {
         Some(ModuleId::Osint) if app.focus == Target::OsintDetail => {
             nudge(&mut app.scrolls.detail, direction * 6, 10_000);
         }
+        Some(ModuleId::Providers)
+            if app.provider_page == ProviderPage::Defaults
+                && matches!(
+                    app.focus,
+                    Target::Button(ButtonId::DefaultRole(_) | ButtonId::FallbackItem(_))
+                ) =>
+        {
+            let body = chrome(app.screen, app).body;
+            let models = model_areas(app, provider_areas(body)[1]);
+            match app.focus {
+                Target::Button(ButtonId::DefaultRole(role)) => {
+                    let index = DefaultsRole::ALL
+                        .iter()
+                        .position(|r| *r == role)
+                        .unwrap_or(0);
+                    let room = super::components::ListGeometry::capacity(
+                        models[6].height.saturating_sub(2) as usize,
+                        1,
+                    )
+                    .max(1);
+                    let next = index
+                        .saturating_add_signed(direction as isize * room as isize)
+                        .min(DefaultsRole::ALL.len() - 1);
+                    app.set_focus(Target::Button(ButtonId::DefaultRole(
+                        DefaultsRole::ALL[next],
+                    )));
+                }
+                Target::Button(ButtonId::FallbackItem(index)) => {
+                    let count = app
+                        .settings
+                        .defaults
+                        .role(app.defaults_role.role_key())
+                        .map_or(0, |r| r.fallbacks.len());
+                    let room = super::components::ListGeometry::capacity(
+                        inset(models[4]).height as usize,
+                        1,
+                    )
+                    .max(1);
+                    let next = index
+                        .saturating_add_signed(direction as isize * room as isize)
+                        .min(count.saturating_sub(1));
+                    app.set_focus(Target::Button(ButtonId::FallbackItem(next)));
+                }
+                _ => {}
+            }
+        }
+        Some(ModuleId::Providers) if app.provider_page != ProviderPage::Defaults => {
+            let max = provider_catalog_scroll_max(app);
+            nudge(&mut app.scrolls.detail, direction * 6, max);
+        }
         Some(ModuleId::Osint) | Some(ModuleId::Providers) => {
             nudge(&mut app.scrolls.detail, direction * 6, 10_000);
         }
@@ -2859,7 +3040,8 @@ pub fn page(app: &mut App, direction: i32) {
             let room = inset(super::jobs::areas(chrome(app.screen, app).body, &app.jobs).detail)
                 .height
                 .max(1) as i32;
-            nudge(&mut app.jobs.detail_scroll, direction * room, 10_000);
+            let max = super::jobs::detail_scroll_max(app);
+            nudge(&mut app.jobs.detail_scroll, direction * room, max);
         }
         Some(ModuleId::Jobs) => {
             let body = chrome(app.screen, app).body;
@@ -3133,7 +3315,14 @@ fn memory_room(app: &App) -> usize {
     if app.brain_list_mode != BrainListMode::List {
         return 1;
     }
-    (list_room(brain_list(chrome(app.screen, app).body).list.height) / 2).max(1)
+    super::components::ListGeometry::capacity(
+        brain_list(chrome(app.screen, app).body)
+            .list
+            .height
+            .saturating_sub(2) as usize,
+        2,
+    )
+    .max(1)
 }
 
 fn tool_room(app: &App) -> usize {
@@ -3183,14 +3372,21 @@ pub(super) fn detail_rows(detail: &str, width: usize) -> Vec<String> {
 }
 
 fn popup_max(app: &App) -> u16 {
-    let room = inset(active_popup_area(app, app.screen)).height.max(1) as usize;
-    popup_text(app).lines().count().saturating_sub(room) as u16
+    let inner = inset(active_popup_area(app, app.screen));
+    popup_lines(app, inner.width as usize)
+        .len()
+        .saturating_sub(inner.height.max(1) as usize)
+        .min(u16::MAX as usize) as u16
 }
 
 fn atlas_feed_room(app: &App) -> usize {
-    inset(atlas_live_areas(app, chrome(app.screen, app).body).3)
-        .height
-        .max(1) as usize
+    super::components::ListGeometry::capacity(
+        inset(atlas_live_areas(app, chrome(app.screen, app).body).3)
+            .height
+            .max(1) as usize,
+        1,
+    )
+    .max(1)
 }
 
 fn origins_room(app: &App) -> usize {
@@ -3208,23 +3404,31 @@ fn insights_room(app: &App) -> usize {
 }
 
 fn origins_scroll_max(app: &App) -> u16 {
-    let rows = if app.atlas_stats.origins.is_empty() {
-        1
-    } else {
-        app.atlas_stats.origins.len()
-    };
-    rows.saturating_sub(origins_room(app)) as u16
+    let inner = inset(atlas_live_areas(app, chrome(app.screen, app).body).1);
+    let origins: Vec<_> = app
+        .atlas_stats
+        .origins
+        .iter()
+        .filter(|row| row.articles > 0 || !app.atlas_stats.scored)
+        .collect();
+    super::atlas_table::origins_lines(&origins, &app.atlas_stats, inner.width)
+        .len()
+        .saturating_sub(inner.height as usize)
+        .min(u16::MAX as usize) as u16
 }
 
 fn atlas_cycle_stats_scroll_max(app: &App) -> u16 {
     let stats = selected_cycle_stats(app);
-    let rows = stats
+    let inner = inset(atlas_runs_areas(chrome(app.screen, app).body).2);
+    let origins: Vec<_> = stats
         .origins
         .iter()
         .filter(|row| row.articles > 0)
-        .count()
-        .max(1);
-    rows.saturating_sub(atlas_cycle_stats_room(app)) as u16
+        .collect();
+    super::atlas_table::origins_lines(&origins, &stats, inner.width)
+        .len()
+        .saturating_sub(atlas_cycle_stats_room(app))
+        .min(u16::MAX as usize) as u16
 }
 
 pub fn cycle_stats_under_pointer(app: &App, x: u16, y: u16) -> bool {
@@ -3257,9 +3461,13 @@ fn insights_scroll_max(app: &App) -> u16 {
 }
 
 fn atlas_runs_room(app: &App) -> usize {
-    inset(atlas_runs_areas(chrome(app.screen, app).body).3)
-        .height
-        .max(1) as usize
+    super::components::ListGeometry::capacity(
+        inset(atlas_runs_areas(chrome(app.screen, app).body).3)
+            .height
+            .max(1) as usize,
+        1,
+    )
+    .max(1)
 }
 
 fn atlas_cycle_stats_room(app: &App) -> usize {
@@ -3270,9 +3478,13 @@ fn atlas_cycle_stats_room(app: &App) -> usize {
 }
 
 fn atlas_news_room(app: &App) -> usize {
-    inset(atlas_news_areas(chrome(app.screen, app).body).2)
-        .height
-        .max(1) as usize
+    super::components::ListGeometry::capacity(
+        inset(atlas_news_areas(chrome(app.screen, app).body).2)
+            .height
+            .max(1) as usize,
+        1,
+    )
+    .max(1)
 }
 
 pub fn shift_atlas_feed(app: &mut App, delta: i32) {
@@ -3436,7 +3648,17 @@ fn geometry_stamp(app: &App) -> String {
             app.scrolls.tools,
             app.scrolls.intel_list,
             app.scrolls.atlas_feed,
-            app.scrolls.atlas_runs
+            (
+                app.scrolls.atlas_runs,
+                app.scrolls.atlas_news,
+                app.scrolls.detail,
+                app.scrolls.recon_context,
+                app.jobs.detail_scroll,
+                app.intel_related.scroll,
+                app.scrolls.intel_brief,
+                app.scrolls.intel_full,
+                app.scrolls.intel_extracted,
+            )
         ),
         (
             app.profile.focus,
@@ -3450,12 +3672,35 @@ fn geometry_stamp(app: &App) -> String {
             app.profile.grid_scroll.offset
         ),
         (
-            app.logs.scroll,
-            app.jobs.scroll,
-            app.profile
-                .snapshot
-                .as_ref()
-                .map_or("", |snapshot| snapshot.captured_at.as_str()),
+            (
+                (
+                    app.logs.scroll,
+                    &app.logs.open,
+                    app.logs.rows.len(),
+                    app.logs.error.is_some()
+                ),
+                app.scrolls.home,
+                app.scrolls.roles,
+                app.scrolls.fallbacks,
+                app.scrolls.popup
+            ),
+            (
+                app.jobs.scroll,
+                app.jobs.detail_open,
+                app.jobs.rows.len(),
+                app.jobs.error.is_some()
+            ),
+            (
+                app.profile
+                    .snapshot
+                    .as_ref()
+                    .map_or("", |snapshot| snapshot.captured_at.as_str()),
+                app.profile.report_scroll.offset,
+                &app.profile.table_offsets,
+                &app.profile.panel_scroll,
+                &app.profile.selected_row,
+                app.intel_sel,
+            ),
             app.recon_context_enabled,
             app.profile.picker_selection,
             &app.profile.filter_edit
@@ -3541,6 +3786,32 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             order.push(entry.target);
         }
     }
+    if app.module.is_none() && app.overlay == Overlay::None {
+        order.retain(|target| !matches!(target, Target::App(_)));
+        order.extend((0..ModuleId::ALL.len()).map(Target::App));
+    }
+    if app.module == Some(ModuleId::Providers)
+        && app.provider_page == ProviderPage::Defaults
+        && app.overlay == Overlay::None
+    {
+        for role in DefaultsRole::ALL {
+            let target = Target::Button(ButtonId::DefaultRole(role));
+            if !order.contains(&target) {
+                order.push(target);
+            }
+        }
+        let count = app
+            .settings
+            .defaults
+            .role(app.defaults_role.role_key())
+            .map_or(0, |role| role.fallbacks.len());
+        for index in 0..count {
+            let target = Target::Button(ButtonId::FallbackItem(index));
+            if !order.contains(&target) {
+                order.push(target);
+            }
+        }
+    }
     // Intel's middle stack can initially clip Related completely. Its logical
     // scope control enters focus order; set_focus reveals the same layout pane.
     if app.module == Some(ModuleId::Intel)
@@ -3562,7 +3833,7 @@ pub fn focus_order(app: &App) -> Vec<Target> {
 pub fn choice_list_room(app: &App) -> usize {
     let inner = inset(popup_area(app.screen));
     let note = usize::from(!app.choice_note.is_empty());
-    inner.height.saturating_sub(note as u16) as usize
+    super::components::ListGeometry::capacity(inner.height.saturating_sub(note as u16) as usize, 1)
 }
 
 pub fn hit_test(app: &App, x: u16, y: u16) -> Option<Target> {
@@ -3614,7 +3885,7 @@ fn legacy_target_at(app: &App, x: u16, y: u16) -> Option<Target> {
         return None;
     }
     match app.module {
-        None => home_line(app, x, y).map(Target::App),
+        None => None,
         Some(ModuleId::Recon) => recon_hit(app, layout.body, x, y),
         Some(ModuleId::Brain) => brain_hit(app, layout.body, x, y),
         Some(ModuleId::Osint) => osint_hit(app, layout.body, x, y),
@@ -3666,7 +3937,9 @@ fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         return Some(Target::Field(FieldId::ReconSearch));
     }
     if in_pane(list, x, y) {
-        let index = app.scrolls.threads as usize + (y - list.y - 1) as usize;
+        let index = app.scrolls.threads as usize
+            + super::components::ListGeometry::fixed(app.threads.len(), 1)
+                .index_at((y - list.y - 1) as usize)?;
         if index < app.threads.len() {
             return Some(Target::Thread(index));
         }
@@ -3743,7 +4016,9 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             .map(|index| Target::Button(ids[index]));
     }
     if in_pane(layout.list, x, y) {
-        let index = app.scrolls.memories as usize + (y - layout.list.y - 1) as usize / 2;
+        let index = app.scrolls.memories as usize
+            + super::components::ListGeometry::fixed(app.memories.len(), 2)
+                .index_at((y - layout.list.y - 1) as usize)?;
         if index < app.memories.len() {
             return Some(Target::Memory(index));
         }
@@ -3844,11 +4119,11 @@ fn osint_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         }
     }
     if in_pane(list, x, y) {
-        let tools = visible_tools(app);
-        let index = app.scrolls.tools as usize + (y - list.y - 1) as usize;
-        if let Some((id, _)) = tools.get(index) {
-            return Some(Target::Tool(*id));
-        }
+        let rows = super::tool_catalog::rows(&app.osint_search, &app.tool_expanded);
+        let index = app.scrolls.tools as usize
+            + super::components::ListGeometry::fixed(rows.len(), 1)
+                .index_at((y - list.y - 1) as usize)?;
+        return rows.get(index).map(|row| row.0);
     }
     if contains(input, x, y) {
         return Some(Target::Field(FieldId::OsintInput));
@@ -5228,7 +5503,7 @@ fn draw_slash_hint(frame: &mut Frame, app: &App, body: Rect) {
     if matches.is_empty() || body.height < 2 {
         return;
     }
-    let height = (matches.len() as u16 + 1)
+    let height = ((matches.len() * 2).saturating_sub(1) as u16 + 3)
         .min(body.height.saturating_sub(1))
         .min(8);
     let area = Rect {
@@ -5239,6 +5514,9 @@ fn draw_slash_hint(frame: &mut Frame, app: &App, body: Rect) {
     };
     let mut lines = vec![Line::from(Span::styled(" commands", theme::card_dim()))];
     for (index, (name, help)) in matches.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
         let selected = index == 0;
         lines.push(Line::from(Span::styled(
             format!(" /{name}  {help}"),
@@ -5677,13 +5955,25 @@ pub(crate) fn draw_composer(
 }
 
 fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
-    if area.height < 18 {
+    if area.height < 32 {
         let metrics = home_layout_metrics(area);
-        for (index, module) in ModuleId::ALL.iter().enumerate() {
+        let room = super::components::ListGeometry::capacity(
+            area.bottom().saturating_sub(metrics.apps_y) as usize,
+            1,
+        )
+        .max(1);
+        let start = app.scrolls.home as usize;
+        for (index, module) in ModuleId::ALL
+            .iter()
+            .enumerate()
+            .skip(start * 2)
+            .take(room * 2)
+        {
+            let local = index - start * 2;
             let width = area.width / 2;
             let rect = Rect::new(
-                area.x + (index % 2) as u16 * width,
-                metrics.apps_y + (index / 2) as u16,
+                area.x + (local % 2) as u16 * width,
+                metrics.apps_y + (local / 2) as u16 * 2,
                 width,
                 1,
             );
@@ -5838,13 +6128,17 @@ fn draw_recon_dashboard(frame: &mut Frame, app: &App, area: Rect) {
             Target::Thread(app.scrolls.threads as usize + index),
             Rect::new(
                 list.x + 1,
-                list.y + 1 + index as u16,
+                list.y + 1 + index as u16 * 2,
                 list.width.saturating_sub(2),
                 1,
             ),
         );
     }
-    frame.render_widget(List::new(items).block(pane(" investigations ")), list);
+    frame.render_widget(
+        List::new(super::components::spaced(items, || ListItem::new("")))
+            .block(pane(" investigations ")),
+        list,
+    );
     let thread_buttons = button_areas(actions, 1);
     draw_button(
         frame,
@@ -5951,6 +6245,72 @@ fn draw_recon_chat(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn recon_context_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![String::new()];
+    if let Some(thread) = app
+        .threads
+        .iter()
+        .find(|thread| Some(&thread.id) == app.selected_thread.as_ref())
+    {
+        // Full title, wrapped by the Paragraph widget — no character clipping.
+        lines.push(thread.title.clone());
+    }
+    if !app.recon_stage.is_empty() {
+        lines.push(format!("Stage · {}", app.recon_stage));
+    }
+    lines.push(String::new());
+    if let Some(run) = app.runs.last() {
+        if let Some(plan) = run
+            .plan_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Plan>(raw).ok())
+        {
+            lines.push(format!("Directives · {}", plan.directives.len()));
+            // Show all directives; wrapping is handled by the Paragraph widget.
+            for directive in plan.directives.iter() {
+                if lines.last().is_some_and(|line: &String| !line.is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push(format!(
+                    "{}  {}",
+                    directive.id.to_uppercase(),
+                    directive.goal
+                ));
+            }
+        }
+    }
+    lines.push(String::new());
+    lines.push(format!("Evidence calls · {}", app.calls.len()));
+    let memories: usize = app.answer_memories.values().map(Vec::len).sum();
+    lines.push(String::new());
+    lines.push(format!("▼ Memories used ({memories})"));
+    for mem_list in app.answer_memories.values() {
+        for mem in mem_list {
+            if lines.last().is_some_and(|line: &String| !line.is_empty()) {
+                lines.push(String::new());
+            }
+            // Full memory text, wrapped by the Paragraph widget.
+            lines.push(format!("  • {}", mem.text));
+        }
+    }
+    super::components::measured_lines(lines.into_iter().map(Line::raw).collect(), width)
+}
+
+pub(crate) fn shift_recon_context(app: &mut App, delta: i32) {
+    let (_, Some(area), _) = recon_chat_areas(app, chrome(app.screen, app).body) else {
+        return;
+    };
+    let inner = inset(area);
+    let room = recon_context_buttons(area, app)
+        .first()
+        .map_or(inner.height, |(_, rect, _)| rect.y.saturating_sub(inner.y));
+    let max = recon_context_lines(app, inner.width)
+        .len()
+        .saturating_sub(room as usize)
+        .min(u16::MAX as usize) as u16;
+    nudge(&mut app.scrolls.recon_context, delta, max);
+}
+
 fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Target::ReconContext;
     let title = if focused {
@@ -5990,54 +6350,17 @@ fn draw_recon_context(frame: &mut Frame, app: &App, area: Rect) {
         height: info_h.min(inner.height),
     };
 
-    let mut lines = vec![String::new()];
-    if let Some(thread) = app
-        .threads
-        .iter()
-        .find(|thread| Some(&thread.id) == app.selected_thread.as_ref())
-    {
-        // Full title, wrapped by the Paragraph widget — no character clipping.
-        lines.push(thread.title.clone());
-    }
-    if !app.recon_stage.is_empty() {
-        lines.push(format!("Stage · {}", app.recon_stage));
-    }
-    lines.push(String::new());
-    if let Some(run) = app.runs.last() {
-        if let Some(plan) = run
-            .plan_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<Plan>(raw).ok())
-        {
-            lines.push(format!("Directives · {}", plan.directives.len()));
-            // Show all directives; wrapping is handled by the Paragraph widget.
-            for directive in plan.directives.iter() {
-                lines.push(format!(
-                    "{}  {}",
-                    directive.id.to_uppercase(),
-                    directive.goal
-                ));
-            }
-        }
-    }
-    lines.push(String::new());
-    lines.push(format!("Evidence calls · {}", app.calls.len()));
-    let memories: usize = app.answer_memories.values().map(Vec::len).sum();
-    lines.push(String::new());
-    lines.push(format!("▼ Memories used ({memories})"));
-    for mem_list in app.answer_memories.values() {
-        for mem in mem_list {
-            // Full memory text, wrapped by the Paragraph widget.
-            lines.push(format!("  • {}", mem.text));
-        }
-    }
-    let content = lines.join("\n");
-    let scroll_offset = app.scrolls.recon_context;
+    let lines = recon_context_lines(app, info_area.width);
+    let scroll_offset = app.scrolls.recon_context.min(
+        lines
+            .len()
+            .saturating_sub(info_area.height as usize)
+            .min(u16::MAX as usize) as u16,
+    );
     frame.render_widget(
-        Paragraph::new(content)
+        Paragraph::new(lines)
             .style(theme::dim())
-            .scroll((scroll_offset, 0))
-            .wrap(Wrap { trim: false }),
+            .scroll((scroll_offset, 0)),
         info_area,
     );
 
@@ -6161,7 +6484,7 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(row, (target, label))| {
             let rect = Rect::new(
                 list.x + 1,
-                list.y + 1 + row as u16,
+                list.y + 1 + row as u16 * 2,
                 list.width.saturating_sub(2),
                 1,
             );
@@ -6175,7 +6498,10 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
             )
         })
         .collect();
-    frame.render_widget(List::new(items).block(pane(" Catalog ")), list);
+    frame.render_widget(
+        List::new(super::components::spaced(items, || ListItem::new(""))).block(pane(" Catalog ")),
+        list,
+    );
     let response_text = app
         .osint_result
         .as_ref()
@@ -6325,7 +6651,8 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     }
     let layout = brain_list(area);
     draw_field(frame, app, FieldId::BrainQuery, " Find ", layout.query);
-    let room = list_room(layout.list.height) / 2;
+    let room =
+        super::components::ListGeometry::capacity(layout.list.height.saturating_sub(2) as usize, 2);
     // Keep each row exactly two lines so room/reveal math matches what is painted.
     let inner_w = layout.list.width.saturating_sub(2) as usize;
     let items = app
@@ -6376,7 +6703,7 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
             Target::Memory(app.scrolls.memories as usize + row),
             Rect::new(
                 layout.list.x + 1,
-                layout.list.y + 1 + row as u16 * 2,
+                layout.list.y + 1 + row as u16 * 3,
                 layout.list.width.saturating_sub(2),
                 2,
             ),
@@ -6398,7 +6725,10 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
             layout.list,
         );
     } else {
-        frame.render_widget(List::new(items).block(pane(&title)), layout.list);
+        frame.render_widget(
+            List::new(super::components::spaced(items, || ListItem::new(""))).block(pane(&title)),
+            layout.list,
+        );
     }
     let action_buttons = button_areas(layout.actions, 4);
     draw_button(
@@ -6566,6 +6896,62 @@ fn source_anchor_label(source: &argos_osint_core::recon::InsightSource) -> Strin
     } else {
         "source".into()
     }
+}
+
+fn model_catalog_lines(labels: impl IntoIterator<Item = String>, width: u16) -> Vec<Line<'static>> {
+    let records = labels
+        .into_iter()
+        .map(|label| super::components::measured_lines(vec![Line::raw(label)], width));
+    super::components::spaced(records, || vec![Line::raw("")])
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+pub(crate) fn provider_catalog_scroll_max(app: &App) -> u16 {
+    let (provider, filter) = match app.provider_page {
+        ProviderPage::Google => ("google", &app.google_model_filter),
+        ProviderPage::Nvidia => ("nvidia", &app.nvidia_model_filter),
+        ProviderPage::OpenRouter => ("openrouter", &app.router_model_filter),
+        ProviderPage::Defaults => return 0,
+    };
+    let body = chrome(app.screen, app).body;
+    let router = router_areas(provider_areas(body)[1]);
+    let catalog = split_vertical(
+        router[5],
+        [
+            Constraint::Length(FIELD_H),
+            Constraint::Length(ACTION_H),
+            Constraint::Min(0),
+        ],
+    );
+    let inner = inset(catalog[2]);
+    let models = app
+        .catalog_cache
+        .get(provider)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| {
+            if app.catalog_for == provider {
+                app.model_catalog.as_slice()
+            } else {
+                &[]
+            }
+        });
+    let query = filter.trim().to_ascii_lowercase();
+    model_catalog_lines(
+        models
+            .iter()
+            .filter(|model| {
+                query.is_empty()
+                    || model.id.to_ascii_lowercase().contains(&query)
+                    || model.name.to_ascii_lowercase().contains(&query)
+            })
+            .map(|model| format!("{} · {}", model.name, model.id)),
+        inner.width,
+    )
+    .len()
+    .saturating_sub(inner.height as usize)
+    .min(u16::MAX as usize) as u16
 }
 
 fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
@@ -6737,10 +7123,12 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
             } else if filtered.is_empty() {
                 vec![Line::from("No models match this filter.")]
             } else {
-                filtered
-                    .iter()
-                    .map(|model| Line::from(format!("{} · {}", model.name, model.id)))
-                    .collect()
+                model_catalog_lines(
+                    filtered
+                        .iter()
+                        .map(|model| format!("{} · {}", model.name, model.id)),
+                    inset(catalog_area[2]).width,
+                )
             };
             let list = draw_see_more(
                 frame,
@@ -6914,12 +7302,25 @@ fn draw_fallbacks_list(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let mut lines = Vec::new();
-    for (i, route) in fallbacks.iter().enumerate() {
+    let start = app.scrolls.fallbacks as usize;
+    for (i, route) in
+        fallbacks
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(super::components::ListGeometry::capacity(
+                inner.height as usize,
+                1,
+            ))
+    {
+        if i > start {
+            lines.push(Line::raw(""));
+        }
         app.layout.borrow_mut().register(
             Target::Button(ButtonId::FallbackItem(i)),
             Rect {
                 x: inner.x,
-                y: inner.y.saturating_add(i as u16),
+                y: inner.y.saturating_add((i - start) as u16 * 2),
                 width: inner.width,
                 height: 1,
             },
@@ -6934,9 +7335,12 @@ fn draw_fallbacks_list(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             theme::text()
         };
-        lines.push(Line::from(Span::styled(label, style)));
+        lines.push(Line::from(Span::styled(
+            super::components::clip_text(&label, inner.width as usize),
+            style,
+        )));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn atlas_live_areas(app: &App, area: Rect) -> (Rect, Rect, Rect, Rect) {
@@ -7314,17 +7718,25 @@ fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
             ]))
         })
         .collect();
-    for row in 0..(list_inner.height as usize).min(
+    for row in 0..room.min(
         app.intel_articles
             .len()
             .saturating_sub(app.scrolls.intel_list as usize),
     ) {
         app.layout.borrow_mut().register(
             Target::IntelArticle(app.scrolls.intel_list as usize + row),
-            Rect::new(list_inner.x, list_inner.y + row as u16, list_inner.width, 1),
+            Rect::new(
+                list_inner.x,
+                list_inner.y + row as u16 * 2,
+                list_inner.width,
+                1,
+            ),
         );
     }
-    frame.render_widget(List::new(items), list_inner);
+    frame.render_widget(
+        List::new(super::components::spaced(items, || ListItem::new(""))),
+        list_inner,
+    );
 }
 
 fn bulletin_image_preview(app: &App, area: Rect) -> (Rect, Rect) {
@@ -7774,7 +8186,8 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     }
     let inner_w = viewport.width.saturating_sub(2).max(1) as usize;
     let min_section = term_pct_height(app, 0.15, 5);
-    let full_h = term_pct_height(app, 0.50, 8).min(viewport.height.saturating_sub(8).max(5));
+    // Two borders, one readable row and the three-row See more action cannot overlap.
+    let full_h = term_pct_height(app, 0.50, 8).min(viewport.height.saturating_sub(8).max(6));
 
     // The article image lives in a left column inside the brief article section;
     // the prose keeps the remaining columns and both are vertically centered.
@@ -8528,32 +8941,24 @@ fn legacy_brief_task_lines(
     let _ = article;
     let body_running = intel_body_loading(app);
     let insights_running = intel_insights_loading(app);
-    let message = app.intel_body_message.trim();
 
     // Full article retrieval / refine.
-    let (body_title, body_detail) = if body_running {
-        let (label, detail) = intel_body_progress_lines(app);
-        (label, detail)
-    } else if let Some(body) = app.intel_body.as_ref() {
-        let quality = if body.quality.trim().is_empty() {
-            body.state.as_str()
-        } else {
-            body.quality.as_str()
-        };
-        let title = format!("Full article · {quality}");
-        let detail =
-            if !message.is_empty() && !message.eq_ignore_ascii_case(&title) && !insights_running {
-                Some(message.to_string())
-            } else if !body.quality_rationale.trim().is_empty() && quality != "complete" {
-                Some(body.quality_rationale.clone())
+    let (body_title, body_detail) = match intel_body_presentation(app) {
+        IntelBodyPresentation::Retrieving => {
+            let (label, detail) = intel_body_progress_lines(app);
+            (label, detail)
+        }
+        IntelBodyPresentation::Content { warning, .. } => {
+            let quality = if warning.is_some() {
+                app.intel_body
+                    .as_ref()
+                    .map_or("ready", |body| body.quality.as_str())
             } else {
-                None
+                "ready"
             };
-        (title, detail)
-    } else if !message.is_empty() {
-        (message.to_string(), None)
-    } else {
-        ("Full article · idle".into(), None)
+            (format!("Full article · {quality}"), warning)
+        }
+        IntelBodyPresentation::Status(_) => ("Full article · unavailable".into(), None),
     };
     let body_style = if body_running {
         theme::accent()
@@ -8694,7 +9099,10 @@ fn brief_stage_lines(app: &App, lines: &mut Vec<Line<'static>>) {
         current,
         theme::text().add_modifier(Modifier::BOLD),
     )));
-    for stage in stages {
+    for (index, stage) in stages.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
         let spin = if stage.active {
             format!("{} ", super::anim::spinner())
         } else {
@@ -9156,105 +9564,143 @@ fn intel_brief_preview_lines(
     lines
 }
 
-fn intel_brief_full_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    // Loading is drawn as a centered Atlas-style spinner overlay, not as text lines.
-    if intel_body_loading(app) {
-        return lines;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum IntelBodyPresentation<'a> {
+    Content {
+        markdown: &'a str,
+        warning: Option<String>,
+    },
+    Retrieving,
+    Status(String),
+}
+
+pub(crate) fn intel_body_presentation(app: &App) -> IntelBodyPresentation<'_> {
+    let Some(article) = app.intel_articles.get(app.intel_sel) else {
+        return IntelBodyPresentation::Status("No article selected.".into());
+    };
+    if app
+        .intel_body_owner
+        .as_ref()
+        .is_some_and(|(id, job)| id != &article.id || job != &app.intel_brief_job)
+    {
+        return IntelBodyPresentation::Status(
+            "Article snapshot pending · use Reload to retry.".into(),
+        );
     }
-    // The sequential chain's validated clean body supersedes the legacy store row.
-    if let Some(md) = app
+    if let Some(markdown) = app
         .intel_brief_outputs
         .get("intel_brief_body")
         .and_then(|v| v["markdown"].as_str())
-        .filter(|m| !m.trim().is_empty())
+        .filter(|s| !s.trim().is_empty())
     {
-        for para in md.lines() {
-            if para.trim().is_empty() {
-                lines.push(Line::from(""));
-                continue;
-            }
-            for chunk in wrap_text(para, width.max(1)) {
-                lines.push(Line::from(Span::styled(chunk, theme::text())));
-            }
-        }
-        return lines;
+        return IntelBodyPresentation::Content {
+            markdown,
+            warning: None,
+        };
     }
-    match &app.intel_body {
-        Some(body)
-            if matches!(body.quality.as_str(), "complete" | "partial" | "uncertain")
-                && !body.body_markdown.trim().is_empty() =>
-        {
-            if body.quality != "complete" {
-                lines.push(Line::from(Span::styled(
-                    format!("[{}] {}", body.quality, body.quality_rationale),
-                    theme::dim(),
-                )));
-            }
-            if app.intel_full_collapsed {
-                lines.push(Line::from(Span::styled(
-                    "[collapsed — press Reload to retrieve again]",
-                    theme::dim(),
-                )));
-            } else {
-                let md = super::markdown::markdown_lines(&body.body_markdown, width.max(1));
-                for line in md {
-                    lines.push(md_line_to_line(line));
-                }
-            }
+    let retrieving = app.intel_brief_job.is_some()
+        && app.intel_brief_stages.iter().any(|stage| {
+            stage.operation == "intel_brief_body" && stage.active && stage.state == "running"
+        });
+    if let Some(body) = app.intel_body.as_ref().filter(|body| {
+        !app.intel_body_require_commit
+            && (body.state != "running" || retrieving)
+            && body.article_id == article.id
+            && matches!(body.quality.as_str(), "complete" | "partial" | "uncertain")
+            && !body.body_markdown.trim().is_empty()
+    }) {
+        return IntelBodyPresentation::Content {
+            markdown: &body.body_markdown,
+            warning: (body.quality != "complete")
+                .then(|| format!("[{}] {}", body.quality, body.quality_rationale)),
+        };
+    }
+    if let Some(error) = &app.intel_body_read_error {
+        return IntelBodyPresentation::Status(format!(
+            "Could not read full article: {error} · use Reload to retry."
+        ));
+    }
+    // Only the current job's acquisition/cleanup stages establish activity.
+    if app.intel_brief_job.is_some() {
+        if retrieving {
+            return IntelBodyPresentation::Retrieving;
         }
-        Some(body) if !app.intel_body_message.is_empty() => {
-            lines.push(Line::from(Span::styled(
-                app.intel_body_message.clone(),
-                theme::dim(),
-            )));
-        }
-        Some(body) => {
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "Unavailable. {}",
-                    if body.quality_rationale.is_empty() {
-                        app.intel_body_message.as_str()
-                    } else {
-                        body.quality_rationale.as_str()
-                    }
-                ),
-                theme::dim(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "[Press Reload to retry full article retrieval]",
-                theme::dim(),
-            )));
-        }
-        None => {
-            lines.push(Line::from(Span::styled(
-                if app.intel_body_message.is_empty() {
-                    "No full article stored yet.".into()
-                } else {
-                    app.intel_body_message.clone()
-                },
-                theme::dim(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "Use Reload to retrieve the full article.",
-                theme::dim(),
-            )));
+        if let Some(stage) = app.intel_brief_stages.iter().find(|stage| {
+            matches!(stage.operation.as_str(), "intel_brief_body") && stage.state != "completed"
+        }) {
+            return IntelBodyPresentation::Status(format!(
+                "{} · {} · use Reload to retry.",
+                stage.label, stage.row
+            ));
         }
     }
-    lines
+    if app
+        .intel_body
+        .as_ref()
+        .is_some_and(|body| body.state == "running")
+    {
+        return IntelBodyPresentation::Status(
+            "Retrieval is no longer active · use Reload to retry.".into(),
+        );
+    }
+    if app
+        .intel_brief_publication
+        .starts_with("Brief job unavailable")
+    {
+        return IntelBodyPresentation::Status(app.intel_brief_publication.clone());
+    }
+    let reason = app
+        .intel_body
+        .as_ref()
+        .map(|body| body.quality_rationale.as_str())
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or("No current full article available");
+    IntelBodyPresentation::Status(format!(
+        "{reason} · use Reload to retrieve the full article."
+    ))
 }
 
-/// True while the focused brief is retrieving or refining the full article body.
+pub(crate) fn intel_body_has_content(app: &App) -> bool {
+    matches!(
+        intel_body_presentation(app),
+        IntelBodyPresentation::Content { .. }
+    )
+}
+
+fn intel_brief_full_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    match intel_body_presentation(app) {
+        IntelBodyPresentation::Retrieving => Vec::new(),
+        IntelBodyPresentation::Status(reason) => super::components::measured_lines(
+            vec![Line::styled(reason, theme::dim())],
+            width.max(1).min(u16::MAX as usize) as u16,
+        ),
+        IntelBodyPresentation::Content { markdown, warning } => {
+            let mut lines = Vec::new();
+            if let Some(warning) = warning {
+                lines.push(Line::styled(warning, theme::dim()));
+            }
+            if app.intel_full_collapsed {
+                lines.push(Line::styled(
+                    "[collapsed — press Reload to retrieve again]",
+                    theme::dim(),
+                ));
+            } else {
+                lines.extend(
+                    super::markdown::markdown_lines(markdown, width.max(1))
+                        .into_iter()
+                        .map(md_line_to_line),
+                );
+            }
+            lines
+        }
+    }
+}
+
 pub(crate) fn intel_body_loading(app: &App) -> bool {
-    let Some(article) = app.intel_articles.get(app.intel_sel) else {
-        return false;
-    };
-    app.intel_body_running.contains(&article.id)
-        || app
-            .intel_body
-            .as_ref()
-            .is_some_and(|body| body.state == "running")
-        || (app.intel_body.is_none() && !app.intel_body_message.is_empty())
+    matches!(
+        intel_body_presentation(app),
+        IntelBodyPresentation::Retrieving
+    )
 }
 
 /// True while cleaned-body insight re-extract is resolving extracted/confidence values.
@@ -9349,9 +9795,18 @@ fn draw_centered_loading_card(frame: &mut Frame, area: Rect, label: &str, detail
 
 /// Mirror `insights_progress_lines`: braille spinner + phase label, optional detail.
 fn intel_body_progress_lines(app: &App) -> (String, Option<String>) {
-    let message = app.intel_body_message.trim();
+    let message = app
+        .intel_brief_stages
+        .iter()
+        .find(|stage| {
+            stage.operation == "intel_brief_body" && stage.active && stage.state == "running"
+        })
+        .map(|stage| stage.row.trim_start_matches("Running · "))
+        .unwrap_or("");
     let lower = message.to_ascii_lowercase();
-    let phase = if lower.contains("re-extract") || lower.contains("insight") {
+    let phase = if lower.contains("clean") {
+        "Cleaning full article"
+    } else if lower.contains("re-extract") || lower.contains("insight") {
         // Body is already painted; insight phase is shown on extracted/confidence cards.
         "Full article ready"
     } else if lower.contains("classif") || lower.contains("sponsored") {
@@ -9426,7 +9881,9 @@ fn intel_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         return Some(Target::Field(FieldId::IntelSearch));
     }
     if in_pane(list, x, y) {
-        let index = app.scrolls.intel_list as usize + (y - list.y - 1) as usize;
+        let index = app.scrolls.intel_list as usize
+            + super::components::ListGeometry::fixed(app.intel_articles.len(), 1)
+                .index_at((y - list.y - 1) as usize)?;
         if index < app.intel_articles.len() {
             return Some(Target::IntelArticle(index));
         }
@@ -9554,12 +10011,12 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
     );
     draw_atlas_coverage(frame, app, insights);
     let rows = inset(feed);
-    for row in 0..rows.height as usize {
+    for row in 0..super::components::ListGeometry::capacity(rows.height as usize, 1) {
         let index = app.scrolls.atlas_feed as usize + row;
         if index < app.atlas_feed.len() {
             app.layout.borrow_mut().register(
                 Target::AtlasFeed(index),
-                Rect::new(rows.x, rows.y + row as u16, rows.width, 1),
+                Rect::new(rows.x, rows.y + row as u16 * 2, rows.width, 1),
             );
         }
     }
@@ -9600,7 +10057,11 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
             })
             .collect()
     };
-    frame.render_widget(Paragraph::new(feed_lines).block(pane(" headlines ")), feed);
+    frame.render_widget(
+        Paragraph::new(super::components::spaced(feed_lines, || Line::raw("")))
+            .block(pane(" headlines ")),
+        feed,
+    );
 }
 
 fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
@@ -9612,12 +10073,12 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
     draw_map_or_hold(frame, app, map);
     draw_atlas_cycle_stats(frame, app, stats);
     let rows = inset(cycles);
-    for row in 0..rows.height as usize {
+    for row in 0..super::components::ListGeometry::capacity(rows.height as usize, 1) {
         let index = app.scrolls.atlas_runs as usize + row;
         if index < app.atlas_runs.len() {
             app.layout.borrow_mut().register(
                 Target::AtlasHistory(index),
-                Rect::new(rows.x, rows.y + row as u16, rows.width, 1),
+                Rect::new(rows.x, rows.y + row as u16 * 2, rows.width, 1),
             );
         }
     }
@@ -9635,7 +10096,11 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
             .map(|(index, run)| news_cycle_line(run, width, index == app.atlas_run_sel))
             .collect()
     };
-    frame.render_widget(Paragraph::new(lines).block(pane(" news cycle ")), cycles);
+    frame.render_widget(
+        Paragraph::new(super::components::spaced(lines, || Line::raw("")))
+            .block(pane(" news cycle ")),
+        cycles,
+    );
     let buttons = button_areas(actions, 3);
     let live = atlas_history_live_label(app);
     draw_button(frame, app, ButtonId::AtlasLive, &live, buttons[0]);
@@ -9779,12 +10244,12 @@ fn draw_atlas_news(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
     let rows = inset(list);
-    for row in 0..rows.height as usize {
+    for row in 0..super::components::ListGeometry::capacity(rows.height as usize, 1) {
         let index = app.scrolls.atlas_news as usize + row;
         if index < app.atlas_articles.len() {
             app.layout.borrow_mut().register(
                 Target::AtlasArticle(index),
-                Rect::new(rows.x, rows.y + row as u16, rows.width, 1),
+                Rect::new(rows.x, rows.y + row as u16 * 2, rows.width, 1),
             );
         }
     }
@@ -9813,7 +10278,10 @@ fn draw_atlas_news(frame: &mut Frame, app: &App, area: Rect) {
             })
             .collect()
     };
-    frame.render_widget(Paragraph::new(lines).block(pane(" news ")), list);
+    frame.render_widget(
+        Paragraph::new(super::components::spaced(lines, || Line::raw(""))).block(pane(" news ")),
+        list,
+    );
 }
 
 fn atlas_row_at(area: Rect, scroll: u16, y: u16) -> Option<usize> {
@@ -9824,7 +10292,8 @@ fn atlas_row_at(area: Rect, scroll: u16, y: u16) -> Option<usize> {
     if y < inner.y || y >= inner.y + inner.height {
         return None;
     }
-    Some(scroll as usize + (y - inner.y) as usize)
+    let row = (y - inner.y) as usize;
+    (row.is_multiple_of(2)).then_some(scroll as usize + row / 2)
 }
 
 fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
@@ -10069,7 +10538,7 @@ fn cover(frame: &mut Frame, area: Rect) {
 
 fn popup_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     if matches!(&app.overlay, Overlay::Help)
-        || matches!(&app.overlay, Overlay::Block { title, .. } if title.to_ascii_lowercase().contains("report"))
+        || matches!(&app.overlay, Overlay::Block { title, .. } if (title.to_ascii_lowercase().contains("report") || title == "Full article"))
     {
         let md = super::markdown::markdown_lines(&popup_text(app), width.max(1));
         return md.into_iter().map(md_line_to_line).collect();
@@ -10185,8 +10654,21 @@ fn draw_add_fallback(frame: &mut Frame, app: &App) {
     } else if models.is_empty() {
         lines.push(Line::from(Span::styled("No models loaded.", theme::dim())));
     } else {
-        for (i, model) in models.iter().enumerate() {
-            let y = list_inner.y.saturating_add(i as u16);
+        let start = app.scrolls.popup as usize;
+        for (i, model) in
+            models
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(super::components::ListGeometry::capacity(
+                    list_inner.height as usize,
+                    1,
+                ))
+        {
+            if i > start {
+                lines.push(Line::raw(""));
+            }
+            let y = list_inner.y.saturating_add((i - start) as u16 * 2);
             if y < list_inner.y.saturating_add(list_inner.height) {
                 app.layout.borrow_mut().register(
                     Target::Button(ButtonId::FallbackPick(i)),
@@ -10208,15 +10690,14 @@ fn draw_add_fallback(frame: &mut Frame, app: &App) {
             } else {
                 theme::text()
             };
-            lines.push(Line::from(Span::styled(label, style)));
+            lines.push(Line::from(Span::styled(
+                super::components::clip_text(&label, list_inner.width as usize),
+                style,
+            )));
         }
     }
-    let skip = app.scrolls.popup as usize;
-    let visible: Vec<Line> = lines.into_iter().skip(skip).collect();
-    frame.render_widget(
-        Paragraph::new(visible).wrap(Wrap { trim: false }),
-        list_inner,
-    );
+    let visible: Vec<Line> = lines;
+    frame.render_widget(Paragraph::new(visible), list_inner);
 
     let add_enabled = has_key && !models.is_empty();
     draw_button_state(
@@ -10477,6 +10958,9 @@ fn draw_palette(frame: &mut Frame, app: &App) {
     let mut rows = Vec::new();
     let mut group = "";
     for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            rows.push((None, String::new()));
+        }
         if group != item.category {
             group = &item.category;
             rows.push((None, group.to_owned()));
@@ -10575,18 +11059,14 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
         );
     }
     let start = app.scrolls.popup as usize;
-    for (index, item) in app
-        .choice_items
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height as usize)
-    {
+    for (index, item) in app.choice_items.iter().enumerate().skip(start).take(
+        super::components::ListGeometry::capacity(height as usize, 1),
+    ) {
         app.layout.borrow_mut().register(
             Target::Choice(index),
             Rect {
                 x: inner.x,
-                y: y + (index - start) as u16,
+                y: y + (index - start) as u16 * 2,
                 width: inner.width,
                 height: 1,
             },
@@ -10602,7 +11082,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
             }),
             Rect {
                 x: inner.x,
-                y: y + (index - start) as u16,
+                y: y + (index - start) as u16 * 2,
                 width: inner.width,
                 height: 1,
             },
@@ -10960,8 +11440,8 @@ mod tests {
         let box_mid_y = areas.box_rect.y + areas.box_rect.height / 2;
         let screen_mid_y = area.height / 2;
         assert!(
-            (box_mid_y as i32 - screen_mid_y as i32).abs() <= 4,
-            "composer box mid ({box_mid_y}) should be close to screen mid ({screen_mid_y})"
+            box_mid_y < screen_mid_y && areas.box_rect.bottom() < home_layout_metrics(area).apps_y,
+            "composer must precede the spaced launcher within the centered content block"
         );
 
         // 3. Balanced top and bottom padding across entire page
@@ -10997,7 +11477,7 @@ mod tests {
         let narrow_area = Rect::new(0, 0, 80, 24);
         let narrow_metrics = home_layout_metrics(narrow_area);
         let narrow_rows = home_rows(narrow_area, 0);
-        assert!(narrow_metrics.top_pad <= 3);
+        assert!(narrow_metrics.top_pad <= 4);
         let narrow_last_y = narrow_rows.last().map(|r| r.y).unwrap_or(0);
         let narrow_bottom_pad = narrow_area.height.saturating_sub(narrow_last_y + 1);
         assert!(

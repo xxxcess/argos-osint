@@ -58,6 +58,7 @@ pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {
     let mut fence: Option<String> = None;
     let mut blank = false;
     let mut table: Vec<Vec<String>> = Vec::new();
+    let mut previous_list = false;
     let flush_table = |table: &mut Vec<Vec<String>>, rows: &mut Vec<MdLine>, width: usize| {
         if table.is_empty() {
             return;
@@ -130,6 +131,10 @@ pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {
             continue;
         }
         if let Some(item) = list_item(trimmed) {
+            if rows.last().is_some_and(|row| !row.pieces.is_empty()) && previous_list {
+                rows.push(md_line(Vec::new()));
+            }
+            previous_list = true;
             rows.extend(
                 with_prefix(
                     &inline(item.body),
@@ -142,6 +147,9 @@ pub fn markdown_lines(text: &str, width: usize) -> Vec<MdLine> {
                 .map(md_line),
             );
             continue;
+        }
+        if !line.starts_with(char::is_whitespace) {
+            previous_list = false;
         }
         rows.extend(
             wrap_pieces(&inline(trimmed), width)
@@ -251,6 +259,16 @@ fn render_table(rows: Vec<Vec<String>>, width: usize) -> Vec<MdLine> {
     }
     let mut out = Vec::new();
     for (row_index, row) in grid.iter().enumerate() {
+        if row_index > 1 {
+            out.push(md_line(vec![piece(
+                widths
+                    .iter()
+                    .map(|w| " ".repeat(*w))
+                    .collect::<Vec<_>>()
+                    .join(" │ "),
+                Tone::Dim,
+            )]));
+        }
         let mut line = String::new();
         for (index, cell) in row.iter().enumerate() {
             if index > 0 {

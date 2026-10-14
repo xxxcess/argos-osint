@@ -236,7 +236,10 @@ pub fn render_table_lines<R: AsRef<[String]>>(
         return rendered;
     }
     rendered.push(sep_border_line(widths));
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            rendered.push(header_line(&[], widths));
+        }
         let cells = row.as_ref();
         let wrapped_cols: Vec<Vec<String>> = cells
             .iter()
@@ -312,11 +315,22 @@ pub fn draw_origins(frame: &mut Frame, view: OriginsView<'_>) {
         return;
     }
 
+    let rendered = origins_lines(origins, stats, inner.width);
+    let skip = scroll.min(rendered.len().saturating_sub(1));
+    let visible: Vec<Line<'static>> = rendered.into_iter().skip(skip).collect();
+    frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), inner);
+}
+
+pub fn origins_lines(
+    origins: &[&atlas::OriginStat],
+    stats: &atlas::RunStats,
+    width: u16,
+) -> Vec<Line<'static>> {
     let min = [12_u16, 4, 5, 6, 8, 5];
-    let avail = inner.width.saturating_sub(2);
+    let avail = width.saturating_sub(2);
     let widths = column_widths(avail, &min, false);
     if widths.is_empty() {
-        return;
+        return Vec::new();
     }
     let headers = ["Country", "Tier", "Temp", "Volume", "Articles", "Share"];
     let rows: Vec<[String; 6]> = origins
@@ -336,10 +350,7 @@ pub fn draw_origins(frame: &mut Frame, view: OriginsView<'_>) {
             ]
         })
         .collect();
-    let rendered = render_table_lines(&headers, &rows, &widths, 4);
-    let skip = scroll.min(rendered.len().saturating_sub(1));
-    let visible: Vec<Line<'static>> = rendered.into_iter().skip(skip).collect();
-    frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), inner);
+    render_table_lines(&headers, &rows, &widths, 4)
 }
 
 #[cfg(test)]

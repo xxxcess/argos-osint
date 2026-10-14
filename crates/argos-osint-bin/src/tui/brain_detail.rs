@@ -384,6 +384,9 @@ pub fn related_rows(view: &RelatedView, width: usize) -> Vec<RelRow> {
         .enumerate()
         .take(view.page_sizes[view.tab.index()].max(20))
     {
+        if index > 0 {
+            rows.push(RelRow::Note(String::new()));
+        }
         for text in super::ui::wrap_text(&format!("· {}", item.title), width.max(1)) {
             rows.push(RelRow::Title(index, text));
         }

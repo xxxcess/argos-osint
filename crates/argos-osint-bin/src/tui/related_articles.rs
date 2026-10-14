@@ -99,6 +99,9 @@ pub fn rows(
         ),
     ];
     for (index, item) in view.page.rows.iter().enumerate() {
+        if index > 0 {
+            lines.push((Line::raw(""), None));
+        }
         let target = if brain {
             Target::RelatedRow(index)
         } else {

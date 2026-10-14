@@ -202,6 +202,9 @@ pub fn intel_category_short(id: &str) -> &'static str {
 pub struct Scrolls {
     pub chat: usize,
     pub threads: u16,
+    pub home: u16,
+    pub roles: u16,
+    pub fallbacks: u16,
     pub memories: u16,
     pub tools: u16,
     pub detail: u16,
@@ -1194,6 +1197,9 @@ pub struct App {
     pub intel_relations: Vec<(String, String, String)>,
     pub intel_body: Option<ArticleBodyRow>,
     pub intel_body_message: String,
+    pub intel_body_read_error: Option<String>,
+    pub intel_body_owner: Option<(String, Option<String>)>,
+    pub intel_body_require_commit: bool,
     pub intel_full_collapsed: bool,
     pub(crate) intel_body_running: HashSet<String>,
     /// Active Intel brief preparation chain for the open article.
@@ -1639,6 +1645,9 @@ impl App {
             intel_relations: Vec::new(),
             intel_body: None,
             intel_body_message: String::new(),
+            intel_body_read_error: None,
+            intel_body_owner: None,
+            intel_body_require_commit: false,
             intel_full_collapsed: false,
             intel_body_running: HashSet::new(),
             intel_brief_job: None,
@@ -3328,6 +3337,12 @@ impl App {
             }
         }
         self.focus = target;
+        match target {
+            Target::App(index) if self.module.is_none() => self.launcher_sel = index,
+            Target::Button(ButtonId::FallbackItem(index)) => self.fallback_sel = index,
+            _ => {}
+        }
+        super::ui::reveal_spaced_lists(self);
         if self.module == Some(ModuleId::Intel)
             && self.intel_page == IntelPage::Briefing
             && self.overlay == Overlay::None
@@ -4097,13 +4112,20 @@ impl App {
             self.status = "No article selected".into();
             return;
         };
+        self.intel_body = None;
+        self.intel_brief_outputs.clear();
+        self.intel_brief_stages.clear();
+        self.intel_body_message.clear();
+        self.intel_body_read_error = None;
+        self.intel_body_owner = None;
+        self.intel_body_require_commit = false;
+        self.intel_brief_job = None;
+        self.layout.borrow_mut().view_stamp.clear();
         self.intel_page = IntelPage::Briefing;
         self.intel_full_collapsed = false;
         self.scrolls.intel_brief = 0;
         self.scrolls.intel_full = 0;
         self.scrolls.intel_extracted = 0;
-        self.refresh_intel_briefing();
-        self.sync_intel_brief_task_ui();
         // One idempotent preparation chain owns retrieval, cleanup, Claims,
         // Inferences and Links; the background brief runner executes it.
         // Mode classification is lazy (Recon configuration).
@@ -4118,6 +4140,7 @@ impl App {
                 self.intel_body_message = format!("Brief preparation unavailable: {error}");
             }
         }
+        self.refresh_intel_briefing();
         self.refresh_intel_brief_stages();
         self.queue_intel_links_explanation();
         self.set_focus(Target::IntelPreview);
@@ -4172,52 +4195,9 @@ impl App {
             self.refresh_intel_briefing();
             return false;
         }
-        let Some(job) = self.intel_brief_job.clone() else {
-            self.intel_brief_stages.clear();
-            return false;
-        };
-        let views = intel_recon::brief_pipeline::stage_views(self.store.connection(), &job)
-            .unwrap_or_default();
-        let changed = views != self.intel_brief_stages;
-        self.intel_brief_stages = views;
-        if changed {
-            let conn = self.store.connection();
-            self.intel_brief_outputs =
-                intel_recon::brief_pipeline::stage_outputs(conn, &job).unwrap_or_default();
-            self.intel_brief_lead_titles.clear();
-            let leads = self
-                .intel_brief_outputs
-                .get("intel_brief_links")
-                .and_then(|v| v["leads"].as_array().cloned())
-                .unwrap_or_default();
-            for lead in leads {
-                let (Some(id), Some(run)) =
-                    (lead["article_id"].as_str(), lead["article_run_id"].as_str())
-                else {
-                    continue;
-                };
-                if let Ok(Some(row)) = self.store.atlas_article(run, id) {
-                    self.intel_brief_lead_titles
-                        .insert(id.to_string(), row.title);
-                }
-            }
-            self.refresh_intel_briefing();
-        }
-        // Polled every tick: the index outbox drains after the stages commit.
-        let article_id = self
-            .intel_articles
-            .get(self.intel_sel)
-            .map(|a| a.id.clone())
-            .unwrap_or_default();
-        let failed = self.intel_brief_stages.iter().any(|s| s.state == "failed");
-        self.intel_brief_publication = intel_recon::brief_canonical::footer(
-            self.store.connection(),
-            &article_id,
-            &job,
-            failed,
-        )
-        .unwrap_or_default();
-        changed
+        let previous = self.intel_brief_stages.clone();
+        self.refresh_intel_briefing();
+        previous != self.intel_brief_stages
     }
 
     fn refresh_intel_briefing(&mut self) {
@@ -4261,135 +4241,86 @@ impl App {
             });
             return;
         }
-        self.intel_extraction_progress = None;
-        let Some(article) = self.intel_articles.get(self.intel_sel) else {
-            self.intel_evidence_confidence = None;
-            self.intel_actors.clear();
-            self.intel_actor_state = "unavailable".into();
-            self.intel_metadata_present = false;
-            self.intel_publisher_prior = None;
-            self.intel_related = Default::default();
-            self.intel_claims.clear();
-            self.intel_relations.clear();
-            self.intel_link_explanations.clear();
-            self.intel_body = None;
+        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
             return;
         };
-        let metadata = self
+        let outcome = self
             .store
-            .atlas_metadata(&article.run_id, &article.id)
-            .ok()
-            .flatten();
-        self.intel_actors = metadata
-            .as_ref()
-            .map(|metadata| argos_osint_core::atlas_metadata::article_actors(article, metadata))
-            .unwrap_or_default();
-        self.intel_actor_state = metadata
-            .as_ref()
-            .map(|m| m.entity_state.as_str())
-            .unwrap_or("pending")
-            .into();
-        self.intel_metadata_present = metadata.is_some();
-        self.intel_publisher_prior = metadata.and_then(|metadata| metadata.publisher_prior);
-        match self
-            .store
-            .related_articles_global(&article.run_id, &article.id, self.related_scope, None, 20)
-            .map(|page| page.into_page(0))
-        {
-            Ok(page) => {
-                self.intel_related = super::related_articles::ArticleRelatedView {
-                    page,
-                    ..Default::default()
-                }
-            }
+            .connection()
+            .unchecked_transaction()
+            .map_err(anyhow::Error::from)
+            .and_then(|transaction| {
+                let snapshot = super::db_reads::IntelBriefSnapshot::read(
+                    &self.store,
+                    &article,
+                    self.related_scope,
+                    self.intel_brief_job.as_deref(),
+                    self.intel_related_limit,
+                );
+                transaction.rollback()?;
+                snapshot
+            });
+        match outcome {
+            Ok(snapshot) => self.accept_intel_brief_snapshot(snapshot),
             Err(error) => {
-                self.intel_related = super::related_articles::ArticleRelatedView {
-                    error: Some(error.to_string()),
-                    ..Default::default()
-                }
+                self.intel_body_read_error = Some(error.to_string());
+                self.layout.borrow_mut().view_stamp.clear();
             }
         }
-        self.intel_extraction_progress =
-            argos_osint_core::investigation::insight_execution::owner_progress(
-                self.store.connection(),
-                "article",
-                &article.id,
-            )
-            .ok()
-            .flatten();
-        self.intel_insight_lifecycle=self.store.connection().query_row("SELECT lifecycle FROM insight_owner_state WHERE owner_kind IN ('article','atlas') AND owner_id=?1 ORDER BY CASE owner_kind WHEN 'article' THEN 0 ELSE 1 END LIMIT 1",[&article.id],|r|r.get(0)).unwrap_or_else(|_|"legacy/unassessed".into());
-        if let Ok(Some(output)) = argos_osint_core::investigation::insight_persist::active_output(
-            self.store.connection(),
-            "article",
-            &article.id,
-        ) {
-            for entity in output.entities {
-                let name = entity.original_forms.first().cloned().unwrap_or_default();
-                if name.trim().is_empty()
-                    || self.intel_actors.iter().any(|a| {
-                        a.type_hint == entity.type_hint
-                            && a.display_name.eq_ignore_ascii_case(&name)
-                    })
-                {
-                    continue;
-                }
-                self.intel_actors
-                    .push(argos_osint_core::atlas_metadata::ArticleActor {
-                        id: entity.id,
-                        type_hint: entity.type_hint,
-                        display_name: name,
-                        spellings: entity.original_forms,
-                        mentions: Vec::new(),
-                    });
-            }
-        }
-        self.intel_refresh_status =
-            argos_osint_core::investigation::insight_persist::article_refresh_status(
-                self.store.connection(),
-                &article.id,
-            )
-            .unwrap_or_else(|error| error.to_string());
+    }
+
+    fn accept_intel_brief_snapshot(&mut self, snapshot: super::db_reads::IntelBriefSnapshot) {
+        let Some(article_id) = self
+            .intel_articles
+            .get(self.intel_sel)
+            .map(|a| a.id.clone())
+        else {
+            return;
+        };
+        self.intel_actors = snapshot.actors;
+        self.intel_actor_state = snapshot.actor_state;
+        self.intel_metadata_present = snapshot.metadata_present;
+        self.intel_publisher_prior = snapshot.publisher_prior;
+        self.intel_extraction_progress = snapshot.progress;
+        self.intel_insight_lifecycle = snapshot.lifecycle;
+        self.intel_refresh_status = snapshot.status;
+        self.intel_evidence_confidence = snapshot.confidence;
+        let related_selected = self
+            .intel_related
+            .page
+            .rows
+            .get(self.intel_related.sel)
+            .map(|r| (r.article.run_id.clone(), r.article.id.clone()));
+        let old_scroll = self.intel_related.scroll;
+        self.intel_related = snapshot.related;
+        self.intel_related.sel = related_selected
+            .and_then(|(run, id)| {
+                self.intel_related
+                    .page
+                    .rows
+                    .iter()
+                    .position(|r| r.article.run_id == run && r.article.id == id)
+            })
+            .unwrap_or(0);
+        self.intel_related.scroll = old_scroll;
+        self.intel_claims = snapshot.claims;
+        self.intel_relations = snapshot.relations;
+        self.intel_link_explanations = snapshot.explanations;
+        self.intel_body = snapshot.body;
+        self.intel_body_require_commit = snapshot.body_requires_commit;
+        self.intel_brief_stages = snapshot.stages;
+        self.intel_brief_outputs = snapshot.outputs;
+        self.intel_brief_lead_titles = snapshot.lead_titles;
+        self.intel_brief_publication = snapshot.publication;
         if matches!(self.intel_refresh_status.as_str(), "Published" | "Indexed")
             || self.intel_refresh_status.starts_with("Previous")
         {
-            self.intel_insights_running.remove(&article.id);
+            self.intel_insights_running.remove(&article_id);
         }
-        self.intel_evidence_confidence =
-            intel_recon::article_confidence(self.store.connection(), &article.id)
-                .ok()
-                .flatten();
-        self.intel_claims = self
-            .store
-            .atlas_claims_for_article(&article.run_id, &article.id)
-            .unwrap_or_default();
-        let fingerprints: Vec<String> = self
-            .intel_claims
-            .iter()
-            .map(|claim| claim.fingerprint.clone())
-            .collect();
-        self.intel_relations = self
-            .store
-            .insight_relations_among(&fingerprints)
-            .unwrap_or_default();
-        self.intel_link_explanations = self
-            .store
-            .get_intel_link_explanations(&article.id)
-            .unwrap_or_default();
-        for (left, right) in self.intel_link_explanations.keys() {
-            if !self
-                .intel_relations
-                .iter()
-                .any(|(l, r, _)| l == left && r == right)
-            {
-                self.intel_relations
-                    .push((left.clone(), right.clone(), "assessed".into()));
-            }
-        }
-        self.intel_body = self
-            .store
-            .article_body_for_article(&article.id)
-            .ok()
-            .flatten();
+        self.intel_body_owner = Some((article_id, self.intel_brief_job.clone()));
+        self.intel_body_read_error = None;
+        self.sync_intel_brief_task_ui();
+        self.layout.borrow_mut().view_stamp.clear();
     }
 
     /// Reconcile in-memory loading flags/messages with store + background task sets on revisit.
@@ -4397,28 +4328,13 @@ impl App {
         let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
             return;
         };
-        if self
-            .intel_body
-            .as_ref()
-            .is_some_and(|body| body.state == "running")
-        {
-            self.intel_body_running.insert(article.id.clone());
-        }
-        if self.intel_insights_running.contains(&article.id) {
-            if self.intel_body_message.trim().is_empty()
-                || !self
-                    .intel_body_message
-                    .to_ascii_lowercase()
-                    .contains("insight")
-            {
-                self.intel_body_message = "Re-extracting insights from full article…".into();
-            }
-            return;
-        }
-        if self.intel_body_running.contains(&article.id)
-            && self.intel_body_message.trim().is_empty()
-        {
-            self.intel_body_message = "Retrieving full article…".into();
+        let ready = super::ui::intel_body_has_content(self);
+        let active = super::ui::intel_body_loading(self);
+        if ready || !active {
+            self.intel_body_running.remove(&article.id);
+            self.intel_body_message.clear();
+        } else {
+            self.intel_body_running.insert(article.id);
         }
     }
 
@@ -5538,49 +5454,11 @@ impl App {
                 }
                 match outcome {
                     Ok(snapshot) => {
-                        self.intel_actors = snapshot.actors;
-                        self.intel_actor_state = snapshot.actor_state;
-                        self.intel_metadata_present = snapshot.metadata_present;
-                        self.intel_publisher_prior = snapshot.publisher_prior;
-                        self.intel_extraction_progress = snapshot.progress;
-                        self.intel_insight_lifecycle = snapshot.lifecycle;
-                        self.intel_refresh_status = snapshot.status;
-                        self.intel_evidence_confidence = snapshot.confidence;
-                        let related_selected = self
-                            .intel_related
-                            .page
-                            .rows
-                            .get(self.intel_related.sel)
-                            .map(|r| (r.article.run_id.clone(), r.article.id.clone()));
-                        let old_scroll = self.intel_related.scroll;
-                        self.intel_related = snapshot.related;
-                        self.intel_related.sel = related_selected
-                            .and_then(|(run, id)| {
-                                self.intel_related
-                                    .page
-                                    .rows
-                                    .iter()
-                                    .position(|r| r.article.run_id == run && r.article.id == id)
-                            })
-                            .unwrap_or(0);
-                        self.intel_related.scroll = old_scroll;
-                        self.intel_claims = snapshot.claims;
-                        self.intel_relations = snapshot.relations;
-                        self.intel_link_explanations = snapshot.explanations;
-                        self.intel_body = snapshot.body;
-                        self.intel_brief_stages = snapshot.stages;
-                        self.intel_brief_outputs = snapshot.outputs;
-                        self.intel_brief_lead_titles = snapshot.lead_titles;
-                        self.intel_brief_publication = snapshot.publication;
-                        if matches!(self.intel_refresh_status.as_str(), "Published" | "Indexed")
-                            || self.intel_refresh_status.starts_with("Previous")
-                        {
-                            self.intel_insights_running.remove(&key.1);
-                        }
-                        self.sync_intel_brief_task_ui();
+                        self.accept_intel_brief_snapshot(*snapshot);
                     }
                     Err(error) => {
-                        self.intel_body_message = format!("Could not refresh brief: {error}");
+                        self.intel_body_read_error = Some(error);
+                        self.layout.borrow_mut().view_stamp.clear();
                     }
                 }
                 true
@@ -8386,10 +8264,13 @@ impl App {
             ButtonId::IntelExtractionRetry => self.retry_selected_extraction(),
             ButtonId::IntelExtractionJob => self.open_selected_extraction_job(),
             ButtonId::IntelBodyMore => {
-                if let Some(body) = &self.intel_body {
+                if let super::ui::IntelBodyPresentation::Content { markdown, .. } =
+                    super::ui::intel_body_presentation(self)
+                {
+                    let body = markdown.to_owned();
                     self.overlay = Overlay::Block {
                         title: "Full article".into(),
-                        body: body.body_markdown.clone(),
+                        body,
                     };
                     self.scrolls.popup = 0;
                     self.set_focus(Target::CloseOverlay);
@@ -8429,6 +8310,13 @@ impl App {
                     ) {
                         Ok(job) => {
                             self.intel_brief_job = Some(job);
+                            self.intel_body = None;
+                            self.intel_brief_outputs.clear();
+                            self.intel_brief_stages.clear();
+                            self.intel_body_owner = None;
+                            self.intel_body_require_commit = true;
+                            self.intel_body_read_error = None;
+                            self.layout.borrow_mut().view_stamp.clear();
                             self.refresh_intel_brief_stages();
                             self.status = "Reloading full article through brief preparation".into();
                         }
@@ -9358,11 +9246,15 @@ impl App {
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.fallback_popup_sel = self.fallback_popup_sel.saturating_sub(1);
+                    super::ui::reveal_spaced_lists(self);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     let last = self.filtered_fallback_models().len().saturating_sub(1);
                     self.fallback_popup_sel = (self.fallback_popup_sel + 1).min(last);
+                    super::ui::reveal_spaced_lists(self);
                 }
+                KeyCode::PageUp => super::ui::page(self, -1),
+                KeyCode::PageDown => super::ui::page(self, 1),
                 KeyCode::Enter => {
                     let result = self.confirm_add_fallback();
                     self.report(result);
@@ -10094,12 +9986,37 @@ impl App {
             Target::Transcript | Target::ChatHeader(_) | Target::ChatBody(_) => {
                 super::ui::move_chat(self, delta);
             }
+            Target::Button(ButtonId::DefaultRole(role)) => {
+                let index = DefaultsRole::ALL
+                    .iter()
+                    .position(|r| *r == role)
+                    .unwrap_or(0);
+                let next = index
+                    .saturating_add_signed(delta as isize)
+                    .min(DefaultsRole::ALL.len() - 1);
+                self.set_focus(Target::Button(ButtonId::DefaultRole(
+                    DefaultsRole::ALL[next],
+                )));
+            }
+            Target::Button(ButtonId::FallbackItem(index)) => {
+                let count = self
+                    .settings
+                    .defaults
+                    .role(self.defaults_role.role_key())
+                    .map_or(0, |role| role.fallbacks.len());
+                let next = index
+                    .saturating_add_signed(delta as isize)
+                    .min(count.saturating_sub(1));
+                self.set_focus(Target::Button(ButtonId::FallbackItem(next)));
+            }
             Target::Memory(_) => self.move_memory(delta),
             Target::Tool(_) | Target::ToolCategory(_) => self.move_tool(delta),
             Target::LogLine(_) => self.move_log(delta),
             Target::JobRow(_) => self.move_job(delta),
+            Target::ReconContext => super::ui::shift_recon_context(self, delta * 3),
             Target::JobDetail => {
-                self.jobs.detail_scroll = add_scroll(self.jobs.detail_scroll, delta);
+                self.jobs.detail_scroll = add_scroll(self.jobs.detail_scroll, delta)
+                    .min(super::jobs::detail_scroll_max(self));
             }
             Target::IntelRelatedArticle(index) => {
                 let next = (index as i32 + delta).clamp(
@@ -10142,7 +10059,8 @@ impl App {
                 Some(ModuleId::Recon) if self.recon_chat => super::ui::move_chat(self, delta),
                 Some(ModuleId::Recon) => self.move_thread(delta),
                 Some(ModuleId::Providers) => {
-                    self.scrolls.detail = add_scroll(self.scrolls.detail, delta * 3);
+                    self.scrolls.detail = add_scroll(self.scrolls.detail, delta * 3)
+                        .min(super::ui::provider_catalog_scroll_max(self));
                 }
             },
         }
@@ -11169,6 +11087,9 @@ mod tests {
             intel_relations: Vec::new(),
             intel_body: None,
             intel_body_message: String::new(),
+            intel_body_read_error: None,
+            intel_body_owner: None,
+            intel_body_require_commit: false,
             intel_full_collapsed: false,
             intel_body_running: HashSet::new(),
             intel_brief_job: None,
@@ -12593,7 +12514,9 @@ mod tests {
         app.go_home();
         app.overlay = Overlay::Help;
         let mut app2 = app;
-        let text = buffer_text(&render(&mut app2, 160, 40));
+        let mut text = buffer_text(&render(&mut app2, 160, 40));
+        super::super::ui::page(&mut app2, 1);
+        text.push_str(&buffer_text(&render(&mut app2, 160, 40)));
         assert!(
             text.contains("1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools"),
             "{text}"
@@ -17082,6 +17005,510 @@ mod tests {
     }
 
     #[test]
+    fn spaced_lists_reveal_last_items_and_spacers_have_no_record_target() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = false;
+        app.threads = (0..30)
+            .map(|i| recon::Thread {
+                id: format!("thread-{i}"),
+                title: format!("Investigation {i}"),
+                created_at: String::new(),
+                updated_at: String::new(),
+                draft: String::new(),
+                scroll: 0,
+                recall_insights: false,
+            })
+            .collect();
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 32),
+            (80, 24),
+            (60, 18),
+            (40, 12),
+        ] {
+            app.scrolls.threads = 0;
+            let buffer = render(&mut app, width, height);
+            let targets: Vec<_> = app
+                .layout
+                .borrow()
+                .entries
+                .iter()
+                .filter(|e| matches!(e.target, Target::Thread(_)))
+                .cloned()
+                .collect();
+            if targets.len() >= 2 {
+                let first = targets[0].rect;
+                let next = targets[1].rect;
+                assert_eq!(next.y, first.bottom() + 1);
+                assert!(buffer
+                    .content
+                    .iter()
+                    .skip((first.bottom() as usize) * width as usize + first.x as usize)
+                    .take(first.width as usize)
+                    .all(|cell| cell.symbol() == " "));
+                assert!(!matches!(
+                    super::super::ui::hit_test(&app, first.x, first.bottom()),
+                    Some(Target::Thread(_))
+                ));
+            }
+            app.thread_sel = 29;
+            app.move_thread(0);
+            render(&mut app, width, height);
+            assert!(app
+                .layout
+                .borrow()
+                .entries
+                .iter()
+                .any(|e| e.target == Target::Thread(29)));
+            app.module = None;
+            app.set_focus(Target::App(8));
+            render(&mut app, width, height);
+            assert!(app
+                .layout
+                .borrow()
+                .entries
+                .iter()
+                .any(|e| e.target == Target::App(8)));
+            app.module = Some(ModuleId::Recon);
+        }
+    }
+
+    #[test]
+    fn list_spacing_populated_screens() {
+        let mut app = app();
+        app.overlay = Overlay::None;
+        app.recon_chat = false;
+        app.threads = (0..20)
+            .map(|i| recon::Thread {
+                id: format!("thread-{i}"),
+                title: format!("Investigation {i}"),
+                created_at: String::new(),
+                updated_at: String::new(),
+                draft: String::new(),
+                scroll: 0,
+                recall_insights: false,
+            })
+            .collect();
+        app.memories = (0..20)
+            .map(|i| Memory {
+                id: format!("memory-{i}"),
+                text: format!("Saved claim {i}"),
+                category: "fact".into(),
+                pinned: false,
+                created_at: String::new(),
+                source: argos_osint_core::brain::MemorySource {
+                    app: "recon".into(),
+                    conversation_id: format!("thread-{i}"),
+                    message_id: None,
+                    reference: None,
+                },
+            })
+            .collect();
+        app.jobs.rows = (0..20)
+            .map(|i| argos_osint_core::jobs_view::JobRow {
+                id: format!("job-{i}"),
+                title: format!("Background job {i}"),
+                app: "intel".into(),
+                state: "completed".into(),
+                ..Default::default()
+            })
+            .collect();
+        app.jobs.loaded = true;
+        app.intel_articles = (0..20)
+            .map(|i| intel_brief_image_article(&format!("article-{i}"), ""))
+            .collect();
+        app.intel_page = IntelPage::Bulletin;
+        for i in 0..3 {
+            app.push_log_detail(
+                "info",
+                format!("Event {i}"),
+                "Complete supporting detail wraps together across terminal rows.",
+            );
+        }
+        app.logs.reload(&app.store);
+        if let Some(first) = app.logs.rows.first() {
+            app.logs.open.insert(first.id.clone());
+        }
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        for module in [
+            ModuleId::Recon,
+            ModuleId::Brain,
+            ModuleId::Osint,
+            ModuleId::Intel,
+            ModuleId::Jobs,
+            ModuleId::Logs,
+        ] {
+            app.module = Some(module);
+            app.compact_pages[module.index()] = 0;
+            for (width, height) in [
+                (160, 50),
+                (120, 40),
+                (100, 32),
+                (80, 24),
+                (60, 18),
+                (40, 12),
+            ] {
+                let buffer = render(&mut app, width, height);
+                let targets: Vec<_> = app
+                    .layout
+                    .borrow()
+                    .entries
+                    .iter()
+                    .filter(|entry| match module {
+                        ModuleId::Recon => matches!(entry.target, Target::Thread(_)),
+                        ModuleId::Brain => matches!(entry.target, Target::Memory(_)),
+                        ModuleId::Osint => {
+                            matches!(entry.target, Target::Tool(_) | Target::ToolCategory(_))
+                        }
+                        ModuleId::Intel => matches!(entry.target, Target::IntelArticle(_)),
+                        ModuleId::Jobs => matches!(entry.target, Target::JobRow(_)),
+                        _ => false,
+                    })
+                    .cloned()
+                    .collect();
+                if targets.len() >= 2 {
+                    let first = targets[0].rect;
+                    let next = targets[1].rect;
+                    assert_eq!(next.y, first.bottom() + 1, "{module:?} at {width}x{height}");
+                    for x in first.x..first.right() {
+                        assert_eq!(buffer[(x, first.bottom())].symbol(), " ");
+                    }
+                    let hit = super::super::ui::hit_test(&app, first.x, first.bottom());
+                    assert_ne!(hit, Some(targets[0].target));
+                    assert_ne!(hit, Some(targets[1].target));
+                }
+                if module == ModuleId::Logs {
+                    let lines =
+                        super::super::logs::row_lines(&app.logs, width.saturating_sub(2) as usize);
+                    for (row, line) in lines.iter().enumerate() {
+                        if line.spans.is_empty() {
+                            assert_eq!(
+                                app.logs
+                                    .index_at_line(row, width.saturating_sub(2) as usize),
+                                None
+                            );
+                        }
+                    }
+                }
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("list-spacing-{}-{width}x{height}", module.index()),
+                        width,
+                        height,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn intel_reload_revisit_and_late_snapshot_keep_generation_ownership() {
+        let mut app = app();
+        let (_, article) = related_ui_fixture(&mut app);
+        app.module = Some(ModuleId::Intel);
+        app.intel_articles = vec![article.clone()];
+        app.intel_sel = 0;
+        let body = app
+            .store
+            .ensure_article_body(
+                &article.id,
+                &article.run_id,
+                &article.url,
+                &article.source_domain,
+                &article.source_name,
+            )
+            .unwrap();
+        app.store
+            .commit_article_body(
+                &body.id,
+                "Old usable body",
+                "old-hash",
+                "complete",
+                "complete",
+                &article.url,
+                "fixture",
+                false,
+            )
+            .unwrap();
+        app.store
+            .connection()
+            .execute(
+                "UPDATE article_bodies SET updated_at='2020-01-01T00:00:00Z' WHERE id=?1",
+                [&body.id],
+            )
+            .unwrap();
+        app.open_intel_briefing();
+        let previous_job = app.intel_brief_job.clone();
+        assert!(super::super::ui::intel_body_has_content(&app));
+        app.activate_button(ButtonId::IntelBodyRefresh);
+        let reload_job = app.intel_brief_job.clone();
+        assert_ne!(previous_job, reload_job);
+        assert!(app.intel_body_require_commit);
+        assert!(!super::super::ui::intel_body_has_content(&app));
+        app.leave_intel_briefing();
+        app.open_intel_briefing();
+        assert_eq!(app.intel_brief_job, reload_job);
+        assert!(!super::super::ui::intel_body_has_content(&app));
+        let mut obsolete = super::super::db_reads::IntelBriefSnapshot::default();
+        obsolete.outputs.insert(
+            "intel_brief_body".into(),
+            serde_json::json!({"markdown":"Obsolete body"}),
+        );
+        app.on_work_event(WorkEvent::IntelBriefLoaded {
+            key: (
+                article.run_id.clone(),
+                article.id.clone(),
+                app.related_scope,
+                previous_job,
+                app.intel_related_limit,
+            ),
+            outcome: Ok(Box::new(obsolete)),
+        });
+        assert!(!super::super::ui::intel_body_has_content(&app));
+        let mut ready = super::super::db_reads::IntelBriefSnapshot::default();
+        ready.outputs.insert(
+            "intel_brief_body".into(),
+            serde_json::json!({"markdown":"Current body"}),
+        );
+        app.on_work_event(WorkEvent::IntelBriefLoaded {
+            key: (
+                article.run_id,
+                article.id,
+                app.related_scope,
+                reload_job,
+                app.intel_related_limit,
+            ),
+            outcome: Ok(Box::new(ready)),
+        });
+        assert!(super::super::ui::intel_body_has_content(&app));
+        assert!(!super::super::ui::intel_body_loading(&app));
+    }
+
+    #[test]
+    fn intel_body_transition_screens_and_quality_states() {
+        use super::super::ui::{
+            intel_body_loading, intel_body_presentation, IntelBodyPresentation,
+        };
+        let mut app = app();
+        app.module = Some(ModuleId::Intel);
+        app.intel_page = IntelPage::Briefing;
+        let article = intel_brief_image_article("body-state", "");
+        app.intel_articles = vec![article.clone()];
+        app.intel_brief_job = Some("body-job".into());
+        app.intel_body_owner = Some((article.id.clone(), app.intel_brief_job.clone()));
+        let body = app
+            .store
+            .ensure_article_body(
+                &article.id,
+                &article.run_id,
+                &article.url,
+                &article.source_domain,
+                &article.source_name,
+            )
+            .unwrap();
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        for state in [
+            "running",
+            "committed",
+            "committed-overflow",
+            "partial",
+            "uncertain",
+            "read-error",
+            "cached-read-error",
+            "orphan",
+            "retry",
+        ] {
+            app.intel_body = None;
+            app.intel_brief_outputs.clear();
+            app.intel_brief_stages.clear();
+            app.intel_body_read_error = None;
+            app.intel_body_message = "Obsolete retrieval message".into();
+            app.intel_body_running.insert(article.id.clone());
+            if state == "running" || state == "retry" {
+                app.intel_brief_stages = vec![intel_recon::brief_pipeline::StageView {
+                    operation: "intel_brief_body".into(),
+                    label: "Full article",
+                    state: if state == "running" {
+                        "running"
+                    } else {
+                        "retry_scheduled"
+                    }
+                    .into(),
+                    row: state.into(),
+                    active: state == "running",
+                }];
+            }
+            if matches!(
+                state,
+                "committed" | "committed-overflow" | "cached-read-error"
+            ) {
+                app.intel_brief_outputs.insert("intel_brief_body".into(), serde_json::json!({"markdown":"## Ready article\n\n- First usable finding\n- Second usable finding\n\nA readable committed body."}));
+                if state == "committed-overflow" {
+                    app.intel_brief_outputs.insert("intel_brief_body".into(), serde_json::json!({"markdown":format!("## Ready article\n\n- First finding\n- Second finding\n\n{}", "A complete committed article paragraph retains qualifications, attribution and Unicode Zoë. ".repeat(200))}));
+                }
+                // Later stage activity cannot keep Body spinning.
+                app.intel_brief_stages
+                    .push(intel_recon::brief_pipeline::StageView {
+                        operation: "intel_brief_links".into(),
+                        label: "Links",
+                        state: if state == "committed" {
+                            "failed"
+                        } else {
+                            "running"
+                        }
+                        .into(),
+                        row: if state == "committed" {
+                            "Failed · Links unavailable"
+                        } else {
+                            "Running"
+                        }
+                        .into(),
+                        active: state != "committed",
+                    });
+            }
+            if matches!(state, "partial" | "uncertain" | "orphan") {
+                let mut current = body.clone();
+                current.state = if state == "orphan" {
+                    "running"
+                } else {
+                    "ready"
+                }
+                .into();
+                current.quality = if state == "orphan" { "complete" } else { state }.into();
+                current.quality_rationale = "Limited coverage".into();
+                current.body_markdown = if state == "orphan" {
+                    "Previous body from an orphaned retrieval"
+                } else {
+                    "Readable article with quality warning"
+                }
+                .into();
+                app.intel_body = Some(current);
+            }
+            if state.ends_with("read-error") {
+                app.intel_body_read_error = Some("Reader unavailable".into());
+            }
+            assert_eq!(intel_body_loading(&app), state == "running");
+            if matches!(state, "partial" | "uncertain") {
+                assert!(matches!(
+                    intel_body_presentation(&app),
+                    IntelBodyPresentation::Content {
+                        warning: Some(_),
+                        ..
+                    }
+                ));
+            }
+            for (width, height) in [
+                (160, 50),
+                (120, 40),
+                (100, 32),
+                (80, 24),
+                (60, 18),
+                (40, 12),
+            ] {
+                app.compact_pages[ModuleId::Intel.index()] = 1;
+                app.scrolls.intel_brief = 0;
+                app.scrolls.intel_full = 0;
+                app.set_focus(Target::IntelFullArticle);
+                render(&mut app, width, height);
+                let geometry = super::super::ui::intel_center_geometry_for(&app).unwrap();
+                app.scrolls.intel_brief =
+                    (geometry.brief.3 + 3).min(super::super::ui::intel_brief_scroll_max(&app));
+                let text = buffer_text(&render(&mut app, width, height));
+                assert!(text.contains("full article"), "{state} at {width}x{height}");
+                if matches!(
+                    state,
+                    "committed" | "committed-overflow" | "cached-read-error"
+                ) {
+                    assert!(
+                        text.contains("Ready article"),
+                        "{state} at {width}x{height}"
+                    );
+                }
+                if state != "running" {
+                    assert!(!text.contains("Retrieving full article"));
+                }
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("intel-transition-{state}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn intel_body_presentation_uses_commits_and_rejects_obsolete_owners() {
+        use super::super::ui::{
+            intel_body_loading, intel_body_presentation, IntelBodyPresentation,
+        };
+        let mut app = app();
+        app.intel_articles = vec![intel_brief_image_article("presentation", "")];
+        app.intel_sel = 0;
+        app.intel_brief_job = Some("job-current".into());
+        app.intel_body_running.insert("presentation".into());
+        app.intel_body_message = "Retrieving full article…".into();
+        assert!(
+            !intel_body_loading(&app),
+            "messages and legacy flags are not activity"
+        );
+        app.intel_brief_stages = vec![intel_recon::brief_pipeline::StageView {
+            operation: "intel_brief_body".into(),
+            label: "Full article",
+            state: "running".into(),
+            row: "Running".into(),
+            active: true,
+        }];
+        assert!(intel_body_loading(&app));
+        let mut snapshot = super::super::db_reads::IntelBriefSnapshot::default();
+        snapshot.outputs.insert(
+            "intel_brief_body".into(),
+            serde_json::json!({"markdown":"Readable committed body"}),
+        );
+        snapshot.stages = app.intel_brief_stages.clone();
+        app.accept_intel_brief_snapshot(snapshot);
+        assert!(!intel_body_loading(&app));
+        assert!(matches!(
+            intel_body_presentation(&app),
+            IntelBodyPresentation::Content {
+                markdown: "Readable committed body",
+                ..
+            }
+        ));
+        assert!(!app.intel_body_running.contains("presentation"));
+        assert!(app.intel_body_message.is_empty());
+        app.intel_body_read_error = Some("reader failed".into());
+        assert!(matches!(
+            intel_body_presentation(&app),
+            IntelBodyPresentation::Content { .. }
+        ));
+        app.intel_brief_job = Some("job-reload".into());
+        assert!(matches!(
+            intel_body_presentation(&app),
+            IntelBodyPresentation::Status(_)
+        ));
+        app.intel_body_owner = None;
+        app.intel_brief_outputs.clear();
+        assert!(
+            matches!(intel_body_presentation(&app), IntelBodyPresentation::Status(reason) if reason.contains("reader failed"))
+        );
+        app.intel_body_read_error = None;
+        app.intel_brief_stages[0].state = "retry_scheduled".into();
+        app.intel_brief_stages[0].row = "Retry scheduled".into();
+        assert!(!intel_body_loading(&app));
+        assert!(
+            matches!(intel_body_presentation(&app), IntelBodyPresentation::Status(reason) if reason.contains("Retry scheduled"))
+        );
+    }
+
+    #[test]
     fn intel_busy_state_is_scoped_to_the_selected_article() {
         let mut app = app();
         app.intel_articles = vec![
@@ -17121,6 +17548,15 @@ mod tests {
             },
         ];
         app.intel_sel = 0;
+        app.intel_brief_job = Some("busy-job".into());
+        app.intel_body_owner = Some(("art-busy".into(), app.intel_brief_job.clone()));
+        app.intel_brief_stages = vec![intel_recon::brief_pipeline::StageView {
+            operation: "intel_brief_body".into(),
+            label: "Full article",
+            state: "running".into(),
+            row: "Running".into(),
+            active: true,
+        }];
         app.intel_body_running.insert("art-busy".into());
         assert!(super::super::ui::intel_body_loading(&app));
         app.intel_sel = 1;
@@ -17275,7 +17711,12 @@ mod tests {
         for code in ["ES", "JP", "BR", "AU", "IN", "SG"] {
             assert!(painted.contains(code), "missing {code}");
         }
-        // Stats shows full country labels for every origin, including tier 3.
+        // Spaced Origins scroll independently of the map; reveal the final records.
+        super::super::ui::shift_cycle_stats(&mut app, i32::MAX);
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let painted = screen_text(&terminal);
         for name in ["Spain", "Japan", "Brazil", "Australia", "India"] {
             assert!(painted.contains(name), "stats missing {name}");
         }
@@ -18147,6 +18588,15 @@ mod tests {
             let geometry = super::super::ui::intel_center_geometry_for(&app).unwrap();
             app.scrolls.intel_brief =
                 (geometry.brief.3 + 3).min(super::super::ui::intel_brief_scroll_max(&app));
+            app.intel_brief_job = Some("fixture-body-job".into());
+            app.intel_body_owner = Some((article.id.clone(), app.intel_brief_job.clone()));
+            app.intel_brief_stages = vec![intel_recon::brief_pipeline::StageView {
+                operation: "intel_brief_body".into(),
+                label: "Full article",
+                state: "running".into(),
+                row: "Running".into(),
+                active: true,
+            }];
             app.intel_body_running.insert(article.id.clone());
             if let Some(dir) = &dir {
                 dump_cells(
@@ -18158,6 +18608,9 @@ mod tests {
                 );
             }
             app.intel_body_running.clear();
+            app.intel_brief_stages[0].state = "failed".into();
+            app.intel_brief_stages[0].row = "Failed · Acquisition failed".into();
+            app.intel_brief_stages[0].active = false;
             app.intel_body_message = "Acquisition failed · retained previous insights".into();
             app.intel_body = Some(body.clone());
             if let Some(dir) = &dir {
@@ -18252,6 +18705,7 @@ mod tests {
                 );
             }
             app.intel_body = None;
+            app.intel_brief_stages.clear();
             app.intel_body_message.clear();
             app.scrolls.intel_full = 0;
             if let Some(dir) = &dir {
@@ -19232,7 +19686,7 @@ mod tests {
         assert!(first.contains("Rows 1–10 / 240"), "{first}");
         app.profile.report = Some("models.latency");
         let compact = buffer_text(&render(&mut app, 60, 18));
-        assert!(compact.contains("Rows 1–3 / 24"), "{compact}");
+        assert!(compact.contains("Rows 1–2 / 24"), "{compact}");
         app.profile.report = Some("tools.reliability");
         app.set_focus(Target::ProfileReport);
         render(&mut app, 120, 40);
@@ -19461,6 +19915,42 @@ mod tests {
                 app.profile.report = report;
                 let buffer = render(&mut app, width, height);
                 assert!(!super::super::ui::focus_order(&app).is_empty());
+                let rows: Vec<_> = app
+                    .layout
+                    .borrow()
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        report.is_none() && matches!(entry.target, Target::ProfilePanelRow(_, _))
+                    })
+                    .cloned()
+                    .collect();
+                for pair in rows.windows(2) {
+                    let (Target::ProfilePanelRow(panel, _), Target::ProfilePanelRow(next, _)) =
+                        (pair[0].target, pair[1].target)
+                    else {
+                        unreachable!()
+                    };
+                    if panel != next {
+                        continue;
+                    }
+                    assert_eq!(
+                        pair[1].rect.y,
+                        pair[0].rect.bottom() + 1,
+                        "{name} at {width}x{height}"
+                    );
+                    for x in pair[0].rect.x..pair[0].rect.right() {
+                        assert_eq!(
+                            buffer[(x, pair[0].rect.bottom())].symbol(),
+                            " ",
+                            "{name} panel {panel}"
+                        );
+                    }
+                    assert!(!matches!(
+                        super::super::ui::hit_test(&app, pair[0].rect.x, pair[0].rect.bottom()),
+                        Some(Target::ProfilePanelRow(_, _))
+                    ));
+                }
                 if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
                     std::fs::create_dir_all(&dir).unwrap();
                     let cells:Vec<_>=(0..height).map(|y|(0..width).map(|x|{let cell=&buffer[(x,y)];serde_json::json!({"s":cell.symbol(),"fg":format!("{:?}",cell.fg),"bg":format!("{:?}",cell.bg),"b":cell.modifier.contains(ratatui::style::Modifier::BOLD),"u":false})}).collect::<Vec<_>>()).collect();

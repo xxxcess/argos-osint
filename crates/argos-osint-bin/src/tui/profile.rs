@@ -1849,8 +1849,9 @@ fn select_row(app: &mut App, delta: isize) {
     let selected = *index;
     let layout = content_layout(app);
     if app.profile.report.is_none() {
+        let start = table_prefix(app, w) + selected * 2 + 1;
         app.profile.panel_scroll.entry(w.id).or_default().reveal(
-            selected + 1,
+            start,
             1,
             layout.panel_height(app.profile.focus).saturating_sub(2),
         );
@@ -1972,6 +1973,19 @@ fn grid_offset(app: &App, layout: &LayoutResult) -> usize {
             .saturating_sub(layout.content.height as usize),
     )
 }
+fn table_prefix(app: &App, widget: &WidgetSpec) -> usize {
+    usize::from(widget.applicable_filters.is_empty() || widget.id == "recon.unresolved")
+        + usize::from(
+            !widget.applicable_filters.is_empty()
+                && ["app", "provider", "role", "mode", "tool", "category"]
+                    .iter()
+                    .any(|d| {
+                        !app.profile.filter_value(d).is_empty()
+                            && !widget.applicable_filters.contains(d)
+                    }),
+        )
+}
+
 fn draw_section_body(frame: &mut Frame, app: &App, area: Rect) {
     let widgets = app.profile.focused_widgets();
     let initial = content_layout(app);
@@ -2004,6 +2018,8 @@ fn draw_section_body(frame: &mut Frame, app: &App, area: Rect) {
             .map(|p| p.offset)
             .unwrap_or(0)
             .min(lines.len().saturating_sub(height));
+        let hides_last_row =
+            widget.renderer != RendererKind::Time && content_offset + height < lines.len();
         if widget.renderer != RendererKind::Time {
             let offset = app
                 .profile
@@ -2020,20 +2036,12 @@ fn draw_section_body(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         if widget.renderer == RendererKind::Table || widget.id == ATTENTION.id {
-            let prefix = usize::from(
-                widget.applicable_filters.is_empty() || widget.id == "recon.unresolved",
-            ) + usize::from(
-                !widget.applicable_filters.is_empty()
-                    && ["app", "provider", "role", "mode", "tool", "category"]
-                        .iter()
-                        .any(|d| {
-                            !app.profile.filter_value(d).is_empty()
-                                && !widget.applicable_filters.contains(d)
-                        }),
-            );
+            let prefix = table_prefix(app, widget);
             for row in 0..logical_rows {
-                let line = prefix + 1 + row;
-                if line < content_offset {
+                let line = prefix + 1 + row * 2;
+                if line < content_offset
+                    || line - content_offset >= height.saturating_sub(usize::from(hides_last_row))
+                {
                     continue;
                 }
                 let virtual_y = 1 + line - content_offset;
@@ -2546,6 +2554,9 @@ fn attention_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         let Ok(r) = serde_json::from_value::<profile_stats::AttentionRow>(row) else {
             continue;
         };
+        if lines.len() > 1 {
+            lines.push(Line::raw(""));
+        }
         lines.push(panels::table_row(
             &[
                 format!(
@@ -3035,6 +3046,9 @@ fn primary_table(
     )];
     let selected = app.profile.selected_row.get(w.id).copied().unwrap_or(0);
     for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::raw(""));
+        }
         let mut cells = keys
             .iter()
             .map(|key| format_cell(key, &row[*key]))
@@ -3880,8 +3894,11 @@ fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
                 .unwrap_or(0)
         }
         .min(rows.len().saturating_sub(1));
-        let viewport = (section.rect.height.saturating_sub(3) as usize)
-            .min(if app.screen.height >= 40 { 10 } else { 3 });
+        let viewport = super::components::ListGeometry::capacity(
+            section.rect.height.saturating_sub(3) as usize,
+            1,
+        )
+        .min(if app.screen.height >= 40 { 10 } else { 3 });
         let offset = app
             .profile
             .table_offsets
@@ -3915,7 +3932,7 @@ fn draw_report(frame: &mut Frame, app: &App, widget: &WidgetSpec, area: Rect) {
         for (local, row) in rows.iter().enumerate().skip(offset).take(viewport) {
             let rect = Rect::new(
                 section.rect.x,
-                section.rect.y + 2 + (local - offset) as u16,
+                section.rect.y + 2 + (local - offset) as u16 * 2,
                 section.rect.width,
                 1,
             );
@@ -4008,13 +4025,19 @@ fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let choices = app.profile.picker_choices();
-    let room = inner.height.saturating_sub(2) as usize;
+    let room =
+        super::components::ListGeometry::capacity(inner.height.saturating_sub(2) as usize, 1);
     let start = app
         .profile
         .picker_selection
         .saturating_sub(room.saturating_sub(1));
     for (i, label) in choices.iter().enumerate().skip(start).take(room) {
-        let rect = Rect::new(inner.x, inner.y + 1 + (i - start) as u16, inner.width, 1);
+        let rect = Rect::new(
+            inner.x,
+            inner.y + 1 + (i - start) as u16 * 2,
+            inner.width,
+            1,
+        );
         app.layout
             .borrow_mut()
             .register(Target::ProfileChoice(i), rect);
@@ -4344,7 +4367,23 @@ pub fn scroll(app: &mut App, delta: isize) {
                 }
                 if let Some((_, data)) = datasets.get(index) {
                     let count = data.as_array().map_or(1, Vec::len);
-                    let viewport = sections.section_height.saturating_sub(4);
+                    let viewport = sections
+                        .sections
+                        .iter()
+                        .find(|section| section.index == index)
+                        .map(|section| {
+                            super::components::ListGeometry::capacity(
+                                section.rect.height.saturating_sub(3) as usize,
+                                1,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            super::components::ListGeometry::capacity(
+                                sections.section_height.saturating_sub(4),
+                                1,
+                            )
+                        })
+                        .max(1);
                     let offset = app.profile.table_offsets.entry((id, index)).or_default();
                     let next = offset
                         .saturating_add_signed(delta)
@@ -4534,12 +4573,37 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 } else {
                     app.profile.table_rows.insert((widget.id, index), selected);
                 }
+                let popup = expanded_area(super::ui::body_rect(app));
+                let inner = Rect::new(
+                    popup.x + 1,
+                    popup.y + 1,
+                    popup.width.saturating_sub(2),
+                    popup.height.saturating_sub(2),
+                );
+                let details = report_layout(app, widget, inner).details;
+                let sections = super::profile_layout::ReportSectionsLayout::new(
+                    details,
+                    datasets.len() + 1,
+                    app.profile.report_scroll.offset,
+                    app.screen.height >= 40,
+                );
+                let room = sections
+                    .sections
+                    .iter()
+                    .find(|section| section.index == index)
+                    .map(|section| {
+                        super::components::ListGeometry::capacity(
+                            section.rect.height.saturating_sub(3) as usize,
+                            1,
+                        )
+                    })
+                    .unwrap_or(if app.screen.height >= 40 { 10 } else { 3 })
+                    .max(1);
                 let offset = app
                     .profile
                     .table_offsets
                     .entry((widget.id, index))
                     .or_default();
-                let room = if app.screen.height >= 40 { 10 } else { 3 };
                 if selected < *offset {
                     *offset = selected;
                 } else if selected >= *offset + room {

@@ -211,7 +211,7 @@ impl ReportSectionsLayout {
     pub fn new(area: Rect, count: usize, offset: usize, tall: bool) -> Self {
         // Title, sticky header, 3–10 data rows, position and gutter.
         let data_rows = if tall { 10 } else { 3 };
-        let section_height = data_rows + 4;
+        let section_height = super::components::ListGeometry::fixed(data_rows, 1).extent + 4;
         let extent = count * section_height;
         let sections = (0..count)
             .filter_map(|index| {

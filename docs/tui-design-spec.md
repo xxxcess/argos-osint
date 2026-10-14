@@ -28,6 +28,15 @@ Charts retain an 11-row minimum and tables 9 rows; scroll instead of squeezing. 
 
 ## Theme, data and interaction
 
+Separate complete list records with at least one blank terminal row. Keep wrapped
+and expanded content together; gaps never count as records or activate adjacent
+items. Shared list geometry governs capacity, reveal and pointer mapping, without
+trailing overflow. Small panes retain gaps and scroll; charts and horizontal
+navigation retain their existing geometry. Full article displays current-job
+committed Body or usable current body content immediately. Messages and orphan
+legacy running rows cannot establish retrieval activity. Read failures retain
+cached content; Reload invalidates the old presentation.
+
 `theme.rs` remains authoritative: preserve all RGB/semantic tokens, the stable `SERIES` mapping and map colors/heat ramp. Use thin terminal borders, one-cell horizontal padding, ACCENT titles, normal-size bold KPI values, ACCENT navigation fill/dark text and ACCENT focus border with `• focused`. Selected table rows use SELECT/TEXT.
 
 All renderers consume immutable snapshots. Storage, network, model calls and detail lookup belong to background delivery, never draw. Preserve stale data/state during loading; one bounded refresh at a time reuses the existing cadence/connection. Discard obsolete filter generations. Detail reads are lazy, bounded and cached by filters/revision.
@@ -69,7 +78,7 @@ TabBar uses three-row bordered buttons when space permits and one-row `[Label]` 
 
 Profile has Overview / System / Configs. Overview retains Summary / Intel / Recon / Atlas / Models / Tools and all 20 metric IDs. System and Configs suspend analytics reads and publication. Configs preserves drafts during page navigation and discards credential buffers on explicit Esc. Export defaults to `~/argos-config.json`; a second Export confirms overwriting the same destination. Import uses a multiline editor, Verify, a redacted summary and Save and apply. Verification performs no writes; edits invalidate the exact verified revision. Commit uses the existing transactional snapshot and reloads settings for subsequent work.
 
-Report datasets are bounded DetailTable sections with sticky headers, 10 visible rows on tall screens and 3 on short screens. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
+Report datasets are bounded DetailTable sections with sticky headers, virtual capacity of 10 logical records on tall screens and 3 on short screens. Spaced data extent is `2*N-1`, plus title/header/footer/gutter, clipped to the viewport. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
 
 Intel imagery uses the Ratatui image adapter with protocol detection once outside draw, a half-block fallback, contain fit, bounded background fetch/decode/encoding and article-ID + URL identity. Missing/invalid/failed images collapse. Image and Visit article site actions open the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
 

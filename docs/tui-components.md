@@ -45,9 +45,28 @@ The general `components::detail_table` and `detail_records` helpers remain avail
 
 ## ScrollPane
 
-Intel Focus Brief keeps its center stack borderless and uses the shared clipped border, padding, independent scroll limits and See more geometry for the **Full article** card in all states. Confidence keeps its ANSI Shadow badge with three fields: Source, Information, Brief rating. Actors from immutable metadata remain visible without claims and during refresh. The context column contains Tags, Country and brief Jobs. Historical article reports remain stored; their execution and Full Assessment Recon controls are removed. Jobs action geometry includes global **Clear old jobs** with matching keyboard and pointer routes.
+Logical records have one blank terminal row between complete items, with no
+trailing gap. `components::LIST_ITEM_GAP_ROWS` and `ListGeometry` define content
+ranges, extent, capacity, title-first reveal and row-to-item mapping. Wrapped
+titles, supporting metadata and expanded details stay contiguous. Spacer rows
+use ordinary pane backgrounds and have no item target; boxed tables retain
+vertical strokes. Counts and selection indices remain logical. Single-line
+capacity is `(available_rows+1)/2`; two-line Brain capacity is
+`(available_rows+1)/3`. Home, roles and fallbacks keep independent offsets.
+Markdown display spacing leaves stored text, ordinary paragraphs and code intact.
 
-The brief **Jobs** pane shows the dependency chain: **Step k/4 · Stage**, then one row per stage (Full article, Claims, Inferences, Links). Active stages spin; Full Article and Claims may run together, then Inferences joins both and Links follows. Running rows name their activity: retrieving / cleaning, waiting for model, validating, or checking fidelity. Queued rows name their blocker; failed rows show a short reason. A **Publication / Index** footer follows: Pending, Published · Index pending / Indexed / Not indexed · reason / Index failed · reason, with historical reports excluded from precedence. Global Jobs shows the same `Stage · row` labels in stage order, and each committed stage logs `intel_brief.stage`. Content panes show completed checkpoints as soon as they commit, and they never inherit a parent failure: validated artifacts read "Validated · not published". Links render as **Potential corroboration**. Captures: `intel_sequential_stage_screens` at 160×50, 120×40, 100×32, 80×24, 60×18 and 40×12; images are in `docs/screens/intel-sequential/`.
+Full article presentation derives from the selected article/current job snapshot.
+Nonempty committed Body Markdown supersedes legacy flags/messages and later stage
+activity. Usable complete/partial/uncertain bodies retain quality warnings.
+Only confirmed running Body work without usable content animates; queued, retry,
+terminal and read-error states expose status and Reload. Snapshot acceptance
+assigns body/stages/outputs together and clears obsolete retrieval tracking.
+Read failures preserve cached content. Navigation rejects mismatched owners;
+Reload invalidates previous-generation content. Drawing performs no reads.
+
+Intel Focus Brief keeps its center stack borderless and uses the shared clipped border, padding, independent scroll limits and See more geometry for the **Full article** card in all states. Its six-row virtual minimum reserves two borders, a readable content row and the three-row See more action without overlap. Confidence keeps its ANSI Shadow badge with three fields: Source, Information, Brief rating. Actors from immutable metadata remain visible without claims and during refresh. The context column contains Tags, Country and brief Jobs. Historical article reports remain stored; their execution and Full Assessment Recon controls are removed. Jobs action geometry includes global **Clear old jobs** with matching keyboard and pointer routes.
+
+The brief **Jobs** pane shows the dependency chain summary followed by one spaced record per stage (Full article, Claims, Inferences, Links). Active stages spin; Full Article and Claims may run together, then Inferences joins both and Links follows. Running rows name their activity: retrieving / cleaning, waiting for model, validating, or checking fidelity. Queued rows name their blocker; failed rows show a short reason. A **Publication / Index** footer follows: Pending, Published · Index pending / Indexed / Not indexed · reason / Index failed · reason, with historical reports excluded from precedence. Global Jobs shows the same `Stage · row` labels in stage order, and each committed stage logs `intel_brief.stage`. Content panes show completed checkpoints as soon as they commit, and they never inherit a parent failure: validated artifacts read "Validated · not published". Links render as **Potential corroboration**. Captures: `intel_sequential_stage_screens` at 160×50, 120×40, 100×32, 80×24, 60×18 and 40×12; images are in `docs/screens/intel-sequential/`.
 
 `components::ScrollPane` owns a `usize` offset. `scroll(delta, extent, viewport)` clamps it; `reveal(start, height, viewport)` brings focused content into view; `visible(lines, height)` slices before rendering, avoiding u16 Paragraph offsets. Dashboard, each panel and expanded detail keep independent state.
 
@@ -119,7 +138,7 @@ TabBar uses three-row bordered buttons when space permits and one-row `[Label]` 
 
 Profile has Overview / System / Configs. Overview retains Summary / Intel / Recon / Atlas / Models / Tools and all 20 metric IDs. System and Configs suspend analytics reads and publication. Configs preserves drafts during page navigation and discards credential buffers on explicit Esc. Export defaults to `~/argos-config.json`; a second Export confirms overwriting the same destination. Import uses a multiline editor, Verify, a redacted summary and Save and apply. Verification performs no writes; edits invalidate the exact verified revision. Commit uses the existing transactional snapshot and reloads settings for subsequent work.
 
-Report datasets are bounded DetailTable sections with sticky headers, 10 visible rows on tall screens and 3 on short screens. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
+Report datasets are bounded DetailTable sections with sticky headers, virtual capacity of 10 logical records on tall screens and 3 on short screens. Spaced data extent is `2*N-1`, plus title/header/footer/gutter, clipped to the viewport. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
 
 Intel imagery uses the Ratatui image adapter with protocol detection once outside draw, a half-block fallback, contain fit, bounded background fetch/decode/encoding and article-ID + URL identity. Missing/invalid/failed images collapse. Image and Visit article site actions open the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
 

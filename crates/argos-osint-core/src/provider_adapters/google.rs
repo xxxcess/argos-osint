@@ -78,7 +78,7 @@ pub(crate) fn compile_native(
         ) => {
             config.insert(
                 "responseFormat".into(),
-                json!({"text": {"mimeType": "application/json", "schema": schema}}),
+                json!({"text": {"mimeType": "APPLICATION_JSON", "schema": schema}}),
             );
             sent.push(SentOption {
                 field: "responseFormat".into(),

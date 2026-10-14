@@ -420,6 +420,20 @@ fn entity_candidates(source: &Source, annotation: &Annotation) -> Vec<EntityCand
         let Some(form) = mention.span.slice(&source.prose) else {
             continue;
         };
+        if mention.kind == "person"
+            && calendar_month_person(
+                &source.prose,
+                mention.span.start_byte,
+                mention.span.end_byte,
+                form,
+                annotation
+                    .date_candidates
+                    .iter()
+                    .map(|d| (d.span.start_byte, d.span.end_byte)),
+            )
+        {
+            continue;
+        }
         let key = form
             .split_whitespace()
             .collect::<Vec<_>>()
@@ -452,6 +466,59 @@ fn entity_candidates(source: &Source, annotation: &Annotation) -> Vec<EntityCand
         }
     }
     candidates
+}
+
+/// Reject a standalone month in a temporal context, while preserving names.
+pub(crate) fn calendar_month_person(
+    text: &str,
+    start: usize,
+    end: usize,
+    name: &str,
+    dates: impl Iterator<Item = (usize, usize)>,
+) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    if !matches!(
+        name.as_str(),
+        "january"
+            | "february"
+            | "march"
+            | "april"
+            | "may"
+            | "june"
+            | "july"
+            | "august"
+            | "september"
+            | "october"
+            | "november"
+            | "december"
+    ) {
+        return false;
+    }
+    if dates.into_iter().any(|(a, b)| a <= start && end <= b) {
+        return true;
+    }
+    let Some(prefix) = text.get(..start) else {
+        return false;
+    };
+    let previous = prefix
+        .split_whitespace()
+        .next_back()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_ascii_lowercase();
+    matches!(
+        previous.as_str(),
+        "in" | "since"
+            | "during"
+            | "until"
+            | "through"
+            | "late"
+            | "early"
+            | "mid"
+            | "last"
+            | "next"
+            | "this"
+    )
 }
 /// Prepare before legacy cuts; incomplete work always returns the caller's bounded fallback.
 pub async fn prepare(
@@ -509,7 +576,7 @@ pub async fn annotate_with_policy(
         return Annotation::terminal(source, &context, Status::Cancelled);
     }
     let cached = db_path
-        .and_then(|db| crate::store::Store::open(db).ok())
+        .and_then(|db| crate::store::Store::open_initialized_light(db).ok())
         .and_then(|s| cache::get(&s.conn, source, &context).ok().flatten());
     let annotation = match cached {
         Some(a) => a,
@@ -526,7 +593,9 @@ pub async fn annotate_with_policy(
         return Annotation::terminal(source, &context, Status::Failed);
     }
     if annotation.status == Status::Complete {
-        if let Some(store) = db_path.and_then(|db| crate::store::Store::open(db).ok()) {
+        if let Some(store) =
+            db_path.and_then(|db| crate::store::Store::open_initialized_light(db).ok())
+        {
             let _ = cache::put(&store.conn, source, &context, &annotation);
         }
     }

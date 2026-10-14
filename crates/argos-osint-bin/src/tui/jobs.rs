@@ -19,7 +19,7 @@ pub const PAGE: usize = 200;
 /// Below this body width the table and detail share one panel.
 pub const WIDE: u16 = 100;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct JobsView {
     pub rows: Vec<JobRow>,
     pub sel: usize,
@@ -94,16 +94,39 @@ impl JobsView {
     }
 
     pub fn select(&mut self, index: usize, store: &Store) {
+        self.select_cached(index);
+        self.load_detail(store);
+    }
+
+    pub fn select_cached(&mut self, index: usize) {
         if self.rows.is_empty() {
             return;
         }
         let index = index.min(self.rows.len() - 1);
         if index != self.sel {
             self.detail_scroll = 0;
+            self.detail = None;
         }
         self.sel = index;
         self.sel_id = self.rows.get(index).map(|row| row.id.clone());
-        self.load_detail(store);
+    }
+
+    pub fn accept(&mut self, snapshot: Self, select_snapshot: bool) {
+        let selected = if select_snapshot {
+            snapshot.selected().map(|j| j.id.clone())
+        } else {
+            self.selected().map(|j| j.id.clone())
+        };
+        self.rows = snapshot.rows;
+        self.counts = snapshot.counts;
+        self.apps = snapshot.apps;
+        self.error = snapshot.error;
+        self.loaded = snapshot.loaded;
+        self.sel = selected
+            .and_then(|id| self.rows.iter().position(|j| j.id == id))
+            .unwrap_or(self.sel.min(self.rows.len().saturating_sub(1)));
+        self.sel_id = self.rows.get(self.sel).map(|j| j.id.clone());
+        self.detail = snapshot.detail;
     }
 
     pub fn move_by(&mut self, delta: i32, store: &Store) {

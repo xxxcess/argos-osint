@@ -1311,7 +1311,7 @@ pub async fn run_next_stage(
 
 /// Reap expired leases and claim one ready stage on a fresh connection.
 pub fn claim_next(db_path: &Path, owner: &str, config: &ExecConfig) -> Result<Option<ClaimedTask>> {
-    let store = Store::open(db_path)?;
+    let store = Store::open_initialized_light(db_path)?;
     tasks::interrupt_expired_leases(&store.conn, &now())?;
     brief_pipeline::claim_stage(&store.conn, owner, config.lease_secs, &now())
 }

@@ -5,6 +5,7 @@ mod atlas_table;
 mod brain_detail;
 mod commands;
 pub mod components;
+mod db_reads;
 mod graph;
 pub mod investigation_trace;
 mod jobs;

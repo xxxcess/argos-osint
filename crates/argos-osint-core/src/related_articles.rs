@@ -7,7 +7,7 @@ use anyhow::Result;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-pub const MATCH_VERSION: &str = "shared-headline-entities-v2-min-two";
+pub const MATCH_VERSION: &str = "shared-headline-entities-v3-min-two-temporal";
 pub const MIN_SHARED_ENTITIES: usize = 2;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RelatedArticle {
@@ -135,11 +135,16 @@ pub fn shared_entity_mentions(
         }) else {
             continue;
         };
-        for mention in m
-            .mentions
-            .iter()
-            .filter(|m| named(&m.type_hint) && valid(articles[side], m))
-        {
+        for mention in m.mentions.iter().filter(|mention| {
+            let text = if mention.field == "title" {
+                &articles[side].title
+            } else {
+                &articles[side].description
+            };
+            named(&mention.type_hint)
+                && valid(articles[side], mention)
+                && !atlas_metadata::temporal_person_mention(text, mention, &m.mentions)
+        }) {
             let target = articles[1 - side];
             if metadata[1 - side].as_ref().is_some_and(|m| {
                 m.mentions.iter().any(|other| {
@@ -165,6 +170,20 @@ pub fn shared_entity_mentions(
                 )
             });
             if let Some(found) = found {
+                let target_text = if found.field == "title" {
+                    &target.title
+                } else {
+                    &target.description
+                };
+                if atlas_metadata::temporal_person_mention(
+                    target_text,
+                    &found,
+                    metadata[1 - side]
+                        .as_ref()
+                        .map_or(&[], |m| m.mentions.as_slice()),
+                ) {
+                    continue;
+                }
                 if metadata[1 - side].as_ref().is_some_and(|m| {
                     m.mentions.iter().any(|other| {
                         named(&other.type_hint)
@@ -266,9 +285,19 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
     let mut anchors: BTreeMap<(String, String), Vec<(usize, ArticleMention)>> = BTreeMap::new();
     for (i, m) in metadata.iter().enumerate() {
         if let Some(m) = m {
-            if m.entity_state == MetadataState::Complete {
+            if m.entity_state == MetadataState::Complete
+                && m.input_hash == atlas_metadata::input_hash(&articles[i])
+            {
                 for mention in &m.mentions {
-                    if named(&mention.type_hint) && valid(&articles[i], mention) {
+                    let text = if mention.field == "title" {
+                        &articles[i].title
+                    } else {
+                        &articles[i].description
+                    };
+                    if named(&mention.type_hint)
+                        && valid(&articles[i], mention)
+                        && !atlas_metadata::temporal_person_mention(text, mention, &m.mentions)
+                    {
                         anchors
                             .entry((mention.type_hint.clone(), mention.comparison_key.clone()))
                             .or_default()
@@ -306,6 +335,18 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
             if let Some(m) = find_exact(&articles[i].title, &key, &kind, "title")
                 .or_else(|| find_exact(&articles[i].description, &key, &kind, "description"))
             {
+                let text = if m.field == "title" {
+                    &articles[i].title
+                } else {
+                    &articles[i].description
+                };
+                if atlas_metadata::temporal_person_mention(
+                    text,
+                    &m,
+                    metadata[i].as_ref().map_or(&[], |m| m.mentions.as_slice()),
+                ) {
+                    continue;
+                }
                 let conflicting_span = metadata[i].as_ref().is_some_and(|metadata| {
                     metadata.mentions.iter().any(|other| {
                         named(&other.type_hint)
@@ -421,6 +462,88 @@ pub(crate) fn canonical_url(raw: &str) -> String {
         .unwrap_or_else(|_| raw.into())
 }
 impl Store {
+    /// Read-only projection of retained ingest pairs, evaluated once per pair
+    /// rather than once per actor. Keys identify exact article occurrences.
+    pub(crate) fn ingest_actor_associations(
+        &self,
+    ) -> Result<BTreeMap<(String, String), BTreeSet<String>>> {
+        let articles = self.atlas_recent_articles()?;
+        let lookup: BTreeMap<_, _> = articles
+            .iter()
+            .map(|a| ((a.run_id.clone(), a.id.clone()), a))
+            .collect();
+        let mut pairs = BTreeSet::new();
+        let mut stmt = self.conn.prepare("SELECT run_id,left_id,right_id,left_revision,right_revision,shared_json FROM atlas_related_articles")?;
+        let records = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?;
+        for row in records {
+            let (run, left, right, lr, rr, json) = row?;
+            let a = (run.clone(), left);
+            let b = (run, right);
+            let (Some(left), Some(right)) = (lookup.get(&a), lookup.get(&b)) else {
+                continue;
+            };
+            if revision(left) == lr && revision(right) == rr {
+                // Match the persisted-pair reader's corruption handling.
+                let _: Vec<SharedMention> = serde_json::from_str(&json)?;
+                pairs.insert(if a < b { (a, b) } else { (b, a) });
+            }
+        }
+        let mut stmt = self.conn.prepare("SELECT memory_id FROM memory_metadata WHERE memory_kind='related' AND lifecycle='active'")?;
+        for id in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            let Some(crate::memory_metadata::MemoryPayload::Related(p)) =
+                self.memory_payload(&id?)?
+            else {
+                continue;
+            };
+            if !current_ingest_related(self, &p)? {
+                continue;
+            }
+            let crate::memory_metadata::EndpointRef::Article {
+                run_id: ar,
+                article_id: ai,
+                ..
+            } = p.source
+            else {
+                continue;
+            };
+            let crate::memory_metadata::EndpointRef::Article {
+                run_id: br,
+                article_id: bi,
+                ..
+            } = p.target
+            else {
+                continue;
+            };
+            let (a, b) = ((ar, ai), (br, bi));
+            pairs.insert(if a < b { (a, b) } else { (b, a) });
+        }
+        let mut out: BTreeMap<_, BTreeSet<String>> = BTreeMap::new();
+        for (a, b) in pairs {
+            let (Some(left), Some(right)) = (lookup.get(&a), lookup.get(&b)) else {
+                continue;
+            };
+            let shared = shared_entity_mentions(self, left, right)?;
+            if shared.len() < MIN_SHARED_ENTITIES {
+                continue;
+            }
+            let names: BTreeSet<_> = shared
+                .iter()
+                .map(|n| crate::brain_actors::normalize_alias(n))
+                .collect();
+            out.entry(a).or_default().extend(names.clone());
+            out.entry(b).or_default().extend(names);
+        }
+        Ok(out)
+    }
     /// Whether an occurrence participates in a retained ingest association
     /// containing this actor name and at least one other distinct entity.
     /// This checks stored pairs, never creates suggestions while browsing.

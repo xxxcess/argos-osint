@@ -9,7 +9,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::{atomic::AtomicBool, Arc};
 
-pub const ENTITY_VERSION: &str = "atlas-entities-v1";
+pub const ENTITY_VERSION: &str = "atlas-entities-v2-temporal-mentions";
 pub const PRIOR_VERSION: &str = "publisher-rsp-v1";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +81,9 @@ pub fn article_actors(article: &AtlasArticleRow, metadata: &ArticleMetadata) -> 
         {
             continue;
         }
+        if temporal_person_mention(text, mention, &metadata.mentions) {
+            continue;
+        }
         // Normalize spelling, not aliases. Typed names from this packet share
         // only article-local identity; cross-source identity requires assessment.
         let key = mention
@@ -112,6 +115,28 @@ pub fn article_actors(article: &AtlasArticleRow, metadata: &ArticleMetadata) -> 
         }
     }
     actors
+}
+
+/// Calendar mentions cannot become people just because a tagger also labels
+/// them Person. Full names such as August Wilson and May Chen remain eligible.
+pub(crate) fn temporal_person_mention(
+    text: &str,
+    mention: &ArticleMention,
+    mentions: &[ArticleMention],
+) -> bool {
+    if mention.type_hint != "person" {
+        return false;
+    }
+    nlp::calendar_month_person(
+        text,
+        mention.start_byte,
+        mention.end_byte,
+        &mention.original_text,
+        mentions
+            .iter()
+            .filter(|m| m.type_hint == "date" && m.field == mention.field)
+            .map(|m| (m.start_byte, m.end_byte)),
+    )
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublisherPrior {
@@ -256,8 +281,27 @@ async fn collect_inner(
                     nlp::Status::Cancelled => MetadataState::Cancelled,
                     _ => MetadataState::Failed,
                 };
-                out.diagnostics
-                    .push(format!("{field} local NLP: {:?}", annotation.status));
+                let reasons = annotation
+                    .flags
+                    .iter()
+                    .take(3)
+                    .map(|s| {
+                        s.chars()
+                            .filter(|c| !c.is_control())
+                            .take(160)
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                out.diagnostics.push(format!(
+                    "{field} local NLP: {:?}{}",
+                    annotation.status,
+                    if reasons.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({reasons})")
+                    }
+                ));
             }
         }
     }
@@ -751,6 +795,52 @@ mod tests {
         metadata.entity_state = MetadataState::Unavailable;
         assert!(article_actors(&a, &metadata).is_empty());
     }
+    #[test]
+    fn calendar_months_are_not_actors_or_related_entity_overlap() {
+        let store = Store::memory().unwrap();
+        store.atlas_insert_run("calendar", "{}", "{}").unwrap();
+        for (id, title) in [
+            ("a", "Jane Doe announced a project in August"),
+            ("b", "Jane Doe reviewed a project in August"),
+        ] {
+            let article = AtlasArticleRow {
+                run_id: "calendar".into(),
+                id: id.into(),
+                title: title.into(),
+                url: format!("https://news.test/{id}"),
+                category: "economic".into(),
+                ..Default::default()
+            };
+            store.atlas_upsert_article(&article).unwrap();
+            let mut metadata = ArticleMetadata::pending(&article);
+            metadata.entity_state = MetadataState::Complete;
+            for name in ["Jane Doe", "August"] {
+                let start = title.find(name).unwrap();
+                metadata.mentions.push(ArticleMention {
+                    type_hint: "person".into(),
+                    comparison_key: name.to_lowercase(),
+                    field: "title".into(),
+                    start_byte: start,
+                    end_byte: start + name.len(),
+                    original_text: name.into(),
+                });
+            }
+            assert_eq!(
+                article_actors(&article, &metadata)
+                    .iter()
+                    .map(|a| a.display_name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Jane Doe"]
+            );
+            store.atlas_save_metadata(&metadata).unwrap();
+        }
+        assert_eq!(
+            crate::related_articles::build(&store, "calendar").unwrap(),
+            0,
+            "a shared month cannot supply the second entity"
+        );
+    }
+
     fn article() -> AtlasArticleRow {
         AtlasArticleRow {
             run_id: "r".into(),

@@ -13,6 +13,52 @@ fn annotation(source: &Source) -> Annotation {
         .collect();
     a
 }
+
+#[test]
+fn calendar_context_excludes_months_but_preserves_people_named_after_months() {
+    let source = Source::derived(
+        "calendar",
+        "1",
+        "August Wilson met May Chen in London in August.",
+    );
+    let mut a = annotation(&source);
+    for name in ["August Wilson", "May Chen", "August"] {
+        let start = if name == "August" {
+            source.prose.rfind(name).unwrap()
+        } else {
+            source.prose.find(name).unwrap()
+        };
+        a.mentions.push(Mention {
+            span: Span {
+                start_byte: start,
+                end_byte: start + name.len(),
+            },
+            kind: "person".into(),
+        });
+    }
+    let candidates = entity_candidates(&source, &a);
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| c.original_forms[0].as_str())
+            .collect::<Vec<_>>(),
+        vec!["August Wilson", "May Chen"]
+    );
+    assert!(!calendar_month_person(
+        "August spoke today",
+        0,
+        6,
+        "August",
+        std::iter::empty()
+    ));
+    assert!(calendar_month_person(
+        "August",
+        0,
+        6,
+        "August",
+        std::iter::once((0, 6))
+    ));
+}
 #[test]
 fn late_correction_selection_and_gold_spans() {
     let mut text =

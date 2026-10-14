@@ -34,6 +34,16 @@ impl PoolKind {
 
 /// Ensure the scheduler lease table exists (additive).
 pub fn migrate_scheduler(conn: &Connection) -> Result<()> {
+    // Lease renewal calls this helper too. Existing pools need a read-only
+    // existence check, not a CREATE statement on every polling interval.
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='argos_scheduler_lease')",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists {
+        return Ok(());
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS argos_scheduler_lease (
             id TEXT PRIMARY KEY,
@@ -269,14 +279,18 @@ impl WorkerPool {
             .name("argos-index-pool".into())
             .spawn(move || {
                 let mut idle_loops = 0u32;
+                let mut schema_ready = false;
                 while !flag.load(Ordering::Relaxed) {
                     let Ok(conn) = Connection::open(&db_path) else {
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
                     };
                     let _ = conn.busy_timeout(Duration::from_secs(5));
-                    let _ = migrate_scheduler(&conn);
-                    let _ = tasks::migrate_tables(&conn);
+                    if !schema_ready {
+                        schema_ready = migrate_scheduler(&conn)
+                            .and_then(|_| tasks::migrate_tables(&conn))
+                            .is_ok();
+                    }
                     if !try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false) {
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
@@ -284,7 +298,7 @@ impl WorkerPool {
                     let now = chrono::Utc::now().to_rfc3339();
                     let _ = tasks::retire_atlas_insight_work(&conn, &now);
                     let _ = tasks::interrupt_expired_leases(&conn, &now);
-                    if let Ok(store) = crate::store::Store::open(&db_path) {
+                    if let Ok(store) = crate::store::Store::open_index_worker(&db_path) {
                         let drained = drain_index_once(&conn, &store, &owner, 16).unwrap_or(0);
                         // Catch up generation rebuilds even without an explicit change row.
                         let _ = store.process_pending_vector_rebuild(2);
@@ -312,13 +326,16 @@ impl WorkerPool {
             .name("argos-summary-pool".into())
             .spawn(move || {
                 let mut loops = 0u32;
+                let mut schema_ready = false;
                 while !flag.load(Ordering::Relaxed) {
                     let Ok(conn) = Connection::open(&db_path) else {
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
                     };
                     let _ = conn.busy_timeout(Duration::from_secs(5));
-                    let _ = tasks::migrate_tables(&conn);
+                    if !schema_ready {
+                        schema_ready = tasks::migrate_tables(&conn).is_ok();
+                    }
                     if !try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false) {
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
@@ -353,9 +370,6 @@ impl WorkerPool {
 
     /// Spawn the default local pools (index + summary) for one state root.
     pub fn spawn_default(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
-        if let Ok(store) = crate::store::Store::open(&db_path) {
-            let _ = store.clear_old_jobs();
-        }
         let owner = process_owner();
         vec![
             Self::spawn_index_drainer(db_path.clone(), owner.clone()),
@@ -380,7 +394,7 @@ impl WorkerPool {
                         try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
                     });
                     let complete = elected
-                        && crate::store::Store::open(&db_path)
+                        && crate::store::Store::open_light(&db_path)
                             .and_then(|s| s.brain_backfill(crate::brain_backfill::BATCH))
                             .map(|r| r.complete)
                             .unwrap_or(false);

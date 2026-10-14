@@ -40,6 +40,13 @@ pub struct Associations {
     pub articles: Vec<ArticleAssociation>,
 }
 
+struct BrowseContext {
+    claims: Vec<Memory>,
+    typed_actors: BTreeMap<String, BTreeSet<String>>,
+    claim_origins: BTreeMap<String, Associations>,
+    ingest: BTreeMap<(String, String), BTreeSet<String>>,
+}
+
 impl ActorGroup {
     pub fn key(&self) -> String {
         format!("actor-group:{}", self.name_key)
@@ -109,19 +116,13 @@ impl Store {
     pub fn brain_browse(&self, kind: Option<MemoryKind>, query: &str) -> Result<Vec<BrowseRow>> {
         let mut rows = Vec::new();
         if kind.is_none() || kind == Some(MemoryKind::Claim) {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT id FROM memories ORDER BY pinned DESC,created_at DESC,id")?;
-            let ids = stmt
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for id in ids {
-                if self.is_browse_claim(&id)? {
-                    if let Some(memory) = self.get_memory(&id)? {
-                        rows.push(BrowseRow::Claim(memory));
-                    }
-                }
-            }
+            let mut stmt = self.conn.prepare("SELECT m.id,m.text,m.category,m.pinned,m.created_at,m.source_json FROM memories m LEFT JOIN memory_metadata t ON t.memory_id=m.id WHERE (t.lifecycle IS NULL OR t.lifecycle='active') AND (t.memory_kind IN ('claim','atomic_claim') OR (t.memory_kind IS NULL AND EXISTS(SELECT 1 FROM insight_claims c WHERE c.memory_id=m.id AND lower(c.classification)<>'inference'))) ORDER BY m.pinned DESC,m.created_at DESC,m.id")?;
+            rows.extend(
+                stmt.query_map([], crate::store::memory_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(BrowseRow::Claim),
+            );
         }
         if kind.is_none() || kind == Some(MemoryKind::Actor) {
             rows.extend(self.actor_groups()?.into_iter().map(BrowseRow::ActorGroup));
@@ -141,12 +142,20 @@ impl Store {
         kind: Option<MemoryKind>,
         query: &str,
     ) -> Result<Vec<Memory>> {
-        self.brain_browse(kind, query)?
-            .into_iter()
+        let rows = self.brain_browse(kind, query)?;
+        let context = if rows.iter().any(|r| matches!(r, BrowseRow::ActorGroup(_))) {
+            Some(self.browse_context()?)
+        } else {
+            None
+        };
+        rows.into_iter()
             .map(|row| match row {
                 BrowseRow::Claim(m) => Ok(m),
                 BrowseRow::ActorGroup(g) => {
-                    let a = self.actor_group_associations(&g)?;
+                    let a = self.actor_group_associations_in(
+                        &g,
+                        context.as_ref().expect("actor context"),
+                    )?;
                     Ok(Memory {
                         id: g.key(),
                         text: g.display_name,
@@ -238,6 +247,59 @@ impl Store {
     }
 
     pub fn actor_group_associations(&self, group: &ActorGroup) -> Result<Associations> {
+        self.actor_group_associations_in(group, &self.browse_context()?)
+    }
+
+    fn browse_context(&self) -> Result<BrowseContext> {
+        let claims: Vec<_> = self
+            .brain_browse(Some(MemoryKind::Claim), "")?
+            .into_iter()
+            .filter_map(|r| match r {
+                BrowseRow::Claim(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        let mut typed_actors = BTreeMap::new();
+        let mut claim_origins = BTreeMap::new();
+        for m in &claims {
+            if let Some(MemoryPayload::Claim(p)) = self.memory_payload(&m.id)? {
+                let mut ids = BTreeSet::new();
+                for a in p.actors {
+                    ids.insert(actors::resolve(&self.conn, &a.actor_id)?);
+                }
+                typed_actors.insert(m.id.clone(), ids);
+            }
+            let mut stmt = self.conn.prepare("SELECT DISTINCT t.id,t.title FROM insight_sources s JOIN insight_claims c ON c.fingerprint=s.fingerprint JOIN recon_threads t ON t.id=s.thread_id WHERE c.memory_id=?1 AND s.deleted_origin=0 AND t.deleted=0 ORDER BY t.title,t.id")?;
+            let threads = stmt
+                .query_map([&m.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let origins = self
+                .article_origins_for_memory(&m.id)?
+                .into_iter()
+                .map(|o| (o.run_id, o.article_id, String::new()))
+                .collect();
+            claim_origins.insert(
+                m.id.clone(),
+                Associations {
+                    threads,
+                    articles: self.association_articles(origins)?,
+                    ..Default::default()
+                },
+            );
+        }
+        Ok(BrowseContext {
+            claims,
+            typed_actors,
+            claim_origins,
+            ingest: self.ingest_actor_associations()?,
+        })
+    }
+
+    fn actor_group_associations_in(
+        &self,
+        group: &ActorGroup,
+        context: &BrowseContext,
+    ) -> Result<Associations> {
         let mut out = Associations::default();
         let mut claims = BTreeSet::new();
         let mut threads = BTreeMap::new();
@@ -252,7 +314,7 @@ impl Store {
                 .prepare("SELECT memory_id FROM brain_memory_actor_refs WHERE actor_id=?1")?;
             for memory in stmt.query_map([id], |r| r.get::<_, String>(0))? {
                 let memory = memory?;
-                if self.is_browse_claim(&memory)? {
+                if context.claim_origins.contains_key(&memory) {
                     claims.insert(memory);
                 }
             }
@@ -267,29 +329,21 @@ impl Store {
             }
         }
         // Typed references are authoritative even before a legacy index repair.
-        for row in self.brain_browse(Some(MemoryKind::Claim), "")? {
-            let BrowseRow::Claim(m) = row else { continue };
-            if let Some(MemoryPayload::Claim(p)) = self.memory_payload(&m.id)? {
-                for a in p.actors {
-                    if group
-                        .actor_ids
-                        .contains(&actors::resolve(&self.conn, &a.actor_id)?)
-                    {
-                        claims.insert(m.id.clone());
-                    }
-                }
+        for (id, actors) in &context.typed_actors {
+            if group.actor_ids.iter().any(|id| actors.contains(id)) {
+                claims.insert(id.clone());
             }
         }
         for id in claims {
-            let a = self.claim_associations(&id)?;
-            for (id, title) in a.threads {
-                threads.insert(id, title);
+            let a = &context.claim_origins[&id];
+            for (id, title) in &a.threads {
+                threads.insert(id.clone(), title.clone());
             }
-            for a in a.articles {
-                origins.extend(a.occurrences);
+            for a in &a.articles {
+                origins.extend(a.occurrences.clone());
             }
-            if let Some(m) = self.get_memory(&id)? {
-                out.claims.push(m);
+            if let Some(m) = context.claims.iter().find(|m| m.id == id) {
+                out.claims.push(m.clone());
             }
         }
         out.threads = threads.into_iter().collect();
@@ -303,7 +357,11 @@ impl Store {
             if !revision.is_empty() && revision != crate::atlas_metadata::input_hash(&article) {
                 continue;
             }
-            if self.has_ingest_actor_association(&article, &group.name_key)? {
+            if context
+                .ingest
+                .get(&(run.clone(), id.clone()))
+                .is_some_and(|names| names.contains(&group.name_key))
+            {
                 eligible.insert((run, id, revision));
             }
         }
@@ -348,8 +406,18 @@ impl Store {
     }
 
     pub fn actor_group_graph(&self, group: &ActorGroup) -> Result<crate::recon::MemoryGraph> {
+        Ok(Self::actor_group_graph_from(
+            group,
+            self.actor_group_associations(group)?,
+        ))
+    }
+
+    /// Build the graph from the same immutable associations used by Related.
+    pub fn actor_group_graph_from(
+        group: &ActorGroup,
+        a: Associations,
+    ) -> crate::recon::MemoryGraph {
         use crate::recon::{GraphEdge, GraphEdgeKind, GraphNode, GraphNodeKind, MemoryGraph};
-        let a = self.actor_group_associations(group)?;
         let root = group.key();
         let node = |id: String, kind, label: String| GraphNode {
             id,
@@ -396,6 +464,6 @@ impl Store {
                 directive: Some("associated with".into()),
             });
         }
-        Ok(graph)
+        graph
     }
 }

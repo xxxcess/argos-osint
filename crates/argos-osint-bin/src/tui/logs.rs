@@ -62,7 +62,7 @@ impl LevelFilter {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LogsView {
     /// Oldest first (newest at the bottom, where live follow keeps the selection).
     pub rows: Vec<EventRow>,
@@ -109,6 +109,22 @@ impl Default for LogsView {
 }
 
 impl LogsView {
+    pub fn accept(&mut self, snapshot: Self) {
+        let selected = self.rows.get(self.sel).map(|e| e.id.clone());
+        self.rows = snapshot.rows;
+        self.counts = snapshot.counts;
+        self.apps = snapshot.apps;
+        self.error = snapshot.error;
+        self.loaded = snapshot.loaded;
+        self.sel = if self.follow {
+            self.rows.len().saturating_sub(1)
+        } else {
+            selected
+                .and_then(|id| self.rows.iter().position(|e| e.id == id))
+                .unwrap_or(self.sel.min(self.rows.len().saturating_sub(1)))
+        };
+        self.sel_id = self.rows.get(self.sel).map(|e| e.id.clone());
+    }
     pub fn filter(&self) -> EventFilter {
         EventFilter {
             min_severity: self.level.severity(),

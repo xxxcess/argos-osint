@@ -149,6 +149,68 @@ fn boost_with_passage_hybrid(
 }
 
 impl Store {
+    /// TUI control connection. Index work stays in the durable worker outbox;
+    /// this connection never opens LanceDB or performs inline embeddings.
+    /// Small interactive writes fail promptly on contention and can be retried.
+    pub fn open_ui(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let store = Self::open_light(path)?;
+        store.ensure_schema()?;
+        crate::job_cleanup::retire_article_reports(&store.conn)?;
+        store
+            .conn
+            .busy_timeout(std::time::Duration::from_millis(25))?;
+        Ok(store)
+    }
+
+    #[cfg(test)]
+    fn ui_store_contract_test(path: &Path) {
+        let store = Self::open_ui(path).unwrap();
+        assert!(
+            !store.vectors_enabled(),
+            "UI never attaches the vector index"
+        );
+        let memory = store
+            .add_user_claim(
+                "Ada announced a new project",
+                "fact",
+                crate::brain::MemorySource {
+                    app: "user".into(),
+                    conversation_id: "ui-test".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        let queued: i64 = store.conn.query_row("SELECT COUNT(*) FROM argos_index_changes WHERE record_id=?1 AND state<>'completed'",[&memory.id],|r| r.get(0)).unwrap();
+        assert!(queued > 0, "UI writes must retain durable indexing work");
+        let before: i64 = store
+            .conn
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
+        drop(Self::open_profile_reader(path).unwrap());
+        drop(Self::open_light(path).unwrap());
+        let after: i64 = store
+            .conn
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "reader/control connections perform no migrations"
+        );
+        let lock = Connection::open(path).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        assert!(store.app_state_set("ui-test", "busy").is_err());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a contended interactive write must fail promptly"
+        );
+        lock.execute_batch("ROLLBACK").unwrap();
+        assert!(store.get_memory(&memory.id).unwrap().is_some());
+    }
     /// Typed Brain insight kind (`claim` = source claim, `inference`) from the
     /// canonical derivation row, newest first; `None` for untyped memories.
     pub fn memory_insight_kind(&self, memory_id: &str) -> Option<String> {
@@ -183,6 +245,22 @@ impl Store {
         })
     }
 
+    /// Worker/cache connection with lazy first-use schema initialization.
+    /// An already-current database performs only the version read, not DDL.
+    pub fn open_initialized_light(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let store = Self::open_light(path)?;
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version != SCHEMA_VERSION {
+            store.ensure_schema()?;
+        }
+        Ok(store)
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -193,6 +271,16 @@ impl Store {
         let store = Self { conn, vectors };
         store.ensure_schema()?;
         crate::job_cleanup::retire_article_reports(&store.conn)?;
+        store.restore_serving_vector_table();
+        Ok(store)
+    }
+
+    /// Index-pool connection after the state root has been initialized. Polls
+    /// attach the shared index without re-running schema/data migrations.
+    pub fn open_index_worker(path: &Path) -> Result<Self> {
+        let mut store = Self::open_initialized_light(path)?;
+        store.vectors = (cfg!(feature = "lancedb") && crate::embed::enabled())
+            .then(|| BrainIndex::shared(&crate::paths::lancedb_dir_for(path)));
         store.restore_serving_vector_table();
         Ok(store)
     }
@@ -2256,6 +2344,12 @@ impl Store {
             .optional()?)
     }
 
+    /// Latest retained occurrence of one article, without decoding the whole
+    /// retained corpus just to open a headline.
+    pub fn atlas_latest_article_by_id(&self, article_id: &str) -> Result<Option<AtlasArticleRow>> {
+        Ok(self.conn.query_row("SELECT run_id,article_id,title,description,url,country,source_name,source_domain,published_at,provider,temperature,category,seen_at,author,image_url FROM atlas_articles WHERE article_id=?1 ORDER BY seen_at DESC LIMIT 1", [article_id], atlas_article_from_row).optional()?)
+    }
+
     /// Distinct UTC calendar days (`YYYY-MM-DD`) that have an Atlas run, newest first.
     pub fn atlas_run_days(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
@@ -3288,6 +3382,12 @@ mod tests {
                 .execute_batch(&format!("PRAGMA user_version={}", SCHEMA_VERSION + 1))
                 .unwrap();
             assert!(Store::open(&path).is_err());
+        }
+
+        #[test]
+        fn ui_store_keeps_indexing_in_outbox_and_bounds_lock_waits() {
+            let dir = tempfile::tempdir().unwrap();
+            Store::ui_store_contract_test(&dir.path().join("argos.db"));
         }
 
         #[test]

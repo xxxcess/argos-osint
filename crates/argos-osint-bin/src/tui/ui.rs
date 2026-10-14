@@ -6471,6 +6471,9 @@ fn memory_list_title(app: &App) -> String {
     if app.memory_error.is_some() && !app.memories.is_empty() {
         return " memories · read failed · showing last loaded list ".into();
     }
+    if app.brain_refreshing() && app.memories_loaded {
+        return " memories · refreshing ".into();
+    }
     let kind = app
         .brain_kind
         .map(|k| format!(" · {}", super::app::brain_kind_label(Some(k))))
@@ -7268,9 +7271,11 @@ fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(list_block, list);
     if app.intel_articles.is_empty() {
         frame.render_widget(
-            Paragraph::new(
-                " No classified articles for this day. Run Atlas, or pick another day. ",
-            )
+            Paragraph::new(if app.intel_bulletin_loading() {
+                super::anim::loading("Loading bulletin")
+            } else {
+                " No classified articles for this day. Run Atlas, or pick another day. ".into()
+            })
             .style(theme::dim()),
             list_inner,
         );
@@ -9786,7 +9791,11 @@ fn draw_atlas_news(frame: &mut Frame, app: &App, area: Rect) {
     let width = inset(list).width as usize;
     let lines = if app.atlas_articles.is_empty() {
         vec![Line::from(Span::styled(
-            "No saved articles for this run.",
+            if app.atlas_news_loading() {
+                super::anim::loading("Loading cycle articles")
+            } else {
+                "No saved articles for this run.".into()
+            },
             theme::dim(),
         ))]
     } else {

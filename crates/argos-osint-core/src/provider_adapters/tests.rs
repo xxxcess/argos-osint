@@ -272,7 +272,7 @@ fn google_native_flash_and_gemma_bodies() {
     assert_eq!(cfg["maxOutputTokens"], 4096);
     assert_eq!(
         cfg["responseFormat"]["text"]["mimeType"],
-        "application/json"
+        "APPLICATION_JSON"
     );
     assert_eq!(cfg["responseFormat"]["text"]["schema"], schema());
     assert!(f.body.get("tools").is_none(), "no grounding/tools added");

@@ -194,6 +194,11 @@ Native Nvidia or Google fields are never sent through OpenRouter, and no tempera
 
 ## Operation wire budget and bounded recovery
 
+Google native schema output uses `responseFormat.text.mimeType: "APPLICATION_JSON"`
+(an enum), with the schema under `responseFormat.text.schema`. The separate
+legacy JSON-mode `responseMimeType` field accepts the string `application/json`.
+See the [Google TextResponseFormat contract](https://ai.google.dev/api/generate-content#TextResponseFormat).
+
 One transport call sends exactly one HTTP request. When a provider rejects an optional `field=value` it names (for example `response_format=json_schema`), `provider_attempt` learns that value for the route and returns a typed recovery proposal. It never resends. The executor (`provider_chain::execute_with_context`) decides whether the operation's budget allows a recompiled dispatch. It applies no backoff, because the request itself changes. An unknown 400 gets no proposal and is not guessed to be transient.
 
 Interactive operations (an open Intel brief, brief-owned cleanup and fidelity) run under `WireBudget::INTERACTIVE`:

@@ -70,6 +70,68 @@ fn browsing_groups_names_before_find_without_resolving_identities() {
 }
 
 #[test]
+fn batched_browse_counts_preserve_ingest_authority_for_large_cohorts() {
+    let store = Store::memory().unwrap();
+    for group in 0..50 {
+        for occurrence in 0..3 {
+            let (council, port, witness) = (
+                format!("Council{group}"),
+                format!("Port{group}"),
+                format!("Witness{group}x{occurrence}"),
+            );
+            let id = format!("a{group}x{occurrence}");
+            let title = format!("{council} and {port} meet {witness}");
+            crate::atlas_actor_index::tests::seed(
+                &store,
+                "cohort",
+                &id,
+                &title,
+                &[&council, &port, &witness],
+            );
+            let mut a = store.atlas_article("cohort", &id).unwrap().unwrap();
+            a.category = "economic".into();
+            store.atlas_upsert_article(&a).unwrap();
+        }
+    }
+    crate::related_articles::build(&store, "cohort").unwrap();
+    assert!(
+        crate::atlas_actor_index::index_run(&store, "cohort", &|| false)
+            .unwrap()
+            .complete()
+    );
+    let started = std::time::Instant::now();
+    let rows = store.brain_browse_memories(None, "").unwrap();
+    eprintln!(
+        "batched Brain browse rows={} articles=150 elapsed_ms={}",
+        rows.len(),
+        started.elapsed().as_millis()
+    );
+    assert_eq!(rows.len(), 250);
+    for key in ["council0", "port49", "witness0x0"] {
+        let group = store.actor_group(key).unwrap().unwrap();
+        let a = store.actor_group_associations(&group).unwrap();
+        let expected = if key.starts_with("witness") { 0 } else { 3 };
+        assert_eq!(a.articles.len(), expected);
+        let row = rows.iter().find(|m| m.id == group.key()).unwrap();
+        assert_eq!(
+            row.category,
+            format!("0 claims · 0 threads · {expected} articles")
+        );
+    }
+    let names = store.ingest_actor_associations().unwrap();
+    for article in store.atlas_recent_articles().unwrap().iter().take(3) {
+        for name in ["council0", "port0", "witness0x0"] {
+            assert_eq!(
+                store.has_ingest_actor_association(article, name).unwrap(),
+                names
+                    .get(&(article.run_id.clone(), article.id.clone()))
+                    .is_some_and(|n| n.contains(name))
+            );
+        }
+    }
+}
+
+#[test]
 fn associations_union_all_members_two_actor_claims_and_more_than_forty_articles() {
     let mut s = Store::memory().unwrap();
     let a = actor(&s, "Ada", "article:1");

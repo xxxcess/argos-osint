@@ -292,6 +292,7 @@ impl Engine {
             a.numerical_spans.dedup();
             if a.status == Status::Complete && !a.validate(source) {
                 a.status = Status::Failed;
+                a.flags.push("annotation span validation failed".into());
             }
             // Release dead input/cancellation references after the job.
             self.guard.lock().unwrap().cancel = Arc::new(AtomicBool::new(false));

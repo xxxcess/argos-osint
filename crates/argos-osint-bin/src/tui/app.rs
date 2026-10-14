@@ -753,7 +753,90 @@ enum ProviderEvent {
 }
 
 #[derive(Debug)]
+struct LoadedBrainDetail {
+    memory: Memory,
+    graph: recon::MemoryGraph,
+    typed: Vec<String>,
+    insight: Option<recon::InsightView>,
+    claim: bool,
+    associations: argos_osint_core::brain_browse::Associations,
+}
+
+#[derive(Debug)]
+enum DashboardSnapshot {
+    Logs(Box<super::logs::LogsView>),
+    Jobs(Box<super::jobs::JobsView>),
+    Counts(argos_osint_core::jobs_view::EventCounts),
+}
+
+#[derive(Debug)]
 enum WorkEvent {
+    LogsCleared {
+        outcome: Result<usize, String>,
+    },
+    JobsCleared {
+        outcome: Result<String, String>,
+    },
+    BrainPreviewLoaded {
+        generation: u64,
+        memory_id: String,
+        outcome: Result<Option<recon::InsightView>, String>,
+    },
+    ManualHistoryLoaded {
+        outcome: Result<Vec<recon::Call>, String>,
+    },
+    MemoryDeleted {
+        memory_id: String,
+        outcome: Result<bool, String>,
+    },
+    ReconLoaded {
+        thread_id: String,
+        outcome: Result<Box<super::db_reads::ReconSnapshot>, String>,
+    },
+    ThreadsLoaded {
+        query: String,
+        outcome: Result<(Vec<recon::Thread>, HashMap<String, String>), String>,
+    },
+    IntelListLoaded {
+        key: (String, String, String),
+        outcome: Result<(Vec<String>, String, Vec<AtlasArticleRow>), String>,
+    },
+    AtlasArticlesLoaded {
+        run_id: String,
+        outcome: Result<Vec<AtlasArticleRow>, String>,
+    },
+    ThreadDeleted {
+        thread_id: String,
+        outcome: Result<usize, String>,
+    },
+    DashboardLoaded {
+        module: Option<ModuleId>,
+        key: String,
+        outcome: Result<Box<DashboardSnapshot>, String>,
+    },
+    IntelBriefLoaded {
+        key: (String, String, RelatedScope, Option<String>, usize),
+        outcome: Result<Box<super::db_reads::IntelBriefSnapshot>, String>,
+    },
+    AtlasLoaded {
+        generation: u64,
+        outcome: Result<(Vec<AtlasRunRow>, Vec<String>), String>,
+    },
+    AtlasDeleted {
+        run_id: String,
+        outcome: Result<bool, String>,
+    },
+    BrainDetailLoaded {
+        generation: u64,
+        outcome: Result<Box<LoadedBrainDetail>, String>,
+    },
+    BrainLoaded {
+        generation: u64,
+        outcome: Result<Vec<Memory>, String>,
+    },
+    BrainMaintenance {
+        outcome: Result<(), String>,
+    },
     ProfileLoaded {
         generation: u64,
         filters: argos_osint_core::profile_stats::StatFilters,
@@ -953,6 +1036,7 @@ pub struct App {
     logged_calls: HashSet<String>,
     pub runs: Vec<recon::Run>,
     pub answer_memories: HashMap<String, Vec<Memory>>,
+    answer_memory_summaries: HashMap<String, String>,
     quit_arm: Option<Instant>,
     esc_arm: Option<Instant>,
     press: Option<(u16, u16, Option<Target>)>,
@@ -1162,6 +1246,42 @@ pub struct App {
     pub memory_error: Option<String>,
     /// False until the first memory list read finished.
     pub memories_loaded: bool,
+    background_db: Option<PathBuf>,
+    atlas_deleting: Option<String>,
+    atlas_reading: bool,
+    atlas_generation: u64,
+    intel_reading: bool,
+    intel_related_limit: usize,
+    dashboard_reading: bool,
+    pending_job: Option<String>,
+    jobs_clearing: bool,
+    logs_clearing: bool,
+    threads_deleting: HashSet<String>,
+    memories_deleting: HashSet<String>,
+    recon_reading: bool,
+    threads_reading: bool,
+    intel_list_reading: bool,
+    atlas_articles_reading: bool,
+    manual_reading: bool,
+    manual_pending: bool,
+    threads_pending: bool,
+    recon_pending: bool,
+    intel_list_pending: bool,
+    brain_preview_reading: bool,
+    brain_preview_target: Option<String>,
+    brain_preview_for: Option<String>,
+    brain_cache: Vec<Memory>,
+    brain_generation: u64,
+    brain_reading: Option<u64>,
+    brain_dirty: bool,
+    brain_prefer: Option<String>,
+    brain_detail_generation: u64,
+    brain_detail_reading: bool,
+    brain_detail_target: Option<String>,
+    brain_detail_restore: Option<super::brain_detail::DetailSnapshot>,
+    brain_detail_back: bool,
+    brain_associations: Option<argos_osint_core::brain_browse::Associations>,
+    brain_detail_claim: bool,
     pub graph_summary: String,
     graph_summary_pending: Option<String>,
     /// Request id of the newest graph explanation; older completions are ignored.
@@ -1261,32 +1381,12 @@ impl App {
         paths::ensure_home()?;
         // Finish any configuration commit a previous process left half applied.
         let _ = argos_osint_core::config_commit::recover_at_startup();
-        let store = Store::open(&paths::db_path())?;
+        let store = Store::open_ui(&paths::db_path())?;
         store.recover_runs()?;
-        loop {
-            let report = store.brain_backfill(1000)?;
-            if report.complete || report.processed == 0 || report.failed > 0 {
-                break;
-            }
-        }
-        let threads = store.list_threads("")?;
-        let thread_states = threads
-            .iter()
-            .map(|t| {
-                Ok((
-                    t.id.clone(),
-                    store.latest_run_state(&t.id)?.unwrap_or_default(),
-                ))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
-        let selected_thread = store
-            .last_thread()?
-            .or_else(|| threads.first().map(|t| t.id.clone()));
-        let messages = selected_thread
-            .as_ref()
-            .map(|id| store.list_messages(id))
-            .transpose()?
-            .unwrap_or_default();
+        let threads = Vec::new();
+        let thread_states = HashMap::new();
+        let selected_thread = store.last_thread()?;
+        let messages = Vec::new();
         let draft = selected_thread
             .as_ref()
             .and_then(|id| store.get_thread(id).ok().flatten())
@@ -1297,12 +1397,8 @@ impl App {
             .and_then(|id| store.get_thread(id).ok().flatten())
             .map(|t| t.scroll.max(0) as usize)
             .unwrap_or_default();
-        let calls = selected_thread
-            .as_ref()
-            .map(|id| store.all_calls_for_thread(id))
-            .transpose()?
-            .unwrap_or_default();
-        let manual_runs = store.manual_calls()?;
+        let calls = Vec::new();
+        let manual_runs: Vec<recon::Call> = Vec::new();
         let manual_run_pos = manual_runs.len().saturating_sub(1);
         let osint_result = manual_runs
             .get(manual_run_pos)
@@ -1311,8 +1407,8 @@ impl App {
             .iter()
             .map(|tool| store.tool_enabled(tool.id))
             .collect::<Result<Vec<_>>>()?;
-        let memories = store.list_memories()?;
-        let memory_total = memories.len();
+        let memories = Vec::new();
+        let memory_total = 0;
         let auth = AuthFile::load()?;
         let settings = SettingsFile::load()?;
         let recon_default = provider::role_secret(&auth, &settings, "recon")?;
@@ -1401,6 +1497,7 @@ impl App {
             logged_calls: HashSet::new(),
             runs: Vec::new(),
             answer_memories: HashMap::new(),
+            answer_memory_summaries: HashMap::new(),
             quit_arm: None,
             esc_arm: None,
             press: None,
@@ -1571,7 +1668,43 @@ impl App {
             brain_detail: Default::default(),
             memory_total,
             memory_error: None,
-            memories_loaded: true,
+            memories_loaded: false,
+            background_db: Some(paths::db_path()),
+            atlas_deleting: None,
+            atlas_reading: false,
+            atlas_generation: 0,
+            intel_reading: false,
+            intel_related_limit: 20,
+            dashboard_reading: false,
+            pending_job: None,
+            jobs_clearing: false,
+            logs_clearing: false,
+            threads_deleting: HashSet::new(),
+            memories_deleting: HashSet::new(),
+            recon_reading: false,
+            threads_reading: false,
+            intel_list_reading: false,
+            atlas_articles_reading: false,
+            manual_reading: false,
+            manual_pending: false,
+            threads_pending: false,
+            recon_pending: false,
+            intel_list_pending: false,
+            brain_preview_reading: false,
+            brain_preview_target: None,
+            brain_preview_for: None,
+            brain_cache: Vec::new(),
+            brain_generation: 0,
+            brain_reading: None,
+            brain_dirty: true,
+            brain_prefer: None,
+            brain_detail_generation: 0,
+            brain_detail_reading: false,
+            brain_detail_target: None,
+            brain_detail_restore: None,
+            brain_detail_back: false,
+            brain_associations: None,
+            brain_detail_claim: true,
             graph_summary: String::new(),
             graph_summary_pending: None,
             graph_summary_request: String::new(),
@@ -1593,6 +1726,9 @@ impl App {
         };
 
         let _ = app.store.atlas_park_running();
+        app.refresh_threads()?;
+        app.refresh_selected()?;
+        app.request_manual_history();
         app.load_atlas();
         app.atlas_auto_next = app.store.atlas_auto_next().ok().flatten();
         app.load_home_draft();
@@ -1623,17 +1759,11 @@ impl App {
     }
 
     pub fn insight_summary(&self, memory_id: &str) -> Option<String> {
-        let insight = self.store.insight_for_memory(memory_id).ok().flatten()?;
-        let mut lines = vec![insight.presentation()];
-        lines.push(format!(
-            "{} evidence link{}",
-            insight.sources.len(),
-            if insight.sources.len() == 1 { "" } else { "s" }
-        ));
-        if !insight.related.is_empty() {
-            lines.push(format!("Related: {}", insight.related.join(", ")));
+        if self.background_db.is_some() {
+            return self.answer_memory_summaries.get(memory_id).cloned();
         }
-        Some(lines.join("\n"))
+        let insight = self.store.insight_for_memory(memory_id).ok().flatten()?;
+        Some(super::db_reads::format_insight_summary(&insight))
     }
 
     fn push_log(&mut self, level: &str, text: impl Into<String>) {
@@ -1664,7 +1794,7 @@ impl App {
         }
         let first = self.dashboards_at.is_none() && !self.logs.loaded;
         self.dashboards_at = Some(Instant::now());
-        if first {
+        if first && self.background_db.is_none() {
             let _ = self.store.prune_events(super::logs::RETENTION_HOURS);
         }
         if self.module == Some(ModuleId::Intel) && self.intel_page == IntelPage::Briefing {
@@ -1674,7 +1804,13 @@ impl App {
             Some(ModuleId::Logs) => self.reload_logs(),
             Some(ModuleId::Jobs) => self.reload_jobs(),
             Some(ModuleId::System) => self.reload_profile(),
-            _ => self.logs.refresh_counts(&self.store),
+            _ => {
+                if self.background_db.is_some() {
+                    self.request_dashboard_snapshot();
+                } else {
+                    self.logs.refresh_counts(&self.store);
+                }
+            }
         }
         true
     }
@@ -1717,6 +1853,10 @@ impl App {
     }
 
     pub(crate) fn reload_logs(&mut self) {
+        if self.background_db.is_some() {
+            self.request_dashboard_snapshot();
+            return;
+        }
         self.logs.reload(&self.store);
         let (room, width) = super::logs::list_geometry(super::ui::body_rect(self));
         self.logs.reveal(room, width);
@@ -1731,9 +1871,71 @@ impl App {
     }
 
     pub(crate) fn reload_jobs(&mut self) {
+        if self.background_db.is_some() {
+            self.request_dashboard_snapshot();
+            return;
+        }
         self.jobs.reload(&self.store);
         let room = super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
         super::jobs::reveal(&mut self.jobs, room);
+    }
+
+    fn dashboard_read_key(&self) -> String {
+        match self.module {
+            Some(ModuleId::Jobs) => format!(
+                "{:?}:{:?}:{:?}",
+                self.jobs.filter(),
+                self.jobs.selected().map(|j| &j.id),
+                self.pending_job,
+            ),
+            Some(ModuleId::Logs) => format!("{:?}", self.logs.filter()),
+            _ => String::new(),
+        }
+    }
+
+    fn request_dashboard_snapshot(&mut self) {
+        if self.dashboard_reading {
+            return;
+        }
+        let Some(db) = self.background_db.clone() else {
+            return;
+        };
+        self.dashboard_reading = true;
+        let module = self.module;
+        let key = self.dashboard_read_key();
+        let mut logs = self.logs.clone();
+        let mut jobs = self.jobs.clone();
+        let pending_job = self.pending_job.clone();
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::open_profile_reader(&db)
+                .and_then(|store| {
+                    store.connection().execute_batch("BEGIN")?;
+                    Ok(Box::new(match module {
+                        Some(ModuleId::Logs) => {
+                            logs.reload(&store);
+                            DashboardSnapshot::Logs(Box::new(logs))
+                        }
+                        Some(ModuleId::Jobs) => {
+                            if let Some(id) = pending_job {
+                                if !jobs.focus_job(&store, &id) {
+                                    jobs.error = Some("Job history expired".into());
+                                }
+                            } else {
+                                jobs.reload(&store);
+                            }
+                            DashboardSnapshot::Jobs(Box::new(jobs))
+                        }
+                        _ => DashboardSnapshot::Counts(store.event_counts()?),
+                    }))
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::DashboardLoaded {
+                module,
+                key,
+                outcome,
+            });
+        });
     }
 
     /// Jobs → Logs prefiltered to the job and its descendants, keeping a
@@ -1752,6 +1954,11 @@ impl App {
 
     /// Logs → Jobs for a job id (selected event's job, or the return path).
     fn open_job(&mut self, id: &str) -> Result<String> {
+        if self.background_db.is_some() {
+            self.pending_job = Some(id.into());
+            self.select(ModuleId::Jobs.index());
+            return Ok(format!("Loading job {}…", super::logs::short_id(id)));
+        }
         self.select(ModuleId::Jobs.index());
         if self.jobs.focus_job(&self.store, id) {
             let room = super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
@@ -1815,6 +2022,7 @@ impl App {
     }
 
     pub fn go_home(&mut self) {
+        self.pending_job = None;
         self.flush_draft();
         let _ = self.flush_home_draft();
         self.overlay = Overlay::None;
@@ -2899,6 +3107,11 @@ impl App {
     }
 
     pub(crate) fn select(&mut self, index: usize) {
+        if ModuleId::ALL[index] != ModuleId::Jobs {
+            self.pending_job = None;
+        }
+        self.brain_detail_target = None;
+        self.brain_detail_generation = self.brain_detail_generation.wrapping_add(1);
         self.flush_draft();
         let _ = self.flush_home_draft();
         self.launcher_sel = index;
@@ -2939,7 +3152,11 @@ impl App {
             self.dashboards_at = Some(Instant::now());
         }
         if self.module == Some(ModuleId::Jobs) {
-            self.atlas_runs = self.store.atlas_list_runs().unwrap_or_default();
+            if self.background_db.is_some() {
+                self.load_atlas();
+            } else {
+                self.atlas_runs = self.store.atlas_list_runs().unwrap_or_default();
+            }
             self.reload_jobs();
             self.dashboards_at = Some(Instant::now());
         }
@@ -3142,6 +3359,24 @@ impl App {
     }
 
     fn sync_selected_insight(&mut self) {
+        if self.background_db.is_some() && self.brain_list_mode == BrainListMode::List {
+            self.brain_preview_target = if self.module == Some(ModuleId::Brain)
+                && matches!(self.focus, Target::Memory(_))
+            {
+                self.memories
+                    .get(self.memory_sel)
+                    .filter(|m| !m.id.starts_with("actor-group:"))
+                    .map(|m| m.id.clone())
+            } else {
+                None
+            };
+            if self.brain_preview_for == self.brain_preview_target {
+                return;
+            }
+            self.selected_insight = None;
+            self.request_brain_preview();
+            return;
+        }
         if self.module != Some(ModuleId::Brain) || self.brain_list_mode != BrainListMode::List {
             return;
         }
@@ -3156,6 +3391,35 @@ impl App {
     }
 
     fn refresh_threads(&mut self) -> Result<()> {
+        if let Some(db) = self.background_db.clone() {
+            if self.threads_reading {
+                self.threads_pending = true;
+                return Ok(());
+            }
+            self.threads_reading = true;
+            let query = self.recon_search.clone();
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                let outcome = Store::open_profile_reader(&db)
+                    .and_then(|store| {
+                        store.connection().execute_batch("BEGIN")?;
+                        let rows = store.list_threads(&query)?;
+                        let states = rows
+                            .iter()
+                            .map(|t| {
+                                Ok((
+                                    t.id.clone(),
+                                    store.latest_run_state(&t.id)?.unwrap_or_default(),
+                                ))
+                            })
+                            .collect::<Result<_>>()?;
+                        Ok((rows, states))
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::ThreadsLoaded { query, outcome });
+            });
+            return Ok(());
+        }
         self.threads = self.store.list_threads(&self.recon_search)?;
         self.thread_states = self
             .threads
@@ -3173,6 +3437,31 @@ impl App {
             .and_then(|id| self.threads.iter().position(|t| &t.id == id))
             .unwrap_or(0);
         Ok(())
+    }
+
+    fn request_brain_preview(&mut self) {
+        if self.brain_preview_reading {
+            return;
+        }
+        let (Some(db), Some(id)) = (
+            self.background_db.clone(),
+            self.brain_preview_target.clone(),
+        ) else {
+            return;
+        };
+        self.brain_preview_reading = true;
+        let generation = self.brain_generation;
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::open_profile_reader(&db)
+                .and_then(|store| store.insight_for_memory(&id))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::BrainPreviewLoaded {
+                generation,
+                memory_id: id,
+                outcome,
+            });
+        });
     }
 
     fn filtered_tool_ids(&self) -> Vec<usize> {
@@ -3308,7 +3597,16 @@ impl App {
             .ok_or_else(|| anyhow::anyhow!("Thread not found"))?;
         self.store.select_thread(id)?;
         self.selected_thread = Some(id.into());
-        self.messages = self.store.list_messages(id)?;
+        if self.background_db.is_none() {
+            self.messages = self.store.list_messages(id)?;
+        } else {
+            self.messages.clear();
+            self.calls.clear();
+            self.investigation_events.clear();
+            self.runs.clear();
+            self.answer_memories.clear();
+            self.answer_memory_summaries.clear();
+        }
         self.refresh_selected()?;
         self.input = thread.draft;
         self.scrolls.chat = thread.scroll.max(0) as usize;
@@ -3663,6 +3961,46 @@ impl App {
 
     /// Load Intel bulletin articles for the active category, run day, and search.
     pub fn load_intel(&mut self) {
+        if let Some(db) = self.background_db.clone() {
+            if self.intel_list_reading {
+                self.intel_list_pending = true;
+                return;
+            }
+            self.intel_list_reading = true;
+            if !INTEL_CATEGORIES.contains(&self.intel_category.as_str()) {
+                self.intel_category = INTEL_CATEGORIES[0].into();
+            }
+            let key = (
+                self.intel_category.clone(),
+                self.intel_day.clone(),
+                self.intel_search.clone(),
+            );
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                let outcome = Store::open_profile_reader(&db)
+                    .and_then(|store| {
+                        store.connection().execute_batch("BEGIN")?;
+                        let days = store.atlas_run_days()?;
+                        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                        let day = if days.contains(&key.1) {
+                            key.1.clone()
+                        } else if days.contains(&today) {
+                            today
+                        } else {
+                            days.first().cloned().unwrap_or_default()
+                        };
+                        let articles = if day.is_empty() {
+                            Vec::new()
+                        } else {
+                            store.atlas_articles_for_intel(&key.0, &day, &key.2)?
+                        };
+                        Ok((days, day, articles))
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::IntelListLoaded { key, outcome });
+            });
+            return;
+        }
         if argos_osint_core::osint::wikipedia_rsp::cached_index().is_none() {
             if let Ok(Some(raw)) = self
                 .store
@@ -3754,6 +4092,7 @@ impl App {
     }
 
     fn open_intel_briefing(&mut self) {
+        self.intel_related_limit = 20;
         let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
             self.status = "No article selected".into();
             return;
@@ -3829,6 +4168,10 @@ impl App {
     /// Reload the shared stage views of the current brief chain; when a
     /// stage committed since the last poll, reload the briefing content.
     pub(crate) fn refresh_intel_brief_stages(&mut self) -> bool {
+        if self.background_db.is_some() {
+            self.refresh_intel_briefing();
+            return false;
+        }
         let Some(job) = self.intel_brief_job.clone() else {
             self.intel_brief_stages.clear();
             return false;
@@ -3878,6 +4221,46 @@ impl App {
     }
 
     fn refresh_intel_briefing(&mut self) {
+        if let Some(db) = self.background_db.clone() {
+            if self.intel_reading
+                || self.module != Some(ModuleId::Intel)
+                || self.intel_page != IntelPage::Briefing
+            {
+                return;
+            }
+            let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
+                return;
+            };
+            self.intel_reading = true;
+            let job = self.intel_brief_job.clone();
+            let scope = self.related_scope;
+            let limit = self.intel_related_limit;
+            let key = (
+                article.run_id.clone(),
+                article.id.clone(),
+                scope,
+                job.clone(),
+                limit,
+            );
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                let outcome = Store::open_profile_reader(&db)
+                    .and_then(|store| {
+                        store.connection().execute_batch("BEGIN")?;
+                        super::db_reads::IntelBriefSnapshot::read(
+                            &store,
+                            &article,
+                            scope,
+                            job.as_deref(),
+                            limit,
+                        )
+                        .map(Box::new)
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::IntelBriefLoaded { key, outcome });
+            });
+            return;
+        }
         self.intel_extraction_progress = None;
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
             self.intel_evidence_confidence = None;
@@ -4113,6 +4496,13 @@ impl App {
     }
 
     fn load_atlas(&mut self) {
+        if let Some(db) = self.background_db.clone() {
+            self.atlas_generation = self.atlas_generation.wrapping_add(1);
+            if !self.atlas_reading {
+                self.request_atlas_snapshot(db);
+            }
+            return;
+        }
         let selected = self
             .atlas_runs
             .get(self.atlas_run_sel)
@@ -4133,6 +4523,42 @@ impl App {
             self.atlas_state = "idle".into();
         }
         self.dismiss_pruned_atlas(&removed, selected.as_deref(), &news_run);
+    }
+
+    fn request_atlas_snapshot(&mut self, db: PathBuf) {
+        self.atlas_reading = true;
+        let generation = self.atlas_generation;
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::open_light(&db)
+                .and_then(|store| {
+                    let removed = store.atlas_prune_expired()?;
+                    Ok((store.atlas_list_runs()?, removed))
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::AtlasLoaded {
+                generation,
+                outcome,
+            });
+        });
+    }
+
+    fn request_atlas_articles(&mut self) {
+        if self.atlas_articles_reading {
+            return;
+        }
+        let Some(db) = self.background_db.clone() else {
+            return;
+        };
+        self.atlas_articles_reading = true;
+        let run_id = self.atlas_news_run.clone();
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::open_profile_reader(&db)
+                .and_then(|store| store.atlas_list_articles(&run_id))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::AtlasArticlesLoaded { run_id, outcome });
+        });
     }
 
     fn on_atlas_history(&self) -> bool {
@@ -4224,13 +4650,11 @@ impl App {
     }
 
     fn feed_to_article_row(&self, feed: &atlas::FeedArticle) -> AtlasArticleRow {
-        if let Ok(rows) = self.store.atlas_recent_articles() {
-            if let Some(mut row) = rows.into_iter().find(|row| row.id == feed.id) {
-                if !feed.category.trim().is_empty() {
-                    row.category = atlas::category_tag(&feed.category).into();
-                }
-                return row;
+        if let Ok(Some(mut row)) = self.store.atlas_latest_article_by_id(&feed.id) {
+            if !feed.category.trim().is_empty() {
+                row.category = atlas::category_tag(&feed.category).into();
             }
+            return row;
         }
         let run_id = self
             .atlas_runs
@@ -4297,10 +4721,14 @@ impl App {
             }
         }
         self.store
-            .atlas_list_runs()
+            .connection()
+            .query_row(
+                "SELECT substr(started_at,1,10) FROM atlas_runs WHERE id=?1",
+                [run_id],
+                |r| r.get::<_, String>(0),
+            )
             .ok()
-            .and_then(|runs| runs.into_iter().find(|run| run.id == run_id))
-            .and_then(|run| (run.started_at.len() >= 10).then(|| run.started_at[..10].to_string()))
+            .filter(|day| day.len() == 10)
     }
 
     fn delete_atlas_run(&mut self) -> Result<String> {
@@ -4310,9 +4738,32 @@ impl App {
         if run.state == "running" {
             anyhow::bail!("Pause the pipeline before deleting this run");
         }
+        if let Some(db) = self.background_db.clone() {
+            anyhow::ensure!(
+                self.atlas_deleting.is_none(),
+                "A cycle deletion is already in progress"
+            );
+            self.atlas_deleting = Some(run.id.clone());
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                let outcome = Store::open_light(&db)
+                    .and_then(|store| store.atlas_delete_run(&run.id))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::AtlasDeleted {
+                    run_id: run.id,
+                    outcome,
+                });
+            });
+            return Ok("Deleting cycle…".into());
+        }
         self.store.atlas_delete_run(&run.id)?;
+        self.finish_atlas_delete(&run.id);
+        Ok("Run deleted".into())
+    }
+
+    fn finish_atlas_delete(&mut self, run_id: &str) {
         self.reload_memories();
-        if self.atlas_news_run == run.id {
+        if self.atlas_news_run == run_id {
             self.atlas_news = false;
             self.atlas_focus = None;
             self.atlas_articles.clear();
@@ -4328,7 +4779,6 @@ impl App {
                 self.atlas_state = "idle".into();
             }
         }
-        Ok("Run deleted".into())
     }
 
     fn open_atlas_news(&mut self) {
@@ -4337,11 +4787,16 @@ impl App {
             return;
         };
         let id = run.id.clone();
-        self.atlas_articles = self.store.atlas_list_articles(&id).unwrap_or_default();
+        if self.background_db.is_none() {
+            self.atlas_articles = self.store.atlas_list_articles(&id).unwrap_or_default();
+        } else {
+            self.atlas_articles.clear();
+        }
         self.atlas_news_run = id;
         self.atlas_news = true;
         self.claim_mark = None;
         self.atlas_article_sel = 0;
+        self.request_atlas_articles();
         self.scrolls.atlas_news = 0;
         self.focus_highlighted_country();
         self.overlay = Overlay::None;
@@ -4771,6 +5226,450 @@ impl App {
 
     fn on_work_event(&mut self, event: WorkEvent) -> bool {
         match event {
+            WorkEvent::LogsCleared { outcome } => {
+                self.logs_clearing = false;
+                match outcome {
+                    Ok(count) => {
+                        self.logs.open.clear();
+                        self.logs.scroll = 0;
+                        self.logs.follow = true;
+                        self.push_log("info", "Events cleared (jobs, results, and memories kept)");
+                        self.status = format!("Cleared {count} events");
+                        self.reload_logs();
+                    }
+                    Err(error) => self.status = format!("Could not clear events: {error}"),
+                }
+                true
+            }
+            WorkEvent::JobsCleared { outcome } => {
+                self.jobs_clearing = false;
+                self.status =
+                    outcome.unwrap_or_else(|error| format!("Could not clear jobs: {error}"));
+                self.reload_jobs();
+                self.refresh_intel_briefing();
+                true
+            }
+            WorkEvent::BrainPreviewLoaded {
+                generation,
+                memory_id,
+                outcome,
+            } => {
+                self.brain_preview_reading = false;
+                if self.brain_list_mode != BrainListMode::List
+                    || self.module != Some(ModuleId::Brain)
+                {
+                    return false;
+                }
+                if generation != self.brain_generation
+                    || self.brain_preview_target.as_deref() != Some(&memory_id)
+                {
+                    self.request_brain_preview();
+                    return true;
+                }
+                if let Ok(insight) = outcome {
+                    self.selected_insight = insight;
+                    self.brain_preview_for = Some(memory_id);
+                }
+                true
+            }
+            WorkEvent::ManualHistoryLoaded { outcome } => {
+                self.manual_reading = false;
+                if std::mem::take(&mut self.manual_pending) {
+                    self.request_manual_history();
+                    return true;
+                }
+                match outcome {
+                    Ok(rows) => {
+                        let selected = self
+                            .manual_runs
+                            .get(self.manual_run_pos)
+                            .map(|c| c.id.clone());
+                        self.manual_runs = rows;
+                        self.manual_run_pos = selected
+                            .and_then(|id| self.manual_runs.iter().position(|c| c.id == id))
+                            .unwrap_or(self.manual_runs.len().saturating_sub(1));
+                        if let Some(call) = self.manual_runs.get(self.manual_run_pos) {
+                            self.osint_result = call.result.clone().map(|r| (call.id.clone(), r));
+                        }
+                    }
+                    Err(error) => self.status = format!("Could not refresh tool history: {error}"),
+                }
+                true
+            }
+            WorkEvent::MemoryDeleted { memory_id, outcome } => {
+                self.memories_deleting.remove(&memory_id);
+                match outcome {
+                    Ok(_) => {
+                        if self.brain_detail.memory_id() == Some(memory_id.as_str()) {
+                            self.leave_brain_detail();
+                        }
+                        self.brain_cache.retain(|m| m.id != memory_id);
+                        self.filter_memory_cache();
+                        self.reload_memories();
+                        self.status = "Memory deleted".into();
+                    }
+                    Err(error) => self.status = format!("Could not delete memory: {error}"),
+                }
+                true
+            }
+            WorkEvent::ReconLoaded { thread_id, outcome } => {
+                self.recon_reading = false;
+                // Logging already committed on the worker, even if its view
+                // snapshot is superseded. Retain those IDs to avoid replay.
+                if let Ok(snapshot) = &outcome {
+                    self.logged_calls
+                        .extend(snapshot.logged_calls.iter().cloned());
+                }
+                if std::mem::take(&mut self.recon_pending) {
+                    let _ = self.refresh_selected();
+                    return true;
+                }
+                if self.selected_thread.as_deref() != Some(&thread_id) {
+                    let _ = self.refresh_selected();
+                    return true;
+                }
+                match outcome {
+                    Ok(snapshot) => {
+                        self.messages = snapshot.messages;
+                        self.investigation_events = snapshot.events;
+                        self.calls = snapshot.calls;
+                        self.runs = snapshot.runs;
+                        self.answer_memories = snapshot.memories;
+                        self.answer_memory_summaries = snapshot.memory_summaries;
+                        if let Some(error) = snapshot.log_error {
+                            self.logs.error =
+                                Some(format!("Could not record tool history: {error}"));
+                        }
+                        self.note_finished_calls();
+                    }
+                    Err(error) => self.status = format!("Could not refresh investigation: {error}"),
+                }
+                true
+            }
+            WorkEvent::ThreadsLoaded { query, outcome } => {
+                self.threads_reading = false;
+                if std::mem::take(&mut self.threads_pending) {
+                    let _ = self.refresh_threads();
+                    return true;
+                }
+                if query != self.recon_search {
+                    let _ = self.refresh_threads();
+                    return true;
+                }
+                match outcome {
+                    Ok((rows, states)) => {
+                        let selected = self.threads.get(self.thread_sel).map(|t| t.id.clone());
+                        self.threads = rows;
+                        self.thread_states = states;
+                        self.thread_sel = selected
+                            .and_then(|id| self.threads.iter().position(|t| t.id == id))
+                            .unwrap_or(self.thread_sel.min(self.threads.len().saturating_sub(1)));
+                        if matches!(self.focus, Target::Thread(_)) {
+                            self.focus = if self.threads.is_empty() {
+                                Target::Field(FieldId::ReconSearch)
+                            } else {
+                                Target::Thread(self.thread_sel)
+                            };
+                        }
+                    }
+                    Err(error) => {
+                        self.status = format!("Could not refresh investigations: {error}")
+                    }
+                }
+                true
+            }
+            WorkEvent::IntelListLoaded { key, outcome } => {
+                self.intel_list_reading = false;
+                if std::mem::take(&mut self.intel_list_pending) {
+                    self.load_intel();
+                    return true;
+                }
+                if key
+                    != (
+                        self.intel_category.clone(),
+                        self.intel_day.clone(),
+                        self.intel_search.clone(),
+                    )
+                {
+                    self.load_intel();
+                    return true;
+                }
+                match outcome {
+                    Ok((days, day, mut rows)) => {
+                        let selected = self.intel_articles.get(self.intel_sel).cloned();
+                        if self.intel_page == IntelPage::Briefing {
+                            if let Some(article) = &selected {
+                                if !rows
+                                    .iter()
+                                    .any(|a| a.id == article.id && a.run_id == article.run_id)
+                                {
+                                    rows.insert(0, article.clone());
+                                }
+                            }
+                        }
+                        self.intel_days = days;
+                        self.intel_day = day;
+                        self.intel_articles = rows;
+                        self.intel_sel = selected
+                            .and_then(|selected| {
+                                self.intel_articles.iter().position(|a| {
+                                    a.id == selected.id && a.run_id == selected.run_id
+                                })
+                            })
+                            .unwrap_or(
+                                self.intel_sel
+                                    .min(self.intel_articles.len().saturating_sub(1)),
+                            );
+                        if matches!(self.focus, Target::IntelArticle(_)) {
+                            self.focus = if self.intel_articles.is_empty() {
+                                Target::Field(FieldId::IntelSearch)
+                            } else {
+                                Target::IntelArticle(self.intel_sel)
+                            };
+                        }
+                        if self.intel_page == IntelPage::Briefing {
+                            self.refresh_intel_briefing();
+                        }
+                    }
+                    Err(error) => self.status = format!("Could not refresh bulletin: {error}"),
+                }
+                true
+            }
+            WorkEvent::AtlasArticlesLoaded { run_id, outcome } => {
+                self.atlas_articles_reading = false;
+                if !self.atlas_news {
+                    return false;
+                }
+                if run_id != self.atlas_news_run {
+                    self.request_atlas_articles();
+                    return true;
+                }
+                match outcome {
+                    Ok(rows) => {
+                        self.atlas_articles = rows;
+                        self.atlas_article_sel = self
+                            .atlas_article_sel
+                            .min(self.atlas_articles.len().saturating_sub(1));
+                    }
+                    Err(error) => {
+                        self.status = format!("Could not refresh cycle articles: {error}")
+                    }
+                }
+                true
+            }
+            WorkEvent::ThreadDeleted { thread_id, outcome } => {
+                self.threads_deleting.remove(&thread_id);
+                match outcome {
+                    Ok(removed) => {
+                        self.finish_thread_delete(&thread_id);
+                        self.status =
+                            format!("Investigation deleted; {removed} brain memories removed");
+                    }
+                    Err(error) => self.status = format!("Could not delete investigation: {error}"),
+                }
+                true
+            }
+            WorkEvent::DashboardLoaded {
+                module,
+                key,
+                outcome,
+            } => {
+                self.dashboard_reading = false;
+                if module != self.module || key != self.dashboard_read_key() {
+                    self.request_dashboard_snapshot();
+                    return true;
+                }
+                match outcome {
+                    Ok(snapshot) => match *snapshot {
+                        DashboardSnapshot::Logs(snapshot) => {
+                            self.logs.accept(*snapshot);
+                            let (room, width) =
+                                super::logs::list_geometry(super::ui::body_rect(self));
+                            self.logs.reveal(room, width);
+                            let max = self.logs.scroll_max(room, width);
+                            self.logs.scroll = if self.logs.follow {
+                                max
+                            } else {
+                                self.logs.scroll.min(max)
+                            };
+                        }
+                        DashboardSnapshot::Jobs(snapshot) => {
+                            let select_snapshot = self.pending_job.take().is_some();
+                            if select_snapshot {
+                                self.jobs.status = snapshot.status;
+                                self.jobs.app = snapshot.app.clone();
+                                self.jobs.search = snapshot.search.clone();
+                            }
+                            self.jobs.accept(*snapshot, select_snapshot);
+                            if matches!(self.focus, Target::JobRow(_)) {
+                                self.focus = Target::JobRow(self.jobs.sel);
+                            }
+                            let room =
+                                super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
+                            super::jobs::reveal(&mut self.jobs, room);
+                        }
+                        DashboardSnapshot::Counts(counts) => self.logs.counts = counts,
+                    },
+                    Err(error) => match self.module {
+                        Some(ModuleId::Logs) => self.logs.error = Some(error),
+                        Some(ModuleId::Jobs) => self.jobs.error = Some(error),
+                        _ => {}
+                    },
+                }
+                true
+            }
+            WorkEvent::IntelBriefLoaded { key, outcome } => {
+                self.intel_reading = false;
+                let current = self.intel_articles.get(self.intel_sel).map(|a| {
+                    (
+                        a.run_id.clone(),
+                        a.id.clone(),
+                        self.related_scope,
+                        self.intel_brief_job.clone(),
+                        self.intel_related_limit,
+                    )
+                });
+                if self.module != Some(ModuleId::Intel) || self.intel_page != IntelPage::Briefing {
+                    return false;
+                }
+                if current.as_ref() != Some(&key) {
+                    self.refresh_intel_briefing();
+                    return true;
+                }
+                match outcome {
+                    Ok(snapshot) => {
+                        self.intel_actors = snapshot.actors;
+                        self.intel_actor_state = snapshot.actor_state;
+                        self.intel_metadata_present = snapshot.metadata_present;
+                        self.intel_publisher_prior = snapshot.publisher_prior;
+                        self.intel_extraction_progress = snapshot.progress;
+                        self.intel_insight_lifecycle = snapshot.lifecycle;
+                        self.intel_refresh_status = snapshot.status;
+                        self.intel_evidence_confidence = snapshot.confidence;
+                        let related_selected = self
+                            .intel_related
+                            .page
+                            .rows
+                            .get(self.intel_related.sel)
+                            .map(|r| (r.article.run_id.clone(), r.article.id.clone()));
+                        let old_scroll = self.intel_related.scroll;
+                        self.intel_related = snapshot.related;
+                        self.intel_related.sel = related_selected
+                            .and_then(|(run, id)| {
+                                self.intel_related
+                                    .page
+                                    .rows
+                                    .iter()
+                                    .position(|r| r.article.run_id == run && r.article.id == id)
+                            })
+                            .unwrap_or(0);
+                        self.intel_related.scroll = old_scroll;
+                        self.intel_claims = snapshot.claims;
+                        self.intel_relations = snapshot.relations;
+                        self.intel_link_explanations = snapshot.explanations;
+                        self.intel_body = snapshot.body;
+                        self.intel_brief_stages = snapshot.stages;
+                        self.intel_brief_outputs = snapshot.outputs;
+                        self.intel_brief_lead_titles = snapshot.lead_titles;
+                        self.intel_brief_publication = snapshot.publication;
+                        if matches!(self.intel_refresh_status.as_str(), "Published" | "Indexed")
+                            || self.intel_refresh_status.starts_with("Previous")
+                        {
+                            self.intel_insights_running.remove(&key.1);
+                        }
+                        self.sync_intel_brief_task_ui();
+                    }
+                    Err(error) => {
+                        self.intel_body_message = format!("Could not refresh brief: {error}");
+                    }
+                }
+                true
+            }
+            WorkEvent::AtlasLoaded {
+                generation,
+                outcome,
+            } => {
+                self.atlas_reading = false;
+                if generation != self.atlas_generation {
+                    if let Some(db) = self.background_db.clone() {
+                        self.request_atlas_snapshot(db);
+                    }
+                    return true;
+                }
+                match outcome {
+                    Ok((runs, removed)) => {
+                        let selected = self
+                            .atlas_runs
+                            .get(self.atlas_run_sel)
+                            .map(|r| r.id.clone());
+                        let news_run = self.atlas_news_run.clone();
+                        self.atlas_runs = runs;
+                        self.atlas_run_sel = selected
+                            .as_ref()
+                            .and_then(|id| self.atlas_runs.iter().position(|r| &r.id == id))
+                            .unwrap_or(
+                                self.atlas_run_sel
+                                    .min(self.atlas_runs.len().saturating_sub(1)),
+                            );
+                        if self.atlas_pause.is_none() {
+                            if let Some(run) = self.atlas_runs.first() {
+                                self.atlas_stats =
+                                    serde_json::from_str(&run.stats_json).unwrap_or_default();
+                                self.atlas_state = run.state.clone();
+                            } else {
+                                self.atlas_stats = Default::default();
+                                self.atlas_state = "idle".into();
+                            }
+                        }
+                        self.dismiss_pruned_atlas(&removed, selected.as_deref(), &news_run);
+                        if !removed.is_empty() {
+                            self.reload_memories();
+                        }
+                    }
+                    Err(error) => {
+                        self.push_log_detail("error", "Atlas: could not refresh history", error)
+                    }
+                }
+                true
+            }
+            WorkEvent::AtlasDeleted { run_id, outcome } => {
+                if self.atlas_deleting.as_deref() != Some(&run_id) {
+                    return false;
+                }
+                self.atlas_deleting = None;
+                match outcome {
+                    Ok(_) => {
+                        self.finish_atlas_delete(&run_id);
+                        self.status = "Run deleted".into();
+                    }
+                    Err(error) => {
+                        self.status = format!("Could not delete cycle: {error}");
+                        self.push_log_detail("error", "Atlas: cycle deletion failed", error);
+                    }
+                }
+                true
+            }
+            WorkEvent::BrainDetailLoaded {
+                generation,
+                outcome,
+            } => {
+                self.on_brain_detail_loaded(generation, outcome);
+                true
+            }
+            WorkEvent::BrainLoaded {
+                generation,
+                outcome,
+            } => {
+                self.on_brain_loaded(generation, outcome);
+                true
+            }
+            WorkEvent::BrainMaintenance { outcome } => {
+                if let Err(error) = outcome {
+                    self.push_log_detail("warn", "Brain: background repair incomplete", error);
+                }
+                self.reload_memories();
+                true
+            }
             WorkEvent::ProfileLoaded {
                 generation,
                 filters,
@@ -4896,7 +5795,9 @@ impl App {
                             );
                         }
                         self.osint_result = Some(value);
-                        if let Ok(runs) = self.store.manual_calls() {
+                        if self.background_db.is_some() {
+                            self.request_manual_history();
+                        } else if let Ok(runs) = self.store.manual_calls() {
                             self.manual_runs = runs;
                             self.manual_run_pos = self.manual_runs.len().saturating_sub(1);
                         }
@@ -5599,6 +6500,38 @@ impl App {
     }
 
     fn refresh_selected(&mut self) -> Result<()> {
+        if let Some(db) = self.background_db.clone() {
+            if self.recon_reading {
+                self.recon_pending = true;
+                return Ok(());
+            }
+            let Some(id) = self.selected_thread.clone() else {
+                return Ok(());
+            };
+            self.recon_reading = true;
+            let logged_calls = self.logged_calls.clone();
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                let outcome = Store::open_profile_reader(&db)
+                    .and_then(|store| {
+                        store.connection().execute_batch("BEGIN")?;
+                        super::db_reads::ReconSnapshot::read(&store, &id)
+                    })
+                    .map(|mut snapshot| {
+                        match Store::open_light(&db) {
+                            Ok(store) => snapshot.record_call_logs(&store, &logged_calls),
+                            Err(error) => snapshot.log_error = Some(error.to_string()),
+                        }
+                        Box::new(snapshot)
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::ReconLoaded {
+                    thread_id: id,
+                    outcome,
+                });
+            });
+            return Ok(());
+        }
         if let Some(tid) = &self.selected_thread {
             self.messages = self.store.list_messages(tid)?;
             self.investigation_events = self.store.list_investigation_events(tid)?;
@@ -5610,8 +6543,29 @@ impl App {
         Ok(())
     }
 
+    fn request_manual_history(&mut self) {
+        if self.manual_reading {
+            self.manual_pending = true;
+            return;
+        }
+        let Some(db) = self.background_db.clone() else {
+            return;
+        };
+        self.manual_reading = true;
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::open_profile_reader(&db)
+                .and_then(|store| store.manual_calls())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::ManualHistoryLoaded { outcome });
+        });
+    }
+
     /// Appends one collapsible System log entry the first time a call has a result.
     fn note_finished_calls(&mut self) {
+        if self.background_db.is_some() {
+            return;
+        }
         let pending: Vec<recon::Call> = self
             .calls
             .iter()
@@ -5649,6 +6603,11 @@ impl App {
 
     /// Graph of the selected list row (list mode only; the detail view owns its graph).
     fn sync_graph(&mut self) {
+        // List rows do not display graphs. Production reads belong to detail
+        // loading, so arrow keys and refresh completion never query a graph.
+        if self.background_db.is_some() && self.brain_list_mode == BrainListMode::List {
+            return;
+        }
         if self.brain_list_mode == BrainListMode::Graph {
             return;
         }
@@ -5675,6 +6634,9 @@ impl App {
             .is_some_and(|id| id.starts_with("actor-group:"))
         {
             return false;
+        }
+        if self.background_db.is_some() {
+            return self.brain_detail_claim;
         }
         // Typed source-claim/inference semantics win over placement heuristics.
         if let Some(kind) = self
@@ -5710,6 +6672,11 @@ impl App {
     /// reload the open Intel article and Brain memory Related lists.
     pub(crate) fn toggle_related_scope(&mut self) {
         self.related_scope = self.related_scope.toggle();
+        if self.background_db.is_some() {
+            self.refresh_intel_briefing();
+            self.status = format!("Related: {}", self.related_scope.label());
+            return;
+        }
         if let Some(article) = self.intel_articles.get(self.intel_sel).cloned() {
             match self.store.related_articles_global(
                 &article.run_id,
@@ -5743,7 +6710,7 @@ impl App {
         };
         self.memory_sel = 0;
         self.scrolls.memories = 0;
-        self.reload_memories();
+        self.filter_memory_cache();
         self.status = format!("Brain kind: {}", brain_kind_label(self.brain_kind));
     }
 
@@ -5754,6 +6721,15 @@ impl App {
     /// Reload the Brain list, keeping the selected memory (by id), Find, and
     /// scroll. A read failure keeps the last good list and reports the error.
     fn reload_memories_selecting(&mut self, prefer: Option<String>) {
+        if self.background_db.is_some() {
+            if prefer.is_some() {
+                self.brain_prefer = prefer;
+            }
+            self.brain_generation = self.brain_generation.wrapping_add(1);
+            self.brain_dirty = true;
+            self.request_memory_snapshot();
+            return;
+        }
         let selected = prefer.or_else(|| {
             self.memories
                 .get(self.memory_sel)
@@ -5782,6 +6758,105 @@ impl App {
                 return;
             }
         }
+        self.restore_memory_selection(selected);
+    }
+
+    fn request_memory_snapshot(&mut self) {
+        if self.module != Some(ModuleId::Brain) || !self.brain_dirty || self.brain_reading.is_some()
+        {
+            return;
+        }
+        let Some(db) = self.background_db.clone() else {
+            return;
+        };
+        let generation = self.brain_generation;
+        self.brain_reading = Some(generation);
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::open_profile_reader(&db)
+                .and_then(|store| {
+                    // One consistent read transaction; concurrent ingest cannot
+                    // produce mixed revisions in the display projection.
+                    store.connection().execute_batch("BEGIN")?;
+                    store.brain_browse_memories(None, "")
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::BrainLoaded {
+                generation,
+                outcome,
+            });
+        });
+    }
+
+    fn on_brain_loaded(&mut self, generation: u64, outcome: Result<Vec<Memory>, String>) {
+        if self.brain_reading != Some(generation) {
+            return;
+        }
+        self.brain_reading = None;
+        if generation != self.brain_generation {
+            self.request_memory_snapshot();
+            return;
+        }
+        self.brain_dirty = false;
+        match outcome {
+            Ok(list) => {
+                self.brain_cache = list;
+                self.brain_preview_for = None;
+                self.memories_loaded = true;
+                if self.memory_error.take().is_some() {
+                    self.push_log("info", "Brain: memories readable again");
+                }
+                self.filter_memory_cache();
+            }
+            Err(message) => {
+                if self.memory_error.as_deref() != Some(&message) {
+                    self.push_log_detail(
+                        "error",
+                        "Brain: could not read memories",
+                        message.clone(),
+                    );
+                }
+                self.memory_error = Some(message);
+                self.status = "Could not read memories; showing the last loaded list".into();
+            }
+        }
+    }
+
+    fn filter_memory_cache(&mut self) {
+        if self.background_db.is_none() {
+            self.reload_memories();
+            return;
+        }
+        let preferred = if self.brain_dirty {
+            self.brain_prefer.clone()
+        } else {
+            self.brain_prefer.take()
+        };
+        let selected =
+            preferred.or_else(|| self.memories.get(self.memory_sel).map(|m| m.id.clone()));
+        let query = self.brain_query.trim().to_lowercase();
+        let eligible = |m: &&Memory| match self.brain_kind {
+            None => true,
+            Some(argos_osint_core::memory_metadata::MemoryKind::Actor) => {
+                m.id.starts_with("actor-group:")
+            }
+            Some(argos_osint_core::memory_metadata::MemoryKind::Claim) => {
+                !m.id.starts_with("actor-group:")
+            }
+            _ => false,
+        };
+        self.memory_total = self.brain_cache.iter().filter(eligible).count();
+        self.memories = self
+            .brain_cache
+            .iter()
+            .filter(eligible)
+            .filter(|m| m.text.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
+        self.restore_memory_selection(selected);
+    }
+
+    fn restore_memory_selection(&mut self, selected: Option<String>) {
         let by_id = selected
             .as_ref()
             .and_then(|id| self.memories.iter().position(|memory| &memory.id == id));
@@ -5814,6 +6889,16 @@ impl App {
         let Some(id) = self.brain_detail.memory_id().map(str::to_string) else {
             return;
         };
+        if self.background_db.is_some() {
+            // A database refresh must not replace an in-flight destination
+            // chosen by the user with the record still visible underneath it.
+            if self.brain_detail_target.is_some() {
+                return;
+            }
+            self.request_brain_detail(&id);
+            self.brain_detail_restore = self.detail_snapshot();
+            return;
+        }
         if id.starts_with("actor-group:") {
             return;
         }
@@ -5828,6 +6913,9 @@ impl App {
     }
 
     fn leave_brain_detail(&mut self) {
+        self.brain_detail_target = None;
+        self.brain_detail_generation = self.brain_detail_generation.wrapping_add(1);
+        self.brain_associations = None;
         self.brain_list_mode = BrainListMode::List;
         self.brain_detail.memory = None;
         self.brain_detail.history.clear();
@@ -5880,6 +6968,10 @@ impl App {
     /// Fetches the destination by id, even when Find hides it. On failure the
     /// current view stays intact. Returns whether the detail opened.
     pub(crate) fn open_memory_detail(&mut self, memory_id: &str) -> bool {
+        if self.background_db.is_some() {
+            self.request_brain_detail(memory_id);
+            return true;
+        }
         if memory_id.starts_with("actor-group:") {
             return self.open_actor_group(memory_id);
         }
@@ -5920,6 +7012,10 @@ impl App {
     }
 
     pub(crate) fn open_actor_group(&mut self, key: &str) -> bool {
+        if self.background_db.is_some() {
+            self.request_brain_detail(key);
+            return true;
+        }
         let group = match self.store.actor_group(key) {
             Ok(Some(group)) => group,
             _ => {
@@ -5956,6 +7052,105 @@ impl App {
         true
     }
 
+    fn request_brain_detail(&mut self, id: &str) {
+        if self.brain_detail_reading && self.brain_detail_target.as_deref() == Some(id) {
+            return;
+        }
+        self.brain_detail_restore = None;
+        self.brain_detail_back = false;
+        self.brain_detail_target = Some(id.to_string());
+        self.brain_detail_generation = self.brain_detail_generation.wrapping_add(1);
+        self.start_brain_detail_read();
+        self.status = "Loading Brain detail…".into();
+    }
+
+    pub(crate) fn brain_refreshing(&self) -> bool {
+        self.brain_reading.is_some()
+    }
+
+    pub(crate) fn intel_bulletin_loading(&self) -> bool {
+        self.intel_list_reading
+    }
+    pub(crate) fn atlas_news_loading(&self) -> bool {
+        self.atlas_articles_reading
+    }
+
+    fn start_brain_detail_read(&mut self) {
+        if self.brain_detail_reading || self.module != Some(ModuleId::Brain) {
+            return;
+        }
+        let (Some(db), Some(id)) = (self.background_db.clone(), self.brain_detail_target.clone())
+        else {
+            return;
+        };
+        self.brain_detail_reading = true;
+        let generation = self.brain_detail_generation;
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::open_profile_reader(&db)
+                .and_then(|store| {
+                    store.connection().execute_batch("BEGIN")?;
+                    load_brain_detail(&store, &id).map(Box::new)
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::BrainDetailLoaded {
+                generation,
+                outcome,
+            });
+        });
+    }
+
+    fn on_brain_detail_loaded(
+        &mut self,
+        generation: u64,
+        outcome: Result<Box<LoadedBrainDetail>, String>,
+    ) {
+        self.brain_detail_reading = false;
+        if generation != self.brain_detail_generation {
+            self.start_brain_detail_read();
+            return;
+        }
+        if self.module != Some(ModuleId::Brain) || self.brain_detail_target.take().is_none() {
+            return;
+        }
+        match outcome {
+            Ok(detail) => {
+                let restore = self.brain_detail_restore.take();
+                if self.brain_detail_back {
+                    self.brain_detail.history.pop();
+                } else if restore.is_none() {
+                    if let Some(snapshot) = self.detail_snapshot() {
+                        if snapshot.memory_id != detail.memory.id {
+                            self.brain_detail.push(snapshot);
+                        }
+                    } else {
+                        self.brain_detail.history.clear();
+                    }
+                }
+                self.brain_associations = Some(detail.associations);
+                self.brain_typed = detail.typed;
+                self.selected_insight = detail.insight;
+                self.brain_detail_claim = detail.claim;
+                self.show_detail(detail.memory, detail.graph, restore.as_ref());
+                self.status = "Brain detail".into();
+            }
+            Err(error) => {
+                if error == "claim unavailable" || error == "actor unavailable" {
+                    if self.brain_detail_back {
+                        self.brain_detail.history.pop();
+                        self.detail_back();
+                        return;
+                    }
+                    if self.brain_detail_restore.is_some() {
+                        self.leave_brain_detail();
+                    }
+                }
+                self.status = format!("Could not load Brain detail: {error}");
+                self.push_log_detail("error", "Brain: could not load detail", error);
+            }
+        }
+    }
+
     fn show_detail(
         &mut self,
         memory: Memory,
@@ -5964,10 +7159,12 @@ impl App {
     ) {
         self.brain_list_mode = BrainListMode::Graph;
         self.brain_graph = graph;
-        self.brain_typed = argos_osint_core::brain_kinds::typed_detail(&self.store, &memory.id)
-            .unwrap_or_default();
+        if self.background_db.is_none() {
+            self.brain_typed = argos_osint_core::brain_kinds::typed_detail(&self.store, &memory.id)
+                .unwrap_or_default();
+            self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
+        }
         self.brain_graph_for = Some(memory.id.clone());
-        self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
         self.graph_summary.clear();
         self.summary_failure = None;
         self.summary_details_open = false;
@@ -5994,13 +7191,14 @@ impl App {
             restore.map_or([None, None, None], |s| s.selected_keys.clone());
         self.request_related(request, &memory.id);
         if actor {
-            let a = self
-                .store
-                .actor_group(&memory.id)
-                .ok()
-                .flatten()
-                .and_then(|g| self.store.actor_group_associations(&g).ok())
-                .unwrap_or_default();
+            let a = self.brain_associations.clone().unwrap_or_else(|| {
+                self.store
+                    .actor_group(&memory.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|g| self.store.actor_group_associations(&g).ok())
+                    .unwrap_or_default()
+            });
             self.graph_summary = format!(
                 "{} claims · {} threads · {} articles",
                 a.claims.len(),
@@ -6023,11 +7221,21 @@ impl App {
     /// otherwise. Late results for another request or memory are dropped.
     fn request_related(&mut self, request: u64, memory_id: &str) {
         let tab = self.brain_detail.related.tab;
+        if self.background_db.is_some() {
+            if let Some(a) = &self.brain_associations {
+                self.on_related(
+                    request,
+                    memory_id,
+                    Ok(association_rows_from(a.clone(), tab)),
+                );
+                return;
+            }
+        }
         if let (Ok(_), Some(db)) = (tokio::runtime::Handle::try_current(), tracked::db_path()) {
             let tx = self.work_tx.clone();
             let memory_id = memory_id.to_string();
             tokio::task::spawn_blocking(move || {
-                let outcome = Store::open(&db)
+                let outcome = Store::open_profile_reader(&db)
                     .and_then(|store| association_rows(&store, &memory_id, tab))
                     .map_err(|e| e.to_string());
                 let _ = tx.send(WorkEvent::Related {
@@ -6092,6 +7300,16 @@ impl App {
     /// Back: the previous detail memory with its selection, focus, and scroll;
     /// at the first detail, the Brain list with its Find and selection.
     fn detail_back(&mut self) {
+        if self.background_db.is_some() {
+            if let Some(snapshot) = self.brain_detail.history.last().cloned() {
+                self.request_brain_detail(&snapshot.memory_id);
+                self.brain_detail_restore = Some(snapshot);
+                self.brain_detail_back = true;
+            } else {
+                self.leave_brain_detail();
+            }
+            return;
+        }
         while let Some(snapshot) = self.brain_detail.history.pop() {
             if snapshot.memory_id.starts_with("actor-group:") {
                 let depth = self.brain_detail.history.len();
@@ -6229,6 +7447,17 @@ impl App {
     }
 
     fn more_related_articles(&mut self) -> Result<String> {
+        if self.background_db.is_some() {
+            self.intel_related_limit = self
+                .intel_related
+                .page
+                .rows
+                .len()
+                .max(self.intel_related_limit)
+                .saturating_add(20);
+            self.refresh_intel_briefing();
+            return Ok("Loading more related articles…".into());
+        }
         let offset = self.intel_related.page.rows.len();
         let article = self
             .intel_articles
@@ -6609,13 +7838,22 @@ impl App {
                     self.status = "Actor groups are read-only".into();
                     return;
                 }
-                self.store.delete_memory(&memory.id).map(|_| {
-                    self.reload_memories();
-                    "Memory deleted".into()
-                })
+                if self.background_db.is_some() {
+                    self.request_memory_delete(memory.id.clone())
+                } else {
+                    self.store.delete_memory(&memory.id).map(|_| {
+                        self.reload_memories();
+                        "Memory deleted".into()
+                    })
+                }
             }
             ButtonId::NewThread => self.new_thread().map(|_| "New investigation".into()),
             ButtonId::DeleteThread => {
+                if self.background_db.is_some() {
+                    let result = self.request_thread_delete();
+                    self.report(result);
+                    return;
+                }
                 let Some(id) = self.selected_thread.clone() else {
                     self.status = "No thread selected".into();
                     return;
@@ -6867,6 +8105,22 @@ impl App {
             ButtonId::AtlasResume => self.resume_atlas_run(),
             ButtonId::ClearLog => {
                 // Scope: durable events only. Jobs, task results and memories stay.
+                if let Some(db) = self.background_db.clone() {
+                    if self.logs_clearing {
+                        self.status = "Events cleanup is already in progress".into();
+                        return;
+                    }
+                    self.logs_clearing = true;
+                    let tx = self.work_tx.clone();
+                    std::thread::spawn(move || {
+                        let outcome = Store::open_light(&db)
+                            .and_then(|store| store.clear_events())
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(WorkEvent::LogsCleared { outcome });
+                    });
+                    self.status = "Clearing events…".into();
+                    return;
+                }
                 let cleared = self.store.clear_events();
                 self.logs.open.clear();
                 self.logs.scroll = 0;
@@ -6917,6 +8171,28 @@ impl App {
             }
             ButtonId::JobsOpenSource => self.open_job_source(),
             ButtonId::JobsClearOld => {
+                if let Some(db) = self.background_db.clone() {
+                    if self.jobs_clearing {
+                        self.status = "Jobs cleanup is already in progress".into();
+                        return;
+                    }
+                    self.jobs_clearing = true;
+                    let tx = self.work_tx.clone();
+                    std::thread::spawn(move || {
+                        let outcome = Store::open_light(&db)
+                            .and_then(|store| store.clear_old_jobs())
+                            .map(|counts| {
+                                format!(
+                                    "Cleared {} jobs · stopped {}",
+                                    counts.cleared, counts.stopped
+                                )
+                            })
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(WorkEvent::JobsCleared { outcome });
+                    });
+                    self.status = "Clearing old jobs…".into();
+                    return;
+                }
                 let result = self.store.clear_old_jobs().map(|counts| {
                     format!(
                         "Cleared {} jobs · stopped {}",
@@ -6925,7 +8201,7 @@ impl App {
                 });
                 self.jobs.scroll = 0;
                 self.jobs.detail_scroll = 0;
-                self.jobs.reload(&self.store);
+                self.reload_jobs();
                 self.refresh_intel_briefing();
                 self.sync_intel_brief_task_ui();
                 self.set_focus(Target::Button(ButtonId::JobsClearOld));
@@ -7629,7 +8905,13 @@ impl App {
                 self.toggle_log();
             }
             Target::JobRow(index) => {
-                self.jobs.select(index, &self.store);
+                if self.background_db.is_some() {
+                    self.pending_job = None;
+                    self.jobs.select_cached(index);
+                    self.reload_jobs();
+                } else {
+                    self.jobs.select(index, &self.store);
+                }
                 self.set_focus(Target::JobRow(self.jobs.sel));
             }
             Target::JobDetail => self.set_focus(Target::JobDetail),
@@ -7805,7 +9087,7 @@ impl App {
             && self.module == Some(ModuleId::Brain)
             && self.brain_list_mode == BrainListMode::List
         {
-            self.reload_memories();
+            self.filter_memory_cache();
         }
         if self.focus == Target::Field(FieldId::IntelSearch) && self.module == Some(ModuleId::Intel)
         {
@@ -7870,6 +9152,9 @@ impl App {
             return Ok("Thread renamed".into());
         }
         if input == ":delete" || input == ":delete-with-insights" {
+            if self.background_db.is_some() {
+                return self.request_thread_delete();
+            }
             let id = self
                 .selected_thread
                 .clone()
@@ -7927,7 +9212,82 @@ impl App {
         Ok(())
     }
 
+    fn request_thread_delete(&mut self) -> Result<String> {
+        let id = self
+            .selected_thread
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No thread selected"))?;
+        anyhow::ensure!(
+            self.threads_deleting.insert(id.clone()),
+            "This investigation is already being deleted"
+        );
+        self.running
+            .remove(&id)
+            .inspect(|cancel| cancel.store(true, Ordering::Relaxed));
+        let db = self.background_db.clone().expect("production database");
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::open_light(&db)
+                .and_then(|mut store| {
+                    let removed = store.deletion_consequences(&id)?.len();
+                    store.delete_thread(&id, true)?;
+                    Ok(removed)
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::ThreadDeleted {
+                thread_id: id,
+                outcome,
+            });
+        });
+        Ok("Deleting investigation…".into())
+    }
+
+    fn request_memory_delete(&mut self, id: String) -> Result<String> {
+        anyhow::ensure!(
+            self.memories_deleting.insert(id.clone()),
+            "This memory is already being deleted"
+        );
+        let db = self.background_db.clone().expect("production database");
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::open_light(&db)
+                .and_then(|store| store.delete_memory(&id))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::MemoryDeleted {
+                memory_id: id,
+                outcome,
+            });
+        });
+        Ok("Deleting memory…".into())
+    }
+
+    fn finish_thread_delete(&mut self, id: &str) {
+        self.tab_ids.retain(|tid| tid != id);
+        self.tab_recently_closed.retain(|tid| tid != id);
+        self.tab_last_active.remove(id);
+        self.tab_unreads.remove(id);
+        self.save_session_tabs();
+        self.threads.retain(|t| t.id != id);
+        if self.selected_thread.as_deref() == Some(id) {
+            self.selected_thread = None;
+            self.messages.clear();
+            self.investigation_events.clear();
+            self.calls.clear();
+            self.runs.clear();
+            self.answer_memories.clear();
+            self.answer_memory_summaries.clear();
+            self.input.clear();
+            self.recon_chat = false;
+        }
+        let _ = self.refresh_threads();
+        self.reload_memories();
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Esc && self.brain_detail_target.is_some() {
+            self.brain_detail_target = None;
+            self.brain_detail_generation = self.brain_detail_generation.wrapping_add(1);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
             return self.on_interrupt();
@@ -8508,6 +9868,11 @@ impl App {
             }
             self.module = Some(ModuleId::Brain);
             self.launcher_sel = ModuleId::Brain.index();
+            if self.background_db.is_some() {
+                self.request_brain_detail(&snapshot.memory_id);
+                self.brain_detail_restore = Some(snapshot);
+                return;
+            }
             let restored = if snapshot.memory_id.starts_with("actor-group:") {
                 let depth = self.brain_detail.history.len();
                 let opened = self.open_actor_group(&snapshot.memory_id);
@@ -8797,7 +10162,15 @@ impl App {
         if self.jobs.rows.is_empty() {
             return;
         }
-        self.jobs.move_by(delta, &self.store);
+        if self.background_db.is_some() {
+            self.pending_job = None;
+            let index =
+                (self.jobs.sel as i32 + delta).clamp(0, self.jobs.rows.len() as i32 - 1) as usize;
+            self.jobs.select_cached(index);
+            self.reload_jobs();
+        } else {
+            self.jobs.move_by(delta, &self.store);
+        }
         let room = super::jobs::table_room(super::ui::body_rect(self), &self.jobs);
         super::jobs::reveal(&mut self.jobs, room);
         self.set_focus(Target::JobRow(self.jobs.sel));
@@ -8925,13 +10298,18 @@ impl App {
         if !self.draft_dirty {
             return;
         }
-        self.draft_dirty = false;
         if let Some(id) = &self.selected_thread {
-            let _ = self.store.save_draft(
-                id,
-                &self.input,
-                i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
-            );
+            if self
+                .store
+                .save_draft(
+                    id,
+                    &self.input,
+                    i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
+                )
+                .is_ok()
+            {
+                self.draft_dirty = false;
+            }
         }
     }
 
@@ -8950,16 +10328,15 @@ impl App {
         if !self.home_draft_dirty {
             return Ok(());
         }
-        self.home_draft_dirty = false;
         let state = HomeDraftState {
             prompt: self.home_draft.clone(),
             cursor: self.home_draft_cursor,
             scroll: self.home_draft_scroll,
             report_mode: self.home_draft_report_mode,
         };
-        if let Ok(json) = serde_json::to_string(&state) {
-            let _ = self.store.app_state_set("home_recon_draft", &json);
-        }
+        let json = serde_json::to_string(&state)?;
+        self.store.app_state_set("home_recon_draft", &json)?;
+        self.home_draft_dirty = false;
         Ok(())
     }
 
@@ -9204,6 +10581,20 @@ pub async fn run(mut app: App) -> Result<()> {
     // Process liveness for the job registry: jobs left running by a process
     // that exited become interrupted; cross-process Cancel reaches this one.
     let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
+    // One-time retention cleanup is separate from the elected, resumable
+    // backfill pool. Neither belongs to startup or the terminal event loop.
+    let repair_tx = app.work_tx.clone();
+    let repair_db = paths::db_path();
+    std::thread::spawn(move || {
+        let outcome = (|| -> Result<()> {
+            let store = Store::open_light(&repair_db)?;
+            store.prune_events(super::logs::RETENTION_HOURS)?;
+            store.clear_old_jobs()?;
+            Ok(())
+        })()
+        .map_err(|e| e.to_string());
+        let _ = repair_tx.send(WorkEvent::BrainMaintenance { outcome });
+    });
     // Committed memory changes from any writer (Atlas, Recon, Intel Recon, the
     // index/repair workers, other processes) reload Brain, coalesced per poll.
     let mut memory_watch = argos_osint_core::store::MemoryChangeWatcher::new(&app.store);
@@ -9382,12 +10773,25 @@ fn work_event(thread_id: &str, event: recon::TurnEvent) -> WorkEvent {
 
 fn pump(app: &mut App) -> bool {
     let mut dirty = false;
-    while let Ok(message) = app.provider_rx.try_recv() {
+    let started = Instant::now();
+    for _ in 0..32 {
+        let Ok(message) = app.provider_rx.try_recv() else {
+            break;
+        };
         app.on_provider_event(message);
         dirty = true;
+        if started.elapsed() >= Duration::from_millis(8) {
+            break;
+        }
     }
-    while let Ok(message) = app.work_rx.try_recv() {
+    for _ in 0..32 {
+        let Ok(message) = app.work_rx.try_recv() else {
+            break;
+        };
         dirty |= app.on_work_event(message);
+        if started.elapsed() >= Duration::from_millis(8) {
+            break;
+        }
     }
     dirty |= flush_streams(app);
     dirty |= app.poll_atlas_auto();
@@ -9443,6 +10847,13 @@ pub(crate) fn association_rows(
     } else {
         store.claim_associations(id)?
     };
+    Ok(association_rows_from(a, tab))
+}
+
+fn association_rows_from(
+    a: argos_osint_core::brain_browse::Associations,
+    tab: RelatedTab,
+) -> Vec<AssociationItem> {
     let row = |memory_id: String, title: String, reason: &str, target: AssociationTarget| {
         AssociationItem {
             key: memory_id,
@@ -9499,7 +10910,53 @@ pub(crate) fn association_rows(
             ));
         }
     }
-    Ok(rows)
+    rows
+}
+
+fn load_brain_detail(store: &Store, id: &str) -> Result<LoadedBrainDetail> {
+    if id.starts_with("actor-group:") {
+        let g = store
+            .actor_group(id)?
+            .ok_or_else(|| anyhow::anyhow!("actor unavailable"))?;
+        let associations = store.actor_group_associations(&g)?;
+        let graph = Store::actor_group_graph_from(&g, associations.clone());
+        let memory = Memory {
+            id: g.key(),
+            text: g.display_name,
+            category: "actor group".into(),
+            pinned: false,
+            created_at: String::new(),
+            source: MemorySource {
+                app: "brain-actor-group".into(),
+                conversation_id: g.name_key,
+                message_id: None,
+                reference: None,
+            },
+        };
+        Ok(LoadedBrainDetail {
+            memory,
+            graph,
+            typed: Vec::new(),
+            insight: None,
+            claim: false,
+            associations,
+        })
+    } else {
+        anyhow::ensure!(store.is_browse_claim(id)?, "claim unavailable");
+        let memory = store
+            .get_memory(id)?
+            .ok_or_else(|| anyhow::anyhow!("claim unavailable"))?;
+        Ok(LoadedBrainDetail {
+            graph: store.graph_for_memory(id)?,
+            typed: argos_osint_core::brain_kinds::typed_detail(store, id)?,
+            insight: store.insight_for_memory(id)?,
+            claim: store
+                .memory_insight_kind(id)
+                .is_none_or(|kind| kind == "claim"),
+            associations: store.claim_associations(id)?,
+            memory,
+        })
+    }
 }
 
 pub(crate) fn brain_kind_label(
@@ -9608,6 +11065,7 @@ mod tests {
             logged_calls: HashSet::new(),
             runs: Vec::new(),
             answer_memories: HashMap::new(),
+            answer_memory_summaries: HashMap::new(),
             quit_arm: None,
             esc_arm: None,
             press: None,
@@ -9741,6 +11199,42 @@ mod tests {
             memory_total: 0,
             memory_error: None,
             memories_loaded: true,
+            background_db: None,
+            atlas_deleting: None,
+            atlas_reading: false,
+            atlas_generation: 0,
+            intel_reading: false,
+            intel_related_limit: 20,
+            dashboard_reading: false,
+            pending_job: None,
+            jobs_clearing: false,
+            logs_clearing: false,
+            threads_deleting: HashSet::new(),
+            memories_deleting: HashSet::new(),
+            recon_reading: false,
+            threads_reading: false,
+            intel_list_reading: false,
+            atlas_articles_reading: false,
+            manual_reading: false,
+            manual_pending: false,
+            threads_pending: false,
+            recon_pending: false,
+            intel_list_pending: false,
+            brain_preview_reading: false,
+            brain_preview_target: None,
+            brain_preview_for: None,
+            brain_cache: Vec::new(),
+            brain_generation: 0,
+            brain_reading: None,
+            brain_dirty: false,
+            brain_prefer: None,
+            brain_detail_generation: 0,
+            brain_detail_reading: false,
+            brain_detail_target: None,
+            brain_detail_restore: None,
+            brain_detail_back: false,
+            brain_associations: None,
+            brain_detail_claim: true,
             graph_summary: String::new(),
             graph_summary_pending: None,
             graph_summary_request: String::new(),
@@ -13059,6 +14553,342 @@ mod tests {
         }
         let json = serde_json::json!({"width": width, "height": height, "cells": cells});
         std::fs::write(format!("{dir}/{name}.json"), json.to_string()).unwrap();
+    }
+
+    #[test]
+    fn brain_background_delivery_preserves_input_selection_and_last_good_data() {
+        let mut app = app();
+        for text in ["alpha one", "beta two", "alpha three"] {
+            app.store
+                .add_user_claim(
+                    text,
+                    "fact",
+                    MemorySource {
+                        app: "user".into(),
+                        conversation_id: "fixture".into(),
+                        message_id: None,
+                        reference: None,
+                    },
+                )
+                .unwrap();
+        }
+        app.brain_cache = app.store.brain_browse_memories(None, "").unwrap();
+        app.background_db = Some(PathBuf::from("controlled-worker"));
+        app.module = Some(ModuleId::Atlas);
+        app.reload_memories();
+        assert!(
+            app.brain_dirty && app.brain_reading.is_none(),
+            "hidden Brain only invalidates its cache"
+        );
+        app.module = Some(ModuleId::Brain);
+        app.filter_memory_cache();
+        let selected = app.memories[0].id.clone();
+        let old_generation = app.brain_generation;
+        app.brain_reading = Some(old_generation);
+        for _ in 0..20 {
+            app.reload_memories();
+        }
+        assert_eq!(
+            app.brain_reading,
+            Some(old_generation),
+            "at most one pending read"
+        );
+        app.set_focus(Target::Field(FieldId::BrainQuery));
+        type_text(&mut app, "alpha");
+        assert_eq!(app.brain_query, "alpha");
+        assert_eq!(
+            app.memories.len(),
+            2,
+            "Find uses cached rows during a delayed read"
+        );
+        app.module = Some(ModuleId::Atlas);
+        let cache = app.brain_cache.clone();
+        app.on_brain_loaded(old_generation, Ok(Vec::new()));
+        assert_eq!(
+            app.brain_cache, cache,
+            "stale completion cannot clear a newer snapshot"
+        );
+        assert!(app.brain_reading.is_none() && app.brain_dirty);
+        app.module = Some(ModuleId::Brain);
+        app.brain_reading = Some(app.brain_generation);
+        app.brain_query.clear();
+        app.brain_prefer = Some(selected.clone());
+        app.on_brain_loaded(app.brain_generation, Ok(cache));
+        assert_eq!(app.memories[app.memory_sel].id, selected);
+        let shown = app.memories.clone();
+        app.brain_generation += 1;
+        app.brain_reading = Some(app.brain_generation);
+        app.on_brain_loaded(app.brain_generation, Err("database is busy".into()));
+        assert_eq!(app.memories, shown);
+        assert_eq!(app.memory_error.as_deref(), Some("database is busy"));
+    }
+
+    #[test]
+    fn background_event_bursts_leave_time_for_navigation() {
+        let mut app = app();
+        for _ in 0..100 {
+            app.work_tx
+                .send(WorkEvent::BrainLoaded {
+                    generation: 0,
+                    outcome: Ok(Vec::new()),
+                })
+                .unwrap();
+        }
+        assert!(pump(&mut app));
+        assert!(
+            app.work_rx.len() >= 68,
+            "a frame handles at most 32 work events"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Brain));
+        assert!(
+            !app.work_rx.is_empty(),
+            "navigation runs while a burst is still queued"
+        );
+    }
+
+    #[test]
+    fn recalled_memory_popup_uses_the_recon_snapshot_after_database_loss() {
+        let mut app = app();
+        let memory = app
+            .store
+            .add_user_claim(
+                "Northwind closed the port",
+                "fact",
+                MemorySource {
+                    app: "user".into(),
+                    conversation_id: "fixture".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        app.store.connection().execute(
+            "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES ('popup',?1,'Northwind','closed','the port','transport','fact',0.8,'','')",
+            [&memory.id],
+        ).unwrap();
+        let expected = app.insight_summary(&memory.id).unwrap();
+        let thread = app.store.new_thread("Port investigation").unwrap();
+        let run = app
+            .store
+            .new_run(&thread.id, "turn", "fixture", "fixture")
+            .unwrap();
+        let answer = app
+            .store
+            .add_answer(
+                &thread.id,
+                &run.id,
+                "Port findings",
+                &[],
+                std::slice::from_ref(&memory.id),
+            )
+            .unwrap();
+        let snapshot = super::super::db_reads::ReconSnapshot::read(&app.store, &thread.id).unwrap();
+        app.answer_memories = snapshot.memories;
+        app.answer_memory_summaries = snapshot.memory_summaries;
+        app.background_db = Some(PathBuf::from("unavailable-database"));
+        app.store = Store::memory().unwrap();
+        assert_eq!(
+            app.insight_summary(&memory.id).as_deref(),
+            Some(expected.as_str())
+        );
+        app.module = Some(ModuleId::Recon);
+        app.overlay = Overlay::Memories {
+            message_id: answer.id,
+        };
+        let text = buffer_text(&render(&mut app, 160, 50));
+        assert!(text.contains("Northwind · closed → the port"), "{text}");
+        assert!(text.contains("0 evidence links"), "{text}");
+    }
+
+    #[test]
+    fn background_log_cleanup_keeps_navigation_and_failed_view() {
+        let mut app = app();
+        app.select(ModuleId::Logs.index());
+        app.logs.open.insert("retained-event".into());
+        app.logs.scroll = 3;
+        app.logs.follow = false;
+        app.background_db = Some(PathBuf::from("controlled-worker"));
+        app.logs_clearing = true;
+        app.activate_button(ButtonId::ClearLog);
+        assert!(app.status.contains("already in progress"));
+        app.set_focus(Target::Button(ButtonId::LogsFollow));
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert_eq!(app.module, Some(ModuleId::Brain));
+        app.on_work_event(WorkEvent::LogsCleared {
+            outcome: Err("database busy".into()),
+        });
+        assert!(!app.logs_clearing);
+        assert!(app.logs.open.contains("retained-event"));
+        assert_eq!(app.logs.scroll, 3);
+        assert!(!app.logs.follow);
+        assert!(app.status.contains("Could not clear events"));
+        assert_eq!(app.module, Some(ModuleId::Brain));
+    }
+
+    #[test]
+    fn background_job_destination_selects_the_requested_record() {
+        let mut app = app();
+        register(&app, "job-one", "recon", "First investigation");
+        register(&app, "job-two", "atlas", "Second cycle");
+        app.select(ModuleId::Jobs.index());
+        let first = app.jobs.selected().unwrap().id.clone();
+        let destination = app
+            .jobs
+            .rows
+            .iter()
+            .find(|j| j.id != first)
+            .unwrap()
+            .id
+            .clone();
+        let mut snapshot = app.jobs.clone();
+        assert!(snapshot.focus_job(&app.store, &destination));
+        app.background_db = Some(PathBuf::from("controlled-worker"));
+        app.pending_job = Some(destination.clone());
+        app.dashboard_reading = true;
+        let key = app.dashboard_read_key();
+        app.on_work_event(WorkEvent::DashboardLoaded {
+            module: Some(ModuleId::Jobs),
+            key,
+            outcome: Ok(Box::new(DashboardSnapshot::Jobs(Box::new(snapshot)))),
+        });
+        assert_eq!(app.jobs.selected().unwrap().id, destination);
+        assert_eq!(app.focus, Target::JobRow(app.jobs.sel));
+        assert!(app.pending_job.is_none());
+    }
+
+    #[test]
+    fn brain_async_detail_back_and_escape_drop_late_navigation() {
+        let mut app = app();
+        brain_world(&app);
+        let groups = app.store.actor_groups().unwrap();
+        let first = groups[0].key();
+        let second = groups[1].key();
+        let a = load_brain_detail(&app.store, &first).unwrap();
+        let b = load_brain_detail(&app.store, &second).unwrap();
+        app.module = Some(ModuleId::Brain);
+        app.background_db = Some(PathBuf::from("controlled-worker"));
+        app.brain_detail_reading = true;
+        app.brain_detail_target = Some(first.clone());
+        app.on_brain_detail_loaded(0, Ok(Box::new(a)));
+        assert_eq!(app.brain_detail.memory_id(), Some(first.as_str()));
+        app.scrolls.path = 2;
+        app.brain_detail_reading = true;
+        app.brain_detail_target = Some(second.clone());
+        app.refresh_open_detail();
+        assert_eq!(
+            app.brain_detail_target.as_deref(),
+            Some(second.as_str()),
+            "refresh preserves pending navigation"
+        );
+        app.on_brain_detail_loaded(0, Ok(Box::new(b)));
+        assert_eq!(app.brain_detail.history.len(), 1);
+        let snapshot = app.brain_detail.history.last().unwrap().clone();
+        app.brain_detail_restore = Some(snapshot.clone());
+        app.brain_detail_back = true;
+        app.brain_detail_reading = true;
+        app.brain_detail_target = Some(first.clone());
+        let a = load_brain_detail(&app.store, &first).unwrap();
+        app.on_brain_detail_loaded(0, Ok(Box::new(a)));
+        assert!(app.brain_detail.history.is_empty());
+        assert_eq!(app.scrolls.path, snapshot.path_scroll);
+        let a = load_brain_detail(&app.store, &second).unwrap();
+        app.brain_detail_reading = true;
+        app.brain_detail_target = Some(second);
+        app.leave_brain_detail();
+        app.on_brain_detail_loaded(0, Ok(Box::new(a)));
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+    }
+
+    #[test]
+    fn dump_db_responsiveness_screens() {
+        let Some(dir) = std::env::var("ARGOS_SCREEN_DIR").ok() else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 32),
+            (80, 24),
+            (60, 18),
+            (40, 20),
+        ] {
+            let mut app = app();
+            app.module = Some(ModuleId::Brain);
+            app.memories_loaded = false;
+            app.background_db = Some(PathBuf::from("controlled-worker"));
+            app.brain_reading = Some(0);
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("brain-loading-{width}x{height}"),
+                width,
+                height,
+            );
+            for text in [
+                "Northwind Ferries suspended the Baltic crossing",
+                "The council requested a safety assessment",
+            ] {
+                app.store
+                    .add_user_claim(
+                        text,
+                        "fact",
+                        MemorySource {
+                            app: "user".into(),
+                            conversation_id: "fixture".into(),
+                            message_id: None,
+                            reference: None,
+                        },
+                    )
+                    .unwrap();
+            }
+            let rows = app.store.brain_browse_memories(None, "").unwrap();
+            app.on_brain_loaded(0, Ok(rows));
+            app.brain_reading = Some(1);
+            app.focus = Target::Memory(0);
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("brain-refreshing-{width}x{height}"),
+                width,
+                height,
+            );
+            app.brain_reading = None;
+            app.memory_error = Some("Database busy; retry the refresh".into());
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("brain-read-error-{width}x{height}"),
+                width,
+                height,
+            );
+            app.module = Some(ModuleId::Intel);
+            app.intel_page = IntelPage::Bulletin;
+            app.intel_list_reading = true;
+            app.intel_articles.clear();
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("intel-bulletin-loading-{width}x{height}"),
+                width,
+                height,
+            );
+            app.module = Some(ModuleId::Atlas);
+            app.atlas_page = AtlasPage::Runs;
+            app.atlas_news = true;
+            app.atlas_news_run = "fixture".into();
+            app.atlas_articles_reading = true;
+            app.atlas_articles.clear();
+            app.focus = Target::Button(ButtonId::AtlasWorld);
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("atlas-news-loading-{width}x{height}"),
+                width,
+                height,
+            );
+        }
     }
 
     #[test]

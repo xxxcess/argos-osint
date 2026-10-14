@@ -57,6 +57,8 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | [tui-overhaul-verification-2026-10-10.md](tui-overhaul-verification-2026-10-10.md) | Shared navigation, imagery, Configs and transcript verification |
 | [tui-verification-brain-intel-2026-10-14.md](tui-verification-brain-intel-2026-10-14.md) | Claims/Actor browsing, ingest Related, retired article reports and reviewed viewport evidence |
 | [ui-interaction-audit.md](ui-interaction-audit.md) | TUI surfaces, fields, focus, overflow |
+| [tui-database-responsiveness.md](tui-database-responsiveness.md) | Database/index path audit, background snapshot ownership and contention handling |
+| [tui-verification-responsiveness-2026-10-14.md](tui-verification-responsiveness-2026-10-14.md) | Scoped responsiveness visual, interaction and association verification |
 | [investigation-harness.md](investigation-harness.md) | Unified investigation task graph |
 | [jev-decision-gates.md](jev-decision-gates.md) | Tool-picker decisions transport |
 

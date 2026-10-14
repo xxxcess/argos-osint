@@ -1,0 +1,147 @@
+{
+  "base_commit": "eaf94c77cc3903cede2b62b260b43d0a30f98265",
+  "verification_ledger": "docs/tui-verification-responsiveness-2026-10-14.md",
+  "evidence_kind": "Actual TestBackend cell reconstruction, image reviewed",
+  "font": "/System/Library/Fonts/Supplemental/Courier New.ttf",
+  "pillow_version": "12.3.0",
+  "python_version": "3.10.10 (main, Mar 21 2023, 13:41:39) [Clang 14.0.6 ]",
+  "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d",
+  "implementation_sha256": {
+    "crates/argos-osint-bin/src/tui/app.rs": "c9f61643c25cb4a015781679169c2b062fb4cefc24e4c8ed2bfb64f941152dcd",
+    "crates/argos-osint-bin/src/tui/db_reads.rs": "dba14d87c66469c59368b88607e2a6f4f5df35922e08c372e996e37362da25fc",
+    "crates/argos-osint-bin/src/tui/jobs.rs": "4f39be1431f8e3abd308f57084cb192003cacabb7949ee897077726a0c997238",
+    "crates/argos-osint-bin/src/tui/logs.rs": "5b67496cb9167a44a664f153a58c423fd6ad814dee5986a1dd54099e60f181fe",
+    "crates/argos-osint-bin/src/tui/mod.rs": "2ef3b2c1da18b4a2648a152de969afb0dc71ec44c92c21e32caf0ed8233869c1",
+    "crates/argos-osint-bin/src/tui/ui.rs": "93a43c88da008d12f09720c630454926d26a0249dae9b2be366a88ef7b9ccc39",
+    "crates/argos-osint-core/src/atlas_metadata.rs": "6ba624f3633051df7e32b5091363bc20a1221106b8a8ea07f64d68a46370368b",
+    "crates/argos-osint-core/src/brain_browse.rs": "589c96c303e5a5c8d1558e441d5284b59ab0cc8359bb39042259727042edd849",
+    "crates/argos-osint-core/src/brain_browse_tests.rs": "2b0630e04efa1f24867fc58859b56ce882cb885e3b5b5f1b450dde0829df2088",
+    "crates/argos-osint-core/src/intel_recon/brief_stages.rs": "ec7df6027536face080b5287dae69eb34466ea0ff575684feea16a0f2656fc47",
+    "crates/argos-osint-core/src/nlp/engine.rs": "d6becf12859f0eb647f57866ed849456e79fb5be1978da8add553bc867d27e93",
+    "crates/argos-osint-core/src/nlp/mod.rs": "a242927fce5122479f800c2b8d0f2d2ee0f73c4f7f773719edd9217a22d75f67",
+    "crates/argos-osint-core/src/nlp/tests.rs": "799062eb2d8ec0aa55fb7afad065dd456251723499408f3fff4a7551a457d27a",
+    "crates/argos-osint-core/src/provider_adapters/google.rs": "cb76f8a1d1904fc80d2c75bd409e007006fc38432e5127ec263ac9124b0c4de0",
+    "crates/argos-osint-core/src/provider_adapters/tests.rs": "03704a59000e3fd6b61ac8a82fb880c426d902a5308859ad9940ce3f93ad051d",
+    "crates/argos-osint-core/src/related_articles.rs": "556b183e4111f39862826e65274f9ff625e0b43b7a9eb7a359a5aed6f8d32ec5",
+    "crates/argos-osint-core/src/scheduler.rs": "480039fcef729cd3f45e4b696850ffa3ed1d0299091e70109c3ecada82479e8a",
+    "crates/argos-osint-core/src/store.rs": "456281cf632c39beba99a84f234d8ffb164671940ac7d64a3196c7514de194a6"
+  },
+  "selected_fixtures": [
+    {
+      "name": "brain-refreshing-160x50",
+      "width": 160,
+      "height": 50,
+      "cells_sha256": "e91ede2196ae8be55364ffdfd7e647d1250b3285dbcfa4bc500b6589367d309d",
+      "png_sha256": "0ebfb0de7f1d4431d19aeb3f792697f8c395e8b5c98aee5258818fb7509174e0",
+      "capture_test": "dump_db_responsiveness_screens"
+    },
+    {
+      "name": "brain-read-error-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "9f60dacea8bf30bd663cbef9719e3e3c81869adf4a6655bbefb6674a85089210",
+      "png_sha256": "35eebcd59b89ae6f33169b26aa5dbce6e6c1b940da4e5faf73d3e17b32e02f4b",
+      "capture_test": "dump_db_responsiveness_screens"
+    },
+    {
+      "name": "brain-actor-graph-160x50",
+      "width": 160,
+      "height": 50,
+      "cells_sha256": "e0d2676d113c1e2dab21bb9c7cb48a430fcb8c1ec4c47316e9ac868d1a4ad14b",
+      "png_sha256": "b094507f9aae853b5aa7034254c0562e449b9cd6a605c1bdab019e587c7658ff",
+      "capture_test": "dump_brain_kind_screens"
+    },
+    {
+      "name": "intel-related-loading-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "be6387829927a2c175d9b99c5d246ad0b373cf4c68d808f148cb140b9b79aa34",
+      "png_sha256": "332634a727a23ae712ddea4ffcc9f60a0cd63aabb8156cf2ccea9b5b3c73d623",
+      "capture_test": "dump_atlas_related_screens"
+    }
+  ],
+  "reviewed_scopes": [
+    {
+      "test": "dump_db_responsiveness_screens",
+      "include": [
+        "brain-*",
+        "intel-bulletin-loading-*",
+        "atlas-news-loading-*"
+      ],
+      "sizes": [
+        "160x50",
+        "120x40",
+        "100x32",
+        "80x24",
+        "60x18",
+        "40x20"
+      ],
+      "all": false,
+      "reason": "Background database reads: initial loading, retained refreshing/error rows and pending Intel/Atlas views",
+      "artifact_count": 30
+    },
+    {
+      "test": "dump_brain_kind_screens",
+      "include": [
+        "brain-actor-graph-*",
+        "brain-claim-split-*"
+      ],
+      "sizes": [
+        "160x50",
+        "120x40",
+        "100x32",
+        "80x24",
+        "60x18",
+        "40x20"
+      ],
+      "all": false,
+      "reason": "Claim and Actor detail delivery with a shared graph/Related association snapshot",
+      "artifact_count": 12
+    },
+    {
+      "test": "dump_atlas_related_screens",
+      "include": [
+        "intel-related-*"
+      ],
+      "sizes": [
+        "160x50",
+        "80x24"
+      ],
+      "all": false,
+      "reason": "Cached Intel Related pages plus empty, loading and unavailable states after background delivery",
+      "artifact_count": 8
+    },
+    {
+      "test": "dump_overhaul_screens",
+      "include": [
+        "app-4-*",
+        "app-5-*",
+        "recon-transcript-*"
+      ],
+      "sizes": [
+        "160x50",
+        "80x24"
+      ],
+      "all": false,
+      "reason": "Representative Jobs, Logs and Recon consumers of shared background database snapshots; unchanged geometry",
+      "artifact_count": 6
+    },
+    {
+      "test": "streamed_insight_progress_screens",
+      "include": [
+        "stream-jobs-3-receiving-*",
+        "stream-logs-*"
+      ],
+      "sizes": [
+        "160x50",
+        "120x40"
+      ],
+      "all": false,
+      "reason": "Loaded Jobs detail and durable Logs rows after cached dashboard delivery",
+      "artifact_count": 4
+    }
+  ],
+  "visual_review": "Complete within recorded scope and limitations",
+  "live_terminal": "Not exercised",
+  "live_providers": "Not exercised"
+}

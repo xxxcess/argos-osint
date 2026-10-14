@@ -1133,6 +1133,7 @@ where
         max_output_tokens: Some(scope.completion_tokens.unwrap_or(8192)),
         json_object: true,
         reasoning: scope.reasoning,
+        ..Default::default()
     };
     let declaration = Arc::new(
         serde_json::to_string(&scope.declaration(settings, insight_policy)).unwrap_or_default(),
@@ -1596,6 +1597,7 @@ where
                 max_output_tokens: stage_tokens,
                 json_object: false,
                 reasoning: stage_reasoning,
+                ..Default::default()
             },
         ))
         .unwrap_or_default(),
@@ -1858,6 +1860,7 @@ where
                             max_output_tokens: Some(stage_tokens.unwrap_or(2048)),
                             json_object: true,
                             reasoning: stage_reasoning,
+                            ..Default::default()
                         },
                     )
                     .await

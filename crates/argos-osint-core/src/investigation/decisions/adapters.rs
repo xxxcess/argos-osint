@@ -38,21 +38,37 @@ impl DecisionAdapterKind {
     }
 }
 
-/// Resolve the best execution adapter for a target model and provider.
+/// Resolve the execution adapter for a target model on a provider's
+/// canonical endpoint from resolved capabilities (documented profiles,
+/// cached catalog evidence and observed rejections), never from provider-name
+/// heuristics. Unknown capabilities fall back to validated text.
 pub fn resolve_adapter(model: &str, provider: &str) -> DecisionAdapterKind {
-    if is_decisions_model(model) {
-        return DecisionAdapterKind::NativeDecisions;
-    }
+    let kind = crate::provider::normalize_kind(provider);
+    let base = crate::provider::preset(&kind)
+        .map(|p| p.base_url)
+        .unwrap_or("");
+    let caps = crate::provider_capabilities::resolve(
+        crate::provider_capabilities::AdapterId::for_kind(&kind),
+        base,
+        model,
+    );
+    adapter_for_caps(&caps)
+}
 
-    let model_lower = model.to_ascii_lowercase();
-    let provider_lower = provider.to_ascii_lowercase();
-
-    if provider_lower == "openai"
-        || model_lower.starts_with("gpt-4o")
-        || model_lower.starts_with("gpt-4.5")
+/// Adapter kind implied by resolved capabilities.
+pub fn adapter_for_caps(
+    caps: &crate::provider_capabilities::ResolvedCapabilities,
+) -> DecisionAdapterKind {
+    if caps.decision_only
+        || is_decisions_model(&caps.model)
+            && caps.adapter == crate::provider_capabilities::AdapterId::OpenRouter
     {
+        DecisionAdapterKind::NativeDecisions
+    } else if caps.strict_schema.is_supported() || caps.native_schema.is_supported() {
         DecisionAdapterKind::StrictJsonSchema
-    } else if provider_lower == "openrouter" || provider_lower == "grok" {
+    } else if caps.output_tool_usable() {
+        DecisionAdapterKind::OutputTool
+    } else if caps.json_mode.is_supported() {
         DecisionAdapterKind::JsonMode
     } else {
         DecisionAdapterKind::ValidatedText

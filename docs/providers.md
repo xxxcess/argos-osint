@@ -147,3 +147,47 @@ Insight stages stream. Typed `AttemptProgress` events (dispatched, headers recei
 ## Brief operation overrides and the focused path
 
 `defaults.operation_overrides` routes one Intel brief operation (`intel_brief_claims.generate`, `…inferences.generate`, `…inferences.assess`, `…links.generate`, …) to a specific provider/model without changing its logical role; empty entries inherit. Models → Defaults shows the effective Brief operation routes. `defaults.focused_oversized_brief` (default false) enables the measured focused oversized-story Inferences path; changing it reruns Inferences and Links only.
+
+## Provider adapters and resolved capabilities
+
+Model IDs are data. Three provider adapters in `provider_adapters/` own the wire details: `openrouter`, `google` and `nvidia`. Any other OpenAI-compatible endpoint uses the generic compatible adapter. Each adapter owns its endpoint and auth, model ID normalization, parameter names, schema/tool compilation, stream and usage parsing, and its error dialect. `compile(contract, route, capabilities)` is pure. It returns the endpoint, dialect, JSON body, response channel and effective policy. `normalize_final` and `StreamDecoder` turn a response back into one `Completion`: the answer text or output-tool arguments, finish/refusal status, and usage, which stays null when the provider does not report it. Only the shared executor (`provider_attempt`, `provider_chain`) makes HTTP calls. The compatibility wrappers `provider::{complete, complete_one, decide}` compile through the same adapters.
+
+`provider_capabilities::resolve` builds `ResolvedCapabilities` from these sources, each overriding the one before:
+
+1. Conservative defaults: every optional feature is unknown.
+2. Documented profiles in `provider_profiles.json`, matched on the exact provider and model ID.
+3. Cached catalog evidence: OpenRouter endpoint `supported_parameters`, intersected over eligible free endpoints, and Google `supportedGenerationMethods` and limits.
+4. Scoped rejections observed on the wire, keyed by field **and** value.
+
+An unknown optional feature is never sent, and the answer is validated locally. A decision-only target such as Jev, or a non-text model, fails at compile time with zero requests sent (`capability skip`). `ResolvedCapabilities::digest` hashes only semantic support states, values and limits. Catalog entries are stored in `app_state` under `provider_caps:<hash>`, a hash of provider, base URL, dialect, model and upstream. They have a 24-hour freshness policy, background refreshes for the same key are coalesced into one, and a brief never waits for a refresh.
+
+Structured output follows the contract (BoundedDecision, GeneratedJson or Prose). For GeneratedJson the adapter tries these modes in order and uses the first the model supports:
+
+1. A confirmed strict schema.
+2. A forced inert `submit_result` output tool. Its arguments are the answer: there is no execution and no second round trip.
+3. JSON mode.
+4. Validated text.
+
+OpenRouter adds `provider.require_parameters=true` whenever it uses an optional capability. Google's own host uses native `models/{id}:generateContent` (`streamGenerateContent?alt=sse` when streaming) with `x-goog-api-key`. A custom base ending in `/openai` keeps compatibility chat with the bare model ID. Agent tool loops also use compatibility chat.
+
+Ceilings: `RequestPolicy.max_output_tokens` is the total ceiling when thinking is off. `thinking_ceiling` is the total ceiling when the model thinks; thinking and visible output share it, and no hidden reserve is added. `reasoning_budget` is sent only where a profile documents a budget field, and it is labelled advisory unless the endpoint enforces it. Reasoning intents (`off`, `efficient`, `low`, `medium`, `high`) map onto each model's own vocabulary:
+
+- Nemotron Super: `none`/`low`/`high`.
+- Nemotron Ultra: `none`/`medium`/`high` (`low` is invalid).
+- Lightning: `chat_template_kwargs.enable_thinking`.
+- Gemini Flash: `low`/`medium`/`high`; thinking cannot be turned off.
+- Gemma native: `minimal`/`high`.
+- DeepSeek: no reasoning field.
+
+Native Nvidia or Google fields are never sent through OpenRouter, and no temperature is sent unless a profile documents one.
+
+| Route | Initial adapter policy (profile) |
+| --- | --- |
+| `typesafe/jev-1.13` | Native decisions only |
+| `nvidia/nemotron-3-super-120b-a12b:free` | Strict JSON schema |
+| `nvidia/nemotron-3-ultra-550b-a55b:free`, `cohere/north-mini-code:free` | Forced output tool; never `response_format` |
+| `google/gemma-4-{26b-a4b,31b}-it:free` | JSON mode; schema only once confirmed |
+| `apodex/apodex-1.1-mini:free` | Validated JSON until endpoint metadata confirms more |
+| `models/gemini-3.8-flash` | Google native schema; thinking `low` minimum |
+| `models/gemma-4-26b-a4b-it` | Google native; local JSON validation; `minimal`/`high` thinking |
+| Nvidia Super / Ultra / Lightning / DeepSeek | Hosted chat; effort data as above; locally validated JSON |

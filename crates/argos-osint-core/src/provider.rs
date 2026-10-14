@@ -47,6 +47,19 @@ pub struct Completion {
     pub finish_reason: Option<String>,
     /// Provider refusal text when the model declined instead of answering.
     pub refusal: Option<String>,
+    /// Reported token usage/cost; `None` when the provider reported none.
+    pub usage: Option<Usage>,
+}
+
+/// Reported usage. Every counter stays `None` unless the provider reported
+/// it; cost is recorded only when reported in USD.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub visible_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
 }
 
 impl Completion {
@@ -1167,9 +1180,25 @@ async fn bearer_token(secret: &ProviderSecret) -> Result<Option<String>, String>
 }
 
 pub(crate) async fn authorize(
-    mut req: reqwest::RequestBuilder,
+    req: reqwest::RequestBuilder,
     secret: &ProviderSecret,
 ) -> Result<reqwest::RequestBuilder> {
+    authorize_as(req, secret, crate::provider_adapters::AuthStyle::Bearer).await
+}
+
+/// Authorize for a compiled request's auth style (Google native uses
+/// `x-goog-api-key`; everything else a bearer token).
+pub(crate) async fn authorize_as(
+    mut req: reqwest::RequestBuilder,
+    secret: &ProviderSecret,
+    style: crate::provider_adapters::AuthStyle,
+) -> Result<reqwest::RequestBuilder> {
+    if style == crate::provider_adapters::AuthStyle::GoogleApiKey {
+        let Some(key) = resolved_key(secret) else {
+            return Err(anyhow!("google credentials are not configured. Connect this account in Providers before selecting its models."));
+        };
+        return Ok(req.header("x-goog-api-key", key));
+    }
     match bearer_token(secret).await {
         Ok(Some(key)) => req = req.bearer_auth(key),
         Ok(None) if effective_kind(secret) == "grok" => {
@@ -1189,6 +1218,32 @@ pub(crate) async fn authorize(
     Ok(req)
 }
 
+/// Compile a compatibility-wrapper request through the provider adapter.
+fn compile_wrapper(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    tools: &[ToolSpec],
+    stream: bool,
+) -> Result<crate::provider_adapters::CompiledRequest> {
+    let caps = crate::provider_capabilities::for_secret(secret);
+    let policy = crate::request_policy::RequestPolicy::default();
+    let contract = crate::provider_adapters::ResponseContract::Prose;
+    crate::provider_adapters::compile(
+        secret,
+        &crate::provider_adapters::OperationRequest {
+            messages,
+            tools,
+            contract: &contract,
+            policy: &policy,
+            stream,
+        },
+        &caps,
+    )
+    .map_err(|e| anyhow::Error::new(e.into_failure(&effective_kind(secret), &secret.model)))
+}
+
+/// One streamed completion. Compiles through the selected provider adapter
+/// (a decision-only target fails here, before any network access).
 pub async fn complete(
     secret: &ProviderSecret,
     messages: &[ChatMessage],
@@ -1198,11 +1253,19 @@ pub async fn complete(
     if effective_kind(secret) == "openai-chatgpt" {
         return crate::subscription::complete(secret, messages, tools, on_delta).await;
     }
+    let compiled = compile_wrapper(secret, messages, tools, true)?;
     let client = http()?;
-    let url = format!("{}/chat/completions", normalize_base(&secret.base_url));
-    let body = chat_body(secret, messages, tools, true);
-    let req = authorize(client.post(&url).json(&body), secret).await?;
-    let resp = req.send().await.with_context(|| format!("POST {url}"))?;
+    let url = compiled.endpoint.clone();
+    let req = authorize_as(
+        client.post(&url).json(&compiled.body),
+        secret,
+        compiled.auth,
+    )
+    .await?;
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("POST {}", crate::provider_diag::sanitize_endpoint(&url)))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -1217,7 +1280,7 @@ pub async fn complete(
         ));
     }
     let mut stream = resp.bytes_stream();
-    let mut acc = SseAcc::default();
+    let mut acc = SseAcc::new(compiled.dialect);
     let mut buf = String::new();
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
@@ -1233,6 +1296,11 @@ pub async fn complete(
             if let Some(delta) = acc.push_line(&line) {
                 on_delta(&delta);
             }
+        }
+    }
+    if !buf.trim().is_empty() {
+        if let Some(delta) = acc.push_line(buf.trim()) {
+            on_delta(&delta);
         }
     }
     let completion = acc.into_completion();
@@ -1381,14 +1449,25 @@ pub async fn decide(
         .timeout(Duration::from_secs(45))
         .build()
         .context("http client")?;
-    let url = decisions_url(&secret.base_url);
-    let body = json!({"model": secret.model, "state": state, "questions": questions});
-    let req = authorize(client.post(&url).json(&body), secret).await?;
+    let caps = crate::provider_capabilities::for_secret(secret);
+    let compiled = crate::provider_adapters::compile_decisions(secret, state, questions, &caps);
+    let url = compiled.endpoint.clone();
+    let req = authorize(client.post(&url).json(&compiled.body), secret).await?;
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
     let status = resp.status();
+    let headers = resp.headers().clone();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("provider {status}: {text}"));
+        // Typed like every other provider failure: status, code, request ID,
+        // Retry-After and sanitized detail.
+        return Err(typed_http_error(
+            secret,
+            &url,
+            status.as_u16(),
+            &headers,
+            &text,
+            "native_decisions",
+        ));
     }
     parse_decisions(&text).map_err(|error| {
         crate::provider_diag::ProviderFailure::new(
@@ -1405,11 +1484,19 @@ async fn complete_once(
     messages: &[ChatMessage],
     tools: &[ToolSpec],
 ) -> Result<Completion> {
+    let compiled = compile_wrapper(secret, messages, tools, false)?;
     let client = http()?;
-    let url = format!("{}/chat/completions", normalize_base(&secret.base_url));
-    let body = chat_body(secret, messages, tools, false);
-    let req = authorize(client.post(&url).json(&body), secret).await?;
-    let resp = req.send().await.with_context(|| format!("POST {url}"))?;
+    let url = compiled.endpoint.clone();
+    let req = authorize_as(
+        client.post(&url).json(&compiled.body),
+        secret,
+        compiled.auth,
+    )
+    .await?;
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("POST {}", crate::provider_diag::sanitize_endpoint(&url)))?;
     let status = resp.status();
     let headers = resp.headers().clone();
     let text = resp.text().await.unwrap_or_default();
@@ -1422,6 +1509,13 @@ async fn complete_once(
             &text,
             "non_stream",
         ));
+    }
+    if compiled.dialect == crate::provider_capabilities::ApiDialect::GoogleGenerateContent {
+        let completion = crate::provider_adapters::normalize_final(&compiled, &text)?;
+        if completion.is_empty() {
+            return Err(completion.empty_error("provider"));
+        }
+        return Ok(completion);
     }
     parse_completion(&text)
 }
@@ -1447,56 +1541,6 @@ fn typed_http_error(
     ))
 }
 
-pub(crate) fn chat_body(
-    secret: &ProviderSecret,
-    messages: &[ChatMessage],
-    tools: &[ToolSpec],
-    stream: bool,
-) -> Value {
-    let msgs: Vec<Value> = messages.iter().map(message_json).collect();
-    let mut body = json!({
-        "model": secret.model,
-        "messages": msgs,
-        "stream": stream,
-        "temperature": 0.2,
-    });
-    if !tools.is_empty() {
-        body["tools"] = json!(tools.iter().map(tool_json).collect::<Vec<_>>());
-        body["tool_choice"] = json!("auto");
-    }
-    body
-}
-
-fn message_json(m: &ChatMessage) -> Value {
-    let mut v = json!({ "role": m.role, "content": m.content });
-    if let Some(id) = &m.tool_call_id {
-        v["tool_call_id"] = json!(id);
-    }
-    if !m.tool_calls.is_empty() {
-        v["tool_calls"] = json!(m
-            .tool_calls
-            .iter()
-            .map(|c| json!({
-                "id": c.id,
-                "type": "function",
-                "function": { "name": c.name, "arguments": c.arguments }
-            }))
-            .collect::<Vec<_>>());
-    }
-    v
-}
-
-fn tool_json(t: &ToolSpec) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": t.name,
-            "description": t.description,
-            "parameters": t.parameters,
-        }
-    })
-}
-
 /// Pulls assistant text from a chat-completions message object.
 /// Returns ONLY content; reasoning is kept separate in [`message_reasoning`].
 pub fn message_text(msg: &Value) -> String {
@@ -1512,6 +1556,10 @@ pub fn message_reasoning(msg: &Value) -> String {
         }
     }
     String::new()
+}
+
+pub(crate) fn value_text_pub(value: Option<&Value>) -> String {
+    value_text(value)
 }
 
 fn value_text(value: Option<&Value>) -> String {
@@ -1601,6 +1649,7 @@ pub fn parse_completion(text: &str) -> Result<Completion> {
         tool_calls,
         finish_reason,
         refusal,
+        usage: crate::provider_adapters::parse_usage(&v),
     };
     if completion.is_empty() {
         return Err(completion.empty_error("provider"));
@@ -1608,30 +1657,34 @@ pub fn parse_completion(text: &str) -> Result<Completion> {
     Ok(completion)
 }
 
-#[derive(Default)]
+/// Line-oriented SSE accumulator for the compatibility wrappers; decoding
+/// is owned by the provider adapter's [`crate::provider_adapters::StreamDecoder`].
 struct SseAcc {
-    content: String,
-    reasoning: String,
-    tool_calls: Vec<ToolCall>,
-    finish_reason: Option<String>,
-    refusal: Option<String>,
+    dec: crate::provider_adapters::StreamDecoder,
+}
+
+impl Default for SseAcc {
+    fn default() -> Self {
+        Self::new(crate::provider_capabilities::ApiDialect::Chat)
+    }
 }
 
 impl SseAcc {
+    fn new(dialect: crate::provider_capabilities::ApiDialect) -> Self {
+        Self {
+            dec: crate::provider_adapters::StreamDecoder::new(dialect),
+        }
+    }
+
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
-        self.content.trim().is_empty()
-            && self.reasoning.trim().is_empty()
-            && self.tool_calls.is_empty()
+        self.dec.content.trim().is_empty()
+            && self.dec.reasoning.trim().is_empty()
+            && self.dec.tool_calls.is_empty()
     }
 
     fn into_completion(self) -> Completion {
-        Completion {
-            content: self.content,
-            reasoning: self.reasoning,
-            tool_calls: self.tool_calls,
-            finish_reason: self.finish_reason,
-            refusal: self.refusal,
-        }
+        self.dec.into_completion()
     }
 
     fn push_line(&mut self, line: &str) -> Option<String> {
@@ -1644,56 +1697,7 @@ impl SseAcc {
             return None;
         }
         let v: Value = serde_json::from_str(data).ok()?;
-        if let Some(reason) = v
-            .pointer("/choices/0/finish_reason")
-            .and_then(|c| c.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            self.finish_reason = Some(reason.to_string());
-        }
-        let delta = v.pointer("/choices/0/delta")?;
-        if let Some(refusal) = delta
-            .get("refusal")
-            .and_then(|c| c.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            self.refusal = Some(refusal.to_string());
-        }
-        let mut emitted = None;
-        if let Some(text) = delta_text(delta, "content") {
-            self.content.push_str(&text);
-            emitted = Some(text);
-        }
-        // Reasoning channel: accumulate separately, do not leak into answer deltas
-        for key in ["reasoning_content", "reasoning"] {
-            if let Some(text) = delta_text(delta, key) {
-                self.reasoning.push_str(&text);
-            }
-        }
-        if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
-            for call in calls {
-                let idx = call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                while self.tool_calls.len() <= idx {
-                    self.tool_calls.push(ToolCall {
-                        id: String::new(),
-                        name: String::new(),
-                        arguments: String::new(),
-                    });
-                }
-                if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
-                    self.tool_calls[idx].id = id.to_string();
-                }
-                if let Some(name) = call.pointer("/function/name").and_then(|v| v.as_str()) {
-                    self.tool_calls[idx].name.push_str(name);
-                }
-                if let Some(args) = call.pointer("/function/arguments").and_then(|v| v.as_str()) {
-                    self.tool_calls[idx].arguments.push_str(args);
-                }
-            }
-        }
-        emitted
+        self.dec.apply(&v).content
     }
 }
 

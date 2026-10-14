@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "notes": "Evidence profiles, not a routing allowlist. Absent fields stay unknown; unknown optional features are omitted on the wire and the answer is validated locally. Sources: docs/providers.md (Provider adapters), spec R1-R22 (2026-10-14).",
+  "profiles": [
+    {
+      "provider": "openrouter",
+      "model": "typesafe/jev-1.13",
+      "evidence": "R1-R2 native POST /api/alpha/decisions; no chat generation",
+      "decision_only": true
+    },
+    {
+      "provider": "openrouter",
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "evidence": "R3 free endpoint advertises structured_outputs + response_format",
+      "strict_schema": "supported",
+      "json_mode": "supported"
+    },
+    {
+      "provider": "openrouter",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "evidence": "R4 free endpoint advertises tools + forced tool_choice, not response_format",
+      "strict_schema": "unsupported",
+      "json_mode": "unsupported",
+      "tools": "supported",
+      "forced_tool": "supported"
+    },
+    {
+      "provider": "openrouter",
+      "model": "cohere/north-mini-code:free",
+      "evidence": "R5 tool-call contract; response_format not advertised",
+      "strict_schema": "unsupported",
+      "json_mode": "unsupported",
+      "tools": "supported",
+      "forced_tool": "supported"
+    },
+    {
+      "provider": "openrouter",
+      "model": "google/gemma-4-26b-a4b-it:free",
+      "evidence": "R6 endpoint advertises JSON mode, tools and reasoning; schema unconfirmed",
+      "json_mode": "supported",
+      "tools": "supported"
+    },
+    {
+      "provider": "openrouter",
+      "model": "google/gemma-4-31b-it:free",
+      "evidence": "R7 endpoint advertises JSON mode, tools and reasoning; schema unconfirmed",
+      "json_mode": "supported",
+      "tools": "supported"
+    },
+    {
+      "provider": "openrouter",
+      "model": "apodex/apodex-1.1-mini:free",
+      "evidence": "R8 model docs describe schema/tools but endpoint metadata was not retrieved: validated JSON until confirmed"
+    },
+    {
+      "provider": "google",
+      "model": "models/gemini-3.8-flash",
+      "evidence": "R9-R10, R22 native generateContent with schema output; thinking low/medium/high, no off/minimal",
+      "generate_content": "supported",
+      "native_schema": "supported",
+      "json_mode": "supported",
+      "tools": "supported",
+      "reasoning": {
+        "control": "google_level",
+        "values": ["low", "medium", "high"],
+        "efficient": "low",
+        "mandatory": true
+      }
+    },
+    {
+      "provider": "google",
+      "model": "models/gemma-4-26b-a4b-it",
+      "evidence": "R11 hosted Gemma native generateContent; binary thinking minimal=off, high=on; native schema enforcement unconfirmed",
+      "generate_content": "supported",
+      "reasoning": {
+        "control": "google_level",
+        "values": ["minimal", "high"],
+        "off": "minimal",
+        "efficient": "high"
+      }
+    },
+    {
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-super-120b-a12b",
+      "evidence": "R12 hosted chat: reasoning_effort none/low/high; documented reasoning_budget",
+      "reasoning": {
+        "control": "reasoning_effort",
+        "values": ["none", "low", "high"],
+        "off": "none",
+        "efficient": "low",
+        "budget_field": "reasoning_budget"
+      }
+    },
+    {
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "evidence": "R13 hosted chat: reasoning_effort none/medium/high (low invalid); documented reasoning_budget",
+      "reasoning": {
+        "control": "reasoning_effort",
+        "values": ["none", "medium", "high"],
+        "off": "none",
+        "efficient": "medium",
+        "budget_field": "reasoning_budget"
+      }
+    },
+    {
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "evidence": "R14-R15 hosted chat: chat_template_kwargs.enable_thinking and hosted reasoning_budget",
+      "reasoning": {
+        "control": "chat_template_thinking",
+        "budget_field": "reasoning_budget"
+      }
+    },
+    {
+      "provider": "nvidia",
+      "model": "deepseek-ai/deepseek-v4.1-flash",
+      "evidence": "R16 hosted chat with explicit max_tokens; no documented reasoning-control field"
+    }
+  ]
+}

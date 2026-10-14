@@ -258,20 +258,57 @@ fn test_tool_selection_template_compilation() {
 
 #[test]
 fn test_resolve_adapter_kinds() {
-    assert_eq!(
-        resolve_adapter("typesafe/jev-1.13", "openrouter"),
-        DecisionAdapterKind::NativeDecisions
-    );
-    assert_eq!(
-        resolve_adapter("gpt-4o", "openai"),
-        DecisionAdapterKind::StrictJsonSchema
-    );
-    assert_eq!(
-        resolve_adapter("grok-4.6", "grok"),
-        DecisionAdapterKind::JsonMode
-    );
-    assert_eq!(
-        resolve_adapter("custom-local-model", "local"),
-        DecisionAdapterKind::ValidatedText
-    );
+    // Capability-driven: the same provider maps to different adapters per
+    // model profile; unknown models fall back to validated text.
+    for (model, provider, want) in [
+        (
+            "typesafe/jev-1.13",
+            "openrouter",
+            DecisionAdapterKind::NativeDecisions,
+        ),
+        (
+            "nvidia/nemotron-3-super-120b-a12b:free",
+            "openrouter",
+            DecisionAdapterKind::StrictJsonSchema,
+        ),
+        (
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "openrouter",
+            DecisionAdapterKind::OutputTool,
+        ),
+        (
+            "cohere/north-mini-code:free",
+            "openrouter",
+            DecisionAdapterKind::OutputTool,
+        ),
+        (
+            "google/gemma-4-26b-a4b-it:free",
+            "openrouter",
+            DecisionAdapterKind::JsonMode,
+        ),
+        (
+            "apodex/apodex-1.1-mini:free",
+            "openrouter",
+            DecisionAdapterKind::ValidatedText,
+        ),
+        (
+            "models/gemini-3.8-flash",
+            "google",
+            DecisionAdapterKind::StrictJsonSchema,
+        ),
+        (
+            "models/gemma-4-26b-a4b-it",
+            "google",
+            DecisionAdapterKind::ValidatedText,
+        ),
+        ("gpt-4o", "openai", DecisionAdapterKind::ValidatedText),
+        ("grok-4.6", "grok", DecisionAdapterKind::ValidatedText),
+        (
+            "custom-local-model",
+            "local",
+            DecisionAdapterKind::ValidatedText,
+        ),
+    ] {
+        assert_eq!(resolve_adapter(model, provider), want, "{model}");
+    }
 }

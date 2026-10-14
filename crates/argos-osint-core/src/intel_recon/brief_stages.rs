@@ -227,7 +227,10 @@ fn norm(text: &str) -> String {
 
 fn empty_reason(value: &Value) -> Result<String> {
     let reason = str_field(value, "empty_reason").trim().to_string();
-    ensure!(words(&reason) <= 25, "empty_reason exceeds 25 words");
+    ensure!(
+        words(&reason) <= super::brief_contracts::EMPTY_REASON_WORDS,
+        "empty_reason exceeds 25 words"
+    );
     Ok(reason)
 }
 
@@ -262,7 +265,10 @@ pub fn validate_claims(raw: &str, meta: &[Sentence]) -> Result<Value> {
     for (n, item) in items.iter().enumerate() {
         let text = str_field(item, "text").trim();
         ensure!(!text.is_empty(), "claim text missing");
-        ensure!(words(text) <= 35, "claim exceeds 35 words");
+        ensure!(
+            words(text) <= super::brief_contracts::CLAIM_TEXT_WORDS,
+            "claim exceeds 35 words"
+        );
         let evidence = ids(item, "evidence_ids")?;
         ensure!(
             !evidence.is_empty(),
@@ -343,12 +349,12 @@ pub fn validate_inferences(
     for (n, item) in items.iter().enumerate() {
         let text = str_field(item, "text").trim();
         ensure!(
-            !text.is_empty() && words(text) <= 35,
+            !text.is_empty() && words(text) <= super::brief_contracts::INFERENCE_TEXT_WORDS,
             "inference text missing or over 35 words"
         );
         let why = str_field(item, "why").trim();
         ensure!(
-            !why.is_empty() && words(why) <= 45,
+            !why.is_empty() && words(why) <= super::brief_contracts::INFERENCE_WHY_WORDS,
             "reasoning missing or over 45 words"
         );
         let support = str_field(item, "support");
@@ -357,9 +363,14 @@ pub fn validate_inferences(
             "support must be supported or conditional"
         );
         let limitations: Vec<String> = ids(item, "limitations")?;
-        ensure!(limitations.len() <= 2, "at most two limitations");
         ensure!(
-            limitations.iter().all(|l| words(l) <= 20),
+            limitations.len() <= super::brief_contracts::MAX_LIMITATIONS,
+            "at most two limitations"
+        );
+        ensure!(
+            limitations
+                .iter()
+                .all(|l| words(l) <= super::brief_contracts::LIMITATION_WORDS),
             "limitation over 20 words"
         );
         ensure!(
@@ -538,7 +549,7 @@ pub fn validate_leads(
         );
         let why = str_field(item, "why").trim();
         ensure!(
-            !why.is_empty() && words(why) <= 40,
+            !why.is_empty() && words(why) <= super::brief_contracts::LEAD_WHY_WORDS,
             "interpretation missing or over 40 words"
         );
         let evidence = ids(item, "metadata_evidence_ids")?;

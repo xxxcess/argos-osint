@@ -151,6 +151,8 @@ pub struct AttemptReport {
     pub outcome: Result<Completion, ProviderFailure>,
     /// Request-policy diagnostics (unsupported/learned options). Never text.
     pub policy_diagnostics: Vec<String>,
+    /// Compiled adapter/dialect/structured mode/ceilings actually requested.
+    pub effective: Option<crate::provider_adapters::EffectivePolicy>,
 }
 
 /// Is this connection served by a subprocess rather than HTTP?
@@ -184,6 +186,7 @@ pub async fn attempt_with_observer(
         observer,
         None,
         &RequestPolicy::default(),
+        None,
     )
     .await
 }
@@ -220,11 +223,38 @@ pub async fn attempt_full(
     policy: &RequestPolicy,
 ) -> AttemptReport {
     attempt_options(
-        secret, messages, transport, deadlines, observer, progress, policy,
+        secret, messages, transport, deadlines, observer, progress, policy, None,
     )
     .await
 }
 
+/// Single attempt for an explicit response contract (for example a
+/// GeneratedJson operation with its authoritative schema).
+#[allow(clippy::too_many_arguments)]
+pub async fn attempt_contract(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    transport: Transport,
+    deadlines: Deadlines,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+    progress: Option<&ProgressFn>,
+    policy: &RequestPolicy,
+    contract: &crate::provider_adapters::ResponseContract,
+) -> AttemptReport {
+    attempt_options(
+        secret,
+        messages,
+        transport,
+        deadlines,
+        observer,
+        progress,
+        policy,
+        Some(contract),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn attempt_options(
     secret: &ProviderSecret,
     messages: &[ChatMessage],
@@ -233,6 +263,7 @@ async fn attempt_options(
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
     progress: Option<&ProgressFn>,
     policy: &RequestPolicy,
+    contract: Option<&crate::provider_adapters::ResponseContract>,
 ) -> AttemptReport {
     let started = Instant::now();
     let kind = provider::effective_kind(secret);
@@ -276,28 +307,36 @@ async fn attempt_options(
             } else {
                 vec!["unsupported-policy:subscription transport".into()]
             },
+            effective: None,
         };
     }
+    let fallback_contract = crate::provider_adapters::ResponseContract::from_policy(policy);
+    let contract = contract.unwrap_or(&fallback_contract);
     let mut first_ms = None;
     let mut stream_state = StreamState::default();
     let mut policy_diagnostics = Vec::new();
+    let mut effective = None;
+    let mut endpoint = endpoint;
     let outcome = run(
         secret,
         messages,
         transport,
         deadlines,
-        &endpoint,
+        &mut endpoint,
         started,
         &mut first_ms,
         &mut stream_state,
         observer,
         progress,
         policy,
+        contract,
         &mut policy_diagnostics,
+        &mut effective,
     )
     .await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     AttemptReport {
+        effective,
         transport,
         endpoint: crate::provider_diag::sanitize_endpoint(&endpoint),
         elapsed_ms,
@@ -320,49 +359,79 @@ async fn run(
     messages: &[ChatMessage],
     transport: Transport,
     deadlines: Deadlines,
-    endpoint: &str,
+    endpoint: &mut String,
     started: Instant,
     first_ms: &mut Option<u64>,
     state: &mut StreamState,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
     progress: Option<&ProgressFn>,
     policy: &RequestPolicy,
+    contract: &crate::provider_adapters::ResponseContract,
     diagnostics: &mut Vec<String>,
+    effective: &mut Option<crate::provider_adapters::EffectivePolicy>,
 ) -> Result<Completion, ProviderFailure> {
+    use crate::provider_adapters as adapters;
+    let kind = provider::effective_kind(secret);
     let client = reqwest::Client::builder()
         .connect_timeout(deadlines.connect)
         .build()
         .map_err(|e| {
             ProviderFailure::from_error(Stage::Configuration, Category::Configuration, &e)
         })?;
-    let kind = provider::effective_kind(secret);
-    // One recovery for options the route rejects: learn them and resend
-    // without them, so later dispatches skip them before sending.
+    // Phase-1 compatibility: one scoped recovery after a rejected optional
+    // option (learned by field AND value), recompiled from the same contract.
+    // The contextual executor takes this over with an explicit wire budget.
     let mut resent = false;
     loop {
-        let mut body = provider::chat_body(secret, messages, &[], transport == Transport::Stream);
-        diagnostics.extend(crate::request_policy::apply(secret, &mut body, policy));
-        match send_once(
-            &client, secret, &body, transport, deadlines, endpoint, started, first_ms, state,
-            observer, progress,
+        let caps = crate::provider_capabilities::for_secret(secret);
+        // Compile before any network access: a decision-only or non-text
+        // target fails here with zero dispatched requests.
+        let compiled = adapters::compile(
+            secret,
+            &adapters::OperationRequest {
+                messages,
+                tools: &[],
+                contract,
+                policy,
+                stream: transport == Transport::Stream,
+            },
+            &caps,
         )
-        .await
-        {
-            Err(f) if !resent && matches!(f.http_status, Some(400 | 422)) && !policy.is_empty() => {
+        .map_err(|e| e.into_failure(&kind, &secret.model))?;
+        *endpoint = compiled.endpoint.clone();
+        diagnostics.extend(compiled.effective.diagnostics.iter().cloned());
+        *effective = Some(compiled.effective.clone());
+        let result = send_once(
+            &client, secret, &compiled, transport, deadlines, started, first_ms, state, observer,
+            progress,
+        )
+        .await;
+        match result {
+            Err(f) if !resent && matches!(f.http_status, Some(400 | 422)) => {
                 let message = format!(
                     "{} {} {}",
                     f.message,
                     f.provider_message.as_deref().unwrap_or(""),
                     f.provider_code.as_deref().unwrap_or("")
                 );
-                let fields = crate::request_policy::rejected_fields(&body, &message);
-                if fields.is_empty() {
+                let rejected =
+                    crate::request_policy::rejected_options(&compiled.effective.sent, &message);
+                if rejected.is_empty() {
+                    // Unknown 400: no speculative same-route resend.
                     return Err(f);
                 }
-                for field in fields {
-                    crate::request_policy::learn_unsupported(&kind, &secret.model, field);
+                for i in rejected {
+                    let o = &compiled.effective.sent[i];
+                    crate::provider_capabilities::learn_rejection(
+                        compiled.adapter,
+                        &secret.base_url,
+                        &secret.model,
+                        &o.field,
+                        &o.value,
+                    );
                     diagnostics.push(format!(
-                        "unsupported-policy:{field} rejected; resent without it"
+                        "unsupported-policy:{}={} rejected; resent without it",
+                        o.field, o.value
                     ));
                 }
                 resent = true;
@@ -376,17 +445,18 @@ async fn run(
 async fn send_once(
     client: &reqwest::Client,
     secret: &ProviderSecret,
-    body: &Value,
+    compiled: &crate::provider_adapters::CompiledRequest,
     transport: Transport,
     deadlines: Deadlines,
-    endpoint: &str,
     started: Instant,
     first_ms: &mut Option<u64>,
     state: &mut StreamState,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
     progress: Option<&ProgressFn>,
 ) -> Result<Completion, ProviderFailure> {
-    let req = provider::authorize(client.post(endpoint).json(body), secret)
+    let endpoint = compiled.endpoint.as_str();
+    let body = &compiled.body;
+    let req = provider::authorize_as(client.post(endpoint).json(body), secret, compiled.auth)
         .await
         .map_err(|err| {
             let mut f = ProviderFailure::from_anyhow(Stage::Configuration, &err);
@@ -463,9 +533,10 @@ async fn send_once(
         .map(|ct| ct.starts_with("text/event-stream"))
         .unwrap_or(transport == Transport::Stream);
 
-    if is_event_stream {
-        read_stream(
+    let completion = if is_event_stream {
+        read_stream_dialect(
             resp.bytes_stream(),
+            compiled.dialect,
             deadlines,
             started.elapsed(),
             state,
@@ -473,7 +544,7 @@ async fn send_once(
             progress,
         )
         .await
-        .map_err(attach)
+        .map_err(attach)?
     } else {
         let text = match tokio::time::timeout(remaining(started), resp.text()).await {
             Err(_) => {
@@ -492,50 +563,41 @@ async fn send_once(
             }
             Ok(Ok(text)) => text,
         };
-        parse_final_json(&text).map_err(attach)
-    }
-}
-
-/// Decode a non-streaming body into a final answer.
-pub fn parse_final_json(text: &str) -> Result<Completion, ProviderFailure> {
-    let v: Value = serde_json::from_str(text)
-        .map_err(|e| ProviderFailure::from_error(Stage::Parse, Category::MalformedPayload, &e))?;
-    if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
-        let (code, message) = provider_error(&err.to_string());
+        let c = match compiled.dialect {
+            crate::provider_capabilities::ApiDialect::GoogleGenerateContent => {
+                crate::provider_adapters::normalize_final(
+                    &crate::provider_adapters::CompiledRequest {
+                        channel: crate::provider_adapters::ResponseChannel::Content,
+                        ..compiled.clone()
+                    },
+                    &text,
+                )
+                .map_err(attach)?
+            }
+            _ => crate::provider_adapters::parse_chat_final(&text).map_err(attach)?,
+        };
+        check_final(c, None).map_err(attach)?
+    };
+    let completion = crate::provider_adapters::finalize_channel(completion, &compiled.channel)
+        .map_err(attach)?;
+    if compiled.channel == crate::provider_adapters::ResponseChannel::Content
+        && completion.content.trim().is_empty()
+    {
+        // A tool call nobody offered is not an answer.
         let mut f = ProviderFailure::new(
             Stage::Parse,
-            Category::SseError,
-            "provider returned an error payload with HTTP 200",
+            Category::Empty,
+            "empty answer (tool call without an offered output tool)",
         );
-        f.provider_code = code;
-        f.provider_message = message;
-        return Err(f);
+        f.stream.finish_reason = completion.finish_reason.clone();
+        return Err(attach(f));
     }
-    if v.pointer("/choices/0").is_none() {
-        return Err(ProviderFailure::new(
-            Stage::Parse,
-            Category::MalformedPayload,
-            "response JSON has no choices",
-        ));
-    }
-    let msg = v
-        .pointer("/choices/0/message")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let completion = Completion {
-        content: provider::message_text(&msg),
-        reasoning: provider::message_reasoning(&msg),
-        tool_calls: Vec::new(),
-        finish_reason: v
-            .pointer("/choices/0/finish_reason")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        refusal: msg
-            .get("refusal")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    };
-    check_final(completion, None)
+    Ok(completion)
+}
+
+/// Decode a non-streaming chat body into a final answer.
+pub fn parse_final_json(text: &str) -> Result<Completion, ProviderFailure> {
+    check_final(crate::provider_adapters::parse_chat_final(text)?, None)
 }
 
 /// Reject truncated, refused or empty answers.
@@ -555,6 +617,10 @@ fn check_final(c: Completion, state: Option<&StreamState>) -> Result<Completion,
         f.stream.partial_chars = partial;
         f.stream.finish_reason = c.finish_reason.clone();
         return Err(f);
+    }
+    if c.content.trim().is_empty() && !c.tool_calls.is_empty() && c.refusal.is_none() {
+        // Output-tool answers are validated by the response channel.
+        return Ok(c);
     }
     if c.content.trim().is_empty() {
         if let Some(refusal) = c.refusal.as_deref().filter(|r| !r.trim().is_empty()) {
@@ -588,12 +654,26 @@ fn check_final(c: Completion, state: Option<&StreamState>) -> Result<Completion,
     Ok(c)
 }
 
-#[derive(Default)]
 struct Acc {
-    content: String,
-    reasoning: String,
-    refusal: Option<String>,
+    dec: crate::provider_adapters::StreamDecoder,
     event: String,
+}
+
+impl Acc {
+    fn new(dialect: crate::provider_capabilities::ApiDialect) -> Self {
+        Self {
+            dec: crate::provider_adapters::StreamDecoder::new(dialect),
+            event: String::new(),
+        }
+    }
+    /// Meaningful output so far: answer, reasoning and output-tool arguments.
+    fn size(&self) -> (usize, usize, u64) {
+        (
+            self.dec.content.len(),
+            self.dec.reasoning.len(),
+            self.dec.tool_chars,
+        )
+    }
 }
 
 /// Read an SSE chat stream.
@@ -602,6 +682,7 @@ struct Acc {
 /// paused tokio clock. Bytes are buffered until a full line arrives, so UTF-8
 /// sequences split across network chunks decode intact. Clocks use
 /// `tokio::time::Instant`; `already` is time spent before the body.
+#[cfg(test)]
 pub(crate) async fn read_stream<S, B, E>(
     stream: S,
     deadlines: Deadlines,
@@ -615,9 +696,36 @@ where
     B: AsRef<[u8]>,
     E: std::error::Error + 'static,
 {
+    read_stream_dialect(
+        stream,
+        crate::provider_capabilities::ApiDialect::Chat,
+        deadlines,
+        already,
+        state,
+        observer,
+        progress,
+    )
+    .await
+}
+
+/// Read an SSE stream in the compiled request's dialect.
+pub(crate) async fn read_stream_dialect<S, B, E>(
+    stream: S,
+    dialect: crate::provider_capabilities::ApiDialect,
+    deadlines: Deadlines,
+    already: Duration,
+    state: &mut StreamState,
+    observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+    progress: Option<&ProgressFn>,
+) -> Result<Completion, ProviderFailure>
+where
+    S: futures_util::Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::error::Error + 'static,
+{
     use tokio::time::Instant as TInstant;
     let mut stream = std::pin::pin!(stream);
-    let mut acc = Acc::default();
+    let mut acc = Acc::new(dialect);
     let mut buf: Vec<u8> = Vec::new();
     let body_start = TInstant::now();
     let total_left = deadlines.total.saturating_sub(already);
@@ -703,7 +811,7 @@ where
         let chunk = chunk.as_ref();
         state.bytes += chunk.len() as u64;
         buf.extend_from_slice(chunk);
-        let before = (acc.content.len(), acc.reasoning.len());
+        let before = acc.size();
         let mut heartbeat = false;
         while let Some(idx) = buf.iter().position(|b| *b == b'\n') {
             let line_bytes: Vec<u8> = buf.drain(..=idx).collect();
@@ -716,7 +824,7 @@ where
                 break;
             }
         }
-        let grew = (acc.content.len(), acc.reasoning.len()) != before;
+        let grew = acc.size() != before;
         let now = TInstant::now();
         if grew {
             if last_model.is_none() {
@@ -729,8 +837,8 @@ where
                 if last_progress.is_none_or(|t| now - t >= PROGRESS_THROTTLE) {
                     last_progress = Some(now);
                     p(AttemptProgress::Receiving {
-                        answer_chars: acc.content.chars().count() as u64,
-                        reasoning_chars: acc.reasoning.chars().count() as u64,
+                        answer_chars: acc.dec.content.chars().count() as u64 + acc.dec.tool_chars,
+                        reasoning_chars: acc.dec.reasoning.chars().count() as u64,
                     });
                 }
             }
@@ -775,13 +883,8 @@ where
             ),
         ));
     }
-    let completion = Completion {
-        content: acc.content,
-        reasoning: acc.reasoning,
-        tool_calls: Vec::new(),
-        finish_reason: state.finish_reason.clone(),
-        refusal: acc.refusal.clone(),
-    };
+    let mut completion = acc.dec.into_completion();
+    completion.finish_reason = state.finish_reason.clone();
     check_final(completion, Some(state)).map_err(|mut f| {
         f.stream = state.clone();
         f
@@ -809,11 +912,8 @@ fn model_timeout(
 }
 
 fn fill(state: &mut StreamState, acc: &Acc) {
-    state.partial_chars = (acc
-        .content
-        .chars()
-        .count()
-        .max(acc.reasoning.chars().count())) as u64;
+    state.partial_chars = (acc.dec.content.chars().count() as u64 + acc.dec.tool_chars)
+        .max(acc.dec.reasoning.chars().count() as u64);
     state.content_began = state.partial_chars > 0;
 }
 
@@ -878,33 +978,12 @@ fn line_event(
         let (code, message) = provider_error(&serde_json::json!({ "error": err }).to_string());
         return Err(sse_error(state, acc, code, message));
     }
-    if let Some(reason) = v
-        .pointer("/choices/0/finish_reason")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        state.finish_reason = Some(reason.to_string());
+    let delta = acc.dec.apply(&v);
+    if let Some(reason) = acc.dec.finish_reason.clone() {
+        state.finish_reason = Some(reason);
     }
-    if let Some(delta) = v.pointer("/choices/0/delta") {
-        if let Some(t) = delta.get("content").and_then(Value::as_str) {
-            acc.content.push_str(t);
-            if let Some(obs) = observer {
-                obs(t);
-            }
-        }
-        for key in ["reasoning_content", "reasoning"] {
-            if let Some(t) = delta.get(key).and_then(Value::as_str) {
-                acc.reasoning.push_str(t);
-            }
-        }
-        if let Some(r) = delta
-            .get("refusal")
-            .and_then(Value::as_str)
-            .filter(|r| !r.trim().is_empty())
-        {
-            acc.refusal = Some(r.to_string());
-        }
+    if let (Some(t), Some(obs)) = (delta.content.as_deref(), observer) {
+        obs(t);
     }
     fill(state, acc);
     Ok(())

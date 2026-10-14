@@ -305,7 +305,7 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
     details_lines.push(Line::from(Span::styled(
-        "Op ▸ selects; Save for op / Reset op edit it; fast preset links Claims and Links to Summarization.",
+        "Op ▸ select · Save/Reset op edit · preset: Claims, Links → Summarization",
         theme::dim(),
     )));
 
@@ -369,7 +369,10 @@ pub fn operation_evidence(row: &BriefOperationRow) -> Vec<String> {
     } else {
         format!("Source: inherited from {}", row.role)
     };
-    let mut out = vec![source, format!("Contract: {}", operation_contract(row.key))];
+    let mut out = vec![format!(
+        "{source} · Contract: {}",
+        operation_contract(row.key)
+    )];
     if row.provider.is_empty() || row.model.is_empty() {
         out.push("Adapter: unset — configure the role or an override".into());
         return out;

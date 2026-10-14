@@ -1391,3 +1391,148 @@ async fn body_reload_reuses_claims_and_unchanged_visit_makes_no_requests() {
         .iter()
         .all(|r| r.starts_with("Completed")));
 }
+
+/// Spec §9 item 7: bounded live held-out comparison of the Claims stage under
+/// the shipped routing versus the Brief fast preset. Opt-in only:
+/// `ARGOS_HELDOUT_LIVE=1 OPENROUTER_API_KEY=… ARGOS_HELDOUT_OUT=…/results.json
+///  cargo test … heldout_fast_preset_comparison -- --ignored`.
+/// Both configurations use the same OpenRouter free models for fidelity, so
+/// only the Claims generation route differs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn heldout_fast_preset_comparison() {
+    if std::env::var("ARGOS_HELDOUT_LIVE").ok().as_deref() != Some("1") {
+        return;
+    }
+    let key = std::env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY");
+    let fixtures: Value =
+        serde_json::from_str(include_str!("fixtures/brief_heldout.json")).unwrap();
+    let mut auth = crate::secrets::AuthFile::default();
+    auth.set_account(crate::secrets::ProviderSecret {
+        kind: "openrouter".into(),
+        model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
+        base_url: "https://openrouter.ai/api/v1".into(),
+        api_key: Some(key),
+        stt_model: None,
+        device: None,
+    });
+    let assign = |model: &str| crate::provider::ModelAssignment {
+        provider: "openrouter".into(),
+        model: model.into(),
+        ..Default::default()
+    };
+    let base = || {
+        let mut s = crate::provider::SettingsFile::default();
+        // Free-model stand-ins for the screenshot chains (J is not free).
+        s.defaults.claim_assessor = assign("nvidia/nemotron-3-ultra-550b-a55b:free");
+        s.defaults.synthesis = assign("nvidia/nemotron-3-ultra-550b-a55b:free");
+        s.defaults.summarization = assign("nvidia/nemotron-3-super-120b-a12b:free");
+        s.defaults.evidence_curator = assign("google/gemma-4-31b-it:free");
+        s
+    };
+    let mut preset = base();
+    preset.defaults.apply_fast_preset();
+    let mut report = Vec::new();
+    for (name, settings) in [("shipped", base()), ("fast_preset", preset)] {
+        let mut rows = Vec::new();
+        for a in fixtures["articles"].as_array().unwrap() {
+            let id = a["id"].as_str().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("argos.db");
+            let store = Store::open(&path).unwrap();
+            store.conn.execute("INSERT OR IGNORE INTO atlas_runs(id,started_at,state) VALUES('fixture',?1,'completed')", [now()]).unwrap();
+            let row = article(
+                "fixture",
+                id,
+                a["title"].as_str().unwrap(),
+                a["description"].as_str().unwrap(),
+                &format!("https://heldout.test/{id}"),
+            );
+            store.atlas_upsert_article(&row).unwrap();
+            let job = ensure_intel_brief_pipeline(&store, &row, &settings).unwrap();
+            // Claim both roots; run Claims only (no body retrieval offline).
+            let mut claimed = Vec::new();
+            while let Some(c) = claim_next(&path, "heldout", &cfg()).unwrap() {
+                claimed.push(c);
+            }
+            let claims = claimed
+                .into_iter()
+                .find(|c| c.operation == "intel_brief_claims")
+                .expect("claims root claimable");
+            let mut backend = RuntimeBackend {
+                db_path: path.clone(),
+                keys: Default::default(),
+                auth: auth.clone(),
+                settings: settings.clone(),
+                user_agent: None,
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let started = std::time::Instant::now();
+            let outcome = run_claimed(&path, claims, &mut backend, &cancel, &cfg()).await;
+            let ms = started.elapsed().as_millis() as i64;
+            let (requests, prompt, completion): (i64, i64, i64) = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*),COALESCE(SUM(prompt_tokens),0),COALESCE(SUM(completion_tokens),0) FROM recon_model_attempts WHERE dispatched=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            let out = stage_output(&store, &job, "intel_brief_claims").ok();
+            let kept: Vec<String> = out
+                .as_ref()
+                .and_then(|o| o["claims"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .map(|c| c["text"].as_str().unwrap_or("").to_lowercase())
+                .collect();
+            let withheld = out
+                .as_ref()
+                .and_then(|o| o["withheld"].as_i64())
+                .unwrap_or(0);
+            let joined = kept.join(" | ");
+            let n = kept.len() as i64;
+            let pass = out.is_some()
+                && n >= a["min_claims"].as_i64().unwrap()
+                && n <= a["max_claims"].as_i64().unwrap()
+                && a["must_mention"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|m| joined.contains(m.as_str().unwrap()));
+            rows.push(json!({
+                "id": id, "kind": a["kind"], "ok": matches!(outcome, Ok(StageOutcome::Committed { .. })),
+                "error": match &outcome { Ok(StageOutcome::Failed { reason, .. }) => reason.clone(), Err(e) => e.to_string(), _ => String::new() },
+                "pass": pass, "kept": n, "withheld": withheld, "ms": ms,
+                "requests": requests, "prompt_tokens": prompt, "completion_tokens": completion,
+                "claims": kept,
+            }));
+            // Warm: the unchanged visit attaches and issues zero requests.
+            assert_eq!(
+                ensure_intel_brief_pipeline(&store, &row, &settings).unwrap(),
+                job
+            );
+        }
+        let mut ms: Vec<i64> = rows.iter().map(|r| r["ms"].as_i64().unwrap()).collect();
+        ms.sort();
+        let pct = |p: f64| ms[((ms.len() as f64 - 1.0) * p).round() as usize];
+        let sum = |k: &str| rows.iter().map(|r| r[k].as_i64().unwrap()).sum::<i64>();
+        report.push(json!({
+            "config": name,
+            "claims_route": settings.defaults.resolve_operation(Some(crate::provider::OP_CLAIMS_GENERATE), "claim_assessor").0.model,
+            "pass": rows.iter().filter(|r| r["pass"] == true).count(),
+            "committed": rows.iter().filter(|r| r["ok"] == true).count(),
+            "articles": rows.len(),
+            "p50_ms": pct(0.5), "p95_ms": pct(0.95),
+            "requests": sum("requests"), "prompt_tokens": sum("prompt_tokens"),
+            "completion_tokens": sum("completion_tokens"),
+            "kept": sum("kept"), "withheld": sum("withheld"),
+            "rows": rows,
+        }));
+    }
+    let text = serde_json::to_string_pretty(&report).unwrap();
+    if let Ok(out) = std::env::var("ARGOS_HELDOUT_OUT") {
+        std::fs::write(out, &text).unwrap();
+    }
+    println!("{text}");
+}

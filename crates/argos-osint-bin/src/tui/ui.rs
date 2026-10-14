@@ -6793,7 +6793,17 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
             );
             let note = "Tried top to bottom after primary retries. Primary: 4 attempts (10s/20s/30s). Each fallback: 3 attempts (10s/20s).";
             if models[6].height >= 8 {
-                let split = split_vertical(models[6], [Constraint::Length(3), Constraint::Min(0)]);
+                // The note needs one row when it fits; give the rest to the
+                // role details (operation evidence must stay visible).
+                let note_rows = if (note.chars().count() as u16) <= models[6].width {
+                    1
+                } else {
+                    3
+                };
+                let split = split_vertical(
+                    models[6],
+                    [Constraint::Length(note_rows), Constraint::Min(0)],
+                );
                 frame.render_widget(
                     Paragraph::new(note)
                         .style(theme::dim())

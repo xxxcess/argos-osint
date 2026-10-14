@@ -30,9 +30,9 @@
     "semantic_hash": "769b9d268d68d2b876cb64cebcc855f9"
   },
   "crates/argos-osint-bin/src/tui/app.rs": {
-    "mtime": 1791967926.642324,
-    "seen": 1791968272.1911721,
-    "ast_hash": "c068134edea9af672ca27772e7c3ae3e",
+    "mtime": 1791968369.2103238,
+    "seen": 1791970738.0985599,
+    "ast_hash": "a201dfad82f9f0057752169ad5c3a02b",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/brain_detail.rs": {
@@ -102,9 +102,9 @@
     "semantic_hash": "28c3293556d4f43b0d509e809b8629dd"
   },
   "crates/argos-osint-bin/src/tui/ui.rs": {
-    "mtime": 1791967229.494324,
-    "seen": 1791967897.54457,
-    "ast_hash": "fb515c3bf4795ddc811046309e76474e",
+    "mtime": 1791968369.198324,
+    "seen": 1791970738.099166,
+    "ast_hash": "5662cbe93b15d0d9370f0dad171ae8b1",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/Cargo.toml": {
@@ -642,9 +642,9 @@
     "semantic_hash": ""
   },
   "docs/providers.md": {
-    "mtime": 1791967425.6223238,
-    "seen": 1791967897.5510638,
-    "ast_hash": "59e775f284cbed25cc61ead5818c4bb7",
+    "mtime": 1791968915.0023239,
+    "seen": 1791970738.1062012,
+    "ast_hash": "02d704b69e6082a3ffb2e61ac80df1a3",
     "semantic_hash": ""
   },
   "docs/unified-reliability-semantic-pipelines-checklist.md": {
@@ -672,9 +672,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/model_roles.rs": {
-    "mtime": 1791967229.310324,
-    "seen": 1791967897.5443256,
-    "ast_hash": "541d3ab0af3a4b4bb77e8006921295fd",
+    "mtime": 1791969062.386324,
+    "seen": 1791970738.0988836,
+    "ast_hash": "5db7d9b0e3d7c4cb1fe24d0277c0d09e",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/investigation/contracts.rs": {
@@ -2538,9 +2538,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_pipeline_tests.rs": {
-    "mtime": 1791966811.9743237,
-    "seen": 1791967897.5455053,
-    "ast_hash": "e1a9fca224e064283594dc1d2f63c72b",
+    "mtime": 1791968843.9503238,
+    "seen": 1791970738.1003246,
+    "ast_hash": "79c99605b969a75344d5d69989f9d982",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_stages.rs": {
@@ -2550,9 +2550,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_stages_tests.rs": {
-    "mtime": 1791967032.086324,
-    "seen": 1791967897.545509,
-    "ast_hash": "b7be6376698acc1b0435fd3794b11ae3",
+    "mtime": 1791968483.586324,
+    "seen": 1791970738.1003523,
+    "ast_hash": "d68fdc796f83310a9ce8118a5a25c8d1",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/clean_body.rs": {
@@ -3018,9 +3018,9 @@
     "semantic_hash": ""
   },
   "docs/model-role-routing-provider-adapters-checklist.md": {
-    "mtime": 1791967415.938324,
-    "seen": 1791967897.5509453,
-    "ast_hash": "ad1e88ab2c15369e45bcc31c13d5fd9b",
+    "mtime": 1791968910.8383238,
+    "seen": 1791970738.1060758,
+    "ast_hash": "4e4bbeeb085c18314f477fcb0a9cf9d2",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/provider_execution_schema.rs": {
@@ -3051,6 +3051,36 @@
     "mtime": 1791967885.4663239,
     "seen": 1791967897.5542848,
     "ast_hash": "ca1037aa38ff5b2908dd793b200acf4f",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/src/intel_recon/fixtures/brief_heldout.json": {
+    "mtime": 1791968452.4663239,
+    "seen": 1791970738.1005125,
+    "ast_hash": "f1aa66b32fcc5b777b95529659dc12d6",
+    "semantic_hash": ""
+  },
+  "docs/benchmarks/brief-fast-preset-heldout.md": {
+    "mtime": 1791968910.8223238,
+    "seen": 1791970738.105562,
+    "ast_hash": "ff13d595609a1b208cc5c159664f63e5",
+    "semantic_hash": ""
+  },
+  "docs/screens/role-routing/phase5-after-brief-blocked-80x24.png": {
+    "mtime": 1791969064.7983239,
+    "seen": 1791970738.1099823,
+    "ast_hash": "2ad35265ad15779174c71a1db20a0c8e",
+    "semantic_hash": ""
+  },
+  "docs/screens/role-routing/phase5-before-brief-serial-160x50.png": {
+    "mtime": 1791969064.7983239,
+    "seen": 1791970738.1099844,
+    "ast_hash": "04df7592415481e0a765c2dbdbe33f53",
+    "semantic_hash": ""
+  },
+  "docs/screens/role-routing/phase5-before-defaults-160x50.png": {
+    "mtime": 1791969064.794324,
+    "seen": 1791970738.1099863,
+    "ast_hash": "4fdf55cbba34c62150bf80330ffa27f8",
     "semantic_hash": ""
   }
 }

@@ -12973,6 +12973,8 @@ mod tests {
         );
         assert!(text.contains("Contract: generated_json"), "{text}");
         assert!(text.contains("Adapter: openrouter"), "{text}");
+        // The evidence line fits at 160x50 without scrolling.
+        assert!(text.contains("Evidence: conservative"), "{text}");
         app.activate_button(ButtonId::BriefOpReset);
         assert!(
             app.status.starts_with("Links override reset"),

@@ -531,3 +531,99 @@ fn overlapping_drainers_never_double_claim_a_stage() {
     // Exactly the two independent roots, never a duplicate or a descendant.
     assert_eq!(claimed, 2);
 }
+
+fn revs(rev: &str, nodes: [&str; 4]) -> BriefInputs {
+    BriefInputs {
+        stage_revisions: nodes.iter().map(|s| s.to_string()).collect(),
+        ..inputs(rev)
+    }
+}
+
+fn complete_chain(store: &Store) {
+    while let Some(c) = claim_stage(&store.conn, "w", 120, &now()).unwrap() {
+        let items = if c.operation == "intel_brief_links" {
+            0
+        } else {
+            1
+        };
+        commit(
+            store,
+            &c,
+            &format!("{{\"stage\":\"{}\"}}", c.operation),
+            items,
+        );
+    }
+}
+
+fn states(store: &Store, job: &str) -> Vec<String> {
+    STAGES
+        .iter()
+        .map(|(op, _)| state(store, &task_id(job, op)))
+        .collect()
+}
+
+/// Spec §9 item 4: changed metadata re-runs Claims and its descendants only;
+/// a Links-only route change re-runs Links only.
+#[test]
+fn changed_metadata_reruns_claims_branch_and_links_only_refresh_reruns_links() {
+    let store = seeded();
+    ensure_chain(&store.conn, &revs("r1", ["b1", "c1", "i1", "l1"]), &now()).unwrap();
+    complete_chain(&store);
+    let meta = ensure_chain(&store.conn, &revs("r2", ["b1", "c2", "i1", "l1"]), &now()).unwrap();
+    assert_eq!(
+        states(&store, &meta),
+        ["completed", "queued", "queued", "queued"],
+        "Body adopted; Claims re-run; descendants wait for the new hash"
+    );
+    complete_chain(&store);
+    let links = ensure_chain(&store.conn, &revs("r3", ["b1", "c2", "i1", "l2"]), &now()).unwrap();
+    assert_eq!(
+        states(&store, &links),
+        ["completed", "completed", "completed", "queued"]
+    );
+    let only = claim_stage(&store.conn, "w", 120, &now()).unwrap().unwrap();
+    assert_eq!(only.operation, "intel_brief_links");
+    assert!(claim_stage(&store.conn, "w2", 120, &now())
+        .unwrap()
+        .is_none());
+}
+
+/// Spec §9 item 4: a crash after one branch commits keeps that branch; the
+/// expired sibling is re-leased under a new epoch and the stale worker is
+/// fenced, then the join binds exactly once.
+#[test]
+fn crash_after_one_branch_commit_keeps_it_and_fences_the_stale_sibling() {
+    let store = seeded();
+    let job = ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap();
+    let a = claim_stage(&store.conn, "w1", 120, &now())
+        .unwrap()
+        .unwrap();
+    let b = claim_stage(&store.conn, "w2", 120, &now())
+        .unwrap()
+        .unwrap();
+    let (body, claims) = if a.operation == "intel_brief_body" {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    commit(&store, &body, "{\"stage\":\"body\"}", 1);
+    // w2 crashes; its lease expires and the reaper interrupts it.
+    tasks::interrupt_expired_leases(&store.conn, &at(600)).unwrap();
+    let again = claim_stage(&store.conn, "w3", 120, &at(601))
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.id, claims.id);
+    assert!(again.epoch > claims.epoch);
+    assert!(!commit_stage(&store.conn, &claims, "{}", 1, "", &now()).unwrap());
+    assert_eq!(
+        state(&store, &body.id),
+        "completed",
+        "committed branch kept"
+    );
+    commit(&store, &again, "{\"stage\":\"claims\"}", 1);
+    let inf = claim_stage(&store.conn, "w", 120, &at(602))
+        .unwrap()
+        .unwrap();
+    assert_eq!(inf.operation, "intel_brief_inferences");
+    assert_eq!(inf.job_id, job);
+}

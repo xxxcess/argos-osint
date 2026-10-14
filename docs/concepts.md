@@ -20,7 +20,7 @@ Home launches nine surfaces. Labels on screen differ from `ModuleId` values; kee
 | Models | `Providers` | System |
 | Profile | `System` | System |
 
-Only Recon has a composer. Intel Briefing starts a **report job** on an Atlas article; that is not a Recon investigation thread.
+Only Recon has a composer. Intel Briefing starts a **focus brief job** on an Atlas article; independent Recon investigations retain their own threads.
 
 ## Model roles
 
@@ -33,7 +33,7 @@ Each role is provider + model plus an ordered `fallbacks` list in `config.toml`.
 | Recon | Directives and bindings |
 | Tool picker | One next tool per request (Jev decisions or chat JSON) |
 | Synthesis | Cited answer |
-| Classifier | Recon report mode from the prompt |
+| Classifier | Atlas article categories and bounded article-cleanup decisions |
 | Summarization | Graph/path summaries |
 | Evidence curator, Entity resolver, Claim assessor, Investigation controller | Investigation harness |
 
@@ -51,17 +51,13 @@ A binding is a typed value (`domain`, `handle`, `url`, …) with an evidence id.
 
 [![Binding and grounding](diagrams/recon-bindings.svg)](diagrams/recon-bindings.html)
 
-## Intel report jobs
+## Intel brief jobs and historical reports
 
-Durable job on one Atlas article (`intel_report_jobs`). Dispatches are rows in `intel_report_attempts` (created on open at schema 24 if missing).
+A Focus Brief retrieves the full article and extracts Claims, joins both for Inferences, then finds Links. Its Jobs pane shows durable stage progress and publication/index status. Related beneath Full Article reflects retained ingest associations requiring at least two distinct shared entity mentions.
 
-| UI | Meaning |
-| --- | --- |
-| `Tools: N calls used · B budget` | N = Argos dispatches including errors. Cache reuse and validation skips are not calls. |
-| Summary | Selected revision `bluf` |
-| View full report | 70%-width card of all sections |
+Article Recon report execution is retired. Historical `intel_report_jobs`, attempts, sections and provenance remain stored; admission, resume and retry reject new execution, and unfinished report jobs and descendants are cancelled and fenced. Historical reports do not take precedence over normal brief publication. Independent Recon investigations remain available.
 
-Busy work on this article hides Summary and the launch control. Another article’s job does not.
+Brain browsing exposes Claims and unique Actor-name groups without merging identities. Actor tabs show Claims, Recall-enabled Threads and ingest-associated Articles. Claim tabs show Actors and original Sources; provenance is independent of Related eligibility. Other memory kinds remain stored for recall and internal use.
 
 ## Persistence
 

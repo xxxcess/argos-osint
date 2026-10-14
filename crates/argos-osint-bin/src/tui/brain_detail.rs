@@ -8,7 +8,6 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use argos_osint_core::brain::Memory;
-use argos_osint_core::related_memories::{RelatedMemory, RelationKind};
 
 use super::app::{App, ButtonId, Target};
 use super::theme::{self, panel};
@@ -28,12 +27,65 @@ pub enum RelatedState {
     Failed(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RelatedTab {
+    #[default]
+    Claims,
+    Threads,
+    Articles,
+    Actors,
+    Sources,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssociationTarget {
+    Claim(String),
+    ActorGroup(String),
+    Thread(String),
+    Article {
+        run_id: String,
+        article_id: String,
+        revision: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssociationItem {
+    pub key: String,
+    pub title: String,
+    pub reason: String,
+    pub target: AssociationTarget,
+}
+
+impl RelatedTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claims => "Claims",
+            Self::Threads => "Threads",
+            Self::Articles => "Articles",
+            Self::Actors => "Actors",
+            Self::Sources => "Sources",
+        }
+    }
+    pub fn index(self) -> usize {
+        match self {
+            Self::Claims | Self::Actors => 0,
+            Self::Threads | Self::Sources => 1,
+            Self::Articles => 2,
+        }
+    }
+}
+
 /// Related memories of the open detail memory.
 #[derive(Clone, Debug, Default)]
 pub struct RelatedView {
-    pub items: Vec<RelatedMemory>,
+    pub items: Vec<AssociationItem>,
+    #[cfg(test)]
     pub articles: super::related_articles::ArticleRelatedView,
-    pub articles_selected: bool,
+    pub tab: RelatedTab,
+    pub cursors: [(usize, u16); 3],
+    pub page_sizes: [usize; 3],
+    pub selected_keys: [Option<String>; 3],
     pub state: RelatedState,
     pub sel: usize,
     pub scroll: u16,
@@ -53,11 +105,13 @@ pub enum DetailPane {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetailSnapshot {
     pub memory_id: String,
+    pub compact_page: usize,
     pub related_sel: usize,
     pub related_scroll: u16,
-    pub articles_selected: bool,
-    pub article_scroll: u16,
-    pub article_sel: usize,
+    pub tab: RelatedTab,
+    pub cursors: [(usize, u16); 3],
+    pub page_sizes: [usize; 3],
+    pub selected_keys: [Option<String>; 3],
     pub path_scroll: u16,
     pub summary_scroll: u16,
     pub focus: Target,
@@ -92,6 +146,10 @@ impl BrainDetail {
         self.related.state = RelatedState::Loading;
         self.related.sel = sel;
         self.related.scroll = scroll;
+        self.related.page_sizes[self.related.tab.index()] = self.related.page_sizes
+            [self.related.tab.index()]
+        .max(20)
+        .max(sel + 1);
         self.related.request
     }
 
@@ -100,7 +158,7 @@ impl BrainDetail {
         &mut self,
         request: u64,
         memory_id: &str,
-        outcome: Result<Vec<RelatedMemory>, String>,
+        outcome: Result<Vec<AssociationItem>, String>,
     ) -> bool {
         if request != self.related.request || self.memory_id() != Some(memory_id) {
             return false;
@@ -109,6 +167,16 @@ impl BrainDetail {
             Ok(items) => {
                 self.related.items = items;
                 self.related.state = RelatedState::Ready;
+                if let Some(key) = &self.related.selected_keys[self.related.tab.index()] {
+                    if let Some(index) = self.related.items.iter().position(|item| &item.key == key)
+                    {
+                        self.related.sel = index;
+                    }
+                }
+                self.related.page_sizes[self.related.tab.index()] = self.related.page_sizes
+                    [self.related.tab.index()]
+                .max(20)
+                .max(self.related.sel + 1);
                 if self.related.sel >= self.related.items.len() {
                     self.related.sel = self.related.items.len().saturating_sub(1);
                 }
@@ -122,7 +190,7 @@ impl BrainDetail {
         true
     }
 
-    pub fn selected_related(&self) -> Option<&RelatedMemory> {
+    pub fn selected_related(&self) -> Option<&AssociationItem> {
         self.related.items.get(self.related.sel)
     }
 }
@@ -142,11 +210,11 @@ pub struct DetailAreas {
 pub fn pane_of(focus: Target) -> DetailPane {
     match focus {
         Target::RelatedRow(_)
-        | Target::BrainRelatedArticle(_)
         | Target::Button(
-            ButtonId::BrainRelatedMemories
-            | ButtonId::BrainRelatedArticles
-            | ButtonId::BrainRelatedMore,
+            ButtonId::BrainRelatedFirst
+            | ButtonId::BrainRelatedSecond
+            | ButtonId::BrainRelatedThird
+            | ButtonId::BrainAssociationsMore,
         ) => DetailPane::Related,
         Target::DetailSummary => DetailPane::Summary,
         Target::Button(button) if super::summary_card::is_card_button(button) => {
@@ -157,7 +225,41 @@ pub fn pane_of(focus: Target) -> DetailPane {
 }
 
 pub fn areas_for(app: &App, area: Rect) -> DetailAreas {
+    let actor = app
+        .brain_detail
+        .memory_id()
+        .is_some_and(|id| id.starts_with("actor-group:"));
     let mut layout = areas(area, pane_of(app.focus));
+    if actor {
+        let content = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(1),
+        );
+        layout.summary = Rect::default();
+        if area.width >= 100 && app.screen.height >= 28 {
+            let left = area.width * 65 / 100;
+            layout.path = Rect::new(content.x, content.y, left, content.height);
+            layout.related = Rect::new(
+                content.x + left,
+                content.y,
+                content.width - left,
+                content.height,
+            );
+        } else {
+            layout.path = if pane_of(app.focus) == DetailPane::Related {
+                Rect::default()
+            } else {
+                content
+            };
+            layout.related = if pane_of(app.focus) == DetailPane::Related {
+                content
+            } else {
+                Rect::default()
+            };
+        }
+    }
     let page = app.compact_pages[super::app::ModuleId::Brain.index()];
     if page > 0 {
         let content = Rect::new(
@@ -251,44 +353,42 @@ pub fn inner(area: Rect) -> Rect {
 /// One painted line of the Related section.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RelRow {
-    Header(&'static str),
-    Title(usize),
-    Reason(usize),
+    Title(usize, String),
+    Reason(usize, String),
     Note(String),
 }
 
 /// The Related section's lines, in paint order. Hit-testing uses the same list.
-pub fn related_rows(view: &RelatedView) -> Vec<RelRow> {
+pub fn related_rows(view: &RelatedView, width: usize) -> Vec<RelRow> {
     match &view.state {
         RelatedState::Idle | RelatedState::Loading => {
-            return vec![RelRow::Note(super::anim::loading(
-                "Loading related memories",
-            ))]
+            return vec![RelRow::Note(super::anim::loading("Loading associations"))]
         }
         RelatedState::Failed(err) => {
-            return vec![RelRow::Note(format!("Related memories unavailable: {err}"))]
+            return vec![RelRow::Note(format!(
+                "Associations unavailable: {err} · select tab to retry"
+            ))]
         }
         RelatedState::Ready if view.items.is_empty() => {
-            return vec![RelRow::Note("No related memories".into())]
+            return vec![RelRow::Note(format!(
+                "No {}",
+                view.tab.label().to_lowercase()
+            ))]
         }
         RelatedState::Ready => {}
     }
     let mut rows = Vec::new();
-    for (kind, header) in [
-        (RelationKind::Explicit, "Linked"),
-        (RelationKind::Similar, "Similar · not evidence"),
-    ] {
-        let mut first = true;
-        for (index, item) in view.items.iter().enumerate() {
-            if item.kind != kind {
-                continue;
-            }
-            if first {
-                rows.push(RelRow::Header(header));
-                first = false;
-            }
-            rows.push(RelRow::Title(index));
-            rows.push(RelRow::Reason(index));
+    for (index, item) in view
+        .items
+        .iter()
+        .enumerate()
+        .take(view.page_sizes[view.tab.index()].max(20))
+    {
+        for text in super::ui::wrap_text(&format!("· {}", item.title), width.max(1)) {
+            rows.push(RelRow::Title(index, text));
+        }
+        for text in super::ui::wrap_text(&format!("  {}", item.reason), width.max(1)) {
+            rows.push(RelRow::Reason(index, text));
         }
     }
     rows
@@ -309,31 +409,41 @@ pub fn related_at(view: &RelatedView, area: Rect, x: u16, y: u16) -> Option<usiz
         return None;
     }
     let row = view.scroll as usize + (y - content.y) as usize;
-    match related_rows(view).get(row)? {
-        RelRow::Title(index) | RelRow::Reason(index) => Some(*index),
+    match related_rows(view, content.width as usize).get(row)? {
+        RelRow::Title(index, _) | RelRow::Reason(index, _) => Some(*index),
         _ => None,
     }
 }
 
 pub fn related_scroll_max(view: &RelatedView, area: Rect) -> u16 {
-    let rows = related_rows(view).len();
+    let rows = related_rows(view, inner(related_content_area(area)).width as usize).len();
     rows.saturating_sub(inner(related_content_area(area)).height as usize) as u16
 }
 
 /// Scroll so the selected item's two lines are visible.
 pub fn reveal_related(view: &mut RelatedView, area: Rect) {
     let height = inner(related_content_area(area)).height.max(1) as usize;
-    let rows = related_rows(view);
-    let Some(top) = rows.iter().position(|row| *row == RelRow::Title(view.sel)) else {
+    let rows = related_rows(view, inner(related_content_area(area)).width as usize);
+    let Some(top) = rows
+        .iter()
+        .position(|row| matches!(row,RelRow::Title(index,_) if *index==view.sel))
+    else {
         return;
     };
     // Keep the group header visible for the first item of a group.
-    let start = if top > 0 && matches!(rows[top - 1], RelRow::Header(_)) {
-        top - 1
-    } else {
-        top
-    };
-    let bottom = top + 1;
+    let start = top;
+    let bottom = rows
+        .iter()
+        .rposition(
+            |row| matches!(row,RelRow::Title(index,_)|RelRow::Reason(index,_) if *index==view.sel),
+        )
+        .unwrap_or(top);
+    if bottom.saturating_sub(start) + 1 > height {
+        // When a short split pane cannot fit the whole item, retain its title;
+        // opening the expanded pane must not start on an orphaned reason line.
+        view.scroll = start as u16;
+        return;
+    }
     let scroll = view.scroll as usize;
     if start < scroll {
         view.scroll = start as u16;
@@ -347,47 +457,63 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let tabs = Rect::new(area.x, area.y, area.width, 1);
-    let left = Rect::new(tabs.x, tabs.y, tabs.width / 2, 1);
-    let right = Rect::new(tabs.x + left.width, tabs.y, tabs.width - left.width, 1);
-    let articles_selected = app.brain_detail.related.articles_selected;
-    super::ui::draw_button_state(
-        frame,
-        app,
-        ButtonId::BrainRelatedMemories,
-        "Memories",
-        left,
-        !articles_selected,
-    );
-    super::ui::draw_button_state(
-        frame,
-        app,
-        ButtonId::BrainRelatedArticles,
-        &format!(
-            "Articles ({})",
-            app.brain_detail.related.articles.page.total
-        ),
-        right,
-        articles_selected,
-    );
+    let actor = app
+        .brain_detail
+        .memory_id()
+        .is_some_and(|id| id.starts_with("actor-group:"));
+    let labels: &[&str] = if actor {
+        &["Claims", "Threads", "Articles"]
+    } else {
+        &["Actors", "Sources"]
+    };
+    let buttons = [
+        ButtonId::BrainRelatedFirst,
+        ButtonId::BrainRelatedSecond,
+        ButtonId::BrainRelatedThird,
+    ];
+    for (index, label) in labels.iter().enumerate() {
+        let x = tabs.x + tabs.width * index as u16 / labels.len() as u16;
+        let end = tabs.x + tabs.width * (index + 1) as u16 / labels.len() as u16;
+        super::ui::draw_button_state(
+            frame,
+            app,
+            buttons[index],
+            label,
+            Rect::new(x, tabs.y, end - x, 1),
+            app.brain_detail.related.tab.index() == index,
+        );
+    }
     let area = related_content_area(area);
     let view = &app.brain_detail.related;
-    if view.articles_selected {
-        draw_article_related(frame, app, area);
-        return;
+    let focused = matches!(
+        app.focus,
+        Target::RelatedRow(_)
+            | Target::Button(
+                ButtonId::BrainAssociationsMore
+                    | ButtonId::BrainRelatedFirst
+                    | ButtonId::BrainRelatedSecond
+                    | ButtonId::BrainRelatedThird
+            )
+    );
+    if view.items.is_empty() {
+        app.layout
+            .borrow_mut()
+            .register(Target::RelatedRow(view.sel), area);
     }
-    let focused = matches!(app.focus, Target::RelatedRow(_));
     let width = inner(area).width as usize;
 
-    let inner_area = inner(area);
+    let mut inner_area = inner(area);
+    let more = view.items.len() > view.page_sizes[view.tab.index()].max(20);
+    inner_area.height = inner_area.height.saturating_sub(u16::from(more));
     let mut current_y = inner_area.y;
-    for (i, row) in related_rows(view).into_iter().enumerate() {
+    for (i, row) in related_rows(view, width).into_iter().enumerate() {
         if i < view.scroll as usize {
             continue;
         }
         if current_y >= inner_area.y + inner_area.height {
             break;
         }
-        if let RelRow::Title(index) | RelRow::Reason(index) = row {
+        if let RelRow::Title(index, _) | RelRow::Reason(index, _) = row {
             app.layout.borrow_mut().register(
                 Target::RelatedRow(index),
                 Rect {
@@ -404,23 +530,17 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
     let loading = matches!(view.state, RelatedState::Idle | RelatedState::Loading);
     let lines: Vec<Line> = if loading {
         super::anim::centered_lines(
-            "Loading related memories",
+            "Loading associations",
             theme::dim(),
             inner_area.width,
             inner_area.height,
         )
     } else {
-        related_rows(view)
+        related_rows(view, width)
             .into_iter()
             .map(|row| match row {
-                RelRow::Header(text) => Line::from(Span::styled(fit(text, width), theme::accent())),
                 RelRow::Note(text) => Line::from(Span::styled(fit(&text, width), theme::dim())),
-                RelRow::Title(index) => {
-                    let item = &view.items[index];
-                    let mark = match item.kind {
-                        RelationKind::Explicit => "⇄",
-                        RelationKind::Similar => "≈",
-                    };
+                RelRow::Title(index, text) => {
                     let style = if index == view.sel && focused {
                         theme::selected()
                     } else if index == view.sel {
@@ -428,28 +548,22 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
                     } else {
                         theme::text()
                     };
-                    Line::from(Span::styled(
-                        fit(&format!("{mark} {}", item.title), width),
-                        style,
-                    ))
+                    Line::from(Span::styled(text, style))
                 }
-                RelRow::Reason(index) => {
-                    let item = &view.items[index];
-                    let reason_text =
-                        argos_osint_core::related_memories::format_meaningful_link_reason(
-                            &item.reason,
-                        );
-                    Line::from(Span::styled(
-                        fit(&format!("  {} · {}", reason_text, item.provenance), width),
-                        theme::muted(),
-                    ))
-                }
+                RelRow::Reason(_, text) => Line::from(Span::styled(text, theme::muted())),
             })
             .collect()
     };
     let title = match view.state {
         RelatedState::Ready if !view.items.is_empty() => {
-            format!(" related · {} ", view.items.len())
+            format!(
+                " {} · {} of {} ",
+                view.tab.label(),
+                view.items
+                    .len()
+                    .min(view.page_sizes[view.tab.index()].max(20)),
+                view.items.len()
+            )
         }
         _ => " related ".to_string(),
     };
@@ -459,63 +573,27 @@ pub fn draw_related(frame: &mut Frame, app: &App, area: Rect) {
         title
     };
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel(&title))
-            .scroll((view.scroll, 0)),
+        Paragraph::new(
+            lines
+                .into_iter()
+                .take(view.scroll as usize + inner_area.height as usize)
+                .collect::<Vec<_>>(),
+        )
+        .block(panel(&title))
+        .scroll((view.scroll, 0)),
         area,
     );
-}
-
-fn draw_article_related(frame: &mut Frame, app: &App, area: Rect) {
-    let view = &app.brain_detail.related.articles;
-    let content = inner(area);
-    let more = view.page.has_more;
-    let row_height = content.height.saturating_sub(u16::from(more));
-    let rows = super::related_articles::rows(view, content.width as usize, true);
-    for (offset, (_, target)) in rows
-        .iter()
-        .skip(view.scroll as usize)
-        .take(row_height as usize)
-        .enumerate()
-    {
-        if let Some(target) = target {
-            app.layout.borrow_mut().register(
-                *target,
-                Rect::new(content.x, content.y + offset as u16, content.width, 1),
+    if more {
+        let content = inner(area);
+        if content.height > 0 {
+            super::ui::draw_button(
+                frame,
+                app,
+                ButtonId::BrainAssociationsMore,
+                "See more",
+                Rect::new(content.x, content.y + content.height - 1, content.width, 1),
             );
         }
-    }
-    let lines = if view.loading {
-        super::anim::centered_lines(
-            "Loading related articles",
-            theme::dim(),
-            content.width,
-            content.height,
-        )
-    } else {
-        rows.into_iter().map(|(line, _)| line).collect::<Vec<_>>()
-    };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel(&format!(
-                " Related · {} ",
-                if view.page.coverage == "this cycle" {
-                    "this cycle"
-                } else {
-                    "all retained cycles"
-                }
-            )))
-            .scroll((view.scroll, 0)),
-        area,
-    );
-    if more && content.height > 0 {
-        super::ui::draw_button(
-            frame,
-            app,
-            ButtonId::BrainRelatedMore,
-            "See more",
-            Rect::new(content.x, content.y + content.height - 1, content.width, 1),
-        );
     }
 }
 
@@ -531,7 +609,15 @@ pub fn draw_nav(frame: &mut Frame, app: &App, areas: &DetailAreas, _claim: bool)
         frame,
         app,
         selectors,
-        &["Split", "Graph", "Related", "Summary"],
+        if app
+            .brain_detail
+            .memory_id()
+            .is_some_and(|id| id.starts_with("actor-group:"))
+        {
+            &["Split", "Graph", "Related"]
+        } else {
+            &["Split", "Graph", "Related", "Summary"]
+        },
     );
     app.layout
         .borrow_mut()

@@ -6,7 +6,7 @@ mod acceptance {
         body_fetch_routes, create_report_job, section_plan, seed_element_ledger,
         validate_article_body, BodyQuality, ReportMode, ReportScope,
     };
-    use crate::store::{AtlasArticleClaim, AtlasArticleRow, AtlasInsightClaim, Store};
+    use crate::store::{AtlasArticleClaim, AtlasArticleRow, Store};
 
     fn article() -> AtlasArticleRow {
         AtlasArticleRow {
@@ -29,112 +29,21 @@ mod acceptance {
     }
 
     #[test]
-    fn completed_modes_commit_immutable_exclusive_report_requests_without_body_or_listener() {
-        use crate::investigation::insight_persist::{
-            desired_generation, report_input, schedule_article_refresh,
-        };
+    fn all_historical_modes_reject_new_article_report_admission() {
         let store = Store::memory().unwrap();
-        let mut art = article();
+        let art = article();
         store.atlas_upsert_article(&art).unwrap();
-        let settings = crate::provider::SettingsFile::default();
-        assert!(schedule_article_refresh(&store, &art, &settings, true)
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            desired_generation(&store.conn, "article", &art.id).unwrap(),
-            0
-        );
-        let mut previous = 0;
         for mode in ReportMode::all() {
-            let job = create_report_job(
-                &store,
-                &art,
-                mode,
-                &ReportScope {
-                    sections: vec!["bluf".into()],
-                    ..Default::default()
-                },
-                true,
-            )
-            .unwrap();
-            let tasks = store.intel_report_tasks(&job.id).unwrap();
-            assert!(tasks.iter().all(|t| t.task_type != "refresh_insights"));
-            for element in store.intel_elements(&job.investigation_id).unwrap() {
-                store
-                    .update_element_assessment(
-                        &element.id,
-                        "unresolved",
-                        "unresolved",
-                        "fixture",
-                        "",
-                        "[]",
-                    )
-                    .unwrap();
+            for force in [false, true] {
+                assert!(
+                    create_report_job(&store, &art, mode, &ReportScope::default(), force)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("retired")
+                );
             }
-            store
-                .upsert_report_section_markdown(
-                    &job.id,
-                    "bluf",
-                    &format!(
-                        "Complete {} report conclusion with qualified uncertainty.",
-                        mode.as_str()
-                    ),
-                    "complete",
-                    "[]",
-                    "{}",
-                    1,
-                    "",
-                )
-                .unwrap();
-            super::super::worker::finalize_job_state(&store, &job.id, &settings, &mut |_| {})
-                .unwrap();
-            assert_eq!(
-                store.intel_report_job(&job.id).unwrap().unwrap().state,
-                "completed"
-            );
-            let generation = desired_generation(&store.conn, "article", &art.id).unwrap();
-            assert!(generation > previous);
-            previous = generation;
-            let input = report_input(&store.conn, &art.id, generation)
-                .unwrap()
-                .unwrap();
-            let payload = serde_json::to_string(&input).unwrap();
-            assert_eq!(input.surface, "recon_report");
-            assert!(!input.recall_enabled);
-            assert!(payload.contains(&format!("Complete {} report", mode.as_str())));
-            assert!(!payload.contains(&art.title));
-            assert!(!payload.contains(&art.description));
-            assert!(!payload.contains(&art.url));
-            assert!(input.snapshot.memory_refs.is_empty());
-            assert!(input.snapshot.tool_refs.is_empty());
-            schedule_article_refresh(&store, &art, &settings, true).unwrap();
-            assert_eq!(
-                desired_generation(&store.conn, "article", &art.id).unwrap(),
-                generation
-            );
-            // Replayed finalization does not create another sequence/generation.
-            super::super::worker::finalize_job_state(&store, &job.id, &settings, &mut |_| {})
-                .unwrap();
-            assert_eq!(
-                desired_generation(&store.conn, "article", &art.id).unwrap(),
-                generation
-            );
         }
-        art.title = "Changed article details cannot supersede completed report".into();
-        store.atlas_upsert_article(&art).unwrap();
-        schedule_article_refresh(&store, &art, &settings, true).unwrap();
-        assert_eq!(
-            desired_generation(&store.conn, "article", &art.id).unwrap(),
-            previous
-        );
-        assert_eq!(
-            store
-                .conn
-                .query_row("SELECT COUNT(*) FROM intel_report_results", [], |r| r
-                    .get::<_, i64>(0))
-                .unwrap(),
-            4
-        );
+        assert!(store.intel_jobs_for_article(&art.id).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -199,174 +108,40 @@ mod acceptance {
     }
 
     #[tokio::test]
-    async fn scripted_empty_report_is_exclusive_clears_old_brain_and_queues_index_removal() {
-        use crate::investigation::insight_persist;
-        use crate::provider_attempt::mock;
-        use std::sync::{atomic::AtomicBool, Arc};
-        let server = mock::serve(vec![
-            mock::ok_json(
-                r#"{"entities":[],"claims":[],"limit_reached":false,"partial_enumeration":false}"#,
-                "stop",
-            ),
-            mock::ok_json(r#"{"inferences":[],"links":[]}"#, "stop"),
-        ])
-        .await;
-        let secret = mock::secret(&server.base_url);
-        let mut auth = crate::secrets::AuthFile::default();
-        auth.set_account(secret.clone());
-        let mut settings = crate::provider::SettingsFile::default();
-        let assignment = crate::provider::ModelAssignment {
-            provider: secret.kind.clone(),
-            model: secret.model.clone(),
-            ..Default::default()
-        };
-        settings.defaults.claim_assessor = assignment.clone();
-        settings.defaults.synthesis = assignment;
+    async fn historical_report_artifact_does_not_admit_extraction_on_recovery() {
         let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("exclusive.db");
+        let db = dir.path().join("argos.db");
         let store = Store::open(&db).unwrap();
         let art = article();
         store.atlas_upsert_article(&art).unwrap();
-        let old = AtlasInsightClaim {
-            fingerprint: String::new(),
-            entity: "geneva".into(),
-            namespace: "place".into(),
-            predicate: "hosts".into(),
-            object: "talks".into(),
-            topic: "geopolitical".into(),
-            claim: "Geneva hosts earlier talks".into(),
-            classification: "fact".into(),
-            confidence: 0.5,
-            article_id: art.id.clone(),
-            source_url: art.url.clone(),
-            published_at: art.published_at.clone(),
-            reliability: "B".into(),
-            info_credibility: 6,
-            admiralty: "B6".into(),
-            rsp_status: String::new(),
-        };
-        let mut unedited = old.clone();
-        unedited.predicate = "archives".into();
-        unedited.claim = "Geneva archives earlier talks".into();
-        store
-            .persist_atlas_insights(&art.run_id, &[old, unedited], &[], "", "")
-            .unwrap();
-        let old_memory: String = store
-            .conn
-            .query_row(
-                "SELECT memory_id FROM insight_claims WHERE predicate='hosts'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let unedited_memory: String = store
-            .conn
-            .query_row(
-                "SELECT memory_id FROM insight_claims WHERE predicate='archives'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        store
-            .update_memory(
-                &old_memory,
-                "User edited this article-owned assertion",
-                "investigation",
-                false,
-            )
-            .unwrap();
-        let manual = store
-            .add_memory(
-                "Independently remembered Geneva context",
-                "general",
-                false,
-                crate::brain::MemorySource {
-                    app: "manual".into(),
-                    conversation_id: "manual-note".into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        let job = create_report_job(
-            &store,
-            &art,
-            ReportMode::Verify,
-            &ReportScope {
-                sections: vec!["bluf".into()],
-                ..Default::default()
-            },
-            true,
-        )
-        .unwrap();
-        for element in store.intel_elements(&job.investigation_id).unwrap() {
-            store
-                .update_element_assessment(
-                    &element.id,
-                    "unresolved",
-                    "unresolved",
-                    "fixture",
-                    "",
-                    "[]",
-                )
-                .unwrap();
-        }
-        store
-            .upsert_report_section_markdown(
-                &job.id,
-                "bluf",
-                "Complete report contains no supported conclusions.",
-                "complete",
-                "[]",
-                "{}",
-                1,
-                "",
-            )
-            .unwrap();
-        super::super::worker::finalize_job_state(&store, &job.id, &settings, &mut |_| {}).unwrap();
-        let task: String = store
-            .conn
-            .query_row(
-                "SELECT id FROM argos_tasks WHERE operation='insight_refresh'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let output = insight_persist::run_refresh_slice(
+        store.connection().execute("INSERT INTO intel_report_results(job_id,generation,article_id,completion_sequence,source_hash,details_json,completed_at) VALUES('old',1,?1,1,'hash','{}',?2)",rusqlite::params![art.id,chrono::Utc::now().to_rfc3339()]).unwrap();
+        let count = crate::investigation::insight_persist::recover_refreshes(
             &db,
-            &task,
-            &auth,
-            &settings,
-            &Arc::new(AtomicBool::new(false)),
+            &crate::secrets::AuthFile::default(),
+            &crate::provider::SettingsFile::default(),
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await
-        .unwrap()
         .unwrap();
-        assert!(output.claims.is_empty() && output.inferences.is_empty());
-        assert!(output.readiness.publication_eligible);
-        assert!(store
-            .atlas_claims_for_article(&art.run_id, &art.id)
-            .unwrap()
-            .is_empty());
+        assert_eq!(count, 0);
         assert_eq!(
-            store.get_memory(&old_memory).unwrap().unwrap().text,
-            "User edited this article-owned assertion"
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM argos_tasks WHERE operation='insight_refresh'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
         );
-        assert!(store.get_memory(&unedited_memory).unwrap().is_none());
-        assert!(store.get_memory(&manual.id).unwrap().is_some());
-        assert!(store.conn.query_row("SELECT EXISTS(SELECT 1 FROM argos_index_changes WHERE record_id=?1 AND operation='index_remove')",[&unedited_memory],|r|r.get::<_,bool>(0)).unwrap());
-        assert_eq!(server.hits(), 2);
-        for request in server.requests.lock().unwrap().iter() {
-            assert!(request.contains("Complete report contains no supported conclusions"));
-            assert!(!request.contains(&art.title));
-            assert!(!request.contains(&art.description));
-            assert!(!request.contains("Geneva hosts earlier talks"));
-            assert!(!request.contains(&art.url));
-        }
-        // Report stays completed independently of extraction and job cleanup.
         assert_eq!(
-            store.intel_report_job(&job.id).unwrap().unwrap().state,
-            "completed"
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM intel_report_results", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
         );
     }
 
@@ -390,83 +165,51 @@ mod acceptance {
     }
 
     #[test]
-    fn create_report_places_section_placeholders_immediately() {
+    fn retired_report_admission_creates_no_section_placeholders() {
         let store = Store::memory().unwrap();
         let art = article();
-        store.atlas_upsert_article(&art).unwrap();
-        let job = create_report_job(
+        assert!(create_report_job(
             &store,
             &art,
             ReportMode::FullAssessment,
             &ReportScope::default(),
-            false,
+            false
         )
-        .unwrap();
-        let sections = store.intel_report_sections(&job.id).unwrap();
-        assert_eq!(sections.len(), 10);
-        assert!(sections.iter().all(|s| s.status == "waiting"));
-        assert_eq!(job.sections_total, 10);
+        .is_err());
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM intel_report_sections", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
-    fn report_attempt_budget_survives_stage_updates_and_reopen() {
+    fn historical_report_attempt_counts_survive_reopen() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let store = Store::open(file.path()).unwrap();
         let art = article();
         store.atlas_upsert_article(&art).unwrap();
-        let job = create_report_job(
-            &store,
-            &art,
-            ReportMode::Verify,
-            &ReportScope::default(),
-            false,
-        )
-        .unwrap();
-        let task = store
-            .intel_report_tasks(&job.id)
-            .unwrap()
-            .into_iter()
-            .find(|task| task.task_type == "collect")
+        let inv = store
+            .ensure_intel_investigation(&art.id, &art.run_id, &art.url, "{}")
+            .unwrap();
+        let job = store
+            .insert_report_job(&inv.id, &art.id, "verify", 1, "{}", "{}", 0, 0, 24, None)
             .unwrap();
         store
-            .conn
+            .connection()
             .execute(
-                "UPDATE intel_report_jobs SET tool_calls_allowance=1 WHERE id=?1",
+                "UPDATE intel_report_jobs SET state='completed',tool_calls_done=7 WHERE id=?1",
                 [&job.id],
             )
             .unwrap();
-        let attempt = store
-            .insert_report_attempt(&job.id, job.generation, &task.id, "firecrawl_search")
-            .unwrap();
-        store
-            .update_report_job(&job.id, "running", "collected", 0, 0, "", "")
-            .unwrap();
-        store
-            .finish_report_attempt(&job.id, &attempt, "success")
-            .unwrap();
-        store
-            .finish_report_attempt(&job.id, &attempt, "failed")
-            .unwrap();
-        assert!(store
-            .insert_report_attempt(&job.id, job.generation, &task.id, "firecrawl_search")
-            .is_err());
-        assert!(store
-            .insert_report_attempt(&job.id, job.generation + 1, &task.id, "firecrawl_search")
-            .is_err());
         drop(store);
         let reopened = Store::open(file.path()).unwrap();
-        let persisted = reopened.intel_report_job(&job.id).unwrap().unwrap();
-        assert_eq!(persisted.tool_calls_done, 1);
-        assert!(persisted.current_tool.is_empty());
-        let state: String = reopened
-            .conn
-            .query_row(
-                "SELECT state FROM intel_report_attempts WHERE id=?1",
-                [&attempt],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(state, "success");
+        let retained = reopened.intel_report_job(&job.id).unwrap().unwrap();
+        assert_eq!(retained.tool_calls_done, 7);
+        assert_eq!(retained.state, "completed");
     }
 
     #[test]
@@ -545,141 +288,52 @@ mod acceptance {
     }
 
     #[test]
-    fn active_job_is_reused_instead_of_duplicated() {
+    fn report_resume_and_retry_cannot_reactivate_historical_work() {
         let store = Store::memory().unwrap();
         let art = article();
-        store.atlas_upsert_article(&art).unwrap();
-        let first = create_report_job(
-            &store,
-            &art,
-            ReportMode::Verify,
-            &ReportScope::default(),
-            false,
-        )
-        .unwrap();
-        let second = create_report_job(
-            &store,
-            &art,
-            ReportMode::Verify,
-            &ReportScope::default(),
-            false,
-        )
-        .unwrap();
-        assert_eq!(first.id, second.id);
-        let forced = create_report_job(
-            &store,
-            &art,
-            ReportMode::Verify,
-            &ReportScope::default(),
-            true,
-        )
-        .unwrap();
-        assert_ne!(first.id, forced.id);
-        assert_eq!(forced.revision, 2);
+        let inv = store
+            .ensure_intel_investigation(&art.id, &art.run_id, &art.url, "{}")
+            .unwrap();
+        let job = store
+            .insert_report_job(&inv.id, &art.id, "verify", 1, "{}", "{}", 0, 0, 24, None)
+            .unwrap();
+        assert!(crate::intel_recon::resume_job(&store, &job.id)
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
+        assert!(crate::intel_recon::retry_failed_tasks(&store, &job.id)
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
     }
 
     #[tokio::test]
-    async fn verify_job_reaches_terminal_state_with_deterministic_synthesis() {
-        use crate::intel_recon::{JobRuntime, ReportMode, ReportScope};
-        use crate::osint::ProviderKeys;
-        use crate::provider::SettingsFile;
-        use std::sync::atomic::AtomicBool;
-        use std::sync::Arc;
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
+    async fn report_worker_entry_rejects_execution_without_events() {
+        use crate::intel_recon::JobRuntime;
+        let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("argos.db");
-        let store = Store::open(&db).unwrap();
+        drop(Store::open(&db).unwrap());
         let art = article();
-        store.atlas_upsert_article(&art).unwrap();
-        // Seed a usable body so acquire_body is a cache hit.
-        let body = store
-            .ensure_article_body(
-                &art.id,
-                &art.run_id,
-                &art.url,
-                &art.source_domain,
-                &art.source_name,
-            )
-            .unwrap();
-        store
-            .commit_article_body(
-                &body.id,
-                "# Geneva talks resume\n\nDiplomats from France and Germany met today to discuss the ceasefire proposal after overnight shelling near the border crossing. Officials said progress was limited but talks will continue next week in the same venue.",
-                "hash",
-                "complete",
-                "fixture",
-                &art.url,
-                "fixture",
-                false,
-            )
-            .unwrap();
-        let claim = AtlasInsightClaim {
-            fingerprint: r#"["news","diplomats","discuss","ceasefire"]"#.into(),
-            entity: "diplomats".into(),
-            namespace: "news".into(),
-            predicate: "discuss".into(),
-            object: "ceasefire".into(),
-            topic: "geopolitical".into(),
-            claim: "Diplomats discuss ceasefire".into(),
-            classification: "fact".into(),
-            confidence: 0.7,
-            article_id: art.id.clone(),
-            source_url: art.url.clone(),
-            published_at: art.published_at.clone(),
-            reliability: "B".into(),
-            info_credibility: 2,
-            admiralty: "B2".into(),
-            rsp_status: "gr".into(),
-        };
-        store
-            .persist_atlas_insights(&art.run_id, &[claim], &[], "", "")
-            .unwrap();
-
-        let job = create_report_job(
-            &store,
-            &art,
-            ReportMode::Verify,
-            &ReportScope::default(),
-            false,
-        )
-        .unwrap();
         let runtime = JobRuntime {
             stage: None,
-            db_path: db.clone(),
-            job_id: job.id.clone(),
-            article_title: art.title.clone(),
-            article_url: art.url.clone(),
-            article_preview: art.description.clone(),
-            article_published: art.published_at.clone(),
-            article_domain: art.source_domain.clone(),
-            run_id: art.run_id.clone(),
-            keys: ProviderKeys::default(),
-            auth: crate::secrets::AuthFile::default(),
+            db_path: db,
+            job_id: "old".into(),
+            article_title: art.title,
+            article_url: art.url,
+            article_preview: art.description,
+            article_published: art.published_at,
+            article_domain: art.source_domain,
+            run_id: art.run_id,
+            keys: Default::default(),
+            auth: Default::default(),
             synthesis_secret: None,
             classifier_secret: None,
-            settings: SettingsFile::default(),
-            cancel: Arc::new(AtomicBool::new(false)),
+            settings: Default::default(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
-        let mut events = 0u32;
-        crate::intel_recon::run_job_to_completion(runtime, |_| {
-            events += 1;
-        })
-        .await
-        .unwrap();
-        let finished = Store::open(&db)
-            .unwrap()
-            .intel_report_job(&job.id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(finished.state, "partial");
-        let sections = Store::open(&db)
-            .unwrap()
-            .intel_report_sections(&job.id)
-            .unwrap();
-        assert!(sections
-            .iter()
-            .any(|s| s.status == "draft" && !s.markdown.is_empty()));
-        assert!(events > 0);
+        let mut events = 0;
+        let result = crate::intel_recon::run_job_to_completion(runtime, |_| events += 1).await;
+        assert!(result.unwrap_err().to_string().contains("retired"));
+        assert_eq!(events, 0);
     }
 }

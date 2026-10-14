@@ -684,6 +684,10 @@ impl Store {
         warning: &str,
         error: &str,
     ) -> Result<()> {
+        if crate::job_cleanup::retired(&self.conn, id)? {
+            return Ok(());
+        }
+
         let finished = if is_terminal_report_state(state) {
             now()
         } else {

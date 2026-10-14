@@ -46,14 +46,15 @@ Turn flow, bindings, and citations: [architecture.md](architecture.md).
 
 Atlas headline board: tabs, day filter, search, hero story.
 
-- Enter → Briefing Focus (confidence, claims, assessment, tags, links, mini-map, Summary)
-- View full report → 70%-width card
-- Mode button → Verify / Explain / Assess Outlook / Full Assessment (Jobs-backed)
-- Busy work on this article hides Summary and the launch control
+- Enter → Focus Brief: extracted facts, article reader, Related and brief Jobs.
+- Left: Confidence, Claims, Inferences, Actors and Links.
+- Middle: preview/image, Visit/Reload, bordered Full Article, then bordered Related.
+- Right: Tags, Country and brief preparation Jobs. Compact pages expose Extracted, Reader and Context.
+- Related has its own cursor and scroll; focus reveals its panel. Wheel and PageUp/PageDown scroll its rows before the middle stack. See more stays anchored.
 
-Intel Focus Brief shows Confidence above Claims: an Admiralty badge with Source, Information and Brief rating. The deterministic rating averages unique supported claims and inferences, collapses copied support roots and penalizes explicit refutations; it is a support score, not a truth probability. Source-only B6 is 60 provisional, F6 is N/A, empty completed assessment is N/A and all-refuted is 0. Pending/failed replacements retain the previous rating with a label. Actors from stored title/description mentions are visible before claims and during refresh. Scroll the extracted column to reach every Actor and Related lead. Full article has a clipped border in loading, empty, error and long-text states, with independent scrolling and See more. Tags/Country/Jobs use the reclaimed Assessment-card space; Full Assessment remains a Recon mode.
+Intel Focus Brief shows Confidence above Claims: an Admiralty badge with Source, Information and Brief rating. The deterministic rating averages unique supported claims and inferences, collapses copied support roots and penalizes explicit refutations; it is a support score, not a truth probability. Source-only B6 is 60 provisional, F6 is N/A, empty completed assessment is N/A and all-refuted is 0. Pending/failed replacements retain the previous rating with a label. Actors from stored title/description mentions are visible before claims and during refresh. Scroll the extracted column to reach every Actor; Related is beneath Full Article in the reader. Full article has a clipped border in loading, empty, error and long-text states, with independent scrolling and See more. Tags/Country/Jobs remain visible in the context column.
 
-Visiting a brief requests initial analysis only after complete retained article details are available. Jobs shows Waiting → Queued → Extracting → Published → Indexed and failure reasons. Every complete enabled Recon scope, including BLUF-only, queues an exclusive report-based replacement afterward. Later body reloads do not overwrite completed-report insights.
+Visiting a brief requests initial analysis only after complete retained article details are available. Jobs shows Waiting → Queued → Extracting → Published → Indexed and failure reasons. Article Recon reports are retired: no mode classification, report launch, BLUF or full-report selector. Independent Recon investigations remain available. Historical report artifacts are retained, and validated cached brief artifacts republish on the next normal visit without repeating extraction stages.
 
 In Intel, Ctrl+K → **Open extraction job** shows stage, completed/total windows and assessment batches, provider route/attempt, withheld items and the exact failure. Ctrl+K → **Retry extraction**, or the extraction job's **Retry extraction** button, admits one retry epoch for recoverable unfinished work and keeps completed compatible checkpoints. Visiting again or restarting does not retry exhausted work. A relevant model-route change admits replacement work using the captured old routes for comparison. Qualified items can publish while optional assessments remain withheld; missing mandatory coverage or all-withheld model failure keeps the previous snapshot. **Published** means Brain rows committed. **Indexed** means their current revisions were acknowledged; pending/disabled index work stays separate. Use **Retry index** on the failed index job in Jobs; reindexing cannot create insights that never published.
 
@@ -63,7 +64,17 @@ Confidence retains the original large ASCII Admiralty grade and color gradient b
 
 Details: [concepts.md](concepts.md) · [architecture.md](architecture.md#intel-reports).
 
-[![Intel report job](diagrams/intel-report.svg)](diagrams/intel-report.html)
+[![Historical Intel report job](diagrams/intel-report.svg)](diagrams/intel-report.html)
+
+### Brain
+
+Kind cycles **All → Claims → Actors → All**. All is exactly the union of visible claims and normalized Actor-name groups; internal inferences, links, tentative Related records, digests, profiles and notes stay stored for recall. Create saves a user-supplied, unassessed Claim. Pin/Delete apply to claims; actor groups are read-only.
+
+An Actor group collects all member and redirected identities for browsing without merging them. Its tabs are **Claims · Threads · Articles**; a Claim exposes **Actors · Sources**. Select a row with keyboard or mouse to open the claim, actor group, original Recon transcript or exact Intel article brief. Back/Esc restores the record, tab, selection, focus and independent offsets. Sources are direct retained origins; similar memories and tentative article leads are excluded. Lists show totals and See more; graphs cover the entire association set.
+
+Only Claim, Topic, Entity, Article and Source nodes are displayed. Graph focus and scrolling remain available; clicking or pressing Enter on a node does not navigate. Claims keep Graph above Related/Summary, stacking below 68 columns. Actor detail uses Graph 65% / Related 35% at 100×28 or larger, with reachable Graph/Related pages below that. Thread detections are recorded only with Recall enabled; later disabling Recall preserves earlier receipts.
+
+[![Brain browse projection](diagrams/brain-browse.svg)](diagrams/brain-browse.html)
 
 ### Atlas
 
@@ -115,7 +126,7 @@ The redacted change summary lists what moves before you commit. Primary IDs, fil
 
 | App | Role |
 | --- | --- |
-| Brain | Saved memories, Find, Create / Pin / Delete, path graph ([recall](diagrams/brain-recall.html)) |
+| Brain | Claims and unique Actor names, Find, Create Claim, typed associations, read-only graph ([recall](diagrams/brain-recall.html)) |
 | Tools (`Osint`) | Manual HTTP tools, keys, documentation, history |
 | Models (`Providers`) | Defaults (primary + ordered fallbacks), OpenRouter, Google, Nvidia |
 | Jobs | Background work ([lifecycle](diagrams/jobs-lifecycle.html)) |
@@ -210,3 +221,5 @@ contain resize for display. Bulletin imagery and short article previews are
 vertically centered; briefing imagery is horizontally centered in the reader column.
 
 Local NLP is configured in `config.toml` with `[nlp] mode = "auto"` (default), `"off"`, `"annotate"`, or `"select"`. It is not part of portable Profile configuration. See [nlp-preprocessing.md](nlp-preprocessing.md) for evidence and fallback behavior.
+
+Related article eligibility requires **at least two distinct overlapping entity mentions** in the exact source/candidate headline or description. Repetitions and aliases of one normalized name count once; country/category fields do not count as mentions. Atlas ingest persists the association; Brain Actor Articles and Intel Related reflect those retained associations and recheck current revisions. A browse visit adds no name-only or canonical-actor suggestions. Original claim Sources preserve provenance independently. Investigation entity associations require Recall on; later disabling Recall preserves earlier receipts. The local match receipt is `shared-headline-entities-v2-min-two`; changing this policy invalidates only Related matching and the dependent Links shortlist, preserving compatible Body/Claims/Inferences and fidelity checkpoints.

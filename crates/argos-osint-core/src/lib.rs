@@ -27,6 +27,7 @@ pub mod atlas_work;
 pub mod brain;
 pub mod brain_actors;
 pub mod brain_backfill;
+pub mod brain_browse;
 pub mod brain_kinds;
 #[cfg_attr(not(feature = "lancedb"), path = "brain_lance_off.rs")]
 pub mod brain_lance;

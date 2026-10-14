@@ -562,14 +562,6 @@ pub const COMMANDS: &[CommandDefinition] = &[
         ModuleId::Intel,
     ),
     local(
-        "intel-recon",
-        "Open report configuration",
-        "Choose an Intel report mode",
-        "",
-        "Intel",
-        ModuleId::Intel,
-    ),
-    local(
         "intel-refresh",
         "Refresh article",
         "Retrieve a fresh article body",
@@ -587,7 +579,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     ),
     local(
         "intel-job",
-        "Open background report job",
+        "Open brief job",
         "Inspect article work in Jobs",
         "",
         "Intel",

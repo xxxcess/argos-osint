@@ -192,6 +192,7 @@ impl Store {
             .then(|| BrainIndex::shared(&crate::paths::lancedb_dir_for(path)));
         let store = Self { conn, vectors };
         store.ensure_schema()?;
+        crate::job_cleanup::retire_article_reports(&store.conn)?;
         store.restore_serving_vector_table();
         Ok(store)
     }

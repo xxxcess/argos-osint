@@ -34,7 +34,7 @@ argos logout
 | Recon | Directives and bindings |
 | Tool picker | One next tool per request |
 | Synthesis | Cited answers and claims |
-| Classifier | Report mode from the prompt |
+| Classifier | Atlas article categories and bounded article-cleanup decisions |
 | Summarization | Graph/path summaries |
 | Investigation harness | curator / resolver / assessor / controller |
 

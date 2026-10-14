@@ -1185,11 +1185,21 @@ impl Store {
         thread_id: &str,
         entities: &[investigation::SelectedEntity],
     ) -> Result<()> {
+        if self
+            .get_thread(thread_id)?
+            .is_some_and(|t| t.recall_insights)
+        {
+            self.conn.execute(
+                "DELETE FROM brain_actor_mentions WHERE origin_kind='thread' AND origin_id=?1",
+                [thread_id],
+            )?;
+        }
         self.conn.execute(
             "DELETE FROM investigation_entities WHERE thread_id=?1",
             [thread_id],
         )?;
         for entity in entities {
+            self.record_thread_actor(thread_id, &entity.canonical_name, &entity.entity_type)?;
             self.conn.execute(
                 "INSERT INTO investigation_entities(id,thread_id,canonical_name,entity_type,identifiers_json,evidence_json,relationships_json,unresolved_json,certainty,why,selected,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)",
                 params![
@@ -1464,6 +1474,10 @@ impl Store {
             return Ok(false);
         }
         crate::nlp::cache::remove_owner(&tx, "thread", tid)?;
+        tx.execute(
+            "DELETE FROM brain_actor_mentions WHERE origin_kind='thread' AND origin_id=?1",
+            [tid],
+        )?;
         crate::job_cleanup::cleanup_batch(&tx, chrono::Utc::now())?;
         tx.execute("UPDATE insight_owner_state SET desired_generation=desired_generation+1,lifecycle='previous',last_error='origin investigation deleted' WHERE owner_kind='recon' AND owner_id IN (SELECT id FROM recon_runs WHERE thread_id=?1)",[tid])?;
         tx.execute("UPDATE insight_derivation_links SET status='origin_deleted' WHERE snapshot_id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='recon' AND last_error='origin investigation deleted')",[])?;
@@ -1560,6 +1574,7 @@ impl Store {
         let eid = format!("{}:{}", kind, canonical);
         self.conn.execute("INSERT OR IGNORE INTO recon_entities(id,kind,namespace,canonical,label) VALUES (?1,?2,'',?3,?3)",params![eid,kind,canonical])?;
         self.conn.execute("INSERT OR IGNORE INTO recon_thread_entities(thread_id,entity_id,source_call_id) VALUES (?1,?2,?3)",params![tid,eid,source_call_id.unwrap_or("")])?;
+        self.record_thread_actor(tid, canonical, kind)?;
         Ok(())
     }
     pub fn thread_entities(&self, tid: &str) -> Result<Vec<(String, String)>> {

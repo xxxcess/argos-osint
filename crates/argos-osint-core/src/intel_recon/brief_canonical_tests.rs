@@ -175,12 +175,12 @@ fn brief_publishes_canonical_derivations_and_index_outbox_through_shared_publish
 }
 
 #[test]
-fn completed_report_keeps_precedence_and_brief_stages_still_complete() {
+fn historical_report_does_not_block_brief_publication() {
     let (store, article) = fixture();
     store.conn.execute("INSERT INTO intel_report_results(job_id,generation,article_id,completion_sequence,source_hash,details_json,completed_at) VALUES('report',1,'a1',1,'h','{}',?1)", [now()]).unwrap();
     let job = complete_chain(&store, &article, "r1");
     let state = index_state(&store.conn, "a1").unwrap().unwrap();
-    assert_eq!(state.state, "report_precedence");
+    assert_eq!(state.state, "indexed");
     let snapshots: i64 = store
         .conn
         .query_row(
@@ -189,7 +189,10 @@ fn completed_report_keeps_precedence_and_brief_stages_still_complete() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(snapshots, 0, "brief never overwrites the report snapshot");
+    assert_eq!(
+        snapshots, 1,
+        "validated brief publishes alongside historical artifacts"
+    );
     let run: String = store
         .conn
         .query_row(
@@ -199,9 +202,42 @@ fn completed_report_keeps_precedence_and_brief_stages_still_complete() {
         )
         .unwrap();
     assert_eq!(run, "completed");
-    assert!(footer(&store.conn, "a1", &job, false)
-        .unwrap()
-        .contains("Recon report takes precedence"));
+    assert_eq!(
+        footer(&store.conn, "a1", &job, false).unwrap(),
+        "Published · Index pending"
+    );
+}
+
+#[test]
+fn publication_policy_refresh_reuses_cached_stage_outputs_once() {
+    let (store, article) = fixture();
+    let job = complete_chain(&store, &article, "cached");
+    store
+        .conn
+        .execute(
+            "UPDATE app_state SET value=json_remove(value,'$.publication_version') WHERE key=?1",
+            [state_key(&article.id)],
+        )
+        .unwrap();
+    let outputs = bp::stage_outputs(&store.conn, &job).unwrap();
+    refresh_cached_publication(&store, &article, &job).unwrap();
+    let state = index_state(&store.conn, &article.id).unwrap().unwrap();
+    assert_eq!(state.publication_version, 2);
+    assert_eq!(state.state, "indexed");
+    let snapshot = state.snapshot_id;
+    refresh_cached_publication(&store, &article, &job).unwrap();
+    assert_eq!(
+        index_state(&store.conn, &article.id)
+            .unwrap()
+            .unwrap()
+            .snapshot_id,
+        snapshot
+    );
+    assert_eq!(
+        bp::stage_outputs(&store.conn, &job).unwrap(),
+        outputs,
+        "no stage is rerun"
+    );
 }
 
 #[test]

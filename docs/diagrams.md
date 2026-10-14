@@ -16,8 +16,9 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Tool picker | Flowchart | [tool-picker.html](diagrams/tool-picker.html) | [tool-picker.svg](diagrams/tool-picker.svg) |
 | OSINT catalog | Nested | [osint-providers.html](diagrams/osint-providers.html) | [osint-providers.svg](diagrams/osint-providers.svg) |
 | Atlas classification-only cycle and Related leads | Process | [atlas-pipeline.html](diagrams/atlas-pipeline.html) | [atlas-pipeline.svg](diagrams/atlas-pipeline.svg) |
-| Intel report | Data flow | [intel-report.html](diagrams/intel-report.html) | [intel-report.svg](diagrams/intel-report.svg) |
-| Intel job states | State machine | [intel-job-states.html](diagrams/intel-job-states.html) | [intel-job-states.svg](diagrams/intel-job-states.svg) |
+| Historical Intel report (retired) | Data flow | [intel-report.html](diagrams/intel-report.html) | [intel-report.svg](diagrams/intel-report.svg) |
+| Brain browse projection | Data flow | [brain-browse.html](diagrams/brain-browse.html) | [brain-browse.svg](diagrams/brain-browse.svg) |
+| Intel brief / historical report states | State machine | [intel-job-states.html](diagrams/intel-job-states.html) | [intel-job-states.svg](diagrams/intel-job-states.svg) |
 | Intel brief preparation | Process | [intel-brief-chain.html](diagrams/intel-brief-chain.html) | [intel-brief-chain.svg](diagrams/intel-brief-chain.svg) |
 | Brain recall | Architecture | [brain-recall.html](diagrams/brain-recall.html) | [brain-recall.svg](diagrams/brain-recall.svg) |
 | Models and roles | Architecture | [model-roles.html](diagrams/model-roles.html) | [model-roles.svg](diagrams/model-roles.svg) |

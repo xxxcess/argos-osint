@@ -31,6 +31,7 @@ pub const BATCH: usize = 100;
 pub const SOURCES: &[&str] = &[
     "recon_entities",
     "investigation_entities",
+    "recon_thread_entities",
     "insight_claims",
     "insight_derivation_links",
     "intel_inference_article_leads",
@@ -63,7 +64,10 @@ fn has_table(conn: &Connection, t: &str) -> Result<bool> {
 }
 
 fn h(v: &Value) -> String {
-    crate::nlp::cache::hash(&format!("{IDENTITY_INDEX_VERSION}|{v}"))
+    crate::nlp::cache::hash(&format!(
+        "{IDENTITY_INDEX_VERSION}|browse-associations-v2|{}|{v}",
+        crate::related_articles::MATCH_VERSION
+    ))
 }
 
 /// `(unit_id, revision)` for every unit of a source.
@@ -78,8 +82,9 @@ fn units(conn: &Connection, source: &str) -> Result<Vec<(String, String)>> {
     }
     let sql = match source {
         "recon_entities" => "SELECT id, json_array(kind,namespace,canonical,label) FROM recon_entities ORDER BY id",
-        "investigation_entities" => "SELECT id, json_array(thread_id,canonical_name,entity_type,identifiers_json) FROM investigation_entities ORDER BY id",
-        "insight_claims" => "SELECT fingerprint, json_array(memory_id,entity_id) FROM insight_claims WHERE entity_id<>'' ORDER BY fingerprint",
+        "investigation_entities" => "SELECT e.id, json_array(e.thread_id,e.canonical_name,e.entity_type,e.identifiers_json,t.recall_insights,t.deleted) FROM investigation_entities e JOIN recon_threads t ON t.id=e.thread_id ORDER BY e.id",
+        "recon_thread_entities" => "SELECT e.thread_id||'/'||e.entity_id, json_array(e.source_call_id,t.recall_insights,t.deleted,a.label,a.canonical) FROM recon_thread_entities e JOIN recon_threads t ON t.id=e.thread_id JOIN recon_entities a ON a.id=e.entity_id ORDER BY e.thread_id,e.entity_id",
+        "insight_claims" => "SELECT c.fingerprint, json_array(c.memory_id,c.entity_id,e.label,e.canonical,(SELECT group_concat(d.item_json||s.entities_json) FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id WHERE d.memory_id=c.memory_id AND d.status='assessed')) FROM insight_claims c LEFT JOIN recon_entities e ON e.id=c.entity_id WHERE c.entity_id<>'' ORDER BY c.fingerprint",
         "insight_derivation_links" => "SELECT id, json_array(revision,status) FROM insight_derivation_links ORDER BY id",
         "intel_inference_article_leads" => "SELECT id, json_array(candidate_metadata_revision,interpretation,verification_needed) FROM intel_inference_article_leads ORDER BY id",
         "atlas_articles" => "SELECT a.run_id||'/'||a.article_id,
@@ -158,9 +163,13 @@ fn identifiers_of(raw: &str) -> Vec<String> {
 /// Bind one claim's subject through the Brain actor service: scoped by the
 /// claim memory's own source (app + conversation), referenced as `subject`.
 fn claim_subject(conn: &Connection, fingerprint: &str, now: &str) -> Result<String> {
+    let inference: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM insight_claims WHERE fingerprint=?1 AND lower(classification)='inference')", [fingerprint], |r| r.get(0))?;
+    if inference {
+        return Ok("inference retained internally".into());
+    }
     let row: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT c.memory_id, c.entity_id, m.source_json FROM insight_claims c JOIN memories m ON m.id=c.memory_id WHERE c.fingerprint=?1",
+            "SELECT c.memory_id, COALESCE(NULLIF(e.label,''),NULLIF(e.canonical,''),c.entity_id), m.source_json FROM insight_claims c JOIN memories m ON m.id=c.memory_id LEFT JOIN recon_entities e ON e.id=c.entity_id WHERE c.fingerprint=?1",
             [fingerprint],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -194,6 +203,49 @@ fn claim_subject(conn: &Connection, fingerprint: &str, now: &str) -> Result<Stri
         },
         now,
     )?;
+    // Repair only the machine-generated ID spelling, preserving analyst names.
+    let entity_id: String = conn.query_row(
+        "SELECT entity_id FROM insight_claims WHERE fingerprint=?1",
+        [fingerprint],
+        |r| r.get(0),
+    )?;
+    if entity_id != entity {
+        conn.execute("UPDATE brain_actors SET display_name=?2,revision=revision+1,updated_at=?3 WHERE actor_id=?1 AND display_name=?4",params![binding.actor_id,entity,now,entity_id])?;
+        let payload: Option<String> = conn
+            .query_row(
+                "SELECT payload_json FROM memory_metadata WHERE memory_id=?1",
+                [&binding.actor_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = payload {
+            if let Ok(crate::memory_metadata::MemoryPayload::Actor(mut p)) =
+                serde_json::from_str(&raw)
+            {
+                if p.display_name == entity_id {
+                    p.display_name = entity.clone();
+                    let subtype = p.subtype;
+                    conn.execute(
+                        "UPDATE memory_metadata SET payload_json=?2 WHERE memory_id=?1",
+                        params![
+                            binding.actor_id,
+                            serde_json::to_string(&crate::memory_metadata::MemoryPayload::Actor(
+                                p
+                            ))?
+                        ],
+                    )?;
+                    conn.execute(
+                        "UPDATE memories SET text=?2 WHERE id=?1 AND text=?3",
+                        params![
+                            binding.actor_id,
+                            format!("Actor: {} ({})", entity, actors::subtype_str(subtype)),
+                            format!("Actor: {} ({})", entity_id, actors::subtype_str(subtype))
+                        ],
+                    )?;
+                }
+            }
+        }
+    }
     actors::add_memory_actor_ref(
         conn,
         &memory_id,
@@ -202,6 +254,67 @@ fn claim_subject(conn: &Connection, fingerprint: &str, now: &str) -> Result<Stri
         binding.state,
         &json!({"fingerprint": fingerprint}),
     )?;
+    // Recover all referenced actors from retained extraction records. A missing
+    // source packet is skipped rather than guessed from other article actors.
+    let retained=conn.prepare("SELECT s.id,s.owner_kind,s.owner_id,s.entities_json,d.item_json FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id WHERE d.memory_id=?1 AND d.insight_kind='claim' AND d.status='assessed'")?.query_map([&memory_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (snapshot, kind, owner, entities, item) in retained {
+        let (Ok(entities), Ok(claim)) = (
+            serde_json::from_str::<Vec<crate::nlp::EntityCandidate>>(&entities),
+            serde_json::from_str::<crate::investigation::insights::SourceClaim>(&item),
+        ) else {
+            continue;
+        };
+        for entity in entities {
+            let referenced = entity.id == claim.subject_ref
+                || entity.mention_refs.iter().any(|span| {
+                    claim.evidence_refs.iter().any(|r| match &r.location {
+                        crate::investigation::insights::EvidenceLocation::Range(range) => {
+                            span.start_byte >= range.start_byte
+                                && span.end_byte <= range.end_byte
+                                && (entity.id.starts_with(&r.source_id)
+                                    || (kind == "article" && r.source_id.starts_with("article:")))
+                        }
+                        _ => false,
+                    })
+                });
+            if !referenced {
+                continue;
+            }
+            let Some(name) = entity
+                .original_forms
+                .first()
+                .filter(|n| !n.trim().is_empty())
+            else {
+                continue;
+            };
+            let scope = format!("{kind}:{owner}");
+            let external = format!("snapshot:{snapshot}");
+            let (binding, _) = actors::bind(
+                conn,
+                &BindRequest {
+                    name,
+                    subtype: actors::parse_subtype(&entity.type_hint),
+                    scope: &scope,
+                    identifiers: &[],
+                    external: Some((&external, &entity.id)),
+                    provenance: json!({"snapshot":snapshot}),
+                },
+                now,
+            )?;
+            actors::add_memory_actor_ref(
+                conn,
+                &memory_id,
+                &binding.actor_id,
+                if entity.id == claim.subject_ref {
+                    "subject"
+                } else {
+                    "mentioned"
+                },
+                binding.state,
+                &json!({"snapshot":snapshot}),
+            )?;
+        }
+    }
     Ok("subject bound".into())
 }
 
@@ -273,6 +386,13 @@ fn process(store: &Store, source: &str, unit: &str, now: &str) -> Result<String>
                 return Ok("no name".into());
             }
             let idents = identifiers_of(&idents);
+            if store
+                .get_thread(&thread)?
+                .is_none_or(|t| !t.recall_insights)
+            {
+                return Ok("Recall disabled; no thread receipt".into());
+            }
+            store.record_thread_actor(&thread, &name, &kind)?;
             let scope = format!("recon-thread:{thread}");
             actors::bind(
                 conn,
@@ -289,6 +409,18 @@ fn process(store: &Store, source: &str, unit: &str, now: &str) -> Result<String>
             Ok("bound".into())
         }
         "insight_claims" => claim_subject(conn, unit, now),
+        "recon_thread_entities" => {
+            let Some((thread, entity)) = unit.split_once('/') else {
+                return Ok("unavailable origin".into());
+            };
+            let (name, kind): (String, String) = conn.query_row(
+                "SELECT COALESCE(NULLIF(label,''),canonical),kind FROM recon_entities WHERE id=?1",
+                [entity],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            store.record_thread_actor(thread, &name, &kind)?;
+            Ok("opt-in thread indexed".into())
+        }
         "insight_derivation_links" => {
             let (snapshot, lk, lid, rk, rid, relation, rationale, rev): (String, String, String, String, String, String, String, String) = conn.query_row(
                 "SELECT snapshot_id,left_kind,left_id,right_kind,right_id,relation,rationale,revision FROM insight_derivation_links WHERE id=?1",
@@ -495,9 +627,9 @@ pub fn index_article(store: &Store, unit: &str, now: &str) -> Result<String> {
         bound.push((a.display_name.clone(), binding));
     }
     // Bounded tentative Related records (≤ RELATED_PER_ARTICLE), newest
-    // origins first; remaining candidates stay derived queries.
+    // origins first; browsing reads only retained ingest associations.
     let mut written = 0usize;
-    'outer: for (display, binding) in &bound {
+    'outer: for (_display, binding) in &bound {
         for other in &binding.candidates {
             let mut origins = actors::mentions(conn, other)?;
             origins.retain(|(k, _, id, _)| k == "article" && id != article_id);
@@ -506,14 +638,22 @@ pub fn index_article(store: &Store, unit: &str, now: &str) -> Result<String> {
                 if written >= RELATED_PER_ARTICLE {
                     break 'outer;
                 }
+                let Some(candidate) = store.atlas_article(&orun, &oid)? else {
+                    continue;
+                };
+                let shared =
+                    crate::related_articles::shared_entity_mentions(store, &article, &candidate)?;
+                if shared.len() < crate::related_articles::MIN_SHARED_ENTITIES {
+                    continue;
+                }
                 actors::write_related(conn, &RelatedPayload {
                     source: article_ep.clone(),
                     target: EndpointRef::Article { run_id: orun, article_id: oid, revision: orev },
                     shared_actors: vec![],
-                    basis: format!("candidate name: {display} (identity unconfirmed)"),
+                    basis: format!("shared mentions: {} (identity unconfirmed)",shared.join(", ")),
                     interpretation: "Articles mention actors with the same name; identity is not established.".into(),
                     verification_gap: "Confirm both mentions refer to the same entity.".into(),
-                    source_revisions: vec![revision.clone()],
+                    source_revisions: vec![format!("ingest:{run_id}/{article_id}:{revision}")],
                 }, now)?;
                 written += 1;
             }

@@ -124,6 +124,24 @@ struct Collector<'a> {
 }
 
 impl Collector<'_> {
+    fn add_related(
+        &mut self,
+        source: &AtlasArticleRow,
+        run: &str,
+        id: &str,
+        basis: String,
+        established: bool,
+    ) -> Result<()> {
+        let Some(candidate) = self.store.atlas_article(run, id)? else {
+            return Ok(());
+        };
+        if crate::related_articles::shared_entity_mentions(self.store, source, &candidate)?.len()
+            < crate::related_articles::MIN_SHARED_ENTITIES
+        {
+            return Ok(());
+        }
+        self.add(run, id, basis, established)
+    }
     fn add(&mut self, run: &str, id: &str, basis: String, established: bool) -> Result<()> {
         let Some(article) = self.store.atlas_article(run, id)? else {
             return Ok(());
@@ -151,21 +169,8 @@ impl Collector<'_> {
         limit: usize,
         scope: RelatedScope,
     ) -> Result<GlobalRelatedPage> {
-        let store = self.store;
         let mut rows = Vec::new();
-        for (key, mut acc) in self.rows {
-            // Every retained occurrence of the same URL is an origin of the row.
-            if !key.starts_with("occurrence:") && scope == RelatedScope::AllRetained {
-                for a in occurrences_of_url(store, &key)? {
-                    acc.occurrences.insert(
-                        ArticleOrigin {
-                            run_id: a.run_id.clone(),
-                            article_id: a.id.clone(),
-                        },
-                        a,
-                    );
-                }
-            }
+        for (key, acc) in self.rows {
             let newest = acc
                 .occurrences
                 .values()
@@ -295,7 +300,7 @@ impl Store {
         loop {
             let page = self.related_articles(&s.run_id, &s.id, start, 100)?;
             for row in &page.rows {
-                c.add(&row.article.run_id, &row.article.id, row.reason(), false)?;
+                c.add_related(s, &row.article.run_id, &row.article.id, row.reason(), false)?;
             }
             if !page.has_more {
                 break;
@@ -323,29 +328,14 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (run, id, memory) in hits {
             let basis = match self.memory_payload(&memory)? {
-                Some(crate::memory_metadata::MemoryPayload::Related(p)) => p.basis,
-                _ => "Brain Related".into(),
-            };
-            c.add(&run, &id, basis, false)?;
-        }
-        // Same canonical actor (explicit identity, not a name match).
-        let mut stmt = self.conn.prepare(
-                "SELECT DISTINCT actor_id FROM brain_actor_mentions WHERE origin_kind='article' AND origin_scope=?1 AND origin_id=?2",
-            )?;
-        let ids = stmt
-            .query_map(params![s.run_id, s.id], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let canon: BTreeSet<String> = ids
-            .iter()
-            .map(|id| actors::resolve(&self.conn, id))
-            .collect::<Result<_>>()?;
-        for actor in canon {
-            let name = actor_name(self, &actor);
-            for (kind, run, id, _) in actors::mentions(&self.conn, &actor)? {
-                if kind == "article" {
-                    c.add(&run, &id, format!("same actor: {name}"), true)?;
+                Some(crate::memory_metadata::MemoryPayload::Related(p))
+                    if crate::related_articles::current_ingest_related(self, &p)? =>
+                {
+                    p.basis
                 }
-            }
+                _ => continue,
+            };
+            c.add_related(s, &run, &id, basis, false)?;
         }
         Ok(())
     }
@@ -414,6 +404,12 @@ impl Store {
         };
         for (kind, run, id, _) in actors::mentions(&self.conn, &canonical)? {
             if kind == "article" {
+                let Some(article) = self.atlas_article(&run, &id)? else {
+                    continue;
+                };
+                if !self.has_ingest_actor_association(&article, &actors::normalize_alias(&name))? {
+                    continue;
+                }
                 c.add(&run, &id, format!("mentions {name}"), true)?;
             }
         }

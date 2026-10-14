@@ -305,20 +305,7 @@ fn schedule_article_refresh_on(
             params![article.id, now],
         )?;
     }
-    let report = report_input(&store.conn, &article.id, 0)?;
-    if report.is_none()
-        && store.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM intel_report_results WHERE article_id=?1)",
-            [&article.id],
-            |r| r.get::<_, bool>(0),
-        )?
-    {
-        return Ok(None);
-    }
-
-    let mut input = if let Some(input) = report {
-        input
-    } else {
+    let mut input = {
         let intent: bool = store.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM article_refresh_intents WHERE article_id=?1)",
             [&article.id],
@@ -728,6 +715,10 @@ pub fn enqueue_refresh(
         input.surface != "atlas" && input.snapshot.owner_kind != "atlas",
         "Atlas cycles cannot enqueue insight refreshes"
     );
+    ensure!(
+        input.surface != "recon_report",
+        "Intel article report extraction is retired"
+    );
     input.snapshot.key = super::insights::input_key(input, settings);
     let job_id = format!(
         "insight-refresh:{}:{}:{}",
@@ -1034,7 +1025,11 @@ pub async fn recover_refreshes(
         let now = chrono::Utc::now().to_rfc3339();
         // Recover a visit whose body commit became durable before scheduling,
         // and completion receipts even when no TUI listener survived.
-        let owners=store.conn.prepare("SELECT article_id FROM article_refresh_intents UNION SELECT article_id FROM intel_report_results WHERE completion_sequence>0")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let owners = store
+            .conn
+            .prepare("SELECT article_id FROM article_refresh_intents")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         for owner in owners {
             let run:Option<String>=store.conn.query_row("SELECT run_id FROM atlas_articles WHERE article_id=?1 ORDER BY seen_at DESC LIMIT 1",[&owner],|r|r.get(0)).optional()?;
             if let Some(article) =
@@ -1148,7 +1143,11 @@ fn validate_live_evidence(conn: &Connection, snapshot: &EvidenceSnapshot) -> Res
     }
     for reference in &snapshot.source_refs {
         if let Some(id) = reference.source_id.strip_prefix("report:") {
-            let live: Option<(String,i64)> = conn.query_row("SELECT source_hash,completion_sequence FROM intel_report_results WHERE article_id=?1 AND job_id=?2 AND completion_sequence=(SELECT MAX(completion_sequence) FROM intel_report_results WHERE article_id=?1)",params![snapshot.owner_id,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            ensure!(
+                !crate::job_cleanup::retired(conn, id)?,
+                "Intel article report execution retired before publication"
+            );
+            let live:Option<(String,i64)>=conn.query_row("SELECT source_hash,completion_sequence FROM intel_report_results WHERE article_id=?1 AND job_id=?2 AND completion_sequence=(SELECT MAX(completion_sequence) FROM intel_report_results WHERE article_id=?1)",params![snapshot.owner_id,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             ensure!(
                 live.is_some_and(
                     |(hash, sequence)| reference.revision == format!("{sequence}:{hash}")
@@ -1181,12 +1180,6 @@ fn validate_live_evidence(conn: &Connection, snapshot: &EvidenceSnapshot) -> Res
                 "article metadata revision changed"
             );
         } else if let Some(id) = reference.source_id.strip_prefix("body:") {
-            let report: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM intel_report_results WHERE article_id=?1)",
-                [&snapshot.owner_id],
-                |r| r.get(0),
-            )?;
-            ensure!(!report, "completed report supersedes article details");
             let version: Option<i64> = conn
                 .query_row(
                     "SELECT body_version FROM article_bodies WHERE id=?1",
@@ -1334,8 +1327,92 @@ pub fn write_derivations(
                     tx.execute("INSERT OR IGNORE INTO recon_entities(id,kind,namespace,canonical,label) VALUES(?1,?2,?1,?3,?4)",params![entity.id,entity.type_hint,entity.comparison_key,entity.original_forms.first().cloned().unwrap_or_default()])?;
                 }
                 tx.execute("INSERT OR IGNORE INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'investigation',?6,0,?7,?7)",params![fingerprint,mid,subject,predicate,object,kind,now])?;
-                crate::store::enqueue_memory_index_on(tx, std::slice::from_ref(&mid), None)?;
                 crate::brain_backfill::bind_claim_subject(tx, &fingerprint)?;
+                if kind == "claim" {
+                    // Bind only actors referenced by this assertion's cited
+                    // passages or explicit subject, never the whole article.
+                    for entity in &output.entities {
+                        let referenced = entity.id == subject
+                            || entity.mention_refs.iter().any(|span| {
+                                refs.iter().any(|r| match &r.location {
+                                    super::insights::EvidenceLocation::Range(range) => {
+                                        span.start_byte >= range.start_byte
+                                            && span.end_byte <= range.end_byte
+                                            && (entity.id.starts_with(&r.source_id)
+                                                || (input.snapshot.owner_kind == "article"
+                                                    && r.source_id.starts_with("article:")
+                                                    && input
+                                                        .snapshot
+                                                        .entities
+                                                        .iter()
+                                                        .any(|e| e.id == entity.id)))
+                                    }
+                                    _ => false,
+                                })
+                            });
+                        if !referenced {
+                            continue;
+                        }
+                        let name = entity
+                            .original_forms
+                            .first()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or(&entity.comparison_key);
+                        let scope =
+                            format!("{}:{}", input.snapshot.owner_kind, input.snapshot.owner_id);
+                        let (binding, _) = crate::brain_actors::bind(
+                            tx,
+                            &crate::brain_actors::BindRequest {
+                                name,
+                                subtype: crate::brain_actors::parse_subtype(&entity.type_hint),
+                                scope: &scope,
+                                identifiers: &[],
+                                external: Some(("recon_entities", &entity.id)),
+                                provenance: serde_json::json!({"snapshot":snapshot_id,"claim":id}),
+                            },
+                            now,
+                        )?;
+                        crate::brain_actors::add_memory_actor_ref(
+                            tx,
+                            &mid,
+                            &binding.actor_id,
+                            if entity.id == subject {
+                                "subject"
+                            } else {
+                                "mentioned"
+                            },
+                            binding.state,
+                            &serde_json::json!({"snapshot":snapshot_id,"claim":id}),
+                        )?;
+                    }
+                    crate::brain_actors::sync_claim_actor_payload(tx, &mid)?;
+                    let raw: String = tx.query_row(
+                        "SELECT payload_json FROM memory_metadata WHERE memory_id=?1",
+                        [&mid],
+                        |r| r.get(0),
+                    )?;
+                    if let crate::memory_metadata::MemoryPayload::Claim(mut p) =
+                        serde_json::from_str(&raw)?
+                    {
+                        p.predicate = predicate.clone();
+                        p.object = object.clone();
+                        p.assessment = assessment.clone();
+                        if let Some(claim) = output.claims.iter().find(|c| c.id == id) {
+                            p.modality = claim.modality.clone();
+                        }
+                        p.passages = refs.iter().map(|r| r.source_id.clone()).collect();
+                        tx.execute(
+                            "UPDATE memory_metadata SET payload_json=?2 WHERE memory_id=?1",
+                            params![
+                                mid,
+                                serde_json::to_string(
+                                    &crate::memory_metadata::MemoryPayload::Claim(p)
+                                )?
+                            ],
+                        )?;
+                    }
+                }
+                crate::store::enqueue_memory_index_on(tx, std::slice::from_ref(&mid), None)?;
                 for reference in &refs {
                     let thread_id = if input.snapshot.owner_kind == "recon" {
                         tx.query_row(

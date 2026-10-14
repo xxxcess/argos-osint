@@ -24,8 +24,8 @@
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
 <rect width="800" height="460" fill="#f5f5f5"/>
 <g fill="none" stroke="#4f5d75" marker-end="url(#arrow)">
-<path d="M150 100 C162 100 162 56 176 56"/><path d="M150 100 C162 100 162 144 176 144"/>
-<path d="M326 56 C356 56 356 96 384 96"/><path d="M326 144 C356 144 356 108 384 108"/>
+<path d="M150 100 H162 V56 H176"/><path d="M150 100 H162 V144 H176"/>
+<path d="M326 56 H356 V96 H384"/><path d="M326 144 H356 V108 H384"/>
 <path d="M534 102 H566"/>
 <path d="M716 102 H770 V276 H662"/>
 <path d="M484 276 H452"/>
@@ -33,17 +33,17 @@
 <path d="M352 316 V384 H556"/>
 </g>
 <g font-family="Geist,system-ui,sans-serif" font-size="12" text-anchor="middle" fill="#2d3142">
-<rect x="14" y="64" width="136" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="82" y="94">Visit / Reload</text><text x="82" y="112" font-size="10" fill="#7a8399">ensure_chain · v1 cutover</text>
+<rect x="14" y="64" width="136" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="82" y="94">Visit / Reload</text><text x="82" y="112" font-size="10" fill="#7a8399">ensure_chain · cached publication</text>
 <rect x="176" y="22" width="150" height="68" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/><text x="251" y="50">Full article · root</text><text x="251" y="68" font-size="10" fill="#7a8399">NLP anchors · Classifier ≤12</text>
 <rect x="176" y="110" width="150" height="68" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/><text x="251" y="138">Claims · root</text><text x="251" y="156" font-size="10" fill="#7a8399">metadata snapshot · fidelity</text>
 <rect x="384" y="66" width="150" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="459" y="94">Inferences · join</text><text x="459" y="112" font-size="10" fill="#7a8399">bound once to both hashes</text>
-<rect x="566" y="66" width="150" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="641" y="94">Links</text><text x="641" y="112" font-size="10" fill="#7a8399">shortlist ≤12 · overlap gate</text>
+<rect x="566" y="66" width="150" height="72" rx="6" fill="#fff" stroke="#2d3142"/><text x="641" y="94">Links</text><text x="641" y="112" font-size="10" fill="#7a8399">shortlist ≤12 · ≥2 entities</text>
 <rect x="485" y="236" width="175" height="80" rx="6" fill="#fff" stroke="#2d3142"/><text x="572" y="268">Fenced Links commit</text><text x="572" y="288" font-size="10" fill="#7a8399">brief snapshot + leads</text>
-<rect x="248" y="236" width="204" height="80" rx="6" fill="#fff4ee" stroke="#eb6c36"/><text x="350" y="268">Shared canonical publisher</text><text x="350" y="288" font-size="10" fill="#7a8399">generation · key · live evidence</text>
+<rect x="248" y="236" width="204" height="80" rx="6" fill="#fff" stroke="#2d3142"/><text x="350" y="268">Shared canonical publisher</text><text x="350" y="288" font-size="10" fill="#7a8399">generation · key · live evidence</text>
 <rect x="20" y="236" width="176" height="80" rx="6" fill="#fff" stroke="#2d3142"/><text x="108" y="268">Insight-refresh lane</text><text x="108" y="288" font-size="10" fill="#7a8399">lease fence + acknowledgement</text>
-<rect x="556" y="354" width="204" height="60" rx="6" fill="#fff4ee" stroke="#eb6c36"/><text x="658" y="380">Brain + index outbox</text><text x="658" y="398" font-size="10" fill="#7a8399">Index footer state</text>
-<text x="250" y="432" font-family="Instrument Serif,serif" font-size="14" font-style="italic">Report precedence or canonical failure: savepoint rollback;</text>
-<text x="250" y="450" font-family="Instrument Serif,serif" font-size="14" font-style="italic">completed stages never turn failed.</text>
+<rect x="556" y="354" width="204" height="60" rx="6" fill="#fff" stroke="#2d3142"/><text x="658" y="380">Brain + index outbox</text><text x="658" y="398" font-size="10" fill="#7a8399">Index footer state</text>
+<text x="250" y="432" font-family="Instrument Serif,serif" font-size="14" font-style="italic">Publication v2: cached artifacts revalidate on visit;</text>
+<text x="250" y="450" font-family="Instrument Serif,serif" font-size="14" font-style="italic">no report precedence; failed replacement keeps history.</text>
 </g>
 <text x="400" y="200" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#eb6c36">two slots · StageContext{generation, lease epoch} · failed root blocks only descendants · Retry re-runs failed branches</text>
 <text x="400" y="216" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">reuse: roots by node revision (Reload forces Body) · descendants by prerequisite hashes + revision · Links always re-reads</text>

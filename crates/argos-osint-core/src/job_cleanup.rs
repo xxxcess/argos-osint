@@ -123,6 +123,54 @@ pub fn cleanup_batch(conn: &Connection, now: DateTime<Utc>) -> Result<CleanupCou
     result
 }
 
+/// One-time retirement of article Recon execution. Keep artifacts and owner
+/// generations intact; only execution leases and descendants are cancelled.
+pub fn retire_article_reports(conn: &Connection) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute_batch("SAVEPOINT retire_article_reports")?;
+    let result = (|| -> Result<Vec<String>> {
+        // Repair only report ancestry. General owner backfill would alter
+        // unrelated jobs merely because a store was opened for retirement.
+        conn.execute_batch("UPDATE argos_jobs SET parent_id=COALESCE((SELECT p.id FROM intel_report_jobs child JOIN argos_jobs p ON p.run_ref=child.parent_job_id AND p.operation='intel_recon' WHERE child.id=argos_jobs.run_ref LIMIT 1),'') WHERE operation='intel_recon' AND parent_id='';")?;
+        let roots = conn.prepare("SELECT id FROM intel_report_jobs WHERE state NOT IN ('completed','done','failed','cancelled','partial')")?.query_map([], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut signalled = Vec::new();
+        for root in roots {
+            let rows = conn.prepare("WITH RECURSIVE tree(id) AS (SELECT id FROM argos_jobs WHERE operation='intel_recon' AND run_ref=?1 UNION SELECT j.id FROM argos_jobs j JOIN tree t ON j.parent_id=t.id) SELECT id FROM tree")?.query_map([&root], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for id in rows.into_iter().chain(std::iter::once(root.clone())) {
+                conn.execute("INSERT OR IGNORE INTO argos_job_retirements(job_id,retired_at,reason) VALUES(?1,?2,'Intel article reports retired')",params![id,now])?;
+                conn.execute("UPDATE argos_tasks SET state='cancelled',lease_owner='',lease_until='',lease_epoch=lease_epoch+1,updated_at=?2 WHERE job_id=?1 AND state<>'completed'",params![id,now])?;
+                conn.execute("UPDATE argos_jobs SET state='cancelled' WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','partial')",[&id])?;
+                signalled.push(id);
+            }
+            conn.execute("UPDATE intel_report_tasks SET status='cancelled',lease_owner='',lease_until='',lease_epoch=lease_epoch+1 WHERE job_id=?1 AND status<>'completed'",[&root])?;
+            conn.execute("UPDATE intel_report_jobs SET state='cancelled',stage='Intel article reports retired',updated_at=?2 WHERE id=?1",params![root,now])?;
+        }
+        let refreshes=conn.prepare("WITH RECURSIVE tree(id) AS (SELECT DISTINCT j.id FROM argos_jobs j JOIN argos_tasks t ON t.job_id=j.id WHERE t.operation='insight_refresh' AND json_valid(t.input_ref) AND json_extract(t.input_ref,'$.surface')='recon_report' AND t.state NOT IN ('completed','cancelled') UNION SELECT j.id FROM argos_jobs j JOIN tree p ON j.parent_id=p.id) SELECT id FROM tree")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in refreshes {
+            conn.execute("INSERT OR IGNORE INTO argos_job_retirements(job_id,retired_at,reason) VALUES(?1,?2,'Intel report extraction retired')",params![id,now])?;
+            conn.execute("UPDATE argos_tasks SET state='cancelled',lease_owner='',lease_until='',lease_epoch=lease_epoch+1,updated_at=?2 WHERE job_id=?1 AND state<>'completed'",params![id,now])?;
+            conn.execute("UPDATE argos_jobs SET state='cancelled' WHERE id=?1", [&id])?;
+            signalled.push(id);
+        }
+        Ok(signalled)
+    })();
+    match result {
+        Ok(ids) => {
+            conn.execute_batch("RELEASE retire_article_reports")?;
+            for id in ids {
+                crate::job_registry::signal_retirement(&id);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            conn.execute_batch(
+                "ROLLBACK TO retire_article_reports; RELEASE retire_article_reports",
+            )?;
+            Err(e)
+        }
+    }
+}
+
 fn cleanup_on(conn: &Connection, now: DateTime<Utc>) -> Result<CleanupCounts> {
     backfill_owners(conn)?;
     let ts = now.to_rfc3339();
@@ -323,7 +371,71 @@ impl crate::store::Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Store;
     use crate::tasks::{self, JobMeta, NewJob, NewTask};
+
+    #[test]
+    fn article_report_retirement_cancels_only_execution_and_fences_late_writes() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let inv = store
+            .ensure_intel_investigation("article", "run", "https://example.com/a", "{}")
+            .unwrap();
+        let report = store
+            .insert_report_job(&inv.id, "article", "verify", 1, "{}", "{}", 0, 0, 24, None)
+            .unwrap();
+        let task = store
+            .insert_report_task(&report.id, "collect", "", "[]", "pending")
+            .unwrap();
+        let leased = store
+            .claim_report_task(&report.id, "fixture", 120)
+            .unwrap()
+            .unwrap();
+        assert_eq!(leased.id, task);
+        store.conn.execute("INSERT INTO intel_report_results(job_id,generation,article_id,completion_sequence,source_hash,details_json,completed_at) VALUES('history',1,'article',1,'hash','{}',?1)",[&now]).unwrap();
+        for (id, operation, parent, run) in [
+            ("report-runtime", "intel_recon", "", report.id.as_str()),
+            ("report-child", "cleanup", "report-runtime", ""),
+            ("brief", "intel_brief", "", ""),
+            ("unrelated-atlas", "atlas_cycle", "", "missing-fixture-run"),
+        ] {
+            store.conn.execute("INSERT INTO argos_jobs(id,kind,state,created_at,updated_at,operation,parent_id,run_ref) VALUES(?1,'user','running',?2,?2,?3,?4,?5)",params![id,now,operation,parent,run]).unwrap();
+        }
+        retire_article_reports(&store.conn).unwrap();
+        retire_article_reports(&store.conn).unwrap();
+        assert!(retired(&store.conn, &report.id).unwrap());
+        assert!(retired(&store.conn, "report-child").unwrap());
+        assert!(!retired(&store.conn, "brief").unwrap());
+        let owners: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM argos_job_owners WHERE job_id='unrelated-atlas'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            owners, 0,
+            "retirement cannot backfill unrelated owner state"
+        );
+        assert!(!store
+            .complete_report_task_fenced(&task, "late", leased.lease_epoch)
+            .unwrap());
+        store
+            .update_report_job(&report.id, "running", "late", 0, 0, "", "")
+            .unwrap();
+        assert_eq!(
+            store.intel_report_job(&report.id).unwrap().unwrap().state,
+            "cancelled"
+        );
+        let history: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM intel_report_results", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(history, 1);
+    }
 
     fn job(conn: &Connection, id: &str, created: &str, parent: &str, resource: &str) {
         tasks::enqueue_job_with(

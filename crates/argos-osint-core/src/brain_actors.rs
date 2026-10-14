@@ -499,6 +499,48 @@ pub fn add_memory_actor_ref(
          ON CONFLICT(memory_id,actor_id,role) DO UPDATE SET binding_state=excluded.binding_state",
         params![memory_id, actor_id, role, state_str(state), provenance.to_string()],
     )?;
+    sync_claim_actor_payload(conn, memory_id)?;
+    Ok(())
+}
+
+/// Keep the typed Claim payload and reference index in the same transaction.
+pub fn sync_claim_actor_payload(conn: &Connection, memory_id: &str) -> Result<()> {
+    use crate::memory_metadata::{ActorRef, ClaimPayload};
+    let raw: Option<(String, String)> = conn
+        .query_row(
+            "SELECT memory_kind,payload_json FROM memory_metadata WHERE memory_id=?1",
+            [memory_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if raw
+        .as_ref()
+        .is_some_and(|(kind, _)| MemoryKind::parse(kind) != Some(MemoryKind::Claim))
+    {
+        return Ok(());
+    }
+    let mut payload = raw
+        .and_then(|(_, json)| serde_json::from_str::<MemoryPayload>(&json).ok())
+        .and_then(|p| match p {
+            MemoryPayload::Claim(c) => Some(c),
+            _ => None,
+        })
+        .unwrap_or_else(|| ClaimPayload {
+            assessment: "unassessed".into(),
+            ..Default::default()
+        });
+    let mut stmt = conn.prepare("SELECT actor_id,role,binding_state FROM brain_memory_actor_refs WHERE memory_id=?1 ORDER BY actor_id,role")?;
+    payload.actors = stmt
+        .query_map([memory_id], |r| {
+            Ok(ActorRef {
+                actor_id: r.get(0)?,
+                role: r.get(1)?,
+                binding_state: parse_state(&r.get::<_, String>(2)?),
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute("INSERT INTO memory_metadata(memory_id,memory_kind,payload_json,payload_schema,revision,lifecycle,created_at,updated_at) VALUES(?1,'claim',?2,1,1,'active',?3,?3) ON CONFLICT(memory_id) DO UPDATE SET payload_json=excluded.payload_json,payload_schema=1,revision=memory_metadata.revision+1,updated_at=excluded.updated_at WHERE memory_metadata.payload_json<>excluded.payload_json", params![memory_id,serde_json::to_string(&MemoryPayload::Claim(payload))?,now])?;
     Ok(())
 }
 

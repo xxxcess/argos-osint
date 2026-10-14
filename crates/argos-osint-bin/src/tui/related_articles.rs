@@ -27,24 +27,6 @@ pub fn rows(
     width: usize,
     brain: bool,
 ) -> Vec<(Line<'static>, Option<Target>)> {
-    if view.loading {
-        return vec![(
-            Line::from(Span::styled(
-                super::anim::center_text(&super::anim::loading("Loading related articles"), width),
-                theme::dim(),
-            )),
-            None,
-        )];
-    }
-    if let Some(error) = &view.error {
-        return vec![(
-            Line::from(Span::styled(
-                fit(&format!("Related unavailable: {error}"), width),
-                theme::dim(),
-            )),
-            None,
-        )];
-    }
     let scope = if view.page.coverage == "this cycle" {
         "This cycle"
     } else {
@@ -57,6 +39,33 @@ pub fn rows(
         )),
         Some(Target::Button(super::app::ButtonId::RelatedScope)),
     );
+    if view.loading {
+        return vec![
+            toggle,
+            (
+                Line::from(Span::styled(
+                    super::anim::center_text(
+                        &super::anim::loading("Loading related articles"),
+                        width,
+                    ),
+                    theme::dim(),
+                )),
+                None,
+            ),
+        ];
+    }
+    if let Some(error) = &view.error {
+        return vec![
+            toggle,
+            (
+                Line::from(Span::styled(
+                    fit(&format!("Related unavailable: {error}"), width),
+                    theme::dim(),
+                )),
+                None,
+            ),
+        ];
+    }
     if view.page.rows.is_empty() {
         return vec![
             toggle,
@@ -91,7 +100,7 @@ pub fn rows(
     ];
     for (index, item) in view.page.rows.iter().enumerate() {
         let target = if brain {
-            Target::BrainRelatedArticle(index)
+            Target::RelatedRow(index)
         } else {
             Target::IntelRelatedArticle(index)
         };
@@ -100,10 +109,9 @@ pub fn rows(
         } else {
             theme::text()
         };
-        lines.push((
-            Line::from(Span::styled(fit(&item.article.title, width), style)),
-            Some(target),
-        ));
+        for text in super::ui::wrap_text(&item.article.title, width) {
+            lines.push((Line::from(Span::styled(text, style)), Some(target)));
+        }
         lines.push((
             Line::from(Span::styled(
                 fit(

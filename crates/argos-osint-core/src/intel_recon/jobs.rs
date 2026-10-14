@@ -97,7 +97,11 @@ pub fn active_job_for_mode(
     store.active_intel_job(article_id, mode.as_str())
 }
 
-/// Create or focus a report job with all section placeholders and the task graph.
+pub fn report_execution_enabled() -> bool {
+    false
+}
+
+/// Historical: create or focus a report job with all section placeholders and the task graph.
 pub fn create_report_job(
     store: &Store,
     article: &AtlasArticleRow,
@@ -105,6 +109,10 @@ pub fn create_report_job(
     scope: &ReportScope,
     force_new_revision: bool,
 ) -> Result<IntelReportJobRow> {
+    anyhow::ensure!(
+        report_execution_enabled(),
+        "Intel article reports have been retired"
+    );
     if !force_new_revision {
         if let Some(active) = active_job_for_mode(store, &article.id, mode)? {
             return Ok(active);
@@ -305,6 +313,10 @@ pub fn pause_job(store: &Store, job_id: &str) -> Result<()> {
 }
 
 pub fn resume_job(store: &Store, job_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        report_execution_enabled(),
+        "Intel article reports have been retired"
+    );
     let job = store
         .intel_report_job(job_id)?
         .ok_or_else(|| anyhow!("job not found"))?;
@@ -339,6 +351,10 @@ pub fn cancel_job(store: &Store, job_id: &str) -> Result<()> {
 }
 
 pub fn retry_failed_tasks(store: &Store, job_id: &str) -> Result<usize> {
+    anyhow::ensure!(
+        report_execution_enabled(),
+        "Intel article reports have been retired"
+    );
     let tasks = store.intel_report_tasks(job_id)?;
     let mut n = 0;
     for task in tasks {
@@ -383,6 +399,10 @@ pub fn start_report_worker(
     cancel: Arc<AtomicBool>,
     on_event: impl FnMut(IntelReportEvent) + Send + 'static,
 ) {
+    if !report_execution_enabled() {
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
     let db_path = db_path.to_path_buf();
     let job = register_canonical(&db_path, &job_id, &article_title, cancel.clone());
     let runtime = JobRuntime {
@@ -530,27 +550,26 @@ mod tests {
             image_url: String::new(),
         };
         store.atlas_upsert_article(&article).unwrap();
-        let job = create_report_job(
+        let error = create_report_job(
             &store,
             &article,
             ReportMode::Verify,
             &ReportScope::default(),
             false,
         )
-        .unwrap();
-        assert_eq!(job.mode, "verify");
-        assert_eq!(job.sections_total, 6);
-        let sections = store.intel_report_sections(&job.id).unwrap();
-        assert_eq!(sections.len(), 6);
-        assert_eq!(sections[0].section_key, "bluf");
-        let again = create_report_job(
-            &store,
-            &article,
-            ReportMode::Verify,
-            &ReportScope::default(),
-            false,
-        )
-        .unwrap();
-        assert_eq!(again.id, job.id, "active job is reused");
+        .unwrap_err();
+        assert!(error.to_string().contains("retired"));
+        assert!(store
+            .intel_jobs_for_article(&article.id)
+            .unwrap()
+            .is_empty());
+        assert!(resume_job(&store, "old")
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
+        assert!(retry_failed_tasks(&store, "old")
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
     }
 }

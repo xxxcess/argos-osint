@@ -5,7 +5,7 @@
 //! only its fence (the fenced Stage-4 commit) and its readiness differ from the
 //! insight-refresh lane. Only items the Claim assessor judged faithful to their
 //! own cited passages are published; citations alone never make an item
-//! faithful. A completed Recon report keeps precedence. Canonical failure never
+//! faithful. Historical reports do not prevent brief publication. Canonical failure never
 //! fails a completed stage: it rolls back to a savepoint and is reported as the
 //! separate Index footer state.
 
@@ -31,7 +31,9 @@ pub struct CanonicalBrief {
 /// Footer state of canonical publication, stored per article.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexState {
-    /// `indexed` | `not_indexed` | `report_precedence` | `failed`
+    #[serde(default)]
+    pub publication_version: u32,
+    /// `indexed` | `not_indexed` | `failed`
     pub state: String,
     pub snapshot_id: String,
     pub reason: String,
@@ -204,7 +206,10 @@ pub fn prepare(
         .expect("article_input always retains metadata");
     let title_offset = article.title.len() + 1;
     let meta_offset = |id: &str| if id.starts_with('d') { title_offset } else { 0 };
-    let mut output = PipelineOutput::default();
+    let mut output = PipelineOutput {
+        entities: input.snapshot.entities.clone(),
+        ..Default::default()
+    };
     for c in claims["claims"].as_array().into_iter().flatten() {
         if c["fidelity"] != "faithful" {
             continue;
@@ -282,19 +287,11 @@ pub fn publish_on(
     now: &str,
 ) -> Result<IndexState> {
     let mut state = IndexState {
+        publication_version: 2,
         job_id: job_id.into(),
         ..Default::default()
     };
-    let report: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM intel_report_results WHERE article_id=?1)",
-        [article_id],
-        |r| r.get(0),
-    )?;
     match prepared {
-        _ if report => {
-            state.state = "report_precedence".into();
-            state.reason = "completed Recon report keeps precedence".into();
-        }
         None => {
             state.state = "not_indexed".into();
             state.reason = "canonical inputs not prepared".into();
@@ -357,6 +354,48 @@ pub fn publish_on(
     Ok(state)
 }
 
+/// Revalidate and publish cached artifacts on the next visit after the
+/// publication-policy change. Extraction keys and fidelity receipts stay valid.
+pub fn refresh_cached_publication(
+    store: &Store,
+    article: &AtlasArticleRow,
+    job: &str,
+) -> Result<()> {
+    if index_state(&store.conn, &article.id)?
+        .is_some_and(|s| s.job_id == job && s.publication_version >= 2)
+    {
+        return Ok(());
+    }
+    let hash: Option<String> = store.conn.query_row("SELECT p.snapshot_hash FROM intel_brief_publications p JOIN intel_brief_runs r ON r.job_id=p.job_id WHERE p.article_id=?1 AND p.job_id=?2 AND r.state='completed' AND NOT EXISTS(SELECT 1 FROM intel_brief_runs n WHERE n.article_id=r.article_id AND n.generation>r.generation)",params![article.id,job],|r|r.get(0)).optional()?;
+    let Some(hash) = hash else { return Ok(()) };
+    let outputs = super::brief_pipeline::stage_outputs(&store.conn, job)?;
+    let (Some(body), Some(claims), Some(inferences)) = (
+        outputs.get("intel_brief_body"),
+        outputs.get("intel_brief_claims"),
+        outputs.get("intel_brief_inferences"),
+    ) else {
+        return Ok(());
+    };
+    let prepared = prepare(store, article, body, claims, inferences)?;
+    let tx = rusqlite::Transaction::new_unchecked(
+        &store.conn,
+        rusqlite::TransactionBehavior::Immediate,
+    )?;
+    let current:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM intel_brief_publications p JOIN intel_brief_runs r ON r.job_id=p.job_id WHERE p.article_id=?1 AND p.job_id=?2 AND p.snapshot_hash=?3 AND NOT EXISTS(SELECT 1 FROM intel_brief_runs n WHERE n.article_id=r.article_id AND n.generation>r.generation))",params![article.id,job,hash],|r|r.get(0))?;
+    if current {
+        publish_on(
+            &tx,
+            &article.id,
+            job,
+            Some(&prepared),
+            &hash,
+            &chrono::Utc::now().to_rfc3339(),
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Publication / Index footer text for one chain. The index part is separate
 /// from the stage rows: an index failure never fails a completed stage.
 pub fn footer(
@@ -393,7 +432,7 @@ pub fn footer(
                     "Indexed".into()
                 }
             }
-            "report_precedence" => "Index · Recon report takes precedence".into(),
+
             "failed" => format!("Index failed · {}", s.reason),
             _ => format!("Not indexed · {}", s.reason),
         },

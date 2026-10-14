@@ -14,9 +14,9 @@ Only Recon has a chat. Everything else is fields, lists, and buttons. Observatio
 
 | App | What it does | Read more |
 | --- | --- | --- |
-| Intel | Browse Atlas headlines and run a cited report on one article | [Usage](docs/usage.md#intel) · [Report](docs/diagrams/intel-report.html) |
+| Intel | Browse Atlas headlines and prepare a cited Focus Brief with ingest-related articles | [Usage](docs/usage.md#intel) · [Brief](docs/diagrams/intel-brief-chain.html) |
 | Atlas | Classifier-only news collection, country heat, local metadata and Related leads | [Usage](docs/usage.md#atlas) · [Cycle](docs/diagrams/atlas-pipeline.html) |
-| Brain | Saved memories, recall, and investigation path graphs | [Usage](docs/usage.md#other-apps) · [Recall](docs/diagrams/brain-recall.html) |
+| Brain | Claims, unique Actor names and navigable associations with read-only graphs | [Usage](docs/usage.md#brain) · [Browse](docs/diagrams/brain-browse.html) · [Recall](docs/diagrams/brain-recall.html) |
 | Recon | Evidence-driven investigations with a planner, binder, and synthesis | [Usage](docs/usage.md#recon) · [Architecture](docs/architecture.md) · [Turn](docs/diagrams/recon-turn.html) |
 | Tools | Manual OSINT catalog (internal id `Osint`) | [Providers](docs/providers.md) · [Catalog](docs/diagrams/osint-providers.html) |
 | Models | Role defaults and OpenRouter / Google / Nvidia accounts (`Providers`) | [Providers](docs/providers.md) · [Roles](docs/diagrams/model-roles.html) |

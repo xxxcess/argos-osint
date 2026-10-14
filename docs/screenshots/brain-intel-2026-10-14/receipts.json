@@ -1,0 +1,78 @@
+{
+  "baseline": "13c635bd5377eae836ec22b494619e7d6ba68254",
+  "review": "PNG inspection; Brain run-05 carries 70 exact regenerated matches from reviewed run-02",
+  "artifacts": [
+    {
+      "name": "brain-list-all-160x50",
+      "png_sha256": "3f58bf98e6e56b913a73ee58094a432dba9c8c9b399c49502f56460389decfce",
+      "cells_sha256": "50576faee00a074f955c19889eb2ce41befe5a922bd8d62bda6850e9173e53bd",
+      "capture_utc": "2026-10-14T14:57:44.685059+00:00",
+      "tracked_diff_sha256": "8afaaa085298a710daf88870b5b611df8e1151c070b83455fb06a5f9ed8a41f8",
+      "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d"
+    },
+    {
+      "name": "brain-claim-split-120x40",
+      "png_sha256": "d95820ee270be754436f7221f1ee7ae26072acc6cee2e6f2e2d62ade5386047f",
+      "cells_sha256": "78d4beb1cca90d16dda1093f9775fed3eea55c1aa1a08a923ef7b6e8e25567ab",
+      "capture_utc": "2026-10-14T14:57:44.685059+00:00",
+      "tracked_diff_sha256": "8afaaa085298a710daf88870b5b611df8e1151c070b83455fb06a5f9ed8a41f8",
+      "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d"
+    },
+    {
+      "name": "brain-actor-graph-100x32",
+      "png_sha256": "51c38717ca6da6294c0624ce988743e230c90e21c7b8d119655de9d0fc5aa50e",
+      "cells_sha256": "4ff4d545ea75b0021aea6e1909d3a32a74687168de8138415eed807f20b427cf",
+      "capture_utc": "2026-10-14T14:57:44.685059+00:00",
+      "tracked_diff_sha256": "8afaaa085298a710daf88870b5b611df8e1151c070b83455fb06a5f9ed8a41f8",
+      "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d"
+    },
+    {
+      "name": "brain-actor-tab2-80x24",
+      "png_sha256": "1705830f7dfb60c8b30ba1b9d053ef81439594fdda8423ae3a9dc1e5de3b7825",
+      "cells_sha256": "0163ae51ca2b36edbf321ac4741433cd360c60ca72c479edfc89c67c808e5771",
+      "capture_utc": "2026-10-14T14:57:44.685059+00:00",
+      "tracked_diff_sha256": "8afaaa085298a710daf88870b5b611df8e1151c070b83455fb06a5f9ed8a41f8",
+      "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d"
+    },
+    {
+      "name": "brain-claim-tab0-40x20",
+      "png_sha256": "772204bdc6ad9528eb0f4d6d70a9dc11ba735bda21100aaa61d7d82bafa9494b",
+      "cells_sha256": "ed177e8560c3d1b884fe446ba01e19aa885b55b688f5c6ea4fc87c5d8b313126",
+      "capture_utc": "2026-10-14T14:57:44.685059+00:00",
+      "tracked_diff_sha256": "8afaaa085298a710daf88870b5b611df8e1151c070b83455fb06a5f9ed8a41f8",
+      "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d"
+    },
+    {
+      "name": "intel-related-articles-160x50",
+      "png_sha256": "0a100e0e82bc807288bdd7686d47f0d596097dd0e25a765a41ecce65fd5267ff",
+      "cells_sha256": "3ea904666e0c80a67b22a73d9fcb71ae71db7833e6578ef41caaa1746411ffa0",
+      "capture_utc": "2026-10-14T15:07:02.821344+00:00",
+      "tracked_diff_sha256": "b57d73d283728c1011fc47dd7aa4748c924ccee9ed21fce668b95c0bf810c1e3",
+      "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d"
+    },
+    {
+      "name": "intel-related-articles-60x18",
+      "png_sha256": "1c2774c2e7579b706cadfe023074c0744258b44a9b3ad15897af002d83f06d1d",
+      "cells_sha256": "58d9fe247a92d15e34114cf520783d1f90c2d728f5214997dd102d92cfa9ff8e",
+      "capture_utc": "2026-10-14T15:07:02.821344+00:00",
+      "tracked_diff_sha256": "b57d73d283728c1011fc47dd7aa4748c924ccee9ed21fce668b95c0bf810c1e3",
+      "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d"
+    },
+    {
+      "name": "intel-body-bordered-long-80x24",
+      "png_sha256": "bd9316f624b34e3d2a5406e9e477cb697faeb770545aabeefc994ab1b70f8d17",
+      "cells_sha256": "ee91e8cd541e37929c92dcd2bbf0e00626866dfbd44b2759142af26cb290d764",
+      "capture_utc": "2026-10-14T15:14:37.614669+00:00",
+      "tracked_diff_sha256": "31f75a0fb5aa66edf7e85d22a589587af55d1065eb884f7424d2df6bdc08a3b5",
+      "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d"
+    },
+    {
+      "name": "intel-actors-tail-60x18",
+      "png_sha256": "8491fe4a6d30940e4f53db95770383ae591c0f8b10b5ccd4fc41fc4b1ecee4d9",
+      "cells_sha256": "cb440fcb4b704af13d3ca5e6ebd78f0f540054feb7bd9b6ea014fd93253c12fd",
+      "capture_utc": "2026-10-14T15:14:37.614669+00:00",
+      "tracked_diff_sha256": "31f75a0fb5aa66edf7e85d22a589587af55d1065eb884f7424d2df6bdc08a3b5",
+      "renderer_sha256": "8271c051116a40526f1fb33d51a55872e1cc4194bb93e4799d042cc42ce69e0d"
+    }
+  ]
+}

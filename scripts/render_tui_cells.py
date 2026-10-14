@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Render ratatui TestBackend cell dumps (JSON) to PNG."""
-import argparse, json, re, sys, pathlib
+import argparse, json, re, sys, pathlib, math
 from PIL import Image, ImageDraw, ImageFont
 FONT = next((p for p in (
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -54,6 +54,19 @@ def box(dr, s, px, py, cw, ch, fg):
                 dx = px + cw * (1 + 2 * col) // 4
                 dy = py + ch * (1 + 2 * row) // 8
                 dr.ellipse([dx - r, dy - r, dx + r, dy + r], fill=fg)
+        return True
+    # Brain Claim/Topic glyphs are absent from some platform monospace fonts.
+    if s == "◆":
+        dr.polygon([(cx, py + 4), (px + cw - 2, cy), (cx, py + ch - 4), (px + 2, cy)], fill=fg)
+        return True
+    if s == "★":
+        points = []
+        for i in range(10):
+            angle = -math.pi / 2 + i * math.pi / 5
+            radius = 1.0 if i % 2 == 0 else 0.45
+            points.append((cx + math.cos(angle) * (cw / 2 - 1) * radius,
+                           cy + math.sin(angle) * (ch / 2 - 3) * radius))
+        dr.polygon(points, fill=fg)
         return True
     # Terminal block/diagonal glyphs may be absent from platform fonts.
     if s in "█▉▊▋▌▍▎▏":

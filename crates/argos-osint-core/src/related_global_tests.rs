@@ -1,6 +1,46 @@
 use super::*;
 use crate::atlas_actor_index::tests::seed;
 
+#[test]
+fn browsing_requires_a_recorded_ingest_pair_and_never_adds_name_suggestions() {
+    let store = Store::memory().unwrap();
+    seed(&store, "rA", "a1", "Ada meets Acme", &["Ada", "Acme"]);
+    seed(&store, "rB", "b1", "Ada joins Acme", &["Ada", "Acme"]);
+    assert!(store
+        .related_articles_global("rA", "a1", RelatedScope::AllRetained, None, 20)
+        .unwrap()
+        .rows
+        .is_empty());
+    index(&store, "rA");
+    index(&store, "rB");
+    assert_eq!(
+        store
+            .related_articles_global("rA", "a1", RelatedScope::AllRetained, None, 20)
+            .unwrap()
+            .total,
+        1
+    );
+    seed(&store, "rB", "b2", "Ada repeats Ada", &["Ada"]);
+    index(&store, "rB");
+    let page = store
+        .related_articles_global("rA", "a1", RelatedScope::AllRetained, None, 20)
+        .unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.rows[0].article.id, "b1");
+    // Editing content while preserving both names must invalidate old receipts.
+    let mut candidate = store.atlas_article("rB", "b1").unwrap().unwrap();
+    candidate.title.push_str(" updated");
+    store.atlas_upsert_article(&candidate).unwrap();
+    assert!(store
+        .related_articles_global("rA", "a1", RelatedScope::AllRetained, None, 20)
+        .unwrap()
+        .rows
+        .is_empty());
+    assert!(!store
+        .has_ingest_actor_association(&candidate, "ada")
+        .unwrap());
+}
+
 fn index(store: &Store, run: &str) {
     assert!(crate::atlas_actor_index::index_run(store, run, &|| false)
         .unwrap()
@@ -9,11 +49,35 @@ fn index(store: &Store, run: &str) {
 
 fn world() -> Store {
     let store = Store::memory().unwrap();
-    seed(&store, "rA", "a1", "Jane Doe visits Kyiv", &["Jane Doe"]);
-    seed(&store, "rA", "a2", "Jane Doe meets envoy", &["Jane Doe"]);
-    seed(&store, "rB", "b1", "Jane Doe resigns", &["Jane Doe"]);
+    seed(
+        &store,
+        "rA",
+        "a1",
+        "Jane Doe visits Kyiv with Acme",
+        &["Jane Doe", "Acme"],
+    );
+    seed(
+        &store,
+        "rA",
+        "a2",
+        "Jane Doe meets envoy at Acme",
+        &["Jane Doe", "Acme"],
+    );
+    seed(
+        &store,
+        "rB",
+        "b1",
+        "Jane Doe resigns from Acme",
+        &["Jane Doe", "Acme"],
+    );
     // b-cycle retains a2 again (same URL).
-    seed(&store, "rB", "a2", "Jane Doe meets envoy", &["Jane Doe"]);
+    seed(
+        &store,
+        "rB",
+        "a2",
+        "Jane Doe meets envoy at Acme",
+        &["Jane Doe", "Acme"],
+    );
     crate::related_articles::build(&store, "rA").unwrap();
     crate::related_articles::build(&store, "rB").unwrap();
     index(&store, "rA");
@@ -68,7 +132,7 @@ fn merged_canonical_actor_establishes_link_and_actor_articles_spans_cycles() {
         store
             .conn
             .query_row(
-                "SELECT actor_id FROM brain_actor_mentions WHERE origin_id=?1 LIMIT 1",
+                "SELECT m.actor_id FROM brain_actor_mentions m JOIN brain_actors a ON a.actor_id=m.actor_id WHERE m.origin_id=?1 AND a.display_name='Jane Doe' LIMIT 1",
                 [id],
                 |r| r.get(0),
             )
@@ -87,12 +151,10 @@ fn merged_canonical_actor_establishes_link_and_actor_articles_spans_cycles() {
         .iter()
         .find(|r| r.url_key.ends_with("/b1"))
         .unwrap();
-    assert!(!b.tentative, "{b:?}");
-    assert!(b
-        .basis
-        .iter()
-        .any(|x| x.starts_with("same actor: Jane Doe")));
-    assert_eq!(page.rows[0].url_key, b.url_key, "established rows first");
+    assert!(
+        b.tentative,
+        "shared mentions remain tentative even after identity resolution"
+    );
     let articles = store.actor_articles(&b1, None, 20).unwrap();
     let keys: Vec<_> = articles.rows.iter().map(|r| r.url_key.clone()).collect();
     assert!(keys.contains(&"https://x.test/a1".to_string()));

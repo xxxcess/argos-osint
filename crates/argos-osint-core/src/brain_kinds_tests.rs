@@ -3,8 +3,20 @@ use crate::atlas_actor_index::tests::seed;
 
 fn world() -> Store {
     let store = Store::memory().unwrap();
-    seed(&store, "rA", "a1", "Jane Doe visits Kyiv", &["Jane Doe"]);
-    seed(&store, "rB", "b1", "Jane Doe resigns", &["Jane Doe"]);
+    seed(
+        &store,
+        "rA",
+        "a1",
+        "Jane Doe visits Kyiv with Acme",
+        &["Jane Doe", "Acme"],
+    );
+    seed(
+        &store,
+        "rB",
+        "b1",
+        "Jane Doe resigns from Acme",
+        &["Jane Doe", "Acme"],
+    );
     for run in ["rA", "rB"] {
         assert!(crate::atlas_actor_index::index_run(&store, run, &|| false)
             .unwrap()
@@ -31,8 +43,8 @@ fn kind_filters_cover_all_five_kinds_and_default_keeps_evidence_only() {
     let store = world();
     let counts: std::collections::HashMap<_, _> =
         store.memory_kind_counts().unwrap().into_iter().collect();
-    assert_eq!(counts[&MemoryKind::Actor], 2);
-    assert_eq!(counts[&MemoryKind::Link], 2);
+    assert_eq!(counts[&MemoryKind::Actor], 4);
+    assert_eq!(counts[&MemoryKind::Link], 4);
     assert!(counts[&MemoryKind::Related] >= 1);
     assert_eq!(
         counts[&MemoryKind::Claim],
@@ -56,7 +68,7 @@ fn kind_filters_cover_all_five_kinds_and_default_keeps_evidence_only() {
 fn typed_details_render_each_payload_kind() {
     let store = world();
     let first = |k| {
-        store.list_memories_by_kind(Some(k), "").unwrap()[0]
+        store.list_memories_by_kind(Some(k), "Jane Doe").unwrap()[0]
             .id
             .clone()
     };
@@ -82,7 +94,7 @@ fn typed_details_render_each_payload_kind() {
     );
     assert!(related
         .iter()
-        .any(|l| l.starts_with("Basis: candidate name: Jane Doe")));
+        .any(|l| l.starts_with("Basis: shared mentions:")));
     let claim = typed_detail(&store, &first(MemoryKind::Claim)).unwrap();
     assert_eq!(claim, vec!["Kind: Claim", "Payload: legacy (untyped)"]);
 }

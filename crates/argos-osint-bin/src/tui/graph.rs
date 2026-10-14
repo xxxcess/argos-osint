@@ -5,19 +5,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-use argos_osint_core::recon::{recon_path, GraphEdgeKind, GraphNodeKind, MemoryGraph};
+use argos_osint_core::recon::{GraphEdgeKind, GraphNodeKind, MemoryGraph};
 
 use super::app::{App, Target};
 use super::brain_detail;
 use super::markdown;
 use super::summary_card;
 use super::theme::{self, panel};
-use super::ui::{center_line, contains};
+use super::ui::center_line;
 
 pub struct PathLine {
     pub text: String,
-    pub article_id: String,
-    pub run_id: String,
 }
 
 /// Graph above, Related (left) and Summary (right) below; stacked when narrow.
@@ -28,15 +26,6 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     draw_path(frame, app, areas.path, claim);
     brain_detail::draw_related(frame, app, areas.related);
     draw_summary(frame, app, areas.summary, claim);
-}
-
-/// Scrollable path lines, above the anchored legend. `None` when the click misses them.
-pub fn path_line_at(app: &App, path: Rect, x: u16, y: u16, scroll: u16) -> Option<usize> {
-    let content = path_content(path, legend_height(app, path));
-    if !contains(content, x, y) {
-        return None;
-    }
-    Some(scroll as usize + (y - content.y) as usize)
 }
 
 fn path_content(path: Rect, legend: u16) -> Rect {
@@ -98,8 +87,6 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
             } else {
                 "This memory has no investigation graph.".into()
             },
-            article_id: String::new(),
-            run_id: String::new(),
         }]
     } else {
         path_lines(&app.brain_graph)
@@ -151,19 +138,6 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
         title.push_str("· focused ");
     }
     app.layout.borrow_mut().register(Target::DetailPath, area);
-    for index in (app.scrolls.path as usize)
-        ..(app.scrolls.path as usize + path_area.height as usize).min(painted.len())
-    {
-        app.layout.borrow_mut().register(
-            Target::PathLine(index),
-            Rect {
-                x: path_area.x,
-                y: path_area.y + (index - app.scrolls.path as usize) as u16,
-                width: path_area.width,
-                height: 1,
-            },
-        );
-    }
     frame.render_widget(panel(&title), area);
     frame.render_widget(
         Paragraph::new(painted)
@@ -271,122 +245,22 @@ fn summary_lines(text: &str, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn legend_parts(app: &App, claim: bool) -> Vec<String> {
+fn legend_parts(app: &App, _claim: bool) -> Vec<String> {
     let mut parts = Vec::new();
-    let present = |kind: GraphNodeKind| app.brain_graph.nodes.iter().any(|node| node.kind == kind);
-    let push = |parts: &mut Vec<String>, kind: GraphNodeKind, name: &str| {
-        if present(kind) {
-            parts.push(format!("{} {name}", glyph(kind)));
+    for (kind, label) in [
+        (GraphNodeKind::Finding, "Claim"),
+        (GraphNodeKind::Topic, "Topic"),
+        (GraphNodeKind::Entity, "Entity"),
+        (GraphNodeKind::Evidence, "Article"),
+        (GraphNodeKind::Source, "Source"),
+    ] {
+        if app.brain_graph.nodes.iter().any(|n| {
+            n.kind == kind || (kind == GraphNodeKind::Entity && n.kind == GraphNodeKind::Actor)
+        }) {
+            parts.push(format!("{} {label}", glyph(kind)));
         }
-    };
-    push(
-        &mut parts,
-        GraphNodeKind::Investigation,
-        if claim { "claim" } else { "investigation" },
-    );
-    push(
-        &mut parts,
-        GraphNodeKind::Directive,
-        if claim { "topic" } else { "directive" },
-    );
-    push(&mut parts, GraphNodeKind::Entity, "entity");
-    push(&mut parts, GraphNodeKind::Topic, "topic");
-    push(
-        &mut parts,
-        GraphNodeKind::Evidence,
-        if claim { "article" } else { "evidence" },
-    );
-    push(&mut parts, GraphNodeKind::Finding, "finding");
-    push(&mut parts, GraphNodeKind::Source, "source");
-    push(&mut parts, GraphNodeKind::Actor, "actor");
-    let edge = |kind| app.brain_graph.edges.iter().any(|e| e.kind == kind);
-    if edge(GraphEdgeKind::Link) {
-        parts.push(format!("{LINK_MARK} link (observed)"));
-    }
-    if edge(GraphEdgeKind::Related) {
-        parts.push(format!("{RELATED_MARK} related (tentative)"));
     }
     parts
-}
-
-/// Observed Link edges draw solid; tentative Related edges draw dashed.
-pub(crate) const LINK_MARK: &str = "──▶";
-pub(crate) const RELATED_MARK: &str = "┄┄";
-
-/// Actor graph: each canonical actor once, its observed Links to articles,
-/// then tentative Related leads between articles (distinct marks).
-fn actor_path_lines(graph: &MemoryGraph) -> Vec<PathLine> {
-    let mut lines = Vec::new();
-    let article = |id: &str| graph.node(id);
-    let line = |text: String, node: Option<&argos_osint_core::recon::GraphNode>| PathLine {
-        text,
-        article_id: node.map(|n| n.article_id.clone()).unwrap_or_default(),
-        run_id: node.map(|n| n.run_id.clone()).unwrap_or_default(),
-    };
-    let date = |n: &argos_osint_core::recon::GraphNode| {
-        n.published_at
-            .get(..10)
-            .map(|d| format!("{d}  "))
-            .unwrap_or_default()
-    };
-    for actor in graph
-        .nodes
-        .iter()
-        .filter(|n| n.kind == GraphNodeKind::Actor)
-    {
-        lines.push(line(
-            format!("{}  {}", glyph(actor.kind), actor.detail),
-            None,
-        ));
-        let links: Vec<_> = graph
-            .edges
-            .iter()
-            .filter(|e| e.kind == GraphEdgeKind::Link && e.from == actor.id)
-            .collect();
-        for (i, edge) in links.iter().enumerate() {
-            let mark = if i + 1 == links.len() { "└" } else { "├" };
-            if let Some(target) = article(&edge.to) {
-                lines.push(line(
-                    format!(
-                        "{mark}{LINK_MARK} {} {}  {}{}",
-                        edge.directive.as_deref().unwrap_or("link"),
-                        glyph(target.kind),
-                        date(target),
-                        target.label
-                    ),
-                    Some(target),
-                ));
-            }
-        }
-    }
-    let related: Vec<_> = graph
-        .edges
-        .iter()
-        .filter(|e| e.kind == GraphEdgeKind::Related)
-        .collect();
-    if !related.is_empty() {
-        lines.push(line(
-            "Related leads · tentative · not evidence".into(),
-            None,
-        ));
-    }
-    for edge in related {
-        let (Some(a), Some(b)) = (article(&edge.from), article(&edge.to)) else {
-            continue;
-        };
-        lines.push(line(format!("  {}  {}", glyph(a.kind), a.label), Some(a)));
-        lines.push(line(
-            format!(
-                "  {RELATED_MARK} {} {}  {}{}",
-                edge.directive.as_deref().unwrap_or("related"),
-                glyph(b.kind),
-                date(b),
-                b.label
-            ),
-            Some(b),
-        ));
-    }
-    lines
 }
 
 /// Typed payload header (kind, typed fields) above the path lines.
@@ -394,11 +268,7 @@ pub(crate) fn with_typed(typed: &[String], lines: Vec<PathLine>) -> Vec<PathLine
     if typed.is_empty() {
         return lines;
     }
-    let blank = |text: String| PathLine {
-        text,
-        article_id: String::new(),
-        run_id: String::new(),
-    };
+    let blank = |text: String| PathLine { text };
     let mut out: Vec<PathLine> = typed.iter().cloned().map(blank).collect();
     out.push(blank(String::new()));
     out.extend(lines);
@@ -406,101 +276,83 @@ pub(crate) fn with_typed(typed: &[String], lines: Vec<PathLine>) -> Vec<PathLine
 }
 
 pub(crate) fn path_lines(graph: &MemoryGraph) -> Vec<PathLine> {
-    if graph.nodes.iter().any(|n| n.kind == GraphNodeKind::Actor)
-        || graph
-            .edges
-            .iter()
-            .any(|e| matches!(e.kind, GraphEdgeKind::Link | GraphEdgeKind::Related))
-    {
-        return actor_path_lines(graph);
-    }
-    let path = recon_path(graph);
-    let mut lines = Vec::new();
-    if let Some(investigation) = graph
+    let visible = |n: &&argos_osint_core::recon::GraphNode| {
+        !matches!(
+            n.kind,
+            GraphNodeKind::Investigation | GraphNodeKind::Directive
+        ) && (n.kind != GraphNodeKind::Evidence || !n.article_id.is_empty())
+    };
+    let mut nodes: Vec<_> = graph.nodes.iter().filter(visible).collect();
+    let actor_root = graph
         .nodes
-        .iter()
-        .find(|node| node.kind == GraphNodeKind::Investigation)
-    {
-        lines.push(PathLine {
-            text: format!("{}  {}", glyph(investigation.kind), investigation.label),
-            article_id: String::new(),
-            run_id: String::new(),
-        });
-    }
-    for (band_index, band) in path.bands.iter().enumerate() {
-        let last_band = band_index + 1 == path.bands.len();
-        let branch = if last_band { "└─" } else { "├─" };
-        let pad = if last_band { "  " } else { "│ " };
-        let caption = graph
-            .nodes
-            .iter()
-            .find(|node| {
-                node.kind == GraphNodeKind::Directive && node.label == band.directive_label
-            })
-            .and_then(|node| node.detail.lines().next())
-            .filter(|line| !line.is_empty())
-            .unwrap_or(band.directive_label.as_str());
-        lines.push(PathLine {
-            text: format!("{branch} {}  {caption}", glyph(GraphNodeKind::Directive)),
-            article_id: String::new(),
-            run_id: String::new(),
-        });
-        let mut children = Vec::new();
-        for subject in &band.subjects {
-            if let Some(node) = graph.nodes.iter().find(|node| node.label == *subject) {
-                children.push(PathLine {
-                    text: format!("{}  {}", glyph(node.kind), node.label),
-                    article_id: String::new(),
-                    run_id: String::new(),
-                });
+        .first()
+        .filter(|n| n.id.starts_with("actor-group:"));
+    nodes.sort_by_key(|n| {
+        if actor_root.is_some_and(|root| root.id == n.id) {
+            0
+        } else {
+            match n.kind {
+                GraphNodeKind::Topic => 0,
+                GraphNodeKind::Finding => 1,
+                GraphNodeKind::Entity | GraphNodeKind::Actor => 2,
+                GraphNodeKind::Evidence => 3,
+                _ => 4,
             }
         }
-        children.extend(
-            graph
-                .nodes
-                .iter()
-                .filter(|node| {
-                    node.kind == GraphNodeKind::Evidence
-                        && node.tags.iter().any(|tag| tag == &band.directive_id)
-                })
-                .map(|node| PathLine {
-                    text: format!("{}  {}", glyph(node.kind), node.label),
-                    article_id: node.article_id.clone(),
-                    run_id: node.run_id.clone(),
-                }),
+    });
+    let mut lines = Vec::new();
+    let total = nodes.len();
+    for (index, n) in nodes.into_iter().enumerate() {
+        let kind = if n.kind == GraphNodeKind::Actor {
+            GraphNodeKind::Entity
+        } else {
+            n.kind
+        };
+        let branch = if index == 0 {
+            ""
+        } else if index + 1 == total {
+            "└─ "
+        } else {
+            "├─ "
+        };
+        let mut text = format!(
+            "{branch}{} {}  {}",
+            glyph(kind),
+            match kind {
+                GraphNodeKind::Finding => "Claim",
+                GraphNodeKind::Entity => "Entity",
+                GraphNodeKind::Topic => "Topic",
+                GraphNodeKind::Evidence => "Article",
+                _ => "Source",
+            },
+            n.label
         );
-        if let Some(label) = &band.finding {
-            children.push(PathLine {
-                text: format!("{}  {label}", glyph(GraphNodeKind::Finding)),
-                article_id: String::new(),
-                run_id: String::new(),
-            });
+        for edge in graph
+            .edges
+            .iter()
+            .filter(|e| e.to == n.id && e.kind != GraphEdgeKind::Related)
+        {
+            if let Some(from) = graph.node(&edge.from).filter(|n| {
+                !matches!(
+                    n.kind,
+                    GraphNodeKind::Investigation | GraphNodeKind::Directive
+                )
+            }) {
+                let relation = if from.kind == GraphNodeKind::Evidence
+                    && n.kind == GraphNodeKind::Finding
+                    && matches!(edge.kind, GraphEdgeKind::Supports | GraphEdgeKind::Reports)
+                {
+                    "reported by"
+                } else {
+                    edge.directive
+                        .as_deref()
+                        .filter(|_| edge.kind == GraphEdgeKind::Link)
+                        .unwrap_or(edge.kind.verb())
+                };
+                text.push_str(&format!(" · {relation}: {}", from.label));
+            }
         }
-        for (child_index, child) in children.iter().enumerate() {
-            let last = child_index + 1 == children.len();
-            let mark = if last { "└─" } else { "├─" };
-            lines.push(PathLine {
-                text: format!("{pad}{mark} {}", child.text),
-                article_id: child.article_id.clone(),
-                run_id: child.run_id.clone(),
-            });
-        }
-        if children.is_empty() {
-            lines.push(PathLine {
-                text: format!("{pad}└─ no finding"),
-                article_id: String::new(),
-                run_id: String::new(),
-            });
-        }
-    }
-    if lines.is_empty() {
-        for node in &graph.nodes {
-            lines.push(PathLine {
-                text: format!("{}  {}", glyph(node.kind), node.label),
-                article_id: node.article_id.clone(),
-                run_id: node.run_id.clone(),
-            });
-        }
+        lines.push(PathLine { text });
     }
     lines
 }

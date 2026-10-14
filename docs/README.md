@@ -33,8 +33,9 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | Tool picker | Flowchart | [diagrams/tool-picker.html](diagrams/tool-picker.html) |
 | OSINT catalog | Nested | [diagrams/osint-providers.html](diagrams/osint-providers.html) |
 | Atlas cycle | Process | [diagrams/atlas-pipeline.html](diagrams/atlas-pipeline.html) |
-| Intel report | Data flow | [diagrams/intel-report.html](diagrams/intel-report.html) |
-| Intel job states | State machine | [diagrams/intel-job-states.html](diagrams/intel-job-states.html) |
+| Historical Intel report (retired) | Data flow | [diagrams/intel-report.html](diagrams/intel-report.html) |
+| Brain browse projection | Data flow | [diagrams/brain-browse.html](diagrams/brain-browse.html) |
+| Intel brief / historical report states | State machine | [diagrams/intel-job-states.html](diagrams/intel-job-states.html) |
 | Brain recall | Architecture | [diagrams/brain-recall.html](diagrams/brain-recall.html) |
 | Models and roles | Architecture | [diagrams/model-roles.html](diagrams/model-roles.html) |
 | Persistence | Layer stack | [diagrams/persistence.html](diagrams/persistence.html) |
@@ -54,6 +55,7 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | [tui-verification.md](tui-verification.md) | Agent standard: shared geometry, capture tooling, screenshot/action/metric verification |
 | [tui-verification-session-2026-10-10.md](tui-verification-session-2026-10-10.md) | Profile process, actual screenshot evidence, defects and results |
 | [tui-overhaul-verification-2026-10-10.md](tui-overhaul-verification-2026-10-10.md) | Shared navigation, imagery, Configs and transcript verification |
+| [tui-verification-brain-intel-2026-10-14.md](tui-verification-brain-intel-2026-10-14.md) | Claims/Actor browsing, ingest Related, retired article reports and reviewed viewport evidence |
 | [ui-interaction-audit.md](ui-interaction-audit.md) | TUI surfaces, fields, focus, overflow |
 | [investigation-harness.md](investigation-harness.md) | Unified investigation task graph |
 | [jev-decision-gates.md](jev-decision-gates.md) | Tool-picker decisions transport |
@@ -64,4 +66,4 @@ Phase checklists under `docs/*-checklist.md` record completed Atlas/Brain/system
 
 TUI presentation: [design contract](tui-design-spec.md) · [component APIs and presets](tui-components.md).
 
-- [Atlas classification and Related articles](atlas-classification-and-related-articles.md) — collection-v1, schema 30, publisher priors, tentative leads and legacy recovery.
+- [Atlas classification and Related articles](atlas-classification-and-related-articles.md) — collection-v2 with v1 compatibility, publisher priors, two-entity ingest associations and legacy recovery.

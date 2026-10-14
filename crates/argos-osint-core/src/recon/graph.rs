@@ -154,6 +154,54 @@ impl Store {
         };
 
         match kind_str.as_str() {
+            "claim" | "atomic_claim" => {
+                let mut graph = self.legacy_graph_for_memory(memory_id)?;
+                if graph.nodes.iter().all(|n| n.kind != GraphNodeKind::Finding) {
+                    if let Some(memory) = self.get_memory(memory_id)? {
+                        graph.nodes.push(GraphNode {
+                            id: memory_id.into(),
+                            kind: GraphNodeKind::Finding,
+                            label: memory.text.clone(),
+                            detail: memory.text,
+                            tags: vec![],
+                            article_id: String::new(),
+                            run_id: String::new(),
+                            published_at: String::new(),
+                        });
+                    }
+                }
+                let associations = self.claim_associations(memory_id)?;
+                for group in associations.actors {
+                    if !graph.nodes.iter().any(|n| {
+                        n.kind == GraphNodeKind::Entity
+                            && crate::brain_actors::normalize_alias(&n.label) == group.name_key
+                    }) {
+                        graph.nodes.push(GraphNode {
+                            id: group.key(),
+                            kind: GraphNodeKind::Entity,
+                            label: group.display_name.clone(),
+                            detail: group.display_name,
+                            tags: vec![],
+                            article_id: String::new(),
+                            run_id: String::new(),
+                            published_at: String::new(),
+                        });
+                    }
+                }
+                for (id, title) in associations.threads {
+                    graph.nodes.push(GraphNode {
+                        id: format!("thread:{id}"),
+                        kind: GraphNodeKind::Source,
+                        label: title.clone(),
+                        detail: title,
+                        tags: vec![],
+                        article_id: String::new(),
+                        run_id: String::new(),
+                        published_at: String::new(),
+                    });
+                }
+                Ok(graph)
+            }
             "cycle_brief" => self.build_brief_graph(memory_id),
             "actor" | "link" | "related" => self.build_actor_graph(memory_id, &kind_str),
             "manual_note" | "user_profile" | "investigation_digest" | "source_summary" => {

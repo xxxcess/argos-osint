@@ -13,12 +13,12 @@ use super::recon_parts::InvestigationPart;
 
 use super::app::{
     intel_category_short, intel_day_button_label, is_picker_field, unix_now, App, AtlasPage,
-    BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId, IntelPage, IntelReconFocus,
-    LastViewSession, ModuleId, Overlay, ProviderPage, Target, INTEL_CATEGORIES,
+    BrainListMode, ButtonId, ChoiceKind, DefaultsRole, FieldId, IntelPage, LastViewSession,
+    ModuleId, Overlay, ProviderPage, Target, INTEL_CATEGORIES,
 };
 use super::theme;
 use argos_osint_core::atlas;
-use argos_osint_core::intel_recon::{self, ReportMode};
+use argos_osint_core::intel_recon;
 use argos_osint_core::osint;
 use argos_osint_core::provider;
 use argos_osint_core::recon::{self, Plan};
@@ -597,17 +597,6 @@ pub(crate) fn active_popup_area(app: &App, area: Rect) -> Rect {
         }
     } else {
         popup_area(area)
-    }
-}
-
-fn intel_recon_popup_area(area: Rect) -> Rect {
-    let width = area.width.clamp(40, 88).min(area.width);
-    let height = area.height.saturating_sub(2).clamp(16, 36).min(area.height);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
     }
 }
 
@@ -2688,7 +2677,7 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         }
         return;
     }
-    if hit_test(app, x, y) == Some(Target::IntelPreview) {
+    if app.intel_page == IntelPage::Bulletin && hit_test(app, x, y) == Some(Target::IntelPreview) {
         app.intel_preview_scroll = app
             .intel_preview_scroll
             .saturating_add_signed((delta * 3) as isize);
@@ -2759,6 +2748,26 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         }
         Region::AtlasRuns => shift_atlas_runs(app, delta * 3),
         Region::AtlasNews => shift_atlas_articles(app, delta * 3),
+        Region::IntelRelated => {
+            let (_, center, _) = intel_briefing_areas(app, body);
+            if let Some(layout) = intel_center_layout(app, center) {
+                let rows = super::related_articles::rows(
+                    &app.intel_related,
+                    center.width.saturating_sub(2) as usize,
+                    false,
+                );
+                let max = rows
+                    .len()
+                    .saturating_sub(layout.related.height.saturating_sub(3) as usize)
+                    as u16;
+                let before = app.intel_related.scroll;
+                nudge(&mut app.intel_related.scroll, delta * 3, max);
+                if app.intel_related.scroll == before {
+                    let stack_max = intel_brief_scroll_max(app);
+                    nudge(&mut app.scrolls.intel_brief, delta * 3, stack_max);
+                }
+            }
+        }
         Region::IntelFull => {
             let max = intel_full_scroll_max(app);
             let before = app.scrolls.intel_full;
@@ -2814,14 +2823,6 @@ pub fn page(app: &mut App, direction: i32) {
             nudge(&mut app.scrolls.recall, direction * 6, 10_000);
         }
         Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => match app.focus {
-            Target::BrainRelatedArticle(_) => {
-                let area = detail_areas(app).related;
-                let view = &mut app.brain_detail.related.articles;
-                let max = (1 + view.page.rows.len() * 4)
-                    .saturating_sub(area.height.saturating_sub(4) as usize)
-                    .min(u16::MAX as usize) as u16;
-                nudge(&mut view.scroll, direction * 4, max);
-            }
             Target::RelatedRow(_) => {
                 let area = detail_areas(app).related;
                 let max = super::brain_detail::related_scroll_max(&app.brain_detail.related, area);
@@ -2906,7 +2907,30 @@ pub fn page(app: &mut App, direction: i32) {
             shift_atlas_feed(app, direction * room);
         }
         Some(ModuleId::Intel) if app.intel_page == IntelPage::Briefing => {
-            if app.focus == Target::IntelLeftColumn {
+            if matches!(
+                app.focus,
+                Target::IntelRelatedArticle(_)
+                    | Target::Button(ButtonId::IntelRelatedMore | ButtonId::RelatedScope)
+            ) {
+                let (_, center, _) = intel_briefing_areas(app, chrome(app.screen, app).body);
+                if let Some(layout) = intel_center_layout(app, center) {
+                    let rows = super::related_articles::rows(
+                        &app.intel_related,
+                        center.width.saturating_sub(2) as usize,
+                        false,
+                    );
+                    let max = rows
+                        .len()
+                        .saturating_sub(layout.related.height.saturating_sub(3) as usize)
+                        as u16;
+                    let before = app.intel_related.scroll;
+                    nudge(&mut app.intel_related.scroll, direction * 6, max);
+                    if app.intel_related.scroll == before {
+                        let stack_max = intel_brief_scroll_max(app);
+                        nudge(&mut app.scrolls.intel_brief, direction * 6, stack_max);
+                    }
+                }
+            } else if app.focus == Target::IntelLeftColumn {
                 let max = intel_extracted_scroll_max(app);
                 nudge(&mut app.scrolls.intel_extracted, direction * 6, max);
             } else if app.focus == Target::IntelFullArticle {
@@ -2973,6 +2997,7 @@ enum Region {
     IntelExtracted,
     IntelBrief,
     IntelFull,
+    IntelRelated,
     ReconContext,
     None,
 }
@@ -3081,7 +3106,9 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
             } else if !contains(center, x, y) {
                 Region::None
             } else if let Some(layout) = intel_center_layout(app, center) {
-                if abs_contains(layout.full, x, y) {
+                if abs_contains(layout.related, x, y) {
+                    Region::IntelRelated
+                } else if abs_contains(layout.full, x, y) {
                     Region::IntelFull
                 } else {
                     Region::IntelBrief
@@ -3514,6 +3541,18 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             order.push(entry.target);
         }
     }
+    // Intel's middle stack can initially clip Related completely. Its logical
+    // scope control enters focus order; set_focus reveals the same layout pane.
+    if app.module == Some(ModuleId::Intel)
+        && app.intel_page == IntelPage::Briefing
+        && app.overlay == Overlay::None
+    {
+        let (_, center, _) = intel_briefing_areas(app, chrome(app.screen, app).body);
+        let target = Target::Button(ButtonId::RelatedScope);
+        if center.width > 0 && !seen.contains(&target) {
+            order.push(target);
+        }
+    }
     if app.overlay != Overlay::None && !seen.contains(&Target::CloseOverlay) {
         order.push(Target::CloseOverlay);
     }
@@ -3648,11 +3687,7 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             return Some(Target::Button(ButtonId::BrainDetailBack));
         }
         if contains(areas.path, x, y) {
-            return Some(
-                super::graph::path_line_at(app, areas.path, x, y, app.scrolls.path)
-                    .map(Target::PathLine)
-                    .unwrap_or(Target::DetailPath),
-            );
+            return Some(Target::DetailPath);
         }
         if contains(areas.related, x, y) {
             return super::brain_detail::related_at(&app.brain_detail.related, areas.related, x, y)
@@ -4522,8 +4557,9 @@ pub(super) fn draw_button_state(
         ButtonId::FallbackTab(_)
             | ButtonId::AtlasWorld
             | ButtonId::AtlasNews
-            | ButtonId::BrainRelatedMemories
-            | ButtonId::BrainRelatedArticles
+            | ButtonId::BrainRelatedFirst
+            | ButtonId::BrainRelatedSecond
+            | ButtonId::BrainRelatedThird
     ) {
         super::components::tab_button(
             frame,
@@ -5081,15 +5117,13 @@ fn footer_line(app: &App) -> Paragraph<'static> {
         "←→ provider · type to filter · ↑↓ · Enter add · Esc close"
     } else if let Overlay::Choice(_) = app.overlay {
         "↑↓ choose · Enter select · Esc close"
-    } else if app.overlay == Overlay::IntelRecon {
-        "←→ modes · ↑↓ sections · Space toggle · Enter start · Esc close"
     } else if app.overlay != Overlay::None {
         "Esc close · Ctrl+U/D scroll"
     } else {
         match (app.module, app.focus) {
             (None, _) => "↑↓ open · 1–9 apps · Ctrl+K · ? help",
             (Some(ModuleId::Intel), _) if app.intel_page == IntelPage::Briefing => {
-                "↑↓ scroll · Recon modes · Esc bulletin"
+                "↑↓ scroll · Related / Reader · Esc bulletin"
             }
             (Some(ModuleId::Intel), _) => {
                 "←→ tabs · ↑↓ articles · Enter brief · / search · Esc home"
@@ -6305,18 +6339,26 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
                 &format!(
                     "{} [{}] {}",
                     if memory.pinned { "◆" } else { "·" },
-                    memory.category,
+                    if memory.id.starts_with("actor-group:") {
+                        "Actor"
+                    } else {
+                        "Claim"
+                    },
                     memory.text
                 ),
                 inner_w,
             );
-            let source = fit(
-                &format!(
-                    "  {} / {}",
-                    memory.source.app, memory.source.conversation_id
-                ),
-                inner_w,
-            );
+            let source = if memory.id.starts_with("actor-group:") {
+                fit(&format!("  {}", memory.category), inner_w)
+            } else {
+                fit(
+                    &format!(
+                        "  {} / {}",
+                        memory.source.app, memory.source.conversation_id
+                    ),
+                    inner_w,
+                )
+            };
             let selected = matches!(app.focus, Target::Memory(_)) && index == app.memory_sel;
             ListItem::new(format!("{title}\n{source}")).style(if selected {
                 theme::selected()
@@ -6366,8 +6408,23 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
         "Create",
         action_buttons[0],
     );
-    draw_button(frame, app, ButtonId::Pin, "Pin", action_buttons[1]);
-    draw_button(frame, app, ButtonId::Delete, "Delete", action_buttons[2]);
+    if app
+        .memories
+        .get(app.memory_sel)
+        .is_some_and(|m| m.id.starts_with("actor-group:"))
+    {
+        for (index, label) in [(1, "Pin"), (2, "Delete")] {
+            frame.render_widget(
+                Paragraph::new(label)
+                    .style(theme::dim())
+                    .block(pane(" unavailable ")),
+                action_buttons[index],
+            );
+        }
+    } else {
+        draw_button(frame, app, ButtonId::Pin, "Pin", action_buttons[1]);
+        draw_button(frame, app, ButtonId::Delete, "Delete", action_buttons[2]);
+    }
     draw_button(
         frame,
         app,
@@ -7386,7 +7443,7 @@ fn intel_hero_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
     for paragraph in text.split('\n') {
@@ -7427,7 +7484,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             frame,
             app,
             Rect::new(area.x, area.y, area.width, 1),
-            &["Extracted", "Reader / BLUF", "Context / jobs"],
+            &["Extracted", "Reader", "Context / jobs"],
         );
     }
     app.layout
@@ -7514,48 +7571,6 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             draw_clipped_md_pane(frame, left, layout.links, " links ", &layout.links_lines, 0);
         }
-        draw_clipped_md_pane(
-            frame,
-            left,
-            layout.related,
-            " Related ",
-            &layout.related_lines,
-            0,
-        );
-        let rows = super::related_articles::rows(
-            &app.intel_related,
-            left.width.saturating_sub(2) as usize,
-            false,
-        );
-        for (offset, (_, target)) in rows.iter().enumerate() {
-            if let Some(target) = target {
-                let row = abs_rect(
-                    left.x + 1,
-                    layout.related.y + 1 + offset as i32,
-                    left.width.saturating_sub(2),
-                    1,
-                );
-                if let Some((rect, _)) = intersect_abs(left, row) {
-                    app.layout.borrow_mut().register(*target, rect);
-                }
-            }
-        }
-        if app.intel_related.page.has_more {
-            let button = abs_rect(
-                left.x + 1,
-                layout.related.y + i32::from(layout.related.height) - 2,
-                left.width.saturating_sub(2),
-                1,
-            );
-            draw_clipped_button(
-                frame,
-                app,
-                left,
-                button,
-                ButtonId::IntelRelatedMore,
-                "See more",
-            );
-        }
     }
 
     // Side panes stay fixed; only the center stack scrolls.
@@ -7563,6 +7578,9 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(layout) = intel_center_layout(app, center) {
         // The brief pane owns the background: paint it before the image column.
         draw_intel_brief_article(frame, center, &layout);
+        if let Some((rect, _)) = intersect_abs(center, layout.brief) {
+            app.layout.borrow_mut().register(Target::IntelPreview, rect);
+        }
         if let Some((rect, _)) = intersect_abs(center, layout.image) {
             draw_article_image(frame, app, rect);
         }
@@ -7618,34 +7636,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 "See more",
             );
         }
-        draw_clipped_button(
-            frame,
-            app,
-            center,
-            layout.reports_btn,
-            ButtonId::IntelReports,
-            app.intel_recon_recommended.title(),
-        );
-        if intel_report_generating(app) {
-            draw_intel_summary_loading(frame, center, layout.reports, app);
-        } else {
-            draw_clipped_md_pane(
-                frame,
-                center,
-                layout.reports,
-                " Summary ",
-                &layout.reports_lines,
-                0,
-            );
-        }
-        draw_clipped_button(
-            frame,
-            app,
-            center,
-            layout.full_report_btn,
-            ButtonId::IntelFullReport,
-            "View full report",
-        );
+        draw_intel_related(frame, app, center, layout.related);
     }
 
     let right_rows = intel_briefing_right_rows(app, right);
@@ -7712,12 +7703,9 @@ struct IntelCenterLayout {
     full: AbsRect,
     full_more: Option<AbsRect>,
     full_room: usize,
-    reports_btn: AbsRect,
-    reports: AbsRect,
-    full_report_btn: AbsRect,
+    related: AbsRect,
     brief_lines: Vec<Line<'static>>,
     full_lines: Vec<Line<'static>>,
-    reports_lines: Vec<Line<'static>>,
     full_scroll_max: u16,
     stack_scroll_max: u16,
 }
@@ -7781,7 +7769,7 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     }
     let inner_w = viewport.width.saturating_sub(2).max(1) as usize;
     let min_section = term_pct_height(app, 0.15, 5);
-    let full_h = term_pct_height(app, 0.50, 8);
+    let full_h = term_pct_height(app, 0.50, 8).min(viewport.height.saturating_sub(8).max(5));
 
     // The article image lives in a left column inside the brief article section;
     // the prose keeps the remaining columns and both are vertically centered.
@@ -7838,25 +7826,13 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
         .max(1);
     let full_scroll_max = full_lines.len().saturating_sub(full_room as usize) as u16;
 
-    let reports_lines = intel_brief_reports_lines(app, inner_w);
-    let reports_h = (reports_lines.len() as u16)
-        .saturating_add(2)
-        .max(min_section)
-        .max(7);
-    let busy = app.selected_intel_busy();
-    let recon_h = if busy { 0 } else { ACTION_H };
-    let view_h = if busy || app.intel_jobs.is_empty() {
-        0
-    } else {
-        ACTION_H
-    };
-
+    // The focused pair fits together at wide/medium viewports, keeping the
+    // Full Article header visible when Related is revealed.
+    let related_h = viewport.height.saturating_sub(full_h).max(8);
     let total = brief_h
         .saturating_add(ACTION_H)
         .saturating_add(full_h)
-        .saturating_add(recon_h)
-        .saturating_add(reports_h)
-        .saturating_add(view_h);
+        .saturating_add(related_h);
     let stack_scroll_max = total.saturating_sub(viewport.height);
     let scroll = app.scrolls.intel_brief.min(stack_scroll_max) as i32;
 
@@ -7892,11 +7868,7 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
         )
     });
     y += i32::from(full_h);
-    let reports_btn = abs_rect(viewport.x, y, viewport.width, recon_h);
-    y += i32::from(recon_h);
-    let reports = abs_rect(viewport.x, y, viewport.width, reports_h);
-    y += i32::from(reports_h);
-    let full_report_btn = abs_rect(viewport.x, y, viewport.width, view_h);
+    let related = abs_rect(viewport.x, y, viewport.width, related_h);
 
     Some(IntelCenterLayout {
         image,
@@ -7906,12 +7878,9 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
         full,
         full_more,
         full_room: full_room as usize,
-        reports_btn,
-        reports,
-        full_report_btn,
+        related,
         brief_lines,
         full_lines,
-        reports_lines,
         full_scroll_max,
         stack_scroll_max,
     })
@@ -8157,8 +8126,7 @@ struct IntelExtractedLayout {
     inferences: AbsRect,
     actors: AbsRect,
     links: AbsRect,
-    related: AbsRect,
-    related_lines: Vec<Line<'static>>,
+
     claims_lines: Vec<Line<'static>>,
     confidence_lines: Vec<Line<'static>>,
     inferences_lines: Vec<Line<'static>>,
@@ -8285,11 +8253,6 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let inferences_lines = parse_extracted_md(&inferences_md, inner_w);
     let actors_lines = parse_extracted_md(&actors_md, inner_w);
     let links_lines = parse_extracted_md(&links_md, inner_w);
-    let related_lines = super::related_articles::rows(&app.intel_related, inner_w, false)
-        .into_iter()
-        .map(|(line, _)| line)
-        .collect::<Vec<_>>();
-
     let insights_loading = intel_insights_loading(app);
     let (claims_loading, inferences_loading, links_loading) = if brief {
         (brief_loading[0], brief_loading[1], brief_loading[2])
@@ -8317,16 +8280,12 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let inferences_h = section_h(inferences_lines.len(), inferences_loading);
     let actors_h = section_h(actors_lines.len(), false);
     let links_h = section_h(links_lines.len(), links_loading);
-    let related_h = section_h(related_lines.len(), false)
-        .saturating_add(u16::from(app.intel_related.page.has_more));
-
     let confidence_h = section_h(confidence_lines.len(), false);
     let total = confidence_h
         .saturating_add(claims_h)
         .saturating_add(inferences_h)
         .saturating_add(actors_h)
-        .saturating_add(links_h)
-        .saturating_add(related_h);
+        .saturating_add(links_h);
     let stack_scroll_max = total.saturating_sub(viewport.height);
     let scroll = app.scrolls.intel_extracted.min(stack_scroll_max) as i32;
 
@@ -8340,14 +8299,10 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let actors = abs_rect(viewport.x, y, viewport.width, actors_h);
     y += i32::from(actors_h);
     let links = abs_rect(viewport.x, y, viewport.width, links_h);
-    y += i32::from(links_h);
-    let related = abs_rect(viewport.x, y, viewport.width, related_h);
 
     Some(IntelExtractedLayout {
         confidence,
         confidence_lines,
-        related,
-        related_lines,
         claims,
         inferences,
         actors,
@@ -8367,23 +8322,103 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
 
 pub fn reveal_intel_related(app: &mut App, index: usize) {
     let body = chrome(app.screen, app).body;
-    let (left, _, _) = intel_briefing_areas(app, body);
-    let Some(layout) = intel_extracted_layout(app, left) else {
+    let (_, center, _) = intel_briefing_areas(app, body);
+    let Some(layout) = intel_center_layout(app, center) else {
         return;
     };
-    let top = layout.related.y + 2 + (index * 4) as i32;
-    let bottom = top + 3;
-    if top < i32::from(left.y) {
-        app.scrolls.intel_extracted = app
+    let room = layout.related.height.saturating_sub(3).max(1) as usize;
+    let rows = super::related_articles::rows(
+        &app.intel_related,
+        center.width.saturating_sub(2) as usize,
+        false,
+    );
+    let top = rows
+        .iter()
+        .position(|(_, t)| *t == Some(Target::IntelRelatedArticle(index)))
+        .unwrap_or(0);
+    reveal_index(&mut app.intel_related.scroll, top, room);
+    let y = layout.related.y;
+    if y < i32::from(center.y) {
+        app.scrolls.intel_brief = app
             .scrolls
-            .intel_extracted
-            .saturating_sub((i32::from(left.y) - top) as u16);
-    } else if bottom >= i32::from(left.y + left.height) {
-        app.scrolls.intel_extracted = app
+            .intel_brief
+            .saturating_sub((i32::from(center.y) - y) as u16);
+    } else if y + i32::from(layout.related.height) > i32::from(center.y + center.height) {
+        app.scrolls.intel_brief = app
             .scrolls
-            .intel_extracted
-            .saturating_add((bottom + 1 - i32::from(left.y + left.height)) as u16)
+            .intel_brief
+            .saturating_add(
+                (y + i32::from(layout.related.height) - i32::from(center.y + center.height)) as u16,
+            )
             .min(layout.stack_scroll_max);
+    }
+}
+
+fn draw_intel_related(frame: &mut Frame, app: &App, viewport: Rect, area: AbsRect) {
+    let focused = matches!(
+        app.focus,
+        Target::IntelRelatedArticle(_)
+            | Target::Button(ButtonId::IntelRelatedMore | ButtonId::RelatedScope)
+    );
+    let title = if focused {
+        " Related • focused "
+    } else {
+        " Related "
+    };
+    let rows = super::related_articles::rows(
+        &app.intel_related,
+        area.width.saturating_sub(2) as usize,
+        false,
+    );
+    let more = app.intel_related.page.has_more;
+    let room = area.height.saturating_sub(2 + u16::from(more));
+    let lines = rows
+        .iter()
+        .take(app.intel_related.scroll as usize + room as usize)
+        .map(|(line, _)| line.clone())
+        .collect::<Vec<_>>();
+    draw_clipped_md_pane(
+        frame,
+        viewport,
+        area,
+        title,
+        &lines,
+        app.intel_related.scroll,
+    );
+    for (offset, (_, target)) in rows
+        .iter()
+        .skip(app.intel_related.scroll as usize)
+        .take(room as usize)
+        .enumerate()
+    {
+        if let Some(target) = target {
+            if let Some((rect, _)) = intersect_abs(
+                viewport,
+                abs_rect(
+                    area.x + 1,
+                    area.y + 1 + offset as i32,
+                    area.width.saturating_sub(2),
+                    1,
+                ),
+            ) {
+                app.layout.borrow_mut().register(*target, rect);
+            }
+        }
+    }
+    if more {
+        draw_clipped_button(
+            frame,
+            app,
+            viewport,
+            abs_rect(
+                area.x + 1,
+                area.y + i32::from(area.height) - 2,
+                area.width.saturating_sub(2),
+                1,
+            ),
+            ButtonId::IntelRelatedMore,
+            "See more",
+        );
     }
 }
 
@@ -8453,103 +8488,8 @@ fn draw_intel_jobs_pane(frame: &mut Frame, app: &App, area: Rect) {
     let block = pane(" jobs ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let (content, actions) = if inner.height >= 6 {
-        let rows = split_vertical(inner, [Constraint::Min(0), Constraint::Length(ACTION_H)]);
-        (rows[0], rows[1])
-    } else {
-        (inner, Rect::default())
-    };
-    let mut lines = intel_brief_task_lines(app);
-    if app.intel_jobs.is_empty() && lines.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No background jobs.")
-                .style(theme::dim())
-                .wrap(Wrap { trim: false }),
-            content,
-        );
-        return;
-    }
-    if !app.intel_jobs.is_empty() {
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
-        }
-        lines.push(Line::from(Span::styled(
-            "RECON REPORTS",
-            theme::accent().add_modifier(Modifier::BOLD),
-        )));
-        let start = app.scrolls.intel_jobs as usize;
-        for (offset, job) in app.intel_jobs.iter().enumerate().skip(start) {
-            let selected = offset == app.intel_job_sel;
-            let style = if selected {
-                theme::selected()
-            } else {
-                theme::text()
-            };
-            let mode = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
-                .map(|m| m.title())
-                .unwrap_or(job.mode.as_str());
-            lines.push(Line::from(Span::styled(
-                format!("{mode} r{} · {}", job.revision, job.state),
-                style.add_modifier(Modifier::BOLD),
-            )));
-            let tools_str = if job.tool_calls_done == -1 {
-                "Tool usage unavailable".to_string()
-            } else if job.tool_calls_done == 0
-                && (job.state == "completed" || job.state == "partial" || job.state == "failed")
-            {
-                "0 calls used · reused evidence".to_string()
-            } else {
-                format!(
-                    "Tools: {} calls used · {} budget",
-                    job.tool_calls_done, job.tool_calls_allowance
-                )
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  {} · sec {}/{} · el {}/{} · {}",
-                    job.stage,
-                    job.sections_done,
-                    job.sections_total,
-                    job.elements_done,
-                    job.elements_total,
-                    tools_str
-                ),
-                theme::dim(),
-            )));
-            if !job.current_tool.is_empty() || !job.warning.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "  {}{}",
-                        job.current_tool,
-                        if job.warning.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" · {}", job.warning)
-                        }
-                    ),
-                    theme::dim(),
-                )));
-            }
-            if lines.len() >= content.height as usize {
-                break;
-            }
-        }
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), content);
-    if !app.intel_jobs.is_empty() && actions.width > 0 {
-        let buttons = button_areas(actions, 4);
-        for (index, (id, label)) in [
-            (ButtonId::IntelJobPause, "Pause"),
-            (ButtonId::IntelJobResume, "Resume"),
-            (ButtonId::IntelJobCancel, "Cancel"),
-            (ButtonId::IntelJobRetry, "Retry"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            draw_button(frame, app, id, label, buttons[index]);
-        }
-    }
+    let lines = intel_brief_task_lines(app);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Focus-brief background task rows: full article fetch, insight re-extract, mode classify.
@@ -8569,22 +8509,6 @@ fn intel_brief_task_lines(app: &App) -> Vec<Line<'static>> {
     } else {
         legacy_brief_task_lines(app, article, &mut lines);
     }
-
-    // Classifier-recommended recon mode.
-    let mode_pending = app.intel_mode_classifying && app.intel_recon_recommended_for == article.id;
-    let mode_label = if mode_pending {
-        format!("{} Classifying recon mode", super::anim::spinner())
-    } else {
-        format!("Mode · {}", app.intel_recon_recommended.title())
-    };
-    lines.push(Line::from(Span::styled(
-        mode_label,
-        if mode_pending {
-            theme::accent().add_modifier(Modifier::BOLD)
-        } else {
-            theme::text().add_modifier(Modifier::BOLD)
-        },
-    )));
 
     lines
 }
@@ -9297,7 +9221,20 @@ fn intel_brief_full_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 theme::dim(),
             )));
         }
-        None => {}
+        None => {
+            lines.push(Line::from(Span::styled(
+                if app.intel_body_message.is_empty() {
+                    "No full article stored yet.".into()
+                } else {
+                    app.intel_body_message.clone()
+                },
+                theme::dim(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Use Reload to retrieve the full article.",
+                theme::dim(),
+            )));
+        }
     }
     lines
 }
@@ -9323,89 +9260,6 @@ pub(crate) fn intel_insights_loading(app: &App) -> bool {
     app.intel_insights_running.contains(&article.id)
 }
 
-/// True while a recon report job for the focused article is running / generating.
-pub(crate) fn intel_report_generating(app: &App) -> bool {
-    let Some(article) = app.intel_articles.get(app.intel_sel) else {
-        return false;
-    };
-    app.intel_jobs.iter().any(|job| {
-        job.article_id == article.id
-            && (app.intel_report_running.contains_key(&job.id)
-                || matches!(job.state.as_str(), "queued" | "running" | "waiting"))
-    })
-}
-
-fn draw_intel_summary_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app: &App) {
-    let Some((vis, _)) = intersect_abs(viewport, area) else {
-        return;
-    };
-    frame.render_widget(Block::default().style(theme::text()), vis);
-    stroke_clipped_box(frame, viewport, area, " Summary ");
-
-    let inner = AbsRect {
-        x: area.x.saturating_add(1),
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    let Some((inner_vis, _)) = intersect_abs(viewport, inner) else {
-        return;
-    };
-    let (label, detail) = intel_report_progress_lines(app);
-    draw_centered_loading_card(frame, inner_vis, &label, detail.as_deref());
-}
-
-fn intel_report_progress_lines(app: &App) -> (String, Option<String>) {
-    let Some(article) = app.intel_articles.get(app.intel_sel) else {
-        return (
-            format!("{} Generating report", super::anim::spinner()),
-            None,
-        );
-    };
-    let active_job = app.intel_jobs.iter().find(|job| {
-        job.article_id == article.id
-            && (app.intel_report_running.contains_key(&job.id)
-                || matches!(job.state.as_str(), "queued" | "running" | "waiting"))
-    });
-    let Some(job) = active_job else {
-        return (
-            format!("{} Generating report", super::anim::spinner()),
-            None,
-        );
-    };
-    let mode_title = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
-        .map(|m| m.title())
-        .unwrap_or(job.mode.as_str());
-    let label = format!(
-        "{} Generating {} report",
-        super::anim::spinner(),
-        mode_title
-    );
-
-    let stage = job.stage.trim();
-    let detail = if !stage.is_empty() {
-        if job.sections_total > 0 && job.sections_done > 0 {
-            Some(format!(
-                "{stage} · section {}/{}",
-                job.sections_done, job.sections_total
-            ))
-        } else {
-            Some(stage.to_string())
-        }
-    } else if !job.current_tool.trim().is_empty() {
-        Some(format!("Running {}", job.current_tool.trim()))
-    } else if job.sections_total > 0 {
-        Some(format!(
-            "Section {}/{}",
-            job.sections_done, job.sections_total
-        ))
-    } else {
-        None
-    };
-    (label, detail)
-}
-
-/// Same centered spinner treatment as Atlas insights extraction.
 fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app: &App) {
     let Some((vis, _)) = intersect_abs(viewport, area) else {
         return;
@@ -9519,40 +9373,6 @@ fn intel_body_progress_lines(app: &App) -> (String, Option<String>) {
     (label, detail)
 }
 
-fn intel_brief_reports_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    let Some(job) = app.intel_jobs.get(app.intel_job_sel) else {
-        return vec![Line::from(Span::styled(
-            "No Recon report yet",
-            theme::dim(),
-        ))];
-    };
-    let mode = argos_osint_core::intel_recon::ReportMode::parse(&job.mode)
-        .map(|mode| mode.title())
-        .unwrap_or(job.mode.as_str());
-    let mut lines = vec![Line::from(Span::styled(
-        format!("{mode} · r{} · {}", job.revision, job.state),
-        theme::dim(),
-    ))];
-    let bluf = app
-        .intel_sections
-        .iter()
-        .find(|section| section.job_id == job.id && section.section_key == "bluf");
-    match bluf.filter(|section| !section.markdown.trim().is_empty()) {
-        Some(section) => {
-            lines.extend(
-                super::markdown::markdown_lines(&section.markdown, width.max(1))
-                    .into_iter()
-                    .map(md_line_to_line),
-            );
-        }
-        None => lines.push(Line::from(Span::styled(
-            "Summary not available for this report",
-            theme::dim(),
-        ))),
-    }
-    lines
-}
-
 fn md_line_to_line(line: super::markdown::MdLine) -> Line<'static> {
     if line.pieces.is_empty() {
         return Line::from("");
@@ -9578,12 +9398,6 @@ fn intel_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
             }
             if abs_contains(reload, x, y) && contains(center, x, y) {
                 return Some(Target::Button(ButtonId::IntelBodyRefresh));
-            }
-            if abs_contains(layout.reports_btn, x, y) && contains(center, x, y) {
-                return Some(Target::Button(ButtonId::IntelReports));
-            }
-            if abs_contains(layout.full_report_btn, x, y) && contains(center, x, y) {
-                return Some(Target::Button(ButtonId::IntelFullReport));
             }
         }
         let rows = intel_briefing_right_rows(app, right);
@@ -10164,24 +9978,7 @@ fn popup_text(app: &App) -> String {
             lines.extend(app.choice_items.iter().map(|item| item.label.clone()));
             lines.join("\n")
         }
-        Overlay::IntelRecon => {
-            let mode = app.intel_recon_mode();
-            let mut lines = vec![
-                mode.title().to_string(),
-                mode.description().to_string(),
-                String::new(),
-                "Sections".into(),
-            ];
-            for section in intel_recon::section_plan(mode) {
-                let mark = if app.intel_recon_section_enabled(mode, section.key) {
-                    "[x]"
-                } else {
-                    "[ ]"
-                };
-                lines.push(format!("{mark} {}", section.title));
-            }
-            lines.join("\n")
-        }
+
         Overlay::Palette => app
             .palette_items()
             .into_iter()
@@ -10238,14 +10035,14 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools · 8 Models · 9 Profile\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
-        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nThe mode button under the full article opens Verify / Explain / Assess Outlook / Full Assessment\nJobs pane tracks focus-brief background progress and recon reports\nEsc returns from briefing to bulletin, or from bulletin to home",
-        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 60 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 60 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, and Delete sit between the map and those panes. Resume continues retained collection/classification and native metadata. Coverage shows classifications, entities, publisher priors, and Related pairs. Atlas collects articles without creating Brain memories. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
+        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nRelated beneath Full Article reflects ingest associations with at least two shared entities\nJobs pane tracks focus-brief background progress\nEsc returns from briefing to bulletin, or from bulletin to home",
+        Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 60 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 60 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, and Delete sit between the map and those panes. Resume continues retained collection/classification and native metadata. Coverage shows classifications, entities, publisher priors, and Related pairs. Atlas collects articles without creating Brain claim memories. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon investigation\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between transcript and prompt\n↑↓ select a query, plan, evidence activity, or answer\n←→ or h/l fold the selected Plan or activity\nEnter toggles that fold · o inspects the captured source · f opens full text\n◉ brain opens memories used by Synthesis\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "Profile\n\nTab / Shift+Tab traverse controls; Enter activates\nOverview / System / Configs · t switches analytics/host · x Configs\n0 Summary · 1–5 Intel/Recon/Atlas/Models/Tools · [ / ] apps\nTab reveals panels · Arrows select rows/buckets · Enter or m expands\nLeft/Right selects buckets · v chart/table · s sort · g provider fold · PageUp/PageDown or wheel scroll\np period · f six dimension filters · c clears filters\nPicker: type to search, Tab dimension, arrows select, Enter apply\nr refreshes statistics in Overview, hardware in System\nEsc restores grid or returns home · Ctrl+K commands",
         Some(ModuleId::Logs) => "Logs\n\nDurable events from every app and background worker, kept 24 hours\nThe header counts errors, warnings, and failures in the last hour\nFilter narrows by text. Level, App, and the job filter narrow further\n↑↓ select an event · Enter or click folds its detail\nf toggles live follow. Moving off the newest event pauses it\no or Open job shows the event's job in Jobs\nOpened from Jobs, Esc or Back to job returns there\nClear events removes events only; jobs, results, and memories stay\nCtrl+U/Ctrl+D and the wheel scroll the list",
         Some(ModuleId::Jobs) => "Jobs\n\nBackground work with timing, attempts, and errors\nActive work is listed first, then recent history, then service workers\nStatus and App filter the table. Filter matches title, id, operation, or error\n↑↓ select a job · Enter opens its detail (full screen when narrow)\nl or View logs opens Logs filtered to the job and its phases\nRetry failed requeues only failed index or summary tasks; completed work is kept\nOpen source jumps to the Atlas cycle or investigation when there is one\nUnknown historic timing shows Unavailable\nEsc closes the detail, then returns home",
-        Some(ModuleId::Brain) => "Brain\n\nMemories lists saved insights. Find filters that list\nEnter opens a recon path, or a claim path for a news insight\nThe detail shows the path graph on top, Related on the left, and Summary on the right\nNarrow terminals stack Related above Summary; the focused one gets more room\nRelated has Memories / Articles tabs. Articles span all retained cycles, one row per URL with its cycles; shared-mention and same-name leads stay tentative, a shared canonical actor shows as same actor; Enter opens the exact article in Intel. Memories lists other memories: linked ones (shared claim relation, source, entity, or investigation) first, then similar ones, which are not evidence\nTab moves between Back, the graph, Related, and Summary\n↑↓ select a related memory · Enter or click opens it, even when Find hides it\nEsc or Back returns to the previous memory, then to the list with its Find and selection\nThe list keeps its selection and Find when memories change elsewhere\nIf memories cannot be read, the last loaded list stays and the error is shown and logged\nThe first visit asks Synthesis to write the summary and saves it\nThe summary says why the concluding insight is a fact or an inference\nClick a recon path to open its source thread\nClick an article on a claim path to open that news cycle\nKind cycles the list: All, Actor, Claim, Inference, Link, Related; an Actor opens its actor graph (──▶ observed Links, ┄┄ tentative Related)\nCreate replaces the list with the form. Save stores the memory\nEsc returns home from the list · ? opens this card",
+        Some(ModuleId::Brain) => "Brain\n\nKind cycles All → Claims → Actors. All contains Claims and unique Actor-name groups\nFind filters after actor names are grouped; grouping does not merge identities\nCreate saves a user-supplied, unassessed Claim. Pin/Delete apply to Claims\nEnter opens Claim detail or an Actor group\nClaims show a read-only graph above Related and Summary\nActor groups show Graph and Related side by side, or reachable compact pages\nGraphs display Claim, Topic, Entity, Article and Source nodes; nodes never navigate\nActor Related tabs: Claims / Threads / Articles. Claim tabs: Actors / Sources\nEach tab keeps its own selection and scroll. See more loads another page\nEnter or click a Related row opens its Claim, Actor group, Recon thread or exact Intel article\nActor Articles reflect ingest associations with at least two distinct shared entities\nClaim Sources preserve original provenance; investigation detections require Recall on\nEsc or Back restores the previous record, tab, row, offsets and focus across apps\nTab moves through reachable controls and panes; arrows, wheel and PageUp/PageDown scroll\nClaims keep their saved summary; Actor groups show local association totals\nEsc returns home from the list · ? opens this card",
         Some(ModuleId::Providers) => "Models\n\nEach account tab stores that provider only\nDefaults sets every role's primary model and ordered fallbacks\nFallbacks are tried top to bottom after primary retries (4 then 3 each)\nAdd fallback opens Google, Nvidia, or OpenRouter catalogs\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
         _ => "Controls\n\nTab moves between fields and buttons\n1–9 switch apps when not typing in a field\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }
@@ -10576,10 +10373,7 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         draw_choice(frame, app, kind);
         return;
     }
-    if app.overlay == Overlay::IntelRecon {
-        draw_intel_recon_popup(frame, app);
-        return;
-    }
+
     if let Overlay::ResumeSession(ref session) = app.overlay {
         draw_resume_session(frame, app, session);
         return;
@@ -10592,7 +10386,6 @@ fn draw_overlay(frame: &mut Frame, app: &App) {
         Overlay::Block { .. } => " Detail ",
         Overlay::ResumeSession(_) => " Open last app view session ",
         Overlay::Choice(_)
-        | Overlay::IntelRecon
         | Overlay::Palette
         | Overlay::AddFallback
         | Overlay::Configs
@@ -10723,181 +10516,6 @@ fn draw_palette(frame: &mut Frame, app: &App) {
             rect,
         );
     }
-}
-
-struct IntelReconPopupLayout {
-    tabs: Vec<Rect>,
-    sections: Vec<Rect>,
-    start: Rect,
-    section_room: usize,
-}
-
-fn intel_recon_popup_layout(area: Rect, app: &App) -> IntelReconPopupLayout {
-    let inner = inset(area);
-    let rows = split_vertical(
-        inner,
-        [
-            Constraint::Length(ACTION_H), // mode tabs
-            Constraint::Length(3),        // description
-            Constraint::Min(4),           // section toggles
-            Constraint::Length(ACTION_H), // start
-        ],
-    );
-    let tabs = button_areas(rows[0], ReportMode::all().len());
-    let section_area = rows[2];
-    let room = section_area.height.max(1) as usize;
-    let plan = intel_recon::section_plan(app.intel_recon_mode());
-    let start_scroll = app.scrolls.popup as usize;
-    let mut sections = Vec::new();
-    for visible in 0..room.min(plan.len().saturating_sub(start_scroll)) {
-        sections.push(Rect {
-            x: section_area.x,
-            y: section_area.y + visible as u16,
-            width: section_area.width,
-            height: 1,
-        });
-    }
-    // Map visible rows back to absolute section indices for hit testing.
-    let section_rects: Vec<Rect> = (0..plan.len())
-        .map(|index| {
-            if index < start_scroll || index >= start_scroll + room {
-                Rect::default()
-            } else {
-                Rect {
-                    x: section_area.x,
-                    y: section_area.y + (index - start_scroll) as u16,
-                    width: section_area.width,
-                    height: 1,
-                }
-            }
-        })
-        .collect();
-    let _ = sections;
-    let start_row = rows[3];
-    let start_w = 14u16.min(start_row.width.saturating_sub(2)).max(8);
-    let start = Rect {
-        x: start_row.x + start_row.width.saturating_sub(start_w) / 2,
-        y: start_row.y,
-        width: start_w,
-        height: start_row.height,
-    };
-    IntelReconPopupLayout {
-        tabs,
-        sections: section_rects,
-        start,
-        section_room: room,
-    }
-}
-
-pub fn intel_recon_section_room(app: &App) -> usize {
-    let area = intel_recon_popup_area(app.screen);
-    intel_recon_popup_layout(area, app).section_room
-}
-
-fn draw_intel_recon_popup(frame: &mut Frame, app: &App) {
-    let area = intel_recon_popup_area(frame.area());
-    cover(frame, area);
-    frame.render_widget(Paragraph::new("").block(theme::card(" Recon ")), area);
-    let close = Rect {
-        x: area.x + area.width.saturating_sub(8),
-        y: area.y,
-        width: 8.min(area.width),
-        height: 1,
-    };
-    app.layout
-        .borrow_mut()
-        .register(Target::CloseOverlay, close);
-    frame.render_widget(Paragraph::new(" close ").style(theme::card_accent()), close);
-
-    let layout = intel_recon_popup_layout(area, app);
-    for (index, rect) in layout.tabs.iter().copied().enumerate() {
-        app.layout
-            .borrow_mut()
-            .register(Target::IntelReconTab(index), rect);
-    }
-    for (index, rect) in layout.sections.iter().copied().enumerate() {
-        app.layout
-            .borrow_mut()
-            .register(Target::IntelReconSection(index), rect);
-    }
-    let modes = ReportMode::all();
-    let mode = app.intel_recon_mode();
-    draw_tabs(
-        frame,
-        Rect {
-            x: layout.tabs.first().map(|r| r.x).unwrap_or(area.x),
-            y: layout.tabs.first().map(|r| r.y).unwrap_or(area.y),
-            width: layout
-                .tabs
-                .last()
-                .map(|r| r.x + r.width)
-                .unwrap_or(area.x)
-                .saturating_sub(layout.tabs.first().map(|r| r.x).unwrap_or(area.x)),
-            height: ACTION_H,
-        },
-        modes.iter().enumerate().map(|(index, item)| {
-            (
-                index,
-                item.title().to_string(),
-                index == app.intel_recon_tab,
-                app.focus == Target::IntelReconTab(index)
-                    || matches!(app.intel_recon_focus, IntelReconFocus::Tab(i) if i == index),
-            )
-        }),
-    );
-
-    let inner = inset(area);
-    let rows = split_vertical(
-        inner,
-        [
-            Constraint::Length(ACTION_H),
-            Constraint::Length(3),
-            Constraint::Min(4),
-            Constraint::Length(ACTION_H),
-        ],
-    );
-    let blurb = format!(
-        "{}\nOutlook horizon default: 30 days · toggle sections to customize the report",
-        mode.description()
-    );
-    frame.render_widget(
-        Paragraph::new(blurb)
-            .style(theme::card_dim())
-            .wrap(Wrap { trim: false }),
-        rows[1],
-    );
-
-    let plan = intel_recon::section_plan(mode);
-    let start = app.scrolls.popup as usize;
-    let room = layout.section_room.max(1);
-    for (offset, section) in plan.iter().enumerate().skip(start).take(room) {
-        let index = offset;
-        let enabled = app.intel_recon_section_enabled(mode, section.key);
-        let focused = app.focus == Target::IntelReconSection(index)
-            || matches!(app.intel_recon_focus, IntelReconFocus::Section(i) if i == index);
-        let mark = if enabled { "[x]" } else { "[ ]" };
-        let text = fit(
-            &format!("{mark} {}", section.title),
-            rows[2].width.max(1) as usize,
-        );
-        frame.render_widget(
-            Paragraph::new(text).style(if focused {
-                theme::selected()
-            } else if enabled {
-                theme::card_text()
-            } else {
-                theme::card_dim()
-            }),
-            Rect {
-                x: rows[2].x,
-                y: rows[2].y + (index - start) as u16,
-                width: rows[2].width,
-                height: 1,
-            },
-        );
-    }
-
-    draw_button(frame, app, ButtonId::IntelReconStart, "Start", layout.start);
 }
 
 fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {

@@ -7,7 +7,8 @@ use anyhow::Result;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-pub const MATCH_VERSION: &str = "shared-headline-entities-v1";
+pub const MATCH_VERSION: &str = "shared-headline-entities-v2-min-two";
+pub const MIN_SHARED_ENTITIES: usize = 2;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RelatedArticle {
     pub article: AtlasArticleRow,
@@ -111,6 +112,107 @@ fn valid(article: &AtlasArticleRow, m: &ArticleMention) -> bool {
     };
     text.get(m.start_byte..m.end_byte) == Some(m.original_text.as_str())
         && atlas_metadata::comparison_key(&m.original_text) == m.comparison_key
+}
+
+/// Distinct, span-backed names shared by two exact article occurrences.
+/// Repeated mentions of one name count once; metadata country/category fields
+/// never count. A retained typed anchor may match exact prospective text.
+pub fn shared_entity_mentions(
+    store: &Store,
+    left: &AtlasArticleRow,
+    right: &AtlasArticleRow,
+) -> Result<Vec<String>> {
+    let metadata = [
+        store.atlas_metadata(&left.run_id, &left.id)?,
+        store.atlas_metadata(&right.run_id, &right.id)?,
+    ];
+    let articles = [left, right];
+    let mut shared = BTreeMap::new();
+    for side in 0..2 {
+        let Some(m) = metadata[side].as_ref().filter(|m| {
+            m.entity_state == MetadataState::Complete
+                && m.input_hash == atlas_metadata::input_hash(articles[side])
+        }) else {
+            continue;
+        };
+        for mention in m
+            .mentions
+            .iter()
+            .filter(|m| named(&m.type_hint) && valid(articles[side], m))
+        {
+            let target = articles[1 - side];
+            if metadata[1 - side].as_ref().is_some_and(|m| {
+                m.mentions.iter().any(|other| {
+                    other.comparison_key == mention.comparison_key
+                        && named(&other.type_hint)
+                        && other.type_hint != mention.type_hint
+                })
+            }) {
+                continue;
+            }
+            let found = find_exact(
+                &target.title,
+                &mention.comparison_key,
+                &mention.type_hint,
+                "title",
+            )
+            .or_else(|| {
+                find_exact(
+                    &target.description,
+                    &mention.comparison_key,
+                    &mention.type_hint,
+                    "description",
+                )
+            });
+            if let Some(found) = found {
+                if metadata[1 - side].as_ref().is_some_and(|m| {
+                    m.mentions.iter().any(|other| {
+                        named(&other.type_hint)
+                            && other.field == found.field
+                            && other.comparison_key != mention.comparison_key
+                            && other.start_byte < found.end_byte
+                            && found.start_byte < other.end_byte
+                    })
+                }) {
+                    continue;
+                }
+                shared
+                    .entry(mention.comparison_key.clone())
+                    .or_insert_with(|| mention.original_text.clone());
+            }
+        }
+    }
+    Ok(shared.into_values().collect())
+}
+/// Only ingest-owned Related records with both exact current endpoints qualify.
+pub(crate) fn current_ingest_related(
+    store: &Store,
+    payload: &crate::memory_metadata::RelatedPayload,
+) -> Result<bool> {
+    if !payload
+        .source_revisions
+        .iter()
+        .any(|r| r.starts_with("ingest:"))
+    {
+        return Ok(false);
+    }
+    for endpoint in [&payload.source, &payload.target] {
+        let crate::memory_metadata::EndpointRef::Article {
+            run_id,
+            article_id,
+            revision,
+        } = endpoint
+        else {
+            return Ok(false);
+        };
+        let Some(article) = store.atlas_article(run_id, article_id)? else {
+            return Ok(false);
+        };
+        if revision != &atlas_metadata::input_hash(&article) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 /// Inverted token and entity postings avoid comparing all article pairs.
 pub fn build(store: &Store, run_id: &str) -> Result<usize> {
@@ -256,6 +358,15 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
     for ((i, j), mut shared) in pairs {
         shared.sort_by(|a, b| a.0.key.cmp(&b.0.key));
         shared.dedup_by(|a, b| a.0.key == b.0.key && a.0.type_hint == b.0.type_hint);
+        if shared
+            .iter()
+            .map(|(s, _)| &s.key)
+            .collect::<BTreeSet<_>>()
+            .len()
+            < MIN_SHARED_ENTITIES
+        {
+            continue;
+        }
         let a = &articles[i];
         let b = &articles[j];
         let (left, right) = if a.id < b.id {
@@ -310,6 +421,63 @@ pub(crate) fn canonical_url(raw: &str) -> String {
         .unwrap_or_else(|_| raw.into())
 }
 impl Store {
+    /// Whether an occurrence participates in a retained ingest association
+    /// containing this actor name and at least one other distinct entity.
+    /// This checks stored pairs, never creates suggestions while browsing.
+    pub fn has_ingest_actor_association(
+        &self,
+        article: &AtlasArticleRow,
+        name_key: &str,
+    ) -> Result<bool> {
+        let mut offset = 0;
+        loop {
+            let page = self.related_articles(&article.run_id, &article.id, offset, 100)?;
+            for row in &page.rows {
+                if shared_entity_mentions(self, article, &row.article)?
+                    .iter()
+                    .any(|name| crate::brain_actors::normalize_alias(name) == name_key)
+                {
+                    return Ok(true);
+                }
+            }
+            if !page.has_more {
+                break;
+            }
+            offset += 100;
+        }
+        let mut stmt=self.conn.prepare("SELECT other.origin,other.ref_id,e.memory_id FROM brain_memory_endpoints e JOIN brain_memory_endpoints other ON other.memory_id=e.memory_id AND other.side<>e.side JOIN memory_metadata m ON m.memory_id=e.memory_id WHERE e.endpoint_kind='article' AND e.origin=?1 AND e.ref_id=?2 AND other.endpoint_kind='article' AND m.memory_kind='related' AND m.lifecycle='active'")?;
+        let candidates = stmt
+            .query_map(params![article.run_id, article.id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (run, id, memory) in candidates {
+            let Some(crate::memory_metadata::MemoryPayload::Related(payload)) =
+                self.memory_payload(&memory)?
+            else {
+                continue;
+            };
+            if !current_ingest_related(self, &payload)? {
+                continue;
+            }
+            let Some(candidate) = self.atlas_article(&run, &id)? else {
+                continue;
+            };
+            let shared = shared_entity_mentions(self, article, &candidate)?;
+            if shared.len() >= MIN_SHARED_ENTITIES
+                && shared
+                    .iter()
+                    .any(|name| crate::brain_actors::normalize_alias(name) == name_key)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub fn related_articles(
         &self,
         run_id: &str,
@@ -342,6 +510,9 @@ impl Store {
                 continue;
             }
             let shared: Vec<SharedMention> = serde_json::from_str(&json)?;
+            if shared_entity_mentions(self, a, b)?.len() < MIN_SHARED_ENTITIES {
+                continue;
+            }
             let target = if left == article_id { b } else { a };
             rows.push(RelatedArticle {
                 article: (*target).clone(),
@@ -515,12 +686,44 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn related_requires_two_distinct_entities_and_filters_old_single_entity_receipts() {
+        let s = store();
+        let mut source = article("source", "Ada and Ada meet Acme", "economic");
+        source.description.clear();
+        let mut one = article("one", "Ada mentions Ada", "unk");
+        one.description.clear();
+        let mut two = article("two", "Ada meets Acme", "unk");
+        two.description.clear();
+        for a in [&source, &one, &two] {
+            s.atlas_upsert_article(a).unwrap();
+        }
+        let mut metadata = atlas_metadata::ArticleMetadata::pending(&source);
+        metadata.entity_state = MetadataState::Complete;
+        for (name, kind) in [("Ada", "person"), ("Acme", "organization")] {
+            metadata
+                .mentions
+                .push(find_exact(&source.title, &name.to_lowercase(), kind, "title").unwrap());
+        }
+        s.atlas_save_metadata(&metadata).unwrap();
+        assert_eq!(shared_entity_mentions(&s, &source, &one).unwrap().len(), 1);
+        assert_eq!(shared_entity_mentions(&s, &source, &two).unwrap().len(), 2);
+        assert_eq!(build(&s, "r").unwrap(), 1);
+        let page = s.related_articles("r", "source", 0, 20).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].article.id, "two");
+        assert!(s
+            .related_articles("r", "one", 0, 20)
+            .unwrap()
+            .rows
+            .is_empty());
+    }
     fn article(id: &str, title: &str, category: &str) -> AtlasArticleRow {
         AtlasArticleRow {
             run_id: "r".into(),
             id: id.into(),
             title: title.into(),
-            description: String::new(),
+            description: "Nairobi".into(),
             url: format!("https://example.com/{id}"),
             country: String::new(),
             source_name: "Publisher".into(),
@@ -542,6 +745,8 @@ mod tests {
         if let Some(mention) = find_exact(&a.title, &key.to_lowercase(), kind, "title") {
             m.mentions.push(mention);
         }
+        m.mentions
+            .push(find_exact(&a.description, "nairobi", "place", "description").unwrap());
         assert!(store.atlas_save_metadata(&m).unwrap());
     }
     fn store() -> Store {
@@ -569,7 +774,7 @@ mod tests {
         let p = s.related_articles("r", "a", 0, 20).unwrap();
         assert_eq!(p.total, 1);
         assert_eq!(p.rows[0].article.id, "b");
-        assert_eq!(p.rows[0].shared_mentions, vec!["José Acme"]);
+        assert_eq!(p.rows[0].shared_mentions, vec!["José Acme", "Nairobi"]);
         assert_eq!(
             s.related_articles("r", "b", 0, 20).unwrap().rows[0]
                 .article

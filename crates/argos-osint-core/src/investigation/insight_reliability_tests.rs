@@ -60,6 +60,68 @@ fn routes(base: &str) -> (AuthFile, SettingsFile) {
     (auth, settings)
 }
 
+fn seed_article(store: &Store, owner: &str, text: &str) -> PipelineInput {
+    let now = chrono::Utc::now().to_rfc3339();
+    store.conn.execute("INSERT OR IGNORE INTO atlas_runs(id,started_at,state) VALUES('fixture',?1,'completed')",[&now]).unwrap();
+    // Retain real article details; these engine fixtures select its full body.
+    store.conn.execute("INSERT OR IGNORE INTO atlas_articles(run_id,article_id,title,description,url,country,source_name,source_domain,published_at,provider,temperature,seen_at) VALUES('fixture',?1,'Acme article','An attributed original article.','','','','','','fixture',0,?2)",params![owner,now]).unwrap();
+    let article = store.atlas_article("fixture", owner).unwrap().unwrap();
+    let body = store
+        .ensure_article_body(owner, "fixture", "", "", "")
+        .unwrap();
+    let mut prose = text.to_string();
+    if prose.split_whitespace().count() < 120 {
+        prose.push_str("\n\n");
+        prose.push_str(
+            &"Officials described the timetable and attributed statements in detail. ".repeat(20),
+        );
+    }
+    store
+        .commit_article_body(
+            &body.id,
+            &prose,
+            &crate::nlp::cache::hash(&prose),
+            "complete",
+            "",
+            "",
+            "fixture",
+            false,
+        )
+        .unwrap();
+    let revision = store
+        .article_body_by_id(&body.id)
+        .unwrap()
+        .unwrap()
+        .body_version
+        .to_string();
+    let mut source = crate::nlp::Source::derived(&body.id, &revision, &prose);
+    source.attempt_id = format!("body-{owner}-{revision}");
+    source.raw_hash = Some(crate::nlp::cache::hash(&prose));
+    crate::nlp::cache::register(
+        &store.conn,
+        "article",
+        owner,
+        &source,
+        Some(&prose),
+        "validated-baseline-v1",
+    )
+    .unwrap();
+    store.app_state_set(&format!("article-acquisition:{}",source.attempt_id),&json!({"artifact_hash":source.raw_hash,"complete_story":true,"known_truncation":false}).to_string()).unwrap();
+    let generation =
+        insight_persist::advance_generation(&store.conn, "article", owner, &now).unwrap();
+    let mut input = insight_persist::article_input(store,&article,generation,"Extract attributed assertions from the complete article title, description and retained cleaned story.",false).unwrap();
+    assert!(
+        insight_persist::article_details_eligible(&input),
+        "fixture must have validated acquisition coverage: {:?}",
+        input.evidence
+    );
+    input
+        .evidence
+        .retain(|e| e.reference.source_id.starts_with("body:"));
+    input.snapshot = snapshot("article", owner, generation, &input.evidence);
+    input
+}
+
 fn seed_report(store: &Store, owner: &str, text: &str) -> PipelineInput {
     let now = chrono::Utc::now().to_rfc3339();
     store.conn.execute("INSERT OR IGNORE INTO atlas_runs(id,started_at,state) VALUES('fixture',?1,'completed')",[&now]).unwrap();
@@ -148,7 +210,7 @@ async fn overlapping_windows_dedup_before_assessment_preserve_late_denial_and_bo
         "Acme announced projects 0 through 7; announcements do not establish completion.\n\n"
             .repeat(820)
     );
-    let mut input = seed_report(&store, "windows", &text);
+    let mut input = seed_article(&store, "windows", &text);
     let spans = evidence_windows(&text, WINDOW_BYTES / 4).unwrap();
     assert!(spans.len() > 2);
     let (entity, mut claims) = claims(&input, 8);
@@ -242,14 +304,14 @@ async fn overlapping_windows_dedup_before_assessment_preserve_late_denial_and_bo
 }
 
 #[tokio::test]
-async fn report_eight_five_eight_is_five_requests_atomic_publication_and_zero_request_replay() {
+async fn article_eight_five_eight_is_five_requests_atomic_publication_and_zero_request_replay() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("fixture.db");
     let store = Store::open(&path).unwrap();
     let text = (0..8)
         .map(|i| format!("Acme announced project {i}. "))
         .collect::<String>();
-    let mut input = seed_report(&store, "owner", &text);
+    let mut input = seed_article(&store, "owner", &text);
     let (entity, claims) = claims(&input, 8);
     let premise_ids: Vec<_> = claims
         .iter()
@@ -279,7 +341,7 @@ async fn report_eight_five_eight_is_five_requests_atomic_publication_and_zero_re
     );
     assert!(
         output.claims.iter().all(|c| c.support_receipts.is_empty()),
-        "report cannot corroborate itself"
+        "an article cannot corroborate itself"
     );
     assert_eq!(server.hits(), 5);
     assert_eq!(
@@ -325,7 +387,7 @@ async fn report_eight_five_eight_is_five_requests_atomic_publication_and_zero_re
         .collect();
     assert!(bytes.iter().all(|b| *b <= REQUEST_BYTES));
     eprintln!(
-        "report 8/5/8 cold: requests=5 wire_bytes={bytes:?} elapsed_ms={}",
+        "article 8/5/8 cold: requests=5 wire_bytes={bytes:?} elapsed_ms={}",
         started.elapsed().as_millis()
     );
     print_attempt_timings(&store, &id);
@@ -354,7 +416,7 @@ async fn report_eight_five_eight_is_five_requests_atomic_publication_and_zero_re
     assert_eq!(warm.links.len(), 8);
     assert_eq!(server.hits(), 5);
     eprintln!(
-        "report warm: requests=0 elapsed_ms={}",
+        "article warm: requests=0 elapsed_ms={}",
         started.elapsed().as_millis()
     );
     let count = store
@@ -445,7 +507,7 @@ async fn invalid_output_repairs_once_then_uses_declared_fallback_and_legacy_vali
 #[test]
 fn compact_evidence_rejects_unknown_ids_bad_utf8_and_out_of_window_spans() {
     let store = Store::memory().unwrap();
-    let input = seed_report(&store, "wire", "Acme café.");
+    let input = seed_article(&store, "wire", "Acme café.");
     let reference = &input.evidence[0].reference;
     let mut wire = json!({"evidence_refs":[reference]});
     let mut dictionary = std::collections::BTreeMap::new();
@@ -469,7 +531,7 @@ async fn partial_assessment_keeps_qualified_items_and_explicit_epoch_preserves_c
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("partial.db");
     let store = Store::open(&path).unwrap();
-    let mut input = seed_report(
+    let mut input = seed_article(
         &store,
         "partial",
         "Acme announced project 0. Acme announced project 1.",
@@ -528,7 +590,8 @@ async fn partial_assessment_keeps_qualified_items_and_explicit_epoch_preserves_c
 #[test]
 fn captured_routes_and_contract_admit_replacement_without_revisit_retry_loops() {
     let store = Store::memory().unwrap();
-    let mut input = seed_report(&store, "routes", "Acme announced project 0.");
+    let mut input = seed_article(&store, "routes", "Acme announced project 0.");
+    input = insight_persist::article_input(&store,&store.atlas_article("fixture","routes").unwrap().unwrap(),input.snapshot.generation,"Extract attributed assertions from the complete article title, description and retained cleaned story.",false).unwrap();
     let (_, mut settings) = routes("http://127.0.0.1:1");
     let id = insight_persist::enqueue_refresh(
         &store.conn,
@@ -623,8 +686,8 @@ async fn recovery_continues_after_one_owner_fails_and_restart_does_not_revive_it
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("recovery.db");
     let store = Store::open(&path).unwrap();
-    let mut failed = seed_report(&store, "failed", "Acme announced project 0.");
-    let mut good = seed_report(&store, "good", "Acme announced project 0.");
+    let mut failed = seed_article(&store, "failed", "Acme announced project 0.");
+    let mut good = seed_article(&store, "good", "Acme announced project 0.");
     let (entity, claims) = claims(&good, 1);
     let server = mock::serve(vec![
         mock::ok_json("invalid", "stop"),
@@ -737,8 +800,9 @@ fn batch_answers_require_exact_ids_and_original_threshold_profiles() {
 #[test]
 fn entity_resolver_routes_are_relevant_to_article_and_recon_but_not_report_only_work() {
     let store = Store::memory().unwrap();
-    let mut input = seed_report(&store, "resolver", "Acme announced project 0.");
+    let mut input = seed_article(&store, "resolver", "Acme announced project 0.");
     let mut settings = SettingsFile::default();
+    input.surface = "recon_report".into();
     let report = input_key(&input, &settings);
     input.surface = "article".into();
     let article = input_key(&input, &settings);
@@ -949,7 +1013,8 @@ fn progress_reaches_jobs_and_logs_throttled_and_resets_per_attempt_and_stage() {
 #[test]
 fn source_and_route_changes_retire_old_task_with_linked_reason_and_polling_never_duplicates() {
     let store = Store::memory().unwrap();
-    let mut input = seed_report(&store, "supersede", "Acme announced project 0.");
+    let mut input = seed_article(&store, "supersede", "Acme announced project 0.");
+    input = insight_persist::article_input(&store,&store.atlas_article("fixture","supersede").unwrap().unwrap(),input.snapshot.generation,"Extract attributed assertions from the complete article title, description and retained cleaned story.",false).unwrap();
     let (_, mut settings) = routes("http://127.0.0.1:1");
     let first = insight_persist::enqueue_refresh(
         &store.conn,
@@ -975,9 +1040,12 @@ fn source_and_route_changes_retire_old_task_with_linked_reason_and_polling_never
         insight_persist::desired_generation(&store.conn, "article", "supersede").unwrap(),
         generation
     );
-    // Report body changes while the first task is still queued.
-    let bundle = json!({"text":"Acme announced project 1 and later denied project 0.","completed_at":chrono::Utc::now().to_rfc3339(),"support_receipts":[]}).to_string();
-    store.conn.execute("INSERT INTO intel_report_results(job_id,generation,article_id,completion_sequence,source_hash,details_json,completed_at) VALUES('report-supersede-2',1,'supersede',2,?1,?2,?3)",params![crate::nlp::cache::hash(&bundle),bundle,chrono::Utc::now().to_rfc3339()]).unwrap();
+    // A new retained body invalidates the source revision.
+    seed_article(
+        &store,
+        "supersede",
+        "Acme announced project 1 and later denied project 0.",
+    );
     let second = insight_persist::schedule_article_refresh(&store, &article, &settings, true)
         .unwrap()
         .unwrap();
@@ -1052,6 +1120,16 @@ fn source_and_route_changes_retire_old_task_with_linked_reason_and_polling_never
 fn completed_report_replacement_is_named_as_such() {
     let store = Store::memory().unwrap();
     let report = seed_report(&store, "rep", "Acme announced project 0.");
+    let mut historical = report.clone();
+    assert!(insight_persist::enqueue_refresh(
+        &store.conn,
+        &mut historical,
+        &SettingsFile::default(),
+        &chrono::Utc::now().to_rfc3339()
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("retired"));
     let (_, settings) = routes("http://127.0.0.1:1");
     let mut article = report.clone();
     article.surface = "article".into();
@@ -1070,7 +1148,7 @@ async fn generation_advanced_mid_flight_retires_task_as_superseded_with_zero_req
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("race.db");
     let store = Store::open(&path).unwrap();
-    let mut input = seed_report(&store, "race", "Acme announced project 0.");
+    let mut input = seed_article(&store, "race", "Acme announced project 0.");
     let server = mock::serve(vec![]).await;
     let (auth, settings) = routes(&server.base_url);
     let id = insight_persist::enqueue_refresh(
@@ -1127,7 +1205,8 @@ async fn index_only_repair_after_insight_publication_makes_zero_model_calls() {
     let text = (0..8)
         .map(|i| format!("Acme announced project {i}. "))
         .collect::<String>();
-    let mut input = seed_report(&store, "owner", &text);
+    let mut input = seed_article(&store, "owner", &text);
+    input = insight_persist::article_input(&store,&store.atlas_article("fixture","owner").unwrap().unwrap(),input.snapshot.generation,"Extract attributed assertions from the complete article title, description and retained cleaned story.",false).unwrap();
     let (entity, claims) = claims(&input, 8);
     let premise_ids: Vec<_> = claims
         .iter()
@@ -1135,7 +1214,19 @@ async fn index_only_repair_after_insight_publication_makes_zero_model_calls() {
         .collect();
     let inferences:Vec<_>=(0..5).map(|i|json!({"id":format!("i{i}"),"text":format!("Project {i} was announced, not completed."),"entity_refs":[entity.id],"premise_claim_ids":[premise_ids[i]],"evidence_refs":[input.evidence[0].reference],"rationale":"An announcement establishes stated intent only.","limitations":["Completion is unknown."]})).collect();
     let links:Vec<_>=(0..8).map(|i|json!({"id":format!("l{i}"),"typed_endpoints":[{"kind":"entity","id":entity.id},{"kind":"claim","id":premise_ids[i]}],"relation":"entity_connection","evidence_refs":[input.evidence[0].reference],"rationale":format!("Acme is the attributed speaker for project {i}.")})).collect();
-    let server=mock::serve(vec![mock::ok_json(&json!({"entities":[entity],"claims":claims,"limit_reached":false,"partial_enumeration":false}).to_string(),"stop"),mock::ok_json(&answers(8,true,"faithful"),"stop"),mock::ok_json(&json!({"inferences":inferences,"links":links}).to_string(),"stop"),mock::ok_json(&answers(8,false,"faithful"),"stop"),mock::ok_json(&answers(5,false,"faithful"),"stop")]).await;
+    let proposed = json!({"inferences":inferences,"links":links}).to_string();
+    let empty_proposals = json!({"inferences":[],"links":[]}).to_string();
+    let server=mock::serve(vec![
+        mock::ok_json(&json!({"entities":[entity],"claims":claims,"limit_reached":false,"partial_enumeration":false}).to_string(),"stop"),
+        mock::ok_json(r#"{"entities":[],"claims":[]}"#,"stop"),
+        mock::ok_json(&answers(8,true,"faithful"),"stop"),
+        mock::ok_json(&proposed,"stop"),
+        mock::ok_json(&empty_proposals,"stop"),
+        mock::ok_json(&proposed,"stop"),
+        mock::ok_json(&proposed,"stop"),
+        mock::ok_json(&answers(8,false,"faithful"),"stop"),
+        mock::ok_json(&answers(5,false,"faithful"),"stop")
+    ]).await;
     let (auth, settings) = routes(&server.base_url);
     let id = insight_persist::enqueue_refresh(
         &store.conn,
@@ -1145,7 +1236,7 @@ async fn index_only_repair_after_insight_publication_makes_zero_model_calls() {
     )
     .unwrap();
     finish(&path, &id, &auth, &settings).await;
-    assert_eq!(server.hits(), 5);
+    assert_eq!(server.hits(), 9);
     let count = |sql: &str| {
         store
             .conn
@@ -1183,7 +1274,7 @@ async fn index_only_repair_after_insight_publication_makes_zero_model_calls() {
             Some(id.clone())
         );
     }
-    assert_eq!(server.hits(), 5, "index-only repair sent model requests");
+    assert_eq!(server.hits(), 9, "index-only repair sent model requests");
     assert_eq!(count("SELECT COUNT(*) FROM memories"), memories);
     assert_eq!(
         count("SELECT COUNT(*) FROM insight_snapshots WHERE owner_id='owner'"),
@@ -1205,7 +1296,7 @@ async fn index_only_repair_after_insight_publication_makes_zero_model_calls() {
 #[test]
 fn claims_insights_and_links_track_their_own_stages_from_checkpoints() {
     let store = Store::memory().unwrap();
-    let mut input = seed_report(&store, "artifacts", "Acme announced project 0.");
+    let mut input = seed_article(&store, "artifacts", "Acme announced project 0.");
     let (_, settings) = routes("http://127.0.0.1:1");
     let id = insight_persist::enqueue_refresh(
         &store.conn,

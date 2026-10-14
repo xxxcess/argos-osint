@@ -21,11 +21,20 @@ fn article(run: &str, id: &str, title: &str) -> AtlasArticleRow {
 
 fn seed(store: &Store, run: &str, id: &str, title: &str, names: &[&str]) {
     let _ = store.atlas_insert_run(run, "{}", "{}");
-    let a = article(run, id, title);
+    let title = if names.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title} with Acme")
+    };
+    let a = article(run, id, &title);
     store.atlas_upsert_article(&a).unwrap();
     let mut m = ArticleMetadata::pending(&a);
     m.entity_state = MetadataState::Complete;
-    for n in names {
+    let mut names = names.to_vec();
+    if !names.is_empty() {
+        names.push("Acme");
+    }
+    for n in &names {
         let start = title.find(n).unwrap();
         m.mentions.push(ArticleMention {
             type_hint: "person".into(),
@@ -60,18 +69,18 @@ fn cross_cycle_backfill_indexes_actors_links_and_bounded_candidates_idempotently
         .unwrap();
     assert_eq!((atlas.done, atlas.total), (4, 4));
     // a1 is one article (same scope) in both cycles → one actor; b1 another.
-    assert_eq!(count(&store, "SELECT COUNT(*) FROM brain_actors"), 2);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM brain_actors"), 4);
     assert_eq!(
         count(&store, "SELECT COUNT(*) FROM brain_actor_mentions"),
-        3
+        6
     );
     assert_eq!(
         count(
             &store,
             "SELECT COUNT(*) FROM memory_metadata WHERE memory_kind='link'"
         ),
-        3,
-        "one observed mention Link per occurrence"
+        6,
+        "one observed mention Link per actor occurrence"
     );
     let related = count(
         &store,
@@ -132,7 +141,10 @@ fn bounded_batches_resume_and_revised_text_reindexes_only_that_occurrence() {
         &store,
         "SELECT COUNT(*) FROM brain_actor_mentions WHERE origin_id='a0'",
     );
-    assert_eq!(live, 1, "stale revision mention replaced");
+    assert_eq!(
+        live, 2,
+        "each current entity replaces its stale revision mention"
+    );
 }
 
 #[test]

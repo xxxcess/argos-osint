@@ -1938,6 +1938,7 @@ pub fn stage_revisions(
         "identity_index": crate::brain_actors::IDENTITY_INDEX_VERSION,
         "actor_index": crate::atlas_actor_index::INDEX_CONTRACT,
         "related_scope": "all_retained",
+        "related_match": crate::related_articles::MATCH_VERSION,
     }));
     vec![body, claims, inferences, links]
 }
@@ -1989,7 +1990,7 @@ pub fn ensure_intel_brief_pipeline(
     article: &AtlasArticleRow,
     settings: &crate::provider::SettingsFile,
 ) -> Result<String> {
-    brief_pipeline::ensure_chain(
+    let job = brief_pipeline::ensure_chain(
         &store.conn,
         &brief_pipeline::BriefInputs {
             article_id: article.id.clone(),
@@ -2000,7 +2001,9 @@ pub fn ensure_intel_brief_pipeline(
             metadata: metadata_snapshot(article),
         },
         &now(),
-    )
+    )?;
+    super::brief_canonical::refresh_cached_publication(store, article, &job)?;
+    Ok(job)
 }
 
 #[cfg(test)]

@@ -45,6 +45,10 @@ pub async fn run_job_to_completion(
     runtime: JobRuntime,
     mut on_event: impl FnMut(IntelReportEvent) + Send,
 ) -> Result<()> {
+    anyhow::ensure!(
+        super::jobs::report_execution_enabled(),
+        "Intel article reports have been retired"
+    );
     loop {
         if runtime.cancel.load(Ordering::Relaxed) {
             let store = Store::open(&runtime.db_path)?;
@@ -64,6 +68,10 @@ pub async fn run_job_slice(
     runtime: JobRuntime,
     on_event: &mut (impl FnMut(IntelReportEvent) + Send),
 ) -> Result<bool> {
+    anyhow::ensure!(
+        super::jobs::report_execution_enabled(),
+        "Intel article reports have been retired"
+    );
     let (job, task) = {
         let store = Store::open(&runtime.db_path)?;
         store.interrupt_expired_leases()?;
